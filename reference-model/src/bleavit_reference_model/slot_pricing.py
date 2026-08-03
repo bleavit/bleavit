@@ -30,32 +30,45 @@ diverts flow, and depth is currently free. This is the defect N14 must repair,
 and it is not repaired by occupancy pricing: occupancy and velocity govern *who
 gets a slot*, while one slot can hold unlimited depth.
 
-**Finding 2 — the hosted door is cheaper on every class, worst on PARAM.**
-Normalized to equal harm (measured decision-grade formation loss at the 0.50
-arming rung, N12), buying denial through a hosted question costs 1.23× to 3.16×
-less than the cheapest 08 §7 channel. Compared at face value the spread reads
-1.46×–8.08×; **the harm normalization halves it**, and reporting the raw ratio
-would have overstated the hole by about two. The structural form of the finding:
-the cheapest governance to deny is the class Bleavit subsidizes *least*, because
-matching a book's depth is what the attack costs and `pol.b` is smallest for
-PARAM.
+**Finding 2 — WITHDRAWN 2026-08-03, and the withdrawal is the record.** An
+earlier revision published per-class ratios (1.23×–3.16×) and per-epoch uplift
+targets, claiming the hosted door was cheaper than the cheapest 08 §7 channel on
+every class. An adversarial review refuted the arithmetic under all of them and
+they are **withdrawn, not corrected**, because two of the three defects are
+missing *inputs* rather than slips:
 
-**Finding 3 — the Track N plan's "≈ 3,000 USDC/epoch" estimate survives.** It
-appears nowhere in `docs/architecture/`, only in the plan document, so it entered
-this work unverified. Derived here by an unrelated route — the fee floor plus
-capital opportunity cost on the depth needed for parity, against the plan's
-round-trip market fees on 500k — it lands at 2,786 for CODE, within 7 %. Recorded
-because an estimate that two independent derivations agree on is worth more than
-one that was merely never checked.
+1. `parity_depth_cash` double-counted the branch structure — `pol.b` is quoted
+   per branch, i.e. per book, and the function multiplied by a further 2 for
+   "the question's two books". A slip, now fixed. Worth recording anyway: the
+   error direction was **against this module's own conclusion**, inflating the
+   attacker's cost and understating the hole, and it regressed a figure that had
+   already been computed correctly by hand hours earlier.
+2. The ratios divided by the hosted attack's *measured* harm while treating the
+   benchmark channel's harm as **1.0**, which is stated nowhere. 08 §7 prices the
+   intake channel's cost; nothing measures its harm.
+3. Only carrying cost was counted. Worst-case LMSR maker loss *is* the posted
+   cash, on the order of 350× that — so the omission does not make the figure
+   conservative, it makes it not a figure.
 
-**Two caveats, stated rather than netted against each other.** Every cost here
-sits on the proportional-to-depth flow model that 16 §8.4 records as *anchored,
-not derived*, with an **unsafe** error direction — a venue more attractive than
-proportional needs less depth, so the attack is cheaper than this module says.
-Against that, the attacker's expected adverse-selection losses to informed
-traders are not counted, which makes it dearer. The two push opposite ways and
-neither is quantified, so these figures are directional and are **not** a bound
-in either direction. Consumers must not read them as one.
+`check_equalization_not_yet_computable` reports that state. This module publishes
+**no ratio and no price target** until (2) and (3) have inputs.
+
+**Finding 3 — WITHDRAWN with Finding 2.** The Track N plan's unsourced
+"≈ 3,000 USDC/epoch" appeared corroborated at 2,786 for CODE. That agreement was
+an artifact of defect 1: the corrected figure is ~1,589, so the two derivations
+do **not** agree, and the apparent corroboration was two different errors landing
+near each other. Recorded because a coincidence that looks like confirmation is
+worth more as a warning than as a deleted line.
+
+**What survives, and why it is independent.** `check_depth_is_unpriced` reads off
+the registration path: `declared_stake = 1` base unit is legal, the fee is
+`max(svc.fee_bps · stake, SVC_FEE_FLOOR_USDC)` so the flat floor binds, and `b`
+has no upper bound. It depends on none of the withdrawn arithmetic.
+
+**One caveat still binds what remains.** Every depth figure sits on the
+proportional-to-depth flow model that 16 §8.4 records as *anchored, not derived*,
+with an **unsafe** error direction — a venue more attractive than proportional
+needs less depth, so the attack is cheaper than this module says.
 
 Units: USDC in whole units (Decimal), matching `sustainability.py` and
 `service_economics.py`. Costs are per epoch, matching 08 §7.
@@ -78,13 +91,12 @@ __all__ = [
     "SVC_FEE_FLOOR_USDC",
     "POL_B_DECISION",
     "EPOCH_SLATE_SIZE",
-    "AttackCost",
-    "attacker_cost_per_epoch",
+    "CarryingCost",
+    "carrying_cost_per_epoch",
     "cheapest_priced_denial_channel",
     "fee_at_minimum_declared_stake",
     "harm_at_arming_rung",
-    "equalization",
-    "required_uplift",
+    "check_equalization_not_yet_computable",
     "check_depth_is_unpriced",
     "check_th72_attack_cost_is_unpriced",
 ]
@@ -136,23 +148,36 @@ def fee_at_minimum_declared_stake(fee_bps: Decimal = Decimal("0.10")) -> Decimal
 def parity_depth_cash(pol_b: Decimal, slate: int = EPOCH_SLATE_SIZE) -> Decimal:
     """Cash an attacker must post to match Bleavit's live decision depth.
 
-    16 §8.4's arming condition bounds external depth at `Σ pol.b(live)`. A slate
-    of `slate` proposals carries two branches each, and 04 §2 mints per-book
-    headroom `b·ln 2`, so the cash is `2 · Σ b · ln 2` over the question's two
-    books — the same `b`-versus-`b·ln 2` distinction that produced the superseded
-    escrow figure in `service_economics.py`.
+    16 §8.4's arming condition bounds external depth at `Σ pol.b(live)`. `pol.b`
+    is quoted **per branch, i.e. per book** (13 §1), and 04 §2 mints per-book
+    headroom `b·ln 2`, so a slate of `slate` proposals holds
+    `slate · 2 · pol_b · ln 2` in cash. A hosted question has exactly two books
+    (16 §7.6), so parity is `2·b_ext·ln 2 = slate·2·pol_b·ln 2`, i.e.
+    `b_ext = slate · pol_b` — and the cash on both sides is the expression above.
+
+    **An earlier revision multiplied by a further 2** "for the question's two
+    books", double-counting the two branches `pol.b` is already quoted per. The
+    error direction was against this module's own conclusion: it inflated the
+    attacker's cost and so *understated* the hole it exists to report. Caught by
+    an adversarial review, 2026-08-03; the test suite now pins the branch-count
+    structure and not merely the `b`-versus-`b·ln 2` distinction, which was the
+    only guard the first version had and which this error walked straight past.
     """
     if pol_b <= 0 or slate <= 0:
         raise SlotPricingError("pol_b and slate must be positive")
     with localcontext() as ctx:
         ctx.prec = _PRECISION
-        live_b = Decimal(slate) * Decimal(2) * pol_b
-        return live_b * _ln2() * Decimal(2)
+        return Decimal(slate) * Decimal(2) * pol_b * _ln2()
 
 
 @dataclass(frozen=True)
-class AttackCost:
-    """One class's cost to buy denial through a hosted question, per epoch."""
+class CarryingCost:
+    """One class's CARRYING cost only — not the attack cost.
+
+    Renamed from `AttackCost` on 2026-08-03: it counts the flat service fee plus
+    08 §7 opportunity cost, and omits the LMSR maker loss that dominates both.
+    A consumer reading this as the cost of the attack reads it wrong.
+    """
 
     proposal_class: str
     depth_cash: Decimal
@@ -164,9 +189,9 @@ class AttackCost:
         return self.capital_time_value + self.service_fee
 
 
-def attacker_cost_per_epoch(
+def carrying_cost_per_epoch(
     proposal_class: str, slate: int = EPOCH_SLATE_SIZE
-) -> AttackCost:
+) -> CarryingCost:
     """TH-72's missing attack-cost cell, for one proposal class.
 
     Two terms only, both already normative: the flat service fee (Finding 1 —
@@ -178,7 +203,7 @@ def attacker_cost_per_epoch(
         raise SlotPricingError(f"unknown proposal class {proposal_class!r}")
     cash = parity_depth_cash(POL_B_DECISION[proposal_class], slate)
     tv = threat_costs.capital_time_value(Fraction(int(cash)))
-    return AttackCost(
+    return CarryingCost(
         proposal_class,
         cash,
         Decimal(tv.numerator) / Decimal(tv.denominator),
@@ -219,35 +244,42 @@ def harm_at_arming_rung(proposal_class: str, artifact: Path) -> Decimal:
         return (control - armed) / control
 
 
-def equalization(artifact: Path, slate: int = EPOCH_SLATE_SIZE) -> dict[str, Decimal]:
-    """Per class, how many times cheaper the hosted door is at equal harm."""
-    _, benchmark = cheapest_priced_denial_channel()
-    out: dict[str, Decimal] = {}
-    with localcontext() as ctx:
-        ctx.prec = _PRECISION
-        for proposal_class in POL_B_DECISION:
-            cost = attacker_cost_per_epoch(proposal_class, slate).total
-            harm = harm_at_arming_rung(proposal_class, artifact)
-            out[proposal_class] = benchmark / (cost / harm)
-    return out
+def check_equalization_not_yet_computable(artifact: Path) -> dict[str, object]:
+    """Why this module publishes no ratio and no price target (2026-08-03).
 
+    An earlier revision published per-class ratios and per-epoch uplifts. An
+    adversarial review refuted the arithmetic under both, and they are withdrawn
+    rather than corrected, because two blockers are not arithmetic errors — they
+    are missing inputs, and R-2 forbids filling them by assumption:
 
-def required_uplift(artifact: Path, slate: int = EPOCH_SLATE_SIZE) -> dict[str, Decimal]:
-    """Per class, the per-epoch cost N14 must add to reach parity.
+    **(a) The benchmark's harm is unmeasured.** Every ratio divides the hosted
+    attack's *measured* formation loss by `intake_denial`'s harm — which the
+    earlier revision silently treated as 1.0 (total denial). Nothing states or
+    justifies that, so each ratio was wrong by `1/H_I`. 08 §7 prices the intake
+    channel's *cost*; nothing measures its *harm*.
 
-    The derived price target: a hosted question that buys `harm` units of denial
-    must cost at least `benchmark · harm`, so the uplift is that less what the
-    attacker pays today.
+    **(b) The dominant cost term is missing.** The model counted only carrying
+    cost on posted escrow. Worst-case LMSR maker loss *is* the posted cash — on
+    the order of 350× the carrying cost — so omitting it does not make the figure
+    conservative, it makes it not a figure.
+
+    What survives is `check_depth_is_unpriced`, which reads off the registration
+    path and depends on none of this.
     """
-    _, benchmark = cheapest_priced_denial_channel()
-    out: dict[str, Decimal] = {}
-    with localcontext() as ctx:
-        ctx.prec = _PRECISION
-        for proposal_class in POL_B_DECISION:
-            cost = attacker_cost_per_epoch(proposal_class, slate).total
-            harm = harm_at_arming_rung(proposal_class, artifact)
-            out[proposal_class] = benchmark * harm - cost
-    return out
+    harms = {c: harm_at_arming_rung(c, artifact) for c in POL_B_DECISION}
+    return {
+        "publishes_ratio": False,
+        "publishes_price_target": False,
+        "hosted_harm_measured": True,
+        "hosted_harm_at_arming_rung": harms,
+        "benchmark_harm_measured": False,
+        "dominant_cost_term_modelled": False,
+        "blockers": (
+            "intake_denial harm is unmeasured (was smuggled as 1.0); "
+            "LMSR maker loss is unmodelled and ~350x the carrying cost counted"
+        ),
+        "surviving_finding": "check_depth_is_unpriced",
+    }
 
 
 def check_depth_is_unpriced() -> dict[str, object]:

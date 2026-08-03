@@ -1,11 +1,17 @@
-"""Pins TH-72's derived attack cost and the N14 equalization (16 §8.4; 08 §7).
+"""Pins what `slot_pricing` may claim, and what it withdrew (16 §8.4; 08 §7).
 
 Follows the S6–S11 convention in two ways that matter. Every published figure is
 pinned so a spec table and this model cannot drift apart silently; and the
 *superseded* or *naive* routes to each figure are asserted **not** to reproduce
 it, because a suite that only asserts right answers cannot catch a known error
-coming back. Three such guards are here: the un-normalized comparison, the
-`b`-versus-`b·ln 2` conflation, and benchmarking against the wrong channel.
+coming back.
+
+The withdrawal of 2026-08-03 is itself pinned. An adversarial review refuted the
+published ratios and uplift targets, so this suite now asserts the module exposes
+**neither**, and that the two helpers which did are gone rather than merely
+unused. The branch double-count that started it gets its own guard: the original
+arithmetic guard pinned `b` versus `b·ln 2` and the error walked straight past
+it, which is the argument for pinning structure and not only magnitude.
 """
 
 from __future__ import annotations
@@ -29,39 +35,40 @@ def _round(value: Decimal, places: str = "1") -> Decimal:
 class AttackerCostTests(unittest.TestCase):
     """TH-72's missing cell, derived."""
 
-    def test_per_class_cost_per_epoch(self) -> None:
+    def test_per_class_carrying_cost_per_epoch(self) -> None:
+        """Carrying cost only. NOT the attack cost — the maker-loss term is absent."""
         expected = {
-            "param": Decimal(792),
-            "treasury": Decimal(1390),
-            "code": Decimal(2786),
-            "meta": Decimal(4381),
+            "param": Decimal(592),
+            "treasury": Decimal(891),
+            "code": Decimal(1589),
+            "meta": Decimal(2387),
         }
         for cls, want in expected.items():
             with self.subTest(cls=cls):
-                self.assertEqual(_round(sp.attacker_cost_per_epoch(cls).total), want)
+                self.assertEqual(_round(sp.carrying_cost_per_epoch(cls).total), want)
 
     def test_service_fee_is_the_kernel_floor_for_every_class(self) -> None:
         """Finding 1: the fee leg is flat, so it is identical across classes."""
-        fees = {sp.attacker_cost_per_epoch(c).service_fee for c in sp.POL_B_DECISION}
+        fees = {sp.carrying_cost_per_epoch(c).service_fee for c in sp.POL_B_DECISION}
         self.assertEqual(fees, {sp.SVC_FEE_FLOOR_USDC})
 
     def test_param_is_the_cheapest_class_to_deny(self) -> None:
         """The structural finding: protection scales with subsidy, so the
         least-subsidized class is the most purchasable."""
-        costs = {c: sp.attacker_cost_per_epoch(c).total for c in sp.POL_B_DECISION}
+        costs = {c: sp.carrying_cost_per_epoch(c).total for c in sp.POL_B_DECISION}
         self.assertEqual(min(costs, key=lambda c: costs[c]), "param")
         self.assertEqual(max(costs, key=lambda c: costs[c]), "meta")
 
     def test_cost_ordering_follows_pol_b_ordering(self) -> None:
         by_pol_b = sorted(sp.POL_B_DECISION, key=lambda c: sp.POL_B_DECISION[c])
         by_cost = sorted(
-            sp.POL_B_DECISION, key=lambda c: sp.attacker_cost_per_epoch(c).total
+            sp.POL_B_DECISION, key=lambda c: sp.carrying_cost_per_epoch(c).total
         )
         self.assertEqual(by_pol_b, by_cost)
 
     def test_unknown_class_refuses_rather_than_guesses(self) -> None:
         with self.assertRaises(sp.SlotPricingError):
-            sp.attacker_cost_per_epoch("gate")
+            sp.carrying_cost_per_epoch("gate")
 
 
 class DepthIsUnpricedTests(unittest.TestCase):
@@ -106,75 +113,45 @@ class EqualizationTests(unittest.TestCase):
         self.assertEqual(benchmark, min(every))
         self.assertLess(benchmark, sum(every) / len(every))
 
-    def test_hosted_door_is_cheaper_on_every_class(self) -> None:
-        for cls, ratio in sp.equalization(ARTIFACT).items():
+    def test_module_publishes_no_ratio_and_no_price_target(self) -> None:
+        """The withdrawal, pinned. An earlier revision published both."""
+        finding = sp.check_equalization_not_yet_computable(ARTIFACT)
+        self.assertFalse(finding["publishes_ratio"])
+        self.assertFalse(finding["publishes_price_target"])
+        self.assertFalse(finding["benchmark_harm_measured"])
+        self.assertFalse(finding["dominant_cost_term_modelled"])
+
+    def test_the_withdrawn_helpers_are_gone_not_merely_unused(self) -> None:
+        """A consumer must not be able to import them back by accident."""
+        self.assertFalse(hasattr(sp, "equalization"))
+        self.assertFalse(hasattr(sp, "required_uplift"))
+        self.assertNotIn("equalization", sp.__all__)
+
+    def test_hosted_harm_is_measured_even_though_the_benchmark_is_not(self) -> None:
+        """The asymmetry that blocks the ratio: one side has evidence, one does not."""
+        finding = sp.check_equalization_not_yet_computable(ARTIFACT)
+        self.assertTrue(finding["hosted_harm_measured"])
+        for cls, harm in finding["hosted_harm_at_arming_rung"].items():
             with self.subTest(cls=cls):
-                self.assertGreater(ratio, Decimal(1))
-
-    def test_harm_normalized_ratios(self) -> None:
-        expected = {
-            "param": Decimal("3.16"),
-            "treasury": Decimal("2.79"),
-            "code": Decimal("1.63"),
-            "meta": Decimal("1.23"),
-        }
-        got = sp.equalization(ARTIFACT)
-        for cls, want in expected.items():
-            with self.subTest(cls=cls):
-                self.assertEqual(got[cls].quantize(Decimal("0.01")), want)
-
-    def test_required_uplift_per_epoch(self) -> None:
-        expected = {
-            "param": Decimal(1710),
-            "treasury": Decimal(2487),
-            "code": Decimal(1752),
-            "meta": Decimal(1002),
-        }
-        got = sp.required_uplift(ARTIFACT)
-        for cls, want in expected.items():
-            with self.subTest(cls=cls):
-                self.assertEqual(_round(got[cls]), want)
-
-    def test_worst_ratio_and_worst_uplift_are_different_classes(self) -> None:
-        """Both are true and they disagree, so neither alone describes the hole.
-
-        PARAM is the cheapest door (worst ratio); TREASURY needs the largest
-        absolute uplift. A repair sized on either one alone misses the other.
-        """
-        eq, up = sp.equalization(ARTIFACT), sp.required_uplift(ARTIFACT)
-        self.assertEqual(max(eq, key=lambda c: eq[c]), "param")
-        self.assertEqual(max(up, key=lambda c: up[c]), "treasury")
+                self.assertGreater(harm, Decimal(0))
 
 
 class NaiveRoutesMustNotReproduceTests(unittest.TestCase):
     """The guards. Each pins a wrong route as wrong, not merely absent."""
 
-    def test_unnormalized_comparison_does_not_reproduce_the_ratios(self) -> None:
-        """Comparing at equal nominal cost overstates the gap by roughly two.
+    def test_depth_cash_does_not_double_count_branches(self) -> None:
+        """The defect the first version shipped: pol.b is already per branch.
 
-        This is the confound the N12 control hit from the other side — comparing
-        two populations that differ in a second variable. Asserting the raw
-        ratios differ keeps the normalization from being quietly dropped.
+        The original guard pinned `b` versus `b*ln 2` and this error walked past
+        it, so the branch count is now pinned separately.
         """
-        _, benchmark = sp.cheapest_priced_denial_channel()
-        normalized = sp.equalization(ARTIFACT)
-        for cls in sp.POL_B_DECISION:
-            with self.subTest(cls=cls):
-                raw = benchmark / sp.attacker_cost_per_epoch(cls).total
-                self.assertNotEqual(
-                    raw.quantize(Decimal("0.01")),
-                    normalized[cls].quantize(Decimal("0.01")),
-                )
-                self.assertGreater(raw, normalized[cls])
-
-    def test_raw_param_ratio_is_the_overstated_eight_fold_figure(self) -> None:
-        _, benchmark = sp.cheapest_priced_denial_channel()
-        raw = benchmark / sp.attacker_cost_per_epoch("param").total
-        self.assertEqual(raw.quantize(Decimal("0.01")), Decimal("8.08"))
-        self.assertEqual(
-            sp.equalization(ARTIFACT)["param"].quantize(Decimal("0.01")),
-            Decimal("3.16"),
-        )
+        cash = sp.parity_depth_cash(sp.POL_B_DECISION["code"])
+        double = (
+            Decimal(sp.EPOCH_SLATE_SIZE) * Decimal(2)
+            * sp.POL_B_DECISION["code"] * Decimal(2)
+        ) * Decimal(2).ln()
+        self.assertEqual(_round(double / cash), Decimal(2))
+        self.assertEqual(_round(cash), Decimal(415888))
 
     def test_depth_cash_uses_b_ln2_not_b(self) -> None:
         """The conflation that produced the superseded escrow figure in
@@ -213,15 +190,16 @@ class ThreatRowTests(unittest.TestCase):
 class ArithmeticHygieneTests(unittest.TestCase):
     def test_module_does_not_mutate_global_decimal_context(self) -> None:
         before = getcontext().prec
-        sp.equalization(ARTIFACT)
-        sp.required_uplift(ARTIFACT)
+        sp.check_equalization_not_yet_computable(ARTIFACT)
+        for cls in sp.POL_B_DECISION:
+            sp.carrying_cost_per_epoch(cls)
         self.assertEqual(getcontext().prec, before)
 
     def test_capital_time_value_matches_08_section_7(self) -> None:
         """The opportunity-cost half is 08 §7's own helper, not a private copy."""
         cash = sp.parity_depth_cash(sp.POL_B_DECISION["code"])
         want = threat_costs.capital_time_value(Fraction(int(cash)))
-        got = sp.attacker_cost_per_epoch("code").capital_time_value
+        got = sp.carrying_cost_per_epoch("code").capital_time_value
         self.assertEqual(
             got.quantize(Decimal("0.0001")),
             (Decimal(want.numerator) / Decimal(want.denominator)).quantize(
