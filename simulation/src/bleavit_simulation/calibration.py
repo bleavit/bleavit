@@ -22,7 +22,13 @@ from bleavit_reference_model.treasury import (
     security_sizing_ok,
 )
 
-from .config import CLASSES, DEFAULT_SEED, SimulationConfig, python_version_tuple
+from .config import (
+    CLASSES,
+    COMPETING_VENUE_ARMING_DIVERSION,
+    DEFAULT_SEED,
+    SimulationConfig,
+    python_version_tuple,
+)
 from .engine import SimulationResult, _strategy_for, simulate_proposal
 from .proposals import Proposal, generate_proposal_with_config
 
@@ -593,6 +599,292 @@ def normative_violations(metrics: dict, attack: dict) -> list[str]:
     return violations
 
 
+def _competing_venue(
+    proposals: list[Proposal],
+    seed: int,
+    config: SimulationConfig,
+    flow_cap: Decimal,
+    baseline: list[SimulationResult],
+) -> dict:
+    """16 §8.4 / 14 TH-72 — the Phase-4 arming leg.
+
+    The Phase-0 calibration assumed no competing venue. Once the hosted service
+    arms, external books draw on the same trader pool, so Bleavit's own books
+    thin while an attacker targeting one proposal does not. This leg re-runs a
+    stratified sample under each ladder rung and reports what the per-class
+    decidable-harm false-pass rate does.
+
+    **This is not a Phase-0 gate and MUST NOT enter `violations`.** Phase 0 has
+    no hosted service; failing a Phase-4 condition cannot retro-invalidate a
+    Phase-0 exit that was measured on a chain where the condition does not
+    apply. The verdict lands in `arming_ready`, which 16 §8.4 reads at
+    switch-on — the same fail-closed shape as every other arming input.
+
+    The comparison is a **sample against the same sample**, never against the
+    10⁴ primary population: the rungs share proposal ids and RNG streams with
+    the 0 % control drawn here, so the difference between them is the diversion
+    and nothing else.
+    """
+    # The sample must consist of WHOLE epoch slates, not loose proposals.
+    # `_simulate_population` derives TH-7's baseline-suppression budget by
+    # pooling `3 · prize` over each epoch group, and `_epoch_groups` rebuilds
+    # those groups from whatever list it is handed — so a stratified sample of
+    # individual ids hands it *partial* slates and silently shrinks the pooled
+    # attacker budget (by ~58× at four-per-class, found by adversarial review
+    # 2026-08-03). That is a confound in exactly the comparison this leg
+    # exists to make, and `control_matches_primary` only catches it when the
+    # budget change happens to flip an outcome. Expanding to full slates makes
+    # the pooled budget identical to the primary run by construction.
+    seeds = _stratified_sample(
+        proposals, config.competing_venue_sample_per_class, seed ^ 0x43564E55
+    )
+    wanted = {row.proposal_id // config.epoch_slate_size for row in seeds}
+    sample = [
+        row
+        for row in proposals
+        if row.proposal_id // config.epoch_slate_size in wanted
+    ]
+    control_config = replace(config, competing_venue_diversion="0.00")
+    rungs: dict[str, dict] = {}
+    control = _simulate_population(
+        proposals=sample,
+        seed=seed,
+        config=control_config,
+        budget_multiple=Decimal(config.primary_manipulator_budget_multiple),
+        flow_cap=flow_cap,
+    )
+    # The control must reproduce the primary run on the sampled ids, or the
+    # rungs are being read against a different population than the artifact's.
+    primary_by_id = {row.proposal.proposal_id: row for row in baseline}
+    control_matches_primary = all(
+        row.proposal.proposal_id in primary_by_id
+        and primary_by_id[row.proposal.proposal_id].outcome == row.outcome
+        for row in control
+    )
+
+    def summarize(rows: list[SimulationResult]) -> dict:
+        metrics = _aggregate(rows, config)
+        return {
+            name: {
+                "decidable_harm": metrics[name]["decidable_harm"],
+                "decidable_harm_false_pass_rate": metrics[name][
+                    "decidable_harm_false_pass_rate"
+                ],
+                "decision_grade_formation_rate": metrics[name][
+                    "decision_grade_formation_rate"
+                ],
+                "not_decision_grade": sum(
+                    row.reason == "NotDecisionGrade"
+                    for row in rows
+                    if row.proposal.proposal_class == name
+                ),
+                # The Baseline's own liveness. It is measured separately
+                # because a failed Baseline does NOT surface as a decision
+                # outcome: `simulate_proposal` falls back to the previous
+                # epoch's Baseline and carries on, so a diversion that
+                # destroys Baseline formation is invisible in every
+                # outcome/reason field (found by adversarial review
+                # 2026-08-03). Diversion thins the Baseline book like any
+                # other organic book, so not measuring this under-reported
+                # the liveness harm the leg exists to expose.
+                "baseline_carried": sum(
+                    not row.baseline_valid
+                    for row in rows
+                    if row.proposal.proposal_class == name
+                ),
+            }
+            for name in CLASSES
+        }
+
+    rungs["0.00"] = summarize(control)
+    for level in config.competing_venue_diversions:
+        rungs[level] = summarize(
+            _simulate_population(
+                proposals=sample,
+                seed=seed,
+                config=replace(config, competing_venue_diversion=level),
+                budget_multiple=Decimal(config.primary_manipulator_budget_multiple),
+                flow_cap=flow_cap,
+            )
+        )
+    arming = rungs[COMPETING_VENUE_ARMING_DIVERSION]
+    # Same gate shape as 15 §4.9's own: per class, decidable-harm, and a class
+    # that measured nothing does not pass on an empty denominator (SQ-269).
+    by_class = {
+        name: arming[name]["decidable_harm"] > 0
+        and Decimal(arming[name]["decidable_harm_false_pass_rate"]) < Decimal("0.01")
+        for name in CLASSES
+    }
+    # The liveness leg, and the reason it is reported rather than gated.
+    #
+    # Diversion's first-order effect is NOT that thin books get manipulated —
+    # it is that they stop being decision-grade at all, so the proposal is
+    # rejected `NotDecisionGrade` and never reaches a wrong outcome. A
+    # false-pass-only criterion would therefore read *cleaner* the more harm
+    # the diversion does, which is precisely backwards. TH-72 names this
+    # directly: the harm is "Bleavit proposals rejected for thin books, with no
+    # market signal that anything was attacked" — governance denial, not
+    # corruption.
+    #
+    # No threshold is invented for it (R-2). 16 §8.4 states the falsifier and
+    # deliberately states no number: "if rejections rise with external
+    # occupancy, the values layer MUST reduce svc.max_live". So the rise is
+    # measured here and the response stays a values decision.
+    control_grade = {
+        name: Decimal(rungs["0.00"][name]["decision_grade_formation_rate"])
+        for name in CLASSES
+    }
+    liveness = {
+        name: {
+            "decision_grade_control": format(control_grade[name], ".6f"),
+            "decision_grade_at_arming": arming[name]["decision_grade_formation_rate"],
+            "decision_grade_loss": format(
+                control_grade[name]
+                - Decimal(arming[name]["decision_grade_formation_rate"]),
+                ".6f",
+            ),
+            "not_decision_grade_control": rungs["0.00"][name]["not_decision_grade"],
+            "not_decision_grade_at_arming": arming[name]["not_decision_grade"],
+            "baseline_carried_control": rungs["0.00"][name]["baseline_carried"],
+            "baseline_carried_at_arming": arming[name]["baseline_carried"],
+        }
+        for name in CLASSES
+    }
+    # The stress rung: what the arming verdict would be if flow diverted MORE
+    # than depth share. Reported, never gated — see the ladder's derivation
+    # note. If `stress_by_class` disagrees with `arming_by_class`, the arming
+    # decision rests on proportional allocation holding, and that dependence is
+    # then a stated fact rather than a buried one.
+    stress_level = config.competing_venue_diversions[-1]
+    stress = rungs[stress_level]
+    stress_by_class = {
+        name: stress[name]["decidable_harm"] > 0
+        and Decimal(stress[name]["decidable_harm_false_pass_rate"]) < Decimal("0.01")
+        for name in CLASSES
+    }
+    # Relative loss, not just the endpoints. A reader comparing two six-decimal
+    # rates will not feel the difference between 0.48 and 0.076; "-84.1 %" is
+    # the same fact in the form that carries.
+    liveness_loss = {
+        name: format(
+            (control_grade[name] - Decimal(arming[name]["decision_grade_formation_rate"]))
+            / control_grade[name]
+            if control_grade[name]
+            else Decimal(0),
+            ".4f",
+        )
+        for name in CLASSES
+    }
+    return {
+        "arming_by_class": by_class,
+        "arming_diversion": COMPETING_VENUE_ARMING_DIVERSION,
+        # There is deliberately NO single "ready to arm" boolean, and its
+        # absence is the point (2026-08-03). An earlier revision published
+        # `arming_ready`, which measured the security leg alone — so on this
+        # very corpus it read True while decision-grade formation fell 39-84 %
+        # and the security leg's own `resolution` block showed every class
+        # `gate_is_all_or_nothing`, i.e. unable to resolve a rate below 1 % at
+        # all. A boolean named "ready" that a phase gate could consume must
+        # not be True on that evidence. The security leg reports what it
+        # actually is — a screen — and the liveness leg reports a magnitude
+        # against 16 §8.4's stated falsifier. Composing them into one verdict
+        # would require a liveness threshold that no document states, which
+        # R-2 forbids inventing.
+        "security_leg_clean": all(by_class.values()) and control_matches_primary,
+        "security_leg_is_a_screen_not_a_measurement": any(
+            row["gate_is_all_or_nothing"] for row in (
+                {
+                    "gate_is_all_or_nothing": arming[name]["decidable_harm"] > 0
+                    and Decimal(1) / Decimal(arming[name]["decidable_harm"])
+                    > Decimal("0.01")
+                }
+                for name in CLASSES
+            )
+        ),
+        "liveness_loss_at_arming": liveness_loss,
+        "no_single_verdict": (
+            "By design there is no composite 'ready to arm' field. The "
+            "security leg is gated but, at this sample, is a screen that "
+            "detects gross failure rather than a measurement of a sub-1 % "
+            "rate — see `resolution`. The liveness leg has a magnitude and a "
+            "stated falsifier (16 §8.4) but no threshold any document names, "
+            "and R-2 forbids inventing one. A consumer that needs a single "
+            "boolean must supply the missing values judgement itself, "
+            "explicitly, rather than read one out of this artifact."
+        ),
+        "control_matches_primary": control_matches_primary,
+        "flow_model": (
+            "The arming rung is ANCHORED, not derived. 16 §8.4 bounds external "
+            "DEPTH at parity (Σ b_ext <= Σ pol.b(live)); turning that into a "
+            "bound on FLOW needs a behavioural model, and proportional-to-depth "
+            "allocation — the neutral one — is what puts the anchor at one "
+            "half. The model errs in the unsafe direction: an external venue of "
+            "equal depth but better fees or returns could take far more than "
+            "half the flow. The ladder therefore runs past the arming rung, and "
+            "`stress_by_class` reports the verdict there. Disagreement between "
+            "`arming_by_class` and `stress_by_class` means the arming decision "
+            "depends on proportional allocation holding."
+        ),
+        "stress_by_class": stress_by_class,
+        "stress_diversion": stress_level,
+        "criterion": (
+            "16 §8.4 Phase-4 arming, two legs. SECURITY (gated): with organic "
+            "formation thinned by the diversion the arming condition "
+            "Σ b_ext <= Σ pol.b(live) admits under proportional allocation "
+            "(one half), every class must still "
+            "hold decidable-harm false-pass < 1 %; if it does not, the "
+            "calibrated δ is under-sized for a chain running the service and "
+            "13 §1's δ rows MUST be raised before arming. LIVENESS (measured, "
+            "not gated): the decision-grade formation loss under the same "
+            "diversion is TH-72's named harm — governance denial — and 16 §8.4 "
+            "states its falsifier without a number, so the values layer owns "
+            "the response (cut svc.max_live). Read the two together: diversion "
+            "denies decisions before it corrupts them, so a clean security leg "
+            "beside a large liveness loss is the expected shape and is NOT a "
+            "clean bill of health. Neither leg is a Phase-0 gate — Phase 0 has "
+            "no hosted service — so this verdict never enters `violations`."
+        ),
+        "diversion_is_organic_only": (
+            "Diversion thins organic formation on decision, gate and Baseline "
+            "books. Attacker budgets are untouched: an adversary targeting one "
+            "proposal is not diverted by a venue elsewhere (14 TH-72)."
+        ),
+        "liveness": liveness,
+        # What the sample can and cannot resolve. Stated because a rate of
+        # "0.000000" over a small denominator reads identically to one over a
+        # large denominator, and the < 1 % gate is only meaningful when the
+        # denominator can express a value below it. `smallest_detectable` is
+        # 1/decidable_harm at the arming rung: where it EXCEEDS 0.01, a single
+        # false pass would already breach the gate, so a clean verdict for that
+        # class means "no false pass observed", not "rate measured below 1 %".
+        "resolution": {
+            name: {
+                "decidable_harm_at_arming": arming[name]["decidable_harm"],
+                "smallest_detectable_rate": format(
+                    Decimal(1) / Decimal(arming[name]["decidable_harm"]), ".6f"
+                )
+                if arming[name]["decidable_harm"]
+                else None,
+                "gate_is_all_or_nothing": arming[name]["decidable_harm"] > 0
+                and Decimal(1) / Decimal(arming[name]["decidable_harm"])
+                > Decimal("0.01"),
+            }
+            for name in CLASSES
+        },
+        "rungs": rungs,
+        "sample_per_class": config.competing_venue_sample_per_class,
+        "sample_unit": (
+            "whole epoch slates. `_simulate_population` pools TH-7's "
+            "baseline-suppression budget per epoch group and rebuilds groups "
+            "from the list it is given, so a sample of loose proposal ids "
+            "would hand it partial slates and shrink that attacker budget "
+            "(~58x at four-per-class). Expanding each sampled id to its full "
+            "slate makes the pooled budget identical to the primary run by "
+            "construction rather than by luck."
+        ),
+    }
+
+
 def _pol_sizing(results: list[SimulationResult]) -> dict:
     identity = {}
     for name in CLASSES:
@@ -671,6 +963,22 @@ def run_full_calibration(*, seed: int = DEFAULT_SEED, config: SimulationConfig |
         primary_results=primary,
     )
     thin = _thin_market_capture(primary)
+    # The competing-venue leg takes the PROBE flow cap, the same input the
+    # primary population above was simulated with -- not the `flow_cap`
+    # calibrated from that population one line earlier. Handing it the
+    # calibrated value (16 against the probe's 17) would make its "control" a
+    # different simulation from `primary`, so `control_matches_primary` would
+    # be comparing two populations that differ in a second variable and could
+    # still read True whenever the flow-cap change happens not to flip an
+    # outcome. Same class of confound as the partial-epoch-slate sampling
+    # above, and the same fix: hold everything but the diversion fixed.
+    competing_venue = _competing_venue(
+        proposals,
+        seed,
+        config,
+        Decimal(config.diagnostic_probe_flow_cap),
+        primary,
+    )
     publication = _publication(metrics, attack, flow_cap, config)
     violations = normative_violations(metrics, attack)
     counts = Counter(row.proposal_class for row in proposals)
@@ -690,6 +998,7 @@ def run_full_calibration(*, seed: int = DEFAULT_SEED, config: SimulationConfig |
             "a2_arbitrage": "A-2 corrective capacity is L/2 per day at elasticity 1; it is empirical and phase-revalidated.",
             "baseline_contest_floor": "The 250,000-USDC Baseline contest floor is the TREASURY-tier dec.v_min.trs mandated by 05 §5.2 (SQ-232 resolution 2026-07-18).",
             "contest_measure": "Per the SQ-231 amendment (04 §7a; 05 §5.2/§5.4/§5.6; 08 §5.2-§5.4), step-5 grading and the step-9 certificate consume time-averaged marked net open interest (contest capital) with the sec.flow_cap ceiling; gross traded notional is recorded as flow telemetry only. Organic formation is modeled as directional informed exposure plus balanced maker-bought pair holdings topped up to the stratum target - balanced pairs are settlement-riskless but lock capital for the window and count per the 04 §7a definition.",
+            "competing_venue": "Phase 0 runs at zero competing-venue diversion, which is the chain state Phase 0 describes: the hosted question service (doc 16, D-20) arms in Phase 4. The `competing_venue` block is a Phase-4 arming input measured on whole epoch slates against its own 0 % control at the same probe flow cap as the primary run, never a Phase-0 gate, and its verdict never enters `violations`. Its arming rung is ANCHORED, not derived: 16 §8.4's `Σ b_ext <= Σ pol.b(live)` bounds external DEPTH at parity, and one half follows only under proportional-to-depth allocation -- a behavioural assumption, not a protocol guarantee. That assumption's error direction is unsafe (an equally deep venue with better fees or returns can take more), which is why the ladder carries a rung ABOVE the anchor and the block publishes `stress_by_class` beside `arming_by_class`. See `competing_venue.flow_model`.",
             "coverage_leg": "Scheduled observations provide an always-clean coverage leg in Phase-0 synthetic runs.",
             "pol_leg": "POL is assumed seeded at the class schedule and undisturbed for step-5 grading.",
             "pre_registered_strata": {
@@ -705,6 +1014,7 @@ def run_full_calibration(*, seed: int = DEFAULT_SEED, config: SimulationConfig |
             "undefined_prize": "An explicit undefined envelope proxy is represented as null and rejects SecuritySizing.",
         },
         "attack_cost_validation": attack,
+        "competing_venue": competing_venue,
         "config": config.canonical(),
         "config_digest": config.digest(),
         "gate_veto_counts": gate_veto_counts,

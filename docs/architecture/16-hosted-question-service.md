@@ -807,7 +807,21 @@ today.** Mitigations, primary first:
   external occupancy, the values layer **MUST** reduce `svc.max_live`.
 - **Recalibration:** the Phase-0 calibration assumed no competing venue, so S4 re-run with a
   competing-venue term is a **Phase-4 arming condition** — if external markets divert flow, the
-  calibrated δ is under-sized.
+  calibrated δ is under-sized. **The term is now executable** ([15](15-invariants-and-testing.md)
+  §4.9; milestone N12): the artifact carries a `competing_venue` block whose arming rung is
+  **anchored** to the arming condition immediately above rather than derived from it. That condition
+  bounds external **depth** at parity; turning it into a bound on **flow** takes a behavioural model,
+  and proportional-to-depth allocation puts the anchor at **one half**. The model's error direction
+  is **unsafe** — an equally deep venue with better fees or returns can take far more than half the
+  flow — so the ladder **MUST** probe above the arming rung and the artifact publishes that stress
+  verdict beside the arming one. The term thins organic
+  formation on decision, gate and Baseline books while leaving attacker budgets untouched. Arming
+  reads **both** its halves: the *security* half gates (per-class decidable-harm false-pass < 1 % at
+  the arming rung, else δ rises before the service arms), and the *liveness* half — decision-grade
+  formation loss, which is TH-72's actual named harm — is measured against the falsifier stated in
+  the bullet above, with no invented threshold. **A clean security half alone is not a clean
+  result**: diversion denies decisions before it corrupts them, so a false-pass-only reading gets
+  *better* the more governance the diversion destroys.
 
 **Accepted residual:** informed-attention diversion is invisible to `dec.v_min`, which measures
 capital rather than information, and nothing in this repository can measure it.
