@@ -21,6 +21,7 @@ tests execute the complete 16-case steps-6–8 partition and pin the one §5.5 c
 whose reason differs from normative §5.4.
 """
 
+import contextlib
 import unittest
 from fractions import Fraction
 from pathlib import Path
@@ -90,6 +91,67 @@ from bleavit_reference_model.lifecycle import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+_ARCHITECTURE = {
+    "doc_05": "05-welfare-and-decision-engine.md",
+    "doc_09": "09-execution-upgrades-and-rollout.md",
+    "doc_11": "11-frontend-workflows.md",
+}
+
+# Anchors for the SQ-552 witnesses. Kept as module constants so a document edit that
+# moves them fails one obvious place rather than three tests with three stack traces.
+_FE_ROW_13 = (
+    "| 13. Batch bounds | decoded batch \u2264 16 calls, \u2264 64 KiB, declared weight "
+    "\u2264 25% block limit *(normative values: [13](13-parameters.md))*; SafetyFilter "
+    "closure over nested wrappers incl. `proxy_announced`, `as_multi_threshold_1` "
+    "(static check on the preimage) |"
+)
+_FE_ROW_14 = (
+    "| 14. **Descriptor lead time (CODE/META)** | `now \u2265 authorized_at + "
+    "DescriptorLeadTime` (43,200 blocks = 72 h *(normative value: "
+    "[13](13-parameters.md))*) per D-14/[09](09-execution-upgrades-and-rollout.md) |"
+)
+_VALID_FAIL_UNCONVERGED = (
+    "| Valid fail \u2014 hurdle missed, series not converged | \u2714 | \u2714 | "
+    "\u2714 | \u2714 | \u2714 | \u2718 | \u2718 | \u2718 | \u2013 | \u2013 | "
+    "\u2013 | Reject(ConvergenceFailed) |"
+)
+_VALID_FAIL_UNCONVERGED_WRONG = _VALID_FAIL_UNCONVERGED.replace(
+    "Reject(ConvergenceFailed)", "Reject(HurdleNotMet)"
+)
+
+
+@contextlib.contextmanager
+def _mutated_repo(**edits: tuple[str, str]):
+    """A temp repo whose architecture documents carry one exact edit each.
+
+    Every SQ-552 witness below works the same way: put the repaired defect back and
+    require the checker to catch it. That direction matters more than it looks. These
+    tests were originally written the other way round \u2014 assert the defect on the live
+    documents, and apply a *hypothetical* repair in a temp copy \u2014 which meant that
+    ruling SQ-552 and repairing the spec turned all of them red at once, including the
+    positive controls, whose anchor strings had ceased to exist.
+
+    A missing anchor is therefore an error here, not a silent no-op: a witness that
+    mutates nothing passes without testing anything, which is the exact failure these
+    witnesses exist to rule out one level down.
+    """
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        architecture = root / "docs/architecture"
+        architecture.mkdir(parents=True)
+        for key, name in _ARCHITECTURE.items():
+            source = (REPO_ROOT / "docs/architecture" / name).read_text(encoding="utf-8")
+            if key in edits:
+                old, new = edits[key]
+                if old not in source:
+                    raise AssertionError(
+                        f"witness anchor absent from {name}: {old[:60]!r}\u2026 \u2014 the "
+                        "mutation would be a no-op and the test would pass vacuously"
+                    )
+                source = source.replace(old, new, 1)
+            (architecture / name).write_text(source, encoding="utf-8")
+        yield root
 
 
 class TestPhaseSchedule(unittest.TestCase):
@@ -578,24 +640,26 @@ class TestSnapshotRetention(unittest.TestCase):
 class TestExecuteChecklistContract(unittest.TestCase):
     """09 §1.2 ↔ 11 §11.5, parsed from the documents and diffed by row."""
 
-    def test_the_documents_publish_thirteen_backend_and_fourteen_frontend_rows(self):
+    def test_the_documents_publish_thirteen_backend_and_thirteen_frontend_rows(self):
         backend = backend_execute_checks(REPO_ROOT)
         frontend = frontend_execute_checks(REPO_ROOT)
         self.assertEqual([check.index for check in backend], list(range(1, 14)))
-        self.assertEqual([check.index for check in frontend], list(range(1, 15)))
+        self.assertEqual([check.index for check in frontend], list(range(1, 14)))
         self.assertEqual((backend[0].name, backend[-1].name), ("Queue state", "Record"))
         self.assertEqual(
             (frontend[0].name, frontend[-1].name),
-            ("Queued, not cancelled", "Descriptor lead time (CODE/META)"),
+            ("Queued, not cancelled", "Batch bounds"),
         )
 
-    def test_sq_552_the_claimed_item_for_item_bijection_is_false(self):
-        """SQ-552. Both documents claim lockstep; the parsed rows are not bijective.
+    def test_the_residual_non_bijection_is_exactly_the_structural_one(self):
+        """SQ-552 resolved. What is left is splits and effects, not a stray row.
 
-        Nine rows map one-to-one. Backend rows 1 and 10 each split into two FE
-        rows, backend dispatch/record rows 12/13 have no FE precondition, and FE
-        row 14 is an `apply_authorized_upgrade` check owned by 09 §2.2 rather
-        than an `execution_guard.execute` check.
+        The documents claimed lockstep and were not bijective. After the ruling the
+        residual difference is entirely accounted for: backend items 1 and 10 each
+        split into two frontend rows, and items 12–13 are the *effects* of passing
+        (dispatch, record), which have nothing to pre-check. The one row that was a
+        real defect — FE 14, an `apply_authorized_upgrade` check owned by 09 §2.2,
+        gating `execute` on a clock `execute` itself starts — is gone.
         """
         diff = execute_checklist_diff(REPO_ROOT)
         self.assertFalse(diff.bijective)
@@ -611,45 +675,84 @@ class TestExecuteChecklistContract(unittest.TestCase):
                 "backend:10:split",
                 "backend:12:unmatched",
                 "backend:13:unmatched",
-                "frontend:14:unmatched",
             },
         )
         self.assertEqual(mismatches["backend:1:split"].frontend_rows, (1, 2))
-        # The audit hypothesis grouped FE row 10 into backend item 10. The live
-        # documents do not: backend item 9 maps one-to-one to FE row 10, while
-        # item 10 maps only to FE rows 11 and 12.
-        self.assertIn((9, 10), diff.one_to_one)
         self.assertEqual(mismatches["backend:10:split"].frontend_rows, (11, 12))
-        self.assertIn("apply_authorized_upgrade", mismatches["frontend:14:unmatched"].why)
 
-    def test_the_check_accessor_exposes_the_unfrozen_terminal_reason(self):
-        """SQ-552. The accessor carries the source-side reason discrepancy."""
+    def test_reinstating_frontend_row_14_is_caught(self):
+        """Witness. The deleted row must still be detectable if it comes back.
+
+        A checker is only worth its green run if it can go red. `_FRONTEND_CHECK_ATOMS`
+        deliberately retains its entry for index 14 so this witness parses rather than
+        raising `ScheduleError` — the classification is kept alive precisely so the
+        defect stays reproducible.
+        """
+        with _mutated_repo(doc_11=(_FE_ROW_13, f"{_FE_ROW_13}\n{_FE_ROW_14}")) as root:
+            diff = execute_checklist_diff(root)
+        mismatches = {finding.key: finding for finding in diff.mismatches}
+        self.assertIn("frontend:14:unmatched", mismatches)
+        self.assertIn(
+            "apply_authorized_upgrade", mismatches["frontend:14:unmatched"].why
+        )
+
+    def test_every_named_terminal_reason_is_a_frozen_02_reason(self):
+        """SQ-552 resolved. No checklist row names a reason 02 §4 cannot construct."""
         findings = check_execute_reject_reasons(REPO_ROOT)
-        invalid = [finding for finding in findings if not finding.ok]
-        self.assertEqual(len(invalid), 1)
-        self.assertEqual((invalid[0].document, invalid[0].row), ("09 §1.2", 11))
-        self.assertNotIn(invalid[0].reason, frozen_reject_reasons())
+        self.assertTrue(findings)
         for finding in findings:
             with self.subTest(document=finding.document, row=finding.row):
-                self.assertEqual(
-                    finding.ok,
-                    finding.reason in frozen_reject_reasons(),
-                )
+                self.assertTrue(finding.ok)
+                self.assertIn(finding.reason, frozen_reject_reasons())
 
-    def test_sq_552_bad_preimage_stays_queued_then_expires_by_t15(self):
-        """SQ-552. 09 §1.2(11)'s `Rejected(BadPreimage)` is unconstructable.
+    def test_superseded_wording_is_quoted_without_being_claimed(self):
+        """The repair's own sentence contains the string it repudiates.
 
-        `BadPreimage` is not a frozen `RejectReason`, so a failed dispatch leaves
-        the proposal `Queued`. It is not a T16 cause either; absent another
-        specific cause, 05 §2.1 therefore sends it through T15 `Expired` at
-        grace end rather than recording the terminal state 09 publishes.
+        09 §1.2(11) explains that `Rejected(BadPreimage)` named nothing constructable,
+        and to explain that it has to *write* `Rejected(BadPreimage)`. A parser that
+        greps for the shape of a claim cannot tell a quotation from an assertion, so
+        repairing the document created a fresh finding out of the repair.
+
+        The convention is the strike-through: dead wording reads as dead to a human
+        and is excluded mechanically. Both halves are asserted here — the string is
+        present in the document, and absent from the parsed claims — because either
+        one alone is satisfied by the wrong outcome.
         """
-        invalid = next(
-            finding
-            for finding in check_execute_reject_reasons(REPO_ROOT)
-            if not finding.ok
+        doc09 = (REPO_ROOT / "docs/architecture/09-execution-upgrades-and-rollout.md")
+        text = doc09.read_text(encoding="utf-8")
+        self.assertIn("~~`Rejected(BadPreimage)`~~", text)
+        item11 = next(
+            check for check in backend_execute_checks(REPO_ROOT) if check.index == 11
         )
-        disposition = unconstructable_reject_disposition(invalid.reason)
+        self.assertNotIn("BadPreimage", item11.reject_reasons)
+        self.assertEqual(checklist_t16_causes(REPO_ROOT), frozenset(T16_CAUSES))
+
+    def test_unstriking_the_superseded_wording_is_caught(self):
+        """Witness. Without the marker the repudiated claim reads as live again."""
+        with _mutated_repo(
+            doc_09=("~~`Rejected(BadPreimage)`~~", "`Rejected(BadPreimage)`")
+        ) as root:
+            invalid = [
+                finding for finding in check_execute_reject_reasons(root)
+                if not finding.ok
+            ]
+            t16 = t16_cause_diff(root)
+        self.assertEqual(len(invalid), 1)
+        self.assertEqual((invalid[0].document, invalid[0].row), ("09 §1.2", 11))
+        self.assertEqual(invalid[0].reason, "BadPreimage")
+        self.assertFalse(t16.ok)
+        self.assertEqual(t16.checklist_only, frozenset({"BadPreimage"}))
+
+    def test_bad_preimage_disposition_is_queued_then_expired_at_t15(self):
+        """SQ-552. The ruling's substance, independent of how the doc words it.
+
+        `BadPreimage` is a `pallet_execution_guard::Error`, not a frozen `RejectReason`:
+        the dispatch errors, the storage layer rolls back, and the proposal stays
+        `Queued` until T15 records `Expired` at grace end. Asserted on the reason
+        string rather than on a live finding, so the claim survives the document being
+        repaired — which is the point, since the repair is what removed the finding.
+        """
+        disposition = unconstructable_reject_disposition("BadPreimage")
         self.assertEqual(
             (
                 disposition.state_after_dispatch,
@@ -659,51 +762,20 @@ class TestExecuteChecklistContract(unittest.TestCase):
             ("Queued", "T15", "Expired"),
         )
 
-    def test_t16_reason_sets_are_compared_in_both_directions(self):
-        """SQ-552. The derived T16 set excludes the unconstructable reason."""
-        checklist = checklist_t16_causes(REPO_ROOT)
+    def test_t16_reason_sets_agree_in_both_directions(self):
+        """SQ-552 resolved. The derived T16 set and 05 §2.1's now match exactly."""
         finding = t16_cause_diff(REPO_ROOT)
-        self.assertFalse(finding.ok)
-        self.assertEqual(len(finding.checklist_only), 1)
+        self.assertTrue(finding.ok)
+        self.assertEqual(finding.checklist_only, frozenset())
         self.assertEqual(finding.transition_only, frozenset())
-        self.assertEqual(checklist - finding.checklist_only, frozenset(T16_CAUSES))
-
-    def test_repaired_payload_disposition_makes_the_reason_parsers_agree(self):
-        """SQ-552. A queued-then-expired repair is the parser positive control."""
-        doc09_path = REPO_ROOT / "docs/architecture/09-execution-upgrades-and-rollout.md"
-        doc11_path = REPO_ROOT / "docs/architecture/11-frontend-workflows.md"
-        doc09 = doc09_path.read_text(encoding="utf-8")
-        stale = "resolves to `Rejected(BadPreimage)` (G-1 status quo)"
-        repaired = (
-            "errors `BadPreimage`, leaves the proposal `Queued`, and reaches "
-            "T15 `Expired` at grace end (G-1 status quo)"
-        )
-        repaired_doc09 = doc09.replace(stale, repaired, 1)
-        self.assertNotEqual(repaired_doc09, doc09)
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            architecture = root / "docs/architecture"
-            architecture.mkdir(parents=True)
-            (architecture / doc09_path.name).write_text(
-                repaired_doc09, encoding="utf-8"
-            )
-            (architecture / doc11_path.name).write_text(
-                doc11_path.read_text(encoding="utf-8"), encoding="utf-8"
-            )
-            findings = check_execute_reject_reasons(root)
-            t16 = t16_cause_diff(root)
-        for finding in findings:
-            with self.subTest(document=finding.document, row=finding.row):
-                self.assertTrue(finding.ok)
-        self.assertTrue(t16.ok)
 
 
 class TestReasonCodeTruthTable(unittest.TestCase):
     """05 §5.5's table structure and its steps-6–8 diff against §5.4."""
 
-    def test_the_published_table_parses_as_twenty_one_rows_by_eleven_steps(self):
+    def test_the_published_table_parses_as_twenty_five_rows_by_eleven_steps(self):
         rows = reason_table_rows(REPO_ROOT)
-        self.assertEqual(len(rows), 21)
+        self.assertEqual(len(rows), 25)
         for row in rows:
             with self.subTest(scenario=row.scenario):
                 self.assertEqual(len(row.steps), 11)
@@ -723,76 +795,50 @@ class TestReasonCodeTruthTable(unittest.TestCase):
         self.assertEqual(analysis.overlaps, ())
         self.assertEqual(analysis.nondeterministic, ())
 
-    def test_sq_552_valid_fail_has_the_wrong_reason_when_not_converged(self):
-        """SQ-552. 05 §5.5 loses the convergence predicate in `Valid fail`.
+    def test_the_split_valid_fail_rows_agree_with_normative_5_4(self):
+        """SQ-552 resolved. §5.5's reasons now match §5.4 on all 16 cases.
 
-        The row publishes `HurdleNotMet` whenever both windows fail, but
-        normative §5.4 chooses `ConvergenceFailed` when `converged` is false.
-        The two mismatching inputs differ only in the irrelevant `extended`
-        flag, so this is one wrong table cell, not two rules.
+        The superseded one-line `Valid fail` row published `HurdleNotMet` whenever both
+        windows failed, but §5.4 dispatches on the *triple* and returns
+        `ConvergenceFailed` when the series has not converged. Two rows replaced it, and
+        the partition is checked as a whole rather than at that cell — a repair that
+        fixed the reason and opened a coverage hole would pass a cell-level assertion.
         """
-        mismatches = analyze_reason_table(REPO_ROOT).mismatches
-        self.assertEqual(len(mismatches), 2)
-        self.assertEqual({mismatch.row for mismatch in mismatches}, {"Valid fail"})
+        analysis = analyze_reason_table(REPO_ROOT)
+        self.assertEqual(analysis.mismatches, ())
+        scenarios = {row.scenario for row in reason_table_rows(REPO_ROOT)}
+        self.assertIn("Valid fail — hurdle missed, series converged", scenarios)
+        self.assertIn("Valid fail — hurdle missed, series not converged", scenarios)
+        self.assertNotIn("Valid fail", scenarios)
+
+    def test_a_wrong_reason_in_a_split_row_is_caught(self):
+        """Witness. Re-introduce SQ-552's defect in the live row shape.
+
+        Deliberately mutates the *current* row rather than restoring the old one-line
+        row: what needs proving is that this parser, as it stands, still detects a
+        non-converged failure published as `HurdleNotMet`. A witness that replays a
+        shape the module no longer parses would prove nothing about the module.
+        """
+        with _mutated_repo(
+            doc_05=(_VALID_FAIL_UNCONVERGED, _VALID_FAIL_UNCONVERGED_WRONG)
+        ) as root:
+            analysis = analyze_reason_table(root)
+        self.assertEqual(len(analysis.mismatches), 2)
+        self.assertEqual(
+            {mismatch.row for mismatch in analysis.mismatches},
+            {"Valid fail — hurdle missed, series not converged"},
+        )
         self.assertEqual(
             {
-                (
-                    mismatch.case.full_pass,
-                    mismatch.case.tail_pass,
-                    mismatch.case.converged,
-                    mismatch.case.extended,
-                )
-                for mismatch in mismatches
+                (case.full_pass, case.tail_pass, case.converged, case.extended)
+                for case in (mismatch.case for mismatch in analysis.mismatches)
             },
             {(False, False, False, False), (False, False, False, True)},
         )
         self.assertEqual(
-            {mismatch.normative.reason for mismatch in mismatches},
+            {mismatch.normative.reason for mismatch in analysis.mismatches},
             {RejectReason.CONVERGENCE_FAILED},
         )
-        self.assertEqual(
-            {mismatch.table.outcome for mismatch in mismatches},
-            {Outcome.REJECT},
-        )
-
-    def test_repaired_reason_rows_make_the_truth_table_agree(self):
-        """SQ-552. Split converged/non-converged failures are a positive control."""
-        doc05_path = REPO_ROOT / "docs/architecture/05-welfare-and-decision-engine.md"
-        doc05 = doc05_path.read_text(encoding="utf-8")
-        stale_valid = (
-            "| Valid fail | ✔ | ✔ | ✔ | ✔ | ✔ | ✘ | – | – | – | – | – | "
-            "Reject(HurdleNotMet) |"
-        )
-        repaired_valid = (
-            "| Valid fail | ✔ | ✔ | ✔ | ✔ | ✔ | ✘ | – | ✔ | – | – | – | "
-            "Reject(HurdleNotMet) |"
-        )
-        existing_non_convergence = (
-            "| Non-convergence | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✘ | – | – | – | "
-            "Reject(ConvergenceFailed) |"
-        )
-        failed_non_convergence = (
-            "| Non-convergence | ✔ | ✔ | ✔ | ✔ | ✔ | ✘ | ✘ | ✘ | – | – | – | "
-            "Reject(ConvergenceFailed) |"
-        )
-        repaired_doc05 = doc05.replace(stale_valid, repaired_valid, 1).replace(
-            existing_non_convergence,
-            f"{existing_non_convergence}\n{failed_non_convergence}",
-            1,
-        )
-        self.assertNotEqual(repaired_doc05, doc05)
-        with tempfile.TemporaryDirectory() as directory:
-            root = Path(directory)
-            architecture = root / "docs/architecture"
-            architecture.mkdir(parents=True)
-            (architecture / doc05_path.name).write_text(
-                repaired_doc05, encoding="utf-8"
-            )
-            analysis = analyze_reason_table(root)
-        self.assertTrue(analysis.total)
-        self.assertTrue(analysis.deterministic)
-        self.assertTrue(analysis.non_overlapping)
-        self.assertEqual(analysis.mismatches, ())
 
 
 if __name__ == "__main__":
