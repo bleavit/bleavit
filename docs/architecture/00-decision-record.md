@@ -241,8 +241,18 @@ New FE epic **FE-14 (Governance surface)**: referenda list/detail, vote/delegate
   inherently require servers are out of scope rather than centralized"*. A hosted or local
   tool-protocol server, a tunnel, a sidecar, or a direct model-API client is each a server whose
   availability the feature's correctness would depend on. The file/clipboard/share design is therefore
-  an **application** of INV-FE-6, not an exception to it, and no INV-FE text is amended
-  ([15 §2.1](15-invariants-and-testing.md) records three ratified readings instead).
+  an **application** of INV-FE-6, not an exception to it.
+- **Two INV-FE texts are amended, and an earlier draft of this decision wrongly claimed none were**
+  ([15 §2.1](15-invariants-and-testing.md); the joint sign-off is the user's, who owns both sides
+  under R-1). **INV-FE-1** now distinguishes values the client *sources* from values the user
+  *chooses* — as published it bound "any value whose incorrectness could change what a user signs"
+  to finalized chain state, which a typed amount satisfies, so the text forbade the transaction
+  screens themselves; that defect pre-dates this work and the handoff only made it unignorable.
+  **INV-FE-9**'s enumeration gains `external-proposal`, because a requested ceiling rendered beside
+  its chain-derived clamp is a displayed item and the five-status list had no label for it. Both
+  changes were first carried as "ratified readings"; an adversarial review called that special
+  pleading, and it was right — a reading that changes what an invariant *requires* is an amendment,
+  and [15](15-invariants-and-testing.md) §6 binds certification to these texts and nothing else.
 - **What is imported is a request, not a fact.** This is the load-bearing half. An imported action
   supplies exactly a choice among a closed action set, an id, and ceilings; every one is re-derived or
   re-validated against `Finalized<T>` chain state at B′ before anything is signed. No inbound field

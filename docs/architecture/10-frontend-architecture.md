@@ -431,7 +431,7 @@ CI-fatal forbidden edges (dependency-cruiser, with the TypeScript project graph 
 
 ### 10.2 Structural firewall inside `app/src` (F-medium: provider firewall)
 
-The reviewed design enforced the firewall structurally *between packages* but only by lint *inside* `apps/web`, where provider-fed store data could seed transaction form state. Corrected, normative:
+The reviewed design (whose application package was then called `apps/web`) enforced the firewall structurally *between packages* but only by lint *inside* that package, where provider-fed store data could seed transaction form state. Corrected, normative — and rooted at `app/src` since the 2026-08-03 re-rooting:
 
 - `app/src` is split into **separate build-time compilation units**, each its own TypeScript project (project references) with an exact reference set:
   - `app/src/features/tx/**` — transaction surfaces, form state, confirm flows — references exactly `{shared-types, chain-client, protocol, simulation, transaction-builder, signing, platform, ui}`.
@@ -509,7 +509,7 @@ Every format carries a **chain binding** — genesis hash, `spec_version`, and `
 
 ### 13.2 The inbound discipline
 
-An intent supplies exactly three things — a **choice** among a closed action set, an **id**, and **ceilings** — and every one of them is re-derived or re-validated against chain state before anything is signed.
+An intent supplies exactly three things — a **choice** among a closed action set, an **id**, and **ceilings** — and every one of them is re-derived or re-validated against chain state before anything is signed. All three carry **`external-proposal`** status (§2.1) for as long as they are displayed: they are requests, they assert nothing about the chain, and INV-FE-9 admits no unlabeled rendering path.
 
 - **`action` and `limits` are closed objects.** An unknown key inside either is refused. This is a deliberate asymmetry against the top-level tolerated-extras rule: at the top level an unknown key is a producer annotation no consumer reads, whereas inside `action` it is a *proposed semantic*, and it is precisely where an encoded call would be placed. Tolerating it there would be tolerating the attack.
 - **No field has a type that can carry arbitrary bytes.** There is no bytes, hex, blob, or unbounded-string field anywhere in the schema, and no free text at all — rendered tool prose would be a social-engineering surface on the confirm screen.
@@ -521,11 +521,15 @@ The import path's only output is a `TxPreparation` entering **Draft**. It constr
 
 ### 13.3 Refusals
 
-`FE-HANDOFF-001..013`, joining the §9.4 taxonomy with the same discipline — fixed user copy, expert detail, and a documented recovery per code, no free text. The classes are: unknown schema, malformed document, unknown action, **foreign field inside `action`/`limits`**, wrong chain, newer-than-live runtime, limit missing/out-of-range/inconsistent, expired, replayed, digest mismatch, action infeasible at the refreshed block, scope refused, and export-from-unverified-state.
+`FE-HANDOFF-001..012`, joining the §9.4 taxonomy with the same discipline — fixed user copy, expert detail, and a documented recovery per code, no free text. The classes are: unknown schema, malformed document, unknown action, **foreign field inside `action`/`limits`**, wrong chain, newer-than-live runtime, limit missing/out-of-range/inconsistent, expired, digest mismatch, action infeasible at the refreshed block, scope refused, and export-from-unverified-state.
 
-Two asymmetries are deliberate. A document from a **newer** runtime is refused (INV-FE-12 fails safe when the runtime surface is unknown) while one from an **older** runtime is displayed and rebuilt against live descriptors — an intent's version never selects an encoding. And the replay guard is honestly labelled a **session-local convenience, not a security boundary**: one changed byte yields a new digest. What actually prevents a replayed action from doing harm is that it is rebuilt, re-clamped, and re-reviewed at the refreshed block every time.
+One asymmetry is deliberate: a document from a **newer** runtime is refused (INV-FE-12 fails safe when the runtime surface is unknown) while one from an **older** runtime is displayed and rebuilt against live descriptors — an intent's version never selects an encoding.
 
-**Replay memory MUST live in volatile session memory and MUST NOT be persisted.** Two independent reasons, and either alone is sufficient. INV-FE-7 states that the transaction path never reads browser-local storage; a replay set in IndexedDB would make an import-path decision depend on a persisted read, and the fact that the check runs before `Draft` is too fine a distinction to rest an invariant on. And a guard already declared not to be a security boundary buys nothing by surviving a reload, while persisting it would make a *cleared* browser store change which documents the client accepts — turning INV-FE-7's "loss is a convenience event" into a behavioral difference. The same rule forecloses the adjacent hazard: **no imported document may write any persisted setting, default, or preference.** An import affects one transaction under review and nothing else, ever.
+**There is no replay guard, and its absence is a design decision rather than an omission.** An earlier draft carried one, keeping a set of consumed digests. It was removed for two compounding reasons. It could never have been a security boundary — one changed byte yields a new digest, so anyone who wanted to replay simply would. And keeping it falsified the third property that makes an imported document *not* remote configuration under INV-FE-13 ([15 §2.1](15-invariants-and-testing.md)): a stored set means a later import behaves differently because of an earlier one, which is precisely the "alters a later operation" that property denies. Trading a real invariant property for a guard that does not guard is a bad trade.
+
+What actually makes a replayed document harmless is that **nothing is remembered, so a re-import is just an import**: it is rebuilt, re-clamped against freshly read state, and re-reviewed at the refreshed block, exactly as the first time. A user who imports the same file twice is shown the same confirm surface twice, computed from current chain state on both occasions, and signs twice only if they choose to — the same position they are in with any transaction screen.
+
+The general rule this leaves is stronger and simpler than the one it replaces: **an imported document writes nothing at all.** No setting, no default, no preference, no record that it was ever seen. Its entire effect is one transaction under review, and when that transaction is signed or discarded the client retains no trace that an import occurred.
 
 ### 13.4 Transports and disclosure
 

@@ -150,11 +150,11 @@ and depeg risk borne by holders.
   returning visit with gaps, after runtime upgrade, deep link to old proposal, active market,
   ten-month chart, address history, IndexedDB corruption, providers down, gateway down, slow
   peer discovery, signing while chain advances, obsolete release. Doc 11 §11.12 (the owner of
-  the matrix) adds E15–E23: referendum voting, VOID redemption, AH deposit, AH withdraw,
+  the matrix) adds E15–E25: referendum voting, VOID redemption, AH deposit, AH withdraw,
   upgrade crank, guardian approval, sudo era, evidence unretrievable, ratification-deadline
   risk. Each row specifies: Visible state · Loading · Available verified data · Unavailable
   convenience data · Failure message · Recovery.
-  Numbering: doc 11 §11.12's E15–E23 is canonical and doc 15 §3.3 is its index, renumbered to
+  Numbering: doc 11 §11.12's E15–E25 is canonical and doc 15 §3.3 is its index, renumbered to
   match (SQ-1, resolved 2026-07-21 — the two lists previously disagreed, e.g. VOID redemption
   was E15 in doc 15 and E16 in doc 11). The pinned-release warning is carried-forward **E14**,
   not a new row.

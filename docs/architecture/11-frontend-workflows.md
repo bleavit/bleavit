@@ -445,7 +445,7 @@ export a capsule → analyse it anywhere → import a proposed action → admiss
 
 ### 11.14.1 Admission checks are not preconditions
 
-The distinction is load-bearing and must not be collapsed. **Admission checks** are properties of a *file*: schema equality, digest, chain binding, expiry, replay memory, closed-object shape, limit presence and internal consistency. **Preconditions** (§11.5) are re-reads of *chain state* at B′, and §11.4 rule 2 requires every row in that table to be an exact chain read. Putting a file-derived row into the precondition table would make that rule false.
+The distinction is load-bearing and must not be collapsed. **Admission checks** are properties of a *file*: schema equality, digest, chain binding, expiry, closed-object shape, limit presence and internal consistency. **Preconditions** (§11.5) are re-reads of *chain state* at B′, and §11.4 rule 2 requires every row in that table to be an exact chain read. Putting a file-derived row into the precondition table would make that rule false.
 
 Admission checks therefore run **before the transaction enters Draft**. A document that fails any of them never becomes a transaction at all, and the user sees a `FE-HANDOFF-*` refusal with its fixed copy and stated fix rather than a blocked confirm screen.
 
@@ -478,7 +478,7 @@ Every limit is re-expressed on the confirm screen as the value that will actuall
 - The origin disclosure is **fixed in-bundle copy and non-dismissible**. No format carries a tool-supplied label, because a label reading "Bleavit Official Assistant" inside the confirm flow would be a phishing primitive.
 - Expert mode exposes the full clamp derivation — asked ceiling, chain-derived value at B′, encoded value — alongside the capsule's block height and age, in the same habit §11.4 rule 3 establishes for preconditions.
 - Export requires **per-export consent** with the scope shown, and the **default scope excludes account-specific data** — positions, balances and addresses are opt-in per export, never included because the last export included them. **Pseudonymization MUST be offered** for the account-bearing scopes, and MUST be labelled for what it is: it replaces the address in the capsule and does nothing about the holdings themselves, which remain a fingerprint. What leaks is linkage rather than content: holdings on a public chain are already public, but a capsule pasted into a hosted service ties them to an identity in a third party's logs, and it cannot be un-sent.
-- An imported document **writes nothing that outlives the transaction under review** — no setting, no default, no preference, and no persisted replay record ([10](10-frontend-architecture.md) §13.3).
+- An imported document **writes nothing at all** — no setting, no default, no preference, and no record that it was ever seen ([10](10-frontend-architecture.md) §13.3). There is deliberately no replay memory: a re-import is simply an import, rebuilt and re-reviewed against current state.
 
 ### 11.14.5 Scope statement
 

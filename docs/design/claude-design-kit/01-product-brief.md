@@ -43,11 +43,13 @@ The **canonical client is itself decentralized** (10, 11, 12):
 - It talks to the chain through an **in-browser light client** (smoldot in a Web Worker) that
   verifies finality proofs itself. The app *proves* what it shows rather than trusting a server.
 - Every displayed value carries a **provenance status** — this is the design's defining
-  material. The five statuses (10 §2.1): `verified-finalized` (light-client proven),
+  material. The six statuses (10 §2.1): `verified-finalized` (light-client proven),
   `verified-best` (proven but not yet final; display-only), `derived-local` (computed from the
   user's own local index, with coverage/holes), `provider` (untrusted third-party data,
   permanently labelled, never promoted), `stale-cache` (old local data shown before sync
-  completes). UI components literally cannot render a value without a status.
+  completes), `external-proposal` (a value an external tool *requested* — never an observation of
+  the chain, and the only status with no block reference). UI components literally cannot render a
+  value without a status.
 - **Transaction safety is a visible ritual**: before any signature, the app re-checks every
   precondition against a freshly finalized block and shows expected-vs-actual; the confirm
   screen is decoded from the exact bytes being signed, never from form state. (11 §11.3–§11.4)
