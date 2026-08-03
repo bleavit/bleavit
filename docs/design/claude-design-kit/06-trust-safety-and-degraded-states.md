@@ -12,8 +12,15 @@ texts, and doc 14's accepted residual risks "MUST be carried into user-facing ho
 ## 1. The fifteen frontend invariants (doc 15 §2) — design consequences
 
 Canonical provenance labels (exact spellings, INV-FE-9): `verified-finalized`, `verified-best`,
-`derived-local`, `provider`, `stale-cache`. Canonical fail-safe modes (INV-FE-12): `restricted`,
-`read-only-incompatible`.
+`derived-local`, `provider`, `stale-cache`, `external-proposal`. Canonical fail-safe modes
+(INV-FE-12): `restricted`, `read-only-incompatible`.
+
+`external-proposal` (D-21, 10 §2.1) is the newest and the odd one out: it labels a value an
+*external tool requested* — a ceiling, a size — rather than anything observed on the chain, and it
+is the only label with no block reference, because there is nothing it is true *at*. Design
+consequence: wherever an asked value is shown beside the chain-derived one it is clamped to, the
+two must be visually distinguishable at a glance, and the asked one must never be able to read as
+the settled number.
 
 | ID | Rule | What the design must show |
 |---|---|---|
@@ -143,11 +150,11 @@ and depeg risk borne by holders.
   returning visit with gaps, after runtime upgrade, deep link to old proposal, active market,
   ten-month chart, address history, IndexedDB corruption, providers down, gateway down, slow
   peer discovery, signing while chain advances, obsolete release. Doc 11 §11.12 (the owner of
-  the matrix) adds E15–E23: referendum voting, VOID redemption, AH deposit, AH withdraw,
+  the matrix) adds E15–E25: referendum voting, VOID redemption, AH deposit, AH withdraw,
   upgrade crank, guardian approval, sudo era, evidence unretrievable, ratification-deadline
   risk. Each row specifies: Visible state · Loading · Available verified data · Unavailable
   convenience data · Failure message · Recovery.
-  Numbering: doc 11 §11.12's E15–E23 is canonical and doc 15 §3.3 is its index, renumbered to
+  Numbering: doc 11 §11.12's E15–E25 is canonical and doc 15 §3.3 is its index, renumbered to
   match (SQ-1, resolved 2026-07-21 — the two lists previously disagreed, e.g. VOID redemption
   was E15 in doc 15 and E16 in doc 11). The pinned-release warning is carried-forward **E14**,
   not a new row.

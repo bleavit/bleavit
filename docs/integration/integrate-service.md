@@ -1,6 +1,6 @@
 # Integrating an off-chain service
 
-Use [`@bleavit/client-ts`](../../frontend/packages/bleavit-client-ts/README.md). It supplies the
+Use [`@bleavit/client-ts`](../../app/packages/bleavit-client-ts/README.md). It supplies the
 registration/open/seal facade, finalized-pin refresh, storage-proof boundary, and v22 provenance
 check. You provide a generated PAPI bridge and a local signer; you do not write XCM, SCALE bytes, or
 fee arithmetic.

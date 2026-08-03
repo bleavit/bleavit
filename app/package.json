@@ -1,10 +1,13 @@
 {
-  "name": "@bleavit/frontend",
+  "name": "@bleavit/app",
   "private": true,
   "workspaces": [
     "packages/*"
   ],
   "scripts": {
     "typecheck": "tsc -b"
+  },
+  "devDependencies": {
+    "typescript": "5.9.3"
   }
 }

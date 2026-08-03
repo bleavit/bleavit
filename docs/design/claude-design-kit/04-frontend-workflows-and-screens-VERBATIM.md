@@ -1,8 +1,7 @@
 > **DERIVED COPY for design-tool context — DO NOT EDIT.**
-> Verbatim copy of `docs/architecture/11-frontend-workflows.md` (the frozen source of truth),
-> regenerated 2026-07-31 from integration contract v17, picking up the E1 redemption-fee
-> display rules, the extended ledger call set and the two new revenue cranks that the
-> previous copy predated, on top of the design-kit copy at commit `5d9c9ce`,
+> Verbatim copy of `docs/architecture/11-frontend-workflows.md` (the source of truth),
+> regenerated 2026-08-03 at integration contract v22, picking up the D-21 handoff workflow
+> (§11.14), screens S21/S22, degradation rows E24/E25 and WBS row FE-17,
 > for upload to Claude Design. If this copy and the source ever differ, the
 > source wins. Regenerate by re-copying the source file.
 
@@ -52,6 +51,8 @@ The canonical frontend serves **every** protocol workflow — including the valu
 | S18 | Welfare snapshot crank | **FE-15** | snapshot staleness | `welfare.snapshot(epoch)` | §11.8.5 |
 | S19 | Incident / Milestone registry: file + challenge | **FE-15** | `pallet-registry` storage per [07](07-oracle-and-disputes.md) | `registry.file_incident/file_milestone/challenge` | §11.8.6 |
 | S20 | Balances & funding status | core | `System.Account`, `ForeignAssets.Account(USDC_LOCATION, who)` | — | [02](02-integration-contract.md) |
+| S21 | Share verified context | **handoff** | the union of the S2/S3/S4 reads for the selected capsule kind — all `Finalized<T>` or the export is refused | — | §11.14 |
+| S22 | Review an imported action | **handoff** | the precondition rows of the calls it constructs (§11.5 P-1) | `market.buy` / `market.sell` — constructed by the client, never carried by the import | §11.14 |
 
 USDC balance reads use the `ForeignAssets` instance keyed by the pinned XCM `Location` (D-17, frozen in [02](02-integration-contract.md), incl. the `[VERIFY asset index 1337]` that lives there) — never `Assets.Account`.
 
@@ -268,9 +269,11 @@ The "Advanced" area. Every workflow below is light-client readable and follows �
 
 ### 11.8.1 Reporter console
 
+**Two of this console's preconditions are not currently client-readable, and that is a stated gap rather than an oversight (2026-08-01, SQ-564).** The retained [07](07-oracle-and-disputes.md) §3 offense record lives in a pallet-internal store that [02](02-integration-contract.md) §7 deliberately does not freeze, so a frontend cannot re-read either *"carries a retained ejection"* or *"entry is closed by saturation"* at `B′`. The consequence is bounded but real: in those states a client submits a transaction that **cannot** succeed, and learns it from the typed error (`ReporterEjected`, `ReporterRecordsSaturated`) rather than from a disabled button. Both states are rare — the first requires three adjudicated-false findings against the account, the second requires 64 distinct ejections chain-wide — and neither can cost more than one transaction fee. Until a contract-readable indicator exists, this console MUST render both errors explicitly rather than as a generic failure, and MUST NOT present registration as unconditionally available. Exposing the indicator is a [02](02-integration-contract.md) §7 addition and therefore a contract bump with joint sign-off; it is tracked as SQ-564 rather than folded into a security fix.
+
 | Tx | Preconditions re-read at B′ |
 |---|---|
-| `oracle.register_reporter()` | free USDC ≥ `ReporterStake` (100,000 USDC *(normative value: [13](13-parameters.md))*); not already registered; stake-hold consequence displayed |
+| `oracle.register_reporter()` | free USDC ≥ `ReporterStake` (100,000 USDC *(normative value: [13](13-parameters.md))*); not already registered; **not carrying a retained [07](07-oracle-and-disputes.md) §3 ejection**, and **permissionless entry not closed by the §3 saturation clause**; stake-hold consequence displayed |
 | `oracle.report` / `oracle.challenge` | rows P-13/P-14 (§11.5) |
 | `oracle.recompute_proof(component, epoch, spec_version, proof)` | round open and the consumed MetricSpec component permits deterministic recomputation ([07](07-oracle-and-disputes.md)); the FE recomputes the proof result locally from the committed raw data before submission and blocks on mismatch — never submit a proof the client's own recomputation contradicts |
 
@@ -404,6 +407,8 @@ Rows E1–E14 carry forward from FE §19 with two corrections: **E3** no longer 
 **E21 Sudo era (Phases 0–3).** V: non-dismissable banner (§11.10) on every route and confirm screen. A: PhaseFlags verified each head. F: — (informational, permanent for the phase). R: disappears on verified Phase ≥ 4.
 **E22 Oracle evidence unretrievable.** V: "evidence unretrievable — treated as absent by the protocol" in dispute/ballot views; hash shown. A: on-chain round state unaffected. U: evidence body. F: hash mismatch ⇒ same treatment plus provider flagged. R: alternate gateway/user-supplied source (re-hashed on arrival).
 **E23 Ratification deadline at risk.** V: proposal-detail ratification panel shows the cannot-complete warning (§11.7.4) when the referendum can no longer pass before `grace_end`. A: referendum + queue state live. F: `execute` precondition row 5 blocks with `NotRatified`. R: resubmission per protocol rules.
+**E24 Imported action reviewed.** V: the action in fixed in-bundle copy; the **chain-read identity of what the id resolves to** (class, state, `payload_hash`, ask, `decide_at`) rendered alongside the id at `verified-finalized`; asked-vs-encoded limits side by side; the context-age diff naming what changed in the book, the phase, the balance and the fee rate since the capsule was made; and the fixed non-dismissible origin disclosure. L: the normal B′ refresh — no separate loading state, because the import performs no I/O. A: every value the action is *evaluated against* is chain-read at B′ — the cost recomputation, the balance, the phase, the fee rate, the feasibility check. The imported choice, id and ceilings are **not** chain-read and are not shown as such: they render `external-proposal` beside the chain-derived values that bound them. U: none — the whole surface is convenience, and its absence blocks no workflow. F: each `FE-HANDOFF-*` code with its fixed copy and stated fix; a refusal rejects the whole document and never partially accepts. R: return to Draft with the imported values preserved, or discard.
+**E25 Context export unavailable.** V: export disabled with the reason stated — unverified RPC mode, degraded sync, or `read-only-incompatible` — never a silently degraded capsule. A: —. F: `FE-HANDOFF-013`; the exporter's input type is `Finalized<T>`, so there is nothing to construct a capsule from. R: restore verified operation; the control re-enables itself on the first fresh finalized head.
 
 ---
 
@@ -423,15 +428,68 @@ The frozen integration contract ([02](02-integration-contract.md), D-2) unblocks
 | FE-7 | `providers` + `tools/snapshot` + sampler + forged-corpus tests | FE-6 | T-5/T-7 suites | 4 |
 | FE-8 | `verify` + release panel + self-check + ArNS cross-check | — | E11/T-1 suites | 3 |
 | FE-9 | Distribution: Vite/Arweave/manifest/SW/CSP/SRI; deploy + repoint tooling | FE-8 | routing/failover suites; staging name live | 4 |
-| FE-10 | Degradation UX (**E1–E23**), error-copy registry, a11y, i18n scaffold, **sudo banner (§11.10)** | FE-5..9 | matrix scripted in Playwright; banner non-dismissability asserted | 4 |
+| FE-10 | Degradation UX (**E1–E25**), error-copy registry, a11y, i18n scaffold, **sudo banner (§11.10)** | FE-5..9 | matrix scripted in Playwright; banner non-dismissability asserted | 4 |
 | FE-11 | Reproducible build + attestations + verify-release CLI + key ceremony | FE-9 | two-environment identical hash | 3 |
 | FE-12 | Perf hardening to budgets ([10](10-frontend-architecture.md)); mobile lab; **AH second-chain memory validated** | all | release gates green on device lab | 3 |
 | FE-13 | Ops handbook, bootnode program, ArNS ceremony, launch ([12](12-release-and-operations.md)) | FE-11 | dry-run rollback executed | 2 |
 | **FE-14** | **Governance surface (§11.7)**: referenda list/detail (six tracks), vote/delegate/undelegate/unlock with conviction, ratification panel + execute-deadline logic, OracleResolution ballot with snapshot rule | FE-1..4 | G-rows implemented; ratification-deadline e2e (Chopsticks); snapshot-power display test | 4 |
 | **FE-15** | **Operator surface (§11.8)**: reporter console + recompute proofs + evidence display, guardian 5-of-7 console, treasury claims + `nav()` w/ haircut flag, upgrade crank (+ FE-P10 spike), snapshot crank, registry filing/challenge | FE-1..4, FE-9 (artifact fetch) | each S14–S19 workflow e2e on Zombienet; `FE-UPG-001` suite | 5 |
 | **FE-16** | **Funding flow (§11.9)**: AH connection UX, deposit construction, withdrawal, two-leg tracker, cap/fee-viability checks | FE-1, FE-2 (AH descriptors), FE-4 | deposit+withdraw e2e against Chopsticks AH+para; cap-block test | 3 |
+| **FE-17** | **External-tool handoff (§11.14)**: `contexts`/`intents`/`receipts`/`llm-handoff` packages, S21/S22, the `FE-HANDOFF-*` refusal family, the portable Skill and prompt set, the hostile-intent corpus | FE-4, FE-5 | hostile corpus rejected by class (one code each); tx-machine edge-enumeration test green with the import entry point included; **no-infra certification run unaffected with the handoff surfaces disabled** | 4 |
 
-New prototype: **FE-P10** — multi-MB extrinsic submission through smoldot/PAPI (§11.8.4); gates the FE-15 upgrade-crank tier, with the verified fallback path shipping regardless.
+New prototypes: **FE-P10** — multi-MB extrinsic submission through smoldot/PAPI (§11.8.4); gates the FE-15 upgrade-crank tier, with the verified fallback path shipping regardless. **FE-P11** — Web Share with files across the matrix, and confirmation that Share/clipboard/File-System-Access are not `connect-src`-governed ([10](10-frontend-architecture.md) §12); gates whether Share ships as a primary or fallback transport for FE-17.
+
+---
+
+## 11.14 External-tool handoff — share context, import an action (D-21)
+
+Architecture and formats: [10](10-frontend-architecture.md) §13. This section owns the *workflow*.
+
+```
+export a capsule → analyse it anywhere → import a proposed action → admission checks
+→ Draft → refreshAndGate at B′ → confirm → wallet signs → submit → finalize → receipt
+```
+
+### 11.14.1 Admission checks are not preconditions
+
+The distinction is load-bearing and must not be collapsed. **Admission checks** are properties of a *file*: schema equality, digest, chain binding, expiry, closed-object shape, limit presence and internal consistency. **Preconditions** (§11.5) are re-reads of *chain state* at B′, and §11.4 rule 2 requires every row in that table to be an exact chain read. Putting a file-derived row into the precondition table would make that rule false.
+
+Admission checks therefore run **before the transaction enters Draft**. A document that fails any of them never becomes a transaction at all, and the user sees a `FE-HANDOFF-*` refusal with its fixed copy and stated fix rather than a blocked confirm screen.
+
+From Draft onward the imported action is indistinguishable from one the user assembled by hand: same screens, same `refreshAndGate`, same P-1 row, same confirm surface decoded from `prep.scaleHex`.
+
+### 11.14.2 The action vocabulary is closed
+
+Three actions, matching the trading workflows S3/S4 already offer: **prepare a PASS position**, **prepare a FAIL position**, **close a fraction of a held position**.
+
+Three encoding choices, each earning itself:
+
+- **The intent names an economic goal; the client computes the calls.** This is not a stylistic preference. Under D-3 the market wrapper splits internally, so a tool that emitted a call *sequence* would very plausibly emit a ledger split *and* a market buy and double-split the user's collateral. The correct call count is a function of chain semantics that changes between contract versions, so it is the client's to determine, always.
+- **Size is expressed as collateral, never as instrument quantity.** Users budget in USDC, and the LMSR inversion from collateral to quantity is exactly the arithmetic an external tool gets wrong. Doing it client-side is also what makes the cost ceiling derivable and therefore clampable.
+- **A close is expressed as a fraction, never an absolute amount.** An absolute amount taken from a stale capsule can exceed the current holding (a dispatch failure) or leave unredeemable dust. A fraction is stale-safe and clamps naturally against a freshly read balance. This is a security choice, not a convenience.
+
+Governance votes and delegation, transfers to an arbitrary address, the Asset Hub funding legs, the operator surfaces of §11.8, and redemptions are **out of scope**, each for a stated reason: irreversible values-layer acts on possibly someone else's proposal; the classic send-to-the-attacker primitive that no analytical workflow needs; two-leg cross-chain flows that §11.9 gates separately; bonded adversarial operator actions that are not analysis-driven; and — for redemptions — that the client's own "you have redeemable positions" prompt does the job better, so admitting them would grow the vocabulary for no analytical gain.
+
+### 11.14.3 Clamping: the client asserts authority over the tool
+
+**A limit is never widened, only narrowed.** For a buy the encoded ceiling is the minimum of what the intent asked, what the client's own recomputed cost at B′ permits under the stated slippage, and the client's own policy cap; symmetrically a floor on proceeds is only raised. When the client's number is the binding one, **the difference is shown, not silently applied**.
+
+A stated deadline is compared against B′, the chain clock, never the device clock. A stated maximum context age is honored only in the narrowing direction: a tool may make its own advice expire sooner, and cannot make it expire later — staleness needs no timer, because it is bounded structurally by `refreshAndGate`. The capsule's age is **displayed and diffed**, never trusted.
+
+Every limit is re-expressed on the confirm screen as the value that will actually be encoded, and that screen is decoded from `prep.scaleHex` (INV-FE-14) — so even a clamping bug cannot make the display disagree with the bytes.
+
+### 11.14.4 Required UX
+
+- The **chain-read identity of the action's target** renders alongside the id at `verified-finalized` status. Id substitution is the sharpest attack this surface admits, and rendering what the id actually resolves to is what defeats it.
+- Every imported value renders with **`external-proposal` status** ([10](10-frontend-architecture.md) §2.1) wherever it is shown — including the asked side of the asked-vs-encoded pair. INV-FE-9 admits no unlabeled rendering path, and a requested ceiling displayed beside a chain-derived one is exactly where an unlabeled number would be mistaken for a verified one.
+- The origin disclosure is **fixed in-bundle copy and non-dismissible**. No format carries a tool-supplied label, because a label reading "Bleavit Official Assistant" inside the confirm flow would be a phishing primitive.
+- Expert mode exposes the full clamp derivation — asked ceiling, chain-derived value at B′, encoded value — alongside the capsule's block height and age, in the same habit §11.4 rule 3 establishes for preconditions.
+- Export requires **per-export consent** with the scope shown, and the **default scope excludes account-specific data** — positions, balances and addresses are opt-in per export, never included because the last export included them. **Pseudonymization MUST be offered** for the account-bearing scopes, and MUST be labelled for what it is: it replaces the address in the capsule and does nothing about the holdings themselves, which remain a fingerprint. What leaks is linkage rather than content: holdings on a public chain are already public, but a capsule pasted into a hosted service ties them to an identity in a third party's logs, and it cannot be un-sent.
+- An imported document **writes nothing at all** — no setting, no default, no preference, and no record that it was ever seen ([10](10-frontend-architecture.md) §13.3). There is deliberately no replay memory: a re-import is simply an import, rebuilt and re-reviewed against current state.
+
+### 11.14.5 Scope statement
+
+This surface is convenience only. Every action expressible as an intent is a strict subset of what S3/S4 already do by hand; no protocol workflow depends on it; and it may be disabled entirely without affecting any INV-FE-4 workflow — which is why the no-infrastructure certification run executes with these surfaces disabled ([15](15-invariants-and-testing.md) §4.8). The external tool is IN scope as a recipient of exported files and a source of proposed actions; embedding a model, calling one over the network, or running any tool-protocol server, tunnel or sidecar is OUT of scope (INV-FE-6, INV-FE-13; D-21).
 
 ---
 

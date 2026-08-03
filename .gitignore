@@ -37,3 +37,14 @@ models/**/states/
 
 # B8 release-pipeline working directory (workflows and local dry-runs)
 release-work/
+
+# Track F — the canonical client at app/ (10 §10.1). The pnpm store and build
+# output are derived; the lockfile is NOT ignored — 12 §1.1 installs from it
+# with --frozen-lockfile, and INV-FE-10's two-environment gate depends on it.
+app/node_modules/
+app/**/node_modules/
+app/dist/
+app/**/dist/
+app/**/*.tsbuildinfo
+app/src-tauri/target/
+app/native/**/build/

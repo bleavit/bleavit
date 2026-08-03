@@ -94,8 +94,10 @@ in both blocks and human time. No lorem ipsum anywhere.
 
 ## Design mandates from the spec (non-negotiable)
 
-- **Provenance is the core visual language.** Every displayed value carries one of the five
-  verification statuses. Design this as a first-class system — instantly legible, not
+- **Provenance is the core visual language.** Every displayed value carries one of the six
+  verification statuses — the sixth, `external-proposal`, labels a value an external tool
+  *requested* rather than anything observed on the chain, and must never read as the settled
+  number it sits beside. Design this as a first-class system — instantly legible, not
   color-alone (a11y), with text equivalents, consistent from dashboard tiles to table cells
   to chart series. Provider data is visibly second-class *forever* (hatching, badging —
   never promoted).

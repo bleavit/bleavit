@@ -230,6 +230,85 @@ New FE epic **FE-14 (Governance surface)**: referenda list/detail, vote/delegate
   a materially larger surface to prove before sudo removal. Taken deliberately: [10](10-frontend-architecture.md)–[11](11-frontend-workflows.md)
   are unbuilt, so the contract bump is cheap now and expensive after F2 binds.
 
+### D-21. Serverless handoff to external analysis tools; no tool-protocol server of any kind (2026-08-03, PLAN Track F)
+
+- **The decision.** The client can export its *verified* view of the chain as a portable capsule, and
+  accept back a *proposed* semantic action. The transport is the user agent and the operating system —
+  files, clipboard, share sheet, inbound deep links — and the client makes **no network request on any
+  handoff path**. Owned by [10 §13](10-frontend-architecture.md) (architecture and formats) and
+  [11 §11.14](11-frontend-workflows.md) (workflow).
+- **The invariant dictates the design; it does not excuse it.** INV-FE-6 ends *"features that
+  inherently require servers are out of scope rather than centralized"*. A hosted or local
+  tool-protocol server, a tunnel, a sidecar, or a direct model-API client is each a server whose
+  availability the feature's correctness would depend on. The file/clipboard/share design is therefore
+  an **application** of INV-FE-6, not an exception to it.
+- **Two INV-FE texts are amended, and an earlier draft of this decision wrongly claimed none were**
+  ([15 §2.1](15-invariants-and-testing.md); the joint sign-off is the user's, who owns both sides
+  under R-1). **INV-FE-1** now distinguishes values the client *sources* from values the user
+  *chooses* — as published it bound "any value whose incorrectness could change what a user signs"
+  to finalized chain state, which a typed amount satisfies, so the text forbade the transaction
+  screens themselves; that defect pre-dates this work and the handoff only made it unignorable.
+  **INV-FE-9**'s enumeration gains `external-proposal`, because a requested ceiling rendered beside
+  its chain-derived clamp is a displayed item and the five-status list had no label for it. Both
+  changes were first carried as "ratified readings"; an adversarial review called that special
+  pleading, and it was right — a reading that changes what an invariant *requires* is an amendment,
+  and [15](15-invariants-and-testing.md) §6 binds certification to these texts and nothing else.
+- **What is imported is a request, not a fact.** This is the load-bearing half. An imported action
+  supplies exactly a choice among a closed action set, an id, and ceilings; every one is re-derived or
+  re-validated against `Finalized<T>` chain state at B′ before anything is signed. No inbound field
+  asserts anything about the chain, so no capsule can seed a precondition and INV-FE-1 is untouched.
+  An imported action is exactly as trusted as keyboard input and travels the same code path: the
+  external tool is a keyboard, not a data source.
+- **No format carries an encoded call, in either direction.** Not inbound, for the obvious reason —
+  and not outbound either, because a receipt containing call bytes teaches a naive tool to echo them
+  back. The intent names an economic goal and the client computes the calls, because under D-3 the
+  market wrapper splits internally: a tool emitting a call *sequence* would very plausibly emit a
+  ledger split *and* a market buy and double-split the user's collateral. The correct call count is a
+  function of chain semantics that changes between contract versions.
+- **The chain surface is unchanged.** Nothing in [02](02-integration-contract.md) §2–§12 moves — no
+  runtime-API method, view type, event, storage key, constant, or dispatchable. A capsule is a
+  client-side projection of surfaces 02 already freezes, exactly like a screen.
+  `INTEGRATION_CONTRACT_VERSION` stays at 22 and `transaction_version` is untouched.
+- **Rejected alternatives**, each for a stated reason:
+  - *Hosted tool-protocol server* — a server the feature's correctness depends on, so INV-FE-6 puts it
+    out of scope; it would also need an operations row in [12 §6.1](12-release-and-operations.md) and a
+    funding line the project does not have.
+  - *Local server, sidecar, or tunnel* — breaks the static-bundle property, adds an unverifiable
+    background process outside the signed release, and lets behavior change without shipping a release,
+    which is precisely what INV-FE-13 forbids.
+  - *Browser-extension bridge* — the same, plus a new supply-chain root the release cannot attest.
+  - *Direct model-API integration* — needs a credential, a `connect-src` host, and a paid per-user
+    dependency; fails INV-FE-4 and INV-FE-6 together.
+  - *Signing capsules with the user's chain key* — reuses a signing key for a non-chain purpose and
+    manufactures an artifact that looks authoritative. Capsules are deliberately unsigned; what
+    verifies one is re-reading the chain, which anyone can do.
+  - *Accepting an encoded call from a tool* — the single decision that would defeat every other control
+    here. There is no exported function outside `packages/chain-client` that accepts raw call bytes, and
+    no inbound field has a type that could carry them.
+  - *Rendering tool-authored prose* — a social-engineering surface on the confirm screen. No format
+    carries free text or a tool label; a label reading "Bleavit Official Assistant" inside a confirm
+    flow would be a phishing primitive.
+  - *Tolerating unknown keys inside `action`/`limits`* — at the top level an unknown key is a producer
+    annotation no consumer reads; inside `action` it is a proposed semantic, and exactly where an
+    encoded call would be placed. Those two objects are closed against the house's own extras rule.
+- **Outbound vendor links are permitted, with three obligations** (user ruling, 2026-08-03). They are
+  top-level navigations rather than fetches, so they add no `connect-src` entry, but: the vendor list
+  ships **inside the signed release** and is never fetched or remotely configured (INV-FE-13); a
+  one-time disclosure interstitial names the vendor and what its logs learn; and a capsule exceeding
+  the URL bound **falls back to clipboard or file automatically and is never truncated**.
+- **Preserved properties, each with its enforcement:** authoritative reads unchanged, because export
+  requires `Finalized<T>` and nothing inbound is a chain value (INV-FE-1); the pre-sign gate unchanged,
+  because the import path's only output is a `TxPreparation` entering Draft and the structural
+  no-bypass assertion is re-run with that entry point enumerated (INV-FE-2); no network primitive in the
+  handoff packages and no `connect-src` addition, both CI-gated (INV-FE-6, INV-FE-13); and the
+  no-infrastructure certification run executed with these surfaces disabled, proving no INV-FE-4
+  workflow depends on them.
+- **Cost accepted:** a persuasive tool can shape a user's judgement, and no detection mechanism changes
+  that. It is the [14](14-threat-model.md) TH-49 class, recorded as an accepted residual: the control is
+  the transaction boundary, not detection. Taken deliberately, because the alternative on offer is not
+  "no external tools" — users already paste chain data into them — but "external tools working from
+  screenshots and guesses instead of a verified, structured, provenance-bearing capsule."
+
 ---
 
 ## Part 2 — Finding disposition table
@@ -310,7 +389,7 @@ Every DESIGN_REVIEW.md finding, its resolution, and the owning component documen
 | F-med: ArNS lease | Moot per D-16 permabuy | 12 |
 | F-med: system.remark | D-14 fixed-layout raw storage key | 09, 12 |
 | F-med: signer disjointness | D-16 | 12, 14 |
-| F-med: provider firewall | Structural enforcement inside `apps/web` too (build-time import boundary, not lint-only) | 10 |
+| F-med: provider firewall | Structural enforcement inside `app/src` too (build-time import boundary, not lint-only) | 10 |
 | F-med: backfill math | Recomputed consistently at 20 blk/s | 10 |
 | F-med: txHistory | Ingest fetches extrinsic bodies for blocks containing the user's extrinsics (only) | 10 |
 | F-med: proof-size conflation | §14.3 corrected | 10 |
