@@ -397,14 +397,25 @@ jobs:
         working-directory: app
         run: pnpm run test:local-index
 
-      - name: Hostile-intent corpus (F20, 10 §13.2-§13.3, 15 §4.8)
+      - name: Hostile-intent corpus (F20, 10 §13.1-§13.3, 11 §11.14.1, 15 §4.8)
         # A handoff parser that accepts every well-formed document is trivially green and
-        # worthless — the subsystem's whole security argument is made of refusals. The
-        # sharpest case is the asymmetry 10 §13.2 mandates: an unknown key at the TOP
-        # LEVEL is a producer annotation and tolerated, while one inside `action` is a
-        # proposed semantic and "precisely where an encoded call would be placed", so it
-        # is refused (FE-HANDOFF-004). Also pinned: FE-HANDOFF-009 stays retired, a newer
-        # runtime is refused while an older one is rebuilt, and a limit only ever narrows.
+        # worthless — the subsystem's whole security argument is made of refusals.
+        # The first thing this asserts is that the 11 §11.14.1 admission checks all run:
+        # the digest gate is the one that was DEFINED AND NEVER EMITTED, so an altered or
+        # truncated document was admitted exactly like an intact one, and no test that
+        # parses a valid document could see it. Hence the tamper cases, which mutate a
+        # signed document and require FE-HANDOFF-010 — and hence the hash function being
+        # a required argument, since an optional one is a digest check that defaults off.
+        # The sharpest structural case is the asymmetry 10 §13.2 mandates: an unknown key
+        # at the TOP LEVEL is a producer annotation and tolerated, while one inside
+        # `binding`/`action`/`limits` is a proposed semantic and "precisely where an
+        # encoded call would be placed", so it is refused (FE-HANDOFF-004). Also pinned:
+        # FE-HANDOFF-009 stays retired; expiry is -008 on arrival and -011 at the refresh,
+        # never one code for both; every limit narrows only, and a stated limit with no
+        # recomputed chain value is refused rather than silently dropped — dropping it
+        # encoded a trade with no cost bound at all; the parser bounds are computed from
+        # 02-frozen type widths rather than chosen, and counted in UTF-8 bytes; and no
+        # refusal echoes a document-supplied string (10 §13.4's phishing rule).
         working-directory: app
         run: pnpm run test:intents
 
@@ -420,6 +431,19 @@ jobs:
         # are deliberately unsigned (10 §13.1).
         working-directory: app
         run: pnpm run test:contexts
+
+      - name: No network primitive on any handoff path (D-21, INV-FE-6)
+        # 10 §13: "the client makes no network request on any handoff path". The
+        # dependency-cruiser rule that claimed to enforce this matches IMPORTS — axios,
+        # undici, ws — and every primitive app-code rule 6 actually names is a GLOBAL:
+        # fetch, XMLHttpRequest, WebSocket, EventSource, sendBeacon, dynamic import().
+        # None is imported, so none was reachable by that rule, and a handoff package
+        # could have called fetch() directly under fully green CI. The witness leg is not
+        # ceremony: a scanner that can no longer detect anything reports success, so the
+        # same patterns are run against a fixture that uses every primitive and must
+        # flag all of them.
+        working-directory: app
+        run: pnpm run check:handoff-network && pnpm run check:handoff-network:witness
 
       - name: smoldot artifact budget (10 §9.3, FE-P4)
         # A budget nothing measures is a sentence, and the one certain thing about a

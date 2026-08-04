@@ -136,6 +136,42 @@ function sameProvenance(a: CoverageRange, b: CoverageRange): boolean {
   return a.origin === b.origin && a.providerId === b.providerId;
 }
 
+/** Whether two ranges touch or overlap — the condition under which a join is possible. */
+function adjacentOrOverlapping(a: CoverageRange, b: CoverageRange): boolean {
+  return a.toBlock >= b.fromBlock - 1 && b.toBlock >= a.fromBlock - 1;
+}
+
+/**
+ * The invariant `addRange` maintains, checked on the way *in* as well as out.
+ *
+ * `addRange` joins the incoming range against what is already there, and its output is
+ * canonical: no two same-provenance ranges touch. It never verified that its **input** was,
+ * and a `Coverage` is an ordinary object a caller can build by hand — from a JSON blob out
+ * of IndexedDB, most obviously, which is exactly the untrusted path INV-FE-7 assumes gets
+ * corrupted. Two same-provenance ranges that already overlap survive every subsequent add,
+ * because the loop only ever compares each existing range against the incoming one and
+ * never against each other. The result reads as coverage while `holesIn` double-counts the
+ * overlap, and nothing anywhere says so.
+ *
+ * Different provenances may of course overlap: keeping those apart is the whole point of
+ * §6.3's no-splice rule, so the check is deliberately not "no two ranges overlap".
+ */
+function assertCanonical(coverage: Coverage): void {
+  coverage.ranges.forEach(assertWellFormed);
+  for (let i = 0; i < coverage.ranges.length; i += 1) {
+    for (let j = i + 1; j < coverage.ranges.length; j += 1) {
+      const a = coverage.ranges[i]!;
+      const b = coverage.ranges[j]!;
+      if (sameProvenance(a, b) && adjacentOrOverlapping(a, b)) {
+        throw new CoverageError(
+          `coverage is not canonical: ${a.origin} ranges ${a.fromBlock}..${a.toBlock} and ` +
+            `${b.fromBlock}..${b.toBlock} should already have been joined`,
+        );
+      }
+    }
+  }
+}
+
 /**
  * Add a range to a coverage set.
  *
@@ -150,14 +186,11 @@ function sameProvenance(a: CoverageRange, b: CoverageRange): boolean {
  */
 export function addRange(coverage: Coverage, incoming: CoverageRange): Coverage {
   assertWellFormed(incoming);
+  assertCanonical(coverage);
   const joined: CoverageRange[] = [];
   let current = incoming;
   for (const existing of coverage.ranges) {
-    if (
-      sameProvenance(existing, current) &&
-      existing.toBlock >= current.fromBlock - 1 &&
-      current.toBlock >= existing.fromBlock - 1
-    ) {
+    if (sameProvenance(existing, current) && adjacentOrOverlapping(existing, current)) {
       current = {
         ...current,
         fromBlock: Math.min(existing.fromBlock, current.fromBlock),
@@ -182,6 +215,20 @@ export function addRange(coverage: Coverage, incoming: CoverageRange): Coverage 
  * data, and the provenance question is answered by the range, not by this function.
  */
 export function holesIn(ranges: readonly CoverageRange[], span?: Hole): readonly Hole[] {
+  // An inverted or non-integer span is refused rather than answered. The arithmetic below
+  // returns `[]` for `toBlock < fromBlock` — every cursor comparison fails immediately —
+  // and `[]` from this function means *no holes*, which a caller reads as complete
+  // coverage. A transposed pair of arguments would therefore report a fully-covered index
+  // over a range nothing has ingested, in the one module whose purpose is to make missing
+  // data visible.
+  if (span !== undefined) {
+    if (!Number.isInteger(span.fromBlock) || !Number.isInteger(span.toBlock)) {
+      throw new CoverageError(`span bounds must be integers: ${span.fromBlock}..${span.toBlock}`);
+    }
+    if (span.toBlock < span.fromBlock) {
+      throw new CoverageError(`span ${span.fromBlock}..${span.toBlock} runs backwards`);
+    }
+  }
   if (ranges.length === 0) return span ? [{ ...span }] : [];
   const sorted = [...ranges].sort((a, b) => a.fromBlock - b.fromBlock);
   const holes: Hole[] = [];

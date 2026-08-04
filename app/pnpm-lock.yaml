@@ -44,14 +44,22 @@ importers:
       '@bleavit/chain-client':
         specifier: workspace:*
         version: link:../chain-client
+      '@bleavit/handoff-envelope':
+        specifier: workspace:*
+        version: link:../handoff-envelope
       '@bleavit/shared-types':
         specifier: workspace:*
         version: link:../shared-types
 
   packages/descriptors: {}
 
+  packages/handoff-envelope: {}
+
   packages/intents:
     dependencies:
+      '@bleavit/handoff-envelope':
+        specifier: workspace:*
+        version: link:../handoff-envelope
       '@bleavit/shared-types':
         specifier: workspace:*
         version: link:../shared-types
@@ -293,6 +301,9 @@ importers:
 
   tests/intents:
     dependencies:
+      '@bleavit/handoff-envelope':
+        specifier: workspace:*
+        version: link:../../packages/handoff-envelope
       '@bleavit/intents':
         specifier: workspace:*
         version: link:../../packages/intents

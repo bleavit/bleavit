@@ -1,5 +1,5 @@
 {
-  "name": "@bleavit/intents",
+  "name": "@bleavit/handoff-envelope",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -14,8 +14,5 @@
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
-  "dependencies": {
-    "@bleavit/handoff-envelope": "workspace:*",
-    "@bleavit/shared-types": "workspace:*"
-  }
+  "dependencies": {}
 }

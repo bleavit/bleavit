@@ -15,7 +15,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@bleavit/shared-types": "workspace:*",
-    "@bleavit/chain-client": "workspace:*"
+    "@bleavit/chain-client": "workspace:*",
+    "@bleavit/handoff-envelope": "workspace:*",
+    "@bleavit/shared-types": "workspace:*"
   }
 }

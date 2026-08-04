@@ -24,7 +24,7 @@ module.exports = {
         'transaction form state (INV-FE-3).',
       from: { path: '^src/features/tx/' },
       to: {
-        path: '^(src/features/(analysis|handoff)|packages/(providers|local-index|contexts|intents|receipts|llm-handoff))/',
+        path: '^(src/features/(analysis|handoff)|packages/(providers|local-index|contexts|handoff-envelope|intents|receipts|llm-handoff))/',
       },
     },
     {
@@ -34,7 +34,7 @@ module.exports = {
         '10 §10.1: `transaction-builder` and `signing` (the reviewed `wallet`) never ' +
         'import providers, the local index, or any handoff package.',
       from: { path: '^packages/(transaction-builder|signing)/' },
-      to: { path: '^packages/(providers|local-index|contexts|intents|receipts|llm-handoff)/' },
+      to: { path: '^packages/(providers|local-index|contexts|handoff-envelope|intents|receipts|llm-handoff)/' },
     },
     {
       name: 'handoff-never-reaches-a-signer',
@@ -43,7 +43,7 @@ module.exports = {
         '10 §10.1: the handoff packages may not reach `signing` or ' +
         '`transaction-builder`. The import path terminates in a TxPreparation ' +
         'entering Draft; it adds no edge to the tx machine (INV-FE-2).',
-      from: { path: '^packages/(contexts|intents|receipts|llm-handoff)/' },
+      from: { path: '^packages/(contexts|handoff-envelope|intents|receipts|llm-handoff)/' },
       to: { path: '^packages/(signing|transaction-builder|providers|local-index)/' },
     },
     {
@@ -131,7 +131,7 @@ module.exports = {
       comment:
         'D-21 / INV-FE-6: the handoff packages contain no network primitive at all. ' +
         'The source gate in CI covers the global forms; this covers module imports.',
-      from: { path: '^packages/(contexts|intents|receipts|llm-handoff)/' },
+      from: { path: '^packages/(contexts|handoff-envelope|intents|receipts|llm-handoff)/' },
       to: { path: EXTERNAL('axios|node-fetch|undici|ws|socket\\.io') },
     },
     { name: 'no-circular', severity: 'error', from: {}, to: { circular: true } },

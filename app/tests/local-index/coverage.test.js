@@ -166,3 +166,58 @@ test('joining keeps the older ingest time', () => {
   const c = addRange(addRange(EMPTY_COVERAGE, self(1, 10, 100)), self(11, 20, 500));
   assert.equal(c.ranges[0].ingestedAt, 100);
 });
+
+test('an inverted span is refused, not answered with "no holes"', () => {
+  // The arithmetic returns `[]` for a backwards span, and `[]` from `holesIn` means *no
+  // holes* — complete coverage. So a transposed pair of arguments reported a fully
+  // covered index over blocks nothing had ingested, in the one module whose purpose is
+  // to make missing data visible.
+  const ranges = [self(1, 10)];
+  assert.throws(() => holesIn(ranges, { fromBlock: 100, toBlock: 50 }), CoverageError);
+  assert.throws(() => holesIn(ranges, { fromBlock: 1.5, toBlock: 50 }), CoverageError);
+  // The same call the right way round still answers, so the guard is not just refusing.
+  assert.deepEqual(holesIn(ranges, { fromBlock: 50, toBlock: 100 }), [
+    { fromBlock: 50, toBlock: 100 },
+  ]);
+});
+
+test('a single-block span is legal, and is not an inverted one', () => {
+  assert.deepEqual(holesIn([self(1, 10)], { fromBlock: 20, toBlock: 20 }), [
+    { fromBlock: 20, toBlock: 20 },
+  ]);
+});
+
+test('non-canonical coverage is refused rather than silently carried forward', () => {
+  // `addRange` compares each existing range against the *incoming* one and never against
+  // the others, so two same-provenance ranges that already overlap survive every add
+  // that follows. A `Coverage` is an ordinary object — most obviously one rehydrated from
+  // IndexedDB, the storage INV-FE-7 assumes gets corrupted — so its shape is checked on
+  // the way in, not assumed from having been produced correctly once.
+  const overlapping = { ranges: [self(1, 10), self(5, 20)], holes: [] };
+  assert.throws(() => addRange(overlapping, self(100, 110)), CoverageError);
+
+  const touching = { ranges: [self(1, 10), self(11, 20)], holes: [] };
+  assert.throws(() => addRange(touching, self(100, 110)), CoverageError);
+
+  const malformed = { ranges: [{ fromBlock: 10, toBlock: 1, origin: 'self', ingestedAt: 1 }], holes: [] };
+  assert.throws(() => addRange(malformed, self(100, 110)), CoverageError);
+});
+
+test('differing provenances may overlap, and that is not "non-canonical"', () => {
+  // The check must not be "no two ranges overlap": keeping a `self` and an `operator`
+  // range over the same blocks apart is the whole point of the no-splice rule, and a
+  // canonicity check that forbade it would delete the distinction it exists to protect.
+  const both = addRange(addRange(EMPTY_COVERAGE, self(1, 10)), op(5, 15));
+  assert.equal(both.ranges.length, 2);
+  assert.doesNotThrow(() => addRange(both, self(100, 110)));
+});
+
+test('what addRange produces is what addRange accepts', () => {
+  // The invariant is closed under the API: every output is a legal input. Without that,
+  // the check above would be an obstacle to ordinary use rather than a corruption guard.
+  let c = EMPTY_COVERAGE;
+  for (const r of [self(1, 10), op(5, 15), self(30, 40), self(11, 12), op(200, 210, 'op-2')]) {
+    c = addRange(c, r);
+    assert.doesNotThrow(() => addRange(c, self(9000, 9001)), 'output was not a legal input');
+  }
+});
