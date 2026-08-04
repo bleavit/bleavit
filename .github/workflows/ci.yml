@@ -133,6 +133,14 @@ jobs:
         # lattice cannot fail on, so a runtime upgrade that moves it reports `full`
         # while the dependent path breaks.
         run: python3 tools/ci/check-client-surface-obligations.py
+      - name: Degradation matrix is complete and countable — 11 §11.12 ↔ 15 §3.3 (SQ-593)
+        # F12's obligation is "rows E1–E25 scripted", and until 2026-08-05 fourteen of
+        # those rows had no text anywhere: §11.12 said they lived in doc 10, doc 10
+        # carried none, and 15 §3.3 called them "self-describing". Nothing detected it
+        # because nothing COUNTED the rows — a client scripting the readable eleven would
+        # have passed every gate here and looked finished. Same shape as SQ-552, SQ-580
+        # and SQ-582: an obligation in prose with no mechanical reader.
+        run: python3 tools/ci/check-degradation-matrix.py
       - name: Bind the quickstart to the executable integration drill
         run: python3 tools/ci/check-quickstart-drill.py
       - name: Bind the pure-XCM integration page to the frozen client ABI
