@@ -21,6 +21,7 @@ import {
   Shell,
   navigationFor,
   placementOf,
+  DEGRADATION_ROWS,
   Outlet,
   PENDING_SCREENS,
   PHASE_FLAG_BITS,
@@ -30,6 +31,7 @@ import {
   hasPhaseFlag,
   namedPhaseFlags,
   readShellState,
+  respondTo,
   screenFor,
   VerificationPanelView,
   screenForHash,
@@ -1147,4 +1149,55 @@ test('a runtime whose EpochOf shape moved fails loudly rather than rendering NaN
   assert.match(flags.reason, /integer/);
   void decoders;
   void pin;
+});
+
+// ------------------------------------------ the degradation matrix (F12, SQ-593)
+
+test('every row doc 11 §11.12 defines has a scripted client response', () => {
+  // The property SQ-593 exposed the absence of: nothing counted the rows, so a client
+  // scripting a subset looked finished. This binds the registry to the spec's own set.
+  const doc = readFileSync(DOC11, 'utf8');
+  const section = /^## 11\.12 UX degradation matrix[\s\S]*?^---$/m.exec(doc);
+  assert.ok(section, 'the §11.12 section moved — re-point this binding');
+  const declared = [...section[0].matchAll(/^\*\*E(\d+) /gm)].map((m) => `E${m[1]}`);
+  // Fail closed on a thin parse: an empty expectation is satisfied by an empty registry.
+  assert.ok(declared.length >= 20, `parsed only ${declared.length} rows: ${declared}`);
+  assert.deepEqual([...DEGRADATION_ROWS].sort(), [...declared].sort());
+});
+
+test('every response says something, names what it blocks, and states its recovery', () => {
+  for (const row of DEGRADATION_ROWS) {
+    const response = respondTo(row);
+    assert.ok(response.says.length > 20, `${row} says nothing useful`);
+    // `blocks` is required even when nothing is blocked, so "blocks nothing" is
+    // distinguishable from "nobody wrote down what it blocks".
+    assert.ok(response.blocks.length > 0, `${row} does not name what it blocks`);
+    assert.ok(
+      ['automatic', 'user-action', 'none'].includes(response.recovery),
+      `${row} has no recovery classification`,
+    );
+  }
+});
+
+test('the three unrecoverable rows are exactly the ones that cannot be recovered', () => {
+  // `recovery: 'none'` is a claim, and a wrong one either overstates the client's power or
+  // strands a user who could have acted. These three are the rows where no retry helps: a
+  // genesis mismatch is a different chain, a quote disagreement is a contract defect, and
+  // an expired checkpoint has lost a guarantee nothing local restores.
+  const unrecoverable = DEGRADATION_ROWS.filter((row) => respondTo(row).recovery === 'none');
+  assert.deepEqual(unrecoverable.sort(), ['E14', 'E16', 'E20', 'E6'].sort());
+});
+
+test('no response promises a repair the client cannot perform', () => {
+  // INV-FE-8's habit, applied to copy: divergence is surfaced, never repaired. A response
+  // telling a user to "try again" for a condition classified unrecoverable would be the
+  // screen contradicting its own classification.
+  for (const row of DEGRADATION_ROWS) {
+    const response = respondTo(row);
+    if (response.recovery !== 'none') continue;
+    assert.ok(
+      !/try again|retry|refresh the page|reload/i.test(response.says),
+      `${row} suggests a retry for a condition it classifies as unrecoverable`,
+    );
+  }
 });

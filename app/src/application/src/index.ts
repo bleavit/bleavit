@@ -44,3 +44,10 @@ export {
   type PhaseFlagName,
 } from './phase-flags.js';
 export { shellDecoders } from './shell-decoders.js';
+export {
+  DEGRADATION_RESPONSES,
+  DEGRADATION_ROWS,
+  respondTo,
+  type DegradationResponse,
+  type DegradationRow,
+} from './degradation.js';
