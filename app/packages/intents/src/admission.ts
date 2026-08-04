@@ -117,9 +117,10 @@ const U64_DIGITS = decimalDigits(64);
 const U128_DIGITS = decimalDigits(128);
 /** `H256` rendered as `0x` + 32 bytes of hex — the genesis hash's frozen width. */
 const H256_HEX_CHARS = 2 + 32 * 2;
-/** SHA-256 rendered as hex. The digest field's width. */
-const DIGEST_HEX_CHARS = 32 * 2;
-const PPM = 1_000_000;
+/** SHA-256 rendered as hex. The digest field's width. Published in the schema. */
+export const DIGEST_HEX_CHARS = 32 * 2;
+/** Parts per million. The `close_position` fraction's inclusive upper bound. */
+export const PPM = 1_000_000;
 const PPM_DIGITS = String(PPM).length;
 
 /**
@@ -269,15 +270,62 @@ export interface AdmissionContext {
   readonly digest: (preimage: Uint8Array) => string | Promise<string>;
 }
 
-const CORE_CONTAINERS = ['binding', 'action', 'limits'] as const;
-const BINDING_KEYS = new Set(['genesisHash', 'specVersion', 'contractVersion']);
-const ACTION_KEYS = new Set(['kind', 'id', 'collateral', 'fractionPpm']);
-const LIMIT_KEYS = new Set(['maxCost', 'minProceeds', 'deadlineBlock']);
+/**
+ * The closed core objects and their permitted keys — 10 §13.2.
+ *
+ * Exported because `app/schemas/` is generated from them. A published JSON Schema is a
+ * *promise to tool authors about what this parser accepts*, and the one way to keep that
+ * promise is for the schema to be derived from the parser's own declarations rather than
+ * transcribed beside them. The specific thing a transcription gets wrong is the one that
+ * matters most: JSON Schema's `additionalProperties` defaults to **true**, so a
+ * hand-written schema that simply omits it publishes the opposite of §13.2's asymmetry and
+ * teaches every tool that a foreign key inside `action` is fine — *"precisely where an
+ * encoded call would be placed"*.
+ *
+ * They are `readonly` arrays at the boundary so the generator sees a stable order; the
+ * parser wraps them into sets once, below.
+ */
+export const CORE_CONTAINERS = Object.freeze(['binding', 'action', 'limits'] as const);
+export const BINDING_KEY_NAMES = Object.freeze([
+  'genesisHash',
+  'specVersion',
+  'contractVersion',
+] as const);
+export const ACTION_KEY_NAMES = Object.freeze(['kind', 'id', 'collateral', 'fractionPpm'] as const);
+export const LIMIT_KEY_NAMES = Object.freeze(['maxCost', 'minProceeds', 'deadlineBlock'] as const);
 
-const LOWERCASE_HEX = /^[0-9a-f]+$/;
+const BINDING_KEYS = new Set<string>(BINDING_KEY_NAMES);
+const ACTION_KEYS = new Set<string>(ACTION_KEY_NAMES);
+const LIMIT_KEYS = new Set<string>(LIMIT_KEY_NAMES);
+
+/**
+ * The lowercase-hex character class, as a string, because two consumers need it in two
+ * shapes: this module tests with `LOWERCASE_HEX` (one-or-more) and the published schema
+ * needs it at an exact width (`{64}`).
+ *
+ * Written once and composed rather than transcribed. Deriving the schema's pattern by
+ * string surgery on `LOWERCASE_HEX.source` produced `^[0-9a-f]+{64}$` — a quantifier on a
+ * quantifier, which is not the pattern anybody intended and which no test of the *parser*
+ * could have caught, since the parser never reads it.
+ */
+const HEX_CHAR = '[0-9a-f]';
+const LOWERCASE_HEX = new RegExp(`^${HEX_CHAR}+$`);
 const GENESIS_HASH = /^0x[0-9a-fA-F]{64}$/;
 /** A canonical decimal integer: no sign, no leading zeros, no exponent, no whitespace. */
 const CANONICAL_DECIMAL = /^(?:0|[1-9][0-9]*)$/;
+
+/**
+ * The patterns the schema publishes, as source strings.
+ *
+ * Taken from the `RegExp` objects the parser actually tests with — `.source` rather than a
+ * second literal — so a pattern cannot be tightened here and left loose in the schema.
+ */
+export const INTENT_PATTERNS = Object.freeze({
+  genesisHash: GENESIS_HASH.source,
+  canonicalDecimal: CANONICAL_DECIMAL.source,
+  /** The exact-width digest pattern, composed from the same class the parser tests with. */
+  digest: `^${HEX_CHAR}{${DIGEST_HEX_CHARS}}$`,
+});
 
 const bad = (refusal: HandoffRefusal): AdmissionResult => ({ ok: false, refusal });
 

@@ -439,6 +439,20 @@ jobs:
         working-directory: app
         run: pnpm run test:intents
 
+      - name: Published handoff schemas match the parser (F20, 10 §13.1-§13.2)
+        # `app/schemas/` is a promise to whoever writes a producer, so it is generated
+        # from the parser's own declarations and byte-compared here. The specific defect
+        # a hand-written schema has is not a missing field: JSON Schema's
+        # `additionalProperties` defaults to TRUE, so omitting it on `action` publishes
+        # the exact opposite of 10 §13.2's asymmetry and teaches every tool that a
+        # foreign key there is fine — "precisely where an encoded call would be placed".
+        # The generator also fails when the parser declares a field the schema does not
+        # publish, which is the direction that shrinks the format to whatever was
+        # written down. A stray file in the directory is drift too, and it is the
+        # direction a per-file loop cannot see.
+        working-directory: app
+        run: pnpm run schemas:check
+
       - name: Export scope, consent and the capsule digest (F20, 11 §11.14.4)
         # Two honesty properties rather than correctness ones. Consent is PER EXPORT and
         # never inherited — opt-in alone is satisfied by a checkbox that remembers, and a
@@ -449,6 +463,17 @@ jobs:
         # pre-image is NUL-terminated so a receipt's digest cannot validate a context,
         # and the package exports nothing that could pass for authentication — capsules
         # are deliberately unsigned (10 §13.1).
+        #
+        # The exporter itself checks scope in BOTH directions, and the second is the one
+        # that lies: data supplied outside the consented scope is refused rather than
+        # dropped (FE-HANDOFF-012), and a scope consented with no read supplied is
+        # refused too — a capsule announcing `positions` and carrying none reads to every
+        # tool and every human as "this user holds no positions", a false claim about the
+        # chain made by the document whose job is to carry true ones. An empty array is
+        # data; an absent key is not. Books carry a `kind` that is CHECKED against the id
+        # band rather than derived, because correcting it would export a label the user
+        # never saw, and positions are keyed by domain so no field can hold the merged
+        # total 11 §11.2a rule 2 forbids.
         working-directory: app
         run: pnpm run test:contexts
 

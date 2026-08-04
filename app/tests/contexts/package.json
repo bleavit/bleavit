@@ -4,5 +4,9 @@
   "private": true,
   "type": "module",
   "scripts": { "test": "node --test *.test.js" },
-  "dependencies": { "@bleavit/contexts": "workspace:*" }
+  "dependencies": {
+    "@bleavit/contexts": "workspace:*",
+    "@bleavit/handoff-envelope": "workspace:*",
+    "@bleavit/receipts": "workspace:*"
+  }
 }

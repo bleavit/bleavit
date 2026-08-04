@@ -286,6 +286,12 @@ importers:
       '@bleavit/contexts':
         specifier: workspace:*
         version: link:../../packages/contexts
+      '@bleavit/handoff-envelope':
+        specifier: workspace:*
+        version: link:../../packages/handoff-envelope
+      '@bleavit/receipts':
+        specifier: workspace:*
+        version: link:../../packages/receipts
 
   tests/depcruise-witness:
     dependencies:

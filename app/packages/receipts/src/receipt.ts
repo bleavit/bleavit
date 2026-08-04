@@ -43,7 +43,12 @@
  * do — and which is why the block height and hash are in the core rather than optional.
  */
 
-import { type ChainBinding, canonicalJson, digestPreimage } from '@bleavit/handoff-envelope';
+import {
+  type ChainBinding,
+  HandoffRefusalError,
+  canonicalJson,
+  digestPreimage,
+} from '@bleavit/handoff-envelope';
 import type { Finalized } from '@bleavit/chain-client';
 
 /** The `schema` string, validated by exact equality (10 §13.1). */
@@ -126,13 +131,24 @@ export interface Receipt {
   readonly amounts: Readonly<Record<string, ReceiptAmount>>;
 }
 
-export class ReceiptError extends Error {
-  readonly code: 'FE-HANDOFF-013' | 'FE-HANDOFF-002';
-
-  constructor(code: 'FE-HANDOFF-013' | 'FE-HANDOFF-002', message: string) {
-    super(message);
+/**
+ * A refusal raised while building a receipt.
+ *
+ * It extends the shared `HandoffRefusalError` rather than declaring its own code union and
+ * its own sentences, which is what it did first. That version took the *message* as a
+ * constructor argument, so `FE-HANDOFF-013` read one way here and another way in the
+ * parser's table — two answers to what a single user-facing code says, in two packages
+ * that never meet in a call site. 10 §13.3 requires the copy be fixed per code, and the
+ * only way to keep that true is for there to be one table.
+ *
+ * The subclass survives because `instanceof ReceiptError` is a useful narrowing for a
+ * caller that builds several document types, and because the name is what appears in a
+ * stack trace. It adds no field the base class lacks.
+ */
+export class ReceiptError extends HandoffRefusalError {
+  constructor(code: 'FE-HANDOFF-013' | 'FE-HANDOFF-002', detail: string) {
+    super(code, detail);
     this.name = 'ReceiptError';
-    this.code = code;
   }
 }
 
@@ -238,6 +254,10 @@ export function buildReceipt(input: BuildReceiptInput): Receipt {
  * construct a capsule from, and export is disabled with a stated reason rather than
  * silently degraded"*. This exists as a named call so the disabled surface has one place
  * to get its copy from, rather than each caller inventing a sentence.
+ *
+ * The mode goes in the **detail**, not the message. It is the *stated reason* §13.1 asks
+ * for — expert text that names which of the three modes the client is in — while what the
+ * user reads first is the same sentence every time, from the one table.
  */
 export function refuseUnverifiedExport(mode: string): ReceiptError {
   return new ReceiptError(
