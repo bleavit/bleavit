@@ -1507,6 +1507,438 @@
       }
     },
     {
+      "id": "constant.constitution.max_params",
+      "kind": "constant",
+      "pallet": "Constitution",
+      "constant": "MaxParams",
+      "required": true,
+      "citation": "02 §9",
+      "layout": {
+        "type": "u32",
+        "value": "0x80000000"
+      }
+    },
+    {
+      "id": "constant.constitution.max_capabilities",
+      "kind": "constant",
+      "pallet": "Constitution",
+      "constant": "MaxCapabilities",
+      "required": true,
+      "citation": "02 §9",
+      "layout": {
+        "type": "u32",
+        "value": "0x40000000"
+      }
+    },
+    {
+      "id": "constant.constitution.max_meters",
+      "kind": "constant",
+      "pallet": "Constitution",
+      "constant": "MaxMeters",
+      "required": true,
+      "citation": "02 §9",
+      "layout": {
+        "type": "u32",
+        "value": "0x10000000"
+      }
+    },
+    {
+      "id": "constant.ledger.archive_delay",
+      "kind": "constant",
+      "pallet": "ConditionalLedger",
+      "constant": "ArchiveDelay",
+      "required": true,
+      "citation": "02 §9",
+      "layout": {
+        "type": "u32",
+        "value": "0x40335000"
+      }
+    },
+    {
+      "id": "constant.ledger.reap_batch",
+      "kind": "constant",
+      "pallet": "ConditionalLedger",
+      "constant": "ReapBatch",
+      "required": true,
+      "citation": "02 §9",
+      "layout": {
+        "type": "u32",
+        "value": "0x64000000"
+      }
+    },
+    {
+      "id": "constant.ledger.redemption_fee",
+      "kind": "constant",
+      "pallet": "ConditionalLedger",
+      "constant": "RedemptionFee",
+      "required": true,
+      "citation": "02 §9",
+      "layout": {
+        "type": "u128",
+        "value": "0x1e000000000000000000000000000000"
+      }
+    },
+    {
+      "id": "constant.market.fee",
+      "kind": "constant",
+      "pallet": "Market",
+      "constant": "Fee",
+      "required": true,
+      "citation": "02 §9",
+      "layout": {
+        "type": "u128",
+        "value": "0x1e000000000000000000000000000000"
+      }
+    },
+    {
+      "id": "constant.market.obs_interval",
+      "kind": "constant",
+      "pallet": "Market",
+      "constant": "ObsInterval",
+      "required": true,
+      "citation": "02 §9",
+      "layout": {
+        "type": "u64",
+        "value": "0x0a00000000000000"
+      }
+    },
+    {
+      "id": "constant.market.kappa1e9",
+      "kind": "constant",
+      "pallet": "Market",
+      "constant": "Kappa1e9",
+      "required": true,
+      "citation": "02 §9",
+      "layout": {
+        "type": "u64",
+        "value": "0x404b4c0000000000"
+      }
+    },
+    {
+      "id": "constant.market.archive_delay",
+      "kind": "constant",
+      "pallet": "Market",
+      "constant": "ArchiveDelay",
+      "required": true,
+      "citation": "02 §9",
+      "layout": {
+        "type": "u32",
+        "value": "0x40335000"
+      }
+    },
+    {
+      "id": "constant.oracle.max_round_close_batch",
+      "kind": "constant",
+      "pallet": "Oracle",
+      "constant": "MaxRoundCloseBatch",
+      "required": true,
+      "citation": "02 §9",
+      "layout": {
+        "type": "u32",
+        "value": "0x0a000000"
+      }
+    },
+    {
+      "id": "constant.execution_guard.integration_contract_version",
+      "kind": "constant",
+      "pallet": "ExecutionGuard",
+      "constant": "INTEGRATION_CONTRACT_VERSION",
+      "required": true,
+      "citation": "02 §9",
+      "layout": {
+        "type": "u32",
+        "value": "0x17000000"
+      }
+    },
+    {
+      "id": "constant.execution_guard.max_live_proposals",
+      "kind": "constant",
+      "pallet": "ExecutionGuard",
+      "constant": "MaxLiveProposals",
+      "required": true,
+      "citation": "02 §9",
+      "layout": {
+        "type": "u32",
+        "value": "0x20000000"
+      }
+    },
+    {
+      "id": "constant.execution_guard.max_execution_records",
+      "kind": "constant",
+      "pallet": "ExecutionGuard",
+      "constant": "MaxExecutionRecords",
+      "required": true,
+      "citation": "02 §9",
+      "layout": {
+        "type": "u32",
+        "value": "0x00010000"
+      }
+    },
+    {
+      "id": "constant.execution_guard.max_calls",
+      "kind": "constant",
+      "pallet": "ExecutionGuard",
+      "constant": "MaxCalls",
+      "required": true,
+      "citation": "02 §9",
+      "layout": {
+        "type": "u32",
+        "value": "0x10000000"
+      }
+    },
+    {
+      "id": "constant.execution_guard.max_payload_bytes",
+      "kind": "constant",
+      "pallet": "ExecutionGuard",
+      "constant": "MaxPayloadBytes",
+      "required": true,
+      "citation": "02 §9",
+      "layout": {
+        "type": "u32",
+        "value": "0x00000100"
+      }
+    },
+    {
+      "id": "constant.execution_guard.max_runtime_code_bytes",
+      "kind": "constant",
+      "pallet": "ExecutionGuard",
+      "constant": "MaxRuntimeCodeBytes",
+      "required": true,
+      "citation": "02 §9",
+      "layout": {
+        "type": "u32",
+        "value": "0x00004000"
+      }
+    },
+    {
+      "id": "constant.epoch.integration_contract_version",
+      "kind": "constant",
+      "pallet": "Epoch",
+      "constant": "INTEGRATION_CONTRACT_VERSION",
+      "required": true,
+      "citation": "02 §9",
+      "layout": {
+        "type": "u32",
+        "value": "0x17000000"
+      }
+    },
+    {
+      "id": "constant.epoch.max_non_terminal_cohorts",
+      "kind": "constant",
+      "pallet": "Epoch",
+      "constant": "MaxNonTerminalCohorts",
+      "required": true,
+      "citation": "02 §9",
+      "layout": {
+        "type": "u32",
+        "value": "0x04000000"
+      }
+    },
+    {
+      "id": "constant.epoch.tick_batch",
+      "kind": "constant",
+      "pallet": "Epoch",
+      "constant": "TickBatch",
+      "required": true,
+      "citation": "02 §9",
+      "layout": {
+        "type": "u32",
+        "value": "0x0a000000"
+      }
+    },
+    {
+      "id": "constant.welfare.integration_contract_version",
+      "kind": "constant",
+      "pallet": "Welfare",
+      "constant": "INTEGRATION_CONTRACT_VERSION",
+      "required": true,
+      "citation": "02 §9",
+      "layout": {
+        "type": "u32",
+        "value": "0x17000000"
+      }
+    },
+    {
+      "id": "constant.welfare.max_metric_specs",
+      "kind": "constant",
+      "pallet": "Welfare",
+      "constant": "MaxMetricSpecs",
+      "required": true,
+      "citation": "02 §9",
+      "layout": {
+        "type": "u32",
+        "value": "0x10000000"
+      }
+    },
+    {
+      "id": "constant.welfare.max_snapshots",
+      "kind": "constant",
+      "pallet": "Welfare",
+      "constant": "MaxSnapshots",
+      "required": true,
+      "citation": "02 §9",
+      "layout": {
+        "type": "u32",
+        "value": "0x3c000000"
+      }
+    },
+    {
+      "id": "constant.welfare.max_gate_flags",
+      "kind": "constant",
+      "pallet": "Welfare",
+      "constant": "MaxGateFlags",
+      "required": true,
+      "citation": "02 §9",
+      "layout": {
+        "type": "u32",
+        "value": "0x14000000"
+      }
+    },
+    {
+      "id": "constant.welfare.max_daily_gate_samples",
+      "kind": "constant",
+      "pallet": "Welfare",
+      "constant": "MaxDailyGateSamples",
+      "required": true,
+      "citation": "02 §9",
+      "layout": {
+        "type": "u8",
+        "value": "0x40"
+      }
+    },
+    {
+      "id": "constant.treasury.integration_contract_version",
+      "kind": "constant",
+      "pallet": "FutarchyTreasury",
+      "constant": "INTEGRATION_CONTRACT_VERSION",
+      "required": true,
+      "citation": "02 §9",
+      "layout": {
+        "type": "u32",
+        "value": "0x17000000"
+      }
+    },
+    {
+      "id": "constant.treasury.max_streams",
+      "kind": "constant",
+      "pallet": "FutarchyTreasury",
+      "constant": "MaxStreams",
+      "required": true,
+      "citation": "02 §9",
+      "layout": {
+        "type": "u32",
+        "value": "0x80000000"
+      }
+    },
+    {
+      "id": "constant.treasury.max_budget_lines",
+      "kind": "constant",
+      "pallet": "FutarchyTreasury",
+      "constant": "MaxBudgetLines",
+      "required": true,
+      "citation": "02 §9",
+      "layout": {
+        "type": "u32",
+        "value": "0x20000000"
+      }
+    },
+    {
+      "id": "constant.treasury.max_pol_commitments",
+      "kind": "constant",
+      "pallet": "FutarchyTreasury",
+      "constant": "MaxPolCommitments",
+      "required": true,
+      "citation": "02 §9",
+      "layout": {
+        "type": "u32",
+        "value": "0xc4000000"
+      }
+    },
+    {
+      "id": "constant.guardian.guardian_seats",
+      "kind": "constant",
+      "pallet": "Guardian",
+      "constant": "GuardianSeats",
+      "required": true,
+      "citation": "02 §9",
+      "layout": {
+        "type": "u32",
+        "value": "0x07000000"
+      }
+    },
+    {
+      "id": "constant.guardian.guardian_threshold",
+      "kind": "constant",
+      "pallet": "Guardian",
+      "constant": "GuardianThreshold",
+      "required": true,
+      "citation": "02 §9",
+      "layout": {
+        "type": "u8",
+        "value": "0x05"
+      }
+    },
+    {
+      "id": "constant.guardian.guardian_bond",
+      "kind": "constant",
+      "pallet": "Guardian",
+      "constant": "GuardianBond",
+      "required": true,
+      "citation": "02 §9",
+      "layout": {
+        "type": "u128",
+        "value": "0x0000c52ebca2b1000000000000000000"
+      }
+    },
+    {
+      "id": "constant.guardian.playbook_freeze_window_blocks",
+      "kind": "constant",
+      "pallet": "Guardian",
+      "constant": "PlaybookFreezeWindowBlocks",
+      "required": true,
+      "citation": "02 §9",
+      "layout": {
+        "type": "u32",
+        "value": "0x80130300"
+      }
+    },
+    {
+      "id": "constant.attestor.att_min_members",
+      "kind": "constant",
+      "pallet": "Attestor",
+      "constant": "AttMinMembers",
+      "required": true,
+      "citation": "02 §9",
+      "layout": {
+        "type": "u32",
+        "value": "0x03000000"
+      }
+    },
+    {
+      "id": "constant.attestor.att_quorum",
+      "kind": "constant",
+      "pallet": "Attestor",
+      "constant": "AttQuorum",
+      "required": true,
+      "citation": "02 §9",
+      "layout": {
+        "type": "u32",
+        "value": "0x02000000"
+      }
+    },
+    {
+      "id": "constant.attestor.challenge_window_blocks",
+      "kind": "constant",
+      "pallet": "Attestor",
+      "constant": "ChallengeWindowBlocks",
+      "required": true,
+      "citation": "02 §9",
+      "layout": {
+        "type": "u32",
+        "value": "0xc0a80000"
+      }
+    },
+    {
       "id": "event.ledger.split",
       "kind": "event",
       "pallet": "ConditionalLedger",
