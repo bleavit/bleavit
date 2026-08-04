@@ -27,6 +27,10 @@ def some(value: object) -> dict[str, object]:
     return {"variant": "Some", "index": 1, "fields": value}
 
 
+def none() -> dict[str, object]:
+    return {"variant": "None", "index": 0, "fields": None}
+
+
 class TelemetryExporterTests(unittest.TestCase):
     def new_exporter(self) -> exporter_module.ChainExporter:
         return exporter_module.ChainExporter(
@@ -258,6 +262,77 @@ class TelemetryExporterTests(unittest.TestCase):
             samples(exporter, "bleavit_runtime_lmsr_domain_rejections_total"),
             {(): 2},
         )
+
+
+    def test_service_partition_publishes_the_84_falsifier_and_85_occupancy(self) -> None:
+        """N7: the five series that used to be declared seams."""
+        exporter = self.new_exporter()
+        row = {
+            "questions_live": 3,
+            "max_live": 16,
+            "contest_capital_external": 415_888,
+            "not_decision_grade_rejections": 2,
+            "external_weight_used_ratio_1e9": 250_000_000,
+        }
+        exporter._telemetry_api = (  # type: ignore[method-assign]
+            lambda _method, _block_hash: some(row)
+        )
+        exporter._service_partition("0x01")
+
+        self.assertEqual(samples(exporter, "bleavit_service_questions_live"), {(): 3})
+        self.assertEqual(samples(exporter, "bleavit_service_max_live"), {(): 16})
+        self.assertEqual(
+            samples(exporter, "bleavit_service_contest_capital_external"),
+            {(): 415_888},
+        )
+        self.assertEqual(
+            samples(exporter, "bleavit_service_not_decision_grade_rejections"),
+            {(): 2},
+        )
+        # Published as a fraction, not on the 1e9 grid: a Prometheus ratio rule
+        # must not have to know the chain's fixed-point scale.
+        self.assertEqual(
+            samples(exporter, "bleavit_service_external_weight_used_ratio"),
+            {(): 0.25},
+        )
+
+    def test_service_partition_fails_closed_rather_than_publishing_zeros(self) -> None:
+        """A falsifier that silently reads 0 is worse than one visibly missing:
+        it would argue *against* the values action 16 §8.4 mandates."""
+        cases = {
+            "absent row": None,
+            "ratio past the quota": {
+                "questions_live": 1,
+                "max_live": 16,
+                "contest_capital_external": 0,
+                "not_decision_grade_rejections": 0,
+                "external_weight_used_ratio_1e9": 1_000_000_001,
+            },
+            "occupancy past the cap": {
+                "questions_live": 17,
+                "max_live": 16,
+                "contest_capital_external": 0,
+                "not_decision_grade_rejections": 0,
+                "external_weight_used_ratio_1e9": 0,
+            },
+            "negative counter": {
+                "questions_live": 1,
+                "max_live": 16,
+                "contest_capital_external": -1,
+                "not_decision_grade_rejections": 0,
+                "external_weight_used_ratio_1e9": 0,
+            },
+        }
+        for name, row in cases.items():
+            with self.subTest(case=name):
+                exporter = self.new_exporter()
+                payload = none() if row is None else some(row)
+                exporter._telemetry_api = (  # type: ignore[method-assign]
+                    lambda _method, _block_hash, payload=payload: payload
+                )
+                with self.assertRaises(exporter_module.MonitoringError):
+                    exporter._service_partition("0x01")
+                self.assertEqual(samples(exporter, "bleavit_service_questions_live"), {})
 
 
 if __name__ == "__main__":

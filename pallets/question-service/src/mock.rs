@@ -166,6 +166,10 @@ parameter_types! {
     pub static Collision: bool = false;
     pub static MainCredited: Balance = 0;
     pub static KeeperRebates: Vec<(AccountId, CrankClass)> = Vec::new();
+    pub static MockPriceCap: Option<FixedU64> = None;
+    /// 16 §8.7 probe reading. Zero = Bleavit's own books are healthy, which is
+    /// what every pre-N15 test assumes and must keep observing.
+    pub static MockStarvation: FixedU64 = FixedU64(0);
 }
 
 pub struct QuestionKeeperRebate;
@@ -411,6 +415,13 @@ impl pallet_question_service::ServiceParamsProvider for Params {
     fn flow_cap() -> FixedU64 {
         FixedU64(16_000_000_000)
     }
+
+    /// Unset by default, matching the shipped 13 §1 row: the multiplier stays 1
+    /// and every pre-N14 test sees the flat tariff unchanged. Tests that
+    /// exercise 16 §8.6 set `MockPriceCap` explicitly.
+    fn price_cap() -> Option<FixedU64> {
+        MockPriceCap::get()
+    }
 }
 
 pub struct Funding;
@@ -434,6 +445,13 @@ impl pallet_question_service::DecisionWindowGuard for Windows {
     }
 }
 
+pub struct Starvation;
+impl pallet_question_service::ContestHealthProbe for Starvation {
+    fn starvation_1e9() -> FixedU64 {
+        MockStarvation::get()
+    }
+}
+
 pub struct Tvl;
 impl pallet_question_service::TvlCapGate<AccountId> for Tvl {
     fn escrow_admissible(_: &AccountId, _: Balance) -> bool {
@@ -454,6 +472,7 @@ impl pallet_question_service::Config for Test {
     type ServiceParams = Params;
     type ExternalMarketOrigin = MarketOrigin;
     type DecisionWindows = Windows;
+    type ContestHealth = Starvation;
     type TvlCapGate = Tvl;
     type InflowCapExemptAccounts = InflowProtocol;
     type AccountIdBytes = Bytes;

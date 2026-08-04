@@ -961,6 +961,58 @@ pub(crate) fn transition_phase_four(
             futarchy_primitives::ProposalClass::Param,
         )?;
     }
+    // 16 §8.4, "at switch-on": `Σ b_ext ≤ Σ pol.b(live)`, so the external side
+    // is never the dominant market on the chain. Normative since N1 and
+    // enforced by nothing until N15 (SQ-575) — `b_ext` appeared in no pallet
+    // and no migration, so N12 measured governance damage *at* a condition that
+    // nothing made true.
+    //
+    // **Outside `enforce_arming_gate`, and that placement is the fix for a
+    // blocker found by adversarial review (2026-08-03).** This check first
+    // shipped inside that branch, which exists so terminal recovery can skip
+    // the *treasury* floor — a chain wedged under `OnlyInherents` cannot
+    // dispatch anything that would fund the treasury, so enforcing the floor
+    // there would brick it forever. The external bound is a different
+    // condition with different recovery semantics, and inheriting the treasury
+    // exemption let terminal recovery arm Phase 4 with external depth dominant:
+    // precisely the state this clause exists to prevent, reached by the one
+    // path nobody watches.
+    //
+    // Not vacuous: registration is not phase-gated, so hosted questions
+    // accumulate through Phase 3 under `phase3.tvl_cap` and can be live now.
+    // Both sides are compared in posted cash (`b·ln 2` per book), the units
+    // `LivePolCommitments` already stores.
+    let external = pallet_question_service::LiveExternalDepth::<Runtime>::get();
+    if external > 0 {
+        let mut protocol: futarchy_primitives::Balance = 0;
+        for commitment in crate::Market::live_pol_commitments() {
+            protocol =
+                protocol
+                    .checked_add(commitment)
+                    .ok_or(sp_runtime::DispatchError::Arithmetic(
+                        sp_runtime::ArithmeticError::Overflow,
+                    ))?;
+        }
+        if external > protocol {
+            if enforce_arming_gate {
+                // Primary path: refuse. The remedy is to let hosted questions
+                // reach a terminal state or to seed protocol depth, then
+                // re-attempt. Failing closed is correct under G-1.
+                return Err(pallet_question_service::Error::<Runtime>::ArmingBoundExceeded.into());
+            }
+            // Terminal recovery: refusing would reintroduce the brick this
+            // lane exists to avoid — under `OnlyInherents` no call can void a
+            // hosted question or seed POL either, so the bound could never be
+            // satisfied and recovery would be impossible. Neither may the
+            // violating state simply be armed. Pause the hosted service
+            // instead: no NEW question can be admitted, live ones drain to
+            // their own deadlines, and the bound is restored by the ordinary
+            // lifecycle rather than by a vote. Guardians unpause once it holds.
+            pallet_question_service::PausedUntil::<Runtime>::put(
+                futarchy_primitives::BlockNumber::MAX,
+            );
+        }
+    }
     // 09 §5.2 (SQ-197): the arming bits are written **before** the cap plan is
     // applied. The two Phase-3 exposure caps are raisable only from Phase 4
     // onward, so the scheduled raise below passes the same ordinary gate every

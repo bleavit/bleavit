@@ -204,30 +204,20 @@ source = "chain-exporter"
 
 [[series]]
 name = "bleavit_service_questions_live"
-source = "seam"
-owner = "N7"
-rationale = "Hosted-question occupancy belongs to N7's still-open resource-partition and arming residual, not N9's delivery diagnostics."
+source = "chain-exporter"
 
 [[series]]
 name = "bleavit_service_contest_capital_external"
-source = "seam"
-owner = "N7"
-rationale = "The 16 §8.4 cannibalization falsifier remains part of N7's open service resource/provenance work."
+source = "chain-exporter"
 
 [[series]]
 name = "bleavit_service_not_decision_grade_rejections"
-source = "seam"
-owner = "N7"
-rationale = "This §8.4 falsifier remains part of N7's open service resource/provenance work."
+source = "chain-exporter"
 
 [[series]]
 name = "bleavit_service_external_weight_used_ratio"
-source = "seam"
-owner = "N7"
-rationale = "The 05 §4.3 external/primary weight partition is N7's explicit open residual."
+source = "chain-exporter"
 
 [[series]]
 name = "bleavit_service_max_live"
-source = "seam"
-owner = "N7"
-rationale = "The live svc.max_live occupancy comparison belongs to N7's open resource-partition residual."
+source = "chain-exporter"

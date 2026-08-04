@@ -93,6 +93,7 @@ class ChainExporterIsolationTests(unittest.TestCase):
             "_xcm_traps",
             "_reserve_probe_runway",
             "_service_egress",
+            "_service_partition",
         ):
             setattr(exporter, method, lambda *_args: None)
 
@@ -127,6 +128,7 @@ class ChainExporterIsolationTests(unittest.TestCase):
             "xcm traps": "_xcm_traps",
             "reserve runway": "_reserve_probe_runway",
             "service egress": "_service_egress",
+            "service partition": "_service_partition",
         }
         for failed_domain, failed_method in method_by_domain.items():
             with self.subTest(domain=failed_domain):

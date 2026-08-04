@@ -46,13 +46,102 @@ const PT10_SERVICE_START_OFFSET: BlockNumber = 1;
 const PT10_SERVICE_OPEN_OFFSET: BlockNumber = PT10_SERVICE_START_OFFSET + 1;
 const PT10_SERVICE_END_OFFSET: BlockNumber = 22;
 // Every block has ten schedulable points: before the first primary call, between
-// each adjacent primary call, and after the last primary call. The rotated
-// patterns make the service trace vary at every point over the whole lifecycle
-// rather than replaying one fixed schedule.
+// each adjacent primary call, and after the last primary call.
+//
+// These two rotated patterns are what PT-10's interleaving used to be, before it
+// was generated. They are KEPT, as seed-independent regressions: they are the
+// interleavings the first implementation was verified against, and a change to
+// the generator must not silently drop them. Counts here mean call counts of the
+// one shape the old harness had -- 1 -> `Deliver`, 2 -> `DeliverTwice`.
 const SERVICE_CONTAINMENT_SCHEDULES: [[u8; 10]; 2] = [
     [1, 2, 1, 1, 2, 1, 1, 2, 1, 1],
     [2, 1, 2, 2, 1, 2, 2, 1, 2, 2],
 ];
+
+/// The 15 §4.3 PT-10 service alphabet, as dispatchable variants.
+///
+/// PT-10 requires the interleaved traffic to be *arbitrary admissible* service
+/// work, and names what "admissible" must cover: the real lifecycle, nested
+/// ledger work, the signed `TransactionExtension` path, the XCM dispatcher
+/// path, varied proof sizes, and successful, failed and refund/reservation
+/// paths. The lifecycle calls are stateful and ordered, so they keep their
+/// windowed offsets — ordering is what makes them admissible at all. Everything
+/// else is drawn from this alphabet at every schedulable point.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ServiceOp {
+    /// No service work at this point. Present so a generated schedule can be
+    /// sparse; a schedule that is service-work-everywhere is not the general
+    /// case.
+    Idle,
+    /// Successful external dispatch through the XCM dispatcher path.
+    Deliver,
+    /// Two of them back to back: same shape, twice the weight and proof.
+    DeliverTwice,
+    /// Failed `register` at the minimum attestor set -- the small-proof
+    /// failure path, which must still retain its full reservation.
+    FailSmall,
+    /// Failed `register` at `MAX_SERVICE_ATTESTORS` -- the same failure at the
+    /// largest admissible proof size the call can carry.
+    FailLarge,
+    /// The signed `TransactionExtension` path, failing after real validation
+    /// and reservation.
+    SignedFail,
+}
+
+impl ServiceOp {
+    const ALPHABET: [Self; 6] = [
+        Self::Idle,
+        Self::Deliver,
+        Self::DeliverTwice,
+        Self::FailSmall,
+        Self::FailLarge,
+        Self::SignedFail,
+    ];
+
+    fn dispatch(self, signed_nonce: &mut u32) {
+        match self {
+            Self::Idle => {}
+            Self::Deliver => dispatch_external_marker(),
+            Self::DeliverTwice => {
+                dispatch_external_marker();
+                dispatch_external_marker();
+            }
+            Self::FailSmall => dispatch_failed_service_register(3, 60),
+            Self::FailLarge => dispatch_failed_service_register(bounds::MAX_SERVICE_ATTESTORS, 80),
+            Self::SignedFail => dispatch_signed_external_failure(signed_nonce),
+        }
+    }
+}
+
+/// One generated interleaving: an op for each of the ten schedulable points in
+/// each of the `PT10_SERVICE_END_OFFSET` blocks.
+type ServiceSchedule = Vec<[ServiceOp; 10]>;
+
+/// Deterministic schedule generation. A counter-based SplitMix64 rather than a
+/// `rand` dependency: the runtime crate carries none, and a reproducible seed
+/// beats a shrinking harness here because a failing case must be replayable
+/// from its seed alone in a suite this slow.
+fn generated_schedule(seed: u64) -> ServiceSchedule {
+    let mut state = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).wrapping_add(1);
+    let mut next = || {
+        state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    };
+    (0..PT10_SERVICE_END_OFFSET)
+        .map(|_| {
+            let mut block = [ServiceOp::Idle; 10];
+            for slot in block.iter_mut() {
+                let index =
+                    usize::try_from(next() % ServiceOp::ALPHABET.len() as u64).unwrap_or_default();
+                *slot = ServiceOp::ALPHABET[index];
+            }
+            block
+        })
+        .collect()
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct ReplayObservation {
@@ -390,16 +479,10 @@ fn dispatch_external_marker() {
     );
 }
 
-fn dispatch_scheduled_service(schedule: &[u8; 10], slot: usize, rotation: usize) {
-    for _ in 0..schedule[(slot + rotation) % schedule.len()] {
-        dispatch_external_marker();
-    }
-}
-
 fn execute_partition_block(
     number: BlockNumber,
     start: BlockNumber,
-    service_schedule: Option<&[u8; 10]>,
+    block_ops: Option<&[ServiceOp; 10]>,
     question: Option<u64>,
     signed_nonce: &mut u32,
 ) {
@@ -409,7 +492,7 @@ fn execute_partition_block(
         &sp_runtime::generic::Digest::default(),
     );
 
-    if let (Some(question), Some(_)) = (question, service_schedule) {
+    if let (Some(question), Some(_)) = (question, block_ops) {
         match number.saturating_sub(start) {
             PT10_SERVICE_START_OFFSET => {
                 // Registration and its nested market/ledger work are inside
@@ -438,42 +521,27 @@ fn execute_partition_block(
 
     // Every primary call has service traffic before it, after it, and between
     // the adjacent unsigned/signed calls. The final slot is after the last
-    // primary call. The successful signed primary marker plus the failed signed
-    // service call exercise the actual TransactionExtension pipeline alongside
-    // the XCM dispatcher.
-    let rotation = usize::try_from(number.saturating_sub(start + 1)).unwrap_or_default() % 10;
+    // primary call. PT-10's alphabet -- successful XCM-dispatcher work, both
+    // failure proof sizes, and the signed TransactionExtension path -- is drawn
+    // per slot from the generated schedule rather than fixed, so the failure
+    // and signed paths land at generated points instead of hard-coded ones.
     for point in 0..3_u8 {
         let slot = usize::from(point) * 3;
-        if let Some(schedule) = service_schedule {
-            dispatch_scheduled_service(schedule, slot, rotation);
+        if let Some(ops) = block_ops {
+            ops[slot].dispatch(signed_nonce);
         }
         dispatch_primary_marker(point);
-        if let Some(schedule) = service_schedule {
-            dispatch_scheduled_service(schedule, slot + 1, rotation);
+        if let Some(ops) = block_ops {
+            ops[slot + 1].dispatch(signed_nonce);
         }
         dispatch_signed_primary_marker(point.saturating_add(16), signed_nonce);
-        if point == 1
-            && number.saturating_sub(start) == PT10_SERVICE_START_OFFSET.saturating_add(2)
-            && service_schedule.is_some()
-        {
-            dispatch_failed_service_register(3, 60);
-        }
-        if point == 2
-            && number.saturating_sub(start) == PT10_SERVICE_START_OFFSET.saturating_add(8)
-            && service_schedule.is_some()
-        {
-            dispatch_failed_service_register(bounds::MAX_SERVICE_ATTESTORS, 80);
-        }
-        if point == 0 && service_schedule.is_some() {
-            dispatch_signed_external_failure(signed_nonce);
-        }
-        if let Some(schedule) = service_schedule {
-            dispatch_scheduled_service(schedule, slot + 2, rotation);
+        if let Some(ops) = block_ops {
+            ops[slot + 2].dispatch(signed_nonce);
         }
         dispatch_primary_marker(point.saturating_add(3));
     }
-    if let Some(schedule) = service_schedule {
-        dispatch_scheduled_service(schedule, 9, rotation);
+    if let Some(ops) = block_ops {
+        ops[9].dispatch(signed_nonce);
     }
     // This is the production Welfare `on_finalize` action. Calling it
     // directly keeps the fixture independent of Timestamp's separate
@@ -517,7 +585,7 @@ fn seed_pt10_decision_fixture() {
     );
 }
 
-fn run_containment_sample(service_schedule: Option<&[u8; 10]>) -> ReplayResult {
+fn run_containment_sample(service_schedule: Option<&ServiceSchedule>) -> ReplayResult {
     seed_pt10_metric_spec();
     seed_pt10_service_params();
     seed_pt10_client();
@@ -533,10 +601,15 @@ fn run_containment_sample(service_schedule: Option<&[u8; 10]>) -> ReplayResult {
     });
     let mut signed_nonce = System::account_nonce(Sr25519Keyring::Alice.to_account_id());
     for offset in 1..=PT10_SERVICE_END_OFFSET {
+        let block_ops = service_schedule.and_then(|schedule| {
+            usize::try_from(offset.saturating_sub(1))
+                .ok()
+                .and_then(|index| schedule.get(index))
+        });
         execute_partition_block(
             start.saturating_add(offset),
             start,
-            service_schedule,
+            block_ops,
             question,
             &mut signed_nonce,
         );
@@ -908,13 +981,110 @@ fn n7_normal_dispatch_escape_hatches_are_inventory_tripwired() {
     assert!(include_str!("configs.rs").contains("type Scheduler = Scheduler;"));
 }
 
+/// PT-10's swept seed count.
+///
+/// Read at **run** time, not compile time: an earlier draft used `option_env!`,
+/// which bakes the value in when the test binary is built, so setting the
+/// variable before `cargo test` would have changed nothing and the deep sweep
+/// would have silently run at the default.
+///
+/// The default is small on purpose. Each case is two full 22-block runtime
+/// replays, so this follows the same split the PT-1..PT-8 suites use: a reduced
+/// count in `cargo test --workspace`, the deep sweep in its own gate leg.
+fn pt10_cases() -> u64 {
+    std::env::var("BLEAVIT_PT10_CASES")
+        .ok()
+        .and_then(|raw| raw.parse().ok())
+        .unwrap_or(6)
+}
+
+/// **PT-10 external-outcome containment** (15 §4.3; 16 §12).
+///
+/// Replay a Bleavit-only scenario, then replay the *same* scenario with
+/// arbitrary admissible service traffic interleaved before and after every
+/// primary schedulable point, and assert every welfare snapshot and every
+/// `decide()` input is byte-identical across the two runs.
+///
+/// This carried the name `n7_service_traffic_containment_sample` while the
+/// interleaving was two fixed patterns over a single call shape, because 15
+/// §4.3 says in terms that **a test claiming the unscoped property MUST NOT be
+/// named PT-10**. The interleaving is now generated over `ServiceOp::ALPHABET`
+/// -- successful XCM-dispatcher work, both failure proof sizes and the signed
+/// `TransactionExtension` path -- at all ten schedulable points of all
+/// `PT10_SERVICE_END_OFFSET` blocks, so the failure and signed paths land at
+/// generated points rather than hard-coded ones, and the name is now earned.
+///
+/// Scope is 15 §4.3's own (SQ-566): the property is asserted over
+/// dispatch-attributable service work. XCM *transport* work is `Mandatory`,
+/// attached to no dispatch, folded into `PrimaryUsed`, and therefore does move
+/// `H`; SQ-566 owns closing that residual.
+///
+/// Case count is deliberately modest and the seeds are deliberately fixed: each
+/// case is two full 22-block runtime replays, so this is a slow property, and a
+/// failure must be replayable from its printed seed alone. `BLEAVIT_PT10_CASES`
+/// raises it for a deeper sweep.
 #[test]
-fn n7_service_traffic_containment_sample() {
+fn pt10_external_outcome_containment() {
+    let cases = pt10_cases();
     let primary = development_ext().execute_with(|| run_containment_sample(None));
-    for service_schedule in SERVICE_CONTAINMENT_SCHEDULES {
-        let service =
-            development_ext().execute_with(|| run_containment_sample(Some(&service_schedule)));
+
+    // The two original hand-written patterns are kept as seed-independent
+    // regressions: they are the interleavings the first implementation was
+    // verified against, and a generator change must not silently drop them.
+    for legacy in SERVICE_CONTAINMENT_SCHEDULES {
+        let schedule: ServiceSchedule = (0..PT10_SERVICE_END_OFFSET)
+            .map(|block| {
+                let mut ops = [ServiceOp::Idle; 10];
+                let rotation = usize::try_from(block).unwrap_or_default() % 10;
+                for (slot, op) in ops.iter_mut().enumerate() {
+                    *op = match legacy[(slot + rotation) % legacy.len()] {
+                        1 => ServiceOp::Deliver,
+                        _ => ServiceOp::DeliverTwice,
+                    };
+                }
+                ops
+            })
+            .collect();
+        let service = development_ext().execute_with(|| run_containment_sample(Some(&schedule)));
         assert_containment_sample(&primary, &service);
+    }
+
+    for seed in 0..cases {
+        let schedule = generated_schedule(seed);
+        // Anti-vacuity: a generator that emitted only `Idle` would make every
+        // assertion below hold trivially while testing nothing.
+        assert!(
+            schedule
+                .iter()
+                .any(|ops| ops.iter().any(|op| *op != ServiceOp::Idle)),
+            "PT-10 seed {seed} generated an empty interleaving"
+        );
+        let service = development_ext().execute_with(|| run_containment_sample(Some(&schedule)));
+        assert_containment_sample(&primary, &service);
+    }
+}
+
+/// The generator must actually reach every letter of the alphabet across the
+/// swept seeds. Without this, dropping a variant from `ALPHABET` -- or skewing
+/// the draw -- would silently narrow PT-10 while it kept passing.
+#[test]
+fn pt10_generated_schedules_cover_the_whole_service_alphabet() {
+    let cases = pt10_cases();
+    let mut seen = Vec::new();
+    for seed in 0..cases {
+        for ops in generated_schedule(seed) {
+            for op in ops {
+                if !seen.contains(&op) {
+                    seen.push(op);
+                }
+            }
+        }
+    }
+    for op in ServiceOp::ALPHABET {
+        assert!(
+            seen.contains(&op),
+            "PT-10's swept seeds never generate {op:?}, so that path is untested"
+        );
     }
 }
 
