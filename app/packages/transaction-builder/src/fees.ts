@@ -22,7 +22,9 @@
 import type { Finalized } from '@bleavit/chain-client';
 import type { GatePassed } from './machine.js';
 
-export type FeeAsset = 'VIT' | 'USDC';
+export type { FeeAsset } from './fee-asset.js';
+
+import type { FeeAsset } from './fee-asset.js';
 
 export class FeeRateUnusableError extends Error {
   readonly code = 'FE-FEE-001';

@@ -155,15 +155,25 @@ Legend: ⬜ pending · 🔨 in progress · ✅ done · ⛔ blocked · 🅿 defer
 > mutations caught (binding removed; height compared instead of hash; a plausible +1 off-by-one),
 > and a fourth that failed to compile was redone rather than counted.
 >
-> **F6's blockers are now all closed.** What remains before it can go ✅ is the 16 majors, still
-> **credible-not-confirmed** — and the v26 work already refuted one of them (#8, for the `execute`
-> path), so triage before code is the right order rather than a caution.
+> **F6's blockers are all closed, and ten of the sixteen majors with them.** The `rows.ts`
+> cluster (#7–#16) is done: every finding was verified against the enforcing pallet before any
+> code moved, and that order paid twice. **Four needed no contract bump** — the surfaces
+> already existed and the rows simply cited the wrong ones (`EpochStatusView.ledger_frozen`
+> answers the freeze; `account_positions().len()` is the per-account count, where
+> `PositionTotals` is per-*position* supply; `ProposalSummaryView` has carried both
+> `proposer` and `funder` since v18). **Two exposed defects in 11 §11.5 itself**, repaired
+> under R-1: P-11 said "caller is proposer" where `epoch-core:823` admits the funder too, and
+> P-10 hardcoded `< 4` where `intake.max_acct` is META-amendable within [2, 8]. A client
+> written to that text would have refused lawful withdrawals — a client refusing what the
+> runtime accepts, which is the direction 15 §4.8's mirror rule exists to forbid, and which
+> `check-dispatch-mirror.py` cannot see because it never reads `rows.ts`.
 >
-> **Next:** rule SQ-589 (the precedent says freeze them, contract v25 → v26, additive, feed
-> regenerated), then the remaining blocker (gate-to-signature staleness) and the 16 majors — wrong
-> `subject` or wrong storage item on several P-rows, self-declared signer capabilities the registry
-> trusts without establishing, `estimateFee` accepting an unadmitted rate. I verified the blockers
-> and SQ-589's list myself; the majors remain **credible-not-confirmed** and want triage before code.
+> Eight mutations, all caught — but **one survived first** and is the useful record: collapsing
+> `market.crank_observe` onto the epoch item passed a `distinct >= 3` assertion, so P-15's
+> per-crank mapping is now pinned by *correspondence* rather than by variety. Two cranks
+> (`market.sweep_revenue`, `ledger.sweep_redemption_fees`) have **no frozen staleness surface**
+> and carry a named refusal pointing at 11 §11.5's expert override, rather than an absent
+> clause that would read as "checked, fine".
 
 > ### ⇨ CURRENT (2026-08-04) — F11: the release train, built and gated per commit rather than first debugged at a tag
 >
