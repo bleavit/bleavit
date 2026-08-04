@@ -1,5 +1,5 @@
 import { StorageDescriptor, PlainDescriptor, TxDescriptor, RuntimeDescriptor, Enum, ApisFromDef, QueryFromPalletsDef, TxFromPalletsDef, EventsFromPalletsDef, ErrorsFromPalletsDef, ConstFromPalletsDef, ViewFnsFromPalletsDef, SS58String, SizedHex, FixedSizeArray } from "polkadot-api";
-import type { I5sesotjlssv2d, Iffmde3ekjedi9, I4mddgoa69c0a2, I9vddjescnh7d4, I95g6i7ilua7lq, Ieniouoqkq4icf, Phase, Ibgl04rn6nbfm6, I4q39t5hn830vp, I8re9183nrhr3n, I1v7jbnil3tjns, I8jgj1nhcr2dg8, Ifn6q3equiq9qi, Ia3sb0vgvovhtg, Iav8k1edbj86k7, Itom7fk49o0c9, I4i91h98n3cv1b, I4iumukclgj8ej, Iqnbvitf7a7l3, I48i407regf59r, I6r5cbv8ttrb09, Inofn0qqbjtb9, I1q8tnt1cluu5j, I8ds64oj6581v0, Ia7pdug7cdsg8g, Ifnu5trqcrgt5b, I9bin2jc70qt6q, I3qklfjubrljqh, If9iqq7i64mur8, Iag3f1hum3p4c8, I4v5g6i7bmt06o, I4s6jkha20aoh0, I84bhscllvv07n, I78s05f59eoi8b, I35l6p7kq19mr0, TransactionPaymentReleases, Ifble4juuml5ig, Version, Ida3u2t8t1l1js, If9jidduiuq7vv, ConvictionVotingVoteVoting, I6ouflveob4eli, PreimageOldRequestStatus, PreimageRequestStatus, I4pact7n2e9a0i, Ifh9leie5rtseb, I56u24ncejr5kt, I9jd27rnpm8ttv, I775lbh1002e7f, I9p9lq3rej5bhc, Iag146hmjgqfgj, I8uo3fpd3bcc6f, Iepbsvlk3qceij, Icgljjb6j82uhn, I5mpbmq1ooiq9i, I5g2vv0ckl2m8b, Ifup3lg9ro8a0f, Idh2ug6ou4a8og, Iejeo53sea6n4q, I53esa2ms463bk, Ib4jhb8tt3uung, I5qfubnuvrnqn6, I8t3u2dv73ahbd, I7vlvrrl2pnbgk, Ie0rpl5bahldfk, XcmPalletVersionMigrationStage, I7e5oaj2qi4kl1, Ie849h3gncgvok, Iat62vud7hlod2, Ict03eedr8de9s, Ici7ejds60vj52, XcmVersionedLocation, Ia2lhg7l2hilo3, Ifi4da1gej1fri, Ifvgo9568rpmqc, I82jm9g7pufuel, Ic5m5lp1oioo8r, I6cs1itejju2vv, I19osbbvcedbnc, Iapa0pspj5na3t, I5ebvuao287pjg, I71v2rrt182hod, Ia03hjl5um8umc, I1bd4sfsts9lp2, I5m1k92kcp4o6d, Ifkob0fdn3eods, I1ai0vm56bl7eu, I7aij5ls86nd9l, Iafqnechp3omqg, I3hg4c9ge064lf, Iej87d0l2agljs, Ifr88cshss4mco, I3qulnvnc3hn00, Iept8gvj9an6pj, I3ge8l11mhestc, I4qqej82rtmcsa, I8el4qiut1afl1, I2o134i87sa348, I9v1nr5t25p3gu, Ij23g2682mtlh, Ib65ekpdoa117u, Ic9m8l8pkrt2k5, Idjevvptm6gjaq, Id9gm4bteop71s, Ibk7vl3nqtkvjq, I25if6a41d56ra, Icj2nb69liuu24, Icm9f9h6nua3dd, I8hs8cgiei54sv, I43pkljl3a50rq, Ic7ihfq9tebase, Ia78sqv46skudk, I8kuj5ij9r87hi, Ieupfkt3mtrjlc, I5eoome1iv99mc, Ifs8l7uhm2p84a, I205qrookusi3d, Itdvhihql560g, I3fphkj3rkb8d1, Ie358p6da7iusl, I3i3q11ol0f2a8, Iihcv2ffgfdth, I5ss06mick4shb, I3a0nip7t7d0i7, I67b4evvsj5s3g, Ifolljjjlhmesh, I342jcra5dcalu, I6lfe132so20ih, It5jnbkpi46a7, I7emrdrb8oc4do, I4dcivh5duqno8, Iflkot84bd90qk, Ibphrfq348d9fn, I1qevohso20t15, I3dp098duidkfr, I6o17cn2677nom, Ias91rflo6ebo5, Idggr61fqjm503, I8fhaue1ob9s7m, I9mj1qagqpte76, I44n5hoqkdsljm, I7rilbfprtfgq9, Ifip05kcrl65am, I7dp3d6kokg6qm, I806t22dpi77ls, Ib9hqqd0dq5sja, Icqilkshp1mtl, I2rc77s0mqdebl, I2uoo9t5ta92pd, I2og4uv7220vja, I8dfqph7nh6ls, I60nr0tc614tgj, I4p5t2krb1gmvp, I5lf8t4evk0fq7, Ic23t0smeuk6mq, Iacpni5fp46chb, Ie1r5megrresvn, Icrbds76ujpbkg, Ifcik8ed7tl04e, I8jh0enk7f0r9l, Icu5tfrap3ledf, I7jbmorihvfg1b, I7tusvhvaa2qim, Iar9rrgd5eqf9n, I96rqo4i9p11oo, In7a38730s6qs, Ibtil0ss5munbk, I9s0ave7t0vnrk, I4fo08joqmcqnm, Ibafpkl9hhno69, Iasb8k6ash5mjn, XcmV5Junctions, I7r7b6bp2g5acg, I7rm113kjbo5gc, I4totqt881mlti, I5pbtpcshc7f67, I35p85j063s0il, I8ofcg5rbj0g2c, I4adgbll7gku4i, I6pjjpfvhvcfru, I9pj91mj79qekl, I39uah9nss64h9, Ik64dknsq7k08, Ib51vk42m1po4n, Idcr6u6361oad9, Ial23jn8hp0aen, Ifpj261e8s63m3, I4ktuaksf5i1gk, I9bqtpv2ii35mp, I9j7pagd6d4bda, I2h9pmio37r7fb, Ibmr18suc9ikh9, I9iq22t0burs89, I5u8olqbbvfnvf, I5utcetro501ir, I7t2thek61ghou, I61tdrsafr1vf3, Ibsk5g3rhm45pu, Icfoe9q8d4vs8f, Ibrfmvjrg4trnb, Iedih7t34maii9, I4e902qbfel1f1, Ie4met0joi8sv0, I1t8vq6a06ohhu, Icvt3pdunbinm7, I9ui3n41balr2q, I89sl7btgl24g2, I3u6g26k9kn96u, If1invp94rsjms, Ie5nc19gtiv5sv, Iald3dgvt1hjkb, Iurrhahet4gno, I5tamv2nk8bj8o, I8apq8e7c7qcpp, Id1e31ij0c35fv, Ibm7u0qulpnrs9, Id9uqtigc0il3v, Iaa2o6cgjdpdn5, Iam6hrl7ptd85l, Ict9ivhr2c5hv0, I8t4vv03357lk9, Ifc6beta7g87k, I666bl2fqjkejo, Icbio0e1f0034b, I8c0vkqjjipnuj, Idnsr2pndm36h0, Ia1pvdcbhuqf8m, I8steo882k7qns, I4pa4q37gj6fua, I5f178ab6b89t3, I4nakhtbsk3c5s, I82nfqfkd48n10, I1jm8m1rh9e20v, I3o5j3bli1pd8e, I4hoqldg80onj4, I5n4sebgkfr760, I7tpmr8tipe9i6, Ifs1i5fk9cqvr6, Ifpr9t4r1bh02u, Idhgkffmrcrpph, Ieg3fd8p4pkt10, I8kg5ll427kfqq, I467333262q1l9, Ibhs62r2hk467a, Ifeg4pudqnboeu, I1d5onj5bp3620, I6jje7fctkmdam, I6he8b4b4q6p14, I57mgih1qrbf70, I3lj33btcqlb1i, I707m7edh0jft8, I2j5sqe1l974kn, I2eb501t8s6hsq, Ianmuoljk2sk1u, I1ok6cg6f6qjvq, I7knpbpi70kjd6, I2ubgugv6pr3bd, Ideaemvoneh309, I3d9o9d7epp66v, I6lqh1vgb4mcja, Ibou4u1engb441, Id6nbvqoqdj4o2, I95iqep3b8snn9, I6fa9aeuk7i4ib, I8k3rnvpeeh4hv, I1jllala72loei, I3vh014cqgmrfd, I40pqum1mu8qg3, I1r4c2ghbtvjuc, Ia5cotcvi888ln, I21jsa919m88fd, Iegif7m3upfe1k, I9kt8c221c83ln, Ic76kfh5ebqkpl, Icscpmubum33bq, I21d2olof7eb60, Ibgm4rnf22lal1, Ie68np0vpihith, I9bnv6lu0crf1q, Iauhjqifrdklq7, Ie1uso9m8rt5cf, Ifccifqltb5obi, Iadtsfv699cq8b, Ialpmgmhr3gk5r, I4cbvqmqadhrea, I3sdol54kg5jaq, I8fougodaj6di6, I81vt5eq60l4b6, Irupv22iu38vu, I7grtu814479f3, I93s1mcesjtqu3, I1p86ntl6dn03c, I3ri98utbddtsd, I6bpho1qciu1vq, I23de7n843u7sn, I5fe6dsj65bbns, Ideepm5vhbl12g, Idasi83b2hi6kd, I3l1prg489cgso, Ibihfmtr4nutgv, I8b0duu38170aj, I7445bslhc0ic2, Id6e8lk3pfjocj, I449ug3537vfu2, I7r9r972bl7s6h, I45orgf9ulklgj, I7gp5f34oc7pki, I36p2bgnnl36ta, I6qcvfaiubjt05, I7tjbm7l304tu9, I7kcd6p94nv55v, I483r8098di3t5, Ico0ou8pmf1cq5, Ie38ogc3bkfpu, Iasovm2m56clga, I3s764kupqvvc3, Ide781hv7v8ek3, I4n0jfeme2dupj, Iejr8qrqkqh148, Ie00dqaka54s56, I97fq4k68v5pmh, Ifh9jjrch89bli, I17o91bl727r0j, Idbt6597auf3g2, I3nkq26pmovr9u, I1mjueefcqgdaj, Ict5mnga93gs4g, If97gtgn6okleo, I5c87v6pd2sdaf, I5l0jsir5si80s, I86uhg8ivvk3a8, I4ov6e94l79mbg, I3dg8tbt6tcck6, Ibnicuotj4pjfm, I4gj9mv93je4sv, I3f8ncpioik5na, I3qt1hgg4djhgb, Idscf6boak49q1, I3ajpo6bheav6q, Iaoh4afnk8h0fj, Ie239vtc2egj50, I4m6dhgb2ar055, I8m9idjg76ip7q, I3c63j6sh3evqn, Idpghfv397i03j, I1iqmhg9l6j4g5, Ifdhckj0h8qpv2, I4uk5nmqsi401j, I7eloeoebplnvf, Icu0h2un8nbhct, Ifoljaehihf3a6, If5i6c2m5d9b65, I9ihjoku7164ou, I7661jqlhbtghb, I5h8g89cqhubt3, I3gvjatq4m8h18, I8vsdam138s0ak, I68s7org31qt4d, Ielk7f0jb1jt1u, I7n5sdbabu8l7g, I1qpch3k96pn83, Ia82mnkmeo2rhc, I40r22b6eosbg5, Icbccs0ug47ilf, I855j4i3kr8ko1, I9lsk105fpepqs, Idd7hd99u0ho0n, Iafscmv8tjf0ou, I100l07kaehdlp, I6gnbnvip5vvdi, Icv68aq8841478, Ic262ibdoec56a, Iflcfm9b6nlmdd, Ijrsf4mnp3eka, Id5fm4p8lj5qgi, I8tjvj9uq4b7hi, I4fooe9dun9o0t, I4ici6vhci5d5f, I9ia5eeknmnh40, I9nrdlsbtsjaoc, Iph9c4rn81ub2, Icqe266pmnr25o, I5hoiph0lqphp, I5k7oropl9ofc7, I48vagp1omigob, Ib5tst4ppem1g6, Ibn64edsrg3737, I83r9d02dh47j9, I22bm4d7re21j9, I3jnhifvaeuama, I8n1gia0lo42ok, I6gb0o7lqjfdjq, Idh36v6iegkmpq, I27hnueutmchbe, Iectm2em66uhao, I7q57goff3j72h, Ibe49veu9i9nro, I1rnkmiu7usb82, Ig6jnoe1clkm7, Ibtugueatkkr9s, Ier2cke86dqbr2, Iaeqj2ebnvkjqe, Ih04jp733tqqa, Ievr89968437gm, I229ijht536qdu, I62nte77gksm0f, I9cg2delv92pvq, Ilhp45uime5tp, I4f1hv034jf1dt, I7svrbkiu01iec, I8cbok7qd7ru4t, I7kij8p9kchdjo, I8t33rj099eb2o, Ia3c82eadg79bj, Ienusoeb625ftq, Ibtsa3docbr9el, I476s2ro8t68f2, Ids3npip9e6148, Ica5b5hrvd0b5i, I9j6s1q21td4b3, Icovh3ggbhth1s, I8a8c1n38ann55, I2ur0oeqg495j8, I7f2f3co93gefl, I1bhd210c3phjj, Iep27ialq4a7o7, Iasu5jvoqr43mv, Id8u6ilg5ec2dc, I5qolde99acmd1, I8gtde5abn1g9a, If1co0pilmi7oq, Iae74gjak1qibn, I3escdojpj0551, Ic5n6d119limum, I5rtkmhm2dng4u, I137t1cld92pod, I1rvj4ubaplho0, Ia3uu7lqcc1q1i, I7crucfnonitkn, I7tmrp94r9sq4n, Ibslgga81p36aa, I61d51nv4cou88, If8u5kl4h8070m, Ibmuil6p3vl83l, I7lul91g50ae87, Icl7nl1rfeog3i, Iasr6pj6shs0fl, I2uqmls7kcdnii, Idg69klialbkb8, I7r6b7145022pp, I30pg328m00nr3, Icmrn7bogp28cs, I7m9b5plj4h5ot, I9onhk772nfs4f, I3l6bnksrmt56r, Idh09k0l2pmdcg, I7uoiphbm0tj4r, I512p1n7qt24l8, I6s1nbislhk619, I3gghqnh2mj0is, I6iv852roh6t3h, I9oc2o6itbiopq, I39t01nnod9109, I6v8sm60vvkmk7, I1qmtmbe5so8r3, Ih99m6ehpcar7, Idgorhsbgdq2ap, I9ubb2kqevnu6t, I2hq50pu2kdjpo, I9acqruh7322g2, I8i1bk7kj5k5ed, Ie5qta40r3ho5l, Ibfd56bn4a7kfk, Ifcslavva7skj1, Icolandhn4qpus, I333ps8sjf4lhr, Iah5vhnso7uqce, I2lct6m7k5r2et, I9cf6so4vur6mg, Isntabb3i2t9f, I40af445fa06rh, Iapmmsuq8j9rcn, I80dirtbv2ognl, I6qrovovkeah6g, I5v7n6l8j8vd1f, I2kpgolvhr6ftt, I20e9ph536u7ti, Id2312c48f17dd, I7a6s4h48lmk1t, I2fkgb649u353b, I3a053sft19jid, Idj8pac8q2ngco, I2sg7pchi235m2, Ibg0qukn7q6t5u, I93sj8arfs7e7f, I3qf57dn94jogo, I7jnda8be156fb, I27lb9t574io60, Ic7t67gl6oo8ed, Ifaori90nvndr0, Ie2rqjbtm23ftk, I7oiv62sj2f3r3, I4oohlti0ugomv, Icj2jtt996rgo7, I55162di4jv6rk, Ib8h08jrok1svd, I4m6m36nu8gsqu, Ie1dicjiiaa5q8, I239j3gnc1jsps, I15atr7h39m6es, I5052qcfs60vjm, If8en01tuc3bij, I5euu4q9kmp9c3, Ictvl5d049lms3, I94jeskiehjtf1, I36oknt2f8tl4g, I288nkd84a7m9u, Ifc75td2ivg90e, I7i7gk545r3sv3, I97i24r5tc4i6u, I5tek56pm6maiv, I60fhenaqhrkjj, I6o7guvg1i99i2, I5l6c62egasn2e, I3qv7v9gggggd4, I7dq91mkderm2o, Ie2mt3ul73mn1d, I50qqth3sk471t, I5em265vo8vck5, Ibp2vba0704net, Idts26aojvm4gr, I141piq296rc2n, Iasl7n2tkle090, I178uj1s35amp3, Iai5mccr300imn, I1uen92pl1lhqu, Id6ktlm8uq63g6, I4f2hva90hak3m, I823eg09r939h3, Ibcj87mgvuqbc8, I5d87nqeditd0c, Ib4lvahglmvoj4, Ib5tkqghj5b2lj, I6d3ckosptflrl, I3if4k84v5n0f6, I5k37qbr3s9v15, I5eol3g6qqti18, I1qrnckffb9nrm, I1e0oh3bn9igat, I70l5rhpgblmim, Id94b4a7r8bjeq, Ic4vbg4dnnpegu, I7nl4maqn6m365, I6bq7cmd37a5ik, I9i68vrjhvjnp1, Icu71ht824icnq, I3fr1hdlq8g81s, I1c5ncj72v7k27, Idhhlivifn563e, I3o9sh4pms1jcb, Iij42ed7fk1sg, I8vg1ab5ssn90l, Ifai7amejetiv, I5el2hvlofnvv5, Ibqi69m3s38lo0, I6ctvd5gvtboll, Ierkp6g0vn9ojj, I1srp17os6n92p, I1hd2l2dfhk11i, Idrd3fp3ciqt4f, I15300qnq5mpkt, I689heiuu575e6, I6v9f8qobgk41i, Ie4auh3nmut3h7, I5r8t4iaend96p, Iaqet9jc3ihboe, Ic952bubvq4k7d, I2v50gu3s1aqk6, Iabpgqcjikia83, I4gil44d08grh, I7u915mvkdsb08, I7g3jnj59cuc3k, I3nir9l71btsd5, Ib4c4hbfg3ril4, I6bep0s8nf1jn4, Idbhri2uj6av22, Ietccudq8ucajb, I3fvgo362krtrr, Ifi0c8r8eomqru, I6tacm14gh0jtv, Ibe056naqv5jeg, Ifpv42fvgi4b3, I8s95j32t1rrnr, If9jrft6hbnnq, I607t5e3e5mnk5, Ie8c3gf89pirvk, Idt3pdmk8m17j6, I8fksma6odit5g, I996aiv3qoehvi, I4fj3mptf3jr0q, I1ervt5j2e1l9d, If7uv525tdvv7a, I2an1fs2eiebjp, TransactionValidityTransactionSource, I9ask1o4tfvcvs, I4ph3d1eepnmr1, Icerf8h8pdu8ss, I15h4jnb8b841p, I6spmpef2c7svf, Iei2mvq0mjvt81, Icscgdrls4bngd, Ic1d4u2opv3fst, Ie9sr1iqcg3cgm, I1mqgk2tmnn9i2, I6lr8sctk0bi4e, I8341h4b88nf15 } from "./common-types";
+import type { I5sesotjlssv2d, Iffmde3ekjedi9, I4mddgoa69c0a2, I7oo41fpphderq, I95g6i7ilua7lq, Ieniouoqkq4icf, Phase, Ibgl04rn6nbfm6, I4q39t5hn830vp, I8re9183nrhr3n, I1v7jbnil3tjns, I8jgj1nhcr2dg8, Ifn6q3equiq9qi, Ia3sb0vgvovhtg, Iav8k1edbj86k7, Itom7fk49o0c9, I4i91h98n3cv1b, I4iumukclgj8ej, Iqnbvitf7a7l3, I48i407regf59r, I6r5cbv8ttrb09, Inofn0qqbjtb9, I1q8tnt1cluu5j, I8ds64oj6581v0, Ia7pdug7cdsg8g, Ifnu5trqcrgt5b, I9bin2jc70qt6q, I3qklfjubrljqh, If9iqq7i64mur8, Iag3f1hum3p4c8, I4v5g6i7bmt06o, I4s6jkha20aoh0, I84bhscllvv07n, I78s05f59eoi8b, I35l6p7kq19mr0, TransactionPaymentReleases, Ifble4juuml5ig, Version, Ida3u2t8t1l1js, If9jidduiuq7vv, ConvictionVotingVoteVoting, I6ouflveob4eli, PreimageOldRequestStatus, PreimageRequestStatus, I4pact7n2e9a0i, Ifh9leie5rtseb, I56u24ncejr5kt, I9jd27rnpm8ttv, I775lbh1002e7f, I9p9lq3rej5bhc, Iag146hmjgqfgj, I8uo3fpd3bcc6f, Iepbsvlk3qceij, Icgljjb6j82uhn, I5mpbmq1ooiq9i, I5g2vv0ckl2m8b, Ifup3lg9ro8a0f, Idh2ug6ou4a8og, Iejeo53sea6n4q, I53esa2ms463bk, Ib4jhb8tt3uung, I5qfubnuvrnqn6, I8t3u2dv73ahbd, I7vlvrrl2pnbgk, Ie0rpl5bahldfk, XcmPalletVersionMigrationStage, I7e5oaj2qi4kl1, Ie849h3gncgvok, Iat62vud7hlod2, Ict03eedr8de9s, Ici7ejds60vj52, XcmVersionedLocation, Ia2lhg7l2hilo3, Ifi4da1gej1fri, Ifvgo9568rpmqc, I82jm9g7pufuel, Ic5m5lp1oioo8r, I6cs1itejju2vv, I19osbbvcedbnc, Iapa0pspj5na3t, I5ebvuao287pjg, I71v2rrt182hod, Ia03hjl5um8umc, I1bd4sfsts9lp2, I5m1k92kcp4o6d, Ifkob0fdn3eods, I1ai0vm56bl7eu, I7aij5ls86nd9l, Iafqnechp3omqg, I3hg4c9ge064lf, Iej87d0l2agljs, Ifr88cshss4mco, I3qulnvnc3hn00, Iept8gvj9an6pj, I3ge8l11mhestc, I4qqej82rtmcsa, I8el4qiut1afl1, I2o134i87sa348, I9v1nr5t25p3gu, Ij23g2682mtlh, Ib65ekpdoa117u, Ic9m8l8pkrt2k5, Idjevvptm6gjaq, Id9gm4bteop71s, Ibk7vl3nqtkvjq, I25if6a41d56ra, Icj2nb69liuu24, Icm9f9h6nua3dd, I8hs8cgiei54sv, I43pkljl3a50rq, Ic7ihfq9tebase, Ia78sqv46skudk, I8kuj5ij9r87hi, Ieupfkt3mtrjlc, I5eoome1iv99mc, Ifs8l7uhm2p84a, I205qrookusi3d, Itdvhihql560g, I3fphkj3rkb8d1, Ie358p6da7iusl, I3i3q11ol0f2a8, Iihcv2ffgfdth, I5ss06mick4shb, I3a0nip7t7d0i7, I67b4evvsj5s3g, Ifolljjjlhmesh, I342jcra5dcalu, I6lfe132so20ih, It5jnbkpi46a7, I7emrdrb8oc4do, I4dcivh5duqno8, Iflkot84bd90qk, Ibphrfq348d9fn, I1qevohso20t15, I3dp098duidkfr, I6o17cn2677nom, Ias91rflo6ebo5, Idggr61fqjm503, I8fhaue1ob9s7m, I9mj1qagqpte76, I44n5hoqkdsljm, I7rilbfprtfgq9, Ifip05kcrl65am, I7dp3d6kokg6qm, I806t22dpi77ls, Ib9hqqd0dq5sja, Icqilkshp1mtl, I2rc77s0mqdebl, I2uoo9t5ta92pd, I2og4uv7220vja, I8dfqph7nh6ls, I60nr0tc614tgj, I4p5t2krb1gmvp, I5lf8t4evk0fq7, Ic23t0smeuk6mq, Iacpni5fp46chb, Ie1r5megrresvn, Icrbds76ujpbkg, Ifcik8ed7tl04e, I8jh0enk7f0r9l, Icu5tfrap3ledf, I7jbmorihvfg1b, I7tusvhvaa2qim, Iar9rrgd5eqf9n, I96rqo4i9p11oo, Iilpsjpsgmkpu, In7a38730s6qs, Ibtil0ss5munbk, I9s0ave7t0vnrk, I4fo08joqmcqnm, Ibafpkl9hhno69, Iasb8k6ash5mjn, XcmV5Junctions, I7r7b6bp2g5acg, I7rm113kjbo5gc, I4totqt881mlti, I5pbtpcshc7f67, I35p85j063s0il, I8ofcg5rbj0g2c, I4adgbll7gku4i, I6pjjpfvhvcfru, I9pj91mj79qekl, I39uah9nss64h9, Ik64dknsq7k08, Ib51vk42m1po4n, Idcr6u6361oad9, Ial23jn8hp0aen, Ifpj261e8s63m3, I4ktuaksf5i1gk, I9bqtpv2ii35mp, I9j7pagd6d4bda, I2h9pmio37r7fb, Ibmr18suc9ikh9, I9iq22t0burs89, I5u8olqbbvfnvf, I5utcetro501ir, I7t2thek61ghou, I61tdrsafr1vf3, Ibsk5g3rhm45pu, Icfoe9q8d4vs8f, Ibrfmvjrg4trnb, Iedih7t34maii9, I4e902qbfel1f1, Ie4met0joi8sv0, I1t8vq6a06ohhu, Icvt3pdunbinm7, I9ui3n41balr2q, I89sl7btgl24g2, I3u6g26k9kn96u, If1invp94rsjms, Ie5nc19gtiv5sv, Iald3dgvt1hjkb, Iurrhahet4gno, I5tamv2nk8bj8o, I8apq8e7c7qcpp, Id1e31ij0c35fv, Ibm7u0qulpnrs9, Id9uqtigc0il3v, Iaa2o6cgjdpdn5, Iam6hrl7ptd85l, Ict9ivhr2c5hv0, I8t4vv03357lk9, Ifc6beta7g87k, I666bl2fqjkejo, Icbio0e1f0034b, I8c0vkqjjipnuj, Idnsr2pndm36h0, Ia1pvdcbhuqf8m, I8steo882k7qns, I4pa4q37gj6fua, I5f178ab6b89t3, I4nakhtbsk3c5s, I82nfqfkd48n10, I1jm8m1rh9e20v, I3o5j3bli1pd8e, I4hoqldg80onj4, I5n4sebgkfr760, I7tpmr8tipe9i6, Ifs1i5fk9cqvr6, Ifpr9t4r1bh02u, Idhgkffmrcrpph, Ieg3fd8p4pkt10, I8kg5ll427kfqq, I467333262q1l9, Ibhs62r2hk467a, Ifeg4pudqnboeu, I1d5onj5bp3620, I6jje7fctkmdam, I6he8b4b4q6p14, I57mgih1qrbf70, I3lj33btcqlb1i, I707m7edh0jft8, I2j5sqe1l974kn, I2eb501t8s6hsq, Ianmuoljk2sk1u, I1ok6cg6f6qjvq, I7knpbpi70kjd6, I2ubgugv6pr3bd, Ideaemvoneh309, I3d9o9d7epp66v, I6lqh1vgb4mcja, Ibou4u1engb441, Id6nbvqoqdj4o2, I95iqep3b8snn9, I6fa9aeuk7i4ib, I8k3rnvpeeh4hv, I1jllala72loei, I3vh014cqgmrfd, I40pqum1mu8qg3, I1r4c2ghbtvjuc, Ia5cotcvi888ln, I21jsa919m88fd, Iegif7m3upfe1k, I9kt8c221c83ln, Ic76kfh5ebqkpl, Icscpmubum33bq, I21d2olof7eb60, Ibgm4rnf22lal1, Ie68np0vpihith, I9bnv6lu0crf1q, Iauhjqifrdklq7, Ie1uso9m8rt5cf, Ifccifqltb5obi, Iadtsfv699cq8b, Ialpmgmhr3gk5r, I4cbvqmqadhrea, I3sdol54kg5jaq, I8fougodaj6di6, I81vt5eq60l4b6, Irupv22iu38vu, I7grtu814479f3, I93s1mcesjtqu3, I1p86ntl6dn03c, I3ri98utbddtsd, I6bpho1qciu1vq, I23de7n843u7sn, I5fe6dsj65bbns, Ideepm5vhbl12g, Idasi83b2hi6kd, I3l1prg489cgso, Ibihfmtr4nutgv, I8b0duu38170aj, I7445bslhc0ic2, Id6e8lk3pfjocj, I449ug3537vfu2, I7r9r972bl7s6h, I45orgf9ulklgj, I7gp5f34oc7pki, I36p2bgnnl36ta, I6qcvfaiubjt05, I7tjbm7l304tu9, I7kcd6p94nv55v, I483r8098di3t5, Ico0ou8pmf1cq5, Ie38ogc3bkfpu, Iasovm2m56clga, I3s764kupqvvc3, Ide781hv7v8ek3, I4n0jfeme2dupj, Iejr8qrqkqh148, Ie00dqaka54s56, I97fq4k68v5pmh, Ifh9jjrch89bli, I17o91bl727r0j, Idbt6597auf3g2, I3nkq26pmovr9u, I1mjueefcqgdaj, Ict5mnga93gs4g, If97gtgn6okleo, I5c87v6pd2sdaf, I5l0jsir5si80s, I86uhg8ivvk3a8, I4ov6e94l79mbg, I3dg8tbt6tcck6, Ibnicuotj4pjfm, I4gj9mv93je4sv, I3f8ncpioik5na, I3qt1hgg4djhgb, Idscf6boak49q1, I3ajpo6bheav6q, Iaoh4afnk8h0fj, Ie239vtc2egj50, I4m6dhgb2ar055, I8m9idjg76ip7q, I3c63j6sh3evqn, Idpghfv397i03j, I1iqmhg9l6j4g5, Ifdhckj0h8qpv2, I4uk5nmqsi401j, I7eloeoebplnvf, Icu0h2un8nbhct, Ifoljaehihf3a6, If5i6c2m5d9b65, I9ihjoku7164ou, I7661jqlhbtghb, I5h8g89cqhubt3, I3gvjatq4m8h18, I8vsdam138s0ak, I68s7org31qt4d, Ielk7f0jb1jt1u, I7n5sdbabu8l7g, I1qpch3k96pn83, Ia82mnkmeo2rhc, I91sqkhtuteciq, Icbccs0ug47ilf, I855j4i3kr8ko1, Iff5ab2dmnvclk, Idd7hd99u0ho0n, Iafscmv8tjf0ou, I100l07kaehdlp, I6gnbnvip5vvdi, Icv68aq8841478, Ic262ibdoec56a, Iflcfm9b6nlmdd, Ijrsf4mnp3eka, Id5fm4p8lj5qgi, I8tjvj9uq4b7hi, I4fooe9dun9o0t, I4ici6vhci5d5f, I9ia5eeknmnh40, I9nrdlsbtsjaoc, Iph9c4rn81ub2, Icqe266pmnr25o, I5hoiph0lqphp, I5k7oropl9ofc7, I48vagp1omigob, Ib5tst4ppem1g6, Ibn64edsrg3737, I83r9d02dh47j9, I22bm4d7re21j9, I3jnhifvaeuama, I8n1gia0lo42ok, I6gb0o7lqjfdjq, Idh36v6iegkmpq, I27hnueutmchbe, Iectm2em66uhao, I7q57goff3j72h, Ibe49veu9i9nro, I1rnkmiu7usb82, Ig6jnoe1clkm7, Ibtugueatkkr9s, Ier2cke86dqbr2, Iaeqj2ebnvkjqe, Ih04jp733tqqa, Ievr89968437gm, I229ijht536qdu, I62nte77gksm0f, I9cg2delv92pvq, Ilhp45uime5tp, I4f1hv034jf1dt, I7svrbkiu01iec, I8cbok7qd7ru4t, I7kij8p9kchdjo, I3dlplal9hg0ou, Ia3c82eadg79bj, Ienusoeb625ftq, Ibtsa3docbr9el, I72dv4a82dus88, I17qjng9vev10h, I53fpkd6hlkoe2, Ib49ck93mjok7d, Icovh3ggbhth1s, I8a8c1n38ann55, I2ur0oeqg495j8, I7f2f3co93gefl, I1bhd210c3phjj, Iep27ialq4a7o7, Iasu5jvoqr43mv, I25quf02h3f45f, I5qolde99acmd1, I8gtde5abn1g9a, If1co0pilmi7oq, Iae74gjak1qibn, I3escdojpj0551, I38473632flscn, I5rtkmhm2dng4u, I137t1cld92pod, I1rvj4ubaplho0, Ia3uu7lqcc1q1i, I7crucfnonitkn, I7tmrp94r9sq4n, Ibslgga81p36aa, I61d51nv4cou88, If8u5kl4h8070m, Ibmuil6p3vl83l, I7lul91g50ae87, Icl7nl1rfeog3i, Iasr6pj6shs0fl, I2uqmls7kcdnii, Idg69klialbkb8, I7r6b7145022pp, I30pg328m00nr3, Icmrn7bogp28cs, I7m9b5plj4h5ot, I9onhk772nfs4f, I3l6bnksrmt56r, Idh09k0l2pmdcg, I7uoiphbm0tj4r, I512p1n7qt24l8, I6s1nbislhk619, I3gghqnh2mj0is, I6iv852roh6t3h, I9oc2o6itbiopq, I39t01nnod9109, I6v8sm60vvkmk7, I1qmtmbe5so8r3, Ih99m6ehpcar7, Idgorhsbgdq2ap, I9ubb2kqevnu6t, I2hq50pu2kdjpo, I9acqruh7322g2, I8i1bk7kj5k5ed, Ie5qta40r3ho5l, Ibfd56bn4a7kfk, Ifcslavva7skj1, Icolandhn4qpus, I333ps8sjf4lhr, Iah5vhnso7uqce, I2lct6m7k5r2et, I9cf6so4vur6mg, Isntabb3i2t9f, I40af445fa06rh, Iapmmsuq8j9rcn, I80dirtbv2ognl, I6qrovovkeah6g, I5v7n6l8j8vd1f, I2kpgolvhr6ftt, I20e9ph536u7ti, Id2312c48f17dd, I7a6s4h48lmk1t, I2fkgb649u353b, I3a053sft19jid, Idj8pac8q2ngco, I2sg7pchi235m2, Ibg0qukn7q6t5u, I93sj8arfs7e7f, I3qf57dn94jogo, I7jnda8be156fb, I27lb9t574io60, Ic7t67gl6oo8ed, Ifaori90nvndr0, Ie2rqjbtm23ftk, I7oiv62sj2f3r3, I4oohlti0ugomv, Icj2jtt996rgo7, I55162di4jv6rk, Ib8h08jrok1svd, I4m6m36nu8gsqu, Ie1dicjiiaa5q8, I239j3gnc1jsps, I15atr7h39m6es, I5052qcfs60vjm, If8en01tuc3bij, I5euu4q9kmp9c3, Ictvl5d049lms3, I94jeskiehjtf1, I36oknt2f8tl4g, I288nkd84a7m9u, Ifc75td2ivg90e, I7i7gk545r3sv3, I97i24r5tc4i6u, I5tek56pm6maiv, I60fhenaqhrkjj, I6o7guvg1i99i2, I5l6c62egasn2e, I3qv7v9gggggd4, I7dq91mkderm2o, Ie2mt3ul73mn1d, I50qqth3sk471t, I5em265vo8vck5, Ibp2vba0704net, Idts26aojvm4gr, I141piq296rc2n, Iasl7n2tkle090, I178uj1s35amp3, Iai5mccr300imn, I1uen92pl1lhqu, Id6ktlm8uq63g6, I4f2hva90hak3m, I823eg09r939h3, Ibcj87mgvuqbc8, I5d87nqeditd0c, Ib4lvahglmvoj4, Ib5tkqghj5b2lj, I6d3ckosptflrl, I3if4k84v5n0f6, I5k37qbr3s9v15, I5eol3g6qqti18, I1qrnckffb9nrm, I1e0oh3bn9igat, I70l5rhpgblmim, Id94b4a7r8bjeq, Ic4vbg4dnnpegu, I7nl4maqn6m365, I6bq7cmd37a5ik, I9i68vrjhvjnp1, Icu71ht824icnq, I3fr1hdlq8g81s, I1c5ncj72v7k27, Idhhlivifn563e, I3o9sh4pms1jcb, Iij42ed7fk1sg, I8vg1ab5ssn90l, Ifai7amejetiv, I5el2hvlofnvv5, Ibqi69m3s38lo0, I6ctvd5gvtboll, Ierkp6g0vn9ojj, I1srp17os6n92p, I1hd2l2dfhk11i, Idrd3fp3ciqt4f, I15300qnq5mpkt, I689heiuu575e6, I6v9f8qobgk41i, Ie4auh3nmut3h7, I5r8t4iaend96p, Iaqet9jc3ihboe, Ic952bubvq4k7d, I2v50gu3s1aqk6, Iabpgqcjikia83, I4gil44d08grh, I7u915mvkdsb08, I7g3jnj59cuc3k, I3nir9l71btsd5, Ib4c4hbfg3ril4, I6bep0s8nf1jn4, Idbhri2uj6av22, Ietccudq8ucajb, I3fvgo362krtrr, Ifi0c8r8eomqru, I6tacm14gh0jtv, Ibe056naqv5jeg, Ifpv42fvgi4b3, I8s95j32t1rrnr, If9jrft6hbnnq, I607t5e3e5mnk5, Ie8c3gf89pirvk, Idt3pdmk8m17j6, I8fksma6odit5g, I996aiv3qoehvi, I4fj3mptf3jr0q, Ibh9utbkad113n, I2b90ci0g6gdiu, If7uv525tdvv7a, I2an1fs2eiebjp, TransactionValidityTransactionSource, I9ask1o4tfvcvs, I4ph3d1eepnmr1, Icerf8h8pdu8ss, I15h4jnb8b841p, I6spmpef2c7svf, Iei2mvq0mjvt81, Icscgdrls4bngd, Ic1d4u2opv3fst, Ie9sr1iqcg3cgm, I1mqgk2tmnn9i2, I6lr8sctk0bi4e, I5cj8vo7lksljp } from "./common-types";
 type AnonymousEnum<T extends {}> = T & {
     __anonymous: true;
 };
@@ -63,7 +63,7 @@ type IStorage = {
          * Events have a large in-memory size. Box the events to not go out-of-memory
          * just in case someone still reads them from within the runtime.
          */
-        Events: StorageDescriptor<[], Anonymize<I9vddjescnh7d4>, false, never>;
+        Events: StorageDescriptor<[], Anonymize<I7oo41fpphderq>, false, never>;
         /**
          * The number of events in the `Events<T>` list.
          */
@@ -2236,6 +2236,32 @@ type IStorage = {
         
          */
         LiveQuestionCount: StorageDescriptor<[], number, false, never>;
+        /**
+         * Aggregate posted external subsidy over live questions, in cash
+         * (`Σ 2·b·ln 2`) — the external side of 16 §8.4's arming condition.
+         *
+         * Exists because that condition had no implementation at all (SQ-575). It
+         * is a running total rather than a fold over `Terms` because the check runs
+         * on every `register` and `Terms` is unbounded in principle; a fold would
+         * put an O(live) read on an extrinsic that must stay O(1).
+         */
+        LiveExternalDepth: StorageDescriptor<[], bigint, false, never>;
+        /**
+         * 16 §8.6 scarcity state: `(multiplier, block last raised, decay window)`.
+         *
+         * The window is stored rather than re-read because `svc.max_window` is
+         * amendable: decaying against the live row would let one amendment expire
+         * every outstanding price at once, and §8.6 says the price moves down only
+         * gradually. Each stored price decays on the schedule that was in force
+         * when it was set.
+         *
+         * `None` means the multiplier is at its floor of 1 — the flat tariff — so
+         * the common case costs one read and no arithmetic. Decay is applied
+         * lazily on read rather than by a hook: nothing else needs the value
+         * between registrations, and a hook would spend block weight every block
+         * to maintain a number only `register` consumes.
+         */
+        ScarcityMultiplier: StorageDescriptor<[], Anonymize<Iilpsjpsgmkpu>, true, never>;
     };
     ServiceLedger: {
         /**
@@ -5547,7 +5573,7 @@ type IEvent = {
         /**
          * An extrinsic failed.
          */
-        ExtrinsicFailed: PlainDescriptor<Anonymize<I40r22b6eosbg5>>;
+        ExtrinsicFailed: PlainDescriptor<Anonymize<I91sqkhtuteciq>>;
         /**
          * `:code` was updated to the code with the given hash.
          */
@@ -5571,7 +5597,7 @@ type IEvent = {
         /**
          * An invalid authorized upgrade was rejected while trying to apply it.
          */
-        RejectedInvalidAuthorizedUpgrade: PlainDescriptor<Anonymize<I9lsk105fpepqs>>;
+        RejectedInvalidAuthorizedUpgrade: PlainDescriptor<Anonymize<Iff5ab2dmnvclk>>;
     };
     ParachainSystem: {
         /**
@@ -5997,7 +6023,7 @@ type IEvent = {
         /**
          * Dispatched some task.
          */
-        Dispatched: PlainDescriptor<Anonymize<I8t33rj099eb2o>>;
+        Dispatched: PlainDescriptor<Anonymize<I3dlplal9hg0ou>>;
         /**
          * Set a retry configuration for some task.
          */
@@ -6033,7 +6059,7 @@ type IEvent = {
          * Batch of dispatches did not complete fully. Index of first failing dispatch given, as
          * well as the error.
          */
-        BatchInterrupted: PlainDescriptor<Anonymize<I476s2ro8t68f2>>;
+        BatchInterrupted: PlainDescriptor<Anonymize<I72dv4a82dus88>>;
         /**
          * Batch of dispatches completed fully with no error.
          */
@@ -6049,11 +6075,11 @@ type IEvent = {
         /**
          * A single item within a Batch of dispatches has completed with error.
          */
-        ItemFailed: PlainDescriptor<Anonymize<Ids3npip9e6148>>;
+        ItemFailed: PlainDescriptor<Anonymize<I17qjng9vev10h>>;
         /**
          * A call was dispatched.
          */
-        DispatchedAs: PlainDescriptor<Anonymize<Ica5b5hrvd0b5i>>;
+        DispatchedAs: PlainDescriptor<Anonymize<I53fpkd6hlkoe2>>;
         /**
          * Main call was dispatched.
          */
@@ -6061,13 +6087,13 @@ type IEvent = {
         /**
          * The fallback call was dispatched.
          */
-        IfElseFallbackCalled: PlainDescriptor<Anonymize<I9j6s1q21td4b3>>;
+        IfElseFallbackCalled: PlainDescriptor<Anonymize<Ib49ck93mjok7d>>;
     };
     Proxy: {
         /**
          * A proxy was executed correctly, with the given.
          */
-        ProxyExecuted: PlainDescriptor<Anonymize<Ica5b5hrvd0b5i>>;
+        ProxyExecuted: PlainDescriptor<Anonymize<I53fpkd6hlkoe2>>;
         /**
          * A pure account has been created by new proxy with given
          * disambiguation index and proxy type.
@@ -6106,7 +6132,7 @@ type IEvent = {
         /**
          * A multisig operation has been executed.
          */
-        MultisigExecuted: PlainDescriptor<Anonymize<Id8u6ilg5ec2dc>>;
+        MultisigExecuted: PlainDescriptor<Anonymize<I25quf02h3f45f>>;
         /**
          * A multisig operation has been cancelled.
          */
@@ -6162,7 +6188,7 @@ type IEvent = {
         /**
          * A sudo call just took place.
          */
-        Sudid: PlainDescriptor<Anonymize<Ic5n6d119limum>>;
+        Sudid: PlainDescriptor<Anonymize<I38473632flscn>>;
         /**
          * The sudo key has been updated.
          */
@@ -6174,7 +6200,7 @@ type IEvent = {
         /**
          * A [sudo_as](Pallet::sudo_as) call just took place.
          */
-        SudoAsDone: PlainDescriptor<Anonymize<Ic5n6d119limum>>;
+        SudoAsDone: PlainDescriptor<Anonymize<I38473632flscn>>;
     };
     XcmpQueue: {
         /**
@@ -9836,6 +9862,11 @@ type IError = {
          */
         StakeBelowFloor: PlainDescriptor<undefined>;
         /**
+         * 16 §8.4: admitting this question would push `Σ b_ext` above
+         * `Σ pol.b(live)`, making the external side the dominant market.
+         */
+        ArmingBoundExceeded: PlainDescriptor<undefined>;
+        /**
         
          */
         SubsidyBelowMinimum: PlainDescriptor<undefined>;
@@ -11108,6 +11139,10 @@ type IRuntimeCalls = {
          * Bounded, sorted client push counters; explicitly non-welfare.
          */
         service_egress: RuntimeDescriptor<[], Anonymize<I4fj3mptf3jr0q>>;
+        /**
+         * 16 §8.4 cannibalization falsifier + §8.5 partition occupancy (N7).
+         */
+        service_partition: RuntimeDescriptor<[], Anonymize<Ibh9utbkad113n>>;
     };
     /**
      * The `BlockBuilder` api trait that provides the required functionality for building a block.
@@ -11119,7 +11154,7 @@ type IRuntimeCalls = {
          * Returns an inclusion outcome which specifies if this extrinsic is included in
          * this block or not.
          */
-        apply_extrinsic: RuntimeDescriptor<[extrinsic: Uint8Array], Anonymize<I1ervt5j2e1l9d>>;
+        apply_extrinsic: RuntimeDescriptor<[extrinsic: Uint8Array], Anonymize<I2b90ci0g6gdiu>>;
         /**
          * Finish the current block.
          */
@@ -11420,7 +11455,7 @@ type IRuntimeCalls = {
         preset_names: RuntimeDescriptor<[], Anonymize<I6lr8sctk0bi4e>>;
     };
 };
-export type BleavitDispatchError = Anonymize<I8341h4b88nf15>;
+export type BleavitDispatchError = Anonymize<I5cj8vo7lksljp>;
 type IAsset = PlainDescriptor<Anonymize<If9iqq7i64mur8>>;
 export type BleavitExtensions = {};
 type PalletsTypedef = {
@@ -11496,7 +11531,7 @@ type AllInteractions = {
         ExecutionGuard: ['Queue', 'CounterForQueue', 'Ratifications', 'CounterForRatifications', 'PendingRatifications', 'CounterForPendingRatifications', 'ExecutionRecords', 'PendingUpgrade', 'CurrentSpecName', 'HeldResources', 'HardGateBreach', 'DeadManFreeze', 'MigrationHalt', 'GateSuspension', 'Expedited', 'LastUpgradeAuthorized', 'UpgradeSpacingHistory', 'PendingAnchorCapture', 'PreMigrationAnchor', 'ScheduledUpgrade', 'AttestationBindings', 'RecoveryImage', 'QueuedRecoveryImages', 'QualifiedRecoveryImages', 'CounterForQualifiedRecoveryImages', 'RerunRecoveryPins', 'CounterForRerunRecoveryPins', 'ExecutingUpgrade', 'PhaseFourBridge', 'RerunPins', 'CounterForRerunPins'];
         InflowCaps: ['CumulativeDeposits'];
         ClientRegistry: ['Clients', 'ClientIdOf', 'ClientIdOfSigner', 'ClientPolicies', 'BondOwners', 'RemovedClients', 'IngressMeters', 'ClientCount', 'NextClientId'];
-        QuestionService: ['Questions', 'CounterForQuestions', 'Reports', 'Terms', 'AttestorBonds', 'Attestations', 'PauseAffected', 'PausedUntil', 'NextServiceId', 'LiveQuestionCount'];
+        QuestionService: ['Questions', 'CounterForQuestions', 'Reports', 'Terms', 'AttestorBonds', 'Attestations', 'PauseAffected', 'PausedUntil', 'NextServiceId', 'LiveQuestionCount', 'LiveExternalDepth', 'ScarcityMultiplier'];
         ServiceLedger: ['Vaults', 'BaselineVaults', 'Positions', 'PositionCount', 'PositionTotals', 'DepositsHeld', 'TotalEscrowed', 'RedemptionFeesAccrued', 'LedgerDrifted', 'LastReconciliation', 'VaultTerminalAt', 'BaselineTerminalAt', 'SplitPausedUntil', 'FrozenUntil', 'FreezeRenewed'];
     };
     tx: {
@@ -11608,7 +11643,7 @@ type AllInteractions = {
         Epoch: ['BadPhase', 'IntakeFull', 'TooManyLiveProposals', 'TooManyResources', 'UnknownProposal', 'BadState', 'DuplicateProposal', 'LockConflict', 'TooManyCohorts', 'TooManyCohortProposals', 'BadEpochLength', 'BadParams', 'BadDecisionInput', 'BatchTooLarge', 'ArithmeticOverflow', 'Ledger', 'ExecutionGuard', 'Welfare', 'TryStateViolation', 'BadProposalShape', 'IntakePaused', 'IntakePauseOutOfBounds'];
         ExecutionGuard: ['QueueFull', 'NotFound', 'Cancelled', 'NotMature', 'GraceExpired', 'BadPreimage', 'StaleQueue', 'NotRatified', 'AttestationMissing', 'CapabilityDenied', 'MetersBlocked', 'ResourceLockMissing', 'GuardianHold', 'GateSuspended', 'FreezeActive', 'PayloadTooLarge', 'TooManyCalls', 'TooManyDomains', 'TooManyLocks', 'BadDomainDeclaration', 'SafetyFilter', 'DispatchFailed', 'BadUpgradePayload', 'PendingUpgradeExists', 'NoPendingUpgrade', 'DescriptorLeadTime', 'UpgradeHashMismatch', 'UpgradeVersionMismatch', 'RecoveryImageMissing', 'RecoveryImageInvalid', 'ShadowMode', 'PhaseFourBridgeUsed', 'JustificationMissing', 'RetryWindowOpen', 'Overflow'];
         ClientRegistry: ['ClientBondUnset', 'DuplicateLocation', 'ClientsFull', 'ClientIdExhausted', 'NotRegistered', 'ClientRemoved', 'QuestionCounterOverflow', 'NoLiveQuestions', 'BondInsufficient', 'BondAccounting', 'DeliveryFloatAmountZero', 'DeliveryFloatInsufficient', 'DeliveryFloatWouldDrain', 'DeliveryFloatBelowMinimum', 'DeliveryFundingWouldDust', 'DeliveryFloatOverflow', 'DeliveryFloatAccounting'];
-        QuestionService: ['NotRegistered', 'ClientRemoved', 'ServicePaused', 'ServiceRateUnset', 'CertificationUnavailable', 'StakeBelowFloor', 'SubsidyBelowMinimum', 'EpsilonOutOfRange', 'WindowTooLong', 'WindowTooShort', 'WindowCollidesWithDecision', 'SlotsExhausted', 'TvlCapWouldBind', 'AttestorSetTooSmall', 'AttestorBondInsufficient', 'ClientIsProtocolAccount', 'EscrowInsufficient', 'NotSealed', 'AlreadySealed', 'AlreadyTerminal', 'QuorumNotReached', 'MedianOutOfRange', 'DeadlineNotReached', 'UnknownQuestion', 'DeadlinePassed', 'CreationFrozen', 'DuplicateAttestor', 'UnknownAttestor', 'AlreadyBonded', 'InvalidSubId', 'ArithmeticOverflow', 'ArchiveNotReady', 'TryStateViolation'];
+        QuestionService: ['NotRegistered', 'ClientRemoved', 'ServicePaused', 'ServiceRateUnset', 'CertificationUnavailable', 'StakeBelowFloor', 'ArmingBoundExceeded', 'SubsidyBelowMinimum', 'EpsilonOutOfRange', 'WindowTooLong', 'WindowTooShort', 'WindowCollidesWithDecision', 'SlotsExhausted', 'TvlCapWouldBind', 'AttestorSetTooSmall', 'AttestorBondInsufficient', 'ClientIsProtocolAccount', 'EscrowInsufficient', 'NotSealed', 'AlreadySealed', 'AlreadyTerminal', 'QuorumNotReached', 'MedianOutOfRange', 'DeadlineNotReached', 'UnknownQuestion', 'DeadlinePassed', 'CreationFrozen', 'DuplicateAttestor', 'UnknownAttestor', 'AlreadyBonded', 'InvalidSubId', 'ArithmeticOverflow', 'ArchiveNotReady', 'TryStateViolation'];
         ServiceLedger: ['BadOrigin', 'UnknownVault', 'UnknownBaselineVault', 'WrongVaultState', 'BelowMinimum', 'ArithmeticOverflow', 'InsufficientPosition', 'TooManyPositions', 'InvalidScore', 'GateAlreadySettled', 'GateNotSettled', 'TryStateViolation', 'ReapNotDue', 'DepositFailed', 'SplitPaused', 'Frozen', 'FreezeOutOfBounds', 'FreezeRenewalExhausted', 'InflowCapExceeded', 'ProtocolDestination'];
     };
     constants: {
@@ -11654,7 +11689,7 @@ type AllInteractions = {
         Metadata: ['metadata', 'metadata_at_version', 'metadata_versions'];
         RuntimeViewFunction: ['execute_view_function'];
         FutarchyApi: ['epoch_status', 'proposal_summaries', 'quote', 'decision_stats', 'account_positions', 'execution_queue', 'welfare_current', 'params', 'nav', 'recent_cohorts', 'open_oracle_rounds', 'hosted_report', 'service_positions'];
-        TelemetryApi: ['market_books', 'mid_window_coverage', 'pol', 'collateral', 'service_collateral', 'reserve_probe_line_balance', 'migration_cursor_stalled', 'storage_utilization', 'service_egress'];
+        TelemetryApi: ['market_books', 'mid_window_coverage', 'pol', 'collateral', 'service_collateral', 'reserve_probe_line_balance', 'migration_cursor_stalled', 'storage_utilization', 'service_egress', 'service_partition'];
         BlockBuilder: ['apply_extrinsic', 'finalize_block', 'inherent_extrinsics', 'check_inherents'];
         TaggedTransactionQueue: ['validate_transaction'];
         OffchainWorkerApi: ['offchain_worker'];

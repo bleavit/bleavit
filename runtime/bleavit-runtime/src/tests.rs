@@ -6990,6 +6990,127 @@ fn metadata_exposes_only_allowed_attestor_and_guardian_constants() {
     });
 }
 
+/// 02 §11's release manifest freezes each critical constant's **encoded value**,
+/// and a good many of those values are not compiled in at all: 02 §9's own
+/// *Value source* column reads `live Params[...]` for eleven of them.
+/// `ClientRegistry::ClientBond` is the sharpest case, because it has neither a
+/// default nor a genesis fallback — the row's *presence* is what arms admission,
+/// so seating it moves the published constant from `None` to `Some(bond)`.
+///
+/// A values adoption therefore changes the metadata this runtime publishes, and
+/// nothing bound the two. `tools/ci/check-chain-feed.py` compares the
+/// *committed* metadata blob against the *committed* manifest, so a stale pair
+/// agrees with itself and passes green — SQ-582's shape, one layer down. The
+/// binding has to be made where the runtime is the source rather than a
+/// recording of it, which is here: no node, no boot, every commit.
+///
+/// **Values only.** The manifest's rendered `type` string is produced by
+/// `tools/release/scale_metadata.py`, and reproducing that renderer in Rust
+/// would test the copy rather than the thing; `check-chain-feed.py` keeps the
+/// type half, against the blob.
+#[test]
+fn frozen_manifest_constant_values_match_what_this_runtime_publishes() {
+    use alloc::{collections::BTreeMap, format, string::String, string::ToString};
+
+    use frame_support::__private::metadata::{RuntimeMetadata, RuntimeMetadataPrefixed};
+
+    // Read the manifest **in place** in `tools/release/`, never a copy: it is the
+    // release surface, and a second copy is a thing that can drift.
+    const MANIFEST: &str = include_str!("../../../tools/release/surface-manifest.json");
+
+    // `development_ext` builds the same `development` genesis preset that
+    // `deploy/chain-specs/out/bleavit-dev.json` hands the node the fixtures are
+    // recorded from, so "what a fresh chain publishes" is exactly what is compared.
+    development_ext().execute_with(|| {
+        let version = Runtime::metadata_versions()
+            .into_iter()
+            .filter(|version| matches!(version, 15 | 16))
+            .max()
+            .expect("stable2606 exposes V15 or V16 metadata");
+        let encoded = Runtime::metadata_at_version(version)
+            .expect("a reported runtime metadata version is constructible");
+        let prefixed = RuntimeMetadataPrefixed::decode(&mut &encoded[..])
+            .expect("runtime-generated metadata decodes");
+
+        macro_rules! published_constants {
+            ($metadata:expr) => {{
+                let mut published = BTreeMap::<(String, String), String>::new();
+                for pallet in $metadata.pallets.iter() {
+                    for constant in pallet.constants.iter() {
+                        let mut hex = String::from("0x");
+                        for byte in constant.value.iter() {
+                            hex.push_str(&format!("{byte:02x}"));
+                        }
+                        published.insert((pallet.name.to_string(), constant.name.to_string()), hex);
+                    }
+                }
+                published
+            }};
+        }
+
+        let published = match prefixed.1 {
+            RuntimeMetadata::V15(metadata) => published_constants!(metadata),
+            RuntimeMetadata::V16(metadata) => published_constants!(metadata),
+            metadata => panic!(
+                "requested V{version}, but runtime returned V{}",
+                metadata.version()
+            ),
+        };
+
+        let manifest = serde_json::from_str::<serde_json::Value>(MANIFEST)
+            .expect("surface-manifest.json parses");
+        let entries = manifest["entries"]
+            .as_array()
+            .expect("the manifest carries an entries array");
+
+        let mut checked = 0usize;
+        let mut drift = Vec::new();
+        for entry in entries {
+            if entry["kind"] != "constant" {
+                continue;
+            }
+            let pallet = entry["pallet"]
+                .as_str()
+                .expect("a constant entry names its pallet");
+            let name = entry["constant"]
+                .as_str()
+                .expect("a constant entry names its constant");
+            let Some(frozen) = entry["layout"]["value"].as_str() else {
+                continue;
+            };
+            checked += 1;
+            match published.get(&(pallet.to_string(), name.to_string())) {
+                None => drift.push(format!(
+                    "{pallet}::{name} is frozen by the manifest but absent from this \
+                     runtime's metadata"
+                )),
+                Some(actual) if actual != frozen => drift.push(format!(
+                    "{pallet}::{name}: this runtime publishes {actual}, the manifest \
+                     freezes {frozen}"
+                )),
+                Some(_) => {}
+            }
+        }
+
+        assert!(
+            drift.is_empty(),
+            "tools/release/surface-manifest.json disagrees with the metadata this \
+             runtime publishes at genesis. Regenerate the 02 §11 feed per \
+             app/fixtures/chain-feed/README.md and re-derive the frozen layouts — \
+             never edit the artifact a drift gate is comparing:\n{}",
+            drift.join("\n")
+        );
+        // Anti-vacuity: a manifest that lost its constant entries would otherwise
+        // pass with nothing compared. The floor is the count at the time of
+        // writing and is expected to *rise* (SQ-581 reconciles the manifest
+        // against 02 §9's 65 declared names).
+        assert!(
+            checked >= 39,
+            "only {checked} frozen constant values were compared; the manifest lost entries"
+        );
+    });
+}
+
 #[cfg(feature = "bootstrap")]
 #[test]
 fn d13_system_calls_are_denied_bare_and_through_every_closed_wrapper() {
