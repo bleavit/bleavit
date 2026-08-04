@@ -19,6 +19,7 @@ import assert from 'node:assert/strict';
 
 import {
   NO_WRAPPER,
+  PROXY_DELEGATION_SURFACE,
   actingAccount,
   deriveApproval,
   proxyAdmits,
@@ -27,6 +28,7 @@ import {
   splitsIdentity,
   wrapperRefusalReason,
 } from '@bleavit/transaction-builder';
+import { CRITICAL_SURFACE } from '@bleavit/descriptors';
 
 const SIGNER = '5Signer';
 const REAL = '5Real';
@@ -222,35 +224,65 @@ test('threshold 1 ignores any stored entry rather than reporting a queue (#5)', 
 /* --------------------------------------------------------- #3 proxy delegation */
 
 const delegation = (over = {}) => ({ delegate: SIGNER, proxyType: 'Any', delay: 0, ...over });
-const readDelegations = (...delegations) => ({ kind: 'read', delegations });
+const readDelegations = (...delegations) =>
+  ({ kind: 'read', read: finalized({ real: REAL, delegations }) });
 
 test('a proxy wrapper with no delegation on chain is refused (#3)', () => {
   // The check did not exist. A wrapper could name `real = R` with proxyType 'Any', every
   // row would be evaluated against R — correctly, since that is the acting account — and
   // nothing established the signer may act for R at all. `pallet_proxy::proxy` returns
   // NotProxy after signature.
-  const none = proxyAdmits(readDelegations(), SIGNER, 'ledger.split');
+  const none = proxyAdmits(readDelegations(), REAL, SIGNER, 'ledger.split');
   assert.equal(none.ok, false);
   assert.match(none.reason, /NotProxy/);
 
   // A delegation to somebody else is not weaker evidence; it is about another account.
-  const other = proxyAdmits(readDelegations(delegation({ delegate: OTHER })), SIGNER, 'ledger.split');
+  const other = proxyAdmits(
+    readDelegations(delegation({ delegate: OTHER })),
+    REAL,
+    SIGNER,
+    'ledger.split',
+  );
   assert.equal(other.ok, false);
 });
 
 test('an unreadable delegation set is absent, never assumed (#3, INV-FE-12)', () => {
-  // `Proxy.Proxies` is not a surface 02 §7 freezes (SQ-590), so the read may be
-  // unavailable. An empty array and an unperformed read must not be the same value: the
-  // first means "nobody may act for this account", the second means "we do not know".
-  const unknown = proxyAdmits({ kind: 'unreadable', reason: 'not frozen in this release' }, SIGNER, 'x');
+  // The read can fail for ordinary reasons — smoldot still syncing, the pinned block
+  // pruned. An empty array and an unperformed read must not be the same value: the first
+  // means "nobody may act for this account", the second means "we do not know". Only one
+  // of them is safe to act on, and it is not the one that looks like a pass.
+  const unknown = proxyAdmits(
+    { kind: 'unreadable', reason: 'the light client has no finalized block yet' },
+    REAL,
+    SIGNER,
+    'x',
+  );
   assert.equal(unknown.ok, false);
-  assert.match(unknown.reason, /not frozen/);
+  assert.match(unknown.reason, /no finalized block/);
+});
+
+test('a delegation read taken for another account is refused, not reused (SQ-590)', () => {
+  // `Proxy.Proxies` is a MAP. A read keyed on someone else says nothing about `real`, and
+  // its emptiness is the dangerous half: reported as "no delegation" it is indistinguishable
+  // from a genuine absence, while reported as an admission it authorises a call the runtime
+  // rejects with NotProxy. Refusing is the only reading that is about this transaction.
+  const elsewhere = { kind: 'read', read: finalized({ real: OTHER, delegations: [delegation()] }) };
+  const wrong = proxyAdmits(elsewhere, REAL, SIGNER, 'ledger.split');
+  assert.equal(wrong.ok, false);
+  assert.match(wrong.reason, /Refusing to decide one account's proxy rights/);
+
+  // An EMPTY read at the wrong key is refused too — the direction an implementation that
+  // only checked the key when a delegation was present would get wrong, exactly as the
+  // multisig stale-absence case above.
+  const emptyElsewhere = { kind: 'read', read: finalized({ real: OTHER, delegations: [] }) };
+  assert.match(proxyAdmits(emptyElsewhere, REAL, SIGNER, 'x').reason, /Refusing to decide/);
 });
 
 test('the STORED proxy type governs, not the one the wrapper claims (#3)', () => {
   // Checking a caller-supplied 'Any' against itself is self-agreement, not a check.
   const restricted = proxyAdmits(
     readDelegations(delegation({ proxyType: 'Governance' })),
+    REAL,
     SIGNER,
     'ledger.split',
   );
@@ -261,21 +293,41 @@ test('the STORED proxy type governs, not the one the wrapper claims (#3)', () =>
 test('an announcement delay refuses the direct proxy call and says why (#3)', () => {
   // A non-zero delay makes the delegation announce-only: `proxy` is rejected with
   // Unannounced, and the call must go through announce + proxy_announced.
-  const delayed = proxyAdmits(readDelegations(delegation({ delay: 10 })), SIGNER, 'ledger.split');
+  const delayed = proxyAdmits(
+    readDelegations(delegation({ delay: 10 })),
+    REAL,
+    SIGNER,
+    'ledger.split',
+  );
   assert.equal(delayed.ok, false);
   assert.match(delayed.reason, /announcement delay of 10 blocks/);
 });
 
 test('a real delegation is admitted, so the refusals are not vacuous (#3)', () => {
-  const ok = proxyAdmits(readDelegations(delegation()), SIGNER, 'ledger.split');
+  const ok = proxyAdmits(readDelegations(delegation()), REAL, SIGNER, 'ledger.split');
   assert.equal(ok.ok, true);
   assert.equal(ok.delegation.delegate, SIGNER);
   // Picked from a set that also contains unusable rows, rather than "the first one".
   const mixed = proxyAdmits(
     readDelegations(delegation({ delay: 5 }), delegation({ proxyType: 'Governance' }), delegation()),
+    REAL,
     SIGNER,
     'ledger.split',
   );
   assert.equal(mixed.ok, true);
   assert.equal(mixed.delegation.delay, 0);
+});
+
+test('the delegation surface is the one 02 §7.6 freezes, and it is probed (SQ-590)', () => {
+  // The citation is bound to the generated CRITICAL_SURFACE rather than written as prose,
+  // which is the half a mandate stated in words cannot supply: 10 §5.2's classifier probes
+  // exactly the frozen set, so a surface that is merely *described* as required is one the
+  // compatibility lattice can never fail on. Asserting the id exists in CRITICAL_SURFACE is
+  // therefore the test — a string equality against itself would prove nothing.
+  assert.equal(PROXY_DELEGATION_SURFACE, 'storage.proxy.proxies');
+  const entryFor = CRITICAL_SURFACE.find((e) => e.id === PROXY_DELEGATION_SURFACE);
+  assert.ok(entryFor, 'Proxy.Proxies is not in CRITICAL_SURFACE — 02 §7.6 must freeze it');
+  assert.equal(entryFor.pallet, 'Proxy');
+  assert.equal(entryFor.member, 'Proxies');
+  assert.equal(entryFor.required, true, 'an optional delegation read is not a precondition');
 });

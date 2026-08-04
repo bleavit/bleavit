@@ -44,8 +44,18 @@
  * the threshold-reaching call — are states a healthy local chain will not produce on
  * demand, and a path that can only be tested against a live multisig is a path that ships
  * untested.
+ *
+ * ## The proxy delegation is read too, and for a sharper reason (contract v27, SQ-590)
+ *
+ * The multisig read decides *which dispatch to build*. The proxy read decides *whether the
+ * transaction is lawful at all* — and its absence is invisible, because the rows are
+ * evaluated against `real` and every one of them passes. `pallet_proxy::proxy` then returns
+ * `NotProxy` after the signature. `Proxy.Proxies` was frozen nowhere until v27, which is
+ * why this took the longer route: it was mandated in §11.3's prose, named by nothing, and
+ * therefore outside every gate that checks declared surfaces against the runtime.
  */
 
+import type { SurfaceId } from '@bleavit/descriptors';
 import type { Finalized } from '@bleavit/chain-client';
 
 import {
@@ -348,15 +358,43 @@ export interface ProxyDelegation {
 }
 
 /**
+ * The frozen surface this check reads — 02 §7.6, contract v27 (SQ-590).
+ *
+ * Typed as a `SurfaceId` rather than a bare string so it is bound to the generated
+ * `CRITICAL_SURFACE`: if the manifest ever stops freezing this item, the citation stops
+ * compiling instead of decaying into a comment. That is the same binding every clause in
+ * `rows.ts` carries, and it is the half of 11 §11.4 rule 2 a prose mandate cannot supply —
+ * 10 §5.2's classifier probes exactly this set, so an unfrozen read is one the
+ * compatibility lattice cannot fail on.
+ */
+export const PROXY_DELEGATION_SURFACE: SurfaceId = 'storage.proxy.proxies';
+
+/** `Proxy.Proxies(real)` as read — the key it was taken at, and the delegations under it. */
+export interface ProxyRead {
+  /** The account the map was keyed on. Checked against the wrapper's `real`. */
+  readonly real: AccountId;
+  /** `Proxy.Proxies(real).0` — the deposit half is not a precondition input. */
+  readonly delegations: readonly ProxyDelegation[];
+}
+
+/**
  * What the client knows about `real`'s delegations.
  *
  * Discriminated rather than an optional array, for the reason every fix in this review
  * round turned on: an empty list and an unperformed read are the same value, and the
  * empty-list reading is *"nobody may act for this account"* while the unperformed reading
  * is *"we have no idea"*. Collapsing them makes a missing check look like a passed one.
+ *
+ * **The `read` branch carries `Finalized<ProxyRead>`, and that is not decoration.** 11
+ * §11.4 rule 4 forbids provider or local-index data from satisfying any precondition, and
+ * `evaluate` enforces it by accepting nothing else. Until contract v27 this branch took a
+ * bare array, because 02 froze no surface to read — so the one wrapper check that decides
+ * whether a signature is even lawful was the one place a cached or provider-served answer
+ * would have been believed. It is keyed as well as branded: `real` travels *with* the
+ * delegations, so a read taken for a different account cannot be presented as this one's.
  */
 export type DelegationEvidence =
-  | { readonly kind: 'read'; readonly delegations: readonly ProxyDelegation[] }
+  | { readonly kind: 'read'; readonly read: Finalized<ProxyRead> }
   | { readonly kind: 'unreadable'; readonly reason: string };
 
 export type ProxyAdmission =
@@ -376,8 +414,12 @@ export type ProxyAdmission =
  * the call, taking the claim itself on trust. The claim is the part that has to come from
  * the chain.
  *
- * Three refusals that are easy to leave out, each of which the runtime enforces:
+ * Four refusals that are easy to leave out, each of which the runtime enforces:
  *
+ *  - The read must be **keyed on the `real` this wrapper names**, and that is checked
+ *    before anything is drawn from it. `Proxy.Proxies` is a map, so a read carried over
+ *    from another account is not merely stale — its *emptiness* is about somebody else,
+ *    and an empty list is exactly what the permissive mistake looks like from the inside.
  *  - The delegation must name **this signer** as delegate. A delegation to somebody else is
  *    not weaker evidence, it is evidence about a different account.
  *  - The stored `proxyType` governs, not the wrapper's. A caller-supplied `'Any'` is a
@@ -389,6 +431,7 @@ export type ProxyAdmission =
  */
 export function proxyAdmits(
   evidence: DelegationEvidence,
+  real: AccountId,
   signer: AccountId,
   callName: string,
 ): ProxyAdmission {
@@ -396,7 +439,18 @@ export function proxyAdmits(
     // INV-FE-12: an unproven capability is *absent*, with a named reason.
     return { ok: false, reason: evidence.reason };
   }
-  const forSigner = evidence.delegations.filter((d) => d.delegate === signer);
+  const { real: readAt, delegations } = evidence.read.value;
+  if (readAt !== real) {
+    // Refused rather than reported as "no delegation": the two are indistinguishable to a
+    // caller and only one of them is about this transaction.
+    return {
+      ok: false,
+      reason:
+        `this delegation read was taken for ${readAt}, not ${real}. Refusing to decide one ` +
+        "account's proxy rights from another account's record.",
+    };
+  }
+  const forSigner = delegations.filter((d) => d.delegate === signer);
   if (forSigner.length === 0) {
     return {
       ok: false,
