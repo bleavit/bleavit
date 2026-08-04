@@ -676,9 +676,11 @@ Every other row in §7 lives in **Bleavit's** metadata. The funding flow does no
 
 | Surface | Chain | Shape | Mandated by |
 |---|---|---|---|
-| `Assets.Account(1337, who)` **[VERIFY asset index — §8 owns it]** | Asset Hub | `AssetAccount { balance, status, reason, extra }` | [11](11-frontend-workflows.md) §11.9.1 — "AH USDC balance ≥ amount + AH-side fees" |
+| `Assets.Account(1337, who)` | Asset Hub | `AssetAccount { balance, status, reason, extra }` | [11](11-frontend-workflows.md) §11.9.1 — "AH USDC balance ≥ amount + AH-side fees" |
 | `System.Account(who)` | Asset Hub | `AccountInfo` | [11](11-frontend-workflows.md) §11.9.1 — AH-side existential and fee viability |
-| `PolkadotXcm.limited_reserve_transfer_assets` **[VERIFY exact extrinsic + params against the pinned AH runtime]** | Asset Hub | dispatchable | [11](11-frontend-workflows.md) §11.9.1 — the deposit leg |
+| `PolkadotXcm.limited_reserve_transfer_assets` | Asset Hub | dispatchable — `(dest, beneficiary, assets, fee_asset_item, weight_limit)` | [11](11-frontend-workflows.md) §11.9.1 — the deposit leg |
+
+**Both `[VERIFY]` tags on this table are discharged (2026-08-04; PLAN.md V-105/V-106), and the *scope* of the first one is the part worth recording.** V-17 verified asset index 1337 as Circle-native USDC on **Polkadot** Asset Hub in July. That is not this row's question at Phase 2, because this section pins the Asset Hub of the relay the release targets — Paseo — and a testnet Asset Hub's asset registry is its own. `Assets.Metadata(1337)` on Paseo Asset Hub decodes to name `USD Coin`, symbol `USDC`, 6 decimals, unfrozen, identically from two independent operators; `Assets` is pallet instance **50**, which is the same `PalletInstance(50)` §8's Location already names. The second tag verified against the pinned runtime's own metadata: `PolkadotXcm` is pallet **31** and `limited_reserve_transfer_assets` is call **8**, present and **not** deprecated — unlike `teleport_assets` and `reserve_transfer_assets`, which the same runtime marks deprecated in favour of the limited forms. The client's foreign-feed gate reports an upstream deprecation on this row rather than failing on it, because a deprecated call still dispatches and taking the deposit leg offline for a runtime that works is the wrong failure; what must not happen is the deprecation going *unseen* until the call is gone.
 
 **Which Asset Hub is not an open question, and it is not one network.** The rollout phases it: HRMP to Asset Hub opens **Phase 2 on Paseo** and **Phase 3 on Polkadot** ([08](08-treasury-and-economics.md) §2.5; [09](09-execution-upgrades-and-rollout.md) §6.3). A release therefore pins **the Asset Hub of the relay that release targets**, exactly as it already pins the relay — a per-release property, not a standing choice this document could freeze once.
 
@@ -720,7 +722,7 @@ Pinned in the frontend's `ChainIdentity` at build time and asserted at boot. The
 |---|---|
 | ss58 prefix | **7777** (ss58-registry submission REQUIRED before Phase 2) |
 | paraId | Assigned at onboarding; **all test fixtures use 4242** |
-| USDC asset | `pallet-assets` instance **`ForeignAssets`**, keyed by XCM `Location { parents: 1, interior: X3(Parachain(1000), PalletInstance(50), GeneralIndex(1337)) }` **[VERIFY asset index 1337 at implementation]** |
+| USDC asset | `pallet-assets` instance **`ForeignAssets`**, keyed by XCM `Location { parents: 1, interior: X3(Parachain(1000), PalletInstance(50), GeneralIndex(1337)) }`. Verified on **both** Asset Hubs this rollout targets: Polkadot 2026-07-16 (PLAN.md V-17) and Paseo 2026-08-04 (V-105), the second because §7.7 pins the Asset Hub of the relay a release targets and a testnet registry is its own. `PalletInstance(50)` is confirmed by the pinned Paseo AH metadata, where `Assets` is pallet 50 |
 | USDC decimals | 6 (preserved from Asset Hub); `min_balance = 10^4` (1 cent) |
 | VIT decimals | 12 |
 | VIT existential deposit | **0.01 VIT** (= 10^10 plancks) |

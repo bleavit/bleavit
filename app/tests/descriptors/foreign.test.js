@@ -69,17 +69,31 @@ test('foreign ids are chain-scoped, so one can never be mistaken for a local sur
 
 /* --------------------------------------------------------- no pin: the shipped default */
 
-test('this release pins no foreign chain, and that is a readiness state rather than an oversight', () => {
-  assert.equal(
-    FOREIGN_CHAIN_PINS.length,
-    0,
-    'a non-empty pin set means Asset Hub artifacts landed — update this test with them, ' +
-      'and never populate it from a live RPC (10 §5.1)',
-  );
+test('this release pins Asset Hub Paseo, and every pin is backed by a committed artifact', () => {
+  // The empty case was the shipped default while the artifacts did not exist. It is now
+  // filled, and what this asserts is the *binding* rather than the values: the numbers
+  // themselves are cross-checked against `fixtures/foreign-chain-feed/` in both directions
+  // by `pnpm run foreign:check`, so restating them here would only add a third copy to
+  // keep true. What cannot be checked there, and is checked here, is that the shape is
+  // well-formed — a pin missing its genesis hash cannot answer the `wrong-chain` question,
+  // which would make the one terminal verdict unreachable.
+  assert.ok(FOREIGN_CHAIN_PINS.length > 0, 'the Asset Hub pin landed 2026-08-04 (F4)');
+  for (const pin of FOREIGN_CHAIN_PINS) {
+    assert.match(pin.genesisHash, /^0x[0-9a-f]{64}$/, `${pin.label}: genesis must be 32 bytes`);
+    assert.ok(pin.supportedSpecVersions.length > 0, `${pin.label}: no spec_version`);
+    for (const version of pin.supportedSpecVersions) {
+      assert.ok(Number.isInteger(version) && version > 0, `${pin.label}: bad spec_version`);
+    }
+  }
 });
 
 test('with no pin the verdict is unreachable and the deposit leg is blocked, not permitted', () => {
-  const verdict = classifyForeign(observation());
+  // Still reachable, and deliberately so: 08 §2.5 phases the Asset Hub connection — Paseo
+  // at Phase 2, Polkadot at Phase 3 — so a release targeting a relay whose Asset Hub this
+  // repository has not pinned is a state the rollout *has*, not a historical one. Passing
+  // an explicit empty pin set exercises it without depending on the shipped constant, which
+  // is what let this test keep its meaning after the pin landed.
+  const verdict = classifyForeign(observation(), []);
   assert.equal(verdict.mode, 'unreachable');
   assert.equal(depositMayProceed(verdict), false);
   assert.match(verdict.reason, /pins no Asset Hub runtime/);

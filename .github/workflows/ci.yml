@@ -368,6 +368,17 @@ jobs:
         working-directory: app
         run: pnpm run surface:check
 
+      - name: Foreign-chain feed — Asset Hub pin and §7.7 surface presence (02 §7.7, §13 rule 8)
+        # The one surface check that cannot be Python. `extract-metadata.py` gets v15 by
+        # booting the runtime in `bleavit-node`, and a foreign runtime cannot be booted
+        # that way — PAPI reads v16 straight from the wasm and `scale_metadata.py` stops at
+        # v15. So the presence check runs over PAPI's own decoder, which is the right home
+        # anyway: what must be proven present is what the *client* will be able to name.
+        # 10 §5.2's foreign verdict probes exactly `FOREIGN_SURFACE`, so a surface that
+        # quietly left the upstream runtime would make that verdict unable to fail on it.
+        working-directory: app
+        run: pnpm run foreign:check
+
       - name: Compatibility classifier (10 §5.2, §3.2)
         # The classifier decides whether the app may sign, so what it is tested on is the
         # probe outcomes a healthy chain never produces — which is why it is a pure

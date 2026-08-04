@@ -1,0 +1,30 @@
+{
+  "schema": "bleavit.foreign-runtime-info.v1",
+  "label": "Asset Hub",
+  "chain_key": "assethub_paseo",
+  "relay": "paseo",
+  "genesis_hash": "0xd6eec26135305a8ad257a20d003357284c8aa03d0bdb2b357ab0a22371e11ef2",
+  "genesis_sources": [
+    "https://asset-hub-paseo-rpc.n.dwellir.com",
+    "https://sys.turboflakes.io/asset-hub-paseo"
+  ],
+  "core_version": {
+    "spec_name": "asset-hub-paseo",
+    "spec_version": 2004002,
+    "transaction_version": 16,
+    "state_version": 1
+  },
+  "artifact": {
+    "source_url": "https://github.com/paseo-network/runtimes/releases/tag/v2.4.2",
+    "file": "asset-hub-paseo_runtime.compressed.wasm",
+    "sha256": "0x1b9f1149278db142fd7289ff6d9a5c5a8d4700c2f82ffd7f3ea3b2dc0695f6db",
+    "srtool_version": "2.3.1",
+    "srtool_blake2_256": "0x73bb1c8197a2d7786be576b499faa2703c52b88580f1c7d03f141cf6642bcd5b"
+  },
+  "metadata": {
+    "version": 16,
+    "sha256": "0x4f38f15c8cba13a09e8a66da6966f4299c6f44109bb6bc2878a7710c121de079",
+    "bytes": 661115,
+    "extracted_by": "papi add --wasm (polkadot-api 2.1.8)"
+  }
+}

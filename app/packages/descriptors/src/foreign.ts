@@ -25,11 +25,13 @@
  *
  * **Fail-closed twice over.** An unprobed surface is refused rather than counted as passing
  * (the same rule `classify` enforces, and for the same reason — a check that passes by
- * shrinking). And with **no pin at all** the verdict is `unreachable`: 02 §7.7's surfaces
- * are frozen, but this release ships no Asset Hub artifacts yet, and R-2 forbids inventing
- * a genesis hash to make the path look complete. `FOREIGN_CHAIN_PINS` is therefore
- * deliberately empty and the deposit leg is deliberately blocked — see the constant's own
- * note for what has to arrive before it can be filled.
+ * shrinking). And with **no pin at all** the verdict is `unreachable`, which is what this
+ * release shipped while the Asset Hub artifacts did not exist: R-2 forbids inventing a
+ * genesis hash to make the path look complete, so the deposit leg was blocked rather than
+ * decorated. **The pin arrived on 2026-08-04** — see `FOREIGN_CHAIN_PINS` — and the empty
+ * case remains reachable and tested, because a release targeting a relay whose Asset Hub is
+ * not yet pinned is a state the rollout explicitly has (08 §2.5: Paseo at Phase 2, Polkadot
+ * at Phase 3).
  */
 
 import type { CompatibilityLevel, DisabledSurface, SurfaceProbe } from './compat.js';
@@ -82,20 +84,36 @@ export interface ForeignChainPin {
 }
 
 /**
- * The pinned foreign chains of this release — **deliberately empty**.
+ * The pinned foreign chains of this release.
  *
- * 02 §7.7 freezes the surfaces; it does not conjure the artifacts. Filling this needs the
- * pinned Asset Hub runtime wasm put through `tools/release/`'s extraction, exactly as the
- * Bleavit feed is — 10 §5.1 requires descriptors be generated from built runtime artifacts
- * and **never** from a live node, so fetching the genesis hash from a public RPC to make
- * this array non-empty would be the discipline F2 exists to prevent, dressed as progress.
- * Two `[VERIFY]` tags ride the same wait (02 §7.7's asset index and the exact AH extrinsic).
+ * **Which Asset Hub is a per-release property, not a standing choice** (02 §7.7). The
+ * rollout phases the connection — HRMP to Asset Hub opens Phase 2 on **Paseo** and Phase 3
+ * on **Polkadot** (08 §2.5; 09 §6.3) — so a release pins the Asset Hub of the relay it
+ * targets, exactly as it pins the relay. This release targets Paseo.
  *
- * Empty is a *state*, not an absence: `classifyForeign` returns `unreachable` for a chain
- * with no pin, which blocks the deposit leg with a named reason and leaves every other
- * surface of the app untouched.
+ * **Every field here is derived from a committed artifact except one, and the exception is
+ * stated rather than hidden.** The `spec_version` and the runtime it describes come from
+ * `fixtures/foreign-chain-feed/asset-hub-paseo/2004002/`, whose wasm is a published,
+ * srtool-built release artifact whose digest matches byte-for-byte. The **genesis hash
+ * cannot** come from any artifact: genesis is a property of the chain spec's genesis
+ * storage, not of the runtime, so no amount of runtime provenance produces it. It was read
+ * from the live chain and cross-checked across two independent operators, which is what
+ * R-2 prescribes for a `[VERIFY]` — and does not collide with 10 §5.1's "never a live node"
+ * rule, which governs *descriptor generation*. The descriptors here are generated from the
+ * wasm; only the identity fact was asked of the network, and `check-foreign-feed.mjs`
+ * refuses a pin recording fewer than two distinct sources.
+ *
+ * Emptiness stays a reachable state, not a historical one: a release targeting a relay
+ * whose Asset Hub this repository has not pinned gets `unreachable` from `classifyForeign`,
+ * which blocks the deposit leg with a named reason and leaves every other surface untouched.
  */
-export const FOREIGN_CHAIN_PINS: readonly ForeignChainPin[] = [];
+export const FOREIGN_CHAIN_PINS: readonly ForeignChainPin[] = [
+  {
+    label: 'Asset Hub',
+    genesisHash: '0xd6eec26135305a8ad257a20d003357284c8aa03d0bdb2b357ab0a22371e11ef2',
+    supportedSpecVersions: [2004002],
+  },
+];
 
 export type ForeignMode =
   /** Pinned chain, supported runtime, every §7.7 surface proven. */
