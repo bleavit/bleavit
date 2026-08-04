@@ -291,8 +291,9 @@ decision or settlement inputs.
 - An admitted transport origin is exactly `ExternalClient(ClientId)`, never a signed, root,
   none or governance origin. It carries the small id rather than the ~306-byte bounded `Location`.
 - The client bond is held natively for registration life and never pays postage. Its
-  live `svc.client_bond` parameter is `[VERIFY]` and absent at genesis, so admission is deliberately
-  fail-closed until a calibration-backed migration seats it. Exact-client top-up/withdraw calls
+  live `svc.client_bond` parameter was adopted at 100,000 VIT on 2026-08-04 and is seeded at
+  genesis, so admission is OPEN; the consumer still reads only the live row with no fallback, so
+  removing the row refuses again with `ClientBondUnset`. Exact-client top-up/withdraw calls
   manage the USDC float; a dry float stops only optional push, while storage/API pull remains
   authoritative. Push uses a bare non-health router and cannot move XCM health or welfare.
 - Lifecycle: `Registered → Open → Sealed → Settled`, with every failure edge ending `Voided`.

@@ -1072,13 +1072,23 @@ be an epoch old by then. And the premium stays **measurable with no new storage 
 no new event**: `premium = fee − max(svc.fee_floor, svc.fee_bps × declared_stake)`,
 and both the charged fee and the declared stake are already stored per question.
 
-**`M` is inert until its ceiling is adopted.** The bound on `M` is a values-layer
-number that nothing in this repository yet anchors — the natural anchor would be the
-measured cost of governance denial, and [14](14-threat-model.md) TH-72's attack-cost
-cell carries no figure (SQ-574). Until `svc.price_cap` is set, `M ≡ 1` and this
-section describes today's behaviour exactly: the posted two-part tariff, first come
-first served. That is the `svc.fee_bps` and `svc.client_bond` precedent — a row ships
-unset with its consumer defaulting to the status quo rather than to a guess.
+**`M` was inert until its ceiling was adopted, and the ceiling is now 4 (2026-08-04).**
+The bound on `M` is a values-layer number that nothing in this repository anchors — the
+natural anchor would be the measured cost of governance denial, and
+[14](14-threat-model.md) TH-72's attack-cost cell carries no figure (SQ-574), **which
+adoption did not change**. It was chosen under R-2's escalation clause, not derived, and
+SQ-574 stays open. While the row was unset, `M ≡ 1` and this section described the prior
+behaviour exactly: the posted two-part tariff, first come first served. That was the
+`svc.fee_bps` and `svc.client_bond` precedent — a row ships unset with its consumer
+defaulting to the status quo rather than to a guess, and is seated when the values layer
+decides rather than when an analysis manufactures a number.
+
+At 4 against `svc.max_live` = 16 the per-admission step is `(4 − 1) / 16` = 0.1875, which
+divides the 1e9 grid exactly (3e9 / 16 = 187,500,000), so full occupancy reaches the
+ceiling precisely rather than stopping short by the integer remainder [13](13-parameters.md)
+§1 warns about. That exactness is a property of the *pair*, so an amendment to either row
+can destroy it; the constitution's genesis test asserts the divisibility rather than
+leaving it to inspection.
 
 **Inert means the *charge* is unchanged, not the declared weight.** `register`'s
 benchmark deliberately arms the ceiling, so the weight it declares always includes the
@@ -1201,10 +1211,12 @@ and that separation is the same one §8.6 draws.
    Inferring starvation from a stalled crank would price a **keeper-liveness** failure as
    a capital failure, which is the wrong instrument, and drawing the line between the two
    needs a staleness threshold that nothing here derives.
-3. **Inert until the ceiling is adopted.** The response magnitude is bounded by
-   `svc.price_cap`, which is `[VERIFY]`-unset (§8.6), so this section is inert on exactly
-   the same condition — one adopted row arms both halves of `M`, which is why no second
-   row is introduced.
+3. **Armed by the same single row.** The response magnitude is bounded by `svc.price_cap`,
+   **adopted at 4 on 2026-08-04** (§8.6), so this section became live at the same instant
+   §8.6's contention pricing did — one adopted row arms both halves of `M`, which is why no
+   second row is introduced and why there is no state in which one half is live and the
+   other is not. While the row was `[VERIFY]`-unset both halves were inert together, on
+   exactly the same condition.
 
 ---
 

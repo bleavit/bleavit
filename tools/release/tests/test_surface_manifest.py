@@ -551,9 +551,21 @@ class SurfaceManifestTests(unittest.TestCase):
                 "MinEpochLength",
                 {"type": "u32", "value": "0x80130300"},
             ),
+            # The only frozen constant in this manifest whose *value is chain
+            # state*: `ClientRegistry::ClientBond` reads the live
+            # `Params[svc.client_bond]` row with no default and no genesis
+            # fallback, so the row's presence is what arms admission — and what
+            # moves this value. It froze `0x00` (`None`) while the row was
+            # `[VERIFY]`-absent; the user adopted 100,000 VIT on 2026-08-04, so a
+            # fresh chain now publishes `Some(1e17)`. Derived from the runtime's
+            # own metadata by `scale_metadata.surface_layout`, never hand-written:
+            # 100,000 VIT at 12 decimals = 1e17, SCALE `Some` + u128 LE.
             "constant.client_registry.client_bond": (
                 "ClientBond",
-                {"type": "Optionenum[None=0|Some=1(u128)]", "value": "0x00"},
+                {
+                    "type": "Optionenum[None=0|Some=1(u128)]",
+                    "value": "0x0100008a5d784563010000000000000000",
+                },
             ),
             "constant.question_service.fee_floor": (
                 "FeeFloor",

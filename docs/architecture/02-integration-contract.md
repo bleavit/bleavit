@@ -458,11 +458,14 @@ is unchanged, so no `INTEGRATION_CONTRACT_VERSION` bump is owed for it — but a
 the previous sentence would have concluded the service was inert, which is why it is corrected here
 rather than left to be inferred from 13 §1.
 
-`svc.price_cap` (16 §8.6, N14) binds the same way and owes **no bump** for the same reason. One
-difference an integrator must not miss: while `svc.fee_bps` was unset the service was *inert*, but
-while `svc.price_cap` is unset the service is fully **operational** — the row's absence means the
-scarcity multiplier is `1`, i.e. the flat two-part tariff, not a refusal. A client reading a missing
-key as "closed" would be wrong in the opposite direction from the row above it.
+`svc.price_cap` (16 §8.6, N14) binds the same way and owes **no bump** for the same reason. It was
+adopted at **4** on 2026-08-04, so an integrator now reads a present key whose value bounds the
+scarcity multiplier at 4× the flat two-part tariff. The asymmetry that mattered while it was absent
+still governs how a *missing* key must be read, and it runs opposite to the row above: while
+`svc.fee_bps` was unset the service was *inert*, but an absent `svc.price_cap` means the multiplier
+is `1` — fully **operational**, not a refusal. A client that treats a missing key as "closed" would
+be wrong here in the opposite direction from the row above it. Read the live value; do not infer
+either state from absence.
 
 **Client transaction and outbound-receiver additions (v22).** `ClientRegistry` appends call index `3`,
 `top_up_delivery_float(amount: Balance)`, and call index `4`,

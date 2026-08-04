@@ -2928,6 +2928,75 @@ pub fn genesis_params() -> Vec<ParamRecord> {
             ParamClass::Param,
             false
         ),
+        // `svc.client_bond` — ADOPTED at 100,000 VIT by the user, 2026-08-04,
+        // closing the `[VERIFY]` tag. Like `svc.fee_bps` this is a values call
+        // with no derivation available in this repository, so R-2's escalation
+        // clause applies and the authority is recorded rather than a false
+        // derivation reverse-engineered for it.
+        //
+        // **Seeding this row is the act that opens the service.** Until now
+        // `client_registry.admit_client` returned `ClientBondUnset` before any
+        // hold or registry write, so no client could exist at all; it is the
+        // only one of the three `[VERIFY]` rows that gated admission.
+        //
+        // Scale: VIT has 12 decimals, so 100,000 VIT = 1e17, on the convention
+        // `att.bond` = 25,000 VIT = 25e15 already pins. The value is 4x that
+        // attestor bond, chosen against the milder anchors deliberately: it
+        // treats a hosted client as a higher-risk counterparty than a seated
+        // attestor. The stated cost is adoption — the first cohort will be
+        // institutions rather than experiments, and 16 §8.4's cannibalization
+        // falsifier and `svc.max_live`'s sizing both need real occupancy to
+        // settle, so both stay open longer. That is the direction that cannot
+        // create an unbacked claim, and Factor(2) with a 2-epoch cooldown
+        // makes it ~6 weeks per halving if the barrier proves too high.
+        //
+        // Held, not spent: native VIT on the B19 custody discipline for the
+        // life of the registration, returned on clean exit. It prices
+        // registration abuse only and is never delivery-fee custody — that is
+        // the separate USDC `delivery_float`. It is also not the anti-spam
+        // gate: admission is a per-client `ConstitutionalValues` act and the
+        // roster is hard-capped at `MaxClients` = 64.
+        row(
+            b"svc.client_bond",
+            ParamValue::Balance(100_000_000_000_000_000),
+            ParamValue::Balance(1_000_000_000_000_000),
+            ParamValue::Balance(1_000_000_000_000_000_000),
+            Some(MaxDelta::Factor(2)),
+            2,
+            ParamClass::Param,
+            false
+        ),
+        // `svc.price_cap` — ADOPTED at 4x by the user, 2026-08-04, closing the
+        // `[VERIFY]` tag. Unlike the two rows above, this one's absence was
+        // never a refusal: the consumer defaulted to `M = 1`, which is the
+        // status quo, so seeding it is a deliberate arming rather than an
+        // unblocking (13 §1, note 3 on this row).
+        //
+        // Scale: `Fixed` is FixedU64 on the 1e9 grid, so 4x = 4e9.
+        //
+        // Two mechanical consequences of 4 against `svc.max_live` = 16, both
+        // favourable and neither accidental. The per-admission step is
+        // `(4 - 1) / 16` = 0.1875, i.e. 3e9 / 16 = 187,500,000 grid units
+        // **exactly** — 16 divides 3e9, so taking every slot at once lands
+        // precisely on the ceiling rather than short of it by the integer
+        // remainder 13 §1 note 1 warns about. And 4 is far enough above 1 that
+        // the step cannot truncate to zero, which is what a ceiling within
+        // `svc.max_live` grid units of 1 would silently do.
+        //
+        // This single row arms BOTH halves of `M` (16 §8.6 contention pricing
+        // and §8.7's starvation response), because they share one ceiling and
+        // combine by `max`. There is no state in which one is live and the
+        // other is not.
+        row(
+            b"svc.price_cap",
+            ParamValue::Fixed(FixedU64(4_000_000_000)),
+            ParamValue::Fixed(FixedU64(1_000_000_000)),
+            ParamValue::Fixed(FixedU64(64_000_000_000)),
+            Some(MaxDelta::Factor(2)),
+            2,
+            ParamClass::Param,
+            false
+        ),
     ]
 }
 

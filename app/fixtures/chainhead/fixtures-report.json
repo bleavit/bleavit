@@ -1,11 +1,11 @@
 {
   "blocked_by": {},
   "metadata_error": null,
-  "metadata_sha256": "40f38db82c8c4b23a193cbfa30ea480833c4aa8786168f52aea5d6c226f8101c",
+  "metadata_sha256": "837adf7f3e58d8f8015d2f8694b6e7dfdb9f106f15142a42a5bbe347043a1b35",
   "metadata_version": 15,
   "missing": [],
   "mode": "chainHead-v1",
-  "pinned_block": "0x9d654896f6d0418ee9f4315ccc67963128f8f125034d1a6005be9d4474398c19",
+  "pinned_block": "0x678c66fcc229a42f23969f66a6e5dd18fdcb4366a0c4b7ded569af41ba2d9057",
   "recorded": [
     "api.account_positions",
     "api.decision_stats",
@@ -268,7 +268,7 @@
   ],
   "recovery_metadata_error": null,
   "recovery_metadata_present": true,
-  "recovery_metadata_sha256": "1cc890f480adb5931171a041b2ac50d3ababbfebe86aceddeb5e9e0850e81ef2",
+  "recovery_metadata_sha256": "303ff8656e42d403d1f4476e54b0350920d7d4dac3a204f05d9be14fe4caa260",
   "recovery_metadata_version": 15,
   "recovery_missing": [],
   "recovery_recorded": [

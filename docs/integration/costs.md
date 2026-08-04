@@ -17,7 +17,7 @@ price discovery, and a settlement failure does not un-discover it.
 
 `svc.fee_bps` ships **unset**, and while it is unset `register` refuses with `ServiceRateUnset`.
 
-**`M` is a scarcity multiplier, and today it is 1.** When more clients want a slot than the cap
+**`M` is a scarcity multiplier, and it is live — capped at 4×.** When more clients want a slot than the cap
 admits, the fee is multiplied by `M`, which rises the moment a slot is taken and falls back toward 1
 over time. The point is that a slot freed by a finishing question does not become instantly cheap —
 its price walks down. If you need that slot *now* you pay more than someone who can wait, which is
@@ -30,13 +30,20 @@ Bleavit's governance depends on, so when that pool is stretched, hosting costs m
 refused and nobody is locked out — the price moves for everyone equally, including for clients who
 already hold a slot. If you plan around a hard number, plan around the ceiling.
 
-You are not exposed to either half yet: `svc.price_cap`, the bound on `M`, ships **unset**, and unset
-means `M = 1` — the plain formula above, first come first served, no starvation surcharge. Unlike
-`svc.fee_bps`, an unset `svc.price_cap` does **not** close the service; it just means there is no
-surcharge. Read the live value from chain metadata rather than assuming either state, and size your
-budget from the fee you actually get quoted.
+**What that means in numbers.** `svc.price_cap` was adopted at **4** on 2026-08-04, so `M` ranges over
+`[1, 4]` and the most a slot can ever cost is four times the plain formula above. With the cap at 16
+live questions, each admission adds `(4 − 1) / 16` = **0.1875** to `M`, so taking every slot at once
+walks the price from 1× to exactly 4×; from there it decays back toward 1 over one question window
+(21 days). In the common case — spare capacity and healthy Bleavit markets — `M` is 1 and you pay the
+plain tariff.
 
-That is not a bug; it is the arming gate. The service is inert until the values layer sets a rate.
+**Read the live value from chain metadata rather than assuming any of this**, and size your budget
+from the fee you are actually quoted. Both the cap and the slot count are governance-amendable, and
+`M` itself depends on chain state at the moment you register.
+
+**One thing you should plan for.** Because `M` also tracks Bleavit's own market depth, your cost can
+rise for reasons that have nothing to do with you or with how many slots are taken. If you need a
+firm number for a budget, use the ceiling: `4 × max(393 USDC, 10 % × your declared stake)`.
 
 ## 2. The subsidy you post — large, and mostly returned
 

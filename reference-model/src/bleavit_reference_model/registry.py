@@ -418,11 +418,13 @@ _row("xcm.dot_per_mb", ParamKind.BALANCE, "DOT planck/MiB", 10_000_000_000, 100_
 _row("xcm.usdc_per_sec", ParamKind.BALANCE, "µUSDC/s", 50_000_000, 500_000, 5_000_000_000, factor(2), 1, AmendmentClass.PARAM)
 _row("xcm.usdc_per_mb", ParamKind.BALANCE, "µUSDC/MiB", 5_000_000, 50_000, 500_000_000, factor(2), 1, AmendmentClass.PARAM)
 
-# Hosted service registration bounds (13 §1; 16 §4, §5.2, §8.5). `svc.client_bond`
-# is still intentionally absent at genesis and therefore does not materialize in
-# this seeded registry model. `svc.fee_bps` was absent for the same reason until
-# the user adopted it at 1,000 bps on 2026-08-02, and seeding it is the act that
-# arms the hosted service.
+# Hosted service registration bounds (13 §1; 16 §4, §5.2, §8.5). All six rows are
+# now seeded: `svc.fee_bps` was adopted at 1,000 bps on 2026-08-02, and the last two
+# `[VERIFY]` rows on 2026-08-04 — `svc.client_bond` at 100,000 VIT and
+# `svc.price_cap` at 4x. Seeding `svc.client_bond` is the act that opened the
+# service to clients; it was the only one of the three that gated admission,
+# because `svc.max_live` already carried its provisional and an absent
+# `svc.price_cap` meant `M = 1` rather than a refusal.
 #
 # Written through `PERBILL_PER_BPS` rather than as a literal, because 13 §1 states
 # this row in **bps** while the stored kind is **Perbill** (parts per 1e9) — the two
@@ -433,6 +435,16 @@ _row("svc.fee_bps", ParamKind.PERBILL, "ppb", 1_000 * PERBILL_PER_BPS, 0, 1_000 
 _row("svc.max_live", ParamKind.U32, "questions", 16, 1, 64, factor(2), 2, AmendmentClass.PARAM)
 _row("svc.max_window", ParamKind.U32, "blocks", 302_400, 43_200, 302_400, factor(2), 1, AmendmentClass.PARAM)
 _row("svc.epsilon_min", ParamKind.PERBILL, "ppb fraction", 10_000_000, 5_000_000, 250_000_000, factor(2), 1, AmendmentClass.PARAM)
+# Adopted 2026-08-04. 100,000 VIT is exactly 4x `att.bond` above, the only other
+# VIT-denominated bond and so the only in-system anchor; the value is chosen under
+# R-2's escalation clause, not derived. Held for the life of the registration and
+# returned on clean exit, behind a per-client ConstitutionalValues admission act.
+_row("svc.client_bond", ParamKind.BALANCE, "VIT planck", 100_000 * VIT, 1_000 * VIT, 1_000_000 * VIT, factor(2), 2, AmendmentClass.PARAM)
+# Adopted 2026-08-04 at 4x the §8.1 tariff, on the FIXED 1e9 grid. Paired with
+# `svc.max_live` = 16 the per-admission step is (4-1)/16 = 0.1875, i.e. 3e9/16 =
+# 187,500,000 grid units exactly, so full occupancy lands ON the ceiling instead of
+# short of it by an integer remainder. One ceiling arms both halves of M (§8.6, §8.7).
+_row("svc.price_cap", ParamKind.FIXED, "1e-9 x tariff", 4 * FIXED_SCALE, 1 * FIXED_SCALE, 64 * FIXED_SCALE, factor(2), 2, AmendmentClass.PARAM)
 
 REGISTRY: dict[str, ParamRecord] = dict(sorted(_records.items()))
 del _records

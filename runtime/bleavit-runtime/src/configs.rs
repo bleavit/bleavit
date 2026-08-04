@@ -2738,10 +2738,18 @@ impl pallet_attestor::AttestorParamsProvider for RuntimeAttestorParams {
     }
 }
 
-/// N4 intentionally reads only the live constitution row. The `[VERIFY]`
-/// `svc.client_bond` key has no genesis seed, so the service remains inert
-/// until a calibration-backed runtime migration seats the governed row (the
-/// existing amendment calls cannot create an absent key).
+/// N4 intentionally reads only the live constitution row, with no default and
+/// no genesis fallback of its own. `svc.client_bond` was `[VERIFY]`-absent
+/// through N15 — which kept the service inert, since this is the one row that
+/// gated admission — and the user adopted it at 100,000 VIT on 2026-08-04, so
+/// genesis now seeds it (13 §1).
+///
+/// The `Option` is deliberately kept rather than collapsed to the seeded value.
+/// It is what makes the row's *presence* the arming act: remove the row on a
+/// live chain and admission refuses again with `ClientBondUnset` rather than
+/// falling back to a compiled-in number, which is also why a post-genesis
+/// activation would need a migration (amendment calls cannot create an absent
+/// key). A runtime test asserts that path by removing the row.
 pub struct RuntimeClientBond;
 impl pallet_client_registry::ClientBondProvider for RuntimeClientBond {
     fn client_bond() -> Option<Balance> {

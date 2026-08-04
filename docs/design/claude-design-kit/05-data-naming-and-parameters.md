@@ -355,9 +355,9 @@ live. For mock data these are the correct realistic values.
 | `MaxExternalBookPairs` | **64** | retained question→Accept/Reject/funder records; cleanup backpressure is bounded |
 | `MaxLiveExternalMarkets` / `MaxStoredExternalMarkets` | **128 / 128** | service books never consume primary live-POL or retained capacity; a `svc.max_live` cut gates new admission while existing questions drain |
 | `MaxAllStoredMarkets` | **2,368** | physical shared-map ceiling = 2,240 primary + 128 external rows |
-| `svc.client_bond` | **`[VERIFY]`, unset at genesis, native VIT** | admission returns `ClientBondUnset`; never invent a mock value or show the service as armed |
+| `svc.client_bond` | **100,000 VIT** (adopted 2026-08-04), native VIT, seeded at genesis | admission is open; an absent row still returns `ClientBondUnset`, so never show absence as a fallback value |
 | `delivery_float` | client-selected USDC balance, not a parameter | optional report push stops when dry; pull remains authoritative; never depict the native VIT bond paying postage |
-| `svc.fee_bps` | **`[VERIFY]`, unset at genesis** | service registration returns `ServiceRateUnset` while absent |
+| `svc.fee_bps` | **1,000 bps = 10 %** (adopted 2026-08-02), seeded at genesis | an absent row would return `ServiceRateUnset`; the fee is `max(393 USDC, 10 % x declared stake)` |
 | `svc.max_live` | provisional **16**, hard max 64, `[VERIFY]` | external resource partition; not a demand target |
 | `svc.max_window` | 302,400 blocks (= one epoch) | live hosted-question window ceiling |
 | `svc.epsilon_min` | 0.01 | live declared manipulation displacement floor |

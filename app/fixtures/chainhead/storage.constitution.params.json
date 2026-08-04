@@ -1,13 +1,13 @@
 {
   "headers": {
-    "pinned_block": "0x9d654896f6d0418ee9f4315ccc67963128f8f125034d1a6005be9d4474398c19"
+    "pinned_block": "0x678c66fcc229a42f23969f66a6e5dd18fdcb4366a0c4b7ded569af41ba2d9057"
   },
   "requests": [
     {
       "method": "chainHead_v1_storage",
       "params": [
         "subscription-1",
-        "0x9d654896f6d0418ee9f4315ccc67963128f8f125034d1a6005be9d4474398c19",
+        "0x678c66fcc229a42f23969f66a6e5dd18fdcb4366a0c4b7ded569af41ba2d9057",
         [
           {
             "key": "0xfb8ccbf677a3d2ce27ab85165f32df6a9a6912ecfeb5c6102fecac8201de0a8f",
@@ -333,6 +333,16 @@
               {
                 "key": "0xfb8ccbf677a3d2ce27ab85165f32df6a9a6912ecfeb5c6102fecac8201de0a8f5bf64e25acdc44a8a95ac427dcf511926465632e64656c74612e706172616d00",
                 "value": "0x6465632e64656c74612e706172616d000360343c020000000003404b4c00000000000300e1f50500000000010003404b4c00000000000200000000000000000000000201"
+              }
+            ],
+            "operationId": "operation-1"
+          },
+          {
+            "event": "operationStorageItems",
+            "items": [
+              {
+                "key": "0xfb8ccbf677a3d2ce27ab85165f32df6a9a6912ecfeb5c6102fecac8201de0a8f5eecd71516623664b22f0d2fabce1e347376632e70726963655f636170000000",
+                "value": "0x7376632e70726963655f6361700000000300286bee000000000300ca9a3b00000000030080b2e60e0000000102020200000000000000000000000000"
               }
             ],
             "operationId": "operation-1"
@@ -883,6 +893,16 @@
               {
                 "key": "0xfb8ccbf677a3d2ce27ab85165f32df6a9a6912ecfeb5c6102fecac8201de0a8fcbf0d06316098051adefc967d46c502370726f702e626f6e642e6d6574610000",
                 "value": "0x70726f702e626f6e642e6d65746100000200743ba40b00000000000000000000000200f2052a010000000000000000000000020088526a7400000000000000000000000102020200000000000000000000000200"
+              }
+            ],
+            "operationId": "operation-1"
+          },
+          {
+            "event": "operationStorageItems",
+            "items": [
+              {
+                "key": "0xfb8ccbf677a3d2ce27ab85165f32df6a9a6912ecfeb5c6102fecac8201de0a8fcf712f56927a1705f851eec1f8332a357376632e636c69656e745f626f6e6400",
+                "value": "0x7376632e636c69656e745f626f6e64000200008a5d784563010000000000000000020080c6a47e8d0300000000000000000002000064a7b3b6e00d00000000000000000102020200000000000000000000000000"
               }
             ],
             "operationId": "operation-1"

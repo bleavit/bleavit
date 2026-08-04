@@ -1227,14 +1227,14 @@ reason = "13 §1 / 16 §4: registration refuses a window one block beyond the li
 [[entry]]
 key = "svc.client_bond"
 class = "value"
-genesis = false
-reason = "13 §1 / 16 §2: the live optional value sets only the exact native VIT security hold at admission and never funds egress; N9's separate client-funded USDC delivery float pays postage. Absence is enforced by `ClientBondUnset`; this is a value consumer, not a caller-supplied dispatch bound."
+genesis = true
+reason = "13 §1 / 16 §2: the live value sets only the exact native VIT security hold at admission and never funds egress; N9's separate client-funded USDC delivery float pays postage. ADOPTED at 100,000 VIT on 2026-08-04, which is the act that opened the service to clients — it was the only `[VERIFY]` svc.* row that gated admission. The absent-row path is still enforced by `ClientBondUnset` and is still covered by a runtime test that REMOVES the row, because the consumer keeps reading the live Params row with no genesis fallback. This is a value consumer, not a caller-supplied dispatch bound."
 
 [[entry]]
 key = "svc.price_cap"
 class = "value"
-genesis = false
-reason = "13 §1 / 16 §8.6: bounds the scarcity multiplier M that re-prices a hosted slot under contention. A value consumer, not a caller-supplied dispatch bound — no registration argument is compared against it; it scales the fee the caller then has to fund. Absence is NOT a refusal: unset means M = 1, which reproduces the flat two-part tariff the chain has today, because this row gates an allocation refinement rather than a safety gate and closing admission would be strictly worse than the status quo it replaces."
+genesis = true
+reason = "13 §1 / 16 §8.6: bounds the scarcity multiplier M that re-prices a hosted slot under contention. A value consumer, not a caller-supplied dispatch bound — no registration argument is compared against it; it scales the fee the caller then has to fund. ADOPTED at 4x on 2026-08-04, which armed both halves of M at once (16 §8.6 contention and §8.7 starvation share this one ceiling). Absence is still NOT a refusal: an unset row means M = 1, reproducing the flat two-part tariff, because this row gates an allocation refinement rather than a safety gate and closing admission would be strictly worse than the status quo it replaces."
 
 [[entry]]
 key = "svc.epsilon_min"

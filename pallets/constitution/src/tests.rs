@@ -1281,11 +1281,13 @@ fn genesis_registry_matches_13_1_row_encodings() {
         // ledger.rdm_fee and +3 for N7's svc.max_live/svc.max_window/
         // svc.epsilon_min); spot-pin the unit encodings per kind.
         //
-        // All four `svc.*` rows are now seeded. `svc.fee_bps` was deliberately
+        // All six `svc.*` rows are now seeded. `svc.fee_bps` was deliberately
         // absent through N7 — its absence was the service's fail-closed arming
         // gate — and was ADOPTED at 1,000 bps by the user on 2026-08-02, which
-        // arms the hosted service by design rather than by accident.
-        assert_eq!(Params::<Test>::count(), 111);
+        // arms the hosted service by design rather than by accident. The last
+        // two `[VERIFY]` rows were ADOPTED by the user on 2026-08-04:
+        // `svc.client_bond` at 100,000 VIT (+1) and `svc.price_cap` at 4x (+1).
+        assert_eq!(Params::<Test>::count(), 113);
         // Pin the adopted rate AND its unit, because 13 §1 states this row in
         // bps while the stored kind is Perbill: 1,000 bps = 10 % = 1e8 parts.
         // A 100,000× unit slip here would be silent and would misprice every
@@ -1295,6 +1297,60 @@ fn genesis_registry_matches_13_1_row_encodings() {
         assert_eq!(fee_bps.max, ParamValue::Perbill(100_000_000));
         assert_eq!(fee_bps.min, ParamValue::Perbill(0));
         assert!(!fee_bps.kernel_bounded);
+
+        // `svc.client_bond` — the row whose absence closed the whole service.
+        // Pin the VIT scale for the same reason the rate's unit is pinned: VIT
+        // carries 12 decimals, so a 1e12 slip reads as 100,000 VIT vs 0.0000001
+        // VIT and neither the type system nor any bound would object. Anchored
+        // to `att.bond` = 25,000 VIT = 25e15, which this is exactly 4x.
+        let bond = Params::<Test>::get(key16(b"svc.client_bond")).unwrap();
+        assert_eq!(bond.value, ParamValue::Balance(100_000_000_000_000_000));
+        assert_eq!(bond.min, ParamValue::Balance(1_000_000_000_000_000));
+        assert_eq!(bond.max, ParamValue::Balance(1_000_000_000_000_000_000));
+        assert!(!bond.kernel_bounded);
+        let att_bond = Params::<Test>::get(key16(b"att.bond")).unwrap();
+        assert_eq!(
+            bond.value,
+            ParamValue::Balance(match att_bond.value {
+                ParamValue::Balance(v) => v.saturating_mul(4),
+                _ => 0,
+            }),
+            "the client bond is stated as 4x the attestor bond; if att.bond \
+             moves, this relation is a values decision to re-take, not a \
+             number to quietly follow"
+        );
+
+        // `svc.price_cap` — Fixed is FixedU64 on the 1e9 grid, so 4x = 4e9.
+        // Also pin the exactness that makes 4-against-16 a good pair: the
+        // per-admission step is (cap-1)/max_live in grid units, and 16 divides
+        // 3e9 exactly, so full occupancy lands ON the ceiling rather than short
+        // of it by an integer remainder (13 §1, this row's note 1).
+        let cap = Params::<Test>::get(key16(b"svc.price_cap")).unwrap();
+        assert_eq!(
+            cap.value,
+            ParamValue::Fixed(futarchy_primitives::FixedU64(4_000_000_000))
+        );
+        assert_eq!(
+            cap.min,
+            ParamValue::Fixed(futarchy_primitives::FixedU64(1_000_000_000))
+        );
+        assert_eq!(
+            cap.max,
+            ParamValue::Fixed(futarchy_primitives::FixedU64(64_000_000_000))
+        );
+        assert!(!cap.kernel_bounded);
+        let max_live = match Params::<Test>::get(key16(b"svc.max_live")).unwrap().value {
+            ParamValue::U32(v) => u64::from(v),
+            _ => 0,
+        };
+        let span = 4_000_000_000u64 - 1_000_000_000u64;
+        assert_eq!(
+            span % max_live,
+            0,
+            "the adopted ceiling must divide evenly by svc.max_live, or the \
+             admission step truncates and full occupancy stops short of the cap"
+        );
+        assert_eq!(span / max_live, 187_500_000);
 
         // Per-class suffix keys (13 rule 6) — δ floors, kernel-capped.
         // Phase-0-calibrated (V-12): dec.delta.meta 0.090 on the 1e9 grid.
