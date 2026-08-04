@@ -21,6 +21,7 @@ import {
   NO_WRAPPER,
   actingAccount,
   deriveApproval,
+  proxyAdmits,
   feePayer,
   proxyTypeCovers,
   splitsIdentity,
@@ -41,8 +42,17 @@ const finalized = (value) => ({
 
 const proxy = (proxyType) => ({ kind: 'proxy', real: REAL, proxyType });
 const multisig = (threshold) => ({ kind: 'multisig', multisig: MULTI, threshold, otherSignatories: [OTHER] });
-const entry = (approvals, when = { height: 100, index: 2 }) =>
-  finalized({ when, deposit: 1n, depositor: OTHER, approvals });
+/**
+ * The `(multisig, callHash)` key every `Multisig.Multisigs` read belongs to (02 §7.6).
+ * Carried by the helpers because a read without its key is what finding #4 was about.
+ */
+const KEY = { multisig: MULTI, callHash: `0x${'ab'.repeat(32)}` };
+const OTHER_KEY = { multisig: MULTI, callHash: `0x${'cd'.repeat(32)}` };
+
+const read = (entry, key = KEY) => finalized({ key, entry });
+const absent = (key = KEY) => read(null, key);
+const entry = (approvals, when = { height: 100, index: 2 }, key = KEY) =>
+  read({ when, deposit: 1n, depositor: OTHER, approvals }, key);
 
 test('an unwrapped call has one identity', () => {
   assert.equal(actingAccount(NO_WRAPPER, SIGNER), SIGNER);
@@ -78,7 +88,7 @@ test('the fee payer is the signer under every wrapper', () => {
 
 test('no entry means the first approval, and the timepoint MUST be absent', () => {
   // `as_multi` rejects a timepoint on the opening approval (`UnexpectedTimepoint`).
-  const step = deriveApproval(finalized(null), SIGNER, 2);
+  const step = deriveApproval(absent(), KEY, SIGNER, 2);
   assert.equal(step.kind, 'first');
   assert.equal(step.maybeTimepoint, undefined);
   assert.equal(step.approvalsSoFar, 0);
@@ -88,7 +98,7 @@ test('no entry means the first approval, and the timepoint MUST be absent', () =
 test('an existing entry means the recorded timepoint MUST be carried', () => {
   // And it must be the *recorded* one — a fresh or derived timepoint is `WrongTimepoint`.
   const when = { height: 4242, index: 3 };
-  const step = deriveApproval(entry([OTHER], when), SIGNER, 2);
+  const step = deriveApproval(entry([OTHER], when), KEY, SIGNER, 2);
   assert.equal(step.kind, 'subsequent');
   assert.deepEqual(step.maybeTimepoint, when);
   assert.equal(step.approvalsSoFar, 1);
@@ -97,17 +107,17 @@ test('an existing entry means the recorded timepoint MUST be carried', () => {
 test('the approval that reaches the threshold is marked as executing', () => {
   // This is the one that dispatches the inner call, so it is the one whose preconditions
   // actually decide an outcome rather than an approval record.
-  const reaching = deriveApproval(entry([OTHER]), SIGNER, 2);
+  const reaching = deriveApproval(entry([OTHER]), KEY, SIGNER, 2);
   assert.equal(reaching.kind, 'subsequent');
   assert.equal(reaching.executes, true);
 
-  const notYet = deriveApproval(entry([OTHER]), SIGNER, 3);
+  const notYet = deriveApproval(entry([OTHER]), KEY, SIGNER, 3);
   assert.equal(notYet.kind, 'subsequent');
   assert.equal(notYet.executes, false);
 });
 
 test('a signer who already approved is refused before paying for the rejection', () => {
-  const step = deriveApproval(entry([OTHER, SIGNER]), SIGNER, 3);
+  const step = deriveApproval(entry([OTHER, SIGNER]), KEY, SIGNER, 3);
   assert.equal(step.kind, 'already-approved');
   assert.deepEqual(step.maybeTimepoint, { height: 100, index: 2 });
   const reason = wrapperRefusalReason(step);
@@ -118,8 +128,8 @@ test('a signer who already approved is refused before paying for the rejection',
 test('a refusal reason exists only for the refused step', () => {
   // Anti-vacuity for the assertion above: if `wrapperRefusalReason` returned a string
   // unconditionally, the previous test would pass on a function that refuses everything.
-  assert.equal(wrapperRefusalReason(deriveApproval(finalized(null), SIGNER, 2)), undefined);
-  assert.equal(wrapperRefusalReason(deriveApproval(entry([OTHER]), SIGNER, 2)), undefined);
+  assert.equal(wrapperRefusalReason(deriveApproval(absent(), KEY, SIGNER, 2)), undefined);
+  assert.equal(wrapperRefusalReason(deriveApproval(entry([OTHER]), KEY, SIGNER, 2)), undefined);
 });
 
 test('an unknown proxy type is treated as absent, not as permitted (INV-FE-12)', () => {
@@ -132,7 +142,7 @@ test('an unknown proxy type is treated as absent, not as permitted (INV-FE-12)',
 
 test('a non-positive or fractional threshold is refused rather than coerced', () => {
   for (const bad of [0, -1, 1.5, Number.NaN]) {
-    assert.throws(() => deriveApproval(finalized(null), SIGNER, bad), RangeError, `threshold ${bad}`);
+    assert.throws(() => deriveApproval(absent(), KEY, SIGNER, bad), RangeError, `threshold ${bad}`);
   }
 });
 
@@ -142,14 +152,130 @@ test('threshold 1 executes on the opening approval', () => {
   // they were recording an intent while the call actually dispatched — the surface
   // describing a different transaction from the one being signed. This assertion is the
   // property; the `kind`/`approvalsNeeded` checks below are not a substitute for it.
-  const step = deriveApproval(finalized(null), SIGNER, 1);
+  const step = deriveApproval(absent(), KEY, SIGNER, 1);
   assert.equal(step.kind, 'first');
   assert.equal(step.executes, true);
   assert.equal(step.approvalsNeeded, 1);
 
   // ...and it must NOT execute at any higher threshold, or the flag says nothing.
   for (const threshold of [2, 3, 7]) {
-    const later = deriveApproval(finalized(null), SIGNER, threshold);
+    const later = deriveApproval(absent(), KEY, SIGNER, threshold);
     assert.equal(later.executes, false, `opening approval executed at threshold ${threshold}`);
   }
+});
+
+/* ============================================================================
+ * The adversarial-review round: findings #3, #4 and #5 (F6 majors).
+ * ========================================================================== */
+
+test('an approval read at another call’s key is refused, not reused (#4)', () => {
+  // 02 §7.6 keys Multisig.Multisigs by (AccountId, [u8;32]) — one multisig can have any
+  // number of concurrent pending calls. `deriveApproval` took an unkeyed entry, so a read
+  // for call hash H1 could be supplied while building H2.
+  assert.throws(
+    () => deriveApproval(entry([OTHER], { height: 100, index: 2 }, OTHER_KEY), KEY, SIGNER, 2),
+    /refusing to treat one pending call's approval state as another's/,
+  );
+  // Same multisig, same hash, different multisig account: also refused.
+  const elsewhere = { multisig: OTHER, callHash: KEY.callHash };
+  assert.throws(() => deriveApproval(absent(elsewhere), KEY, SIGNER, 2), /refusing to treat/);
+  // The matching key still works, or this test would pass by refusing everything.
+  assert.equal(deriveApproval(absent(), KEY, SIGNER, 2).kind, 'first');
+});
+
+test('a stale ABSENCE is refused too — the dangerous half of #4', () => {
+  // The subtle direction. A `null` read at H1 says only that H1 has no approvals; used for
+  // H2 it reads as "nobody has approved yet", so the client sends maybe_timepoint: None for
+  // a call that HAS a recorded timepoint. `as_multi` rejects it, after the user has paid.
+  // An implementation that only checked the key when an entry was present would pass the
+  // test above and fail here.
+  assert.throws(() => deriveApproval(absent(OTHER_KEY), KEY, SIGNER, 2), /refusing to treat/);
+});
+
+test('threshold 1 dispatches as_multi_threshold_1, never as_multi (#5)', () => {
+  // pallet-multisig 46.0.0 ensures `threshold >= 2` at three entry points
+  // (MinimumThreshold). The 1-of-N dispatch is as_multi_threshold_1, which 11 §11.5's
+  // check 13 already names in the SafetyFilter closure. Marking threshold 1 as executing
+  // "through as_multi" described a call the runtime refuses outright.
+  const one = deriveApproval(absent(), KEY, SIGNER, 1);
+  assert.equal(one.dispatch, 'as_multi_threshold_1');
+  assert.equal(one.executes, true);
+  assert.equal(one.maybeTimepoint, undefined, 'as_multi_threshold_1 takes no timepoint');
+
+  // Every threshold >= 2 uses as_multi, or the distinction is decorative.
+  for (const threshold of [2, 3, 64]) {
+    assert.equal(deriveApproval(absent(), KEY, SIGNER, threshold).dispatch, 'as_multi');
+    assert.equal(deriveApproval(entry([OTHER]), KEY, SIGNER, threshold).dispatch, 'as_multi');
+  }
+});
+
+test('threshold 1 ignores any stored entry rather than reporting a queue (#5)', () => {
+  // as_multi_threshold_1 stores nothing, so an entry at this key cannot describe this
+  // dispatch. Reporting "1 of 1 approvals recorded" from it would put a queue on screen
+  // that does not exist.
+  const step = deriveApproval(entry([OTHER]), KEY, SIGNER, 1);
+  assert.equal(step.kind, 'first');
+  assert.equal(step.approvalsSoFar, 0);
+  assert.equal(step.dispatch, 'as_multi_threshold_1');
+});
+
+/* --------------------------------------------------------- #3 proxy delegation */
+
+const delegation = (over = {}) => ({ delegate: SIGNER, proxyType: 'Any', delay: 0, ...over });
+const readDelegations = (...delegations) => ({ kind: 'read', delegations });
+
+test('a proxy wrapper with no delegation on chain is refused (#3)', () => {
+  // The check did not exist. A wrapper could name `real = R` with proxyType 'Any', every
+  // row would be evaluated against R — correctly, since that is the acting account — and
+  // nothing established the signer may act for R at all. `pallet_proxy::proxy` returns
+  // NotProxy after signature.
+  const none = proxyAdmits(readDelegations(), SIGNER, 'ledger.split');
+  assert.equal(none.ok, false);
+  assert.match(none.reason, /NotProxy/);
+
+  // A delegation to somebody else is not weaker evidence; it is about another account.
+  const other = proxyAdmits(readDelegations(delegation({ delegate: OTHER })), SIGNER, 'ledger.split');
+  assert.equal(other.ok, false);
+});
+
+test('an unreadable delegation set is absent, never assumed (#3, INV-FE-12)', () => {
+  // `Proxy.Proxies` is not a surface 02 §7 freezes (SQ-590), so the read may be
+  // unavailable. An empty array and an unperformed read must not be the same value: the
+  // first means "nobody may act for this account", the second means "we do not know".
+  const unknown = proxyAdmits({ kind: 'unreadable', reason: 'not frozen in this release' }, SIGNER, 'x');
+  assert.equal(unknown.ok, false);
+  assert.match(unknown.reason, /not frozen/);
+});
+
+test('the STORED proxy type governs, not the one the wrapper claims (#3)', () => {
+  // Checking a caller-supplied 'Any' against itself is self-agreement, not a check.
+  const restricted = proxyAdmits(
+    readDelegations(delegation({ proxyType: 'Governance' })),
+    SIGNER,
+    'ledger.split',
+  );
+  assert.equal(restricted.ok, false);
+  assert.match(restricted.reason, /INV-FE-12/);
+});
+
+test('an announcement delay refuses the direct proxy call and says why (#3)', () => {
+  // A non-zero delay makes the delegation announce-only: `proxy` is rejected with
+  // Unannounced, and the call must go through announce + proxy_announced.
+  const delayed = proxyAdmits(readDelegations(delegation({ delay: 10 })), SIGNER, 'ledger.split');
+  assert.equal(delayed.ok, false);
+  assert.match(delayed.reason, /announcement delay of 10 blocks/);
+});
+
+test('a real delegation is admitted, so the refusals are not vacuous (#3)', () => {
+  const ok = proxyAdmits(readDelegations(delegation()), SIGNER, 'ledger.split');
+  assert.equal(ok.ok, true);
+  assert.equal(ok.delegation.delegate, SIGNER);
+  // Picked from a set that also contains unusable rows, rather than "the first one".
+  const mixed = proxyAdmits(
+    readDelegations(delegation({ delay: 5 }), delegation({ proxyType: 'Governance' }), delegation()),
+    SIGNER,
+    'ledger.split',
+  );
+  assert.equal(mixed.ok, true);
+  assert.equal(mixed.delegation.delay, 0);
 });

@@ -71,6 +71,55 @@ export interface MultisigEntry {
   readonly approvals: readonly AccountId[];
 }
 
+/**
+ * The **key** a `Multisig.Multisigs` entry was read at — 02 §7.6 freezes it as
+ * `(AccountId, [u8; 32])`.
+ *
+ * Carried with the value because a multisig entry is meaningless without it. The storage is
+ * keyed by *(multisig account, call hash)*: one multisig can have any number of concurrent
+ * pending calls, each with its own approvals and its own timepoint. An entry read for call
+ * hash H1 describes nothing at all about H2.
+ *
+ * The dangerous half is the **absence**. A `null` read at H1 says only that H1 has no
+ * pending approvals; treated as the value for H2 it reads as "nobody has approved this
+ * yet", so the client sends `maybe_timepoint: None` for a call that already has a recorded
+ * timepoint — which `as_multi` rejects, after the user has paid. And an entry that *is*
+ * present at the wrong key is worse: the client shows real approvals from a different
+ * pending call, so the confirm screen describes a transaction that is not the one being
+ * signed (11 §11.3 anti-substitution).
+ */
+export interface MultisigKey {
+  readonly multisig: AccountId;
+  /** The 32-byte blake2-256 hash of the encoded inner call, as `0x`-prefixed hex. */
+  readonly callHash: string;
+}
+
+/**
+ * A `Multisig.Multisigs` read, inseparable from the key it was performed at.
+ *
+ * One object rather than two arguments so a caller cannot pass a value and forget the key —
+ * the shape is the check.
+ */
+export interface MultisigRead {
+  readonly key: MultisigKey;
+  /** `null` for an absent key: the ordinary first-approval case, not an error. */
+  readonly entry: MultisigEntry | null;
+}
+
+/**
+ * Which dispatch actually carries this approval.
+ *
+ * `as_multi` is **not** valid at threshold 1: `pallet_multisig` rejects it with
+ * `MinimumThreshold` at every entry point (`ensure!(threshold >= 2, …)`, three sites in
+ * pallet-multisig 46.0.0). The 1-of-N dispatch is `as_multi_threshold_1`, which takes no
+ * threshold, no timepoint and no weight bound, creates no storage entry, and executes the
+ * inner call immediately. 11 §11.5's check 13 already names it in the SafetyFilter closure.
+ *
+ * Naming the dispatch here rather than leaving it to the encoder means the confirm screen
+ * and the encoder cannot disagree about which call is being built.
+ */
+export type MultisigDispatch = 'as_multi' | 'as_multi_threshold_1';
+
 export type CallWrapper =
   | { readonly kind: 'none' }
   | {
@@ -158,14 +207,16 @@ export type ApprovalStep =
       readonly approvalsSoFar: 0;
       readonly approvalsNeeded: number;
       /**
-       * True at `threshold === 1`, where `as_multi` is a plain dispatch and the inner
-       * call executes on this very approval. Carried on `first` as well as `subsequent`
-       * because a confirm screen that assumed "the opening approval never executes"
-       * would tell a 1-of-N signer they were merely recording an intent while the call
-       * actually dispatched — the confirm surface would be describing a different
-       * transaction from the one being signed (11 §11.3 anti-substitution).
+       * True at `threshold === 1`, where the inner call executes on this very approval.
+       * Carried on `first` as well as `subsequent` because a confirm screen that assumed
+       * "the opening approval never executes" would tell a 1-of-N signer they were merely
+       * recording an intent while the call actually dispatched — the confirm surface would
+       * be describing a different transaction from the one being signed (11 §11.3
+       * anti-substitution).
        */
       readonly executes: boolean;
+      /** `as_multi_threshold_1` at threshold 1; `as_multi` otherwise. */
+      readonly dispatch: MultisigDispatch;
     }
   | {
       /** An entry exists: `maybe_timepoint` MUST carry the recorded `when`. */
@@ -175,6 +226,8 @@ export type ApprovalStep =
       readonly approvalsNeeded: number;
       /** This approval reaches the threshold, so the inner call dispatches now. */
       readonly executes: boolean;
+      /** Always `as_multi`: a stored entry can only exist at threshold ≥ 2. */
+      readonly dispatch: 'as_multi';
     }
   | {
       /**
@@ -199,21 +252,51 @@ export type ApprovalStep =
  * `entry` is `null` for an absent key — the ordinary first-approval case, not an error.
  */
 export function deriveApproval(
-  entry: Finalized<MultisigEntry | null>,
+  read: Finalized<MultisigRead>,
+  expected: MultisigKey,
   signer: AccountId,
   threshold: number,
 ): ApprovalStep {
   if (!Number.isInteger(threshold) || threshold < 1) {
     throw new RangeError(`multisig threshold must be a positive integer, got ${threshold}`);
   }
-  const value = entry.value;
+  // The read must be the one for *this* call. 02 §7.6 keys `Multisig.Multisigs` by
+  // `(AccountId, [u8; 32])`, so an entry — or an absence — belongs to exactly one pending
+  // call, and applying it to another produces a confidently wrong answer in both
+  // directions: a stale `null` sends `maybe_timepoint: None` for a call that has a
+  // recorded timepoint, and a stale entry shows another call's approvals on this call's
+  // confirm screen. Neither is detectable downstream, because both are well-formed.
+  const { key, entry: value } = read.value;
+  if (key.multisig !== expected.multisig || key.callHash !== expected.callHash) {
+    throw new RangeError(
+      `this Multisig.Multisigs read is for (${key.multisig}, ${key.callHash}) and the call ` +
+        `being built is (${expected.multisig}, ${expected.callHash}); refusing to treat one ` +
+        "pending call's approval state as another's",
+    );
+  }
+  if (threshold === 1) {
+    // `as_multi` refuses threshold < 2 (`MinimumThreshold`; pallet-multisig 46.0.0 checks
+    // it at three separate entry points). The 1-of-N path is `as_multi_threshold_1`, which
+    // stores nothing and dispatches immediately — so there is no entry to consult even if
+    // one were somehow present at this key, and reporting "approvals so far" for it would
+    // describe a queue that does not exist.
+    return {
+      kind: 'first',
+      maybeTimepoint: undefined,
+      approvalsSoFar: 0,
+      approvalsNeeded: 1,
+      executes: true,
+      dispatch: 'as_multi_threshold_1',
+    };
+  }
   if (value === null) {
     return {
       kind: 'first',
       maybeTimepoint: undefined,
       approvalsSoFar: 0,
       approvalsNeeded: threshold,
-      executes: threshold === 1,
+      executes: false,
+      dispatch: 'as_multi',
     };
   }
   const approvalsSoFar = value.approvals.length;
@@ -232,6 +315,7 @@ export function deriveApproval(
     approvalsNeeded: threshold,
     // This signer's approval is the one that reaches the threshold.
     executes: approvalsSoFar + 1 >= threshold,
+    dispatch: 'as_multi',
   };
 }
 
@@ -253,6 +337,94 @@ export function proxyTypeCovers(proxyType: string | undefined, callName: string)
   void callName;
   if (proxyType === undefined) return false;
   return proxyType === 'Any';
+}
+
+/** One row of `Proxy.Proxies(real).0` — `ProxyDefinition<AccountId, ProxyType, BlockNumber>`. */
+export interface ProxyDelegation {
+  readonly delegate: AccountId;
+  readonly proxyType: string;
+  /** Announcement delay in blocks. Non-zero means `proxy` alone is refused. */
+  readonly delay: number;
+}
+
+/**
+ * What the client knows about `real`'s delegations.
+ *
+ * Discriminated rather than an optional array, for the reason every fix in this review
+ * round turned on: an empty list and an unperformed read are the same value, and the
+ * empty-list reading is *"nobody may act for this account"* while the unperformed reading
+ * is *"we have no idea"*. Collapsing them makes a missing check look like a passed one.
+ */
+export type DelegationEvidence =
+  | { readonly kind: 'read'; readonly delegations: readonly ProxyDelegation[] }
+  | { readonly kind: 'unreadable'; readonly reason: string };
+
+export type ProxyAdmission =
+  | { readonly ok: true; readonly delegation: ProxyDelegation }
+  | { readonly ok: false; readonly reason: string };
+
+/**
+ * Whether `signer` may actually dispatch `callName` as `real` — 11 §11.3, §11.4 rule 2.
+ *
+ * **This check did not exist.** A wrapper could name `real = R` with `proxyType: 'Any'` and
+ * every precondition row would be evaluated against R — correctly, since that is the
+ * account the call would act as — while nothing established that the signer holds a
+ * delegation for R at all. With no delegation, all rows pass, the user signs, and
+ * `pallet_proxy::proxy` returns `NotProxy`. The client had told them it would work.
+ *
+ * `proxyTypeCovers` does not close this: it answers whether a *claimed* proxy type covers
+ * the call, taking the claim itself on trust. The claim is the part that has to come from
+ * the chain.
+ *
+ * Three refusals that are easy to leave out, each of which the runtime enforces:
+ *
+ *  - The delegation must name **this signer** as delegate. A delegation to somebody else is
+ *    not weaker evidence, it is evidence about a different account.
+ *  - The stored `proxyType` governs, not the wrapper's. A caller-supplied `'Any'` is a
+ *    claim; `Proxy.Proxies` is the record. Checking the claim against itself is the
+ *    self-agreement defect in its purest form.
+ *  - A **non-zero `delay`** means the delegation is announce-only: `proxy` is refused and
+ *    the call must go through `announce` and then `proxy_announced`. Ignoring the delay
+ *    admits a wrapper the runtime rejects with `Unannounced`.
+ */
+export function proxyAdmits(
+  evidence: DelegationEvidence,
+  signer: AccountId,
+  callName: string,
+): ProxyAdmission {
+  if (evidence.kind === 'unreadable') {
+    // INV-FE-12: an unproven capability is *absent*, with a named reason.
+    return { ok: false, reason: evidence.reason };
+  }
+  const forSigner = evidence.delegations.filter((d) => d.delegate === signer);
+  if (forSigner.length === 0) {
+    return {
+      ok: false,
+      reason:
+        'this account holds no proxy delegation for that address, so the chain would reject ' +
+        'the call with NotProxy. Nothing is signed.',
+    };
+  }
+  const usable = forSigner.find((d) => d.delay === 0 && proxyTypeCovers(d.proxyType, callName));
+  if (usable === undefined) {
+    const delayed = forSigner.find((d) => d.delay > 0 && proxyTypeCovers(d.proxyType, callName));
+    if (delayed !== undefined) {
+      return {
+        ok: false,
+        reason:
+          `this delegation carries an announcement delay of ${delayed.delay} blocks, so a direct ` +
+          'proxy call is rejected. It has to be announced first and dispatched after the delay.',
+      };
+    }
+    return {
+      ok: false,
+      reason:
+        `the delegation you hold is of type ${forSigner.map((d) => d.proxyType).join(', ')}, ` +
+        'which this release cannot prove covers this call. An unproven capability is treated ' +
+        'as absent (INV-FE-12).',
+    };
+  }
+  return { ok: true, delegation: usable };
 }
 
 /** Why a wrapped submission is refused, in the client's own words. */
