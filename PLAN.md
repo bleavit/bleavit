@@ -142,8 +142,22 @@ Legend: ⬜ pending · 🔨 in progress · ✅ done · ⛔ blocked · 🅿 defer
 > items, so it was plausible and wrong, and it is corrected. All 24 app gates green; changed-scope
 > Rust gate 476 tests, 0 warnings.
 >
-> **F6 now stands on one blocker: gate-to-signature staleness**, plus the 16 majors, still
-> credible-not-confirmed.
+> **The staleness blocker is closed too.** 11 §11.3 is normative — *"era 64 blocks from B′;
+> nonce from finalized `System.Account(who).nonce` at B′"* — and `mortalityFor` took a bare
+> `number` while `nonceFor` accepted a nonce read at **any** block. The era *is* the staleness
+> bound: the gate reads preconditions at one finalized block, the user then spends an unbounded
+> time at a wallet prompt while balances and freezes move, and nothing re-checks afterwards —
+> what stops a stale signature being *included* is that it expires. Anchored to the wrong block
+> the bound is simply not applied, and the transaction still looks valid. Both now take
+> **`GatePassed`**, which only `gate()` can mint, so "signed against the block that was gated" is
+> structural rather than a convention a caller must honour. The nonce compares the block **hash,
+> not the height**, because a reorg can reuse a height and the gate pinned one sibling. Three
+> mutations caught (binding removed; height compared instead of hash; a plausible +1 off-by-one),
+> and a fourth that failed to compile was redone rather than counted.
+>
+> **F6's blockers are now all closed.** What remains before it can go ✅ is the 16 majors, still
+> **credible-not-confirmed** — and the v26 work already refuted one of them (#8, for the `execute`
+> path), so triage before code is the right order rather than a caution.
 >
 > **Next:** rule SQ-589 (the precedent says freeze them, contract v25 → v26, additive, feed
 > regenerated), then the remaining blocker (gate-to-signature staleness) and the 16 majors — wrong

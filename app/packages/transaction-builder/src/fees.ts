@@ -20,6 +20,7 @@
  */
 
 import type { Finalized } from '@bleavit/chain-client';
+import type { GatePassed } from './machine.js';
 
 export type FeeAsset = 'VIT' | 'USDC';
 
@@ -128,14 +129,26 @@ export interface Mortality {
 }
 
 /**
- * The era for a payload signed against B′.
+ * The era for a payload signed against B′ — **B′ being the block the gate actually pinned**.
+ *
+ * 11 §11.3 says "era 64 blocks from B′", and this used to take a bare `number`, which let a
+ * caller name any block at all. That is the whole staleness bound: the gate reads
+ * preconditions at one finalized block and then the user spends an unbounded amount of time
+ * at a wallet prompt, during which balances, freezes and nonces move. Nothing re-checks
+ * afterwards — what keeps a stale signature from being *included* is that the era expires.
+ * An era anchored to the wrong block is therefore not an off-by-one; it is the bound not
+ * being applied, and it is invisible because the transaction still looks perfectly valid.
+ *
+ * So the anchor is taken from `GatePassed`, which only `gate()` can mint. "The era starts at
+ * the block the preconditions were read at" stops being a convention a caller must honour.
  *
  * A raw-external payload gets the longer era because it makes a round trip through an
  * air-gapped device or a QR scan, and a 64-block era would expire mid-transcription. It is
  * a *longer replay window*, so it is opt-in per payload rather than the default — the
  * shorter era is the safer one and the one every in-app signature uses.
  */
-export function mortalityFor(at: number, rawExternal = false): Mortality {
+export function mortalityFor(passed: GatePassed, rawExternal = false): Mortality {
+  const at = passed.at.blockNumber;
   if (!Number.isInteger(at) || at < 0) throw new RangeError(`not a block number: ${at}`);
   return {
     periodBlocks: rawExternal ? MORTAL_ERA_BLOCKS_RAW_EXTERNAL : MORTAL_ERA_BLOCKS,
@@ -152,9 +165,25 @@ export function mortalityFor(at: number, rawExternal = false): Mortality {
  * read as the base is what keeps this from drifting — an internal counter alone loses
  * track the moment anything is signed elsewhere for the same account.
  */
-export function nonceFor(finalizedNonce: Finalized<bigint>, inFlight: number): bigint {
+export function nonceFor(
+  passed: GatePassed,
+  finalizedNonce: Finalized<bigint>,
+  inFlight: number,
+): bigint {
   if (!Number.isInteger(inFlight) || inFlight < 0) {
     throw new RangeError(`in-flight count must be a non-negative integer: ${inFlight}`);
+  }
+  // 11 §11.3 says "at B′", and B′ is the gate's pin. A nonce read one block earlier is a
+  // perfectly valid `Finalized<bigint>` for a *different* state, and signing with it
+  // produces a transaction the chain drops as a duplicate or a gap — a failure the user
+  // sees as "nothing happened". Comparing the hash rather than the height is deliberate:
+  // two blocks can share a height across a reorg, and the gate pinned one of them.
+  if (finalizedNonce.status.blockHash !== passed.at.blockHash) {
+    throw new RangeError(
+      `the nonce was read at ${finalizedNonce.status.blockHash} but the gate pinned ` +
+        `${passed.at.blockHash}; a nonce from another block does not describe the state ` +
+        'this signature was gated against (11 §11.3)',
+    );
   }
   return finalizedNonce.value + BigInt(inFlight);
 }
