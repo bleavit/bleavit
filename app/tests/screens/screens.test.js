@@ -33,6 +33,7 @@ import {
   screenFor,
   VerificationPanelView,
   screenForHash,
+  shellDecoders,
   sudoActive,
   sudoBannerFor,
 } from '@bleavit/application';
@@ -1056,4 +1057,94 @@ test('an indeterminate age is danger too, never quietly info', () => {
   const html = renderToStaticMarkup(h(VerificationPanelView, { panel: PANEL, checkpoint: clockBack }));
   assert.ok(/cannot be established/.test(html), html);
   assert.ok(html.includes('data-severity="danger"'), html);
+});
+
+// -------------------- end to end: recorded bytes → real codecs → the shell
+
+/** The exact values recorded from the runtime at one pinned block. */
+function recordedStorageValue(fixture) {
+  const doc = JSON.parse(
+    readFileSync(join(REPO, 'app/fixtures/chainhead', fixture), 'utf8'),
+  );
+  for (const request of doc.requests) {
+    for (const event of request.response.events ?? []) {
+      for (const item of event.items ?? []) {
+        if (item.value !== undefined) return item.value;
+      }
+    }
+  }
+  throw new Error(`${fixture} records no storage value`);
+}
+
+test('the recorded chain bytes reach the shell as the right model', async () => {
+  // The whole path with no node: recorded bytes → the real PAPI codecs → the read layer →
+  // the screen model. Every layer between is exercised, and the expected values come from
+  // the RUNTIME's own recording rather than from a shape written out of the docs — which is
+  // how the PhaseFlags defect was found in the first place.
+  const { bleavit } = await import('@polkadot-api/descriptors');
+  const { loadCodecs } = await import('@bleavit/chain-client');
+  const codecs = await loadCodecs(bleavit);
+
+  const pin = { blockHash: '0xbeef', blockNumber: 4242 };
+  const reader = readerDouble(pin, {
+    [SHELL_READS.epochOf]: recordedStorageValue('storage.epoch.epoch_of.json'),
+    [SHELL_READS.phaseFlags]: recordedStorageValue('storage.constitution.phase_flags.json'),
+  });
+
+  const { state, undecodable } = await readShellState(reader, shellDecoders(codecs));
+  assert.deepEqual(undecodable, [], JSON.stringify(undecodable));
+  assert.equal(state.epoch.value, 1);
+  assert.equal(state.phaseLabel.value, 'Intake');
+  assert.equal(state.phaseFlags.value, 17);
+
+  // And the consequence that matters: this chain has sudo, so the banner shows.
+  assert.equal(sudoActive(state.phaseFlags.value), true);
+  const html = renderToStaticMarkup(
+    h(Shell, { chain: state, handoffEnabled: true, activeScreen: 'S21', children: null }),
+  );
+  assert.ok(html.includes('data-fact="sudo-era-banner"'), 'the banner is absent on a sudo chain');
+  assert.ok(html.includes('Intake'), html);
+});
+
+test('a decode failure keeps its own reason instead of being relabelled', () => {
+  // Mutation M60 survived without this: replacing the propagation with a shape check still
+  // produced `ok: false`, so every existing assertion passed — while the reason changed
+  // from "these bytes did not decode" to "this is not a record", which sends a reader
+  // hunting a runtime-shape problem that is not there.
+  const failing = {
+    query: {
+      Epoch: { EpochOf: { value: { dec: () => { throw new Error('bytes ran out'); } } } },
+      Constitution: { PhaseFlags: { value: { dec: () => { throw new Error('bytes ran out'); } } } },
+    },
+  };
+  const built = shellDecoders(failing);
+  for (const decode of [built.epochOf, built.phaseFlags]) {
+    const result = decode('0xdead');
+    assert.equal(result.ok, false);
+    assert.match(result.reason, /bytes ran out/, `the underlying reason was replaced: ${result.reason}`);
+  }
+});
+
+test('a runtime whose EpochOf shape moved fails loudly rather than rendering NaN', async () => {
+  // The direction a silent field read gets wrong: `undefined` in, `NaN` and the word
+  // "undefined" on the header out.
+  const decoders = {
+    epochOf: () => ({ ok: true, value: { somethingElse: 1 } }),
+    phaseFlags: () => ({ ok: true, value: 0 }),
+  };
+  const pin = { blockHash: '0xbeef', blockNumber: 1 };
+  // The shape check lives in `shellDecoders`, so drive it directly with a stub codec set.
+  const { shellDecoders: build } = await import('@bleavit/application');
+  const stub = { query: { Epoch: { EpochOf: { value: { dec: () => ({ somethingElse: 1 }) } } },
+                          Constitution: { PhaseFlags: { value: { dec: () => 1.5 } } } } };
+  const built = build(stub);
+  const epoch = built.epochOf('0x00');
+  assert.equal(epoch.ok, false);
+  assert.match(epoch.reason, /encodes the epoch differently/);
+  // A non-integer bitset is refused too: testing bits on a float yields nonsense silently.
+  const flags = built.phaseFlags('0x00');
+  assert.equal(flags.ok, false);
+  assert.match(flags.reason, /integer/);
+  void decoders;
+  void pin;
 });

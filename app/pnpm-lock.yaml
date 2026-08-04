@@ -444,6 +444,9 @@ importers:
       '@bleavit/application':
         specifier: workspace:*
         version: link:../../src/application
+      '@bleavit/chain-client':
+        specifier: workspace:*
+        version: link:../../packages/chain-client
       '@bleavit/contexts':
         specifier: workspace:*
         version: link:../../packages/contexts
@@ -468,6 +471,9 @@ importers:
       '@bleavit/verify':
         specifier: workspace:*
         version: link:../../packages/verify
+      '@polkadot-api/descriptors':
+        specifier: workspace:*
+        version: link:../../packages/papi-descriptors
       react:
         specifier: 19.2.8
         version: 19.2.8

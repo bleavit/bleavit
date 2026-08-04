@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "@bleavit/application": "workspace:*",
+    "@bleavit/chain-client": "workspace:*",
     "@bleavit/contexts": "workspace:*",
     "@bleavit/features-handoff": "workspace:*",
     "@bleavit/features-tx": "workspace:*",
@@ -16,6 +17,7 @@
     "@bleavit/shared-types": "workspace:*",
     "@bleavit/ui": "workspace:*",
     "@bleavit/verify": "workspace:*",
+    "@polkadot-api/descriptors": "workspace:*",
     "react": "19.2.8",
     "react-dom": "19.2.8"
   }

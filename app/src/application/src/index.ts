@@ -43,3 +43,4 @@ export {
   sudoActive,
   type PhaseFlagName,
 } from './phase-flags.js';
+export { shellDecoders } from './shell-decoders.js';
