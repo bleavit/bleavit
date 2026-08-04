@@ -1,2 +1,4 @@
-// bleavit.intent.v1 parse/serialize. Closed action vocabulary, no bytes-typed field. F20.
-export {};
+// `bleavit.intent.v1` — the only inbound format (10 §13, 11 §11.14). F20.
+export * from './refusals.js';
+export * from './parse.js';
+export * from './clamp.js';

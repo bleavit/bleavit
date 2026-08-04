@@ -285,6 +285,12 @@ importers:
         specifier: workspace:*
         version: link:../../packages/transaction-builder
 
+  tests/intents:
+    dependencies:
+      '@bleavit/intents':
+        specifier: workspace:*
+        version: link:../../packages/intents
+
   tests/local-index:
     dependencies:
       '@bleavit/local-index':

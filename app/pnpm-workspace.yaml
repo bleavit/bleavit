@@ -14,3 +14,4 @@ packages:
   - 'tests/transaction-builder'
   - 'tests/verify'
   - 'tests/local-index'
+  - 'tests/intents'
