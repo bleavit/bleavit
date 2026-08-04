@@ -200,12 +200,16 @@ export const MAX_DEPTH = FROZEN_CORE_DEPTH + 1;
  * The format
  * ------------------------------------------------------------------------------------ */
 
-/** The chain binding every inbound document is gated on by exact equality (10 §13.1). */
-export interface ChainBinding {
-  readonly genesisHash: string;
-  readonly specVersion: number;
-  readonly contractVersion: number;
-}
+/**
+ * The chain binding every inbound document is gated on by exact equality (10 §13.1).
+ *
+ * Re-exported from `@bleavit/handoff-envelope` rather than declared here. 10 §13.1 states
+ * the binding once for all three formats, and the two copies would never meet in a call
+ * site — inbound parses it, outbound emits it — so a drift between them would be invisible
+ * to the compiler rather than caught by it.
+ */
+import type { ChainBinding } from '@bleavit/handoff-envelope';
+export type { ChainBinding };
 
 export interface IntentAction {
   readonly kind: IntentActionKind;

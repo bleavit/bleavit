@@ -17,4 +17,7 @@
 export { canonicalJson, digestPreimage } from '@bleavit/handoff-envelope';
 
 export const CONTEXT_DOMAIN_TAG = 'bleavit.context.v1';
-export const RECEIPT_DOMAIN_TAG = 'bleavit.receipt.v1';
+
+// `RECEIPT_DOMAIN_TAG` used to sit here, which contradicted the paragraph above it: the
+// context exporter has no business emitting a receipt tag. It lives in `@bleavit/receipts`.
+// The cross-format separation test moved with it, to the suite that can import both.

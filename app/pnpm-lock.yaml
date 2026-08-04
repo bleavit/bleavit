@@ -116,6 +116,12 @@ importers:
 
   packages/receipts:
     dependencies:
+      '@bleavit/chain-client':
+        specifier: workspace:*
+        version: link:../chain-client
+      '@bleavit/handoff-envelope':
+        specifier: workspace:*
+        version: link:../handoff-envelope
       '@bleavit/shared-types':
         specifier: workspace:*
         version: link:../shared-types
@@ -338,6 +344,18 @@ importers:
       '@bleavit/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
+
+  tests/receipts:
+    dependencies:
+      '@bleavit/contexts':
+        specifier: workspace:*
+        version: link:../../packages/contexts
+      '@bleavit/handoff-envelope':
+        specifier: workspace:*
+        version: link:../../packages/handoff-envelope
+      '@bleavit/receipts':
+        specifier: workspace:*
+        version: link:../../packages/receipts
 
   tests/release:
     dependencies:

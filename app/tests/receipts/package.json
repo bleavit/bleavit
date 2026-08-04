@@ -1,0 +1,12 @@
+{
+  "name": "@bleavit/receipts-suite",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node --test *.test.js" },
+  "dependencies": {
+    "@bleavit/receipts": "workspace:*",
+    "@bleavit/contexts": "workspace:*",
+    "@bleavit/handoff-envelope": "workspace:*"
+  }
+}

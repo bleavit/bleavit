@@ -19,7 +19,6 @@ import {
   ACCOUNT_SCOPES,
   CONTEXT_DOMAIN_TAG,
   PUBLIC_SCOPES,
-  RECEIPT_DOMAIN_TAG,
   ScopeError,
   canonicalJson,
   defaultScope,
@@ -124,14 +123,8 @@ test('the pre-image is tag ++ NUL ++ canonical(core)', () => {
   assert.equal(bytes.includes(0), true, 'the NUL terminator is missing');
 });
 
-test('the domain tag separates the two formats', () => {
-  // Without separation a receipt's digest could validate a context.
-  const core = { same: 'core' };
-  assert.notDeepEqual(
-    Array.from(digestPreimage(CONTEXT_DOMAIN_TAG, core)),
-    Array.from(digestPreimage(RECEIPT_DOMAIN_TAG, core)),
-  );
-});
+// The cross-format separation test moved to tests/receipts with RECEIPT_DOMAIN_TAG:
+// it needs both tags, and the receipt tag belongs to the receipt package.
 
 test('the NUL makes the tag/payload boundary unambiguous', () => {
   // Concatenation alone is ambiguous: tag "ab" + payload "c" and tag "a" + payload "bc"

@@ -17,4 +17,5 @@ packages:
   - 'tests/local-index'
   - 'tests/intents'
   - 'tests/contexts'
+  - 'tests/receipts'
   - 'tests/release'
