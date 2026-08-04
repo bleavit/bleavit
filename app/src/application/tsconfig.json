@@ -5,11 +5,27 @@
     "rootDir": "src"
   },
   "include": [
-    "src/**/*.ts"
+    "src/**/*.ts",
+    "src/**/*.tsx"
   ],
   "references": [
     {
       "path": "../../packages/platform"
+    },
+    {
+      "path": "../../packages/shared-types"
+    },
+    {
+      "path": "../../packages/ui"
+    },
+    {
+      "path": "../features/analysis"
+    },
+    {
+      "path": "../features/handoff"
+    },
+    {
+      "path": "../features/tx"
     }
   ]
 }

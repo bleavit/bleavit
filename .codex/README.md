@@ -24,7 +24,7 @@ codex exec "$(cat .codex/prompts/spec-audit.md) Scope: ledger"
 
 | Playbook | Mirrors | Purpose |
 |---|---|---|
-| `prompts/implement-next.md` | `/implement` | One spec-driven milestone increment, PLAN.md updated |
+| `prompts/implement-next.md` | `/implement` | Spec-driven milestone increments, PLAN.md updated, continuing to the next item |
 | `prompts/spec-audit.md` | `/spec-audit` | Compliance audit vs `docs/architecture/` (report-only) |
 | `prompts/sync-docs.md` | `/sync-docs` | Re-true the living documents against the repo |
 

@@ -7,4 +7,16 @@ export {
   setPinned,
   type WorkerStatus,
 } from './release-worker.js';
-export { boot } from './main.js';
+export { boot, screenForHash } from './boot.js';
+export {
+  INVENTORY_IDS,
+  SCREENS,
+  navigationFor,
+  placementOf,
+  reachableScreens,
+  type Navigation,
+  type Placement,
+  type Screen,
+  type ScreenArea,
+} from './screens.js';
+export { EpochHeader, Shell, sudoBannerFor, type ShellChainState } from './shell.js';

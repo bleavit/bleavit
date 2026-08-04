@@ -15,6 +15,11 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@bleavit/platform": "workspace:*"
+    "@bleavit/features-analysis": "workspace:*",
+    "@bleavit/features-handoff": "workspace:*",
+    "@bleavit/features-tx": "workspace:*",
+    "@bleavit/platform": "workspace:*",
+    "@bleavit/shared-types": "workspace:*",
+    "@bleavit/ui": "workspace:*"
   }
 }

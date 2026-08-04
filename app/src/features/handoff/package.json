@@ -15,13 +15,14 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@bleavit/shared-types": "workspace:*",
     "@bleavit/chain-client": "workspace:*",
-    "@bleavit/protocol": "workspace:*",
     "@bleavit/contexts": "workspace:*",
+    "@bleavit/handoff-envelope": "workspace:*",
     "@bleavit/intents": "workspace:*",
-    "@bleavit/receipts": "workspace:*",
     "@bleavit/llm-handoff": "workspace:*",
+    "@bleavit/protocol": "workspace:*",
+    "@bleavit/receipts": "workspace:*",
+    "@bleavit/shared-types": "workspace:*",
     "@bleavit/ui": "workspace:*"
   }
 }

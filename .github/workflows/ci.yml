@@ -323,6 +323,35 @@ jobs:
         # The only suite that tests the firewall REJECTS rather than that the app
         # works. Includes an anti-vacuity positive control.
         run: pnpm run test:firewall
+      - name: Render provenance and the never-defer facts (INV-FE-9, 11 §11.2)
+        working-directory: app
+        # The `ui` layer. Rendered headlessly with `react-dom/server`, because every
+        # property here is about what the markup says. The two that fail silently: a
+        # badge that renders empty (which no happy-path test distinguishes from a
+        # badge that renders), and a meaning-changing fact wrapped in a `<details>`
+        # by a later layout change — 11 §11.2 constraint 3 names five of those and
+        # this suite binds the list to the section citations in doc 11 itself.
+        run: pnpm run test:ui
+      - name: The default surface — S1, S2, confirm, S21/S22 (11 §11.2–§11.5, §11.14)
+        working-directory: app
+        # Includes the 11 §11.2 constraint-1 check that matters most: with the
+        # handoff surfaces DISABLED (the 15 §4.8 no-infrastructure posture) every
+        # other screen is still reachable, and the client still has a front door.
+        # "Demoting a surface is permitted; removing one is not."
+        run: pnpm run test:screens
+      - name: Emitted imports on every handoff path (10 §10.1, V-109)
+        working-directory: app
+        # The hole the compile gate and dependency-cruiser both miss, measured
+        # rather than reasoned: `tsc` resolves `react/jsx-runtime` to `@types/react`
+        # at the workspace root and compiles clean with the runtime package reachable
+        # from nowhere, and dependency-cruiser cruises SOURCE so a compiler-injected
+        # import is absent from its graph entirely. A handoff screen written the
+        # obvious way would have carried an external import with every gate green.
+        # This reads what was actually emitted, which reflects source AND compiler.
+        run: pnpm run check:handoff-emitted
+      - name: Emitted-import gate witness
+        working-directory: app
+        run: pnpm run check:handoff-emitted:witness
       - name: Protocol math vs the reference corpus (04 §5, 15 §4.8)
         working-directory: app
         # Reads `reference-model/fixtures/vectors.json` in place — the single

@@ -1,0 +1,21 @@
+{
+  "name": "@bleavit/screens-suite",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test *.test.js"
+  },
+  "dependencies": {
+    "@bleavit/application": "workspace:*",
+    "@bleavit/features-tx": "workspace:*",
+    "@bleavit/features-handoff": "workspace:*",
+    "@bleavit/ui": "workspace:*",
+    "@bleavit/shared-types": "workspace:*",
+    "@bleavit/intents": "workspace:*",
+    "@bleavit/handoff-envelope": "workspace:*",
+    "@bleavit/contexts": "workspace:*",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  }
+}

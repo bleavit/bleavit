@@ -15,7 +15,7 @@
     "depcruise": "depcruise packages src --config .dependency-cruiser.cjs",
     "test:firewall": "node --test tests/firewall/*.test.js",
     "test:protocol": "node --test tests/protocol/*.test.js",
-    "test": "pnpm run test:firewall && pnpm run test:protocol && pnpm run test:mock-runtime && pnpm run test:chain-client && pnpm run test:descriptors && pnpm run test:tx && pnpm run test:verify && pnpm run test:local-index && pnpm run test:intents && pnpm run test:contexts && pnpm run schemas:check && pnpm run skills:check && pnpm run test:receipts && pnpm run test:llm-handoff && pnpm run test:release && pnpm run check:handoff-network && pnpm run check:handoff-network:witness && pnpm run check:chain-literals && pnpm run check:chain-literals:witness && pnpm run check:casts && pnpm run surface:check && pnpm run foreign:check && pnpm run check:budget && pnpm run depcruise:witness",
+    "test": "pnpm run test:firewall && pnpm run test:ui && pnpm run test:screens && pnpm run test:protocol && pnpm run test:mock-runtime && pnpm run test:chain-client && pnpm run test:descriptors && pnpm run test:tx && pnpm run test:verify && pnpm run test:local-index && pnpm run test:intents && pnpm run test:contexts && pnpm run schemas:check && pnpm run skills:check && pnpm run test:receipts && pnpm run test:llm-handoff && pnpm run test:release && pnpm run check:handoff-network && pnpm run check:handoff-network:witness && pnpm run check:handoff-emitted && pnpm run check:handoff-emitted:witness && pnpm run check:chain-literals && pnpm run check:chain-literals:witness && pnpm run check:casts && pnpm run surface:check && pnpm run foreign:check && pnpm run check:budget && pnpm run depcruise:witness",
     "depcruise:witness": "depcruise tests/depcruise-witness --config tests/depcruise-witness/.dependency-cruiser.cjs --output-type err && (echo 'WITNESS DID NOT FIRE \u2014 the rule set is vacuous' && exit 1) || echo 'witness fired: rules are live'",
     "check:casts": "node tools/check-finalized-casts.mjs",
     "descriptors:generate": "node tools/check-descriptor-drift.mjs --update",
@@ -45,10 +45,16 @@
     "schemas:generate": "node tools/generate-schemas.mjs --write",
     "schemas:check": "node tools/generate-schemas.mjs",
     "skills:generate": "node tools/generate-skill-examples.mjs --write && node tools/generate-skill-instructions.mjs --write",
-    "skills:check": "node tools/generate-skill-examples.mjs && node tools/generate-skill-instructions.mjs"
+    "skills:check": "node tools/generate-skill-examples.mjs && node tools/generate-skill-instructions.mjs",
+    "check:handoff-emitted": "node tools/check-handoff-emitted-imports.mjs",
+    "check:handoff-emitted:witness": "node tools/check-handoff-emitted-imports.mjs --witness",
+    "test:ui": "node --test tests/ui/*.test.js",
+    "test:screens": "node --test tests/screens/*.test.js"
   },
   "devDependencies": {
     "@polkadot-api/substrate-bindings": "0.20.3",
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.4",
     "dependency-cruiser": "17.0.1",
     "esbuild": "0.28.1",
     "polkadot-api": "2.1.8",
