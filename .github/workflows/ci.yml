@@ -385,6 +385,18 @@ jobs:
         working-directory: app
         run: pnpm run test:verify
 
+      - name: Gap-tolerant coverage (F8, 10 §6.3)
+        # The property is a REFUSAL: adjacent ranges of different provenance must not
+        # merge. The natural index implementation extends a cursor and joins whatever
+        # touches, and doing that here is a silent promotion — a merged range must claim
+        # one origin, and claiming `self` tells the user that provider blocks were
+        # light-client verified, which 10 §2.2 says has no promotion path at all. Holes
+        # are first-class for the same reason: 10 §6.3 withdrew the old "history
+        # continuous" promise because a 1,200-block gap cannot be closed with verified
+        # data, and code that quietly closed it would re-implement the withdrawn promise.
+        working-directory: app
+        run: pnpm run test:local-index
+
       - name: smoldot artifact budget (10 §9.3, FE-P4)
         # A budget nothing measures is a sentence, and the one certain thing about a
         # dependency's compressed size is that it changes. Fails closed if the pinned

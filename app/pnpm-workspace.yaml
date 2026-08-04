@@ -13,3 +13,4 @@ packages:
   - 'tests/descriptors'
   - 'tests/transaction-builder'
   - 'tests/verify'
+  - 'tests/local-index'

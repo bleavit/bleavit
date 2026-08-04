@@ -285,6 +285,12 @@ importers:
         specifier: workspace:*
         version: link:../../packages/transaction-builder
 
+  tests/local-index:
+    dependencies:
+      '@bleavit/local-index':
+        specifier: workspace:*
+        version: link:../../packages/local-index
+
   tests/mock-runtime:
     dependencies:
       '@bleavit/mock-runtime':
