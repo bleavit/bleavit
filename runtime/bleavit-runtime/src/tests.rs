@@ -1967,6 +1967,27 @@ fn n4_client_bond_and_guardian_track_are_live_only_when_explicitly_seated() {
         let location = staging_xcm::latest::Location::here();
         let owner = account(90);
 
+        // Genesis SEATS `svc.client_bond` since the user adopted it at 100,000
+        // VIT on 2026-08-04 (13 §1), so admission is open by default and this
+        // test can no longer prove fail-closed by simply not seating it.
+        let key = pallet_constitution::key16(b"svc.client_bond");
+        let seated = pallet_constitution::Params::<Runtime>::get(key)
+            .expect("genesis must seat svc.client_bond after its 2026-08-04 adoption");
+        let bond = 100_000 * currency::VIT;
+        assert_eq!(
+            seated.value,
+            pallet_constitution::ParamValue::Balance(bond),
+            "the adopted client bond is 100,000 VIT = 4x att.bond"
+        );
+
+        // The fail-closed proof is KEPT, by removing the row rather than by
+        // never seating it. The consumer reads the live `Params` row only and
+        // has no default or genesis fallback, so an absent row must still
+        // refuse before any hold or registry write — that is what makes the
+        // row's presence the arming act rather than a formality, and it stays
+        // true after adoption. Deleting this assertion because the default
+        // changed would silently drop the only coverage of that path.
+        pallet_constitution::Params::<Runtime>::remove(key);
         assert_noop!(
             ClientRegistry::admit_client(
                 crate::track_origins::Origin::GuardianTrack.into(),
@@ -1978,24 +1999,7 @@ fn n4_client_bond_and_guardian_track_are_live_only_when_explicitly_seated() {
         );
         assert_eq!(pallet_client_registry::ClientCount::<Runtime>::get(), 0);
         assert!(!pallet_client_registry::ClientIdOf::<Runtime>::contains_key(&location));
-
-        let bond = 1_000 * currency::VIT;
-        let key = pallet_constitution::key16(b"svc.client_bond");
-        pallet_constitution::Params::<Runtime>::insert(
-            key,
-            pallet_constitution::ParamRecord {
-                key,
-                value: pallet_constitution::ParamValue::Balance(bond),
-                min: pallet_constitution::ParamValue::Balance(1_000 * currency::VIT),
-                max: pallet_constitution::ParamValue::Balance(1_000_000 * currency::VIT),
-                max_delta: None,
-                cooldown_epochs: 2,
-                last_changed_epoch: 0,
-                last_change_block: 0,
-                class: pallet_constitution::ParamClass::Param,
-                kernel_bounded: false,
-            },
-        );
+        pallet_constitution::Params::<Runtime>::insert(key, seated);
         assert_ok!(Balances::force_set_balance(
             RuntimeOrigin::root(),
             MultiAddress::Id(owner.clone()),

@@ -171,6 +171,11 @@ def _raw_unit(kind: ParamKind, doc_unit: str) -> str:
             "prob": "1e-9 probability",
             "—": "1e-9",
             "× of (b_acc + b_rej)": "1e-9 multiple",
+            # svc.price_cap, adopted 2026-08-04. It became visible to this
+            # parser only on adoption: the extractor reads rows with a concrete
+            # value, so a `[VERIFY]` row is invisible here and its unit spelling
+            # is unverified until the day it is seeded.
+            "× of the §8.1 tariff": "1e-9 x tariff",
         }[unit]
     if kind is ParamKind.PERBILL:
         return {"bps": "ppb", "NAV": "ppb NAV", "—": "ppb fraction"}[unit]
@@ -496,15 +501,20 @@ class RegistryGroundingTests(unittest.TestCase):
         # 205 -> 206 on 2026-08-03 with N14's `svc.price_cap` (16 §8.6), the
         # scarcity multiplier's ceiling. It is the ONLY row that milestone adds:
         # the multiplier's decay anchors to `svc.max_window` and its per-admission
-        # step is `svc.price_cap^(1/svc.max_live)`, both derived from keys already
-        # here. The genesis counters do NOT move — the row ships `[VERIFY]`-unset
-        # like `svc.client_bond`, but unlike it the unset consumer defaults to
-        # `M = 1` (today's flat tariff) rather than refusing, because it gates an
-        # allocation refinement and not a safety gate.
+        # step is `(svc.price_cap - 1) / svc.max_live`, both derived from keys
+        # already here.
+        #
+        # The GENESIS counters then moved 111 -> 113 on 2026-08-04, when the user
+        # adopted the last two `[VERIFY]` svc.* rows: `svc.client_bond` at
+        # 100,000 VIT and `svc.price_cap` at 4x. The total entry count does NOT
+        # move with them — adoption seeds existing rows, it does not add any.
+        # That asymmetry is the point of keeping the two counts separate: a
+        # change that moves both is a new key, a change that moves only the
+        # genesis count is an adoption, and the two need different scrutiny.
         self.assertEqual(len(entries), 206)
-        self.assertEqual(len(json_keys), 111)
-        self.assertEqual(len(classified_genesis), 111)
-        self.assertEqual(len(model_bytes), 111)
+        self.assertEqual(len(json_keys), 113)
+        self.assertEqual(len(classified_genesis), 113)
+        self.assertEqual(len(model_bytes), 113)
         self.assertEqual(model_bytes, json_bytes)
         self.assertEqual(model_bytes, classified_bytes)
 
