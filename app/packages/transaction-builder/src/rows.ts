@@ -215,7 +215,12 @@ const P9: readonly PreconditionClause[] = [
   clause('P-9', 'the recipient has room for another position', 'constant.ledger.max_positions_per_account', 'constant', 'recipient'),
   clause('P-9', 'the recipient’s current position count leaves room', 'storage.ledger.position_totals', 'storage', 'recipient'),
   clause('P-9', 'the amount is at least the minimum transfer', 'constant.ledger.min_transfer', 'constant', 'chain'),
-  clause('P-9', 'you can cover the per-entry position deposit', 'constant.ledger.position_deposit', 'constant', 'acting'),
+  // The deposit is taken from the **entry owner**, and 03 §4's storage-deposit paragraph
+  // names that explicitly as "the *recipient* on `transfer`". Classified `acting` at
+  // first, which is the sender — so a sender with a healthy balance passed the row while
+  // the runtime rejected the transfer for the recipient's insufficient deposit headroom.
+  // The wording moved with the subject: "you" was the wrong person.
+  clause('P-9', 'the recipient can cover the per-entry position deposit', 'constant.ledger.position_deposit', 'constant', 'recipient'),
 ];
 
 /** P-10 — `epoch.submit`. The preimage must be *noted and pinned*, not merely noted. */

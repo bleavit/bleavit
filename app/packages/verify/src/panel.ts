@@ -53,8 +53,23 @@ export interface VerificationPanel {
   readonly rows: readonly PanelRow[];
   /** Present when something diverged. Surfaced, never repaired (INV-FE-8). */
   readonly warnings: readonly string[];
-  /** False when a terminal identity failure means the app must not operate. */
-  readonly mayOperate: boolean;
+  /**
+   * Whether the chain identity has been **positively verified** — the gate for signing.
+   *
+   * Named for the check rather than for permission, because the earlier name
+   * (`mayOperate`) invited the fail-open reading it shipped with: an app that had simply
+   * never run the check got `true`, so *omitting* verification was indistinguishable
+   * from passing it. INV-FE-11 requires identity verification at boot and makes a
+   * mismatch terminal; "not checked yet" must therefore sit on the same side as "wrong",
+   * not on the same side as "right".
+   *
+   * This is deliberately **not** what decides whether the panel renders. 10 §3.2 lists
+   * the panel among the surfaces that still work under `FE-BOOT-002`, when no verified
+   * read exists at all — so the panel is always available and this flag is false while
+   * it renders. The two questions were conflated in one boolean, and separating them is
+   * the fix.
+   */
+  readonly chainIdentityVerified: boolean;
 }
 
 const short = (hash: Hash32 | string): string =>
@@ -134,6 +149,9 @@ export function buildPanel(
     status,
     rows,
     warnings,
-    mayOperate: chain === undefined ? true : mayOperate(chain),
+    // Fail-closed on the unchecked path: an absent verdict is "not verified", never
+    // "fine so far". The previous form returned true when `chain === undefined`, which
+    // made skipping the check indistinguishable from passing it.
+    chainIdentityVerified: chain === undefined ? false : mayOperate(chain),
   };
 }

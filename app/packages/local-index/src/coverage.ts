@@ -39,14 +39,56 @@
 /** Where a range's blocks came from. `self` is the only light-client-verified origin. */
 export type RangeOrigin = 'self' | 'operator' | 'snapshot' | 'indexer';
 
-export interface CoverageRange {
+declare const SELF_INGESTED: unique symbol;
+
+/**
+ * Proof that a range came from the local light client.
+ *
+ * A string union is not authority. With `origin` as a plain field, any caller could write
+ * `{ origin: 'self' }` around an operator payload and `isVerifiedAt` would agree — the
+ * relabelled range would then be indistinguishable from one smoldot actually served, which
+ * is the silent promotion this module's whole no-splice rule exists to prevent, arriving
+ * through the front door instead.
+ *
+ * So `self` carries a brand only `selfRange()` can mint, exactly as `Finalized<T>` is
+ * constructible only inside `chain-client` and for the same reason. A forged `self` range
+ * is now a type error rather than a naming convention.
+ */
+export interface SelfIngested {
+  readonly [SELF_INGESTED]: true;
+}
+
+export type CoverageRange = {
   /** Inclusive, contiguous. */
   readonly fromBlock: number;
   readonly toBlock: number;
-  readonly origin: RangeOrigin;
-  /** Required when `origin !== 'self'`; absent for `self`. */
-  readonly providerId?: string;
   readonly ingestedAt: number;
+} & (
+  | ({ readonly origin: 'self'; readonly providerId?: undefined } & SelfIngested)
+  | { readonly origin: Exclude<RangeOrigin, 'self'>; readonly providerId: string }
+);
+
+/**
+ * Mint a light-client-ingested range. The only way to obtain `origin: 'self'`.
+ *
+ * Callable only where the ingest loop actually holds light-client output; the brand it
+ * attaches has no runtime representation, so this costs nothing and is checked entirely
+ * by the compiler — like the `Finalized<T>` brand, whose companion cast gate exists
+ * because a brand stops object literals and not assertions.
+ */
+export function selfRange(fromBlock: number, toBlock: number, ingestedAt: number): CoverageRange {
+  return { fromBlock, toBlock, ingestedAt, origin: 'self' } as CoverageRange;
+}
+
+/** Mint a range from a non-verifying source. `providerId` is required by the type. */
+export function providerRange(
+  origin: Exclude<RangeOrigin, 'self'>,
+  providerId: string,
+  fromBlock: number,
+  toBlock: number,
+  ingestedAt: number,
+): CoverageRange {
+  return { fromBlock, toBlock, ingestedAt, origin, providerId };
 }
 
 export interface Hole {
@@ -74,12 +116,17 @@ function assertWellFormed(range: CoverageRange): void {
   if (range.toBlock < range.fromBlock) {
     throw new CoverageError(`range ${range.fromBlock}..${range.toBlock} runs backwards`);
   }
-  // A non-`self` range without a provider is unattributable, and an unattributable
-  // range is exactly the one a later reader would be tempted to treat as `self`.
-  if (range.origin !== 'self' && range.providerId === undefined) {
-    throw new CoverageError(`a ${range.origin} range must name its providerId`);
+  // The discriminated union already makes both of these unconstructible in TypeScript —
+  // narrowing proves the second branch `never`, which is the compiler confirming the type
+  // does its job. The runtime check is kept anyway and reads through a widened view,
+  // because the callers that matter here are **untyped**: the suites are JavaScript, and
+  // so is anything that hands this package a decoded record from storage. A type that
+  // cannot be violated in TS is still violated by JSON.
+  const loose = range as { origin: string; providerId?: string };
+  if (loose.origin !== 'self' && loose.providerId === undefined) {
+    throw new CoverageError(`a ${loose.origin} range must name its providerId`);
   }
-  if (range.origin === 'self' && range.providerId !== undefined) {
+  if (loose.origin === 'self' && loose.providerId !== undefined) {
     throw new CoverageError('a self range is light-client-ingested and has no provider');
   }
 }

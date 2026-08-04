@@ -59,15 +59,44 @@ export interface SelfCheckResult {
  * them would not run in the others — while the comparison, which is the part that decides
  * whether a user is warned, is identical everywhere and belongs in one tested place.
  */
+/**
+ * Read a hash map as **own-key, null-prototype data**.
+ *
+ * Both sides of this comparison arrive from outside — a signed manifest and whatever a
+ * gateway served — and a plain object lookup consults the prototype chain while
+ * `Object.entries` does not. Those two disagreeing is a bypass, not a curiosity:
+ * `Object.create({ 'app.js': goodHash })` makes `served['app.js']` return the good hash
+ * at lookup time while the enumeration never lists it, so a tampered `app.js` is neither
+ * compared nor reported as unexpected. Copying own keys into a null-prototype map makes
+ * lookup and enumeration answer the same question.
+ */
+function ownKeysOnly(source: Readonly<Record<string, Hash32>>): Map<string, Hash32> {
+  const out = new Map<string, Hash32>();
+  for (const key of Object.getOwnPropertyNames(source)) {
+    const descriptor = Object.getOwnPropertyDescriptor(source, key);
+    // A getter could return a different value on each read, so the pair that is compared
+    // would not be the pair that was enumerated. Read once, here.
+    if (descriptor && 'value' in descriptor) out.set(key, descriptor.value as Hash32);
+  }
+  return out;
+}
+
 export function runSelfCheck(
   identity: ReleaseIdentity,
-  served: Readonly<Record<string, Hash32>>,
+  servedInput: Readonly<Record<string, Hash32>>,
 ): SelfCheckResult {
+  // Refuse an uncheckable release here rather than trusting every caller to remember:
+  // a self-check over an empty manifest compares nothing and returns `ok`, which is the
+  // vacuous green this repository keeps rediscovering.
+  assertCheckable(identity);
+
+  const pinnedFiles = ownKeysOnly(identity.perFileHashes);
+  const served = ownKeysOnly(servedInput);
   const findings: SelfCheckFinding[] = [];
   let verifiedCount = 0;
 
-  for (const [path, pinned] of Object.entries(identity.perFileHashes)) {
-    const actual = served[path];
+  for (const [path, pinned] of pinnedFiles) {
+    const actual = served.get(path);
     if (actual === undefined) {
       findings.push({
         kind: 'missing',
@@ -93,8 +122,8 @@ export function runSelfCheck(
   }
 
   // The direction a manifest-driven loop cannot see: served files nobody signed.
-  for (const [path, actual] of Object.entries(served)) {
-    if (!(path in identity.perFileHashes)) {
+  for (const [path, actual] of served) {
+    if (!pinnedFiles.has(path)) {
       findings.push({
         kind: 'unexpected',
         path,
@@ -109,7 +138,7 @@ export function runSelfCheck(
   return {
     ok: findings.length === 0,
     findings,
-    pinnedCount: Object.keys(identity.perFileHashes).length,
+    pinnedCount: pinnedFiles.size,
     verifiedCount,
   };
 }
