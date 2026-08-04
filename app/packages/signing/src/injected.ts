@@ -8,15 +8,22 @@
  * behind a manual step, and the logic here is where the safety properties live.
  *
  * **What this adapter declares, and what it refuses to.** An injected extension proves
- * `external-key-custody` — the key never enters this app — and `decoded-payload`, because
- * PJS `signPayload` takes a `SignerPayloadJSON` the extension decodes itself. It does
- * **not** declare `metadata-hash`: whether a given extension honours `CheckMetadataHash`
- * for a custom chain is FE-P6, unresolved, and 11 §11.3 makes that decode the independent
- * second channel against substitution. Declaring it would tell the user their wallet
- * verified the call when nothing here has established it can. It does not declare
- * `hashed-payload` either — an extension that falls back to signing a hash of an oversized
- * payload is signing something it did not show anyone, which is the substitution this
- * whole surface exists to prevent.
+ * `external-key-custody` — the key never enters this app. `decoded-payload` is granted
+ * **only when the connected extension exposes `signTx`**, and that condition was added by
+ * an adversarial review: the capability used to be declared unconditionally while this
+ * adapter signed through `signBytes`. The two are different channels. PAPI's `signTx`
+ * takes the call data, the signed extensions and the **metadata**, so the extension decodes
+ * and renders the call on its own screen, which is the independent second channel 11 §11.3
+ * requires against substitution; `signBytes` is documented as signing *"an arbitrary
+ * payload"* and as possibly *refusing* bytes that constitute a valid extrinsic. An
+ * extension asked that way shows the user an opaque blob, so declaring the capability told
+ * them their wallet had verified a call it had never seen.
+ *
+ * It does **not** declare `metadata-hash`, which is now unreachable rather than merely
+ * undeclared — there is no grant function for it anywhere while FE-P6 is unresolved. It
+ * does not declare `hashed-payload` either: an extension that falls back to signing a hash
+ * of an oversized payload is signing something it did not show anyone, which is the
+ * substitution this whole surface exists to prevent.
  *
  * **Account selection is not a capability question.** An extension can be connected and
  * still not hold the account the payload was built for, and signing with a different
@@ -26,6 +33,10 @@
  */
 
 import {
+  describeSigner,
+  grantsDecodedPayload,
+  grantsExternalKeyCustody,
+  type SignTxFn,
   type SignedPayload,
   type SignerAdapter,
   type SignerDescriptor,
@@ -46,6 +57,14 @@ export interface InjectedAccountLike {
 export interface PolkadotSignerLike {
   readonly publicKey: Uint8Array;
   signBytes: (data: Uint8Array) => Promise<Uint8Array>;
+  /**
+   * PAPI's transaction-signing entry point — the wallet-side decode channel.
+   *
+   * Optional in this structural view because an extension may not expose it, and INV-FE-12
+   * makes that absence a *capability* question rather than an error: the adapter still
+   * works, it simply does not hold `decoded-payload`.
+   */
+  signTx?: SignTxFn;
 }
 
 /** Structurally `InjectedExtension`. */
@@ -84,8 +103,28 @@ export class AccountNotHeldError extends Error {
 const toHex = (bytes: Uint8Array): HexString =>
   `0x${Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('')}` as HexString;
 
+/**
+ * Decode payload hex, refusing anything that is not hex — INV-FE-14.
+ *
+ * The odd-length check alone is not enough, and the gap is silent. `Number.parseInt('zz',
+ * 16)` is `NaN`, and `Uint8Array` coerces `NaN` to **zero** — so `'0xzz'` has even length,
+ * parses without error, and yields `0x00`. The adapter then asks the wallet to sign a byte
+ * the payload never contained, and every layer downstream sees a well-formed signature over
+ * well-formed bytes. INV-FE-14 requires the *exact* raw SCALE bytes to reach the signer;
+ * a zero-filled stand-in is the one substitution nothing else in this path can detect.
+ *
+ * An empty payload is refused for the same reason: it is a caller defect that presents as a
+ * successful signature over nothing.
+ */
 const hexToBytes = (hex: string): Uint8Array => {
-  const body = hex.startsWith('0x') ? hex.slice(2) : hex;
+  if (typeof hex !== 'string' || !/^0x[0-9a-fA-F]*$/.test(hex)) {
+    throw new Error(
+      `payload is not 0x-prefixed hex: ${String(hex).slice(0, 20)}… — refusing to sign, because ` +
+        'a non-hex digit parses to NaN and coerces to a zero byte rather than failing',
+    );
+  }
+  const body = hex.slice(2);
+  if (body.length === 0) throw new Error('refusing to sign an empty payload');
   if (body.length % 2 !== 0) throw new Error(`odd-length payload hex: ${hex.slice(0, 20)}…`);
   const out = new Uint8Array(body.length / 2);
   for (let i = 0; i < out.length; i += 1) out[i] = Number.parseInt(body.slice(i * 2, i * 2 + 2), 16);
@@ -97,13 +136,43 @@ export function availableExtensions(api: PjsSignerApi): readonly string[] {
   return api.getInjectedExtensions();
 }
 
-export const INJECTED_DESCRIPTOR = (extensionName: string): SignerDescriptor => ({
-  id: `injected:${extensionName}`,
-  label: `${extensionName} (browser extension)`,
-  // `metadata-hash` and `hashed-payload` are deliberately absent — see the module note.
-  capabilities: new Set(['decoded-payload', 'external-key-custody'] as const),
-  testOnly: false,
-});
+/**
+ * The injected descriptor — a function of the extension name, and of what it exposes.
+ *
+ * **`decoded-payload` is granted only when the extension provides `signTx`.** It was
+ * declared unconditionally while this adapter signed through `signBytes`, and the two are
+ * different channels: PAPI's `signTx` takes the call data, the signed extensions and the
+ * **metadata**, so the extension decodes and renders the call itself — the independent
+ * second channel 11 §11.3 requires against substitution. `signBytes` signs *"an arbitrary
+ * payload"* and is documented as possibly *refusing* bytes that look like a valid
+ * extrinsic; an extension asked that way shows the user an opaque blob. Declaring the
+ * capability anyway told the user their wallet had verified the call when nothing had.
+ *
+ * So the grant is derived from the connected object rather than asserted about it, and an
+ * extension exposing only `signBytes` yields an adapter whose `decoded-payload` is
+ * **absent** — which INV-FE-12 then turns into a named refusal at the dependent surface
+ * instead of a silent downgrade.
+ */
+export const INJECTED_DESCRIPTOR = (
+  extensionName: string,
+  decodeChannel?: SignTxFn,
+): SignerDescriptor =>
+  describeSigner({
+    id: `injected:${extensionName}`,
+    label: `${extensionName} (browser extension)`,
+    // `metadata-hash` is unreachable by construction — there is no grant function for it
+    // while FE-P6 is unresolved. `hashed-payload` is deliberately absent: an extension that
+    // falls back to signing a hash of an oversized payload is signing something it did not
+    // show anyone, which is the substitution this surface exists to prevent.
+    grants: [
+      ...(decodeChannel === undefined ? [] : [grantsDecodedPayload({ kind: 'sign-tx', signTx: decodeChannel })]),
+      grantsExternalKeyCustody(
+        'the extension holds the key and returns only a signature; this adapter has no path ' +
+          'that accepts key material',
+      ),
+    ],
+    testOnly: false,
+  });
 
 /**
  * Connect one extension and adapt it.
@@ -126,7 +195,17 @@ export async function connectInjected(
     );
   }
   const extension = await api.connectInjectedExtension(extensionName, dappName);
-  const descriptor = INJECTED_DESCRIPTOR(extensionName);
+  // Derive the capability from what the connected extension actually exposes. Probed on
+  // the accounts it offers rather than assumed: an extension that exposes `signTx` on some
+  // accounts and not others cannot be described by one claim, so the capability is granted
+  // only when **every** account can serve it.
+  const connectedAccounts = extension.getAccounts();
+  const decodeChannel =
+    connectedAccounts.length > 0 &&
+    connectedAccounts.every((account) => typeof account.polkadotSigner.signTx === 'function')
+      ? connectedAccounts[0]!.polkadotSigner.signTx
+      : undefined;
+  const descriptor = INJECTED_DESCRIPTOR(extensionName, decodeChannel);
 
   return {
     descriptor,

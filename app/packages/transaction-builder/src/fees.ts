@@ -48,6 +48,27 @@ export interface VitUsdcRate {
   readonly scale: bigint;
 }
 
+declare const RATE_ADMITTED: unique symbol;
+
+/**
+ * A rate that has passed `admitRate` — the only kind `estimateFee` accepts.
+ *
+ * The brand exists because `admitRate` used to return the same `VitUsdcRate` it was given,
+ * so the bounds check was **advisory**: any caller could build a rate literal, or take one
+ * from a provider read, and hand it straight to `estimateFee`. Every test called
+ * `admitRate` first, so the omission was invisible — the suite proved the checker worked
+ * and never that anything used it.
+ *
+ * What that buys an attacker is a number on a confirm screen. A 100× rate makes a fee look
+ * negligible in the currency the user is reading, or makes headroom look unreachable in the
+ * one they hold; either way the figure they consent to is not the figure the chain charges.
+ * 11 §11.3 requires the *live bounded* rate, and "bounded" is the half a type can carry.
+ *
+ * Same construction as `GatePassed` and `Finalized<T>`: a phantom `unique symbol` no caller
+ * outside this module can mint.
+ */
+export type AdmittedRate = VitUsdcRate & { readonly [RATE_ADMITTED]: true };
+
 const LOWER_NUMERATOR = 1n;
 const LOWER_DENOMINATOR = 10n;
 const UPPER_MULTIPLE = 10n;
@@ -58,7 +79,7 @@ const UPPER_MULTIPLE = 10n;
  * Cross-multiplied rather than divided: a division would floor the bound itself, and a
  * rate one unit outside a floored bound reads as inside it.
  */
-export function admitRate(read: Finalized<VitUsdcRate>): VitUsdcRate {
+export function admitRate(read: Finalized<VitUsdcRate>): AdmittedRate {
   const rate = read.value;
   if (rate.scale <= 0n) {
     throw new FeeRateUnusableError('fee.vit_usdc_rate has a non-positive scale; no figure can be computed');
@@ -79,7 +100,7 @@ export function admitRate(read: Finalized<VitUsdcRate>): VitUsdcRate {
         'constitution does not admit this rate',
     );
   }
-  return rate;
+  return rate as AdmittedRate;
 }
 
 export interface FeeEstimate {
@@ -101,7 +122,7 @@ export interface FeeEstimate {
  */
 export function estimateFee(
   feeInVit: bigint,
-  rate: VitUsdcRate,
+  rate: AdmittedRate,
   selected: FeeAsset,
 ): FeeEstimate {
   if (feeInVit < 0n) throw new FeeRateUnusableError('a negative fee is not an estimate');

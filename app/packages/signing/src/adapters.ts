@@ -33,13 +33,153 @@ export type SignerCapability =
   /** Produces a signature without the app holding key material at any point. */
   | 'external-key-custody';
 
+declare const CAPABILITY_ESTABLISHED: unique symbol;
+
+/**
+ * A capability that was **established**, not asserted — INV-FE-12.
+ *
+ * The defect this replaces: `capabilities` was a `Set` literal on the descriptor, and
+ * `requireCapability` trusted whatever was in it. Any adapter could name
+ * `decoded-payload`, `hashed-payload` or `metadata-hash` and be believed, so a transport
+ * that merely renders full hex on a screen could advertise itself as decode-capable and
+ * hash-capable while doing neither. INV-FE-12 says an unproven capability is *absent*; a
+ * self-declared set makes "proven" and "claimed" the same word.
+ *
+ * A grant is mintable only by the function below that requires the thing which does the
+ * work. The two capabilities that carry the anti-substitution guarantee —
+ * `decoded-payload` and `hashed-payload` — cannot be granted without passing the function
+ * that performs the decode or the hash, so the claim and the machinery are the same object.
+ */
+export interface CapabilityGrant {
+  readonly capability: SignerCapability;
+  /** What established it, for the confirm surface and for a receipt. */
+  readonly basis: string;
+  readonly [CAPABILITY_ESTABLISHED]: true;
+}
+
+const grant = (capability: SignerCapability, basis: string): CapabilityGrant =>
+  ({ capability, basis }) as CapabilityGrant;
+
+/** PAPI's `PolkadotSigner['signTx']` — the wallet-side decode channel (11 §11.3). */
+export type SignTxFn = (
+  callData: Uint8Array,
+  signedExtensions: Record<string, { identifier: string; value: Uint8Array; additionalSigned: Uint8Array }>,
+  metadata: Uint8Array,
+  atBlockNumber: number,
+) => Promise<Uint8Array>;
+
+/**
+ * How a decode capability was established.
+ *
+ * The `sign-tx` evidence is not decorative. PAPI draws the line exactly here: `signTx`
+ * takes call data, signed extensions and **the metadata**, so the wallet decodes and
+ * renders the call on its own screen — which is what 11 §11.3 means by an independent
+ * second channel. `signBytes`, by contrast, is documented as signing *"an arbitrary
+ * payload"* and as possibly refusing bytes that constitute a valid extrinsic. An adapter
+ * built on `signBytes` shows the wallet nothing it can interpret, so it cannot hold this
+ * capability however it describes itself.
+ *
+ * Two kinds, kept **distinguishable on purpose**. `sign-tx` is machine-checked: the
+ * function that performs the decode is the argument, so the claim and the machinery are
+ * the same object. `attested-flow` is not checkable from here — whether a hardware wallet
+ * renders a Bleavit call on its own screen is a fact about that device — and it is
+ * therefore recorded as an attestation, with its basis carried into the grant.
+ *
+ * Collapsing the two would be the defect one level up: a surface that cannot tell a proof
+ * from a promise reports both as "proven", which is what a bare `Set` did.
+ */
+export type DecodeEvidence =
+  | { readonly kind: 'sign-tx'; readonly signTx: SignTxFn }
+  | { readonly kind: 'attested-flow'; readonly basis: string };
+
+export function grantsDecodedPayload(evidence: DecodeEvidence): CapabilityGrant {
+  if (evidence.kind === 'sign-tx') {
+    if (typeof evidence.signTx !== 'function') {
+      throw new TypeError(
+        'decoded-payload requires the signTx function that performs the wallet-side decode; ' +
+          'it cannot be declared without one (INV-FE-12)',
+      );
+    }
+    return grant('decoded-payload', 'proven: the signer exposes signTx, so the wallet decodes the call');
+  }
+  if (typeof evidence.basis !== 'string' || evidence.basis.length < 20) {
+    throw new TypeError('an attested decode channel needs a stated basis, not a bare assertion');
+  }
+  return grant('decoded-payload', `attested: ${evidence.basis}`);
+}
+
+/** `hashed-payload`, established by the hasher that produces the digest, or attested. */
+export function grantsHashedPayload(
+  evidence: { readonly kind: 'hasher'; readonly hasher: (bytes: Uint8Array) => Uint8Array } | { readonly kind: 'attested-flow'; readonly basis: string },
+): CapabilityGrant {
+  if (evidence.kind === 'hasher') {
+    if (typeof evidence.hasher !== 'function') {
+      throw new TypeError('hashed-payload requires the hash function that produces the digest');
+    }
+    return grant('hashed-payload', 'proven: the adapter hashes the payload with a supplied digest');
+  }
+  if (typeof evidence.basis !== 'string' || evidence.basis.length < 20) {
+    throw new TypeError('an attested hashed-payload flow needs a stated basis');
+  }
+  return grant('hashed-payload', `attested: ${evidence.basis}`);
+}
+
+/**
+ * `external-key-custody` — architectural, and labelled as such.
+ *
+ * Nothing at runtime can prove a key never entered this process; what establishes it is
+ * that the adapter has no path to receive one. Stating the basis in words is the honest
+ * encoding: it is checked by review, and this function exists so the *claim* still travels
+ * with a reason rather than appearing in a set beside two claims that are machine-checked.
+ */
+export function grantsExternalKeyCustody(basis: string): CapabilityGrant {
+  if (typeof basis !== 'string' || basis.length < 20) {
+    throw new TypeError('external-key-custody needs a stated basis, not a bare assertion');
+  }
+  return grant('external-key-custody', basis);
+}
+
 export interface SignerDescriptor {
   readonly id: string;
   /** Shown to the user; never a bare id. */
   readonly label: string;
+  /** Derived from `grants` — never written directly. */
   readonly capabilities: ReadonlySet<SignerCapability>;
+  /** Why each capability is held, in the order granted. */
+  readonly grants: readonly CapabilityGrant[];
   /** True only for adapters that must never appear in a release chunk (INV-FE-5). */
   readonly testOnly: boolean;
+}
+
+/**
+ * Build a descriptor. The only way to obtain one whose capabilities are populated.
+ *
+ * `capabilities` is computed here from the grants rather than accepted from the caller, so
+ * the set cannot contain anything nobody established. There is deliberately no
+ * `metadata-hash` grant function at all: whether a wallet honours `CheckMetadataHash` for a
+ * custom chain is FE-P6, unresolved, so the capability is currently *unreachable* rather
+ * than merely undeclared — and a future probe result is what should mint it.
+ */
+export function describeSigner(input: {
+  readonly id: string;
+  readonly label: string;
+  readonly grants: readonly CapabilityGrant[];
+  readonly testOnly: boolean;
+}): SignerDescriptor {
+  const seen = new Set<SignerCapability>();
+  for (const g of input.grants) {
+    if (seen.has(g.capability)) {
+      throw new Error(`${input.id} grants ${g.capability} twice; a duplicate hides which basis applies`);
+    }
+    seen.add(g.capability);
+  }
+  return {
+    id: input.id,
+    label: input.label,
+    capabilities: seen,
+    grants: [...input.grants],
+    testOnly: input.testOnly,
+  };
 }
 
 /**
@@ -139,10 +279,32 @@ export class SignerRegistry {
  * unproven is not pessimism — it is what stops a surface telling the user their device
  * verified the call when nothing here has established that it can.
  */
-export const RAW_PAYLOAD_DESCRIPTOR: SignerDescriptor = Object.freeze({
+export const RAW_PAYLOAD_DESCRIPTOR: SignerDescriptor = describeSigner({
   id: 'raw-payload',
   label: 'Air-gapped / hardware (QR or hex)',
-  capabilities: new Set<SignerCapability>(['decoded-payload', 'hashed-payload', 'external-key-custody']),
+  grants: [
+    // Attested, not proven, and the grant says so. Whether a given device renders a
+    // Bleavit call on its own screen is a fact about that device, and 11 §11.3's
+    // raw-external flow is premised on it. What this side can guarantee is that the
+    // **complete** payload is handed over — never a truncation and never a digest the
+    // device did not compute — which is the half that makes the device's decode possible.
+    grantsDecodedPayload({
+      kind: 'attested-flow',
+      basis:
+        'the raw-external flow transmits the complete payload to a device that renders the ' +
+        'call itself; nothing here truncates or pre-digests it (11 §11.3)',
+    }),
+    grantsHashedPayload({
+      kind: 'attested-flow',
+      basis:
+        'an oversized payload is presented as a digest the device recomputes from the bytes ' +
+        'it was shown, never one supplied by this app',
+    }),
+    grantsExternalKeyCustody(
+      'the payload leaves as bytes and a signature returns; this adapter has no path that ' +
+        'accepts key material at any point',
+    ),
+  ],
   testOnly: false,
 });
 
