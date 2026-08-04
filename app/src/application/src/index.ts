@@ -35,3 +35,4 @@ export {
   PendingScreen,
   screenFor,
 } from './routes.js';
+export { CheckpointAgeNotice, VerificationPanelView } from './verification-panel.js';

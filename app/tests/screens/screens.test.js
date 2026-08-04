@@ -28,6 +28,7 @@ import {
   reachableScreens,
   readShellState,
   screenFor,
+  VerificationPanelView,
   screenForHash,
   sudoBannerFor,
 } from '@bleavit/application';
@@ -50,6 +51,7 @@ import { DeferredMeaningChangingFactError, Disclosure, Undecodable } from '@blea
 import { externalProposal } from '@bleavit/shared-types';
 import { defaultScope } from '@bleavit/contexts';
 import { refuse } from '@bleavit/handoff-envelope';
+import { classifyCheckpointAge } from '@bleavit/verify';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '../../..');
 const DOC11 = join(REPO, 'docs/architecture/11-frontend-workflows.md');
@@ -920,4 +922,85 @@ test('the confirm controller reaches no signer', async () => {
   );
   assert.ok(!/@bleavit\/signing/.test(source), 'the confirm controller imports a signer');
   assert.ok(!/\bsign\s*\(/.test(source.replace(/mayOfferSigning|onSign/g, '')), source);
+});
+
+// ------------------------------------------------ the verification panel (F10)
+
+const PANEL = {
+  status: 'unverified',
+  rows: [
+    { label: 'Release (Arweave TXID)', value: 'txid-abc', kind: 'pinned' },
+    { label: 'Relay genesis', value: '0x91b1…c3', kind: 'pinned' },
+    { label: 'Observed genesis', value: '0x91b1…c3', kind: 'observed' },
+  ],
+  warnings: [],
+  chainIdentityVerified: false,
+};
+
+test('a pin is distinguishable from an observation in words, not only in markup', () => {
+  // "A panel that renders both identically lets a pin masquerade as a verification." A
+  // class name or a colour is not a fact a reader can act on.
+  //
+  // Asserted PER ROW, and the first version was not: it searched the whole document for the
+  // two phrases, which also appear in the "not verified yet" notice above the list. Deleting
+  // the per-row label entirely left that test green — mutation M41 survived on it.
+  const html = renderToStaticMarkup(h(VerificationPanelView, { panel: PANEL }));
+  const rows = [...html.matchAll(/<div class="verification__row" data-kind="(\w+)"[^>]*>(.*?)<\/div>/g)];
+  assert.equal(rows.length, PANEL.rows.length, `expected ${PANEL.rows.length} rows: ${html}`);
+  for (const [, kind, body] of rows) {
+    const expected = kind === 'pinned' ? 'in this bundle' : 'reported by the chain';
+    assert.ok(body.includes(expected), `a ${kind} row carries no words saying so: ${body}`);
+  }
+});
+
+test('the panel renders with no chain handle and nothing verified (10 §3.2)', () => {
+  // Under FE-BOOT-002 the worker never started and no verified read exists. The panel is
+  // one of the surfaces that must still work — it takes no chain, and says so plainly.
+  const html = renderToStaticMarkup(h(VerificationPanelView, { panel: PANEL }));
+  assert.ok(/has not been verified yet/.test(html), html);
+  assert.ok(html.includes('txid-abc'), 'the pinned rows are absent');
+});
+
+test('divergence is reported and explicitly not repaired', () => {
+  const html = renderToStaticMarkup(
+    h(VerificationPanelView, {
+      panel: { ...PANEL, status: 'divergent', warnings: ['index.html differs from the release'] },
+    }),
+  );
+  assert.ok(/does not match/.test(html), html);
+  assert.ok(/re-fetching would ask the same channel/.test(html), html);
+  assert.ok(html.includes('index.html differs'), html);
+});
+
+test('a fresh checkpoint renders no reassurance at all', () => {
+  // A green "checkpoint is current" line is a claim about the future: the bound lapses on
+  // a clock the client does not control, so the reassurance would go stale silently.
+  //
+  // Asserted as BYTE EQUALITY against the panel with no checkpoint supplied at all. The
+  // first version only checked that the three warning phrases were absent, which any other
+  // reassuring wording passes — mutation M42 added "Release is current" and survived.
+  const fresh = renderToStaticMarkup(
+    h(VerificationPanelView, { panel: PANEL, checkpoint: { kind: 'fresh', ageMillis: 0 } }),
+  );
+  const none = renderToStaticMarkup(h(VerificationPanelView, { panel: PANEL }));
+  assert.equal(fresh, none, 'a fresh checkpoint rendered something a missing one does not');
+});
+
+test('an expired checkpoint is rendered at danger, with its own message', () => {
+  const verdict = classifyCheckpointAge(0, 40 * 24 * 60 * 60 * 1000, {
+    bondingDurationEras: 28, slashDeferDurationEras: 27, eraMillis: 24 * 60 * 60 * 1000,
+  });
+  const html = renderToStaticMarkup(h(VerificationPanelView, { panel: PANEL, checkpoint: verdict }));
+  assert.ok(/too old to verify/.test(html), html);
+  assert.ok(html.includes('data-severity="danger"'), html);
+  assert.ok(/newer release/.test(html), html);
+});
+
+test('an indeterminate age is danger too, never quietly info', () => {
+  const clockBack = classifyCheckpointAge(100 * 24 * 60 * 60 * 1000, 0, {
+    bondingDurationEras: 28, slashDeferDurationEras: 27, eraMillis: 24 * 60 * 60 * 1000,
+  });
+  const html = renderToStaticMarkup(h(VerificationPanelView, { panel: PANEL, checkpoint: clockBack }));
+  assert.ok(/cannot be established/.test(html), html);
+  assert.ok(html.includes('data-severity="danger"'), html);
 });

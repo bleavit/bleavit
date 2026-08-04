@@ -21,6 +21,7 @@
     "@bleavit/features-tx": "workspace:*",
     "@bleavit/platform": "workspace:*",
     "@bleavit/shared-types": "workspace:*",
-    "@bleavit/ui": "workspace:*"
+    "@bleavit/ui": "workspace:*",
+    "@bleavit/verify": "workspace:*"
   }
 }

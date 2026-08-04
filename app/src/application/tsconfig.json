@@ -22,6 +22,9 @@
       "path": "../../packages/ui"
     },
     {
+      "path": "../../packages/verify"
+    },
+    {
       "path": "../features/analysis"
     },
     {

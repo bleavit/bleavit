@@ -227,6 +227,9 @@ importers:
       '@bleavit/ui':
         specifier: workspace:*
         version: link:../../packages/ui
+      '@bleavit/verify':
+        specifier: workspace:*
+        version: link:../../packages/verify
 
   src/features/analysis:
     dependencies:
@@ -459,6 +462,9 @@ importers:
       '@bleavit/ui':
         specifier: workspace:*
         version: link:../../packages/ui
+      '@bleavit/verify':
+        specifier: workspace:*
+        version: link:../../packages/verify
       react:
         specifier: 19.2.8
         version: 19.2.8
