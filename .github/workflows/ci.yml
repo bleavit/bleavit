@@ -139,6 +139,15 @@ jobs:
         run: python3 tools/ci/check-integration-abi.py
       - name: Check runbooks
         run: python3 tools/deploy/check-runbooks.py
+      - name: Bind the ops handbook to 12 §6.1's service table (F15)
+        # 12 §6 opens with "every row names an owner role (an accountable person holds
+        # each role; assignments are published in the ops handbook)". The document owns
+        # the commitments, the handbook owns the assignments, and nothing made the two
+        # agree. Bidirectional: a dropped row is a commitment nobody owns, an invented one
+        # is a commitment nobody made. A vacancy is DECLARED rather than omitted — an
+        # omitted row reads as "no such commitment" — and `--strict`, which a launch gate
+        # runs rather than CI, refuses one.
+        run: python3 tools/deploy/check-ops-handbook.py
 
   # S1 formal models — 15 §4.1; 03 §11.
   model-checking:
