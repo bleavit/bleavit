@@ -38,6 +38,8 @@ import {
   PROPOSAL_READS,
   ProposalDetail,
   decodeForConfirm,
+  confirmProps,
+  mayOfferSigning,
   readProposals,
   summarise,
   viewFor,
@@ -841,4 +843,81 @@ test('a prefix key with no value is reported, never silently dropped', async () 
   assert.equal(read.undecodable.length, 1);
   assert.match(read.undecodable[0].label, /Epoch\.Proposals\[k2\]/);
   assert.match(read.undecodable[0].reason, /carries no value/);
+});
+
+// ------------------------------------------- the confirm surface's gate wiring
+
+const session = (overrides) => ({
+  state: 'Draft', prep: undefined, failed: [], lastError: undefined,
+  signingWindow: undefined, ...overrides,
+});
+const confirmInputs = () => ({
+  decoded: decodeForConfirm(PREP.scaleHex, DECODER),
+  sudoActive: false, expert: false, onSign: () => {}, onEdit: () => {},
+});
+
+test('no confirm screen exists before the chain has been re-read', () => {
+  // A confirm screen is a statement that the chain was re-read at a named block. In these
+  // states that statement is not yet true, so there is nothing to render — not a screen
+  // with empty or remembered rows.
+  for (const state of ['Draft', 'Prepared', 'Refreshing']) {
+    assert.equal(
+      confirmProps(session({ state, prep: PREP }), confirmInputs()),
+      undefined,
+      state,
+    );
+  }
+});
+
+test('AwaitingSignature renders the gate’s own passing rows', () => {
+  const passed = { at: AT, results: [PASSING_ROW, { ...PASSING_ROW, id: 'P-2' }] };
+  const props = confirmProps(
+    session({ state: 'AwaitingSignature', prep: PREP, signingWindow: passed }),
+    confirmInputs(),
+  );
+  assert.ok(props);
+  assert.deepEqual(props.preconditions.map((r) => r.id), ['P-1', 'P-2']);
+  assert.equal(mayOfferSigning(session({ state: 'AwaitingSignature' })), true);
+});
+
+test('Blocked renders the failures only — rule 5’s diff view, not a padded set', () => {
+  const failed = [{ ...PASSING_ROW, id: 'P-2', ok: false, expected: 'Open', actual: 'Closed' }];
+  // The session MUST carry a stale signing window, and the first version of this test did
+  // not: with `signingWindow: undefined` a controller that preferred the window would fall
+  // back to `failed` and pass. Mutation M34 survived on exactly that. The dangerous session
+  // is `Blocked` reached *after* a gate once passed — a full set of rows that were true at
+  // a block B′ has already moved past.
+  const stale = { at: { blockHash: '0xold', blockNumber: 999 }, results: [PASSING_ROW, { ...PASSING_ROW, id: 'P-3' }] };
+  const props = confirmProps(
+    session({ state: 'Blocked', prep: PREP, failed, signingWindow: stale }),
+    confirmInputs(),
+  );
+  assert.ok(props);
+  assert.deepEqual(props.preconditions.map((r) => r.id), ['P-2']);
+  assert.ok(!props.preconditions.some((r) => r.ok), 'a superseded passing row was rendered');
+});
+
+test('signing is offered on the state, never on "every row passes"', () => {
+  // FE-TX-007 blocks with an EMPTY `failed` array — the runtime changed, so the bytes are
+  // wrong and no precondition is at fault. "Every row passes" is vacuously true of it, and
+  // a surface deriving the signer from the rows would offer to sign stale bytes.
+  const runtimeChanged = session({
+    state: 'Blocked', prep: PREP, failed: [], lastError: 'FE-TX-007',
+  });
+  assert.equal(mayOfferSigning(runtimeChanged), false);
+  const props = confirmProps(runtimeChanged, confirmInputs());
+  assert.ok(props);
+  assert.deepEqual(props.preconditions, []);
+  assert.ok(!props.preconditions.some((r) => !r.ok), 'no row is at fault, by construction');
+});
+
+test('the confirm controller reaches no signer', async () => {
+  // `src/features/tx` may reference `signing` (10 §10.2), so this restraint is not
+  // structural and has to be asserted. The controller hands `onSign` back to its caller.
+  const source = readFileSync(
+    join(REPO, 'app/src/features/tx/src/confirm-controller.ts'),
+    'utf8',
+  );
+  assert.ok(!/@bleavit\/signing/.test(source), 'the confirm controller imports a signer');
+  assert.ok(!/\bsign\s*\(/.test(source.replace(/mayOfferSigning|onSign/g, '')), source);
 });

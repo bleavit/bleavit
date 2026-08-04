@@ -30,3 +30,8 @@ export {
   type ProposalsRead,
   type StatsRecord,
 } from './proposal-reads.js';
+export {
+  confirmProps,
+  mayOfferSigning,
+  type ConfirmInputs,
+} from './confirm-controller.js';
