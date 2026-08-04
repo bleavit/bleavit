@@ -1,0 +1,62 @@
+{
+  "headers": {
+    "pinned_block": "0x9d654896f6d0418ee9f4315ccc67963128f8f125034d1a6005be9d4474398c19"
+  },
+  "requests": [
+    {
+      "method": "chainHead_v1_header",
+      "params": [
+        "subscription-1",
+        "0x9d654896f6d0418ee9f4315ccc67963128f8f125034d1a6005be9d4474398c19"
+      ],
+      "response": {
+        "direct": {
+          "id": 1,
+          "jsonrpc": "2.0",
+          "result": "0x1bda0714c512ec9cb44a0240bf4c6af7a74521074d1a3f94883a51fc87271acc04ff238c13c28270a39a8c1413eb7d9ba33c7ec14b1f7e69d44a34aa8c24cc644220d21eb6e8ec0c18c2be3d46085d38574ab7cb0c525bfb6e95989dadefcb67ea08066175726120ff88bd11000000000452505352906a21b9af69281572811f925fd2cbd558cfd8e5352f617961a9f4e2c8102f0b02fe23f646"
+        }
+      }
+    },
+    {
+      "method": "metadata_presence",
+      "params": {
+        "kind": "constant",
+        "surface": "constant.execution_guard.integration_contract_version"
+      },
+      "response": {
+        "detail": "layout matches",
+        "expected_layout": {
+          "type": "u32",
+          "value": "0x17000000"
+        },
+        "layout": {
+          "type": "u32",
+          "value": "0x17000000"
+        },
+        "layout_matches": true,
+        "present": true
+      }
+    },
+    {
+      "method": "recovery_metadata_presence",
+      "params": {
+        "kind": "constant",
+        "surface": "constant.execution_guard.integration_contract_version"
+      },
+      "response": {
+        "detail": "layout matches",
+        "expected_layout": {
+          "type": "u32",
+          "value": "0x17000000"
+        },
+        "layout": {
+          "type": "u32",
+          "value": "0x17000000"
+        },
+        "layout_matches": true,
+        "present": true
+      }
+    }
+  ],
+  "surface": "constant.execution_guard.integration_contract_version"
+}
