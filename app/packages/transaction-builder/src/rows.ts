@@ -39,8 +39,37 @@ import type { SurfaceId } from '@bleavit/descriptors';
 
 export type { SurfaceId };
 
+import { actingAccount, feePayer, type AccountId, type CallWrapper } from './wrappers.js';
+
 /** 11 §11.5's `[C]` marker — a constants-API read, per 11 §11.4 rule 2's third source. */
 export type ClauseSource = 'storage' | 'runtime-api' | 'constant';
+
+/**
+ * *Whose* account a clause reads — 11 §11.3's multisig and proxy wrappers made explicit.
+ *
+ * Without this, every clause implicitly reads "the signer", which is correct only for an
+ * unwrapped extrinsic. A wrapper splits the identity: `Proxy.proxy` executes the inner
+ * call as `real` and `Multisig.as_multi` executes it as the derived multisig account,
+ * while the **signer** still pays the fee and owns the nonce. A table that resolves one
+ * account for both questions checks the wrong one for at least one of them, and it fails
+ * in the dangerous direction — the signer's healthy balance turns every row green while
+ * the runtime rejects the inner call because the *proxied* account is short. The user
+ * signed something the client had told them would work.
+ *
+ * `recipient` is a third subject rather than a special case of the others: P-9's
+ * `MaxPositionsPerAccount` clauses are about the **transfer destination**, an account
+ * that is neither the signer nor the acting origin, and folding it into either would
+ * check the sender's position count against the recipient's bound.
+ */
+export type ClauseSubject =
+  /** Not account-scoped: chain state, a constant, or a runtime-wide flag. */
+  | 'chain'
+  /** The account the call executes as — signer, or the proxied/multisig account. */
+  | 'acting'
+  /** The account that pays the fee and owns the nonce — always the signer. */
+  | 'signer'
+  /** A named third party, e.g. `ledger.transfer`'s destination. */
+  | 'recipient';
 
 export interface PreconditionClause {
   /** The `P-n` row this clause belongs to. */
@@ -50,6 +79,8 @@ export interface PreconditionClause {
   /** The `CRITICAL_SURFACE` id it is read from. */
   readonly surface: SurfaceId;
   readonly source: ClauseSource;
+  /** Whose account the read is against. Required — an omitted subject is the defect. */
+  readonly subject: ClauseSubject;
 }
 
 export type PreconditionRowId =
@@ -61,7 +92,8 @@ const clause = (
   requirement: string,
   surface: SurfaceId,
   source: ClauseSource,
-): PreconditionClause => ({ row, requirement, surface, source });
+  subject: ClauseSubject,
+): PreconditionClause => ({ row, requirement, surface, source, subject });
 
 /**
  * P-1 — `market.buy/sell` on a decision or gate book.
@@ -73,9 +105,9 @@ const clause = (
  * `Perbill / 100,000` projection, because agreeing with itself is not a check.
  */
 const P1: readonly PreconditionClause[] = [
-  clause('P-1', 'the owning proposal is Trading or Extended', 'storage.epoch.proposals', 'storage'),
-  clause('P-1', 'the book exists and its phase is Open', 'storage.market.markets', 'storage'),
-  clause('P-1', 'the quoted cost still satisfies max_cost / min_proceeds', 'api.quote', 'runtime-api'),
+  clause('P-1', 'the owning proposal is Trading or Extended', 'storage.epoch.proposals', 'storage', 'chain'),
+  clause('P-1', 'the book exists and its phase is Open', 'storage.market.markets', 'storage', 'chain'),
+  clause('P-1', 'the quoted cost still satisfies max_cost / min_proceeds', 'api.quote', 'runtime-api', 'chain'),
   // 02 §4/§9 rule 4's cross-check, with both halves named — agreeing with itself is not
   // a check. The frozen `Market::Fee` metadata constant against raw `params(mkt.fee)`
   // under the floored `Perbill / 100,000` projection.
@@ -85,13 +117,13 @@ const P1: readonly PreconditionClause[] = [
   // earlier draft cited `constant.market.min_trade` — a *different* constant that happens
   // to exist — and both the type checker and a reading eye accepted it. The fix was not a
   // better citation but the missing manifest entry.
-  clause('P-1', 'the chain fee rate matches the client’s', 'constant.market.fee', 'constant'),
-  clause('P-1', 'the raw fee parameter agrees with the metadata constant', 'api.params', 'runtime-api'),
-  clause('P-1', 'the trade is within the per-trade minimum', 'constant.market.min_trade', 'constant'),
-  clause('P-1', 'the trade is within the per-trade maximum ratio', 'constant.market.max_trade_ratio', 'constant'),
-  clause('P-1', 'trading is enabled by the constitution’s phase flags', 'storage.constitution.phase_flags', 'storage'),
-  clause('P-1', 'your USDC balance covers the purchase', 'storage.foreign_assets.account', 'storage'),
-  clause('P-1', 'your position balance covers the sale', 'storage.ledger.positions', 'storage'),
+  clause('P-1', 'the chain fee rate matches the client’s', 'constant.market.fee', 'constant', 'chain'),
+  clause('P-1', 'the raw fee parameter agrees with the metadata constant', 'api.params', 'runtime-api', 'chain'),
+  clause('P-1', 'the trade is within the per-trade minimum', 'constant.market.min_trade', 'constant', 'chain'),
+  clause('P-1', 'the trade is within the per-trade maximum ratio', 'constant.market.max_trade_ratio', 'constant', 'chain'),
+  clause('P-1', 'trading is enabled by the constitution’s phase flags', 'storage.constitution.phase_flags', 'storage', 'chain'),
+  clause('P-1', 'your USDC balance covers the purchase', 'storage.foreign_assets.account', 'storage', 'acting'),
+  clause('P-1', 'your position balance covers the sale', 'storage.ledger.positions', 'storage', 'acting'),
 ];
 
 /**
@@ -102,23 +134,32 @@ const P1: readonly PreconditionClause[] = [
  * checked only the pointer would trade against a book that is not there.
  */
 const P2: readonly PreconditionClause[] = [
-  clause('P-2', 'the epoch has a Baseline book', 'storage.market.baseline_market_of', 'storage'),
-  clause('P-2', 'that Baseline book exists in Markets', 'storage.market.markets', 'storage'),
-  clause('P-2', 'the epoch trading window is open', 'storage.epoch.epoch_of', 'storage'),
-  clause('P-2', 'the Baseline vault for the epoch is open', 'storage.ledger.baseline_vaults', 'storage'),
-  clause('P-2', 'the trade is within the per-trade minimum', 'constant.market.min_trade', 'constant'),
-  clause('P-2', 'the trade is within the per-trade maximum ratio', 'constant.market.max_trade_ratio', 'constant'),
-  clause('P-2', 'trading is enabled by the constitution’s phase flags', 'storage.constitution.phase_flags', 'storage'),
+  clause('P-2', 'the epoch has a Baseline book', 'storage.market.baseline_market_of', 'storage', 'chain'),
+  clause('P-2', 'that Baseline book exists in Markets', 'storage.market.markets', 'storage', 'chain'),
+  clause('P-2', 'the epoch trading window is open', 'storage.epoch.epoch_of', 'storage', 'chain'),
+  clause('P-2', 'the Baseline vault for the epoch is open', 'storage.ledger.baseline_vaults', 'storage', 'chain'),
+  clause('P-2', 'the trade is within the per-trade minimum', 'constant.market.min_trade', 'constant', 'chain'),
+  clause('P-2', 'the trade is within the per-trade maximum ratio', 'constant.market.max_trade_ratio', 'constant', 'chain'),
+  clause('P-2', 'trading is enabled by the constitution’s phase flags', 'storage.constitution.phase_flags', 'storage', 'chain'),
 ];
 
 /** P-3 — `ledger.split` / `split_scalar`. */
 const P3: readonly PreconditionClause[] = [
-  clause('P-3', 'the vault is Open', 'storage.ledger.vaults', 'storage'),
-  clause('P-3', 'your USDC balance covers the amount plus fee headroom', 'storage.foreign_assets.account', 'storage'),
-  clause('P-3', 'the amount is at least the minimum split', 'constant.ledger.min_split', 'constant'),
-  clause('P-3', 'you have room for each new position key', 'constant.ledger.max_positions_per_account', 'constant'),
-  clause('P-3', 'your current position count leaves room', 'storage.ledger.position_totals', 'storage'),
-  clause('P-3', 'the ledger is not frozen by PB-LEDGER-FREEZE', 'storage.constitution.phase_flags', 'storage'),
+  clause('P-3', 'the vault is Open', 'storage.ledger.vaults', 'storage', 'chain'),
+  // 11 §11.5's P-3 text reads "USDC balance ≥ amount + fee headroom (in selected fee
+  // asset)" as one clause, and for an unwrapped extrinsic that is exactly right: signer
+  // and origin are the same account, so one read answers both. **A wrapper decomposes
+  // it.** Under `Proxy.proxy` the amount leaves the *proxied* account while the fee
+  // leaves the *signer*, so a single clause resolves to one account and silently checks
+  // the wrong balance for the other half. Split here rather than in the spec: the
+  // document's sentence stays true of the case it describes, and the two reads it
+  // implies are made separate where they are actually performed.
+  clause('P-3', 'the acting account’s USDC balance covers the amount', 'storage.foreign_assets.account', 'storage', 'acting'),
+  clause('P-3', 'your fee headroom covers the fee in the selected asset', 'storage.foreign_assets.account', 'storage', 'signer'),
+  clause('P-3', 'the amount is at least the minimum split', 'constant.ledger.min_split', 'constant', 'chain'),
+  clause('P-3', 'you have room for each new position key', 'constant.ledger.max_positions_per_account', 'constant', 'chain'),
+  clause('P-3', 'your current position count leaves room', 'storage.ledger.position_totals', 'storage', 'acting'),
+  clause('P-3', 'the ledger is not frozen by PB-LEDGER-FREEZE', 'storage.constitution.phase_flags', 'storage', 'chain'),
 ];
 
 /**
@@ -129,9 +170,9 @@ const P3: readonly PreconditionClause[] = [
  * refuse the one action that still pays out on a voided vault.
  */
 const P4: readonly PreconditionClause[] = [
-  clause('P-4', 'the vault is Open, Resolved or Voided', 'storage.ledger.vaults', 'storage'),
-  clause('P-4', 'you hold enough of both sides of the pair', 'storage.ledger.positions', 'storage'),
-  clause('P-4', 'the ledger is not frozen by PB-LEDGER-FREEZE', 'storage.constitution.phase_flags', 'storage'),
+  clause('P-4', 'the vault is Open, Resolved or Voided', 'storage.ledger.vaults', 'storage', 'chain'),
+  clause('P-4', 'you hold enough of both sides of the pair', 'storage.ledger.positions', 'storage', 'acting'),
+  clause('P-4', 'the ledger is not frozen by PB-LEDGER-FREEZE', 'storage.constitution.phase_flags', 'storage', 'chain'),
 ];
 
 /**
@@ -142,54 +183,54 @@ const P4: readonly PreconditionClause[] = [
  * how a client offers an action that can only revert.
  */
 const P5: readonly PreconditionClause[] = [
-  clause('P-5', 'the vault is ScalarSettled', 'storage.ledger.vaults', 'storage'),
-  clause('P-5', 'you hold enough winning-branch USDC', 'storage.ledger.positions', 'storage'),
+  clause('P-5', 'the vault is ScalarSettled', 'storage.ledger.vaults', 'storage', 'chain'),
+  clause('P-5', 'you hold enough winning-branch USDC', 'storage.ledger.positions', 'storage', 'acting'),
 ];
 
 /** P-6 — `ledger.redeem_scalar` / `redeem_baseline`. The fee is chain-read (contract v17). */
 const P6: readonly PreconditionClause[] = [
-  clause('P-6', 'the vault is ScalarSettled with a settlement value', 'storage.ledger.vaults', 'storage'),
-  clause('P-6', 'the Baseline position view is BaselineSettled', 'storage.ledger.baseline_vaults', 'storage'),
-  clause('P-6', 'your LONG or SHORT balance covers the amount', 'storage.ledger.positions', 'storage'),
-  clause('P-6', 'the redemption-fee rate is readable and agrees with its raw parameter', 'api.params', 'runtime-api'),
+  clause('P-6', 'the vault is ScalarSettled with a settlement value', 'storage.ledger.vaults', 'storage', 'chain'),
+  clause('P-6', 'the Baseline position view is BaselineSettled', 'storage.ledger.baseline_vaults', 'storage', 'chain'),
+  clause('P-6', 'your LONG or SHORT balance covers the amount', 'storage.ledger.positions', 'storage', 'acting'),
+  clause('P-6', 'the redemption-fee rate is readable and agrees with its raw parameter', 'api.params', 'runtime-api', 'chain'),
 ];
 
 /** P-7 — `ledger.redeem_scalar_pair` / `redeem_baseline_pair`; payout is exactly `a` gross. */
 const P7: readonly PreconditionClause[] = [
-  clause('P-7', 'the vault is ScalarSettled', 'storage.ledger.vaults', 'storage'),
-  clause('P-7', 'the Baseline position view is BaselineSettled', 'storage.ledger.baseline_vaults', 'storage'),
-  clause('P-7', 'you hold at least the amount of both LONG and SHORT', 'storage.ledger.positions', 'storage'),
-  clause('P-7', 'the redemption-fee rate is readable and agrees with its raw parameter', 'api.params', 'runtime-api'),
+  clause('P-7', 'the vault is ScalarSettled', 'storage.ledger.vaults', 'storage', 'chain'),
+  clause('P-7', 'the Baseline position view is BaselineSettled', 'storage.ledger.baseline_vaults', 'storage', 'chain'),
+  clause('P-7', 'you hold at least the amount of both LONG and SHORT', 'storage.ledger.positions', 'storage', 'acting'),
+  clause('P-7', 'the redemption-fee rate is readable and agrees with its raw parameter', 'api.params', 'runtime-api', 'chain'),
 ];
 
 /** P-8 — `ledger.redeem_void`. 11 §11.6 owns the row; the vault state is the shared clause. */
 const P8: readonly PreconditionClause[] = [
-  clause('P-8', 'the vault is Voided', 'storage.ledger.vaults', 'storage'),
-  clause('P-8', 'you hold the position being redeemed', 'storage.ledger.positions', 'storage'),
+  clause('P-8', 'the vault is Voided', 'storage.ledger.vaults', 'storage', 'chain'),
+  clause('P-8', 'you hold the position being redeemed', 'storage.ledger.positions', 'storage', 'acting'),
 ];
 
 /** P-9 — `ledger.transfer`. */
 const P9: readonly PreconditionClause[] = [
-  clause('P-9', 'the vault is Open, Resolved or Voided', 'storage.ledger.vaults', 'storage'),
-  clause('P-9', 'the recipient has room for another position', 'constant.ledger.max_positions_per_account', 'constant'),
-  clause('P-9', 'the recipient’s current position count leaves room', 'storage.ledger.position_totals', 'storage'),
-  clause('P-9', 'the amount is at least the minimum transfer', 'constant.ledger.min_transfer', 'constant'),
-  clause('P-9', 'you can cover the per-entry position deposit', 'constant.ledger.position_deposit', 'constant'),
+  clause('P-9', 'the vault is Open, Resolved or Voided', 'storage.ledger.vaults', 'storage', 'chain'),
+  clause('P-9', 'the recipient has room for another position', 'constant.ledger.max_positions_per_account', 'constant', 'recipient'),
+  clause('P-9', 'the recipient’s current position count leaves room', 'storage.ledger.position_totals', 'storage', 'recipient'),
+  clause('P-9', 'the amount is at least the minimum transfer', 'constant.ledger.min_transfer', 'constant', 'chain'),
+  clause('P-9', 'you can cover the per-entry position deposit', 'constant.ledger.position_deposit', 'constant', 'acting'),
 ];
 
 /** P-10 — `epoch.submit`. The preimage must be *noted and pinned*, not merely noted. */
 const P10: readonly PreconditionClause[] = [
-  clause('P-10', 'the epoch is in its Intake phase', 'storage.epoch.epoch_of', 'storage'),
-  clause('P-10', 'the intake queue has room', 'storage.epoch.intake_queue', 'storage'),
-  clause('P-10', 'the intake queue bound is not reached', 'constant.epoch.max_intake_queue', 'constant'),
-  clause('P-10', 'you are under your per-epoch intake rate limit', 'storage.epoch.intake_queue', 'storage'),
-  clause('P-10', 'your class bond balance is sufficient', 'storage.system.account', 'storage'),
+  clause('P-10', 'the epoch is in its Intake phase', 'storage.epoch.epoch_of', 'storage', 'chain'),
+  clause('P-10', 'the intake queue has room', 'storage.epoch.intake_queue', 'storage', 'chain'),
+  clause('P-10', 'the intake queue bound is not reached', 'constant.epoch.max_intake_queue', 'constant', 'chain'),
+  clause('P-10', 'you are under your per-epoch intake rate limit', 'storage.epoch.intake_queue', 'storage', 'acting'),
+  clause('P-10', 'your class bond balance is sufficient', 'storage.system.account', 'storage', 'acting'),
 ];
 
 /** P-11 — `epoch.withdraw`: Submitted, caller is proposer, before Qualify. */
 const P11: readonly PreconditionClause[] = [
-  clause('P-11', 'the proposal is still Submitted', 'storage.epoch.proposals', 'storage'),
-  clause('P-11', 'the epoch has not reached Qualify', 'storage.epoch.epoch_of', 'storage'),
+  clause('P-11', 'the proposal is still Submitted', 'storage.epoch.proposals', 'storage', 'chain'),
+  clause('P-11', 'the epoch has not reached Qualify', 'storage.epoch.epoch_of', 'storage', 'chain'),
 ];
 
 /**
@@ -200,27 +241,27 @@ const P11: readonly PreconditionClause[] = [
  * second copy here would be something for that gate to agree with rather than check.
  */
 const P12: readonly PreconditionClause[] = [
-  clause('P-12', 'the proposal is queued and not cancelled', 'storage.execution_guard.queue', 'storage'),
-  clause('P-12', 'the execution window is open', 'storage.execution_guard.queue', 'storage'),
-  clause('P-12', 'the mandate is ratified', 'storage.execution_guard.ratifications', 'storage'),
-  clause('P-12', 'the attestor quorum is met', 'storage.attestor.attestations', 'storage'),
-  clause('P-12', 'no guardian suspension is active', 'storage.guardian.members', 'storage'),
-  clause('P-12', 'the constitution’s gate flags permit execution', 'storage.constitution.phase_flags', 'storage'),
-  clause('P-12', 'the batch is within its declared bounds', 'api.execution_queue', 'runtime-api'),
+  clause('P-12', 'the proposal is queued and not cancelled', 'storage.execution_guard.queue', 'storage', 'chain'),
+  clause('P-12', 'the execution window is open', 'storage.execution_guard.queue', 'storage', 'chain'),
+  clause('P-12', 'the mandate is ratified', 'storage.execution_guard.ratifications', 'storage', 'chain'),
+  clause('P-12', 'the attestor quorum is met', 'storage.attestor.attestations', 'storage', 'chain'),
+  clause('P-12', 'no guardian suspension is active', 'storage.guardian.members', 'storage', 'chain'),
+  clause('P-12', 'the constitution’s gate flags permit execution', 'storage.constitution.phase_flags', 'storage', 'chain'),
+  clause('P-12', 'the batch is within its declared bounds', 'api.execution_queue', 'runtime-api', 'chain'),
 ];
 
 /** P-13 — `oracle.report`. The bond is `max(flat_floor, bps × cohort_escrow)`, recomputed. */
 const P13: readonly PreconditionClause[] = [
-  clause('P-13', 'the round is open and its report window has not elapsed', 'storage.oracle.rounds', 'storage'),
-  clause('P-13', 'you are a registered reporter holding the full stake', 'storage.oracle.reporters', 'storage'),
-  clause('P-13', 'your balance covers the recomputed round bond', 'storage.system.account', 'storage'),
+  clause('P-13', 'the round is open and its report window has not elapsed', 'storage.oracle.rounds', 'storage', 'chain'),
+  clause('P-13', 'you are a registered reporter holding the full stake', 'storage.oracle.reporters', 'storage', 'acting'),
+  clause('P-13', 'your balance covers the recomputed round bond', 'storage.system.account', 'storage', 'acting'),
 ];
 
 /** P-14 — `oracle.challenge`. The bond doubles per round against a value-scaled floor. */
 const P14: readonly PreconditionClause[] = [
-  clause('P-14', 'the round is open and its challenge window has not elapsed', 'storage.oracle.rounds', 'storage'),
-  clause('P-14', 'any watchtower-quorum extension is accounted for', 'storage.oracle.watchtowers', 'storage'),
-  clause('P-14', 'your balance covers the escalated bond', 'storage.system.account', 'storage'),
+  clause('P-14', 'the round is open and its challenge window has not elapsed', 'storage.oracle.rounds', 'storage', 'chain'),
+  clause('P-14', 'any watchtower-quorum extension is accounted for', 'storage.oracle.watchtowers', 'storage', 'chain'),
+  clause('P-14', 'your balance covers the escalated bond', 'storage.system.account', 'storage', 'acting'),
 ];
 
 /**
@@ -232,10 +273,10 @@ const P14: readonly PreconditionClause[] = [
  * screen from the crank having run.
  */
 const P15: readonly PreconditionClause[] = [
-  clause('P-15', 'the epoch crank has work to do', 'storage.epoch.epoch_of', 'storage'),
-  clause('P-15', 'the observation crank is due', 'storage.market.markets', 'storage'),
-  clause('P-15', 'the cohort is settleable', 'storage.epoch.cohorts', 'storage'),
-  clause('P-15', 'the welfare snapshot for the epoch is not yet taken', 'storage.welfare.snapshots', 'storage'),
+  clause('P-15', 'the epoch crank has work to do', 'storage.epoch.epoch_of', 'storage', 'chain'),
+  clause('P-15', 'the observation crank is due', 'storage.market.markets', 'storage', 'chain'),
+  clause('P-15', 'the cohort is settleable', 'storage.epoch.cohorts', 'storage', 'chain'),
+  clause('P-15', 'the welfare snapshot for the epoch is not yet taken', 'storage.welfare.snapshots', 'storage', 'chain'),
 ];
 
 /** 11 §11.5's table, as data. */
@@ -262,4 +303,61 @@ export function rowsFor(id: PreconditionRowId): readonly PreconditionClause[] {
     throw new Error(`no precondition clauses for ${id}; refusing to treat that as "nothing to check"`);
   }
   return rows;
+}
+
+/**
+ * Resolve which account a clause is read against — the wrapper's identity split applied.
+ *
+ * Returns `undefined` for a `chain` clause, which is not an "unknown account" but a
+ * statement that the read is not account-scoped at all. Callers must treat the two
+ * differently: substituting the signer for `undefined` would re-introduce exactly the
+ * implicit-signer assumption the subject field exists to remove.
+ *
+ * `recipient` requires the caller to supply the destination, because it is an argument of
+ * the call rather than a property of the session. Omitting it throws rather than falling
+ * back: a P-9 evaluation that quietly checked the *sender's* position count against the
+ * recipient's `MaxPositionsPerAccount` bound would pass on a healthy sender and let the
+ * user sign a transfer the runtime refuses.
+ */
+export function accountForClause(
+  entry: PreconditionClause,
+  wrapper: CallWrapper,
+  signer: AccountId,
+  recipient?: AccountId,
+): AccountId | undefined {
+  switch (entry.subject) {
+    case 'chain':
+      return undefined;
+    case 'acting':
+      return actingAccount(wrapper, signer);
+    case 'signer':
+      return feePayer(wrapper, signer);
+    case 'recipient':
+      if (recipient === undefined) {
+        throw new Error(
+          `clause "${entry.requirement}" (${entry.row}) is read against the transfer ` +
+            'recipient, which was not supplied; refusing to substitute the signer',
+        );
+      }
+      return recipient;
+  }
+}
+
+/**
+ * The clauses of a row that must be read against an account other than the signer.
+ *
+ * Empty for an unwrapped call, non-empty under a wrapper — which is the property that
+ * makes the split reviewable rather than asserted: if this returns nothing under a proxy,
+ * the row has no account-scoped clause and the wrapper is doing nothing.
+ */
+export function clausesNeedingOtherAccounts(
+  id: PreconditionRowId,
+  wrapper: CallWrapper,
+  signer: AccountId,
+): readonly PreconditionClause[] {
+  return rowsFor(id).filter((entry) => {
+    if (entry.subject === 'recipient') return true;
+    const account = accountForClause(entry, wrapper, signer);
+    return account !== undefined && account !== signer;
+  });
 }
