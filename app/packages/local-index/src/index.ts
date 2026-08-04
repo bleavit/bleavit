@@ -2,3 +2,4 @@
 export * from './coverage.js';
 export * from './ingest.js';
 export * from './backfill.js';
+export * from './candles.js';
