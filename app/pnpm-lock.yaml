@@ -323,6 +323,9 @@ importers:
       '@bleavit/mock-runtime':
         specifier: workspace:*
         version: link:../../packages/mock-runtime
+      '@polkadot-api/descriptors':
+        specifier: workspace:*
+        version: link:../../packages/papi-descriptors
 
   tests/contexts:
     dependencies:
