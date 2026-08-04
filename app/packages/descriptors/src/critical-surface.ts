@@ -58,31 +58,56 @@ export type SurfaceId =
   | "api.recent_cohorts"
   | "api.service_positions"
   | "api.welfare_current"
+  | "constant.attestor.att_min_members"
+  | "constant.attestor.att_quorum"
+  | "constant.attestor.challenge_window_blocks"
   | "constant.client_registry.client_bond"
+  | "constant.constitution.max_capabilities"
+  | "constant.constitution.max_meters"
+  | "constant.constitution.max_params"
   | "constant.decision.delta_floors"
   | "constant.decision.extension"
   | "constant.decision.sigma_floors"
   | "constant.decision.window_floor"
   | "constant.epoch.books_per_proposal"
+  | "constant.epoch.integration_contract_version"
   | "constant.epoch.length_floor"
   | "constant.epoch.max_intake_queue"
   | "constant.epoch.max_live_proposals"
+  | "constant.epoch.max_non_terminal_cohorts"
   | "constant.epoch.phase_offsets"
   | "constant.epoch.recent_cohorts"
+  | "constant.epoch.tick_batch"
   | "constant.epoch.treasury_bond_ask_bps"
   | "constant.execution_guard.descriptor_lead_time"
   | "constant.execution_guard.grace_floor"
+  | "constant.execution_guard.integration_contract_version"
+  | "constant.execution_guard.max_calls"
+  | "constant.execution_guard.max_execution_records"
+  | "constant.execution_guard.max_live_proposals"
+  | "constant.execution_guard.max_payload_bytes"
+  | "constant.execution_guard.max_runtime_code_bytes"
   | "constant.execution_guard.timelock_floor"
+  | "constant.guardian.guardian_bond"
+  | "constant.guardian.guardian_seats"
+  | "constant.guardian.guardian_threshold"
+  | "constant.guardian.playbook_freeze_window_blocks"
   | "constant.identity.contract_version"
   | "constant.identity.ss58_prefix"
   | "constant.identity.vit_existential_deposit"
+  | "constant.ledger.archive_delay"
   | "constant.ledger.max_positions_per_account"
   | "constant.ledger.min_split"
   | "constant.ledger.min_transfer"
   | "constant.ledger.position_deposit"
+  | "constant.ledger.reap_batch"
+  | "constant.ledger.redemption_fee"
   | "constant.ledger.service_id_base"
+  | "constant.market.archive_delay"
+  | "constant.market.fee"
   | "constant.market.gate_eps_floor"
   | "constant.market.gate_p_max_ceiling"
+  | "constant.market.kappa1e9"
   | "constant.market.max_all_stored_markets"
   | "constant.market.max_live_external_markets"
   | "constant.market.max_live_markets"
@@ -90,6 +115,8 @@ export type SurfaceId =
   | "constant.market.max_stored_markets"
   | "constant.market.max_trade_ratio"
   | "constant.market.min_trade"
+  | "constant.market.obs_interval"
+  | "constant.oracle.max_round_close_batch"
   | "constant.question_service.attestors_min"
   | "constant.question_service.epsilon_min"
   | "constant.question_service.fee_floor"
@@ -97,6 +124,15 @@ export type SurfaceId =
   | "constant.question_service.max_window"
   | "constant.registry.archive_delay.incident"
   | "constant.registry.archive_delay.milestone"
+  | "constant.treasury.integration_contract_version"
+  | "constant.treasury.max_budget_lines"
+  | "constant.treasury.max_pol_commitments"
+  | "constant.treasury.max_streams"
+  | "constant.welfare.integration_contract_version"
+  | "constant.welfare.max_daily_gate_samples"
+  | "constant.welfare.max_gate_flags"
+  | "constant.welfare.max_metric_specs"
+  | "constant.welfare.max_snapshots"
   | "event.attestor.attestation_challenged"
   | "event.attestor.attestation_revoked"
   | "event.attestor.attestation_submitted"
@@ -280,31 +316,56 @@ export const CRITICAL_SURFACE: readonly CriticalSurfaceEntry[] = [
   { id: "api.recent_cohorts", compatGroup: "apis", pallet: "FutarchyApi", member: "recent_cohorts", required: true, citation: "02 §3" },
   { id: "api.service_positions", compatGroup: "apis", pallet: "FutarchyApi", member: "service_positions", required: true, citation: "02 §3; 02 §7.1" },
   { id: "api.welfare_current", compatGroup: "apis", pallet: "FutarchyApi", member: "welfare_current", required: true, citation: "02 §3" },
+  { id: "constant.attestor.att_min_members", compatGroup: "constants", pallet: "Attestor", member: "AttMinMembers", required: true, citation: "02 §9" },
+  { id: "constant.attestor.att_quorum", compatGroup: "constants", pallet: "Attestor", member: "AttQuorum", required: true, citation: "02 §9" },
+  { id: "constant.attestor.challenge_window_blocks", compatGroup: "constants", pallet: "Attestor", member: "ChallengeWindowBlocks", required: true, citation: "02 §9" },
   { id: "constant.client_registry.client_bond", compatGroup: "constants", pallet: "ClientRegistry", member: "ClientBond", required: true, citation: "02 §4a; 02 §9" },
+  { id: "constant.constitution.max_capabilities", compatGroup: "constants", pallet: "Constitution", member: "MaxCapabilities", required: true, citation: "02 §9" },
+  { id: "constant.constitution.max_meters", compatGroup: "constants", pallet: "Constitution", member: "MaxMeters", required: true, citation: "02 §9" },
+  { id: "constant.constitution.max_params", compatGroup: "constants", pallet: "Constitution", member: "MaxParams", required: true, citation: "02 §9" },
   { id: "constant.decision.delta_floors", compatGroup: "constants", pallet: "Epoch", member: "DecisionDeltaFloors", required: true, citation: "02 §9" },
   { id: "constant.decision.extension", compatGroup: "constants", pallet: "Epoch", member: "DecisionExtension", required: true, citation: "02 §9" },
   { id: "constant.decision.sigma_floors", compatGroup: "constants", pallet: "Epoch", member: "DecisionSigmaFloors", required: true, citation: "02 §9" },
   { id: "constant.decision.window_floor", compatGroup: "constants", pallet: "Epoch", member: "DecisionWindowFloor", required: true, citation: "02 §9" },
   { id: "constant.epoch.books_per_proposal", compatGroup: "constants", pallet: "Epoch", member: "MaxBooksPerProposal", required: true, citation: "02 §9" },
+  { id: "constant.epoch.integration_contract_version", compatGroup: "constants", pallet: "Epoch", member: "INTEGRATION_CONTRACT_VERSION", required: true, citation: "02 §9" },
   { id: "constant.epoch.length_floor", compatGroup: "constants", pallet: "Epoch", member: "MinEpochLength", required: true, citation: "02 §9" },
   { id: "constant.epoch.max_intake_queue", compatGroup: "constants", pallet: "Epoch", member: "MaxIntakeQueue", required: true, citation: "02 §9" },
   { id: "constant.epoch.max_live_proposals", compatGroup: "constants", pallet: "Epoch", member: "MaxLiveProposals", required: true, citation: "02 §9" },
+  { id: "constant.epoch.max_non_terminal_cohorts", compatGroup: "constants", pallet: "Epoch", member: "MaxNonTerminalCohorts", required: true, citation: "02 §9" },
   { id: "constant.epoch.phase_offsets", compatGroup: "constants", pallet: "Epoch", member: "PhaseOffsets", required: true, citation: "02 §9" },
   { id: "constant.epoch.recent_cohorts", compatGroup: "constants", pallet: "Epoch", member: "RecentCohortSummariesBound", required: true, citation: "02 §9" },
+  { id: "constant.epoch.tick_batch", compatGroup: "constants", pallet: "Epoch", member: "TickBatch", required: true, citation: "02 §9" },
   { id: "constant.epoch.treasury_bond_ask_bps", compatGroup: "constants", pallet: "Epoch", member: "TreasuryBondAskBps", required: true, citation: "02 §9; 08 §7" },
   { id: "constant.execution_guard.descriptor_lead_time", compatGroup: "constants", pallet: "ExecutionGuard", member: "DescriptorLeadTime", required: true, citation: "02 §9" },
   { id: "constant.execution_guard.grace_floor", compatGroup: "constants", pallet: "ExecutionGuard", member: "ExecutionGraceFloor", required: true, citation: "02 §9" },
+  { id: "constant.execution_guard.integration_contract_version", compatGroup: "constants", pallet: "ExecutionGuard", member: "INTEGRATION_CONTRACT_VERSION", required: true, citation: "02 §9" },
+  { id: "constant.execution_guard.max_calls", compatGroup: "constants", pallet: "ExecutionGuard", member: "MaxCalls", required: true, citation: "02 §9" },
+  { id: "constant.execution_guard.max_execution_records", compatGroup: "constants", pallet: "ExecutionGuard", member: "MaxExecutionRecords", required: true, citation: "02 §9" },
+  { id: "constant.execution_guard.max_live_proposals", compatGroup: "constants", pallet: "ExecutionGuard", member: "MaxLiveProposals", required: true, citation: "02 §9" },
+  { id: "constant.execution_guard.max_payload_bytes", compatGroup: "constants", pallet: "ExecutionGuard", member: "MaxPayloadBytes", required: true, citation: "02 §9" },
+  { id: "constant.execution_guard.max_runtime_code_bytes", compatGroup: "constants", pallet: "ExecutionGuard", member: "MaxRuntimeCodeBytes", required: true, citation: "02 §9" },
   { id: "constant.execution_guard.timelock_floor", compatGroup: "constants", pallet: "ExecutionGuard", member: "ExecutionTimelockFloor", required: true, citation: "02 §9" },
+  { id: "constant.guardian.guardian_bond", compatGroup: "constants", pallet: "Guardian", member: "GuardianBond", required: true, citation: "02 §9" },
+  { id: "constant.guardian.guardian_seats", compatGroup: "constants", pallet: "Guardian", member: "GuardianSeats", required: true, citation: "02 §9" },
+  { id: "constant.guardian.guardian_threshold", compatGroup: "constants", pallet: "Guardian", member: "GuardianThreshold", required: true, citation: "02 §9" },
+  { id: "constant.guardian.playbook_freeze_window_blocks", compatGroup: "constants", pallet: "Guardian", member: "PlaybookFreezeWindowBlocks", required: true, citation: "02 §9" },
   { id: "constant.identity.contract_version", compatGroup: "constants", pallet: "Constitution", member: "INTEGRATION_CONTRACT_VERSION", required: true, citation: "02 §8; 02 §13" },
   { id: "constant.identity.ss58_prefix", compatGroup: "constants", pallet: "System", member: "SS58Prefix", required: true, citation: "02 §8" },
   { id: "constant.identity.vit_existential_deposit", compatGroup: "constants", pallet: "Balances", member: "ExistentialDeposit", required: true, citation: "02 §8" },
+  { id: "constant.ledger.archive_delay", compatGroup: "constants", pallet: "ConditionalLedger", member: "ArchiveDelay", required: true, citation: "02 §9" },
   { id: "constant.ledger.max_positions_per_account", compatGroup: "constants", pallet: "ConditionalLedger", member: "MaxPositionsPerAccount", required: true, citation: "02 §9" },
   { id: "constant.ledger.min_split", compatGroup: "constants", pallet: "ConditionalLedger", member: "MinSplit", required: true, citation: "02 §9" },
   { id: "constant.ledger.min_transfer", compatGroup: "constants", pallet: "ConditionalLedger", member: "MinTransfer", required: true, citation: "02 §9" },
   { id: "constant.ledger.position_deposit", compatGroup: "constants", pallet: "ConditionalLedger", member: "PositionDeposit", required: true, citation: "02 §9" },
+  { id: "constant.ledger.reap_batch", compatGroup: "constants", pallet: "ConditionalLedger", member: "ReapBatch", required: true, citation: "02 §9" },
+  { id: "constant.ledger.redemption_fee", compatGroup: "constants", pallet: "ConditionalLedger", member: "RedemptionFee", required: true, citation: "02 §9" },
   { id: "constant.ledger.service_id_base", compatGroup: "constants", pallet: "ConditionalLedger", member: "ServiceIdBase", required: true, citation: "02 §9" },
+  { id: "constant.market.archive_delay", compatGroup: "constants", pallet: "Market", member: "ArchiveDelay", required: true, citation: "02 §9" },
+  { id: "constant.market.fee", compatGroup: "constants", pallet: "Market", member: "Fee", required: true, citation: "02 §9" },
   { id: "constant.market.gate_eps_floor", compatGroup: "constants", pallet: "Market", member: "GateEpsFloor", required: true, citation: "02 §9" },
   { id: "constant.market.gate_p_max_ceiling", compatGroup: "constants", pallet: "Market", member: "GatePMaxCeiling", required: true, citation: "02 §9" },
+  { id: "constant.market.kappa1e9", compatGroup: "constants", pallet: "Market", member: "Kappa1e9", required: true, citation: "02 §9" },
   { id: "constant.market.max_all_stored_markets", compatGroup: "constants", pallet: "Market", member: "MaxAllStoredMarkets", required: true, citation: "02 §9" },
   { id: "constant.market.max_live_external_markets", compatGroup: "constants", pallet: "Market", member: "MaxLiveExternalMarkets", required: true, citation: "02 §9" },
   { id: "constant.market.max_live_markets", compatGroup: "constants", pallet: "Market", member: "MaxLiveMarkets", required: true, citation: "02 §9" },
@@ -312,6 +373,8 @@ export const CRITICAL_SURFACE: readonly CriticalSurfaceEntry[] = [
   { id: "constant.market.max_stored_markets", compatGroup: "constants", pallet: "Market", member: "MaxStoredMarkets", required: true, citation: "02 §9" },
   { id: "constant.market.max_trade_ratio", compatGroup: "constants", pallet: "Market", member: "MaxTradeRatio", required: true, citation: "02 §9" },
   { id: "constant.market.min_trade", compatGroup: "constants", pallet: "Market", member: "MinTrade", required: true, citation: "02 §9" },
+  { id: "constant.market.obs_interval", compatGroup: "constants", pallet: "Market", member: "ObsInterval", required: true, citation: "02 §9" },
+  { id: "constant.oracle.max_round_close_batch", compatGroup: "constants", pallet: "Oracle", member: "MaxRoundCloseBatch", required: true, citation: "02 §9" },
   { id: "constant.question_service.attestors_min", compatGroup: "constants", pallet: "QuestionService", member: "AttestorsMin", required: true, citation: "02 §4a; 02 §9" },
   { id: "constant.question_service.epsilon_min", compatGroup: "constants", pallet: "QuestionService", member: "EpsilonMin", required: true, citation: "02 §4a; 02 §9" },
   { id: "constant.question_service.fee_floor", compatGroup: "constants", pallet: "QuestionService", member: "FeeFloor", required: true, citation: "02 §4a; 02 §9" },
@@ -319,6 +382,15 @@ export const CRITICAL_SURFACE: readonly CriticalSurfaceEntry[] = [
   { id: "constant.question_service.max_window", compatGroup: "constants", pallet: "QuestionService", member: "MaxWindow", required: true, citation: "02 §4a; 02 §9" },
   { id: "constant.registry.archive_delay.incident", compatGroup: "constants", pallet: "IncidentRegistry", member: "ArchiveDelay", required: true, citation: "02 §9" },
   { id: "constant.registry.archive_delay.milestone", compatGroup: "constants", pallet: "MilestoneRegistry", member: "ArchiveDelay", required: true, citation: "02 §9" },
+  { id: "constant.treasury.integration_contract_version", compatGroup: "constants", pallet: "FutarchyTreasury", member: "INTEGRATION_CONTRACT_VERSION", required: true, citation: "02 §9" },
+  { id: "constant.treasury.max_budget_lines", compatGroup: "constants", pallet: "FutarchyTreasury", member: "MaxBudgetLines", required: true, citation: "02 §9" },
+  { id: "constant.treasury.max_pol_commitments", compatGroup: "constants", pallet: "FutarchyTreasury", member: "MaxPolCommitments", required: true, citation: "02 §9" },
+  { id: "constant.treasury.max_streams", compatGroup: "constants", pallet: "FutarchyTreasury", member: "MaxStreams", required: true, citation: "02 §9" },
+  { id: "constant.welfare.integration_contract_version", compatGroup: "constants", pallet: "Welfare", member: "INTEGRATION_CONTRACT_VERSION", required: true, citation: "02 §9" },
+  { id: "constant.welfare.max_daily_gate_samples", compatGroup: "constants", pallet: "Welfare", member: "MaxDailyGateSamples", required: true, citation: "02 §9" },
+  { id: "constant.welfare.max_gate_flags", compatGroup: "constants", pallet: "Welfare", member: "MaxGateFlags", required: true, citation: "02 §9" },
+  { id: "constant.welfare.max_metric_specs", compatGroup: "constants", pallet: "Welfare", member: "MaxMetricSpecs", required: true, citation: "02 §9" },
+  { id: "constant.welfare.max_snapshots", compatGroup: "constants", pallet: "Welfare", member: "MaxSnapshots", required: true, citation: "02 §9" },
   { id: "event.attestor.attestation_challenged", compatGroup: "event", pallet: "Attestor", member: "AttestationChallenged", required: true, citation: "02 §6" },
   { id: "event.attestor.attestation_revoked", compatGroup: "event", pallet: "Attestor", member: "AttestationRevoked", required: true, citation: "02 §6" },
   { id: "event.attestor.attestation_submitted", compatGroup: "event", pallet: "Attestor", member: "AttestationSubmitted", required: true, citation: "02 §6" },
