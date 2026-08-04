@@ -37,7 +37,16 @@ const DOC = resolve(HERE, '..', '..', '..', 'docs', 'architecture', '11-frontend
 
 const PIN = { blockHash: `0x${'11'.repeat(32)}`, blockNumber: 100 };
 const BUILT_FOR = { specVersion: 2, metadataHash: `0x${'ab'.repeat(32)}` };
-const PREP = { scaleHex: '0x0403aabbcc', builtFor: BUILT_FOR, preparedAt: { blockHash: `0x${'22'.repeat(32)}`, blockNumber: 99 } };
+// `requires` is the rows this call declares. It is required and non-empty: without it the
+// gate could not distinguish "every precondition holds" from "nobody read one", and those
+// were the same value — every check in `gate` is a filter, and a filter over an empty array
+// is empty. An adversarial review found `gate(PREP, PIN, BUILT_FOR, [])` returning `proceed`.
+const PREP = {
+  scaleHex: '0x0403aabbcc',
+  builtFor: BUILT_FOR,
+  preparedAt: { blockHash: `0x${'22'.repeat(32)}`, blockNumber: 99 },
+  requires: ['P-1'],
+};
 
 const okRow = (id) => ({ id, ok: true, requirement: 'r', expected: 'e', actual: 'a', at: PIN });
 const failRow = (id) => ({ ...okRow(id), ok: false });
@@ -76,6 +85,51 @@ test('AwaitingSignature is reachable ONLY from Refreshing, and only with a passe
   }
 });
 
+/* ------------------------------------------------ the gate cannot pass by shrinking */
+
+test('a gate over zero reads is BLOCKED — it certifies nothing (adversarial review, 2026-08-04)', () => {
+  // The defect this replaces: every check in `gate` is a filter over `results`, and every
+  // filter over an empty array is empty — so `gate(PREP, PIN, BUILT_FOR, [])` returned
+  // `proceed` and the reducer reached AwaitingSignature having read nothing. "Every
+  // precondition holds" and "nobody read one" were the same value.
+  const outcome = gate(PREP, PIN, BUILT_FOR, []);
+  assert.equal(outcome.kind, 'blocked');
+  assert.match(outcome.detail, /never read at this block/);
+});
+
+test('a declared row with no result blocks, naming the row', () => {
+  const twoRows = { ...PREP, requires: ['P-1', 'P-3'] };
+  const outcome = gate(twoRows, PIN, BUILT_FOR, [okRow('P-1')]);
+  assert.equal(outcome.kind, 'blocked');
+  assert.match(outcome.detail, /P-3/);
+});
+
+test('a preparation declaring no rows at all is refused rather than trivially passing', () => {
+  // 11 §11.5 gives every call at least one row, so an empty `requires` is a defect in the
+  // builder — and the fail-open reading of it is a signature nothing gated.
+  const outcome = gate({ ...PREP, requires: [] }, PIN, BUILT_FOR, []);
+  assert.equal(outcome.kind, 'blocked');
+  assert.match(outcome.detail, /declares no precondition rows/);
+});
+
+test('extra results beyond the declared set do not substitute for a missing one', () => {
+  // A count-based coverage check would pass this: two declared, two supplied.
+  const twoRows = { ...PREP, requires: ['P-1', 'P-3'] };
+  const outcome = gate(twoRows, PIN, BUILT_FOR, [okRow('P-1'), okRow('P-7')]);
+  assert.equal(outcome.kind, 'blocked');
+  assert.match(outcome.detail, /P-3/);
+});
+
+test('the edge enumerator reaches AwaitingSignature through a covered gate, not an empty one', () => {
+  // txTransitionEdges() built its own `proceed` from an empty read set, which is the bypass
+  // it exists to prove absent. If that regressed, this edge would vanish.
+  const edges = txTransitionEdges();
+  assert.ok(
+    edges.some(([from, to]) => from === 'Refreshing' && to === 'AwaitingSignature'),
+    'the enumerator can no longer reach AwaitingSignature — its gate stopped passing',
+  );
+});
+
 test('a session in AwaitingSignature carries the gate proof, and nothing else does', () => {
   const signing = toAwaitingSignature();
   assert.equal(signing.state, 'AwaitingSignature');
@@ -111,7 +165,7 @@ test('FE-TX-007 is checked before the preconditions, not alongside them', () => 
   assert.match(outcome.detail, /rebuilt rather than re-checked/);
 
   // A changed metadata hash at the same spec_version is equally disqualifying.
-  const rehashed = gate(PREP, PIN, { specVersion: 2, metadataHash: `0x${'cd'.repeat(32)}` }, []);
+  const rehashed = gate(PREP, PIN, { specVersion: 2, metadataHash: `0x${'cd'.repeat(32)}` }, [okRow('P-1')]);
   assert.equal(rehashed.code, 'FE-TX-007');
 });
 
