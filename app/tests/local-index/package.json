@@ -8,5 +8,8 @@
   },
   "dependencies": {
     "@bleavit/local-index": "workspace:*"
+  },
+  "devDependencies": {
+    "fake-indexeddb": "6.2.5"
   }
 }
