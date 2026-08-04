@@ -15,7 +15,7 @@
     "depcruise": "depcruise packages src --config .dependency-cruiser.cjs",
     "test:firewall": "node --test tests/firewall/*.test.js",
     "test:protocol": "node --test tests/protocol/*.test.js",
-    "test": "pnpm run test:firewall && pnpm run test:protocol && pnpm run test:mock-runtime && pnpm run test:chain-client && pnpm run test:descriptors && pnpm run test:tx && pnpm run check:casts && pnpm run surface:check && pnpm run check:budget && pnpm run depcruise:witness",
+    "test": "pnpm run test:firewall && pnpm run test:protocol && pnpm run test:mock-runtime && pnpm run test:chain-client && pnpm run test:descriptors && pnpm run test:tx && pnpm run test:verify && pnpm run check:casts && pnpm run surface:check && pnpm run check:budget && pnpm run depcruise:witness",
     "depcruise:witness": "depcruise tests/depcruise-witness --config tests/depcruise-witness/.dependency-cruiser.cjs --output-type err && (echo 'WITNESS DID NOT FIRE \u2014 the rule set is vacuous' && exit 1) || echo 'witness fired: rules are live'",
     "check:casts": "node tools/check-finalized-casts.mjs",
     "descriptors:generate": "node tools/check-descriptor-drift.mjs --update",
@@ -26,7 +26,8 @@
     "surface:check": "node tools/generate-critical-surface.mjs --check",
     "test:descriptors": "node --test tests/descriptors/*.test.js",
     "check:budget": "node tools/check-smoldot-budget.mjs",
-    "test:tx": "node --test tests/transaction-builder/*.test.js"
+    "test:tx": "node --test tests/transaction-builder/*.test.js",
+    "test:verify": "node --test tests/verify/*.test.js"
   },
   "devDependencies": {
     "dependency-cruiser": "17.0.1",

@@ -373,6 +373,18 @@ jobs:
         working-directory: app
         run: pnpm run test:tx
 
+      - name: Release self-check and verification panel (F10, INV-FE-8/11)
+        # Two properties carry the invariants and both fail silently if untested. A
+        # genesis mismatch is TERMINAL rather than a degraded mode — it means a
+        # different chain, where no reduced surface is safe — and divergence is
+        # surfaced, never repaired, which is asserted structurally: the package must
+        # export no refetch/repair path, because re-fetching asks the channel that just
+        # served wrong bytes for better ones. The panel is also proven renderable with
+        # no chain handle at all, since 10 §3.2 lists it among what still works when
+        # smoldot fails to start — the moment a user most needs it.
+        working-directory: app
+        run: pnpm run test:verify
+
       - name: smoldot artifact budget (10 §9.3, FE-P4)
         # A budget nothing measures is a sentence, and the one certain thing about a
         # dependency's compressed size is that it changes. Fails closed if the pinned

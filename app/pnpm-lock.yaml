@@ -315,6 +315,12 @@ importers:
         specifier: workspace:*
         version: link:../../packages/transaction-builder
 
+  tests/verify:
+    dependencies:
+      '@bleavit/verify':
+        specifier: workspace:*
+        version: link:../../packages/verify
+
 packages:
 
   '@babel/code-frame@7.29.7':

@@ -12,3 +12,4 @@ packages:
   - 'tests/chain-client'
   - 'tests/descriptors'
   - 'tests/transaction-builder'
+  - 'tests/verify'
