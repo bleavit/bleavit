@@ -51,7 +51,7 @@ export interface UndecodableRead {
  */
 export interface ShellDecoders {
   readonly epochOf: (raw: string) => Decoded<{ readonly epoch: number; readonly phase: string }>;
-  readonly phaseFlags: (raw: string) => Decoded<{ readonly governancePhase: number }>;
+  readonly phaseFlags: (raw: string) => Decoded<number>;
 }
 
 /** The frozen 02 §7 keys this screen reads. Names, never re-derived hashes. */
@@ -89,7 +89,7 @@ export function assertOnePin(state: ShellChainState, blockHash: string): void {
     state.epoch,
     state.phaseLabel,
     state.finalizedHeight,
-    ...(state.bootstrapPhase === undefined ? [] : [state.bootstrapPhase]),
+    ...(state.phaseFlags === undefined ? [] : [state.phaseFlags]),
   ];
   for (const leaf of leaves) {
     const at = 'blockHash' in leaf.status ? leaf.status.blockHash : undefined;
@@ -158,7 +158,9 @@ export async function readShellState(
     finalizedHeight: finalized(at.blockNumber),
     // Unread and undecodable collapse here deliberately: both mean the client cannot
     // establish that sudo is gone, and INV-FE-12 gives them the same fail-closed answer.
-    bootstrapPhase: flagsDecoded.ok ? finalized(flagsDecoded.value.governancePhase) : undefined,
+    // The raw u32 bitset of 02 §7.3, deliberately not pre-interpreted: a screen handed a
+    // boolean could not show which other flags are set.
+    phaseFlags: flagsDecoded.ok ? finalized(flagsDecoded.value) : undefined,
   };
 
   assertOnePin(state, at.blockHash);

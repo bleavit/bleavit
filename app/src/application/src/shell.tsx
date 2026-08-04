@@ -13,11 +13,15 @@
  *   `Disclosure` (11 §11.2 constraint 3 names `sudo-era-banner` explicitly).
  * - *"It MUST NOT be gated behind settings, themes, or 'compact mode'"* — so `Shell` takes
  *   no prop that could hide it. The only input is the chain read.
- * - *"it disappears only when a finalized `PhaseFlags` read shows Phase ≥ 4"* — so its
- *   presence is a function of `Verified<PhaseState>` and nothing else. In particular an
- *   **unread** phase renders the banner: 10 §5.4 / INV-FE-12 make the unknown case
- *   fail-closed, and the closed direction here is *warn*, since a client that quietly
- *   drops the banner because a read failed presents bootstrap state as post-sudo state.
+ * - *"it disappears only when a finalized `PhaseFlags` read shows Phase ≥ 4 (sudo removed)"*
+ *   — so its presence is a function of that one read and nothing else. **`PhaseFlags` is a
+ *   bitset, and sudo-present is bit 4** (02 §7.3): the first version of this file tested
+ *   `phase >= 4`, which shares the digit and is the opposite check. A real recorded value
+ *   of `17` (shadow mode + sudo present) would have *hidden* the banner on a chain running
+ *   sudo. See `phase-flags.ts`. An **unread** value renders the banner: 10 §5.4 /
+ *   INV-FE-12 make the unknown case fail-closed, and the closed direction here is *warn*,
+ *   since a client that quietly drops the banner because a read failed presents bootstrap
+ *   state as post-sudo state.
  *
  * ## Why the header takes `Verified<T>` rather than a store
  *
@@ -38,19 +42,27 @@ import {
 } from '@bleavit/ui';
 import type { Verified } from '@bleavit/shared-types';
 import { navigationFor, type Navigation, type Screen } from './screens.js';
+import { sudoActive } from './phase-flags.js';
 
 /**
  * What the shell knows about the chain's phase.
  *
- * `phase` is `undefined` when `Constitution.PhaseFlags` could not be read — distinct from
- * a phase that was read and is ≥ 4, and the distinction decides whether the banner shows.
+ * `phaseFlags` is `undefined` when `Constitution.PhaseFlags` could not be read — distinct
+ * from a value that was read and has bit 4 clear, and the distinction decides the banner.
  */
 export interface ShellChainState {
   readonly epoch: Verified<number>;
   readonly phaseLabel: Verified<string>;
   readonly finalizedHeight: Verified<number>;
-  /** The 02 §9 governance phase, finalized-read. `undefined` means unread, not post-sudo. */
-  readonly bootstrapPhase: Verified<number> | undefined;
+  /**
+   * `Constitution.PhaseFlags` — the raw **u32 bitset** of 02 §7.3, finalized-read.
+   *
+   * A bitset, not a phase number. Modelling it as a number is the defect this field was
+   * renamed to kill: the banner keyed off `phase < 4` while sudo-present is *bit* 4, so a
+   * real recorded value of `17` would have hidden the banner on a chain running sudo.
+   * `undefined` means unread, which INV-FE-12 treats as *show the banner*.
+   */
+  readonly phaseFlags: Verified<number> | undefined;
 }
 
 /** 11 §11.10's normative copy, in-bundle, one place. */
@@ -63,18 +75,15 @@ const SUDO_UNREAD =
   'establish that sudo has been removed. It is showing this warning rather than assuming ' +
   'the safer-looking answer.';
 
-/** Phase ≥ 4 is the post-sudo window (09 §3.1); below it the banner stands. */
-const FIRST_POST_SUDO_PHASE = 4;
-
-export function sudoBannerFor(bootstrapPhase: Verified<number> | undefined): ReactNode | null {
-  if (bootstrapPhase === undefined) {
+export function sudoBannerFor(phaseFlags: Verified<number> | undefined): ReactNode | null {
+  if (phaseFlags === undefined) {
     return (
       <Notice severity="danger" heading={SUDO_HEADING}>
         {SUDO_UNREAD}
       </Notice>
     );
   }
-  if (bootstrapPhase.value >= FIRST_POST_SUDO_PHASE) return null;
+  if (!sudoActive(phaseFlags.value)) return null;
   return (
     <Notice severity="caution" heading={SUDO_HEADING}>
       {SUDO_BODY}
@@ -147,7 +156,7 @@ export function Shell({
   readonly activeScreen: string;
   readonly children: ReactNode;
 }) {
-  const banner = sudoBannerFor(chain.bootstrapPhase);
+  const banner = sudoBannerFor(chain.phaseFlags);
   const nav = navigationFor(handoffEnabled);
   return (
     <div className="shell">

@@ -23,13 +23,17 @@ import {
   placementOf,
   Outlet,
   PENDING_SCREENS,
+  PHASE_FLAG_BITS,
   SHELL_READS,
   assertOnePin,
   reachableScreens,
+  hasPhaseFlag,
+  namedPhaseFlags,
   readShellState,
   screenFor,
   VerificationPanelView,
   screenForHash,
+  sudoActive,
   sudoBannerFor,
 } from '@bleavit/application';
 import {
@@ -133,11 +137,60 @@ test('no screen was quietly dropped from the client', () => {
 
 // --------------------------------------------------------------- S1 / shell
 
-test('the sudo banner shows below phase 4, hides at and above it', () => {
-  assert.notEqual(sudoBannerFor(finalized(0)), null);
-  assert.notEqual(sudoBannerFor(finalized(3)), null);
-  assert.equal(sudoBannerFor(finalized(4)), null);
-  assert.equal(sudoBannerFor(finalized(5)), null);
+test('the phase-flag bit table matches 02 §7.3 exactly', () => {
+  // The assignments are wire format frozen in the contract, not a tunable, so they are
+  // compiled in — and bound to the document's own sentence so a reassignment fails here
+  // rather than silently disagreeing with the runtime.
+  const doc = readFileSync(join(REPO, 'docs/architecture/02-integration-contract.md'), 'utf8');
+  const sentence = /Bit assignments: ([^|]+?); bits 8–31 reserved/.exec(doc);
+  assert.ok(sentence, 'the §7.3 bit-assignment sentence moved — re-point this binding');
+  const declared = Object.fromEntries(
+    sentence[1].split(',').map((part) => {
+      const [bit, name] = part.split('=').map((x) => x.trim());
+      return [name, Number(bit)];
+    }),
+  );
+  assert.equal(Object.keys(declared).length, 8, `parsed ${JSON.stringify(declared)}`);
+  assert.deepEqual({ ...PHASE_FLAG_BITS }, declared);
+});
+
+test('the sudo banner keys off bit 4, not off a phase number', () => {
+  // The defect this replaced: the first version tested `phase >= 4`, which shares the digit
+  // with "bit 4" and is the opposite check. The recorded chain value is the witness.
+  const RECORDED = 17; // 0b10001 — shadow mode + sudo present, decoded from the real fixture
+  assert.equal(sudoActive(RECORDED), true);
+  assert.notEqual(sudoBannerFor(finalized(RECORDED)), null, 'the banner hid on a sudo chain');
+  // Under the old reading `17 >= 4` was true and the banner would have been hidden.
+  assert.ok(RECORDED >= 4, 'the witness must be a value the old check got wrong');
+
+  // Bit 4 clear, other bits set: no banner.
+  assert.equal(sudoActive(0b1111), false);
+  assert.equal(sudoBannerFor(finalized(0b1111)), null);
+  // Bit 4 alone: banner.
+  assert.equal(sudoActive(1 << 4), true);
+  assert.notEqual(sudoBannerFor(finalized(1 << 4)), null);
+  // Nothing set at all: no banner, and that is a read rather than an absence.
+  assert.equal(sudoBannerFor(finalized(0)), null);
+});
+
+test('flags are tested by name, and a set reserved bit changes nothing', () => {
+  assert.deepEqual(namedPhaseFlags(17), ['shadow mode', 'sudo present']);
+  // Reserved bits 8–31 are unnamed, and setting them must not disturb the named ones.
+  // `1 << 31` is negative in JS, which is why it is the interesting case — and the reason
+  // `hasPhaseFlag` needs no sign normalisation: every named bit is 0–7, so the mask is
+  // positive and the result is non-negative whatever the sign of the input.
+  assert.equal(hasPhaseFlag((1 << 31) | (1 << 4), 'sudo present'), true);
+  assert.equal(hasPhaseFlag(1 << 31, 'sudo present'), false);
+  assert.deepEqual(namedPhaseFlags((1 << 31) | 17), ['shadow mode', 'sudo present']);
+});
+
+test('an unestablished PhaseFlags means sudo is assumed active (INV-FE-12)', () => {
+  // `sudoActive`'s own undefined branch. Every earlier test reached it through
+  // `sudoBannerFor`, which has a separate `undefined` branch of its own — so a mutation
+  // flipping this one survived, with the banner still showing for the other function's
+  // reason rather than for this one's.
+  assert.equal(sudoActive(undefined), true);
+  assert.equal(sudoActive(0), false);
 });
 
 test('an unread phase shows the banner — unknown is not post-sudo', () => {
@@ -155,13 +208,13 @@ const shellChain = (phase) => ({
   epoch: finalized(7),
   phaseLabel: finalized('Trade'),
   finalizedHeight: finalized(1_000_000),
-  bootstrapPhase: phase === undefined ? undefined : finalized(phase),
+  phaseFlags: phase === undefined ? undefined : finalized(phase),
 });
 
 test('the banner renders above the navigation, on the shell, with nothing to dismiss it', () => {
   const html = renderToStaticMarkup(
     h(Shell, {
-      chain: shellChain(1),
+      chain: shellChain(1 << 4),
       handoffEnabled: true,
       activeScreen: 'S21',
       children: h('p', null, 'content'),
@@ -186,7 +239,7 @@ test('the shell offers no prop that could hide the banner', () => {
   ]) {
     const html = renderToStaticMarkup(
       h(Shell, {
-        chain: shellChain(0),
+        chain: shellChain(1 << 4),
         handoffEnabled: true,
         activeScreen: 'S21',
         children: null,
@@ -592,7 +645,7 @@ test('every leaf of the shell model comes from the reader’s one pinned block',
   const reader = readerDouble(pin, { [SHELL_READS.epochOf]: '0x01', [SHELL_READS.phaseFlags]: '0x04' });
   const { state, undecodable } = await readShellState(reader, DECODERS_OK);
   assert.deepEqual(undecodable, []);
-  for (const leaf of [state.epoch, state.phaseLabel, state.finalizedHeight, state.bootstrapPhase]) {
+  for (const leaf of [state.epoch, state.phaseLabel, state.finalizedHeight, state.phaseFlags]) {
     assert.equal(leaf.status.blockHash, '0xbeef');
     assert.equal(leaf.status.blockNumber, 42);
   }
@@ -624,8 +677,8 @@ test('an unreadable PhaseFlags fails closed to the banner, not to post-sudo', as
   // sudo has been removed.
   const reader = readerDouble(pin, { [SHELL_READS.epochOf]: '0x01' });
   const { state, undecodable } = await readShellState(reader, DECODERS_OK);
-  assert.equal(state.bootstrapPhase, undefined);
-  assert.notEqual(sudoBannerFor(state.bootstrapPhase), null);
+  assert.equal(state.phaseFlags, undefined);
+  assert.notEqual(sudoBannerFor(state.phaseFlags), null);
   assert.ok(undecodable.some((row) => row.label === SHELL_READS.phaseFlags));
 });
 
@@ -640,13 +693,13 @@ test('a model assembled from two blocks is refused rather than rendered', () => 
     epoch: ok(7),
     phaseLabel: ok('Trade'),
     finalizedHeight: ok(42),
-    bootstrapPhase: ok(4),
+    phaseFlags: ok(4),
   };
   assert.doesNotThrow(() => assertOnePin(consistent, at.blockHash));
 
   // One leaf from a different block: a header showing the epoch at one block and the phase
   // at another is a view that never existed, and nothing on screen distinguishes it.
-  for (const field of ['epoch', 'phaseLabel', 'finalizedHeight', 'bootstrapPhase']) {
+  for (const field of ['epoch', 'phaseLabel', 'finalizedHeight', 'phaseFlags']) {
     const mixed = {
       ...consistent,
       [field]: {

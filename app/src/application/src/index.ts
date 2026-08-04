@@ -36,3 +36,10 @@ export {
   screenFor,
 } from './routes.js';
 export { CheckpointAgeNotice, VerificationPanelView } from './verification-panel.js';
+export {
+  PHASE_FLAG_BITS,
+  hasPhaseFlag,
+  namedPhaseFlags,
+  sudoActive,
+  type PhaseFlagName,
+} from './phase-flags.js';

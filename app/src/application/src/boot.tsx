@@ -45,8 +45,8 @@ function initialChainState(): ShellChainState {
     epoch: { value: 0, status: unread },
     phaseLabel: { value: 'connecting…', status: unread },
     finalizedHeight: { value: 0, status: unread },
-    // Unread, not post-sudo. This is what makes the banner show during sync.
-    bootstrapPhase: undefined,
+    // Unread, not "sudo absent". This is what makes the banner show during sync.
+    phaseFlags: undefined,
   };
 }
 
