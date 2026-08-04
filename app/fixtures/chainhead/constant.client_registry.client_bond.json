@@ -1,19 +1,19 @@
 {
   "headers": {
-    "pinned_block": "0x4a079de432599f14c3de77382e2d2aba0064a4ee0ef23f3b5210ac13aa927686"
+    "pinned_block": "0x29061f184e9bd4693484b3f37d25d1637cd3b596e9fe17de007dc8f35ca795bc"
   },
   "requests": [
     {
       "method": "chainHead_v1_header",
       "params": [
         "subscription-1",
-        "0x4a079de432599f14c3de77382e2d2aba0064a4ee0ef23f3b5210ac13aa927686"
+        "0x29061f184e9bd4693484b3f37d25d1637cd3b596e9fe17de007dc8f35ca795bc"
       ],
       "response": {
         "direct": {
           "id": 1,
           "jsonrpc": "2.0",
-          "result": "0xc2f1bc7fb19ad7506bf0331adad1475e3db6a9f09a17647b0b5a6935c0db169b04ef2ffd07b100b11b94cf5eb7681ce315815a2542d7a0b61578bb316461d0a202d55611bfeaf767525d3882867d3960076798177d05418185f352d09497f32152080661757261208893bd1100000000045250535290d6b9fe7bba007898f1e84c429fb40782c5b3140ffea7632b1e9aa2ab80173681224ef646"
+          "result": "0xa13f59ab0c4fb24a93587efa1eea701788fda8e6f1fc7793e8c3697af695b30604640987dd3a522e93dbabbcfa6d1c65c80556160e0748b3209da21678b2be8b1f13ef7f74b325ff4ff922092a22481afd926366cc23d321e3da66c0221f3817e908066175726120eca0bd110000000004525053529009f588e123fd56917f9560fd8f1511925b910aa7b1569b02960537400ae58ef0b283f646"
         }
       }
     },
@@ -27,11 +27,11 @@
         "detail": "layout matches",
         "expected_layout": {
           "type": "Optionenum[None=0|Some=1(u128)]",
-          "value": "0x00"
+          "value": "0x0100008a5d784563010000000000000000"
         },
         "layout": {
           "type": "Optionenum[None=0|Some=1(u128)]",
-          "value": "0x00"
+          "value": "0x0100008a5d784563010000000000000000"
         },
         "layout_matches": true,
         "present": true
@@ -47,11 +47,11 @@
         "detail": "layout matches",
         "expected_layout": {
           "type": "Optionenum[None=0|Some=1(u128)]",
-          "value": "0x00"
+          "value": "0x0100008a5d784563010000000000000000"
         },
         "layout": {
           "type": "Optionenum[None=0|Some=1(u128)]",
-          "value": "0x00"
+          "value": "0x0100008a5d784563010000000000000000"
         },
         "layout_matches": true,
         "present": true

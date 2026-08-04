@@ -35,8 +35,8 @@ export const SUPPORTED_RUNTIMES: readonly SupportedRuntime[] = [
     role: 'primary',
     profile: 'bootstrap',
     descriptorKey: 'bleavit',
-    integrationContractVersion: 23,
-    metadataSha256: '837adf7f3e58d8f8015d2f8694b6e7dfdb9f106f15142a42a5bbe347043a1b35',
+    integrationContractVersion: 25,
+    metadataSha256: '44cc11b1ec8c939f005e78cf25d94143d962fd3c5e0bc0261c4092bc8a414deb',
   },
   {
     specVersion: 3,
@@ -44,8 +44,8 @@ export const SUPPORTED_RUNTIMES: readonly SupportedRuntime[] = [
     role: 'recovery',
     profile: 'bootstrap-recovery',
     descriptorKey: 'bleavit_recovery',
-    integrationContractVersion: 23,
-    metadataSha256: '303ff8656e42d403d1f4476e54b0350920d7d4dac3a204f05d9be14fe4caa260',
+    integrationContractVersion: 25,
+    metadataSha256: '376e0ea51631d4b1f9624bd61fb94828533a885954f28b690396e58034ad8980',
   },
 ];
 

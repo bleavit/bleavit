@@ -20,6 +20,41 @@ Legend: ⬜ pending · 🔨 in progress · ✅ done · ⛔ blocked · 🅿 defer
 
 ## Current focus
 
+> ### ⇨ CURRENT (2026-08-04) — #232 merged, contract v25 reconciled, **PR #234 open (draft)**
+>
+> **The parked branch is unparked.** PR #232 landed, so the chain feed can finally be regenerated
+> against a runtime that includes its `ClientBond` surface — the thing this branch waited for rather
+> than regenerating early and shipping a feed that omitted it while passing locally.
+>
+> **The merge was 273 conflicts and 272 of them were generated artifacts.** All took main's version,
+> per app-code rule 12: `metadata.scale` is binary, the transcripts and descriptors are produced
+> together from one runtime, and a hand-merged generated file is a file nothing produced. They are
+> regenerated wholesale in the next commit.
+>
+> **Two resolutions needed judgement rather than a rule.**
+>
+> 1. **`surface-manifest.json` was reconciled entry by entry.** The five contract-version constant
+>    layouts come from this branch (they encode the number itself, `0x18` → `0x19`);
+>    `constant.client_registry.client_bond` comes from **main**, because it carries #232's adopted
+>    100,000 VIT. Taking this branch's copy wholesale would have silently reverted the value #232
+>    exists to adopt — which is exactly the loss this branch waited to avoid, arriving from the
+>    direction nobody was watching.
+> 2. **Spec-question ids collided**, which an append-only index cannot absorb. #233 took SQ-583 and
+>    SQ-584 while this branch already used them, so this branch's four renumber **+2 → SQ-585…588**
+>    across PLAN.md, 02 §3/§6/§7.6/§13, the manifest and `app/tools/release/build.mjs`. Same remedy
+>    as the Track N collision on SQ-574/575/576, and the second time it has happened.
+>
+> **PR #234 is open as a draft, and the draft state is the honest one:** three gates are red by
+> construction — the manifest is at contract **v25** and the committed feed at **v23** — and the
+> regeneration in flight is what reconciles them. It was opened late; twenty-four commits sat on a
+> local branch when R-12 asks for a draft PR as soon as the code state is coherent, which it had
+> been for several milestones.
+>
+> **Next:** the feed regeneration (`chain-feed/README.md`'s sequence: specs → node → both runtime
+> profiles → `extract-metadata.py` → 259 chainhead transcripts → descriptors), then the exhaustive
+> Rust gate, then mark #234 ready. **SQ-587 is the one open question only the user can answer** —
+> Paseo or Polkadot Asset Hub — and F4/F18 wait on it.
+
 > ### ⇨ CURRENT (2026-08-04) — F11: the release train, built and gated per commit rather than first debugged at a tag
 >
 > **The v25 work is still parked on PR #232** (see the row below it): three app gates stay red for
