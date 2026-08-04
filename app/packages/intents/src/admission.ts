@@ -159,16 +159,32 @@ const FROZEN_CORE_CEILING_BYTES =
   ['binding', 'action', 'limits'].reduce((total, name) => total + leafBytes(name, 2), 0);
 
 /**
- * The document byte cap.
+ * A JSON string escape costs at most six bytes per source character (`\u0041` for `A`).
  *
- * The frozen core at its ceiling, plus an equal budget for the top-level annotations
- * 10 §13.1 tolerates. That factor of two is the single judgement in the derivation, and it
- * is stated rather than folded into a round number: a producer may annotate at most as
- * much as the format itself carries. It leaves roughly a kilobyte, which is generous for
- * machine annotations and useless for anything else — the format carries no free text at
- * all (10 §13.2), so there is nothing legitimate that needs the room a 64 KiB cap gives.
+ * The ceiling table above counts a field's *decoded* width, and the cap is measured on the
+ * bytes as received — so a conforming document written entirely in `\uXXXX` escapes is six
+ * times the size of the same document written plainly. Without this factor the parser
+ * refused a valid signed intent purely for how its producer spelled it.
  */
-export const MAX_DOCUMENT_BYTES = FROZEN_CORE_CEILING_BYTES * 2;
+const JSON_ESCAPE_WORST_CASE = 6;
+
+/**
+ * Room for the top-level annotations 10 §13.1 tolerates: one more core's worth.
+ *
+ * The single judgement in the derivation, stated rather than folded into a round number —
+ * a producer may annotate at most as much as the format itself carries.
+ */
+const ANNOTATION_ALLOWANCE = 1;
+
+/**
+ * The document byte cap: the frozen core at its widest, escaped, plus annotations.
+ *
+ * Under 4 KiB, against the 64 KiB that was there before. The format carries no free text
+ * at all (10 §13.2), so nothing legitimate needs the sixteenfold slack the round number
+ * gave, and every term here moves by itself when a field is added.
+ */
+export const MAX_DOCUMENT_BYTES =
+  FROZEN_CORE_CEILING_BYTES * (JSON_ESCAPE_WORST_CASE + ANNOTATION_ALLOWANCE);
 
 /**
  * The nesting cap, derived the same way.
@@ -255,6 +271,7 @@ const ACTION_KEYS = new Set(['kind', 'id', 'collateral', 'fractionPpm']);
 const LIMIT_KEYS = new Set(['maxCost', 'minProceeds', 'deadlineBlock']);
 
 const LOWERCASE_HEX = /^[0-9a-f]+$/;
+const GENESIS_HASH = /^0x[0-9a-fA-F]{64}$/;
 /** A canonical decimal integer: no sign, no leading zeros, no exponent, no whitespace. */
 const CANONICAL_DECIMAL = /^(?:0|[1-9][0-9]*)$/;
 
@@ -262,6 +279,88 @@ const bad = (refusal: HandoffRefusal): AdmissionResult => ({ ok: false, refusal 
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Read a field as **own data only**.
+ *
+ * `object['binding']` walks the prototype chain and `Object.keys` does not, so the two
+ * disagree exactly when something has polluted `Object.prototype` — and then a document of
+ * `{"schema":"bleavit.intent.v1"}` alone can be admitted on an inherited `binding`,
+ * `action`, `limits` and `digest` that the closed-shape scan never sees, because it
+ * enumerates own keys and finds none. `JSON.parse` output has a clean prototype today;
+ * that is a property of the input, not of this parser, and the parser is the thing that
+ * has to hold. Same defect, same fix, as `ownKeysOnly` in `packages/verify`.
+ */
+function own(object: Record<string, unknown>, key: string): unknown {
+  return Object.hasOwn(object, key) ? object[key] : undefined;
+}
+
+type JsonLevel = { readonly kind: 'object'; readonly keys: Set<string> } | { readonly kind: 'array' };
+
+/**
+ * Whether any object in the document repeats a key.
+ *
+ * `JSON.parse` keeps the **last** occurrence and discards the rest silently, which makes a
+ * document that says two different things at once — and every reader free to pick. A tool
+ * displays `{"action":{"call":"0x…"},"action":{…benign…}}` as its first `action` while
+ * Bleavit admits the second, digests the second, and shows the user the second. Nothing is
+ * malformed to either side; they simply read different documents. The refusal is what
+ * makes "the confirm screen shows what will be signed" survive contact with a producer
+ * that is not honest.
+ *
+ * Keys are compared **after unescaping**, because `"acti\u006fn"` and `"action"` are the
+ * same member and a byte comparison would miss it.
+ *
+ * The text has already passed `JSON.parse`, so this walk may assume well-formed JSON and
+ * only has to track string boundaries and container nesting.
+ */
+function hasDuplicateKey(text: string): boolean {
+  const stack: JsonLevel[] = [];
+  let expectKey = false;
+  let index = 0;
+  while (index < text.length) {
+    const char = text[index];
+    if (char === '"') {
+      let end = index + 1;
+      while (end < text.length) {
+        if (text[end] === '\\') {
+          end += 2;
+          continue;
+        }
+        if (text[end] === '"') break;
+        end += 1;
+      }
+      const literal = text.slice(index, end + 1);
+      index = end + 1;
+      if (expectKey) {
+        const level = stack[stack.length - 1];
+        if (level?.kind === 'object') {
+          const key = JSON.parse(literal) as string;
+          if (level.keys.has(key)) return true;
+          level.keys.add(key);
+        }
+        expectKey = false;
+      }
+      continue;
+    }
+    if (char === '{') {
+      stack.push({ kind: 'object', keys: new Set() });
+      expectKey = true;
+    } else if (char === '[') {
+      stack.push({ kind: 'array' });
+      expectKey = false;
+    } else if (char === '}' || char === ']') {
+      stack.pop();
+      expectKey = false;
+    } else if (char === ',') {
+      expectKey = stack[stack.length - 1]?.kind === 'object';
+    } else if (char === ':') {
+      expectKey = false;
+    }
+    index += 1;
+  }
+  return false;
 }
 
 /**
@@ -351,32 +450,39 @@ export async function admitIntent(
   if (depthOf(parsed) > MAX_DEPTH) {
     return bad(refuse('FE-HANDOFF-002', `the document nests deeper than ${MAX_DEPTH}`));
   }
+  if (hasDuplicateKey(document)) {
+    // Two values under one key is a document that says two things at once; `JSON.parse`
+    // keeps the last and every other reader is free to keep the first.
+    return bad(refuse('FE-HANDOFF-002', 'an object in the document repeats a key'));
+  }
 
   /* -- 1. schema equality ---------------------------------------------------------- */
 
-  if (parsed['schema'] !== INTENT_SCHEMA) {
+  if (own(parsed, 'schema') !== INTENT_SCHEMA) {
     return bad(refuse('FE-HANDOFF-001', `the schema field is not ${INTENT_SCHEMA}`));
   }
 
   /* -- 2. digest ------------------------------------------------------------------- */
 
   for (const container of CORE_CONTAINERS) {
-    if (!isPlainObject(parsed[container])) {
+    if (!isPlainObject(own(parsed, container))) {
       return bad(refuse('FE-HANDOFF-002', `the ${container} object is missing`));
     }
   }
-  const binding = parsed['binding'] as Record<string, unknown>;
-  const action = parsed['action'] as Record<string, unknown>;
-  const limitsRaw = parsed['limits'] as Record<string, unknown>;
+  const binding = own(parsed, 'binding') as Record<string, unknown>;
+  const action = own(parsed, 'action') as Record<string, unknown>;
+  const limitsRaw = own(parsed, 'limits') as Record<string, unknown>;
 
-  const claimed = parsed['digest'];
-  if (
-    typeof claimed !== 'string' ||
-    claimed.length === 0 ||
-    claimed.length % 2 !== 0 ||
-    !LOWERCASE_HEX.test(claimed)
-  ) {
-    return bad(refuse('FE-HANDOFF-002', 'the digest field is not lowercase hex'));
+  // Exactly SHA-256's width. Accepting any even-length hex made the algorithm whatever the
+  // caller's function happened to be, so a two-character "digest" was a well-formed claim
+  // and a mismatch against a real SHA-256 was reported as *tampering* rather than as a
+  // malformed field — a document that was never a `bleavit.intent.v1` document, blamed on
+  // the channel that carried it.
+  const claimed = own(parsed, 'digest');
+  if (typeof claimed !== 'string' || claimed.length !== DIGEST_HEX_CHARS || !LOWERCASE_HEX.test(claimed)) {
+    return bad(
+      refuse('FE-HANDOFF-002', `the digest field is not ${DIGEST_HEX_CHARS} lowercase hex characters`),
+    );
   }
   // The core projection is the frozen field core **as received** — never the normalized
   // values — because the producer hashed what it sent. Top-level annotations are excluded:
@@ -396,8 +502,11 @@ export async function admitIntent(
     // already corrupted (past 2^53) — a damaged document, not a hash failure.
     return bad(refuse('FE-HANDOFF-002', 'the document contains a value that cannot be encoded'));
   }
-  if (typeof expected !== 'string' || !LOWERCASE_HEX.test(expected)) {
-    throw new TypeError('the supplied digest function did not return lowercase hex');
+  if (typeof expected !== 'string' || expected.length !== DIGEST_HEX_CHARS || !LOWERCASE_HEX.test(expected)) {
+    throw new TypeError(
+      `the supplied digest function did not return ${DIGEST_HEX_CHARS} lowercase hex characters; ` +
+        'this format is SHA-256',
+    );
   }
   if (claimed !== expected) {
     return bad(refuse('FE-HANDOFF-010', 'the document does not match its own digest'));
@@ -412,12 +521,19 @@ export async function admitIntent(
       );
     }
   }
-  const specVersion = readU32(binding['specVersion']);
-  const contractVersion = readU32(binding['contractVersion']);
+  const specVersion = readU32(own(binding, 'specVersion'));
+  const contractVersion = readU32(own(binding, 'contractVersion'));
   if (specVersion === undefined || contractVersion === undefined) {
     return bad(refuse('FE-HANDOFF-002', 'binding.specVersion and binding.contractVersion must be u32'));
   }
-  if (binding['genesisHash'] !== ctx.live.genesisHash || contractVersion !== ctx.live.contractVersion) {
+  // Shape before comparison: `genesisHash: null` is a malformed field, not a claim about a
+  // different chain, and reporting it as the latter tells the user something false about
+  // what the file was for.
+  const genesisHash = own(binding, 'genesisHash');
+  if (typeof genesisHash !== 'string' || !GENESIS_HASH.test(genesisHash)) {
+    return bad(refuse('FE-HANDOFF-002', 'binding.genesisHash is not a 32-byte hex hash'));
+  }
+  if (genesisHash !== ctx.live.genesisHash || contractVersion !== ctx.live.contractVersion) {
     return bad(refuse('FE-HANDOFF-005', 'the document names a different chain'));
   }
   if (specVersion > ctx.live.specVersion) {
@@ -434,8 +550,8 @@ export async function admitIntent(
   /* -- 4. expiry ------------------------------------------------------------------- */
 
   let deadlineBlock: number | undefined;
-  if (limitsRaw['deadlineBlock'] !== undefined) {
-    deadlineBlock = readU32(limitsRaw['deadlineBlock']);
+  if (own(limitsRaw, 'deadlineBlock') !== undefined) {
+    deadlineBlock = readU32(own(limitsRaw, 'deadlineBlock'));
     if (deadlineBlock === undefined || deadlineBlock === 0) {
       return bad(refuse('FE-HANDOFF-007', 'limits.deadlineBlock is not a positive u32'));
     }
@@ -466,7 +582,7 @@ export async function admitIntent(
 
   /* -- 6. limit presence and internal consistency ---------------------------------- */
 
-  const kind = action['kind'];
+  const kind = own(action, 'kind');
   if (typeof kind !== 'string' || !(INTENT_ACTIONS as readonly string[]).includes(kind)) {
     return bad(refuse('FE-HANDOFF-003', 'action.kind is not one of the three admitted actions'));
   }
@@ -478,7 +594,7 @@ export async function admitIntent(
   // against chain state cannot have its identity rendered beside it. It also removes, in
   // one rule rather than a blocklist, every string that is not an id — a URL, a control
   // character, a bidirectional override, a homoglyph of a different id.
-  const rawId = action['id'];
+  const rawId = own(action, 'id');
   if (typeof rawId !== 'string' || !CANONICAL_DECIMAL.test(rawId) || BigInt(rawId) > U64_MAX) {
     return bad(refuse('FE-HANDOFF-002', 'action.id is not a canonical u64 decimal string'));
   }
@@ -488,23 +604,23 @@ export async function admitIntent(
   let fractionPpm: number | undefined;
 
   if (actionKind === 'close_position') {
-    const fraction = action['fractionPpm'];
+    const fraction = own(action, 'fractionPpm');
     if (typeof fraction !== 'number' || !Number.isInteger(fraction) || fraction <= 0 || fraction > PPM) {
       return bad(refuse('FE-HANDOFF-007', 'close_position needs a fraction in (0, 1_000_000] ppm'));
     }
     fractionPpm = fraction;
-    if (action['collateral'] !== undefined) {
+    if (own(action, 'collateral') !== undefined) {
       return bad(refuse('FE-HANDOFF-004', 'close_position is a fraction and takes no collateral'));
     }
   } else {
-    collateral = readU128(action['collateral']);
+    collateral = readU128(own(action, 'collateral'));
     // Never defaulted: 10 §13.2, "there is no safe default for money".
     if (collateral === undefined || collateral === 0n) {
       return bad(
         refuse('FE-HANDOFF-007', 'a prepare action needs a positive u128 collateral decimal string'),
       );
     }
-    if (action['fractionPpm'] !== undefined) {
+    if (own(action, 'fractionPpm') !== undefined) {
       return bad(
         refuse('FE-HANDOFF-004', 'a prepare action is sized in collateral and takes no fraction'),
       );
@@ -513,8 +629,8 @@ export async function admitIntent(
 
   const limits: { maxCost?: bigint; minProceeds?: bigint; deadlineBlock?: number } = {};
   for (const key of ['maxCost', 'minProceeds'] as const) {
-    if (limitsRaw[key] !== undefined) {
-      const amount = readU128(limitsRaw[key]);
+    if (own(limitsRaw, key) !== undefined) {
+      const amount = readU128(own(limitsRaw, key));
       if (amount === undefined) {
         return bad(refuse('FE-HANDOFF-007', `limits.${key} is not a u128 decimal string`));
       }
@@ -522,9 +638,41 @@ export async function admitIntent(
     }
   }
   if (deadlineBlock !== undefined) limits.deadlineBlock = deadlineBlock;
-  // A buy ceiling and a sell floor in one document describe two different trades.
-  if (limits.maxCost !== undefined && limits.minProceeds !== undefined) {
-    return bad(refuse('FE-HANDOFF-007', 'maxCost and minProceeds are mutually exclusive'));
+
+  // The monetary limit is **required, and its direction must match the action**.
+  //
+  // 10 §13.2 is unambiguous: "A missing, unparseable, or out-of-range limit is refused,
+  // never defaulted; there is no safe default for money." An earlier draft admitted
+  // `limits: {}` and let the clamp step supply the client's own recomputed value, which is
+  // defaulting by another name — the tool stated no bound and the transaction acquired one
+  // anyway, so nothing the user was shown as *asked* had ever been asked.
+  //
+  // Direction follows the trade. A prepare buys, so it carries a cost ceiling; a close
+  // sells, so it carries a proceeds floor. The wrong one is not a tighter bound in some
+  // other units, it is a limit on a quantity this trade does not produce — it would sit on
+  // the confirm screen looking like protection and bind nothing. That subsumes the old
+  // mutual-exclusion check, which caught only the case where a document stated both.
+  const wants = actionKind === 'close_position' ? 'minProceeds' : 'maxCost';
+  const forbidden = wants === 'maxCost' ? 'minProceeds' : 'maxCost';
+  if (limits[wants] === undefined) {
+    return bad(
+      refuse(
+        'FE-HANDOFF-007',
+        wants === 'maxCost'
+          ? 'a prepare action must state limits.maxCost; a cost ceiling is never defaulted'
+          : 'a close action must state limits.minProceeds; a proceeds floor is never defaulted',
+      ),
+    );
+  }
+  if (limits[forbidden] !== undefined) {
+    return bad(
+      refuse(
+        'FE-HANDOFF-007',
+        wants === 'maxCost'
+          ? 'a prepare action buys, so it takes a cost ceiling and not a proceeds floor'
+          : 'a close action sells, so it takes a proceeds floor and not a cost ceiling',
+      ),
+    );
   }
 
   return {

@@ -51,9 +51,42 @@
  * base-unit amounts that run past 2^53, and `JSON.stringify` on a lossy conversion would
  * produce a document whose digest is stable and whose contents are wrong — the failure
  * mode is silence, which is why the conversion is refused rather than rounded (V-74).
+ *
+ * ## Canonical across languages, not just across runs
+ *
+ * "Canonical" here has to mean the same bytes from a Python producer, a Rust one and this
+ * one, because a digest computed anywhere else is compared here. Three places where the
+ * obvious JavaScript implementation silently disagrees, each closed rather than documented:
+ *
+ *  - **Key order is by code point, not by UTF-16 code unit.** JavaScript's `<` compares
+ *    code units, so an astral key (`U+10000`, stored as a surrogate pair beginning `0xD800`)
+ *    sorts *before* `U+E000`; Python's `sort_keys` puts it after. Two producers, two orders,
+ *    two digests for one document.
+ *  - **Non-integer numbers are refused.** `1.0` renders as `1` here and `1.0` in Python, and
+ *    `1e-7` as `1e-7` against Python's `1e-07`. None of the three formats carries a
+ *    fractional number — amounts are decimal strings, and ppm, versions and block heights
+ *    are integers — so refusing is free and removes the whole class.
+ *  - **Only plain objects and dense arrays are values.** `Date`, `Map`, `Set` and `RegExp`
+ *    all serialize as `{}` under a naive `Object.entries`, so three unrelated documents
+ *    collide on one digest; a sparse array emits `[,]`, which is not JSON at all.
  */
 export function canonicalJson(value: unknown): string {
   return serialize(value);
+}
+
+/**
+ * Order two keys by Unicode **code point**, as `sort_keys` does everywhere else.
+ *
+ * `a < b` would compare UTF-16 code units and put every astral character before `U+E000`.
+ */
+function byCodePoint(a: string, b: string): number {
+  const left = Array.from(a);
+  const right = Array.from(b);
+  for (let i = 0; i < Math.min(left.length, right.length); i += 1) {
+    const difference = left[i]!.codePointAt(0)! - right[i]!.codePointAt(0)!;
+    if (difference !== 0) return difference;
+  }
+  return left.length - right.length;
 }
 
 function serialize(value: unknown): string {
@@ -67,7 +100,12 @@ function serialize(value: unknown): string {
       if (!Number.isFinite(value)) {
         throw new TypeError('canonical JSON has no representation for a non-finite number');
       }
-      if (!Number.isSafeInteger(value) && Number.isInteger(value)) {
+      if (!Number.isInteger(value)) {
+        // See the module note: `1.0` and `1e-7` render differently in every language, and
+        // no handoff format carries a fractional number.
+        throw new TypeError(`${value} is not an integer; canonical JSON here carries no floats`);
+      }
+      if (!Number.isSafeInteger(value)) {
         throw new TypeError(
           `${value} is an integer past 2^53 and would serialize lossily; pass a bigint`,
         );
@@ -80,13 +118,25 @@ function serialize(value: unknown): string {
     default:
       break;
   }
-  if (Array.isArray(value)) return `[${value.map(serialize).join(',')}]`;
+  if (Array.isArray(value)) {
+    // `Array.from` fills a sparse array's holes with `undefined`, which `serialize` then
+    // refuses. `value.map` preserves the holes and `join` renders them as nothing, so a
+    // sparse array would emit `[,]` — not JSON, and accepted by nothing that reads it back.
+    return `[${Array.from(value, serialize).join(',')}]`;
+  }
   if (typeof value === 'object') {
+    const prototype = Object.getPrototypeOf(value) as unknown;
+    if (prototype !== Object.prototype && prototype !== null) {
+      // `Date`, `Map`, `Set` and `RegExp` all have no own enumerable properties, so the
+      // branch below would render each as `{}` and three unrelated documents would share
+      // one digest.
+      throw new TypeError('canonical JSON carries plain objects only; this value is not one');
+    }
     const entries = Object.entries(value as Record<string, unknown>)
       // `undefined` members are omitted rather than serialized, matching JSON.stringify;
       // an explicit null is kept, because it is a value the producer chose.
       .filter(([, v]) => v !== undefined)
-      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+      .sort(([a], [b]) => byCodePoint(a, b));
     return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${serialize(v)}`).join(',')}}`;
   }
   throw new TypeError(`canonical JSON has no representation for ${typeof value}`);
@@ -115,8 +165,17 @@ const NUL = String.fromCharCode(0);
  * caller's job.
  */
 export function digestPreimage(tag: string, core: unknown): Uint8Array {
-  if (tag.includes(NUL)) {
-    throw new TypeError('a domain-separation tag may not contain NUL; it is the terminator');
+  // Printable ASCII only. Refusing NUL is what the separation argument strictly needs, and
+  // it is not sufficient on its own: `TextEncoder` replaces every lone surrogate with
+  // U+FFFD, so a tag of one lone surrogate and a tag of U+FFFD encode to identical bytes
+  // and the separation they were supposed to provide is gone. Every real tag is a schema
+  // id, so restricting the alphabet costs nothing and removes the collision class instead
+  // of patching one spelling of it.
+  if (!/^[\x20-\x7e]+$/.test(tag)) {
+    throw new TypeError(
+      'a domain-separation tag must be non-empty printable ASCII (it is hashed as a prefix, ' +
+        'and any encoding that is not one-to-one collapses two tags into one)',
+    );
   }
   return new TextEncoder().encode(`${tag}${NUL}${canonicalJson(core)}`);
 }

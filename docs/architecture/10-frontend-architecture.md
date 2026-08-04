@@ -419,7 +419,7 @@ The client is rooted at **`app/`** in the chain repository — one workspace, on
 
 - **Shell** — `app/src/{application, components, routes, styles}`.
 - **Compilation units** — `app/src/features/{tx, analysis, handoff}` (§10.2).
-- **Packages** — `app/packages/{shared-types, chain-client, descriptors, protocol, simulation, transaction-builder, signing, contexts, intents, receipts, llm-handoff, ui, verify, local-index, providers, platform, mock-runtime}`.
+- **Packages** — `app/packages/{shared-types, chain-client, descriptors, protocol, simulation, transaction-builder, signing, handoff-envelope, contexts, intents, receipts, llm-handoff, ui, verify, local-index, providers, platform, mock-runtime}`.
 
 The names differ from the reviewed design; the **edges** are what carry the invariant, and they are preserved intact. `chain-client` is the reviewed `chain`; `transaction-builder` + `signing` together are the reviewed `wallet`; `protocol` keeps its name and its normative role, with `simulation` layered above it for what-if derivation only.
 
@@ -429,7 +429,8 @@ CI-fatal forbidden edges (dependency-cruiser, with the TypeScript project graph 
 - `chain-client` → anything above it
 - `providers` never imported by `transaction-builder` or `signing`
 - `shared-types` → **nothing** (it is the dependency-free root, and it MUST NOT contain `Finalized<T>`'s brand — §2.1)
-- `llm-handoff`, `contexts`, `intents`, `receipts` → `{transaction-builder, signing, providers, local-index}`; permitted: `→ {shared-types, chain-client, protocol}`
+- `llm-handoff`, `contexts`, `intents`, `receipts`, `handoff-envelope` → `{transaction-builder, signing, providers, local-index}`; permitted: `→ {shared-types, chain-client, protocol, handoff-envelope}` — **and `handoff-envelope` itself depends on nothing at all.** It carries the §13.1 envelope conventions (canonical JSON and the digest pre-image), which all three formats share and which must therefore have exactly one implementation; it is a separate package rather than a module inside `contexts` because `contexts` is the *outbound* half and depends on `chain-client` for `Finalized<T>`, while the **inbound** parser must not be able to reach a chain connection even transitively — §13's second load-bearing sentence is that the inbound format carries no chain state.
+- **No package on a handoff path imports anything external.** Not a network library, not a utility, not a node built-in: a denylist only forbids the libraries somebody thought of, and the transport here is files, the clipboard and the share sheet in every case. The client makes no network request on any handoff path (§13), and the rule that enforces it is the absence of a dependency rather than the absence of a name.
 - `platform` is the only package permitted to import a host or native SDK (`@tauri-apps/*`, `@parity/product-sdk`); `src/features/tx/**` may reference `platform` but never a concrete platform implementation
 - nothing outside test builds imports `mock-runtime` or `chain-client/testing`, and no signer adapter marked test-only may appear in a release chunk
 
@@ -532,7 +533,7 @@ The import path's only output is a `TxPreparation` entering **Draft**. It constr
 
 ### 13.3 Refusals
 
-`FE-HANDOFF-001..013`, joining the §9.4 taxonomy with the same discipline — fixed user copy, expert detail, and a documented recovery per code, no free text. The classes are: unknown schema, malformed document, unknown action, **foreign field inside `action`/`limits`**, wrong chain, newer-than-live runtime, limit missing/out-of-range/inconsistent, expired, digest mismatch, action infeasible at the refreshed block, scope refused, and export-from-unverified-state.
+`FE-HANDOFF-001..013`, joining the §9.4 taxonomy with the same discipline — fixed user copy, expert detail, and a documented recovery per code, no free text. The classes are: unknown schema, malformed document, unknown action, **foreign field inside a closed core object (`binding`, `action`, `limits`)**, wrong chain, newer-than-live runtime, limit missing/out-of-range/inconsistent, expired, digest mismatch, action infeasible at the refreshed block, scope refused, and export-from-unverified-state.
 
 **`FE-HANDOFF-009` is retired and MUST NOT be reassigned.** It was the replay refusal, deleted below. An error code is a user-facing identifier that appears in support threads, logs and documentation long after the release that emitted it, so the family carries a gap rather than renumbering the codes above it — a reused code is a worse defect than an absent one.
 

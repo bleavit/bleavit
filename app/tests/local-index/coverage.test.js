@@ -14,6 +14,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 
 import {
   CoverageError,
@@ -220,4 +221,95 @@ test('what addRange produces is what addRange accepts', () => {
     c = addRange(c, r);
     assert.doesNotThrow(() => addRange(c, self(9000, 9001)), 'output was not a legal input');
   }
+});
+
+test('block heights are u32-bounded, so 2^53 arithmetic cannot invent coverage', () => {
+  // `Number.isInteger(2 ** 53)` is true and `2 ** 53 + 1 === 2 ** 53`, so an unchecked
+  // "integer" past that point makes adjacency arithmetic silently wrong: two ranges one
+  // block apart compare as touching, join, and the joined range claims a block nobody
+  // ingested. BlockNumber is a u32 here, which is the correct bound and well inside the
+  // safe range.
+  const past = 2 ** 53;
+  assert.throws(() => addRange(EMPTY_COVERAGE, self(past, past)), CoverageError);
+  assert.throws(() => holesIn([self(1, 10)], { fromBlock: 0, toBlock: past }), CoverageError);
+  assert.throws(() => addRange(EMPTY_COVERAGE, self(-1, 10)), CoverageError);
+  // The u32 ceiling itself is legal.
+  assert.doesNotThrow(() => addRange(EMPTY_COVERAGE, self(2 ** 32 - 1, 2 ** 32 - 1)));
+});
+
+test('holesIn refuses a malformed RANGE, not only a malformed span', () => {
+  // The same fail-open one argument over: an inverted range covers nothing, the cursor
+  // arithmetic steps straight over it, and the answer is `[]` — which means complete
+  // coverage. Guarding only the span left this reachable.
+  const inverted = { fromBlock: 100, toBlock: 50, origin: 'self', ingestedAt: 1 };
+  assert.throws(() => holesIn([inverted]), CoverageError);
+  assert.throws(() => holesIn([inverted], { fromBlock: 1, toBlock: 100 }), CoverageError);
+});
+
+test('an unknown origin is refused rather than treated as provider data', () => {
+  // `isVerifiedAt` asks whether the origin is `self`, so any other string reads as
+  // "provider data" and is retained under a label 10 §6.2 does not define.
+  assert.throws(
+    () => addRange(EMPTY_COVERAGE, { fromBlock: 1, toBlock: 5, origin: 'rpc', providerId: 'p', ingestedAt: 1 }),
+    CoverageError,
+  );
+  assert.throws(
+    () => addRange(EMPTY_COVERAGE, { fromBlock: 1, toBlock: 5, origin: 'operator', providerId: '', ingestedAt: 1 }),
+    CoverageError,
+  );
+  assert.throws(
+    () => addRange(EMPTY_COVERAGE, { fromBlock: 1, toBlock: 5, origin: 'operator', providerId: 7, ingestedAt: 1 }),
+    CoverageError,
+  );
+});
+
+test('holes are derived, never supplied — a span-bounded coverage is refused', () => {
+  // `addRange` and `invalidateRange` recompute holes with no span, so a coverage whose
+  // holes came from `holesIn(ranges, span)` silently loses its edge holes on the next
+  // mutation: a bounded query turns into an unbounded claim. Refusing the mixed object is
+  // what keeps `Coverage.holes` meaning one thing.
+  const r = self(10, 20);
+  const spanBounded = { ranges: [r], holes: holesIn([r], { fromBlock: 1, toBlock: 30 }) };
+  assert.deepEqual([...spanBounded.holes], [
+    { fromBlock: 1, toBlock: 9 },
+    { fromBlock: 21, toBlock: 30 },
+  ]);
+  assert.throws(() => addRange(spanBounded, self(25, 25)), CoverageError);
+  assert.throws(() => invalidateRange(spanBounded, r), CoverageError);
+
+  // A stale holes field is refused too, not just a span-bounded one.
+  assert.throws(
+    () => addRange({ ranges: [self(1, 10), self(21, 30)], holes: [] }, self(100, 110)),
+    CoverageError,
+  );
+});
+
+test('invalidateRange validates like every other mutation', () => {
+  // It was the one entry point that accepted a corrupted set unchanged, so a caller could
+  // drop a range and be handed back coverage that had never been checked at all.
+  const malformed = { ranges: [self(1, 10), self(5, 20)], holes: [] };
+  assert.throws(() => invalidateRange(malformed, self(1, 10)), CoverageError);
+});
+
+test('the self brand is a compile-time control, and the runtime control is elsewhere', () => {
+  // Stated as a test because it is easy to read the brand as more than it is. `SELF_INGESTED`
+  // has no runtime representation, so an untyped caller — a JSON record rehydrated from
+  // IndexedDB, most obviously — can write `{ origin: 'self' }` and `isVerifiedAt` agrees.
+  // That is not fixable inside this module: no local artifact can prove it came from a
+  // light client.
+  const forged = addRange(EMPTY_COVERAGE, { fromBlock: 1, toBlock: 10, origin: 'self', ingestedAt: 1 });
+  assert.equal(isVerifiedAt(forged, 5), true, 'the brand is erased at runtime, as branded types are');
+
+  // What makes that harmless is INV-FE-7 plus the firewall: local storage is disposable and
+  // **the transaction path never reads this package**. So the control is the edge that does
+  // not exist, and this asserts the rule that forbids it is actually written down — a rule
+  // nobody checks for is how the last vacuous control shipped.
+  const config = readFileSync(new URL('../../.dependency-cruiser.cjs', import.meta.url), 'utf8');
+  const start = config.indexOf("name: 'wallet-never-imports-acceleration'");
+  assert.notEqual(start, -1, 'the rule that keeps the tx path away from this package is gone');
+  // To the start of the next rule, not to the first `},` — that one closes the `from`
+  // clause, and slicing there reads the rule's source and never its target.
+  const rule = config.slice(start, config.indexOf('name:', start + 10));
+  assert.match(rule, /from[\s\S]*transaction-builder\|signing/, 'the rule no longer names the tx path');
+  assert.match(rule, /to:[\s\S]*local-index/, 'the tx-path firewall no longer names local-index');
 });

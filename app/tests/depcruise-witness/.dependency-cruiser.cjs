@@ -6,6 +6,7 @@
 // witnesses is decoration.
 const production = require('../../.dependency-cruiser.cjs');
 const { EXTERNAL, WORKSPACE_SUBPATH, POLKADOT_API_NON_SIGNER } = require('../../tools/depcruise-external.cjs');
+const { NON_LOCAL_DEPENDENCY_TYPES } = require('../../tools/handoff-packages.cjs');
 
 module.exports = {
   forbidden: [
@@ -33,6 +34,22 @@ module.exports = {
       severity: 'error',
       from: { path: '^tests/depcruise-witness/' },
       to: { path: POLKADOT_API_NON_SIGNER },
+    },
+    {
+      // The two matchers that replaced the handoff denylist. `dependencyTypes` catches a
+      // resolvable package and `couldNotResolve` catches one that is not installed — and
+      // the second is the half a rule usually lacks, so both are witnessed rather than
+      // assumed to be equivalent.
+      name: 'witness-non-local-dependency-types',
+      severity: 'error',
+      from: { path: '^tests/depcruise-witness/' },
+      to: { dependencyTypes: NON_LOCAL_DEPENDENCY_TYPES },
+    },
+    {
+      name: 'witness-could-not-resolve',
+      severity: 'error',
+      from: { path: '^tests/depcruise-witness/' },
+      to: { couldNotResolve: true },
     },
     {
       // The workspace-subpath matcher, likewise imported rather than restated.

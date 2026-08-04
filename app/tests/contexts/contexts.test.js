@@ -155,3 +155,54 @@ test('the module offers no signing or authentication helper', () => {
   );
   assert.deepEqual(authish, [], 'contexts exports something that could pass for authentication');
 });
+
+// --- canonical JSON must be canonical ACROSS LANGUAGES, not just across runs -----------
+
+test('keys sort by code point, not by UTF-16 code unit', () => {
+  // JavaScript's `<` compares code units, so an astral key (stored as a surrogate pair
+  // starting 0xD800) sorts BEFORE U+E000; Python's `sort_keys` puts it after. Two
+  // producers, two orders, two digests for one document — and the digest is the only
+  // thing that would notice.
+  const astral = String.fromCodePoint(0x10000);
+  const bmp = String.fromCharCode(0xe000);
+  assert.ok(astral < bmp, 'precondition: the naive comparison has them the wrong way round');
+  assert.equal(canonicalJson({ [astral]: 1, [bmp]: 2 }).indexOf(JSON.stringify(bmp)) <
+    canonicalJson({ [astral]: 1, [bmp]: 2 }).indexOf(JSON.stringify(astral)), true);
+});
+
+test('a non-integer number is refused rather than rendered', () => {
+  // `1.0` renders as `1` here and `1.0` in Python; `1e-7` as `1e-7` against `1e-07`. No
+  // handoff format carries a fractional number, so refusing costs nothing and removes the
+  // whole divergence class.
+  assert.throws(() => canonicalJson({ rate: 1.5 }), TypeError);
+  assert.throws(() => canonicalJson({ rate: 1e-7 }), TypeError);
+  assert.equal(canonicalJson({ n: 1 }), '{"n":1}');
+});
+
+test('Date, Map, Set and RegExp are refused instead of colliding on {}', () => {
+  // All four have no own enumerable properties, so a naive `Object.entries` renders each
+  // as `{}` — three unrelated documents, one digest.
+  for (const value of [new Date(0), new Map(), new Set(), /x/, new Error('x')]) {
+    assert.throws(() => canonicalJson({ value }), TypeError, String(value));
+  }
+  // A null-prototype object is data and is kept.
+  assert.equal(canonicalJson(Object.assign(Object.create(null), { a: 1 })), '{"a":1}');
+});
+
+test('a sparse array is refused, not rendered as invalid JSON', () => {
+  // `[,]` is not JSON. `value.map` preserves holes and `join` renders them as nothing.
+  const sparse = [1];
+  sparse[2] = 3;
+  assert.throws(() => canonicalJson(sparse), TypeError);
+  assert.equal(canonicalJson([1, 2, 3]), '[1,2,3]');
+});
+
+test('a domain tag must be printable ASCII, so no two tags collide', () => {
+  // `TextEncoder` replaces every lone surrogate with U+FFFD, so a lone-surrogate tag and a
+  // U+FFFD tag encode identically and the separation is gone. Refusing NUL alone did not
+  // cover it.
+  assert.throws(() => digestPreimage(String.fromCharCode(0xd800), {}), TypeError);
+  assert.throws(() => digestPreimage('é', {}), TypeError);
+  assert.throws(() => digestPreimage('', {}), TypeError);
+  assert.doesNotThrow(() => digestPreimage('bleavit.context.v1', {}));
+});

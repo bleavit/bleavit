@@ -131,6 +131,26 @@ export type ClampResult =
  * with none of those.
  */
 export function clampLimits(limits: IntentLimits, inputs: ClampInputs): ClampResult {
+  // The client's own inputs are checked first, and against each other. A
+  // `chainDeadlineBlock` already at or behind `B'` is a mortality window with nothing in
+  // it — the encoded transaction would be born expired — and `NaN` propagates through
+  // `Math.min` to produce an encoded deadline of `NaN`. Neither is a hostile document; both
+  // are a client that has computed something wrong, and encoding either is worse than
+  // refusing, because the user pays for a transaction that cannot be included.
+  if (
+    !Number.isInteger(inputs.currentBlock) ||
+    !Number.isInteger(inputs.chainDeadlineBlock) ||
+    inputs.currentBlock < 0 ||
+    inputs.chainDeadlineBlock <= inputs.currentBlock
+  ) {
+    return {
+      ok: false,
+      refusal: refuse(
+        'FE-HANDOFF-011',
+        'the client holds no usable mortality window at the refreshed block',
+      ),
+    };
+  }
   if (limits.deadlineBlock !== undefined && limits.deadlineBlock <= inputs.currentBlock) {
     return {
       ok: false,

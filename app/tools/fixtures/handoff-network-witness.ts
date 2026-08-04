@@ -1,10 +1,12 @@
 /**
  * The positive control for `tools/check-handoff-network.mjs`. NOT part of the build.
  *
- * Every primitive D-21 forbids on a handoff path appears here exactly once, in the form
- * the scanner is supposed to catch. `--witness` fails unless all of them are flagged, so
- * a pattern that quietly stops matching — a rename, a regex edit, a changed file filter —
- * shows up as a failure rather than as a cleaner-looking green run.
+ * Every primitive D-21 forbids on a handoff path appears here at least once, in the form
+ * the scanner is supposed to catch, including the *evasions* an earlier version missed:
+ * an alias rather than a call, a computed lookup, a call split across lines, an optional
+ * call, and the two ways to build code from a string. `--witness` fails unless all of them
+ * are flagged, so a pattern that quietly stops matching — a rename, a regex edit, a
+ * changed file filter — shows up as a failure rather than as a cleaner-looking green run.
  *
  * It lives under `tools/fixtures/` because nothing there is in a tsconfig `include` or in
  * dependency-cruiser's scan, so this file is never compiled and never linked. If it ever
@@ -13,12 +15,19 @@
  */
 
 export async function everyForbiddenPrimitive(url: string): Promise<unknown> {
+  // The plain call, and the three spellings that a line-anchored call pattern missed.
   const viaFetch = await fetch(url);
+  const aliased = globalThis.fetch;
+  const optional = await fetch?.(url);
+  const split = await fetch
+    (url);
 
   const xhr = new XMLHttpRequest();
   xhr.open('GET', url);
 
   const socket = new WebSocket(url);
+  const shared = new SharedWorker(url);
+  const worker = new Worker(url);
   const stream = new EventSource(url);
 
   navigator.sendBeacon(url, 'payload');
@@ -29,7 +38,19 @@ export async function everyForbiddenPrimitive(url: string): Promise<unknown> {
 
   const dynamic = await import(url);
 
-  return [viaFetch, xhr, socket, stream, dynamic];
+  // Requests wearing markup.
+  const image = new Image();
+  image.src = url;
+  const link = document.createElement('link');
+  link.href = url;
+
+  // The two ways to spell a banned identifier without writing it.
+  const computed = (globalThis as unknown as Record<string, unknown>)['fet' + 'ch'];
+  const alsoComputed = navigator['connection' as keyof Navigator];
+  const evaluated: unknown = eval('1 + 1');
+  const constructed = new Function('return 1');
+
+  return [viaFetch, aliased, optional, split, xhr, socket, shared, worker, stream, dynamic, image, link, computed, alsoComputed, evaluated, constructed];
 }
 
 declare function importScripts(...urls: string[]): void;

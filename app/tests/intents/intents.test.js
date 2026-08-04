@@ -219,8 +219,22 @@ test('the schema is matched by exact equality, not by prefix', async () => {
 });
 
 test('a document for another chain is refused', async () => {
-  assert.equal(await refusalOf({ binding: { ...LIVE, genesisHash: '0xdef' } }), 'FE-HANDOFF-005');
+  const otherChain = '0x' + 'ab'.repeat(32);
+  assert.equal(await refusalOf({ binding: { ...LIVE, genesisHash: otherChain } }), 'FE-HANDOFF-005');
   assert.equal(await refusalOf({ binding: { ...LIVE, contractVersion: 23 } }), 'FE-HANDOFF-005');
+});
+
+test('a malformed genesis hash is malformed, not "a different chain"', async () => {
+  // Shape before comparison. `genesisHash: null` compared unequal and was reported as a
+  // document prepared for another chain — which tells the user something false about what
+  // the file was for, and sends them looking for the chain it names.
+  for (const genesisHash of [null, '0xdef', 42, LIVE.genesisHash.slice(0, -1)]) {
+    assert.equal(
+      await refusalOf({ binding: { ...LIVE, genesisHash } }),
+      'FE-HANDOFF-002',
+      String(genesisHash),
+    );
+  }
 });
 
 test('a NEWER runtime is refused and an OLDER one is admitted (10 §13.3)', async () => {
@@ -258,25 +272,57 @@ test('the input is text; a caller-built object is refused', async () => {
   assert.equal(await refusalOfRaw(JSON.parse(sign(body()))), 'FE-HANDOFF-002');
 });
 
+/**
+ * A document that is otherwise **fully valid** — signed, correctly bound, in date — so the
+ * only thing wrong with it is the resource bound under test.
+ *
+ * The first version of these tests padded an *unsigned* `body()`, which carries no digest
+ * at all. Every one of them therefore reached `FE-HANDOFF-002` through the missing-digest
+ * check and would have passed with the depth, byte and UTF-8 guards deleted outright. A
+ * refusal test whose document has a second reason to be refused proves nothing about the
+ * first.
+ */
+const oversized = (padding) => {
+  const doc = JSON.parse(sign(body()));
+  doc.padding = padding;
+  return JSON.stringify(doc);
+};
+
+test('the padded fixtures are otherwise valid, or the bound tests prove nothing', async () => {
+  const r = await admit(oversized('small'));
+  assert.equal(r.ok, true, r.ok === false ? r.refusal.detail : '');
+});
+
 test('an over-deep document is refused before it is read semantically', async () => {
   let nested = { deep: true };
   for (let i = 0; i < MAX_DEPTH + 3; i += 1) nested = { nested };
-  assert.equal(await refusalOfRaw(JSON.stringify({ ...body(), padding: nested })), 'FE-HANDOFF-002');
+  assert.equal(await refusalOfRaw(oversized(nested)), 'FE-HANDOFF-002');
   // Arrays nest too. A guard that walks only objects leaves this unbounded.
   let arrays = [1];
   for (let i = 0; i < MAX_DEPTH + 3; i += 1) arrays = [arrays];
-  assert.equal(await refusalOfRaw(JSON.stringify({ ...body(), padding: arrays })), 'FE-HANDOFF-002');
+  assert.equal(await refusalOfRaw(oversized(arrays)), 'FE-HANDOFF-002');
 });
 
 test('the parser bounds are computed from the format, not chosen', async () => {
   // 10 §13.2: "Parser bounds are computed, not chosen." An intent carries no chain view,
   // so its ceiling is the frozen core at its widest 02-frozen type widths — about a
   // kilobyte — and not a round number with three orders of magnitude of slack in it.
-  assert.ok(MAX_DOCUMENT_BYTES > 500 && MAX_DOCUMENT_BYTES < 4096, `bound is ${MAX_DOCUMENT_BYTES}`);
+  assert.ok(MAX_DOCUMENT_BYTES > 500 && MAX_DOCUMENT_BYTES < 8192, `bound is ${MAX_DOCUMENT_BYTES}`);
   assert.notEqual(MAX_DOCUMENT_BYTES, 64 * 1024);
   assert.equal(MAX_DEPTH, 3);
-  const pad = 'a'.repeat(MAX_DOCUMENT_BYTES);
-  assert.equal(await refusalOfRaw(JSON.stringify({ ...body(), pad })), 'FE-HANDOFF-002');
+  assert.equal(await refusalOfRaw(oversized('a'.repeat(MAX_DOCUMENT_BYTES))), 'FE-HANDOFF-002');
+});
+
+test('a conforming document written entirely in escapes is still admitted', async () => {
+  // The ceiling table counts a field's DECODED width and the cap is measured on the bytes
+  // as received, so an escaped document is six times the size of the same one written
+  // plainly. Without an escaping allowance the parser refused a valid signed intent purely
+  // for how its producer spelled it — and the producer had no way to tell why.
+  const plain = sign(body());
+  const escaped = plain.replace(/[a-z]/g, (c) => '\\u' + c.charCodeAt(0).toString(16).padStart(4, '0'));
+  assert.ok(escaped.length > plain.length * 3, 'the fixture must actually be escaped');
+  const r = await admit(escaped);
+  assert.equal(r.ok, true, r.ok === false ? r.refusal.detail : '');
 });
 
 test('the byte cap counts UTF-8 bytes, not UTF-16 code units', async () => {
@@ -285,7 +331,7 @@ test('the byte cap counts UTF-8 bytes, not UTF-16 code units', async () => {
   const astral = String.fromCodePoint(0x1f600).repeat(Math.ceil(MAX_DOCUMENT_BYTES / 3));
   assert.ok(astral.length < MAX_DOCUMENT_BYTES, 'the fixture must pass a UTF-16 length check');
   assert.ok(new TextEncoder().encode(astral).byteLength > MAX_DOCUMENT_BYTES);
-  assert.equal(await refusalOfRaw(JSON.stringify({ ...body(), pad: astral })), 'FE-HANDOFF-002');
+  assert.equal(await refusalOfRaw(oversized(astral)), 'FE-HANDOFF-002');
 });
 
 test('an unknown action is refused', async () => {
@@ -341,18 +387,35 @@ test('a close is a FRACTION and refuses an absolute amount', async () => {
   // An absolute amount from a stale capsule can exceed the current holding or leave
   // unredeemable dust. A security choice, not a convenience.
   const close = { kind: 'close_position', id: '1', fractionPpm: 250000 };
-  assert.equal((await admitDoc({ action: close })).ok, true);
-  assert.equal(await refusalOf({ action: { ...close, collateral: '5' } }), 'FE-HANDOFF-004');
+  const sellLimits = { minProceeds: '900000' };
+  assert.equal((await admitDoc({ action: close, limits: sellLimits })).ok, true);
+  assert.equal(
+    await refusalOf({ action: { ...close, collateral: '5' }, limits: sellLimits }),
+    'FE-HANDOFF-004',
+  );
 });
 
 test('a fraction outside (0, 1_000_000] ppm is refused', async () => {
-  for (const fractionPpm of [0, -1, 1000001, 1.5]) {
+  for (const fractionPpm of [0, -1, 1000001]) {
     assert.equal(
       await refusalOf({ action: { kind: 'close_position', id: '1', fractionPpm } }),
       'FE-HANDOFF-007',
       `fractionPpm ${fractionPpm} was accepted`,
     );
   }
+});
+
+test('a fractional number is malformed, not merely out of range', async () => {
+  // Canonical JSON carries no floats (`1.0` and `1e-7` render differently in every
+  // language, so a digest over one is not portable). A conforming producer therefore could
+  // not have computed a digest for this document at all — which makes it damaged rather
+  // than a limit stated wrongly, and -002 rather than -007. The digest is hand-written
+  // here because the producer helper cannot encode the document either.
+  const doc = {
+    ...body({ action: { kind: 'close_position', id: '1', fractionPpm: 1.5 } }),
+    digest: 'ab'.repeat(32),
+  };
+  assert.equal(await refusalOfRaw(JSON.stringify(doc)), 'FE-HANDOFF-002');
 });
 
 test('a missing or zero collateral is refused, never defaulted', async () => {
@@ -408,16 +471,105 @@ test('a buy ceiling and a sell floor in one document are refused', async () => {
 test('a deadline already past on arrival is FE-HANDOFF-008', async () => {
   // 11 §11.14.1 lists expiry among the *admission* checks — properties of a file. The
   // document never becomes a transaction.
-  assert.equal(await refusalOf({ limits: { deadlineBlock: NOW - 1 } }), 'FE-HANDOFF-008');
-  assert.equal(await refusalOf({ limits: { deadlineBlock: NOW } }), 'FE-HANDOFF-008');
-  assert.equal((await admitDoc({ limits: { deadlineBlock: NOW + 1 } })).ok, true);
+  const buy = (deadlineBlock) => ({ limits: { maxCost: '1100000', deadlineBlock } });
+  assert.equal(await refusalOf(buy(NOW - 1)), 'FE-HANDOFF-008');
+  assert.equal(await refusalOf(buy(NOW)), 'FE-HANDOFF-008');
+  assert.equal((await admitDoc(buy(NOW + 1))).ok, true);
 });
 
 test('expiry is compared against the chain clock, not the device clock', async () => {
   // The same document, two chain heights, two outcomes — and no reference to Date.
-  const deadline = { limits: { deadlineBlock: 500 } };
+  const deadline = { limits: { maxCost: '1100000', deadlineBlock: 500 } };
   assert.equal((await admitDoc(deadline, ctx({ currentBlock: 499 }))).ok, true);
   assert.equal(await refusalOf(deadline, ctx({ currentBlock: 501 })), 'FE-HANDOFF-008');
+});
+
+// --- one document, two meanings ------------------------------------------
+
+test('a repeated key is refused, because the document says two things at once', async () => {
+  // `JSON.parse` keeps the LAST occurrence and discards the rest silently. A tool renders
+  // the first `action` while Bleavit admits, digests and confirms the second — nothing is
+  // malformed to either side, they simply read different documents. The digest cannot see
+  // it either: it is computed over the collapsed object.
+  const signed = sign(body());
+  const hostile = signed.replace(
+    '"action":',
+    '"action":{"kind":"prepare_pass_position","id":"999","collateral":"999999999"},"action":',
+  );
+  assert.equal(JSON.parse(hostile).action.id, '7', 'precondition: last-wins collapsed it');
+  assert.equal(await refusalOfRaw(hostile), 'FE-HANDOFF-002');
+});
+
+test('an escaped duplicate key is the same key', async () => {
+  // `"acti\u006fn"` and `"action"` are one member; a byte comparison would miss it.
+  const signed = sign(body());
+  const hostile = signed.replace('"action":', '"acti\\u006fn":{"kind":"close_position"},"action":');
+  assert.equal(await refusalOfRaw(hostile), 'FE-HANDOFF-002');
+});
+
+test('a legitimate repeated key in DIFFERENT objects is fine', async () => {
+  // The check is per object, not per document — `kind` may appear in `action` and again in
+  // an annotation without either being a duplicate.
+  const doc = JSON.parse(sign(body()));
+  doc.annotation = { kind: 'note' };
+  const r = await admit(JSON.stringify(doc));
+  assert.equal(r.ok, true, r.ok === false ? r.refusal.detail : '');
+});
+
+test('required fields are read as OWN properties, never inherited', async () => {
+  // `object[key]` walks the prototype chain and `Object.keys` does not, so with an ambient
+  // `Object.prototype` pollution a document of `{"schema":"…"}` alone could be admitted on
+  // an inherited binding, action, limits and digest that the closed-shape scan never sees.
+  const polluted = ['binding', 'action', 'limits', 'digest'];
+  const original = Object.fromEntries(polluted.map((k) => [k, Object.prototype[k]]));
+  const template = JSON.parse(sign(body()));
+  try {
+    for (const key of polluted) Object.prototype[key] = template[key];
+    assert.equal(await refusalOfRaw(JSON.stringify({ schema: INTENT_SCHEMA })), 'FE-HANDOFF-002');
+  } finally {
+    for (const key of polluted) {
+      if (original[key] === undefined) delete Object.prototype[key];
+      else Object.prototype[key] = original[key];
+    }
+  }
+});
+
+// --- the monetary limit is required, and has a direction ------------------
+
+test('a document that states no monetary limit is refused, never defaulted', async () => {
+  // 10 §13.2: "A missing, unparseable, or out-of-range limit is refused, never defaulted;
+  // there is no safe default for money." Admitting `limits: {}` and letting the clamp step
+  // supply the client's own value is defaulting by another name — the tool stated no bound
+  // and the transaction acquired one, so nothing shown as *asked* had ever been asked.
+  assert.equal(await refusalOf({ limits: {} }), 'FE-HANDOFF-007');
+  assert.equal(await refusalOf({ limits: { deadlineBlock: NOW + 100 } }), 'FE-HANDOFF-007');
+});
+
+test('the limit direction must match the action', async () => {
+  // A prepare buys, so it carries a cost ceiling; a close sells, so it carries a proceeds
+  // floor. The wrong one is not a tighter bound in other units — it is a limit on a
+  // quantity the trade does not produce, sitting on the confirm screen looking like
+  // protection and binding nothing.
+  assert.equal(await refusalOf({ limits: { minProceeds: '1' } }), 'FE-HANDOFF-007');
+  const close = { kind: 'close_position', id: '1', fractionPpm: 250000 };
+  assert.equal(await refusalOf({ action: close, limits: { maxCost: '1' } }), 'FE-HANDOFF-007');
+  // Both at once was the only case the old mutual-exclusion check caught.
+  assert.equal(await refusalOf({ limits: { maxCost: '1', minProceeds: '1' } }), 'FE-HANDOFF-007');
+});
+
+// --- the digest field is SHA-256 wide ------------------------------------
+
+test('the digest must be exactly 64 lowercase hex characters', async () => {
+  // Accepting any even-length hex made the algorithm whatever the caller's function
+  // happened to be: a two-character "digest" was a well-formed claim, and against a real
+  // SHA-256 its mismatch was reported as TAMPERING rather than as a malformed field —
+  // blaming the channel for a document that was never a bleavit.intent.v1 document.
+  const doc = JSON.parse(sign(body()));
+  for (const digest of ['00', 'ab'.repeat(31), 'ab'.repeat(33), doc.digest.toUpperCase()]) {
+    assert.equal(await refusalOfRaw(JSON.stringify({ ...doc, digest })), 'FE-HANDOFF-002', digest.slice(0, 8));
+  }
+  // ...and a hash function of the wrong width is a programmer error, not a refusal.
+  await assert.rejects(() => admitDoc({}, ctx({ digest: () => '00' })), TypeError);
 });
 
 // --- the refusal family ---------------------------------------------------
@@ -526,19 +678,58 @@ test('a stated limit with no chain value to narrow against is REFUSED, not dropp
   assert.equal(neither.refusal.code, 'FE-HANDOFF-011');
 });
 
-test('a deadline that passes before the refresh is FE-HANDOFF-011, not -008', () => {
-  // 11 §11.14.1's distinction: -008 says the *file* had expired on arrival; -011 says the
-  // file was fine and the chain moved. Collapsing them either blames a good file or
-  // leaves a gap between the two checks.
-  const c = clampLimits({ deadlineBlock: 5 }, clampCtx({ chainMaxCost: 1n, currentBlock: 10 }));
-  assert.equal(c.ok, false);
-  assert.equal(c.refusal.code, 'FE-HANDOFF-011');
+test('a document admitted in date, then expiring before the refresh, is -011 not -008', async () => {
+  // 11 §11.14.1's distinction, exercised as the sequence it describes rather than asserted
+  // on a document that was already expired: the file passes ADMISSION at one block and
+  // fails the CLAMP at a later one. -008 says the file had expired on arrival; -011 says
+  // the file was fine and the chain moved. The earlier version of this test handed the
+  // clamp a deadline already past at the block it supplied, which is the -008 case wearing
+  // the -011 test's name.
+  const admitted = await admitDoc(
+    { limits: { maxCost: '1100000', deadlineBlock: 500 } },
+    ctx({ currentBlock: 400 }),
+  );
+  assert.equal(admitted.ok, true, admitted.ok === false ? admitted.refusal.detail : '');
+
+  const window = { chainMaxCost: 1n, chainDeadlineBlock: 600 };
+  const stillFine = clampLimits(admitted.intent.limits, clampCtx({ ...window, currentBlock: 499 }));
+  assert.equal(stillFine.ok, true, 'the same limits must clamp cleanly one block earlier');
+
+  const tooLate = clampLimits(admitted.intent.limits, clampCtx({ ...window, currentBlock: 501 }));
+  assert.equal(tooLate.ok, false);
+  assert.equal(tooLate.refusal.code, 'FE-HANDOFF-011');
 });
 
-test('clamping returns a refusal rather than throwing', () => {
+test('clamping returns a refusal rather than throwing — and it IS a refusal', () => {
   // An exception escapes the FE-HANDOFF taxonomy entirely, and the import flow's whole
-  // contract with the user is that every rejection arrives as a coded refusal.
-  assert.doesNotThrow(() => clampLimits({ deadlineBlock: 5 }, clampCtx({ currentBlock: 10 })));
+  // contract with the user is that every rejection arrives as a coded refusal. Asserting
+  // only `doesNotThrow` passed on a SUCCESSFUL clamp too, so it never checked the thing it
+  // was named for.
+  let result;
+  assert.doesNotThrow(() => {
+    result = clampLimits({ deadlineBlock: 5 }, clampCtx({ chainMaxCost: 1n, currentBlock: 10 }));
+  });
+  assert.equal(result.ok, false, 'an expired deadline was clamped rather than refused');
+  assert.equal(result.refusal.code, 'FE-HANDOFF-011');
+  assert.equal(typeof result.refusal.message, 'string');
+});
+
+test('the client\'s own mortality window is checked, not assumed', () => {
+  // `chainDeadlineBlock` behind `B'` encodes a transaction that is born expired, and `NaN`
+  // propagates through `Math.min` to an encoded deadline of `NaN`. Neither is a hostile
+  // document — both are the client having computed something wrong — and encoding either
+  // makes the user pay for a transaction that cannot be included.
+  for (const inputs of [
+    { chainMaxCost: 1n, currentBlock: 10, chainDeadlineBlock: 5 },
+    { chainMaxCost: 1n, currentBlock: 10, chainDeadlineBlock: 10 },
+    { chainMaxCost: 1n, currentBlock: 10, chainDeadlineBlock: Number.NaN },
+    { chainMaxCost: 1n, currentBlock: Number.NaN, chainDeadlineBlock: 100 },
+    { chainMaxCost: 1n, currentBlock: -1, chainDeadlineBlock: 100 },
+  ]) {
+    const r = clampLimits({}, inputs);
+    assert.equal(r.ok, false, JSON.stringify({ ...inputs, chainMaxCost: '1' }));
+    assert.equal(r.refusal.code, 'FE-HANDOFF-011');
+  }
 });
 
 test('a deadline narrows to the earlier of the two', () => {

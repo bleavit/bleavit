@@ -109,12 +109,42 @@ export interface CoveredResult<T> {
 
 export class CoverageError extends Error {}
 
-function assertWellFormed(range: CoverageRange): void {
-  if (!Number.isInteger(range.fromBlock) || !Number.isInteger(range.toBlock)) {
-    throw new CoverageError(`range bounds must be integers: ${range.fromBlock}..${range.toBlock}`);
+/**
+ * A block height, bounded by the chain's own type rather than by JavaScript's.
+ *
+ * `Number.isInteger(2 ** 53)` is `true` and `2 ** 53 + 1 === 2 ** 53`, so an unchecked
+ * "integer" past that point makes arithmetic silently wrong: two ranges one apart at 2^53
+ * compare as adjacent and join, and the joined range claims a block nobody ingested.
+ * `BlockNumber` is a `u32` in this runtime, which is both the correct bound and well
+ * inside the safe range, so the whole class disappears rather than being reasoned about.
+ */
+const MAX_BLOCK = 2 ** 32 - 1;
+
+function assertBlock(value: number, what: string): void {
+  if (!Number.isInteger(value) || value < 0 || value > MAX_BLOCK) {
+    throw new CoverageError(`${what} must be a u32 block height, got ${value}`);
   }
+}
+
+const ORIGINS: readonly RangeOrigin[] = ['self', 'operator', 'snapshot', 'indexer'];
+
+function assertWellFormed(range: CoverageRange): void {
+  if (range === null || typeof range !== 'object') {
+    throw new CoverageError('a coverage range must be an object');
+  }
+  assertBlock(range.fromBlock, 'fromBlock');
+  assertBlock(range.toBlock, 'toBlock');
   if (range.toBlock < range.fromBlock) {
     throw new CoverageError(`range ${range.fromBlock}..${range.toBlock} runs backwards`);
+  }
+  if (!Number.isFinite(range.ingestedAt) || range.ingestedAt < 0) {
+    throw new CoverageError(`ingestedAt must be a non-negative number, got ${range.ingestedAt}`);
+  }
+  if (!(ORIGINS as readonly string[]).includes((range as { origin: string }).origin)) {
+    // An unknown origin is not merely unrecognised: `isVerifiedAt` asks whether the origin
+    // is `self`, so anything else reads as "provider data" and is quietly retained under a
+    // label no part of 10 §6.2 defines.
+    throw new CoverageError(`unknown range origin: ${String((range as { origin: string }).origin)}`);
   }
   // The discriminated union already makes both of these unconstructible in TypeScript —
   // narrowing proves the second branch `never`, which is the compiler confirming the type
@@ -122,8 +152,8 @@ function assertWellFormed(range: CoverageRange): void {
   // because the callers that matter here are **untyped**: the suites are JavaScript, and
   // so is anything that hands this package a decoded record from storage. A type that
   // cannot be violated in TS is still violated by JSON.
-  const loose = range as { origin: string; providerId?: string };
-  if (loose.origin !== 'self' && loose.providerId === undefined) {
+  const loose = range as { origin: string; providerId?: unknown };
+  if (loose.origin !== 'self' && (typeof loose.providerId !== 'string' || loose.providerId === '')) {
     throw new CoverageError(`a ${loose.origin} range must name its providerId`);
   }
   if (loose.origin === 'self' && loose.providerId !== undefined) {
@@ -150,25 +180,65 @@ function adjacentOrOverlapping(a: CoverageRange, b: CoverageRange): boolean {
  * of IndexedDB, most obviously, which is exactly the untrusted path INV-FE-7 assumes gets
  * corrupted. Two same-provenance ranges that already overlap survive every subsequent add,
  * because the loop only ever compares each existing range against the incoming one and
- * never against each other. The result reads as coverage while `holesIn` double-counts the
- * overlap, and nothing anywhere says so.
+ * never against each other. `holesIn` still computes the right union over them, so nothing
+ * *looks* wrong — the set simply stops being the one this module's rules are stated over,
+ * and `invalidateRange` on either half then leaves the other still covering the blocks the
+ * drop was supposed to remove.
  *
  * Different provenances may of course overlap: keeping those apart is the whole point of
  * §6.3's no-splice rule, so the check is deliberately not "no two ranges overlap".
  */
 function assertCanonical(coverage: Coverage): void {
+  if (coverage === null || typeof coverage !== 'object' || !Array.isArray(coverage.ranges)) {
+    throw new CoverageError('coverage must carry a ranges array');
+  }
   coverage.ranges.forEach(assertWellFormed);
-  for (let i = 0; i < coverage.ranges.length; i += 1) {
-    for (let j = i + 1; j < coverage.ranges.length; j += 1) {
-      const a = coverage.ranges[i]!;
-      const b = coverage.ranges[j]!;
-      if (sameProvenance(a, b) && adjacentOrOverlapping(a, b)) {
-        throw new CoverageError(
-          `coverage is not canonical: ${a.origin} ranges ${a.fromBlock}..${a.toBlock} and ` +
-            `${b.fromBlock}..${b.toBlock} should already have been joined`,
-        );
-      }
+
+  // Sorted by provenance then position, so only neighbours can conflict. The pairwise form
+  // this replaces was O(n^2) on every add, and the range list has no bound — a rehydrated
+  // index of ten thousand alternating one-block ranges is perfectly canonical and cost
+  // fifty million comparisons to say so.
+  const ordered = [...coverage.ranges].sort(
+    (a, b) =>
+      a.origin.localeCompare(b.origin) ||
+      (a.providerId ?? '').localeCompare(b.providerId ?? '') ||
+      a.fromBlock - b.fromBlock ||
+      a.toBlock - b.toBlock,
+  );
+  for (let i = 1; i < ordered.length; i += 1) {
+    const previous = ordered[i - 1]!;
+    const current = ordered[i]!;
+    if (sameProvenance(previous, current) && adjacentOrOverlapping(previous, current)) {
+      throw new CoverageError(
+        `coverage is not canonical: ${previous.origin} ranges ` +
+          `${previous.fromBlock}..${previous.toBlock} and ${current.fromBlock}..${current.toBlock} ` +
+          'should already have been joined',
+      );
     }
+  }
+
+  // `holes` is part of the value, so it is part of the invariant. Without this a caller
+  // could hand in a coverage whose holes were computed over an explicit *span* — the
+  // `holesIn(ranges, span)` form — and every mutation below would silently recompute them
+  // without one, dropping the edge holes and turning a bounded query into an unbounded
+  // claim. Refusing the mixed object is the honest resolution: `Coverage.holes` means
+  // interior holes and nothing else, and a span query calls `holesIn` directly.
+  if (!Array.isArray(coverage.holes)) {
+    throw new CoverageError('coverage must carry a holes array');
+  }
+  const expected = holesIn(coverage.ranges);
+  const same =
+    expected.length === coverage.holes.length &&
+    expected.every(
+      (hole, index) =>
+        hole.fromBlock === coverage.holes[index]?.fromBlock &&
+        hole.toBlock === coverage.holes[index]?.toBlock,
+    );
+  if (!same) {
+    throw new CoverageError(
+      'coverage.holes does not describe coverage.ranges; holes are derived, never supplied ' +
+        '(for a bounded question use holesIn(ranges, span), which is not storable here)',
+    );
   }
 }
 
@@ -222,13 +292,16 @@ export function holesIn(ranges: readonly CoverageRange[], span?: Hole): readonly
   // over a range nothing has ingested, in the one module whose purpose is to make missing
   // data visible.
   if (span !== undefined) {
-    if (!Number.isInteger(span.fromBlock) || !Number.isInteger(span.toBlock)) {
-      throw new CoverageError(`span bounds must be integers: ${span.fromBlock}..${span.toBlock}`);
-    }
+    assertBlock(span.fromBlock, 'span.fromBlock');
+    assertBlock(span.toBlock, 'span.toBlock');
     if (span.toBlock < span.fromBlock) {
       throw new CoverageError(`span ${span.fromBlock}..${span.toBlock} runs backwards`);
     }
   }
+  // The ranges too, and for the same reason as the span: an inverted range covers nothing,
+  // and the cursor arithmetic below simply steps over it — so the answer is `[]`, which
+  // means *complete coverage*. Validating only the span left the failure one argument away.
+  ranges.forEach(assertWellFormed);
   if (ranges.length === 0) return span ? [{ ...span }] : [];
   const sorted = [...ranges].sort((a, b) => a.fromBlock - b.fromBlock);
   const holes: Hole[] = [];
@@ -272,6 +345,8 @@ export function isVerifiedAt(coverage: Coverage, block: number): boolean {
  * for unnecessarily. The hole the drop creates is the honest result and is recomputed.
  */
 export function invalidateRange(coverage: Coverage, target: CoverageRange): Coverage {
+  assertCanonical(coverage);
+  assertWellFormed(target);
   const ranges = coverage.ranges.filter(
     (r) =>
       !(

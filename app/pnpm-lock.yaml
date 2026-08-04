@@ -343,6 +343,9 @@ importers:
       '@bleavit/transaction-builder':
         specifier: workspace:*
         version: link:../../packages/transaction-builder
+      '@noble/hashes':
+        specifier: 1.8.0
+        version: 1.8.0
 
   tests/verify:
     dependencies:

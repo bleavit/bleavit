@@ -48,6 +48,12 @@
 
 import type { Finalized } from '@bleavit/chain-client';
 
+import {
+  otherSignatories,
+  type MultisigAccount,
+  type MultisigDerivation,
+} from './multisig.js';
+
 /** An SS58-decoded account, as the rest of the package carries it. */
 export type AccountId = string;
 
@@ -79,13 +85,36 @@ export type CallWrapper =
     }
   | {
       readonly kind: 'multisig';
-      /** The derived multisig account — the origin the inner call executes with. */
-      readonly multisig: AccountId;
+      /**
+       * The origin the inner call executes with — **branded**, so it can only have come
+       * from `deriveMultisigAccount`. A plain `AccountId` here let a caller name any
+       * account at all, and a wrong one is silent in the dangerous direction: every
+       * precondition row below reads it, so the client would report a healthy balance
+       * for an address this transaction never acts as. See `multisig.ts`.
+       */
+      readonly multisig: MultisigAccount;
       readonly threshold: number;
+      /** Ascending and signer-excluded, as `as_multi` requires. From `otherSignatories`. */
       readonly otherSignatories: readonly AccountId[];
     };
 
 export const NO_WRAPPER: CallWrapper = Object.freeze({ kind: 'none' });
+
+/**
+ * Build a multisig wrapper from a derivation and the account that will sign.
+ *
+ * The only constructor: `otherSignatories` refuses a signer outside the derived set, so a
+ * wrapper whose signatory list and whose derived account describe different multisigs
+ * cannot be assembled.
+ */
+export function multisigWrapper(derivation: MultisigDerivation, signer: AccountId): CallWrapper {
+  return {
+    kind: 'multisig',
+    multisig: derivation.account,
+    threshold: derivation.threshold,
+    otherSignatories: otherSignatories(derivation, signer),
+  };
+}
 
 /**
  * The account the inner call executes as — what 11 §11.5's rows are about.

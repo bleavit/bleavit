@@ -11,6 +11,7 @@
     "@bleavit/signing": "workspace:*",
     "@bleavit/chain-client": "workspace:*",
     "@bleavit/mock-runtime": "workspace:*",
-    "@bleavit/descriptors": "workspace:*"
+    "@bleavit/descriptors": "workspace:*",
+    "@noble/hashes": "1.8.0"
   }
 }

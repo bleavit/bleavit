@@ -12,6 +12,7 @@
  * would silently demote it. These rules keep failing in that case.
  */
 const { EXTERNAL, WORKSPACE_SUBPATH, POLKADOT_API_NON_SIGNER } = require('./tools/depcruise-external.cjs');
+const { HANDOFF_PATH, NON_LOCAL_DEPENDENCY_TYPES } = require('./tools/handoff-packages.cjs');
 
 module.exports = {
   forbidden: [
@@ -130,9 +131,33 @@ module.exports = {
       severity: 'error',
       comment:
         'D-21 / INV-FE-6: the handoff packages contain no network primitive at all. ' +
-        'The source gate in CI covers the global forms; this covers module imports.',
-      from: { path: '^packages/(contexts|handoff-envelope|intents|receipts|llm-handoff)/' },
+        'The source gate in CI covers the global forms; this covers module imports. ' +
+        'Strictly weaker than the two rules below and kept anyway, because it names the ' +
+        'libraries in its failure message and a named refusal is easier to act on.',
+      from: { path: HANDOFF_PATH },
       to: { path: EXTERNAL('axios|node-fetch|undici|ws|socket\\.io') },
+    },
+    {
+      name: 'handoff-imports-nothing-external',
+      severity: 'error',
+      comment:
+        'D-21: a named-library denylist only forbids the libraries somebody thought of — ' +
+        '`import ky` defeated the rule above while every gate stayed green. Nothing on a ' +
+        'handoff path imports any external package today, so the honest rule is that none ' +
+        'may. `core` is included: node:net and node:fs are as much a network and ' +
+        'filesystem surface as any package.',
+      from: { path: HANDOFF_PATH },
+      to: { dependencyTypes: NON_LOCAL_DEPENDENCY_TYPES },
+    },
+    {
+      name: 'handoff-imports-nothing-unresolvable',
+      severity: 'error',
+      comment:
+        'The other half, and the one a rule usually misses: dependency-cruiser records a ' +
+        'specifier it cannot resolve VERBATIM, with no dependency type at all (V-86). An ' +
+        'uninstalled package therefore slips past a dependencyTypes rule entirely.',
+      from: { path: HANDOFF_PATH },
+      to: { couldNotResolve: true },
     },
     { name: 'no-circular', severity: 'error', from: {}, to: { circular: true } },
     { name: 'no-orphans', severity: 'warn', from: { orphan: true, pathNot: '\\.d\\.ts$' }, to: {} },

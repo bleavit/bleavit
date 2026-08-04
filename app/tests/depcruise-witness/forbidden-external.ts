@@ -22,3 +22,12 @@ import '@bleavit/signing/testing';
 // under `polkadot-api` still constructs chains and providers, so it must still fail. A
 // narrowed rule that nobody watches fail is how the next V-86 ships.
 import 'polkadot-api/ws-provider';
+
+// The RESOLVABLE half of the handoff import ban, and it is here because the first version
+// of that witness could not fire. Every import above is one dependency-cruiser cannot
+// resolve, so all three are recorded verbatim with `couldNotResolve` and none carries a
+// dependency *type* — the `dependencyTypes` matcher matched nothing and the witness for it
+// passed green anyway. A node built-in always resolves, and resolves as `core`, which is
+// in `NON_LOCAL_DEPENDENCY_TYPES` precisely because `node:net` and `node:fs` are as much a
+// network and filesystem surface on a handoff path as any package.
+import 'node:http';

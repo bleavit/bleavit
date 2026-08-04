@@ -135,6 +135,8 @@ mod tests_constitution_params;
 #[cfg(test)]
 mod tests_migration_guard;
 #[cfg(test)]
+mod tests_multisig_derivation;
+#[cfg(test)]
 mod tests_n7;
 #[cfg(test)]
 mod tests_n8;
