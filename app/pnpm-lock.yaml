@@ -323,6 +323,12 @@ importers:
         specifier: workspace:*
         version: link:../../packages/intents
 
+  tests/llm-handoff:
+    dependencies:
+      '@bleavit/llm-handoff':
+        specifier: workspace:*
+        version: link:../../packages/llm-handoff
+
   tests/local-index:
     dependencies:
       '@bleavit/local-index':

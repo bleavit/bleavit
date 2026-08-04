@@ -46,6 +46,8 @@
  * about what a handoff path is.
  */
 
+import ts from 'typescript';
+
 import { createRequire } from 'node:module';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
@@ -118,17 +120,53 @@ function walk(dir) {
   return out;
 }
 
+/**
+ * Blank every comment, preserving offsets so reported line numbers stay true.
+ *
+ * The patterns above run over raw text, so a module *documenting why it makes no network
+ * request* trips its own gate on the word `fetch` — which is not a near-miss to reword
+ * around. It is the tokenizer hole this repository already paid for once in
+ * `check-chain-literals`, where every defect adversarial review found was a scanner
+ * confusing code with text, and the fix was the same one: use the TypeScript scanner that
+ * is already a pinned dependency, rather than a regex that approximates one.
+ *
+ * **Comments only — string bodies stay in scope, deliberately.** A comment is provably
+ * inert; a string is not, because `window['fet' + 'ch']` spells a banned identifier without
+ * writing it. That path is separately banned (`globalThis` outright, `window`/`self`/
+ * `navigator` under a computed index), and leaving strings scanned keeps a second net under
+ * it. The narrowing is therefore exactly as wide as *cannot possibly execute*, which is the
+ * only safe amount to narrow a control like this one.
+ */
+function withoutComments(source) {
+  const scanner = ts.createScanner(ts.ScriptTarget.Latest, /* skipTrivia */ false, ts.LanguageVariant.Standard, source);
+  const out = source.split('');
+  let token = scanner.scan();
+  while (token !== ts.SyntaxKind.EndOfFileToken) {
+    if (token === ts.SyntaxKind.SingleLineCommentTrivia || token === ts.SyntaxKind.MultiLineCommentTrivia) {
+      const start = scanner.getTokenStart();
+      const end = scanner.getTokenEnd();
+      for (let i = start; i < end; i += 1) {
+        // Newlines survive, so a match's line number is still the line it is on.
+        if (out[i] !== '\n') out[i] = ' ';
+      }
+    }
+    token = scanner.scan();
+  }
+  return out.join('');
+}
+
 /** Whole-file matching, with the line recovered from the match offset for the report. */
 function findings(files) {
   const found = [];
   for (const file of files) {
-    const source = readFileSync(file, 'utf8');
+    const raw = readFileSync(file, 'utf8');
+    const source = withoutComments(raw);
     for (const { name, pattern } of PRIMITIVES) {
       const global = new RegExp(pattern.source, pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`);
       let match;
       while ((match = global.exec(source)) !== null) {
         const line = source.slice(0, match.index).split('\n').length;
-        const text = source.split('\n')[line - 1] ?? '';
+        const text = raw.split('\n')[line - 1] ?? '';
         found.push({ file: relative(APP_ROOT, file), line, name, text: text.trim() });
         if (match.index === global.lastIndex) global.lastIndex += 1;
       }
@@ -154,6 +192,34 @@ if (witnessMode) {
     console.error('WITNESS DID NOT FIRE for: ' + missed.join(', '));
     console.error('The scanner can no longer detect these, so a clean run over the handoff');
     console.error('packages would prove nothing about them.');
+    failed = true;
+  }
+
+  // The narrowing's two controls. `withoutComments` stopped the scan matching inside
+  // comments; these prove it narrowed by exactly that and no more. The string case is the
+  // load-bearing one: extending the blanking to string bodies would look like the same
+  // tidy-up, would void the gate, and every other assertion here would stay green — because
+  // they all name their primitives in code.
+  const witnessSource = readFileSync(join(APP_ROOT, WITNESS), 'utf8');
+  const commentOnly = witnessSource.slice(witnessSource.indexOf('// A comment naming fetch'));
+  const commentLines = commentOnly.split('\n').slice(0, 2).join('\n');
+  const commentStart = witnessSource.slice(0, witnessSource.indexOf('// A comment naming fetch')).split('\n').length;
+  const commentEnd = commentStart + commentLines.split('\n').length - 1;
+  const inComments = hits.filter((h) => h.line >= commentStart && h.line <= commentEnd);
+  if (inComments.length > 0) {
+    console.error(
+      'WITNESS: the scanner reported a primitive that appears only in a comment: ' +
+        inComments.map((h) => `${h.name} (line ${h.line})`).join(', '),
+    );
+    console.error('A comment cannot execute; matching one trains authors to reword rather than think.');
+    failed = true;
+  }
+
+  const stringLine = witnessSource.split('\n').findIndex((l) => l.startsWith('export const NOT_INERT')) + 1;
+  if (!hits.some((h) => h.line === stringLine && h.name === 'fetch')) {
+    console.error('WITNESS: a primitive named inside a STRING was not reported.');
+    console.error("The comment narrowing has widened to string bodies. `window['fet' + 'ch']`");
+    console.error('spells a banned identifier without writing it, and this is the net under it.');
     failed = true;
   }
 

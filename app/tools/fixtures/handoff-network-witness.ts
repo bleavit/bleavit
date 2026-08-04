@@ -54,3 +54,24 @@ export async function everyForbiddenPrimitive(url: string): Promise<unknown> {
 }
 
 declare function importScripts(...urls: string[]): void;
+
+/**
+ * The controls for the comment-blanking narrowing (added with `withoutComments`).
+ *
+ * The scanner stopped matching inside comments, because a module documenting *why* it makes
+ * no network request trips its own gate on the word. That narrowing needs a control in both
+ * directions, or it is one edit away from becoming a hole:
+ *
+ *  - a primitive named only in a comment MUST NOT be reported, and
+ *  - a primitive named inside a **string** MUST still be reported.
+ *
+ * The second is the one that matters. Extending the blanking to string bodies would look
+ * like the same cleanup and would void the gate, and the existing witness — which names
+ * every primitive in *code* — would stay green through it.
+ */
+
+// A comment naming fetch, WebSocket and XMLHttpRequest. None of these may be reported.
+/* Nor these, in a block comment: EventSource, sendBeacon, globalThis. */
+
+export const NOT_INERT = 'fetch';
+export const ALSO_NOT_INERT = "the string 'XMLHttpRequest' is how a computed lookup is spelled";

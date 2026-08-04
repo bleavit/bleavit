@@ -18,4 +18,5 @@ packages:
   - 'tests/intents'
   - 'tests/contexts'
   - 'tests/receipts'
+  - 'tests/llm-handoff'
   - 'tests/release'
