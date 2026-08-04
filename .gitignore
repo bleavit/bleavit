@@ -54,5 +54,10 @@ app/**/dist/
 !app/packages/papi-descriptors/dist/
 !app/packages/papi-descriptors/dist/**
 app/**/*.tsbuildinfo
+# `release.json` and `sbom.cdx.json` are per-build outputs of `release:build` (12 §1.1).
+# They are derived from the tree and the lockfile, published as release artifacts, and
+# would otherwise churn on every commit — the committed inputs that decide them are
+# `tools/release/sources/`.
+app/release-out/
 app/src-tauri/target/
 app/native/**/build/

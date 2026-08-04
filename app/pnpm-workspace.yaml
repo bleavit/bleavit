@@ -4,6 +4,7 @@
 # rather than merely un-referenced. See .npmrc — node-linker is pinned, not defaulted.
 packages:
   - 'packages/*'
+  - 'src/application'
   - 'src/features/*'
   - 'tests/firewall'
   - 'tests/depcruise-witness'
@@ -16,3 +17,4 @@ packages:
   - 'tests/local-index'
   - 'tests/intents'
   - 'tests/contexts'
+  - 'tests/release'

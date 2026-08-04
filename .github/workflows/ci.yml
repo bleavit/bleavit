@@ -452,6 +452,38 @@ jobs:
         working-directory: app
         run: pnpm run check:budget
 
+      - name: No hardcoded chain value (10 §5.4)
+        # Two rules, because either alone is blind or useless. Rule A catches a frozen
+        # constant's NAME bound to a numeric literal — `const MAX_POSITIONS_PER_ACCOUNT =
+        # 64` is the defect in its purest form and stays a defect when the value is
+        # currently right, which is exactly what a value scan waves through. Rule B catches
+        # a distinctive frozen value appearing bare, and is deliberately restricted to
+        # values of four digits or more: `32` and `64` are hash widths and array sizes on
+        # every other line, so an unrestricted value rule fires constantly on nothing and
+        # gets switched off. The witness leg is the anti-vacuity half — both rules are run
+        # against a fixture that violates them and must fire.
+        working-directory: app
+        run: pnpm run check:chain-literals && pnpm run check:chain-literals:witness
+
+      - name: Release pipeline and its bundle controls (12 §1, §5; F11)
+        # Builds the tree and runs every distribution gate over it, per commit. A release
+        # pipeline that only runs at a tag is a release pipeline first debugged during a
+        # release. It is fail-closed in the direction that matters: the connect-src
+        # allowlist is DERIVED from declared sources and diffed against the incumbent
+        # (15 §4.8), so an addition fails the build rather than arriving one release at a
+        # time (D-21); an unsubstituted CSP or service-worker asset map fails rather than
+        # shipping a control that was silently not applied; and the emitted chunks are
+        # scanned for a test-only signer, which is the one 10 §10.1 rule dependency-cruiser
+        # structurally cannot answer because it is about the bundle, not the import graph.
+        # The build's own readiness blockers are reported and do not fail this job —
+        # `--production` is the gate that refuses while any stand.
+        working-directory: app
+        run: pnpm run release:build
+
+      - name: Release suite (12 §1, §5.2–§5.3; F11)
+        working-directory: app
+        run: pnpm run test:release
+
   environments:
     name: Environment definitions
     runs-on: ubuntu-latest

@@ -1,0 +1,40 @@
+{
+  "_doc": "Classification for the 10 \u00a75.4 no-hardcoded-chain-value gate (app/tools/check-chain-literals.mjs). Groups, not line exemptions: a number is permitted in a named set of files for a stated reason, so a new file cannot inherit an exemption by copying a literal. `constants` exempts rule A (a frozen constant's name bound to a literal); `values` exempts rule B (a distinctive frozen value appearing bare).",
+  "groups": [
+    {
+      "name": "lmsr-kernel",
+      "reason": "packages/protocol IS the 04 \u00a74 kernel. `USDC_ONE` is D-17's identity pin for the collateral asset's decimals and `BPS_DENOMINATOR` is the unit 02 \u00a79 publishes `Market::Fee` in \u2014 neither has a 02 \u00a79 row of its own, a `Params` key, or a governance track that could move it, so there is nowhere to read them from. They collide with `Market::MinTrade` (= 1,000,000 base units = 1 USDC) and `ConditionalLedger::MinTransfer` (= 10,000) only because those are denominated in the same units. The chain *tunables* this package touches \u2014 mkt.fee, mkt.kappa, mkt.obs_interval, MinTrade, MaxTradeRatio \u2014 are function arguments with no default, so a caller that forgets one gets a type error rather than a stale launch value baked into a quote. Scoped to the single file that defines them, not the package: a group that exempted the whole package would let a genuinely hardcoded `Market::MinTrade` pass anywhere in it, which is the converse of the risk groups exist to close.",
+      "files": [
+        "packages/protocol/src/quote.ts"
+      ],
+      "values": [
+        "1000000",
+        "10000"
+      ],
+      "constants": []
+    },
+    {
+      "name": "generated-release-pins",
+      "reason": "Both files are GENERATED from tools/release/surface-manifest.json and app/fixtures/chain-feed/ and byte-compared by `surface:check` \u2014 never hand-edited (app-code rule 7). The contract version they carry is the version this bundle *expects*, which INV-FE-11 requires the bundle to pin and 10 \u00a75.2's classifier compares against the chain's metadata constant. Pinning it and reading it are the two halves of that comparison; a bundle that only read it would have nothing to compare against and could not detect the mismatch the classifier exists for.",
+      "files": [
+        "packages/descriptors/src/critical-surface.ts",
+        "packages/descriptors/src/spec-versions.ts"
+      ],
+      "values": [],
+      "constants": [
+        "INTEGRATION_CONTRACT_VERSION"
+      ]
+    },
+    {
+      "name": "handoff-document-units",
+      "reason": "`PPM` is parts-per-million \u2014 the unit 10 \u00a713.2's `fractionPpm` is expressed in, a property of the handoff document format that an external tool authors and this package parses. It is not a chain value and there is no metadata constant for it; it collides with `Market::MinTrade` only because one USDC is also 10^6 base units. 11 \u00a711.14.3 keeps the two apart: a stated fraction is narrowed against a chain-derived amount, never substituted for one.",
+      "files": [
+        "packages/intents/src/admission.ts"
+      ],
+      "values": [
+        "1000000"
+      ],
+      "constants": []
+    }
+  ]
+}
