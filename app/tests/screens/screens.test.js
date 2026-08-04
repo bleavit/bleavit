@@ -35,9 +35,12 @@ import {
   ConfirmSurface,
   EpochShrinkNotice,
   PayloadMismatchError,
+  PROPOSAL_READS,
   ProposalDetail,
   decodeForConfirm,
+  readProposals,
   summarise,
+  viewFor,
 } from '@bleavit/features-tx';
 import { ImportRefused, ImportReview, UnlabellableClampError } from '@bleavit/features-handoff';
 import { ShareContext } from '@bleavit/features-handoff';
@@ -721,4 +724,121 @@ test('the navigation highlight and the outlet agree on which screen is showing',
       assert.equal(screenForHash(hash, handoff), screenFor(hash, handoff).id, `${hash}/${handoff}`);
     }
   }
+});
+
+// ---------------------------------------------------------- S2's reads
+
+test('no statistics render while a proposal is still trading', () => {
+  const summary = {
+    id: finalized('42'),
+    title: finalized('t'),
+    klass: finalized('TREASURY'),
+    state: finalized('Trading'),
+  };
+  const { view, anomaly } = viewFor(summary, undefined);
+  assert.equal(view.stage, 'pre-decision');
+  assert.equal(view.reason, 'trading');
+  assert.equal(anomaly, undefined);
+  assert.ok(!('decisionStats' in view));
+});
+
+test('an Extended proposal gets its own copy, not the generic one', () => {
+  const summary = {
+    id: finalized('42'), title: finalized('t'), klass: finalized('P'), state: finalized('Extended'),
+  };
+  assert.equal(viewFor(summary, undefined).view.reason, 'extended');
+});
+
+test('statistics arriving on an open market are refused and reported, not rendered', () => {
+  // The case a "render it if the API returned some" implementation gets wrong. Both reads
+  // came from one pinned block, so it is a contradiction rather than a race, and only one
+  // reading is safe to act on.
+  const summary = {
+    id: finalized('42'), title: finalized('t'), klass: finalized('P'), state: finalized('Trading'),
+  };
+  const stats = { outcome: finalized('PASS'), upliftPpm: finalized(12_500n) };
+  const { view, anomaly } = viewFor(summary, stats);
+  assert.equal(view.stage, 'pre-decision');
+  assert.ok(anomaly, 'the contradiction was swallowed');
+  assert.match(anomaly.detail, /trading signal/);
+  assert.equal(anomaly.proposalId, '42');
+});
+
+test('an unknown lifecycle state renders no statistics — fail closed, not fail open', () => {
+  // INV-FE-12. A denylist alone would admit a state from a runtime upgrade, or one a
+  // plausible-but-wrong decode produced.
+  const summary = {
+    id: finalized('42'), title: finalized('t'), klass: finalized('P'),
+    state: finalized('SomeStateFromANewerRuntime'),
+  };
+  const stats = { outcome: finalized('PASS'), upliftPpm: finalized(1n) };
+  const { view, anomaly } = viewFor(summary, stats);
+  assert.equal(view.stage, 'pre-decision');
+  assert.ok(anomaly, 'an unknown state let statistics through');
+});
+
+test('a sealed proposal does render its statistics', () => {
+  // The anti-vacuity control: if this failed, every test above would pass for the trivial
+  // reason that nothing ever renders statistics.
+  const summary = {
+    id: finalized('42'), title: finalized('t'), klass: finalized('P'), state: finalized('Settled'),
+  };
+  const stats = { outcome: finalized('PASS'), upliftPpm: finalized(12_500n) };
+  const { view, anomaly } = viewFor(summary, stats);
+  assert.equal(view.stage, 'decided');
+  assert.equal(anomaly, undefined);
+  assert.equal(view.decisionStats.upliftPpm.value, 12_500n);
+});
+
+test('the proposal list is cross-checked against its own storage prefix (FE-P2)', async () => {
+  const pin = { blockHash: '0xbeef', blockNumber: 42 };
+  let asked;
+  const reader = {
+    at: pin,
+    async crossCheckedCall(source) {
+      asked = source;
+      return {
+        value: { result: '0x00', witness: [{ key: 'k1', value: '0xaa' }, { key: 'k2', value: '0xbb' }] },
+        status: { kind: 'verified-finalized', ...pin },
+      };
+    },
+  };
+  const read = await readProposals(reader, {
+    proposals: (raw) => ({
+      ok: true,
+      value: raw.map((hex, i) => ({ id: String(i), title: hex, klass: 'P', state: 'Settled' })),
+    }),
+    decisionStats: () => ({ ok: true, value: undefined }),
+  });
+  // The API and the prefix are paired by the reader, never by this call site — satisfying
+  // one domain's view with the other's keys is what would make the check vacuous.
+  assert.deepEqual(asked, { api: PROPOSAL_READS.summaries, storagePrefix: PROPOSAL_READS.proposals });
+  assert.equal(read.summaries.length, 2);
+  for (const summary of read.summaries) assert.equal(summary.id.status.blockHash, '0xbeef');
+});
+
+test('a prefix key with no value is reported, never silently dropped', async () => {
+  // The failure this catches shortens the list and passes: the remaining entries decode
+  // perfectly, the screen shows fewer proposals than the chain has, and nothing says so.
+  const pin = { blockHash: '0xbeef', blockNumber: 42 };
+  const reader = {
+    at: pin,
+    async crossCheckedCall() {
+      return {
+        value: { result: '0x00', witness: [{ key: 'k1', value: '0xaa' }, { key: 'k2' }] },
+        status: { kind: 'verified-finalized', ...pin },
+      };
+    },
+  };
+  const read = await readProposals(reader, {
+    proposals: (raw) => ({
+      ok: true,
+      value: raw.map((hex, i) => ({ id: String(i), title: hex, klass: 'P', state: 'Settled' })),
+    }),
+    decisionStats: () => ({ ok: true, value: undefined }),
+  });
+  assert.equal(read.summaries.length, 1);
+  assert.equal(read.undecodable.length, 1);
+  assert.match(read.undecodable[0].label, /Epoch\.Proposals\[k2\]/);
+  assert.match(read.undecodable[0].reason, /carries no value/);
 });

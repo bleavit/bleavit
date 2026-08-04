@@ -19,3 +19,14 @@ export {
   type ProposalView,
   type SlotsShrunk,
 } from './proposals.js';
+export {
+  PROPOSAL_READS,
+  readProposals,
+  viewFor,
+  type Decoded,
+  type ProposalAnomaly,
+  type ProposalDecoders,
+  type ProposalRecord,
+  type ProposalsRead,
+  type StatsRecord,
+} from './proposal-reads.js';
