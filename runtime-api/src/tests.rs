@@ -383,7 +383,11 @@ fn runtime_api_id_and_version_are_frozen() {
     // precisely the append-only property being pinned: a *rename* or a removal
     // would move it, and this assertion would then fail loudly rather than
     // letting a breaking change ship as an additive one.
-    assert_eq!(runtime_decl_for_futarchy_api::VERSION, 3);
+    // Contract v25 raised it to 4 by appending the fourteenth method,
+    // `is_reserved_protocol_destination` — 11 §11.5's P-9 predicate, which the
+    // runtime enforces as a `Contains` implementation rather than as storage, so
+    // there was no surface for a precondition row to read (SQ-586).
+    assert_eq!(runtime_decl_for_futarchy_api::VERSION, 4);
     // N9 raised this to 4 by adding the isolated I-36 service-egress counters;
     // **N7 raised it to 5** by appending `service_partition`, the row that
     // retired the last five declared monitoring seams — 16 §8.4's

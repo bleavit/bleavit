@@ -9,7 +9,7 @@ use core::convert::TryFrom;
 use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 
-pub const INTEGRATION_CONTRACT_VERSION: u32 = 24;
+pub const INTEGRATION_CONTRACT_VERSION: u32 = 25;
 
 pub type Balance = u128;
 pub type ProposalId = u64;
@@ -1916,7 +1916,20 @@ mod tests {
         // Referenda/ConvictionVoting/Preimage/Scheduler/Multisig/System reads of
         // 02 §7.6. Nothing in this crate's types moves: the bump records that the
         // *contract* grew an obligation, which is why only this constant changes.
-        assert_eq!(INTEGRATION_CONTRACT_VERSION, 24);
+        //
+        // v25 (SQ-586) appends a **fourteenth** `FutarchyApi` method,
+        // `is_reserved_protocol_destination(who) -> bool`. 11 §11.5's P-9 clause
+        // ("recipient is not a protocol account") had no chain surface at all: the
+        // runtime refuses on `ReservedProtocolDestinations::contains`, which is a
+        // `Contains` implementation and not storage, so there was nothing for a
+        // precondition row to read and the clause was simply absent from the client.
+        // A method rather than published constants because §11.4 rule 2 requires a
+        // precondition to be an *exact chain read* — a client recomputing the
+        // namespace would be evaluating a computation, and would also be maintaining
+        // a second copy of a predicate that can drift. Additive, so the `sp_api`
+        // version moves (3 -> 4) and no existing method, type, storage key, event or
+        // call index does; `transaction_version` is untouched (02 §13 rules 2 and 7).
+        assert_eq!(INTEGRATION_CONTRACT_VERSION, 25);
     }
 
     #[test]

@@ -630,7 +630,7 @@ class SurfaceManifestTests(unittest.TestCase):
         runtime_apis = [
             entry for entry in self.entries if entry["kind"] == "runtime_api"
         ]
-        self.assertEqual(len(runtime_apis), 13)
+        self.assertEqual(len(runtime_apis), 14)
         for entry in runtime_apis:
             self.assertNotIn("blocked_by", entry, entry["id"])
             # These entries carried no `layout` until F2, under the rule that this
@@ -880,7 +880,7 @@ class SurfaceManifestTests(unittest.TestCase):
             "0x" + (2**63).to_bytes(8, "little").hex(),
         )
 
-    def test_all_thirteen_runtime_api_methods_are_present(self) -> None:
+    def test_all_fourteen_runtime_api_methods_are_present(self) -> None:
         methods = {
             entry["method"]
             for entry in self.entries
@@ -906,6 +906,7 @@ class SurfaceManifestTests(unittest.TestCase):
                 # per-instance cap, so one shared return vector could truncate a
                 # user's real holdings (02 §3).
                 "service_positions",
+                "is_reserved_protocol_destination",
             },
         )
 

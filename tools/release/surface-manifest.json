@@ -1,6 +1,6 @@
 {
   "schema": "bleavit.critical-surface.v1",
-  "integration_contract_version": 24,
+  "integration_contract_version": 25,
   "description": "Critical chain/frontend surface frozen by architecture 02 sections 3, 6-9, and 12.",
   "release_blockers": [
     {
@@ -254,6 +254,26 @@
           }
         ],
         "return": "futarchy_primitives::BoundedVec(Vec<futarchy_primitives::PositionView{position:futarchy_primitives::PositionIdenum[Proposal=0{proposal:u64,branch:futarchy_primitives::Branchenum[Accept=0|Reject=1],kind:futarchy_primitives::PositionKindenum[BranchUsdc=0|Long=1|Short=2|GateYes=3(futarchy_primitives::GateTypeenum[Survival=0|Security=1])|GateNo=4(futarchy_primitives::GateTypeenum[Survival=0|Security=1])]}|Baseline=1{epoch:u32,side:futarchy_primitives::ScalarSideenum[Long=0|Short=1]}],balance:u128,vault_state:futarchy_primitives::VaultStateenum[Open=0|Resolved=1(futarchy_primitives::Branchenum[Accept=0|Reject=1])|ScalarSettled=2{winner:futarchy_primitives::Branchenum[Accept=0|Reject=1],s:futarchy_primitives::FixedU64(u64)}|Voided=3|BaselineSettled=4{s:futarchy_primitives::FixedU64(u64)}]}>)"
+      }
+    },
+    {
+      "id": "api.is_reserved_protocol_destination",
+      "kind": "runtime_api",
+      "api": "FutarchyApi",
+      "method": "is_reserved_protocol_destination",
+      "state_call": "FutarchyApi_is_reserved_protocol_destination",
+      "params_hex": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "params_description": "AccountId([0;32])",
+      "required": true,
+      "citation": "02 §3; 11 §11.5 P-9",
+      "layout": {
+        "params": [
+          {
+            "name": "who",
+            "type": "[u8;32]"
+          }
+        ],
+        "return": "bool"
       }
     },
     {
@@ -1334,7 +1354,7 @@
       "citation": "02 §8; 02 §13",
       "layout": {
         "type": "u32",
-        "value": "0x18000000"
+        "value": "0x19000000"
       }
     },
     {
@@ -1838,7 +1858,7 @@
       "citation": "02 §9",
       "layout": {
         "type": "u32",
-        "value": "0x18000000"
+        "value": "0x19000000"
       }
     },
     {
@@ -1910,7 +1930,7 @@
       "citation": "02 §9",
       "layout": {
         "type": "u32",
-        "value": "0x18000000"
+        "value": "0x19000000"
       }
     },
     {
@@ -1946,7 +1966,7 @@
       "citation": "02 §9",
       "layout": {
         "type": "u32",
-        "value": "0x18000000"
+        "value": "0x19000000"
       }
     },
     {
@@ -2006,7 +2026,7 @@
       "citation": "02 §9",
       "layout": {
         "type": "u32",
-        "value": "0x18000000"
+        "value": "0x19000000"
       }
     },
     {

@@ -201,3 +201,36 @@ test('the acting subject is used by more than one row', () => {
   const rows = new Set(ALL_CLAUSES.filter((c) => c.subject === 'acting').map((c) => c.row));
   assert.ok(rows.size >= 8, `only ${rows.size} rows carry an acting clause`);
 });
+
+test('P-9 checks the protocol-destination refusal, and does it as a CHAIN READ', () => {
+  // The clause 11 §11.5 mandates and this table could not express until contract v25.
+  // `ledger.transfer` refuses a protocol destination, and the runtime's test is a
+  // `Contains` implementation — not storage — so there was no `SurfaceId` to cite and the
+  // clause was simply absent. A user could be walked through a green precondition table
+  // to a signature the runtime then refuses (SQ-586).
+  const clause = rowsFor('P-9').find((c) => c.surface === 'api.is_reserved_protocol_destination');
+  assert.ok(clause, 'P-9 lost the protocol-destination clause');
+
+  // §11.4 rule 2: every row in this table is an EXACT CHAIN READ. A client deriving
+  // membership from frozen constants would be evaluating a computation, which is why this
+  // is a `runtime-api` source and not a `constant` one. If someone "optimises" it into a
+  // local namespace test, this is the assertion that objects.
+  assert.equal(clause.source, 'runtime-api');
+  assert.notEqual(clause.source, 'constant');
+
+  // And it asks about the RECIPIENT — the address the user just typed, which is exactly
+  // the value no local predicate should be trusted to classify.
+  assert.equal(clause.subject, 'recipient');
+});
+
+test('the P-9 surface is a real frozen surface, not a plausible string', () => {
+  // The SQ-581 defect in its general form: a clause citing a `SurfaceId` that happens to
+  // typecheck but names something else. `CRITICAL_SURFACE` is generated from the manifest,
+  // so membership here is the manifest's answer rather than this file's.
+  const entry = CRITICAL_SURFACE.find((s) => s.id === 'api.is_reserved_protocol_destination');
+  assert.ok(entry, 'the manifest does not freeze the surface P-9 cites');
+  assert.equal(entry.compatGroup, 'apis');
+  assert.equal(entry.pallet, 'FutarchyApi');
+  assert.equal(entry.member, 'is_reserved_protocol_destination');
+  assert.equal(entry.required, true);
+});

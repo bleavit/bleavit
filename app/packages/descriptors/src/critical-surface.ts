@@ -1,5 +1,5 @@
 /**
- * GENERATED — do not edit. Source: `tools/release/surface-manifest.json` (contract v24).
+ * GENERATED — do not edit. Source: `tools/release/surface-manifest.json` (contract v25).
  * Regenerate: `pnpm -C app run surface:generate`; verified by `pnpm -C app run surface:check`.
  *
  * 10 §5.2's `CRITICAL_SURFACE`: every runtime API, storage item, constant and event the
@@ -29,7 +29,7 @@ export interface CriticalSurfaceEntry {
   readonly citation: string;
 }
 
-export const INTEGRATION_CONTRACT_VERSION = 24;
+export const INTEGRATION_CONTRACT_VERSION = 25;
 
 /** Manifest entries with no metadata surface to probe (raw fixed-layout key, chain properties). */
 export const UNPROBED_MANIFEST_ENTRIES = 2;
@@ -50,6 +50,7 @@ export type SurfaceId =
   | "api.epoch_status"
   | "api.execution_queue"
   | "api.hosted_report"
+  | "api.is_reserved_protocol_destination"
   | "api.nav"
   | "api.open_oracle_rounds"
   | "api.params"
@@ -320,6 +321,7 @@ export const CRITICAL_SURFACE: readonly CriticalSurfaceEntry[] = [
   { id: "api.epoch_status", compatGroup: "apis", pallet: "FutarchyApi", member: "epoch_status", required: true, citation: "02 §3" },
   { id: "api.execution_queue", compatGroup: "apis", pallet: "FutarchyApi", member: "execution_queue", required: true, citation: "02 §3" },
   { id: "api.hosted_report", compatGroup: "apis", pallet: "FutarchyApi", member: "hosted_report", required: true, citation: "02 §3; 02 §4a" },
+  { id: "api.is_reserved_protocol_destination", compatGroup: "apis", pallet: "FutarchyApi", member: "is_reserved_protocol_destination", required: true, citation: "02 §3; 11 §11.5 P-9" },
   { id: "api.nav", compatGroup: "apis", pallet: "FutarchyApi", member: "nav", required: true, citation: "02 §3" },
   { id: "api.open_oracle_rounds", compatGroup: "apis", pallet: "FutarchyApi", member: "open_oracle_rounds", required: true, citation: "02 §3" },
   { id: "api.params", compatGroup: "apis", pallet: "FutarchyApi", member: "params", required: true, citation: "02 §3" },

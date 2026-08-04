@@ -38,7 +38,7 @@ pub const MAX_QUEUED_EXECUTIONS: u32 = bounds::MAX_LIVE_PROPOSALS;
 
 sp_api::decl_runtime_apis! {
     /// The frozen Bleavit read-only runtime API (02 §3).
-    #[api_version(3)]
+    #[api_version(4)]
     pub trait FutarchyApi {
         /// Epoch clock: index, phase, boundaries, dead-man, freeze and phase flags.
         fn epoch_status() -> EpochStatusView;
@@ -72,6 +72,25 @@ sp_api::decl_runtime_apis! {
         /// instance*, so both domains can be simultaneously full and one shared
         /// return vector would truncate a user's real holdings (02 §3, v23).
         fn service_positions(who: AccountId) -> BoundedVec<PositionView, { bounds::MAX_ACCOUNT_POSITIONS }>;
+        /// Whether an account is a **reserved protocol destination** — the exact
+        /// predicate `ledger.transfer` refuses on (02 §3, v25).
+        ///
+        /// This is the chain read behind 11 §11.5's P-9 clause, and it is a method
+        /// rather than a published derivation for one reason: §11.4 rule 2 requires
+        /// every precondition row to be *an exact chain read*, and a client that
+        /// recomputed the predicate from frozen constants would be evaluating a
+        /// computation. The distinction is the same one that made
+        /// `ConditionalLedger::ServiceIdBase` correctly a metadata constant — that
+        /// classifies a datum the client already holds; this asks the chain a
+        /// question about an address the user just typed.
+        ///
+        /// Deliberately **not** `MarketProtocolAccounts::contains_key`. That index is
+        /// ownership/refcount state for deposit exemption and is strictly narrower:
+        /// classification does not depend on it, because every canonical
+        /// future/present/past book address is reserved by namespace whether or not a
+        /// book currently references it (SQ-586). A client bound to the narrower
+        /// predicate would pass a row the runtime then refuses.
+        fn is_reserved_protocol_destination(who: AccountId) -> bool;
     }
 }
 

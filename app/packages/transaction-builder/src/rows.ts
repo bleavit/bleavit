@@ -221,6 +221,27 @@ const P9: readonly PreconditionClause[] = [
   // the runtime rejected the transfer for the recipient's insufficient deposit headroom.
   // The wording moved with the subject: "you" was the wrong person.
   clause('P-9', 'the recipient can cover the per-entry position deposit', 'constant.ledger.position_deposit', 'constant', 'recipient'),
+  // The clause 11 §11.5 mandates and this table could not express until contract v25.
+  //
+  // `ledger.transfer` refuses a protocol destination, and the runtime's test is
+  // `ReservedProtocolDestinations::contains` — a `Contains` implementation over a
+  // domain-separated address namespace plus a set of PalletId-derived singletons, which
+  // is not storage. There was therefore no `SurfaceId` to cite and the clause was simply
+  // absent: a user could be walked through a green precondition table to a signature the
+  // runtime then refuses (SQ-586).
+  //
+  // It reads the chain rather than recomputing the namespace locally, and that is §11.4
+  // rule 2 rather than taste: every row here must be *an exact chain read*, and a client
+  // deriving membership from frozen constants would be evaluating a computation. It is
+  // also the one clause whose subject is the **recipient the user just typed**, which is
+  // exactly the value no local predicate should be trusted to classify.
+  clause(
+    'P-9',
+    'the recipient is not a protocol account',
+    'api.is_reserved_protocol_destination',
+    'runtime-api',
+    'recipient',
+  ),
 ];
 
 /** P-10 — `epoch.submit`. The preimage must be *noted and pinned*, not merely noted. */
