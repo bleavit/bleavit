@@ -118,7 +118,7 @@ test('FE-R1 bounds are exactly 02 §9\'s frozen values', () => {
     'constant.epoch.max_intake_queue': 64n,            // IntakeQueue
     'constant.ledger.max_positions_per_account': 64n,  // MaxPositionsPerAccount
     'constant.identity.ss58_prefix': 7777n,
-    'constant.identity.contract_version': 25n,         // INTEGRATION_CONTRACT_VERSION (v25: SQ-588)
+    'constant.identity.contract_version': 26n,         // INTEGRATION_CONTRACT_VERSION (v26: SQ-589)
     'constant.market.max_live_markets': 196n,
     'constant.market.max_stored_markets': 2240n,
     'constant.market.max_live_external_markets': 128n,

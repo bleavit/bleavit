@@ -1,0 +1,93 @@
+{
+  "headers": {
+    "pinned_block": "0x19b3e843c128ea3c2e2b107ccd19e2cc3c367830af0f76182abaf87385b40fee"
+  },
+  "requests": [
+    {
+      "method": "chainHead_v1_storage",
+      "params": [
+        "subscription-1",
+        "0x19b3e843c128ea3c2e2b107ccd19e2cc3c367830af0f76182abaf87385b40fee",
+        [
+          {
+            "key": "0xfb8ccbf677a3d2ce27ab85165f32df6a84b8cbadb4e7b9ae1cc5755d6033dc57",
+            "type": "value"
+          }
+        ],
+        null
+      ],
+      "response": {
+        "direct": {
+          "id": 1,
+          "jsonrpc": "2.0",
+          "result": {
+            "discardedItems": 0,
+            "operationId": "operation-1",
+            "result": "started"
+          }
+        },
+        "events": [
+          {
+            "event": "operationStorageItems",
+            "items": [
+              {
+                "key": "0xfb8ccbf677a3d2ce27ab85165f32df6a84b8cbadb4e7b9ae1cc5755d6033dc57",
+                "value": "0x1400006d6b742e6f62735f696e74657276616c01030101020401010501010801"
+              }
+            ],
+            "operationId": "operation-1"
+          },
+          {
+            "event": "operationStorageDone",
+            "operationId": "operation-1"
+          }
+        ]
+      }
+    },
+    {
+      "method": "metadata_presence",
+      "params": {
+        "kind": "storage",
+        "surface": "storage.constitution.capabilities"
+      },
+      "response": {
+        "detail": "layout matches",
+        "expected_layout": {
+          "hashers": [],
+          "key": null,
+          "value": "bounded_collections::bounded_vec::BoundedVec(Vec<constitution_core::CapabilityRecord{class:futarchy_primitives::ProposalClassenum[Param=0|Treasury=1|Code=2|Meta=3|Constitutional=4],capability:constitution_core::Capabilityenum[SetParam=0([u8;16])|SetCapability=1|AmendRegistry=2|SetReleaseChannel=3|AuthorizeUpgrade=4|TreasurySpend=5|OracleConfig=6|MarketTemplate=7|InsuranceSweep=8],enabled:bool}>)"
+        },
+        "layout": {
+          "hashers": [],
+          "key": null,
+          "value": "bounded_collections::bounded_vec::BoundedVec(Vec<constitution_core::CapabilityRecord{class:futarchy_primitives::ProposalClassenum[Param=0|Treasury=1|Code=2|Meta=3|Constitutional=4],capability:constitution_core::Capabilityenum[SetParam=0([u8;16])|SetCapability=1|AmendRegistry=2|SetReleaseChannel=3|AuthorizeUpgrade=4|TreasurySpend=5|OracleConfig=6|MarketTemplate=7|InsuranceSweep=8],enabled:bool}>)"
+        },
+        "layout_matches": true,
+        "present": true
+      }
+    },
+    {
+      "method": "recovery_metadata_presence",
+      "params": {
+        "kind": "storage",
+        "surface": "storage.constitution.capabilities"
+      },
+      "response": {
+        "detail": "layout matches",
+        "expected_layout": {
+          "hashers": [],
+          "key": null,
+          "value": "bounded_collections::bounded_vec::BoundedVec(Vec<constitution_core::CapabilityRecord{class:futarchy_primitives::ProposalClassenum[Param=0|Treasury=1|Code=2|Meta=3|Constitutional=4],capability:constitution_core::Capabilityenum[SetParam=0([u8;16])|SetCapability=1|AmendRegistry=2|SetReleaseChannel=3|AuthorizeUpgrade=4|TreasurySpend=5|OracleConfig=6|MarketTemplate=7|InsuranceSweep=8],enabled:bool}>)"
+        },
+        "layout": {
+          "hashers": [],
+          "key": null,
+          "value": "bounded_collections::bounded_vec::BoundedVec(Vec<constitution_core::CapabilityRecord{class:futarchy_primitives::ProposalClassenum[Param=0|Treasury=1|Code=2|Meta=3|Constitutional=4],capability:constitution_core::Capabilityenum[SetParam=0([u8;16])|SetCapability=1|AmendRegistry=2|SetReleaseChannel=3|AuthorizeUpgrade=4|TreasurySpend=5|OracleConfig=6|MarketTemplate=7|InsuranceSweep=8],enabled:bool}>)"
+        },
+        "layout_matches": true,
+        "present": true
+      }
+    }
+  ],
+  "surface": "storage.constitution.capabilities"
+}

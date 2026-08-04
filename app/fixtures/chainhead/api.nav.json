@@ -1,13 +1,13 @@
 {
   "headers": {
-    "pinned_block": "0x29061f184e9bd4693484b3f37d25d1637cd3b596e9fe17de007dc8f35ca795bc"
+    "pinned_block": "0x19b3e843c128ea3c2e2b107ccd19e2cc3c367830af0f76182abaf87385b40fee"
   },
   "requests": [
     {
       "method": "chainHead_v1_call",
       "params": [
         "subscription-1",
-        "0x29061f184e9bd4693484b3f37d25d1637cd3b596e9fe17de007dc8f35ca795bc",
+        "0x19b3e843c128ea3c2e2b107ccd19e2cc3c367830af0f76182abaf87385b40fee",
         "FutarchyApi_nav",
         "0x"
       ],

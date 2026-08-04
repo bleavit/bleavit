@@ -260,20 +260,68 @@ const P11: readonly PreconditionClause[] = [
 ];
 
 /**
- * P-12 — `execution_guard.execute`.
+ * P-12 — `execution_guard.execute`, all thirteen dispatch checks (contract v26; SQ-589).
  *
- * Deliberately a pointer rather than a list. The complete dispatch-time set lives in
- * 11 §11.5's own sub-table and is diffed against 09 §1.2 by the 15 §4.8 mirror gate; a
- * second copy here would be something for that gate to agree with rather than check.
+ * **This row was seven clauses and a comment claiming the 15 §4.8 mirror gate owned the
+ * rest. That claim was false**, and an adversarial review caught it:
+ * `tools/ci/check-dispatch-mirror.py` parses docs 09 §1.2 and 11 §11.5 and **never reads
+ * this file**, so nothing verified the client implemented the checks at all. The old test
+ * asserted `rowsFor('P-12').length < 13`, which passes for a trivial reason.
+ *
+ * The real obstacle was that seven of the surfaces were not frozen, so there was nothing to
+ * cite — inventing a `SurfaceId` is the hand-listing app-code rule 7 forbids. Contract v26
+ * froze them (02 §7.8, §7.3), and the list below is derived from `do_execute` itself
+ * (`pallets/execution-guard/src/lib.rs:1928-2130`), each clause named for the error the
+ * runtime returns when it fails.
+ *
+ * **Three of these read the way a reviewer would not guess, so they are stated:**
+ *
+ *  - The **ledger freeze and dead-man** clauses read `Constitution.PhaseFlags` bits 5 and 6,
+ *    not a ledger or epoch item — `configs.rs:9411` and `:9416` are where the runtime looks.
+ *    The guard *also* keeps its own `DeadManFreeze` latch, which is a different flag with
+ *    the same name in prose; both are checked, because `FreezeActive` fires on either.
+ *  - **`Expedited` is an exemption, not a check.** An expedited proposal executes *through*
+ *    a triggering freeze (`lib.rs:2091`), so a client reading only the freeze flags tells
+ *    the user they are blocked when the chain would run the call. Fail-closed in the safe
+ *    direction and still wrong on screen.
+ *  - **`GateSuspension` is undecidable alone.** `Some(epoch)` is a suspension only when that
+ *    epoch is current, so it is read with `Epoch.EpochOf` — whose `index` is the current
+ *    epoch — and with the breach flags for that same epoch (`configs.rs:9421`).
  */
 const P12: readonly PreconditionClause[] = [
+  // 1-2. Queue state and the execution window (`Cancelled`, `NotMature`, `GraceExpired`).
   clause('P-12', 'the proposal is queued and not cancelled', 'storage.execution_guard.queue', 'storage', 'chain'),
   clause('P-12', 'the execution window is open', 'storage.execution_guard.queue', 'storage', 'chain'),
+  // 3. `BadPreimage` — the client re-hashes the bytes and compares the noted length.
+  clause('P-12', 'the payload preimage is noted and matches the queued hash and length', 'storage.preimage.preimage_for', 'storage', 'chain'),
+  // 4. `StaleQueue` — the queued RuntimeVersionConstraint against the live runtime.
+  clause('P-12', 'the mandate’s runtime-version constraint still matches this runtime', 'storage.execution_guard.queue', 'storage', 'chain'),
+  // 5. `NotRatified`.
   clause('P-12', 'the mandate is ratified', 'storage.execution_guard.ratifications', 'storage', 'chain'),
-  clause('P-12', 'the attestor quorum is met', 'storage.attestor.attestations', 'storage', 'chain'),
-  clause('P-12', 'no guardian suspension is active', 'storage.guardian.members', 'storage', 'chain'),
-  clause('P-12', 'the constitution’s gate flags permit execution', 'storage.constitution.phase_flags', 'storage', 'chain'),
-  clause('P-12', 'the batch is within its declared bounds', 'api.execution_queue', 'runtime-api', 'chain'),
+  // 6. `AttestationMissing` — the records, and the binding to the payload actually queued.
+  clause('P-12', 'the attestor quorum is met and unrevoked', 'storage.attestor.attestations', 'storage', 'chain'),
+  clause('P-12', 'the attestations are bound to this payload', 'storage.execution_guard.attestation_bindings', 'storage', 'chain'),
+  // 7. `CapabilityDenied`.
+  clause('P-12', 'every declared call domain’s capability rule admits this class origin', 'storage.constitution.capabilities', 'storage', 'chain'),
+  // 8. `MetersBlocked` — the chain's own answer (02 §4), not a client re-derivation.
+  clause('P-12', 'the rate meters admit this execution now', 'api.execution_queue', 'runtime-api', 'chain'),
+  // 9. `ResourceLockMissing` — the guard reads its own HeldResources, NOT Epoch.ResourceLocks
+  //    (11 §11.5's check 9 cited the latter; corrected at v26, SQ-589).
+  clause('P-12', 'every declared resource domain is still locked to this proposal', 'storage.execution_guard.held_resources', 'storage', 'chain'),
+  // 10. `GuardianHold` / `GateSuspended`.
+  clause('P-12', 'the proposal is not suspended or held for rerun', 'storage.epoch.proposals', 'storage', 'chain'),
+  clause('P-12', 'no welfare-gate suspension is active for the current epoch', 'storage.execution_guard.gate_suspension', 'storage', 'chain'),
+  clause('P-12', 'the current epoch is read for that suspension', 'storage.epoch.epoch_of', 'storage', 'chain'),
+  // 11. `FreezeActive` (hard gate) — the guard latch and the welfare flags it mirrors.
+  clause('P-12', 'no hard welfare-gate breach is latched', 'storage.execution_guard.hard_gate_breach', 'storage', 'chain'),
+  clause('P-12', 'no hard-gate daily breach flag is set', 'storage.welfare.gate_breach_flags', 'storage', 'chain'),
+  // 12. `FreezeActive` (dead-man, ledger freeze, migration halt) and the expedited exemption.
+  clause('P-12', 'the dead-man switch is not engaged', 'storage.execution_guard.dead_man_freeze', 'storage', 'chain'),
+  clause('P-12', 'PB-LEDGER-FREEZE and the dead-man flag are clear', 'storage.constitution.phase_flags', 'storage', 'chain'),
+  clause('P-12', 'no migration halt is in force', 'storage.execution_guard.migration_halt', 'storage', 'chain'),
+  clause('P-12', 'or this proposal holds the expedited exemption', 'storage.execution_guard.expedited', 'storage', 'chain'),
+  // 13. Batch bounds and the SafetyFilter closure over the decoded preimage.
+  clause('P-12', 'the decoded batch is within its call, size and weight bounds', 'api.execution_queue', 'runtime-api', 'chain'),
 ];
 
 /** P-13 — `oracle.report`. The bond is `max(flat_floor, bps × cohort_escrow)`, recomputed. */

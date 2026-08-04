@@ -1,5 +1,5 @@
 /**
- * GENERATED — do not edit. Source: `tools/release/surface-manifest.json` (contract v25).
+ * GENERATED — do not edit. Source: `tools/release/surface-manifest.json` (contract v26).
  * Regenerate: `pnpm -C app run surface:generate`; verified by `pnpm -C app run surface:check`.
  *
  * 10 §5.2's `CRITICAL_SURFACE`: every runtime API, storage item, constant and event the
@@ -29,7 +29,7 @@ export interface CriticalSurfaceEntry {
   readonly citation: string;
 }
 
-export const INTEGRATION_CONTRACT_VERSION = 25;
+export const INTEGRATION_CONTRACT_VERSION = 26;
 
 /** Manifest entries with no metadata surface to probe (raw fixed-layout key, chain properties). */
 export const UNPROBED_MANIFEST_ENTRIES = 2;
@@ -265,6 +265,7 @@ export type SurfaceId =
   | "storage.attestor.next_attestation_id"
   | "storage.attestor.revocations"
   | "storage.client_registry.clients"
+  | "storage.constitution.capabilities"
   | "storage.constitution.params"
   | "storage.constitution.phase_flags"
   | "storage.conviction_voting.class_locks_for"
@@ -275,7 +276,14 @@ export type SurfaceId =
   | "storage.epoch.proposals"
   | "storage.epoch.recent_cohort_summaries"
   | "storage.epoch.resource_locks"
+  | "storage.execution_guard.attestation_bindings"
+  | "storage.execution_guard.dead_man_freeze"
   | "storage.execution_guard.execution_records"
+  | "storage.execution_guard.expedited"
+  | "storage.execution_guard.gate_suspension"
+  | "storage.execution_guard.hard_gate_breach"
+  | "storage.execution_guard.held_resources"
+  | "storage.execution_guard.migration_halt"
   | "storage.execution_guard.queue"
   | "storage.execution_guard.ratifications"
   | "storage.foreign_assets.account"
@@ -536,6 +544,7 @@ export const CRITICAL_SURFACE: readonly CriticalSurfaceEntry[] = [
   { id: "storage.attestor.next_attestation_id", compatGroup: "query", pallet: "Attestor", member: "NextAttestationId", required: true, citation: "02 §7.5" },
   { id: "storage.attestor.revocations", compatGroup: "query", pallet: "Attestor", member: "Revocations", required: true, citation: "02 §7.5" },
   { id: "storage.client_registry.clients", compatGroup: "query", pallet: "ClientRegistry", member: "Clients", required: true, citation: "02 §4a; 02 §7" },
+  { id: "storage.constitution.capabilities", compatGroup: "query", pallet: "Constitution", member: "Capabilities", required: true, citation: "02 §7.3" },
   { id: "storage.constitution.params", compatGroup: "query", pallet: "Constitution", member: "Params", required: true, citation: "02 §7.3" },
   { id: "storage.constitution.phase_flags", compatGroup: "query", pallet: "Constitution", member: "PhaseFlags", required: true, citation: "02 §7.3" },
   { id: "storage.conviction_voting.class_locks_for", compatGroup: "query", pallet: "ConvictionVoting", member: "ClassLocksFor", required: true, citation: "02 §7.6" },
@@ -546,7 +555,14 @@ export const CRITICAL_SURFACE: readonly CriticalSurfaceEntry[] = [
   { id: "storage.epoch.proposals", compatGroup: "query", pallet: "Epoch", member: "Proposals", required: true, citation: "02 §7.1" },
   { id: "storage.epoch.recent_cohort_summaries", compatGroup: "query", pallet: "Epoch", member: "RecentCohortSummaries", required: true, citation: "02 §7.1" },
   { id: "storage.epoch.resource_locks", compatGroup: "query", pallet: "Epoch", member: "ResourceLocks", required: true, citation: "02 §7.1" },
+  { id: "storage.execution_guard.attestation_bindings", compatGroup: "query", pallet: "ExecutionGuard", member: "AttestationBindings", required: true, citation: "02 §7.8" },
+  { id: "storage.execution_guard.dead_man_freeze", compatGroup: "query", pallet: "ExecutionGuard", member: "DeadManFreeze", required: true, citation: "02 §7.8" },
   { id: "storage.execution_guard.execution_records", compatGroup: "query", pallet: "ExecutionGuard", member: "ExecutionRecords", required: true, citation: "02 §7.4" },
+  { id: "storage.execution_guard.expedited", compatGroup: "query", pallet: "ExecutionGuard", member: "Expedited", required: true, citation: "02 §7.8" },
+  { id: "storage.execution_guard.gate_suspension", compatGroup: "query", pallet: "ExecutionGuard", member: "GateSuspension", required: true, citation: "02 §7.8" },
+  { id: "storage.execution_guard.hard_gate_breach", compatGroup: "query", pallet: "ExecutionGuard", member: "HardGateBreach", required: true, citation: "02 §7.8" },
+  { id: "storage.execution_guard.held_resources", compatGroup: "query", pallet: "ExecutionGuard", member: "HeldResources", required: true, citation: "02 §7.8" },
+  { id: "storage.execution_guard.migration_halt", compatGroup: "query", pallet: "ExecutionGuard", member: "MigrationHalt", required: true, citation: "02 §7.8" },
   { id: "storage.execution_guard.queue", compatGroup: "query", pallet: "ExecutionGuard", member: "Queue", required: true, citation: "02 §7.4" },
   { id: "storage.execution_guard.ratifications", compatGroup: "query", pallet: "ExecutionGuard", member: "Ratifications", required: true, citation: "02 §7.4" },
   { id: "storage.foreign_assets.account", compatGroup: "query", pallet: "ForeignAssets", member: "Account", required: true, citation: "02 §7.4; 02 §8" },

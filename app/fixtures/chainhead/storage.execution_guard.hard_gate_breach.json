@@ -1,0 +1,83 @@
+{
+  "headers": {
+    "pinned_block": "0x19b3e843c128ea3c2e2b107ccd19e2cc3c367830af0f76182abaf87385b40fee"
+  },
+  "requests": [
+    {
+      "method": "chainHead_v1_storage",
+      "params": [
+        "subscription-1",
+        "0x19b3e843c128ea3c2e2b107ccd19e2cc3c367830af0f76182abaf87385b40fee",
+        [
+          {
+            "key": "0x0fa4af4f19b810e797f335f5b2f479289ce573cc45ebc4934cb0c15055d8f075",
+            "type": "value"
+          }
+        ],
+        null
+      ],
+      "response": {
+        "direct": {
+          "id": 1,
+          "jsonrpc": "2.0",
+          "result": {
+            "discardedItems": 0,
+            "operationId": "operation-1",
+            "result": "started"
+          }
+        },
+        "events": [
+          {
+            "event": "operationStorageDone",
+            "operationId": "operation-1"
+          }
+        ]
+      }
+    },
+    {
+      "method": "metadata_presence",
+      "params": {
+        "kind": "storage",
+        "surface": "storage.execution_guard.hard_gate_breach"
+      },
+      "response": {
+        "detail": "layout matches",
+        "expected_layout": {
+          "hashers": [],
+          "key": null,
+          "value": "bool"
+        },
+        "layout": {
+          "hashers": [],
+          "key": null,
+          "value": "bool"
+        },
+        "layout_matches": true,
+        "present": true
+      }
+    },
+    {
+      "method": "recovery_metadata_presence",
+      "params": {
+        "kind": "storage",
+        "surface": "storage.execution_guard.hard_gate_breach"
+      },
+      "response": {
+        "detail": "layout matches",
+        "expected_layout": {
+          "hashers": [],
+          "key": null,
+          "value": "bool"
+        },
+        "layout": {
+          "hashers": [],
+          "key": null,
+          "value": "bool"
+        },
+        "layout_matches": true,
+        "present": true
+      }
+    }
+  ],
+  "surface": "storage.execution_guard.hard_gate_breach"
+}

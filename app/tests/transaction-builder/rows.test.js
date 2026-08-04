@@ -86,14 +86,60 @@ test('the constants-API clauses are the ones 11 §11.5 marks [C]', () => {
   }
 });
 
-test('P-12 points at the dispatch-check mirror rather than restating it', () => {
-  // 09 §1.2 ↔ 11 §11.5's execute list is diffed by tools/ci/check-dispatch-mirror.py
-  // (15 §4.8). A second full copy here would be something for that gate to agree with
-  // instead of a source to check — which is the shape of the defect SQ-552 was.
-  assert.ok(
-    rowsFor('P-12').length < 13,
-    'P-12 has grown into a full copy of the dispatch list; the mirror gate owns that diff',
-  );
+/**
+ * P-12 carries all thirteen dispatch checks (contract v26; SQ-589).
+ *
+ * **This replaces a test that asserted `rowsFor('P-12').length < 13`** — deliberately, on
+ * the theory that `check-dispatch-mirror.py` owned the diff. It does not: that gate parses
+ * docs 09 §1.2 and 11 §11.5 and never reads `rows.ts`, so nothing checked the client
+ * implemented these at all, and the assertion passed for a trivial reason. An adversarial
+ * review found it.
+ *
+ * Asserted by **surface**, not by count. A count is satisfied by thirteen copies of the
+ * cheapest clause, which is exactly the failure the original had in the other direction.
+ */
+const P12_REQUIRED_SURFACES = [
+  'storage.execution_guard.queue',                 // 1, 2, 4 — queue state, window, version
+  'storage.preimage.preimage_for',                 // 3  — BadPreimage
+  'storage.execution_guard.ratifications',         // 5  — NotRatified
+  'storage.attestor.attestations',                 // 6  — AttestationMissing
+  'storage.execution_guard.attestation_bindings',  // 6  — bound to THIS payload
+  'storage.constitution.capabilities',             // 7  — CapabilityDenied
+  'api.execution_queue',                           // 8, 13 — meters, batch bounds
+  'storage.execution_guard.held_resources',        // 9  — ResourceLockMissing
+  'storage.epoch.proposals',                       // 10 — GuardianHold (rerun_held)
+  'storage.execution_guard.gate_suspension',       // 10 — GateSuspended
+  'storage.epoch.epoch_of',                        // 10 — the epoch it is keyed to
+  'storage.execution_guard.hard_gate_breach',      // 11 — FreezeActive
+  'storage.welfare.gate_breach_flags',             // 11 — the breach flags
+  'storage.execution_guard.dead_man_freeze',       // 12 — the guard's own latch
+  'storage.constitution.phase_flags',              // 12 — LEDGER_FROZEN / DEAD_MAN_ENGAGED
+  'storage.execution_guard.migration_halt',        // 12 — MigrationHalt
+  'storage.execution_guard.expedited',             // 12 — the exemption
+];
+
+test('P-12 reads every surface its thirteen dispatch checks need', () => {
+  const cited = new Set(rowsFor('P-12').map((c) => c.surface));
+  for (const surface of P12_REQUIRED_SURFACES) {
+    assert.ok(cited.has(surface), `P-12 has no clause reading ${surface}; a dispatch check is unmirrored`);
+  }
+});
+
+test('P-12 reads the resource locks the GUARD holds, not the epoch pallet’s own set', () => {
+  // 11 §11.5's check 9 cited `Epoch.ResourceLocks`. `do_execute` reads
+  // `ExecutionGuard.HeldResources` (lib.rs:2067). Both items exist and are frozen, so the
+  // wrong one is a plausible read that passes rows the guard refuses — corrected at v26.
+  const cited = new Set(rowsFor('P-12').map((c) => c.surface));
+  assert.ok(cited.has('storage.execution_guard.held_resources'));
+  assert.equal(cited.has('storage.epoch.resource_locks'), false);
+});
+
+test('P-12 carries the expedited exemption, not just the freeze flags', () => {
+  // Reading the freezes without this tells a user they are blocked when the chain would
+  // execute: fail-closed in the safe direction and still wrong on screen.
+  const clauses = rowsFor('P-12');
+  assert.ok(clauses.some((c) => c.surface === 'storage.execution_guard.expedited'));
+  assert.ok(clauses.some((c) => c.surface === 'storage.execution_guard.migration_halt'));
 });
 
 test('rowsFor refuses an unknown row rather than returning an empty set', () => {

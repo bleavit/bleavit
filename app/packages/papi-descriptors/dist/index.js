@@ -20,7 +20,7 @@ const metadataTypes$1 = import('./metadataTypes-JRcbuUVC.js').then(
 );
 const asset$1 = {};
 const extensions$1 = {};
-const getMetadata$2 = () => import('./bleavit_metadata-DydH3t_I.js').then(
+const getMetadata$2 = () => import('./bleavit_metadata-CzbcHyh4.js').then(
   (module) => toBinary("default" in module ? module.default : module)
 );
 const genesis$1 = void 0;
@@ -32,7 +32,7 @@ const metadataTypes = import('./metadataTypes-JRcbuUVC.js').then(
 );
 const asset = {};
 const extensions = {};
-const getMetadata$1 = () => import('./bleavit_recovery_metadata-B-CdBXan.js').then(
+const getMetadata$1 = () => import('./bleavit_recovery_metadata-DUsmhRMB.js').then(
   (module) => toBinary("default" in module ? module.default : module)
 );
 const genesis = void 0;
