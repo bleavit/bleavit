@@ -24,10 +24,10 @@
  * longest and least attended part of a session.
  */
 
-import { mount as mountTree } from '@bleavit/ui';
+import { mount as mountTree, type ReactNode } from '@bleavit/ui';
 import { registerReleaseWorker, type WorkerStatus } from './release-worker.js';
 import { Shell, type ShellChainState } from './shell.js';
-import { SCREENS } from './screens.js';
+import { Outlet, screenFor } from './routes.js';
 
 /**
  * What the shell shows before anything has been read.
@@ -50,23 +50,32 @@ function initialChainState(): ShellChainState {
   };
 }
 
-/** The screen named by the current hash, or the first primary one. */
+/**
+ * The id of the screen a hash names.
+ *
+ * Delegates to `screenFor` rather than repeating the lookup. The two were briefly separate
+ * implementations of one rule, which is a drift waiting to happen: the navigation would
+ * highlight one screen while the outlet rendered another, and both would look correct in
+ * isolation.
+ */
 export function screenForHash(hash: string, handoffEnabled: boolean): string {
-  const match = SCREENS.find((screen) => screen.path === hash);
-  if (match !== undefined) return match.id;
-  return handoffEnabled ? 'S21' : 'S2';
+  return screenFor(hash, handoffEnabled).id;
 }
 
 export async function boot(container: Element): Promise<WorkerStatus> {
   const handoffEnabled = true;
-  const active = screenForHash(globalThis.location?.hash ?? '', handoffEnabled);
+  const hash = globalThis.location?.hash ?? '';
+  const active = screenForHash(hash, handoffEnabled);
+  // The composition root, and the only place the three compilation units meet. It is a map
+  // rather than an import inside `routes.tsx` because `tx` and `handoff` may not see each
+  // other (10 §10.2) — assembling them here is what keeps that true while still letting one
+  // outlet render either. Empty for now: the screens take their models from the read layer,
+  // which is wired per screen as each lands.
+  const implemented: Readonly<Record<string, () => ReactNode>> = {};
   mountTree(
     container,
     <Shell chain={initialChainState()} handoffEnabled={handoffEnabled} activeScreen={active}>
-      <p className="shell__pending">
-        Connecting to the chain with this device’s own light client. Nothing on this screen is
-        a chain reading until it carries a badge saying so.
-      </p>
+      <Outlet hash={hash} handoffEnabled={handoffEnabled} implemented={implemented} />
     </Shell>,
   );
   // Registered after the tree is up: a release-worker failure must not stop the app

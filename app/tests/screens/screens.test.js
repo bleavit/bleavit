@@ -21,10 +21,14 @@ import {
   Shell,
   navigationFor,
   placementOf,
+  Outlet,
+  PENDING_SCREENS,
   SHELL_READS,
   assertOnePin,
   reachableScreens,
   readShellState,
+  screenFor,
+  screenForHash,
   sudoBannerFor,
 } from '@bleavit/application';
 import {
@@ -652,4 +656,69 @@ test('a model assembled from two blocks is refused rather than rendered', () => 
     () => assertOnePin({ ...consistent, epoch: { value: 7, status: { kind: 'external-proposal' } } }, at.blockHash),
     /mixes blocks/,
   );
+});
+
+// ------------------------------------------------------------- the outlet
+
+test('every navigable screen resolves to something, in both handoff postures', () => {
+  for (const handoff of [true, false]) {
+    for (const screen of reachableScreens(handoff)) {
+      const resolved = screenFor(screen.path, handoff);
+      assert.equal(resolved.id, screen.id, `${screen.path} did not resolve to ${screen.id}`);
+    }
+  }
+});
+
+test('an unknown hash lands on the front door rather than on nothing', () => {
+  assert.equal(screenFor('#/nonsense', true).id, 'S21');
+  assert.equal(screenFor('#/nonsense', false).id, 'S2');
+  assert.equal(screenFor('', true).id, 'S21');
+});
+
+test('the not-yet-built set is declared, and every member is a real screen', () => {
+  // The direction that matters: a screen *dropped* from the client must not be able to
+  // hide among the pending ones. Every pending id has to exist in the inventory, and no
+  // pending id may be one this build actually implements.
+  const inventory = new Set(INVENTORY_IDS);
+  for (const id of Object.keys(PENDING_SCREENS)) {
+    assert.ok(inventory.has(id), `${id} is declared pending but is not in the inventory`);
+  }
+  const built = ['S1', 'S2', 'S21', 'S22'];
+  for (const id of built) {
+    assert.ok(!(id in PENDING_SCREENS), `${id} is built but declared pending`);
+  }
+  // And the two sets together cover the whole inventory — no screen is unaccounted for.
+  const accounted = new Set([...Object.keys(PENDING_SCREENS), ...built]);
+  assert.deepEqual([...inventory].filter((id) => !accounted.has(id)), []);
+});
+
+test('a pending screen says which milestone owns it, and offers no action', () => {
+  const html = renderToStaticMarkup(
+    h(Outlet, { hash: '#/guardian', handoffEnabled: true, implemented: {} }),
+  );
+  assert.ok(/F17/.test(html), html);
+  assert.ok(/not in this build/.test(html), html);
+  assert.ok(!/<button/.test(html), `a pending screen offered an action: ${html}`);
+});
+
+test('an implemented screen renders its own component instead of the placeholder', () => {
+  const html = renderToStaticMarkup(
+    h(Outlet, {
+      hash: '#/share',
+      handoffEnabled: true,
+      implemented: { S21: () => h('p', { id: 'real' }, 'the real screen') },
+    }),
+  );
+  assert.ok(html.includes('the real screen'), html);
+  assert.ok(!/not in this build/.test(html), html);
+});
+
+test('the navigation highlight and the outlet agree on which screen is showing', () => {
+  // They were briefly two implementations of one lookup. A disagreement would highlight one
+  // screen in the nav while rendering another, and each half would look right on its own.
+  for (const handoff of [true, false]) {
+    for (const hash of [...SCREENS.map((s) => s.path), '#/nonsense', '']) {
+      assert.equal(screenForHash(hash, handoff), screenFor(hash, handoff).id, `${hash}/${handoff}`);
+    }
+  }
 });
