@@ -1,1 +1,74 @@
-{"headers":{"pinned_block":"0x678c66fcc229a42f23969f66a6e5dd18fdcb4366a0c4b7ded569af41ba2d9057"},"requests":[{"method":"chainHead_v1_call","params":["subscription-1","0x678c66fcc229a42f23969f66a6e5dd18fdcb4366a0c4b7ded569af41ba2d9057","FutarchyApi_nav","0x"],"response":{"direct":{"id":1,"jsonrpc":"2.0","result":{"operationId":"operation-1","result":"started"}},"events":[{"event":"operationCallDone","operationId":"operation-1","output":"0x000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000102700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000406968e833040000000000000000000000d0e674b906000000000000000000000048dab79b0c00000000000000000000403f192c551300000000000000000000"}]}},{"method":"metadata_presence","params":{"kind":"runtime_api","surface":"api.nav"},"response":{"detail":"layout matches","expected_layout":{"params":[],"return":"futarchy_primitives::NavView{total:u128,main:u128,pol:u128,insurance:u128,keeper:u128,oracle:u128,rewards:u128,stream_remainders:u128,obligations:u128,haircut_flag:bool,spendable_nav:u128,meter_utilization_bps:u32,class_floors:[u128;4]}"},"layout":{"params":[],"return":"futarchy_primitives::NavView{total:u128,main:u128,pol:u128,insurance:u128,keeper:u128,oracle:u128,rewards:u128,stream_remainders:u128,obligations:u128,haircut_flag:bool,spendable_nav:u128,meter_utilization_bps:u32,class_floors:[u128;4]}"},"layout_matches":true,"present":true}},{"method":"recovery_metadata_presence","params":{"kind":"runtime_api","surface":"api.nav"},"response":{"detail":"layout matches","expected_layout":{"params":[],"return":"futarchy_primitives::NavView{total:u128,main:u128,pol:u128,insurance:u128,keeper:u128,oracle:u128,rewards:u128,stream_remainders:u128,obligations:u128,haircut_flag:bool,spendable_nav:u128,meter_utilization_bps:u32,class_floors:[u128;4]}"},"layout":{"params":[],"return":"futarchy_primitives::NavView{total:u128,main:u128,pol:u128,insurance:u128,keeper:u128,oracle:u128,rewards:u128,stream_remainders:u128,obligations:u128,haircut_flag:bool,spendable_nav:u128,meter_utilization_bps:u32,class_floors:[u128;4]}"},"layout_matches":true,"present":true}}],"surface":"api.nav"}
+{
+  "headers": {
+    "pinned_block": "0x4a079de432599f14c3de77382e2d2aba0064a4ee0ef23f3b5210ac13aa927686"
+  },
+  "requests": [
+    {
+      "method": "chainHead_v1_call",
+      "params": [
+        "subscription-1",
+        "0x4a079de432599f14c3de77382e2d2aba0064a4ee0ef23f3b5210ac13aa927686",
+        "FutarchyApi_nav",
+        "0x"
+      ],
+      "response": {
+        "direct": {
+          "id": 1,
+          "jsonrpc": "2.0",
+          "result": {
+            "operationId": "operation-1",
+            "result": "started"
+          }
+        },
+        "events": [
+          {
+            "event": "operationCallDone",
+            "operationId": "operation-1",
+            "output": "0x000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000102700000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000406968e833040000000000000000000000d0e674b906000000000000000000000048dab79b0c00000000000000000000403f192c551300000000000000000000"
+          }
+        ]
+      }
+    },
+    {
+      "method": "metadata_presence",
+      "params": {
+        "kind": "runtime_api",
+        "surface": "api.nav"
+      },
+      "response": {
+        "detail": "layout matches",
+        "expected_layout": {
+          "params": [],
+          "return": "futarchy_primitives::NavView{total:u128,main:u128,pol:u128,insurance:u128,keeper:u128,oracle:u128,rewards:u128,stream_remainders:u128,obligations:u128,haircut_flag:bool,spendable_nav:u128,meter_utilization_bps:u32,class_floors:[u128;4]}"
+        },
+        "layout": {
+          "params": [],
+          "return": "futarchy_primitives::NavView{total:u128,main:u128,pol:u128,insurance:u128,keeper:u128,oracle:u128,rewards:u128,stream_remainders:u128,obligations:u128,haircut_flag:bool,spendable_nav:u128,meter_utilization_bps:u32,class_floors:[u128;4]}"
+        },
+        "layout_matches": true,
+        "present": true
+      }
+    },
+    {
+      "method": "recovery_metadata_presence",
+      "params": {
+        "kind": "runtime_api",
+        "surface": "api.nav"
+      },
+      "response": {
+        "detail": "layout matches",
+        "expected_layout": {
+          "params": [],
+          "return": "futarchy_primitives::NavView{total:u128,main:u128,pol:u128,insurance:u128,keeper:u128,oracle:u128,rewards:u128,stream_remainders:u128,obligations:u128,haircut_flag:bool,spendable_nav:u128,meter_utilization_bps:u32,class_floors:[u128;4]}"
+        },
+        "layout": {
+          "params": [],
+          "return": "futarchy_primitives::NavView{total:u128,main:u128,pol:u128,insurance:u128,keeper:u128,oracle:u128,rewards:u128,stream_remainders:u128,obligations:u128,haircut_flag:bool,spendable_nav:u128,meter_utilization_bps:u32,class_floors:[u128;4]}"
+        },
+        "layout_matches": true,
+        "present": true
+      }
+    }
+  ],
+  "surface": "api.nav"
+}

@@ -1,1 +1,113 @@
-{"headers":{"pinned_block":"0x678c66fcc229a42f23969f66a6e5dd18fdcb4366a0c4b7ded569af41ba2d9057"},"requests":[{"method":"chainHead_v1_storage","params":["subscription-1","0x678c66fcc229a42f23969f66a6e5dd18fdcb4366a0c4b7ded569af41ba2d9057",[{"key":"0x26aa394eea5630e07c48ae0c9558cef780d41e5e16056765bc8461851072c9d7","type":"value"}],null],"response":{"direct":{"id":1,"jsonrpc":"2.0","result":{"discardedItems":0,"operationId":"operation-1","result":"started"}},"events":[{"event":"operationStorageItems","items":[{"key":"0x26aa394eea5630e07c48ae0c9558cef780d41e5e16056765bc8461851072c9d7","value":"0x0800000000000000226cf83e5517020000000100000000002261c91900020000"}],"operationId":"operation-1"},{"event":"operationStorageDone","operationId":"operation-1"}]}},{"method":"state_getStorage","params":["0x26aa394eea5630e07c48ae0c9558cef780d41e5e16056765bc8461851072c9d7","0x678c66fcc229a42f23969f66a6e5dd18fdcb4366a0c4b7ded569af41ba2d9057"],"response":"0x0800000000000000226cf83e5517020000000100000000002261c91900020000"},{"method":"metadata_presence","params":{"kind":"event","surface":"event.epoch.markets_opened"},"response":{"detail":"layout matches","expected_layout":{"fields":[{"name":null,"type":"u64"}]},"layout":{"fields":[{"name":null,"type":"u64"}]},"layout_matches":true,"present":true}},{"method":"recovery_metadata_presence","params":{"kind":"event","surface":"event.epoch.markets_opened"},"response":{"detail":"layout matches","expected_layout":{"fields":[{"name":null,"type":"u64"}]},"layout":{"fields":[{"name":null,"type":"u64"}]},"layout_matches":true,"present":true}}],"surface":"event.epoch.markets_opened"}
+{
+  "headers": {
+    "pinned_block": "0x4a079de432599f14c3de77382e2d2aba0064a4ee0ef23f3b5210ac13aa927686"
+  },
+  "requests": [
+    {
+      "method": "chainHead_v1_storage",
+      "params": [
+        "subscription-1",
+        "0x4a079de432599f14c3de77382e2d2aba0064a4ee0ef23f3b5210ac13aa927686",
+        [
+          {
+            "key": "0x26aa394eea5630e07c48ae0c9558cef780d41e5e16056765bc8461851072c9d7",
+            "type": "value"
+          }
+        ],
+        null
+      ],
+      "response": {
+        "direct": {
+          "id": 1,
+          "jsonrpc": "2.0",
+          "result": {
+            "discardedItems": 0,
+            "operationId": "operation-1",
+            "result": "started"
+          }
+        },
+        "events": [
+          {
+            "event": "operationStorageItems",
+            "items": [
+              {
+                "key": "0x26aa394eea5630e07c48ae0c9558cef780d41e5e16056765bc8461851072c9d7",
+                "value": "0x0800000000000000226cf83e5517020000000100000000002261c91900020000"
+              }
+            ],
+            "operationId": "operation-1"
+          },
+          {
+            "event": "operationStorageDone",
+            "operationId": "operation-1"
+          }
+        ]
+      }
+    },
+    {
+      "method": "state_getStorage",
+      "params": [
+        "0x26aa394eea5630e07c48ae0c9558cef780d41e5e16056765bc8461851072c9d7",
+        "0x4a079de432599f14c3de77382e2d2aba0064a4ee0ef23f3b5210ac13aa927686"
+      ],
+      "response": "0x0800000000000000226cf83e5517020000000100000000002261c91900020000"
+    },
+    {
+      "method": "metadata_presence",
+      "params": {
+        "kind": "event",
+        "surface": "event.epoch.markets_opened"
+      },
+      "response": {
+        "detail": "layout matches",
+        "expected_layout": {
+          "fields": [
+            {
+              "name": null,
+              "type": "u64"
+            }
+          ]
+        },
+        "layout": {
+          "fields": [
+            {
+              "name": null,
+              "type": "u64"
+            }
+          ]
+        },
+        "layout_matches": true,
+        "present": true
+      }
+    },
+    {
+      "method": "recovery_metadata_presence",
+      "params": {
+        "kind": "event",
+        "surface": "event.epoch.markets_opened"
+      },
+      "response": {
+        "detail": "layout matches",
+        "expected_layout": {
+          "fields": [
+            {
+              "name": null,
+              "type": "u64"
+            }
+          ]
+        },
+        "layout": {
+          "fields": [
+            {
+              "name": null,
+              "type": "u64"
+            }
+          ]
+        },
+        "layout_matches": true,
+        "present": true
+      }
+    }
+  ],
+  "surface": "event.epoch.markets_opened"
+}

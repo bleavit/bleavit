@@ -9,7 +9,7 @@ use core::convert::TryFrom;
 use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 
-pub const INTEGRATION_CONTRACT_VERSION: u32 = 23;
+pub const INTEGRATION_CONTRACT_VERSION: u32 = 24;
 
 pub type Balance = u128;
 pub type ProposalId = u64;
@@ -1909,8 +1909,14 @@ mod tests {
         // the twelfth API method and the exact §4a types/events/storage/constants.
         // N9 is v22: ClientRecord gains trailing USDC delivery_float and the
         // fixed outbound receiver ABI becomes contract surface; FutarchyApi is
-        // unchanged.
-        assert_eq!(INTEGRATION_CONTRACT_VERSION, 23);
+        // unchanged. N13 is v23: the canonical client serves external books, so
+        // `service_positions` is appended as the thirteenth API method.
+        // v24 (SQ-580) freezes twelve storage items docs 10/11 already required
+        // the client to read — `Epoch::ResourceLocks` plus the eleven upstream
+        // Referenda/ConvictionVoting/Preimage/Scheduler/Multisig/System reads of
+        // 02 §7.6. Nothing in this crate's types moves: the bump records that the
+        // *contract* grew an obligation, which is why only this constant changes.
+        assert_eq!(INTEGRATION_CONTRACT_VERSION, 24);
     }
 
     #[test]

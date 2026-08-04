@@ -1,1 +1,91 @@
-{"headers":{"pinned_block":"0x678c66fcc229a42f23969f66a6e5dd18fdcb4366a0c4b7ded569af41ba2d9057"},"requests":[{"method":"chainHead_v1_storage","params":["subscription-1","0x678c66fcc229a42f23969f66a6e5dd18fdcb4366a0c4b7ded569af41ba2d9057",[{"key":"0x0ff5e4a4a71cf21d2b9cd3070ce7efc68cb2ffcc631d77c9bfaf8ae0aa59502e","type":"descendantsValues"}],null],"response":{"direct":{"id":1,"jsonrpc":"2.0","result":{"discardedItems":0,"operationId":"operation-1","result":"started"}},"events":[{"event":"operationStorageDone","operationId":"operation-1"}]}},{"method":"metadata_presence","params":{"kind":"storage","surface":"storage.service_ledger.position_totals"},"response":{"detail":"layout matches","expected_layout":{"hashers":["Blake2_128Concat"],"key":"futarchy_primitives::PositionIdenum[Proposal=0{proposal:u64,branch:futarchy_primitives::Branchenum[Accept=0|Reject=1],kind:futarchy_primitives::PositionKindenum[BranchUsdc=0|Long=1|Short=2|GateYes=3(futarchy_primitives::GateTypeenum[Survival=0|Security=1])|GateNo=4(futarchy_primitives::GateTypeenum[Survival=0|Security=1])]}|Baseline=1{epoch:u32,side:futarchy_primitives::ScalarSideenum[Long=0|Short=1]}]","value":"u128"},"layout":{"hashers":["Blake2_128Concat"],"key":"futarchy_primitives::PositionIdenum[Proposal=0{proposal:u64,branch:futarchy_primitives::Branchenum[Accept=0|Reject=1],kind:futarchy_primitives::PositionKindenum[BranchUsdc=0|Long=1|Short=2|GateYes=3(futarchy_primitives::GateTypeenum[Survival=0|Security=1])|GateNo=4(futarchy_primitives::GateTypeenum[Survival=0|Security=1])]}|Baseline=1{epoch:u32,side:futarchy_primitives::ScalarSideenum[Long=0|Short=1]}]","value":"u128"},"layout_matches":true,"present":true}},{"method":"recovery_metadata_presence","params":{"kind":"storage","surface":"storage.service_ledger.position_totals"},"response":{"detail":"layout matches","expected_layout":{"hashers":["Blake2_128Concat"],"key":"futarchy_primitives::PositionIdenum[Proposal=0{proposal:u64,branch:futarchy_primitives::Branchenum[Accept=0|Reject=1],kind:futarchy_primitives::PositionKindenum[BranchUsdc=0|Long=1|Short=2|GateYes=3(futarchy_primitives::GateTypeenum[Survival=0|Security=1])|GateNo=4(futarchy_primitives::GateTypeenum[Survival=0|Security=1])]}|Baseline=1{epoch:u32,side:futarchy_primitives::ScalarSideenum[Long=0|Short=1]}]","value":"u128"},"layout":{"hashers":["Blake2_128Concat"],"key":"futarchy_primitives::PositionIdenum[Proposal=0{proposal:u64,branch:futarchy_primitives::Branchenum[Accept=0|Reject=1],kind:futarchy_primitives::PositionKindenum[BranchUsdc=0|Long=1|Short=2|GateYes=3(futarchy_primitives::GateTypeenum[Survival=0|Security=1])|GateNo=4(futarchy_primitives::GateTypeenum[Survival=0|Security=1])]}|Baseline=1{epoch:u32,side:futarchy_primitives::ScalarSideenum[Long=0|Short=1]}]","value":"u128"},"layout_matches":true,"present":true}}],"surface":"storage.service_ledger.position_totals"}
+{
+  "headers": {
+    "pinned_block": "0x4a079de432599f14c3de77382e2d2aba0064a4ee0ef23f3b5210ac13aa927686"
+  },
+  "requests": [
+    {
+      "method": "chainHead_v1_storage",
+      "params": [
+        "subscription-1",
+        "0x4a079de432599f14c3de77382e2d2aba0064a4ee0ef23f3b5210ac13aa927686",
+        [
+          {
+            "key": "0x0ff5e4a4a71cf21d2b9cd3070ce7efc68cb2ffcc631d77c9bfaf8ae0aa59502e",
+            "type": "descendantsValues"
+          }
+        ],
+        null
+      ],
+      "response": {
+        "direct": {
+          "id": 1,
+          "jsonrpc": "2.0",
+          "result": {
+            "discardedItems": 0,
+            "operationId": "operation-1",
+            "result": "started"
+          }
+        },
+        "events": [
+          {
+            "event": "operationStorageDone",
+            "operationId": "operation-1"
+          }
+        ]
+      }
+    },
+    {
+      "method": "metadata_presence",
+      "params": {
+        "kind": "storage",
+        "surface": "storage.service_ledger.position_totals"
+      },
+      "response": {
+        "detail": "layout matches",
+        "expected_layout": {
+          "hashers": [
+            "Blake2_128Concat"
+          ],
+          "key": "futarchy_primitives::PositionIdenum[Proposal=0{proposal:u64,branch:futarchy_primitives::Branchenum[Accept=0|Reject=1],kind:futarchy_primitives::PositionKindenum[BranchUsdc=0|Long=1|Short=2|GateYes=3(futarchy_primitives::GateTypeenum[Survival=0|Security=1])|GateNo=4(futarchy_primitives::GateTypeenum[Survival=0|Security=1])]}|Baseline=1{epoch:u32,side:futarchy_primitives::ScalarSideenum[Long=0|Short=1]}]",
+          "value": "u128"
+        },
+        "layout": {
+          "hashers": [
+            "Blake2_128Concat"
+          ],
+          "key": "futarchy_primitives::PositionIdenum[Proposal=0{proposal:u64,branch:futarchy_primitives::Branchenum[Accept=0|Reject=1],kind:futarchy_primitives::PositionKindenum[BranchUsdc=0|Long=1|Short=2|GateYes=3(futarchy_primitives::GateTypeenum[Survival=0|Security=1])|GateNo=4(futarchy_primitives::GateTypeenum[Survival=0|Security=1])]}|Baseline=1{epoch:u32,side:futarchy_primitives::ScalarSideenum[Long=0|Short=1]}]",
+          "value": "u128"
+        },
+        "layout_matches": true,
+        "present": true
+      }
+    },
+    {
+      "method": "recovery_metadata_presence",
+      "params": {
+        "kind": "storage",
+        "surface": "storage.service_ledger.position_totals"
+      },
+      "response": {
+        "detail": "layout matches",
+        "expected_layout": {
+          "hashers": [
+            "Blake2_128Concat"
+          ],
+          "key": "futarchy_primitives::PositionIdenum[Proposal=0{proposal:u64,branch:futarchy_primitives::Branchenum[Accept=0|Reject=1],kind:futarchy_primitives::PositionKindenum[BranchUsdc=0|Long=1|Short=2|GateYes=3(futarchy_primitives::GateTypeenum[Survival=0|Security=1])|GateNo=4(futarchy_primitives::GateTypeenum[Survival=0|Security=1])]}|Baseline=1{epoch:u32,side:futarchy_primitives::ScalarSideenum[Long=0|Short=1]}]",
+          "value": "u128"
+        },
+        "layout": {
+          "hashers": [
+            "Blake2_128Concat"
+          ],
+          "key": "futarchy_primitives::PositionIdenum[Proposal=0{proposal:u64,branch:futarchy_primitives::Branchenum[Accept=0|Reject=1],kind:futarchy_primitives::PositionKindenum[BranchUsdc=0|Long=1|Short=2|GateYes=3(futarchy_primitives::GateTypeenum[Survival=0|Security=1])|GateNo=4(futarchy_primitives::GateTypeenum[Survival=0|Security=1])]}|Baseline=1{epoch:u32,side:futarchy_primitives::ScalarSideenum[Long=0|Short=1]}]",
+          "value": "u128"
+        },
+        "layout_matches": true,
+        "present": true
+      }
+    }
+  ],
+  "surface": "storage.service_ledger.position_totals"
+}

@@ -1,1 +1,93 @@
-{"headers":{"pinned_block":"0x678c66fcc229a42f23969f66a6e5dd18fdcb4366a0c4b7ded569af41ba2d9057"},"requests":[{"method":"chainHead_v1_storage","params":["subscription-1","0x678c66fcc229a42f23969f66a6e5dd18fdcb4366a0c4b7ded569af41ba2d9057",[{"key":"0x6ecdde33e5d791e9c15595f33fdaafd65a4cbabd21adff247133cb5710222418","type":"value"}],null],"response":{"direct":{"id":1,"jsonrpc":"2.0","result":{"discardedItems":0,"operationId":"operation-1","result":"started"}},"events":[{"event":"operationStorageItems","items":[{"key":"0x6ecdde33e5d791e9c15595f33fdaafd65a4cbabd21adff247133cb5710222418","value":"0x00000000000000000000000000000000"}],"operationId":"operation-1"},{"event":"operationStorageDone","operationId":"operation-1"}]}},{"method":"metadata_presence","params":{"kind":"storage","surface":"storage.oracle.reserve_health"},"response":{"detail":"layout matches","expected_layout":{"hashers":[],"key":null,"value":"oracle_core::ReserveHealth{consecutive_fails:u8,consecutive_passes:u8,unhealthy:bool,last_query_id:u64,last_probe_at:u32,pending_since:Optionenum[None=0|Some=1(u32)]}"},"layout":{"hashers":[],"key":null,"value":"oracle_core::ReserveHealth{consecutive_fails:u8,consecutive_passes:u8,unhealthy:bool,last_query_id:u64,last_probe_at:u32,pending_since:Optionenum[None=0|Some=1(u32)]}"},"layout_matches":true,"present":true}},{"method":"recovery_metadata_presence","params":{"kind":"storage","surface":"storage.oracle.reserve_health"},"response":{"detail":"layout matches","expected_layout":{"hashers":[],"key":null,"value":"oracle_core::ReserveHealth{consecutive_fails:u8,consecutive_passes:u8,unhealthy:bool,last_query_id:u64,last_probe_at:u32,pending_since:Optionenum[None=0|Some=1(u32)]}"},"layout":{"hashers":[],"key":null,"value":"oracle_core::ReserveHealth{consecutive_fails:u8,consecutive_passes:u8,unhealthy:bool,last_query_id:u64,last_probe_at:u32,pending_since:Optionenum[None=0|Some=1(u32)]}"},"layout_matches":true,"present":true}}],"surface":"storage.oracle.reserve_health"}
+{
+  "headers": {
+    "pinned_block": "0x4a079de432599f14c3de77382e2d2aba0064a4ee0ef23f3b5210ac13aa927686"
+  },
+  "requests": [
+    {
+      "method": "chainHead_v1_storage",
+      "params": [
+        "subscription-1",
+        "0x4a079de432599f14c3de77382e2d2aba0064a4ee0ef23f3b5210ac13aa927686",
+        [
+          {
+            "key": "0x6ecdde33e5d791e9c15595f33fdaafd65a4cbabd21adff247133cb5710222418",
+            "type": "value"
+          }
+        ],
+        null
+      ],
+      "response": {
+        "direct": {
+          "id": 1,
+          "jsonrpc": "2.0",
+          "result": {
+            "discardedItems": 0,
+            "operationId": "operation-1",
+            "result": "started"
+          }
+        },
+        "events": [
+          {
+            "event": "operationStorageItems",
+            "items": [
+              {
+                "key": "0x6ecdde33e5d791e9c15595f33fdaafd65a4cbabd21adff247133cb5710222418",
+                "value": "0x00000000000000000000000000000000"
+              }
+            ],
+            "operationId": "operation-1"
+          },
+          {
+            "event": "operationStorageDone",
+            "operationId": "operation-1"
+          }
+        ]
+      }
+    },
+    {
+      "method": "metadata_presence",
+      "params": {
+        "kind": "storage",
+        "surface": "storage.oracle.reserve_health"
+      },
+      "response": {
+        "detail": "layout matches",
+        "expected_layout": {
+          "hashers": [],
+          "key": null,
+          "value": "oracle_core::ReserveHealth{consecutive_fails:u8,consecutive_passes:u8,unhealthy:bool,last_query_id:u64,last_probe_at:u32,pending_since:Optionenum[None=0|Some=1(u32)]}"
+        },
+        "layout": {
+          "hashers": [],
+          "key": null,
+          "value": "oracle_core::ReserveHealth{consecutive_fails:u8,consecutive_passes:u8,unhealthy:bool,last_query_id:u64,last_probe_at:u32,pending_since:Optionenum[None=0|Some=1(u32)]}"
+        },
+        "layout_matches": true,
+        "present": true
+      }
+    },
+    {
+      "method": "recovery_metadata_presence",
+      "params": {
+        "kind": "storage",
+        "surface": "storage.oracle.reserve_health"
+      },
+      "response": {
+        "detail": "layout matches",
+        "expected_layout": {
+          "hashers": [],
+          "key": null,
+          "value": "oracle_core::ReserveHealth{consecutive_fails:u8,consecutive_passes:u8,unhealthy:bool,last_query_id:u64,last_probe_at:u32,pending_since:Optionenum[None=0|Some=1(u32)]}"
+        },
+        "layout": {
+          "hashers": [],
+          "key": null,
+          "value": "oracle_core::ReserveHealth{consecutive_fails:u8,consecutive_passes:u8,unhealthy:bool,last_query_id:u64,last_probe_at:u32,pending_since:Optionenum[None=0|Some=1(u32)]}"
+        },
+        "layout_matches": true,
+        "present": true
+      }
+    }
+  ],
+  "surface": "storage.oracle.reserve_health"
+}

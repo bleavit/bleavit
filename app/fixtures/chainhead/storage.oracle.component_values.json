@@ -1,1 +1,99 @@
-{"headers":{"pinned_block":"0x678c66fcc229a42f23969f66a6e5dd18fdcb4366a0c4b7ded569af41ba2d9057"},"requests":[{"method":"chainHead_v1_storage","params":["subscription-1","0x678c66fcc229a42f23969f66a6e5dd18fdcb4366a0c4b7ded569af41ba2d9057",[{"key":"0x6ecdde33e5d791e9c15595f33fdaafd62ceea42326d12fe6635710de71201857","type":"descendantsValues"}],null],"response":{"direct":{"id":1,"jsonrpc":"2.0","result":{"discardedItems":0,"operationId":"operation-1","result":"started"}},"events":[{"event":"operationStorageDone","operationId":"operation-1"}]}},{"method":"metadata_presence","params":{"kind":"storage","surface":"storage.oracle.component_values"},"response":{"detail":"layout matches","expected_layout":{"hashers":["Blake2_128Concat","Blake2_128Concat","Blake2_128Concat"],"key":"(u16,u32,u16)","value":"oracle_core::SettledComponent{value:futarchy_primitives::FixedU64(u64),path:oracle_core::SettlePathenum[Unchallenged=0|Recomputed=1|Adjudicated=2|ChallengerDefault=3|Neutral=4],flagged:bool}"},"layout":{"hashers":["Blake2_128Concat","Blake2_128Concat","Blake2_128Concat"],"key":"(u16,u32,u16)","value":"oracle_core::SettledComponent{value:futarchy_primitives::FixedU64(u64),path:oracle_core::SettlePathenum[Unchallenged=0|Recomputed=1|Adjudicated=2|ChallengerDefault=3|Neutral=4],flagged:bool}"},"layout_matches":true,"present":true}},{"method":"recovery_metadata_presence","params":{"kind":"storage","surface":"storage.oracle.component_values"},"response":{"detail":"layout matches","expected_layout":{"hashers":["Blake2_128Concat","Blake2_128Concat","Blake2_128Concat"],"key":"(u16,u32,u16)","value":"oracle_core::SettledComponent{value:futarchy_primitives::FixedU64(u64),path:oracle_core::SettlePathenum[Unchallenged=0|Recomputed=1|Adjudicated=2|ChallengerDefault=3|Neutral=4],flagged:bool}"},"layout":{"hashers":["Blake2_128Concat","Blake2_128Concat","Blake2_128Concat"],"key":"(u16,u32,u16)","value":"oracle_core::SettledComponent{value:futarchy_primitives::FixedU64(u64),path:oracle_core::SettlePathenum[Unchallenged=0|Recomputed=1|Adjudicated=2|ChallengerDefault=3|Neutral=4],flagged:bool}"},"layout_matches":true,"present":true}}],"surface":"storage.oracle.component_values"}
+{
+  "headers": {
+    "pinned_block": "0x4a079de432599f14c3de77382e2d2aba0064a4ee0ef23f3b5210ac13aa927686"
+  },
+  "requests": [
+    {
+      "method": "chainHead_v1_storage",
+      "params": [
+        "subscription-1",
+        "0x4a079de432599f14c3de77382e2d2aba0064a4ee0ef23f3b5210ac13aa927686",
+        [
+          {
+            "key": "0x6ecdde33e5d791e9c15595f33fdaafd62ceea42326d12fe6635710de71201857",
+            "type": "descendantsValues"
+          }
+        ],
+        null
+      ],
+      "response": {
+        "direct": {
+          "id": 1,
+          "jsonrpc": "2.0",
+          "result": {
+            "discardedItems": 0,
+            "operationId": "operation-1",
+            "result": "started"
+          }
+        },
+        "events": [
+          {
+            "event": "operationStorageDone",
+            "operationId": "operation-1"
+          }
+        ]
+      }
+    },
+    {
+      "method": "metadata_presence",
+      "params": {
+        "kind": "storage",
+        "surface": "storage.oracle.component_values"
+      },
+      "response": {
+        "detail": "layout matches",
+        "expected_layout": {
+          "hashers": [
+            "Blake2_128Concat",
+            "Blake2_128Concat",
+            "Blake2_128Concat"
+          ],
+          "key": "(u16,u32,u16)",
+          "value": "oracle_core::SettledComponent{value:futarchy_primitives::FixedU64(u64),path:oracle_core::SettlePathenum[Unchallenged=0|Recomputed=1|Adjudicated=2|ChallengerDefault=3|Neutral=4],flagged:bool}"
+        },
+        "layout": {
+          "hashers": [
+            "Blake2_128Concat",
+            "Blake2_128Concat",
+            "Blake2_128Concat"
+          ],
+          "key": "(u16,u32,u16)",
+          "value": "oracle_core::SettledComponent{value:futarchy_primitives::FixedU64(u64),path:oracle_core::SettlePathenum[Unchallenged=0|Recomputed=1|Adjudicated=2|ChallengerDefault=3|Neutral=4],flagged:bool}"
+        },
+        "layout_matches": true,
+        "present": true
+      }
+    },
+    {
+      "method": "recovery_metadata_presence",
+      "params": {
+        "kind": "storage",
+        "surface": "storage.oracle.component_values"
+      },
+      "response": {
+        "detail": "layout matches",
+        "expected_layout": {
+          "hashers": [
+            "Blake2_128Concat",
+            "Blake2_128Concat",
+            "Blake2_128Concat"
+          ],
+          "key": "(u16,u32,u16)",
+          "value": "oracle_core::SettledComponent{value:futarchy_primitives::FixedU64(u64),path:oracle_core::SettlePathenum[Unchallenged=0|Recomputed=1|Adjudicated=2|ChallengerDefault=3|Neutral=4],flagged:bool}"
+        },
+        "layout": {
+          "hashers": [
+            "Blake2_128Concat",
+            "Blake2_128Concat",
+            "Blake2_128Concat"
+          ],
+          "key": "(u16,u32,u16)",
+          "value": "oracle_core::SettledComponent{value:futarchy_primitives::FixedU64(u64),path:oracle_core::SettlePathenum[Unchallenged=0|Recomputed=1|Adjudicated=2|ChallengerDefault=3|Neutral=4],flagged:bool}"
+        },
+        "layout_matches": true,
+        "present": true
+      }
+    }
+  ],
+  "surface": "storage.oracle.component_values"
+}

@@ -125,6 +125,14 @@ jobs:
         # mandated nothing (SQ-552). It must fail on a frontend precondition with no
         # backend check behind it — a client refusing an action the runtime accepts.
         run: python3 tools/ci/check-dispatch-mirror.py
+      - name: Client surface obligations — every 10/11 read names a frozen 02 surface
+        # The inverse of every other surface gate. `check-chain-feed.py`, `surface:check`
+        # and `test:mock-runtime` all verify that what IS declared agrees with the
+        # runtime; none asked whether what is REQUIRED was ever declared, which is how
+        # SQ-552/577/580/581 all survived. An unfrozen client read is one the 10 §5.2
+        # lattice cannot fail on, so a runtime upgrade that moves it reports `full`
+        # while the dependent path breaks.
+        run: python3 tools/ci/check-client-surface-obligations.py
       - name: Bind the quickstart to the executable integration drill
         run: python3 tools/ci/check-quickstart-drill.py
       - name: Bind the pure-XCM integration page to the frozen client ABI

@@ -118,7 +118,7 @@ test('FE-R1 bounds are exactly 02 §9\'s frozen values', () => {
     'constant.epoch.max_intake_queue': 64n,            // IntakeQueue
     'constant.ledger.max_positions_per_account': 64n,  // MaxPositionsPerAccount
     'constant.identity.ss58_prefix': 7777n,
-    'constant.identity.contract_version': 23n,         // INTEGRATION_CONTRACT_VERSION
+    'constant.identity.contract_version': 24n,         // INTEGRATION_CONTRACT_VERSION (v24: SQ-580)
     'constant.market.max_live_markets': 196n,
     'constant.market.max_stored_markets': 2240n,
     'constant.market.max_live_external_markets': 128n,
@@ -185,6 +185,58 @@ test('storage and runtime-API reads replay through the chainHead transcript', ()
     .requests.find((r) => r.method === 'chainHead_v1_storage').params[2][0];
   const items = chainHeadStorageValue(runtime, key.key, key.type);
   assert.ok(Array.isArray(items), 'RecentCohortSummaries did not replay');
+});
+
+test('the twelve surfaces contract v24 froze are present and probeable (SQ-580)', () => {
+  // The completeness test above is bidirectional between the manifest and the
+  // fixtures, so it passes just as happily on a manifest that never listed these —
+  // it proves the two artifacts agree, not that they cover what docs 10/11 require.
+  // These are named individually because their *absence* was the defect: with no
+  // frozen entry there is nothing for a 10 §5.2 probe to ask about, so a runtime
+  // upgrade that moved one would leave the classifier reporting `full` while the
+  // dependent path broke. Naming them is what makes deleting one fail here.
+  const frozen = [
+    'storage.epoch.resource_locks',            // 09 §1.2(8) dispatch check, 11 §11.5 row 9
+    'storage.multisig.multisigs',              // 11 §11.3 — blocked F6's multisig/proxy
+    'storage.referenda.referendum_count',
+    'storage.referenda.referendum_info_for',
+    'storage.referenda.track_queue',
+    'storage.referenda.deciding_count',
+    'storage.preimage.status_for',
+    'storage.preimage.preimage_for',
+    'storage.conviction_voting.voting_for',
+    'storage.conviction_voting.class_locks_for',
+    'storage.scheduler.agenda',                // display only (11 §11.7.2)
+    'storage.system.events',                   // 10 §4.2 — events are state
+  ];
+  const runtime = createMockRuntime(bundle);
+  for (const surface of frozen) {
+    assert.ok(bundle.fixtures.has(surface), `${surface} has no fixture`);
+    const presence = metadataPresence(runtime, surface, 'storage');
+    assert.equal(presence.present, true, `${surface}: ${presence.detail}`);
+    assert.equal(presence.layout_matches, true, `${surface}: ${presence.detail}`);
+  }
+  assert.equal(frozen.length, 12, 'contract v24 froze twelve surfaces');
+});
+
+test('System.Events freezes its container while §6 freezes the payload (SQ-580)', () => {
+  // `System.Events` has value `Vec<EventRecord<RuntimeEvent>>`. Expanding RuntimeEvent
+  // restates every event of every pallet — 2.2 MB — and makes this row's drift signal
+  // fire whenever any unrelated pallet gains an event. The manifest therefore elides
+  // it, which is only sound because §6 freezes those events one by one. This asserts
+  // both halves: the container is still checked, and the elision did not swallow it.
+  const runtime = createMockRuntime(bundle);
+  const presence = metadataPresence(runtime, 'storage.system.events', 'storage');
+  assert.equal(presence.present, true, presence.detail);
+  assert.equal(presence.layout_matches, true, presence.detail);
+  const value = presence.layout.value;
+  for (const part of ['EventRecord', 'phase', 'topics', 'bleavit_runtime::RuntimeEvent']) {
+    assert.ok(value.includes(part), `System.Events layout lost ${part}`);
+  }
+  assert.ok(
+    !value.includes('ExtrinsicSuccess'),
+    'RuntimeEvent was expanded rather than elided — the row now restates every pallet event',
+  );
 });
 
 test('the mock refuses an unrecorded request rather than answering it', () => {

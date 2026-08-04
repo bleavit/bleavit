@@ -1,1 +1,93 @@
-{"headers":{"pinned_block":"0x678c66fcc229a42f23969f66a6e5dd18fdcb4366a0c4b7ded569af41ba2d9057"},"requests":[{"method":"chainHead_v1_storage","params":["subscription-1","0x678c66fcc229a42f23969f66a6e5dd18fdcb4366a0c4b7ded569af41ba2d9057",[{"key":"0x217d0aba3b8e701c3cd0d4575ad8c331cb4a45fc6cc77f97439c3c2cb9a6de1a","type":"value"}],null],"response":{"direct":{"id":1,"jsonrpc":"2.0","result":{"discardedItems":0,"operationId":"operation-1","result":"started"}},"events":[{"event":"operationStorageItems","items":[{"key":"0x217d0aba3b8e701c3cd0d4575ad8c331cb4a45fc6cc77f97439c3c2cb9a6de1a","value":"0x010000000000000000"}],"operationId":"operation-1"},{"event":"operationStorageDone","operationId":"operation-1"}]}},{"method":"metadata_presence","params":{"kind":"storage","surface":"storage.epoch.epoch_of"},"response":{"detail":"layout matches","expected_layout":{"hashers":[],"key":null,"value":"pallet_epoch::pallet::EpochInfo{index:u32,phase:futarchy_primitives::EpochPhaseenum[Intake=0|Qualify=1|Seed=2|Trade=3|Decide=4|Review=5|Execute=6|Housekeeping=7],phase_start_block:u32}"},"layout":{"hashers":[],"key":null,"value":"pallet_epoch::pallet::EpochInfo{index:u32,phase:futarchy_primitives::EpochPhaseenum[Intake=0|Qualify=1|Seed=2|Trade=3|Decide=4|Review=5|Execute=6|Housekeeping=7],phase_start_block:u32}"},"layout_matches":true,"present":true}},{"method":"recovery_metadata_presence","params":{"kind":"storage","surface":"storage.epoch.epoch_of"},"response":{"detail":"layout matches","expected_layout":{"hashers":[],"key":null,"value":"pallet_epoch::pallet::EpochInfo{index:u32,phase:futarchy_primitives::EpochPhaseenum[Intake=0|Qualify=1|Seed=2|Trade=3|Decide=4|Review=5|Execute=6|Housekeeping=7],phase_start_block:u32}"},"layout":{"hashers":[],"key":null,"value":"pallet_epoch::pallet::EpochInfo{index:u32,phase:futarchy_primitives::EpochPhaseenum[Intake=0|Qualify=1|Seed=2|Trade=3|Decide=4|Review=5|Execute=6|Housekeeping=7],phase_start_block:u32}"},"layout_matches":true,"present":true}}],"surface":"storage.epoch.epoch_of"}
+{
+  "headers": {
+    "pinned_block": "0x4a079de432599f14c3de77382e2d2aba0064a4ee0ef23f3b5210ac13aa927686"
+  },
+  "requests": [
+    {
+      "method": "chainHead_v1_storage",
+      "params": [
+        "subscription-1",
+        "0x4a079de432599f14c3de77382e2d2aba0064a4ee0ef23f3b5210ac13aa927686",
+        [
+          {
+            "key": "0x217d0aba3b8e701c3cd0d4575ad8c331cb4a45fc6cc77f97439c3c2cb9a6de1a",
+            "type": "value"
+          }
+        ],
+        null
+      ],
+      "response": {
+        "direct": {
+          "id": 1,
+          "jsonrpc": "2.0",
+          "result": {
+            "discardedItems": 0,
+            "operationId": "operation-1",
+            "result": "started"
+          }
+        },
+        "events": [
+          {
+            "event": "operationStorageItems",
+            "items": [
+              {
+                "key": "0x217d0aba3b8e701c3cd0d4575ad8c331cb4a45fc6cc77f97439c3c2cb9a6de1a",
+                "value": "0x010000000000000000"
+              }
+            ],
+            "operationId": "operation-1"
+          },
+          {
+            "event": "operationStorageDone",
+            "operationId": "operation-1"
+          }
+        ]
+      }
+    },
+    {
+      "method": "metadata_presence",
+      "params": {
+        "kind": "storage",
+        "surface": "storage.epoch.epoch_of"
+      },
+      "response": {
+        "detail": "layout matches",
+        "expected_layout": {
+          "hashers": [],
+          "key": null,
+          "value": "pallet_epoch::pallet::EpochInfo{index:u32,phase:futarchy_primitives::EpochPhaseenum[Intake=0|Qualify=1|Seed=2|Trade=3|Decide=4|Review=5|Execute=6|Housekeeping=7],phase_start_block:u32}"
+        },
+        "layout": {
+          "hashers": [],
+          "key": null,
+          "value": "pallet_epoch::pallet::EpochInfo{index:u32,phase:futarchy_primitives::EpochPhaseenum[Intake=0|Qualify=1|Seed=2|Trade=3|Decide=4|Review=5|Execute=6|Housekeeping=7],phase_start_block:u32}"
+        },
+        "layout_matches": true,
+        "present": true
+      }
+    },
+    {
+      "method": "recovery_metadata_presence",
+      "params": {
+        "kind": "storage",
+        "surface": "storage.epoch.epoch_of"
+      },
+      "response": {
+        "detail": "layout matches",
+        "expected_layout": {
+          "hashers": [],
+          "key": null,
+          "value": "pallet_epoch::pallet::EpochInfo{index:u32,phase:futarchy_primitives::EpochPhaseenum[Intake=0|Qualify=1|Seed=2|Trade=3|Decide=4|Review=5|Execute=6|Housekeeping=7],phase_start_block:u32}"
+        },
+        "layout": {
+          "hashers": [],
+          "key": null,
+          "value": "pallet_epoch::pallet::EpochInfo{index:u32,phase:futarchy_primitives::EpochPhaseenum[Intake=0|Qualify=1|Seed=2|Trade=3|Decide=4|Review=5|Execute=6|Housekeeping=7],phase_start_block:u32}"
+        },
+        "layout_matches": true,
+        "present": true
+      }
+    }
+  ],
+  "surface": "storage.epoch.epoch_of"
+}

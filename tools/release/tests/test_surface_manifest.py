@@ -150,10 +150,24 @@ class SurfaceManifestTests(unittest.TestCase):
         # version moved to 13, so the suite stayed green while the manifest no
         # longer matched the runtime it gates (SQ-186 connector review).
         declared = self.manifest["integration_contract_version"]
-        self.assertEqual(
-            version["layout"],
-            {"type": "u32", "value": "0x" + declared.to_bytes(4, "little").hex()},
-        )
+        expected = {"type": "u32", "value": "0x" + declared.to_bytes(4, "little").hex()}
+        self.assertEqual(version["layout"], expected)
+
+        # ...and every *other* pallet that re-exports the constant, because there are
+        # five of them and this assertion pinned one. That is the same shape as the
+        # stale `0x0c000000` above: one copy checked, the rest free to drift. A bump
+        # that moved only the checked entry would leave four entries encoding the old
+        # version, and `check-chain-feed.py` would then fail against real metadata at
+        # release time rather than here.
+        version_constants = [
+            entry
+            for entry in self.entries
+            if entry["kind"] == "constant"
+            and "CONTRACT_VERSION" in str(entry.get("constant", ""))
+        ]
+        self.assertGreaterEqual(len(version_constants), 5, "contract-version constants vanished")
+        for entry in version_constants:
+            self.assertEqual(entry["layout"], expected, entry["id"])
 
     def test_section_six_events_and_section_seven_attestor_storage_are_exact(self) -> None:
         expected_events = {
@@ -354,9 +368,15 @@ class SurfaceManifestTests(unittest.TestCase):
         ].split("**§7 additions — storage", 1)[0]
         contract_events["pallet-question-service"] = event_table_names(hosted_events)
 
-        attestor_section = contract.split("### 7.5 `pallet-attestor`", 1)[1].split(
-            "\n---\n", 1
-        )[0]
+        # Bounded by the next subsection as well as the next rule, because §7.5 is no
+        # longer the last one: contract v24 added §7.6 (the SDK-pallet reads, SQ-580)
+        # ahead of §7's closing rule paragraph, and a slice that ran to `---` swept
+        # eleven foreign rows into the attestor set.
+        attestor_section = (
+            contract.split("### 7.5 `pallet-attestor`", 1)[1]
+            .split("\n### ", 1)[0]
+            .split("\n---\n", 1)[0]
+        )
         contract_attestor_storage = set(
             re.findall(r"^\| `([^`]+)` \|", attestor_section, flags=re.MULTILINE)
         )

@@ -1,0 +1,91 @@
+{
+  "headers": {
+    "pinned_block": "0x4a079de432599f14c3de77382e2d2aba0064a4ee0ef23f3b5210ac13aa927686"
+  },
+  "requests": [
+    {
+      "method": "chainHead_v1_storage",
+      "params": [
+        "subscription-1",
+        "0x4a079de432599f14c3de77382e2d2aba0064a4ee0ef23f3b5210ac13aa927686",
+        [
+          {
+            "key": "0x0f6738a0ee80c8e74cd2c7417c1e25564e1bec5bc8b0bd558fa6331ca842b0f5",
+            "type": "descendantsValues"
+          }
+        ],
+        null
+      ],
+      "response": {
+        "direct": {
+          "id": 1,
+          "jsonrpc": "2.0",
+          "result": {
+            "discardedItems": 0,
+            "operationId": "operation-1",
+            "result": "started"
+          }
+        },
+        "events": [
+          {
+            "event": "operationStorageDone",
+            "operationId": "operation-1"
+          }
+        ]
+      }
+    },
+    {
+      "method": "metadata_presence",
+      "params": {
+        "kind": "storage",
+        "surface": "storage.referenda.deciding_count"
+      },
+      "response": {
+        "detail": "layout matches",
+        "expected_layout": {
+          "hashers": [
+            "Twox64Concat"
+          ],
+          "key": "u16",
+          "value": "u32"
+        },
+        "layout": {
+          "hashers": [
+            "Twox64Concat"
+          ],
+          "key": "u16",
+          "value": "u32"
+        },
+        "layout_matches": true,
+        "present": true
+      }
+    },
+    {
+      "method": "recovery_metadata_presence",
+      "params": {
+        "kind": "storage",
+        "surface": "storage.referenda.deciding_count"
+      },
+      "response": {
+        "detail": "layout matches",
+        "expected_layout": {
+          "hashers": [
+            "Twox64Concat"
+          ],
+          "key": "u16",
+          "value": "u32"
+        },
+        "layout": {
+          "hashers": [
+            "Twox64Concat"
+          ],
+          "key": "u16",
+          "value": "u32"
+        },
+        "layout_matches": true,
+        "present": true
+      }
+    }
+  ],
+  "surface": "storage.referenda.deciding_count"
+}
