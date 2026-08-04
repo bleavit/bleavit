@@ -1,3 +1,4 @@
+// expect-error: TS2307 — a forbidden package edge is unresolvable rather than merely un-referenced — that is why pnpm's isolated node_modules is pinned
 // MUST FAIL: `@bleavit/providers` is not a declared dependency of this package, so
 // under pnpm's isolated node_modules it does not resolve. This is the 10 §10.1
 // firewall as a module-resolution failure, not a lint opinion.

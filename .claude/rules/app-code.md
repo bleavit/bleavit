@@ -55,7 +55,11 @@ Practical consequences:
    `WebSocket`, `EventSource`, `sendBeacon` and dynamic URL `import()` are gated out
    by CI. Never add a `connect-src` entry for an external tool vendor (12 §5.1).
 7. **No hardcoded chain constants.** Everything in 02 §9 is read from chain
-   metadata/storage; the no-literal lint gate fails the release otherwise. The TS
+   metadata/storage; the no-literal lint gate fails the release otherwise.
+   **`CRITICAL_SURFACE` and `SUPPORTED_RUNTIMES` are generated and compared, never typed** (F4):
+   the first re-derives from `tools/release/surface-manifest.json`, the second is checked in
+   both directions against `app/fixtures/chain-feed/`. Run `pnpm -C app run surface:generate`;
+   never hand-edit the output and never edit a source to match an output. The TS
    protocol math (`packages/protocol`) must match the CI-regenerated vector corpus
    (04 §5, 15 §4.4) — never hand-adjust an expected value. `CRITICAL_SURFACE` is
    generated from `tools/release/surface-manifest.json`, never hand-listed.
@@ -128,7 +132,30 @@ Practical consequences:
     metadata is self-consistent. Likewise a **whitelist is not a surface check**: PAPI's
     `applyWhitelist` filters silently, so an entry naming an absent surface yields a
     smaller descriptor set rather than an error.
-13. **Pinned versions.** The stack pins live in 01 §9 / 10 — PAPI 2.x, smoldot 3.x,
+13. **One chain connection, one home (10 §2.1/§4.1, F3).** `packages/chain-client` is the only
+    package that may import `polkadot-api` or `smoldot`, enforced by
+    `only-chain-client-opens-a-chain-connection`. The reason is not tidiness: a second package
+    able to construct a chain connection would not need to forge the brand — it could serve reads
+    that never passed the finalized-only discipline. `bleavit-client-ts` and `papi-descriptors`
+    are exempt because they are not part of the canonical client. Inside the package, the
+    transport is **injected** and reads take the block **explicitly** (`storage(at, …)`), so
+    "read at the block I pinned" is unbypassable rather than checked around — a guard that
+    re-checks the head before issuing a read does not prevent the read happening after it (V-84).
+    A chain spec is trusted input to smoldot: verify the **bundled bytes** against the release
+    pin first, apply any expert bootnodes after, and treat the §3.1 genesis check as a separate
+    obligation the hash pin does not discharge.
+
+    **dependency-cruiser records any specifier it cannot resolve verbatim** (V-86, V-92) — an
+    uninstalled external package *and* a workspace subpath export like
+    `@bleavit/signing/testing`, whose `exports` map enhanced-resolve does not follow. A rule
+    written against only the resolved path can never fire. Use `EXTERNAL()` /
+    `WORKSPACE_SUBPATH()` from `app/tools/depcruise-external.cjs`, and add a witness module —
+    a rule proven only by a green run is not proven.
+
+    **The same applies to the negative-compilation corpus** (V-91): a fixture must declare the
+    error it produces (`// expect-error: TSxxxx` on line 1), because "did not compile" is also
+    what a missing dependency looks like.
+14. **Pinned versions.** The stack pins live in 01 §9 / 10 — PAPI 2.x, smoldot 3.x,
     Vite 8, Dexie 4, Tauri 2.x. Do not bump majors without a PLAN.md decision-log
     entry. `app/` is its own pnpm workspace and its own cargo workspace (excluded from
     the root one); never let its dependency tree reach the runtime pins.

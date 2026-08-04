@@ -15,13 +15,18 @@
     "depcruise": "depcruise packages src --config .dependency-cruiser.cjs",
     "test:firewall": "node --test tests/firewall/*.test.js",
     "test:protocol": "node --test tests/protocol/*.test.js",
-    "test": "pnpm run test:firewall && pnpm run test:protocol && pnpm run test:mock-runtime && pnpm run test:chain-client && pnpm run check:casts && pnpm run depcruise:witness",
-    "depcruise:witness": "depcruise tests/depcruise-witness --config tests/depcruise-witness/.dependency-cruiser.cjs --output-type err && (echo 'WITNESS DID NOT FIRE — the rule set is vacuous' && exit 1) || echo 'witness fired: rules are live'",
+    "test": "pnpm run test:firewall && pnpm run test:protocol && pnpm run test:mock-runtime && pnpm run test:chain-client && pnpm run test:descriptors && pnpm run test:tx && pnpm run check:casts && pnpm run surface:check && pnpm run check:budget && pnpm run depcruise:witness",
+    "depcruise:witness": "depcruise tests/depcruise-witness --config tests/depcruise-witness/.dependency-cruiser.cjs --output-type err && (echo 'WITNESS DID NOT FIRE \u2014 the rule set is vacuous' && exit 1) || echo 'witness fired: rules are live'",
     "check:casts": "node tools/check-finalized-casts.mjs",
     "descriptors:generate": "papi generate --config .papi/polkadot-api.json",
     "test:mock-runtime": "node --test tests/mock-runtime/*.test.js",
     "descriptors:check": "node tools/check-descriptor-drift.mjs",
-    "test:chain-client": "node --test tests/chain-client/*.test.js"
+    "test:chain-client": "node --test tests/chain-client/*.test.js",
+    "surface:generate": "node tools/generate-critical-surface.mjs",
+    "surface:check": "node tools/generate-critical-surface.mjs --check",
+    "test:descriptors": "node --test tests/descriptors/*.test.js",
+    "check:budget": "node tools/check-smoldot-budget.mjs",
+    "test:tx": "node --test tests/transaction-builder/*.test.js"
   },
   "devDependencies": {
     "dependency-cruiser": "17.0.1",

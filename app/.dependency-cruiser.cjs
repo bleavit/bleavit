@@ -11,6 +11,8 @@
  * so a future `node-linker=hoisted` — or a `paths` alias added for convenience —
  * would silently demote it. These rules keep failing in that case.
  */
+const { EXTERNAL, WORKSPACE_SUBPATH, POLKADOT_API_NON_SIGNER } = require('./tools/depcruise-external.cjs');
+
 module.exports = {
   forbidden: [
     {
@@ -69,7 +71,50 @@ module.exports = {
         '10 §10.1: `platform` is the only package permitted to import a native or host ' +
         'SDK. Concrete adapters are injected, so a tx surface cannot reach one.',
       from: { pathNot: '^packages/platform' },
-      to: { path: 'node_modules/(@tauri-apps|@parity/product-sdk)' },
+      to: { path: EXTERNAL('@tauri-apps|@parity/product-sdk') },
+    },
+    {
+      name: 'only-chain-client-opens-a-chain-connection',
+      severity: 'error',
+      comment:
+        '10 §2.1/§4.1: `chain-client` is the sole home of the light-client connection, and ' +
+        'therefore the sole source of `Finalized<T>`. A second package able to construct a ' +
+        'smoldot chain or a PAPI provider would not need to forge the brand — it could serve ' +
+        'reads that never passed the finalized-only discipline and hand them to a UI that ' +
+        'cannot tell the difference. `bleavit-client-ts` is exempt because it is not part of ' +
+        'the canonical client: it is N10\'s facade for third parties integrating the hosted ' +
+        'question service, and nothing in `src/` may import it.',
+      from: { pathNot: '^packages/(chain-client|bleavit-client-ts|papi-descriptors|signing)/' },
+      to: { path: EXTERNAL('polkadot-api|smoldot') },
+    },
+    {
+      name: 'signing-may-only-reach-the-signer-surface',
+      severity: 'error',
+      comment:
+        '`packages/signing` is exempt from the rule above for the *signer* subpaths only ' +
+        '(`polkadot-api/pjs-signer`, `polkadot-api/signer`), and this rule is what makes ' +
+        '"only" true. The exemption follows the rule above\'s own stated reason rather than ' +
+        'its letter: the danger it names is a second package able to construct a chain or a ' +
+        'provider and serve reads that never passed the finalized-only discipline. ' +
+        '`getPolkadotSignerFromPjs(address, signPayload, signRaw)` constructs neither and ' +
+        'cannot read anything — it takes two callbacks and returns a signer. The root entry ' +
+        'point, `polkadot-api/smoldot` and the provider subpaths remain forbidden here, ' +
+        'because those *can*.',
+      from: { path: '^packages/signing/' },
+      // `polkadot-api` and every subpath except the two signer ones. smoldot has no
+      // signer surface at all, so it stays wholly forbidden via the rule above.
+      to: { path: POLKADOT_API_NON_SIGNER },
+    },
+    {
+      name: 'no-test-signer-in-the-bundle',
+      severity: 'error',
+      comment:
+        'INV-FE-5 / 10 §10.1: "no signer adapter marked test-only may appear in a release ' +
+        'chunk". `@bleavit/signing/testing` is reachable only by a deliberate subpath import, ' +
+        'and this makes that deliberate act fail. The runtime refusal in `SignerRegistry` is ' +
+        'the third control, and the only one that survives someone copying the file.',
+      from: { path: '^(src|packages)/', pathNot: '^tests/' },
+      to: { path: WORKSPACE_SUBPATH('@bleavit/signing/testing', 'packages/signing/dist/testing') },
     },
     {
       name: 'no-mock-signer-in-the-bundle',
@@ -87,7 +132,7 @@ module.exports = {
         'D-21 / INV-FE-6: the handoff packages contain no network primitive at all. ' +
         'The source gate in CI covers the global forms; this covers module imports.',
       from: { path: '^packages/(contexts|intents|receipts|llm-handoff)/' },
-      to: { path: 'node_modules/(axios|node-fetch|undici|ws|socket\\.io)' },
+      to: { path: EXTERNAL('axios|node-fetch|undici|ws|socket\\.io') },
     },
     { name: 'no-circular', severity: 'error', from: {}, to: { circular: true } },
     { name: 'no-orphans', severity: 'warn', from: { orphan: true, pathNot: '\\.d\\.ts$' }, to: {} },

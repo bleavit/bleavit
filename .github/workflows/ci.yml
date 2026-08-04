@@ -120,6 +120,11 @@ jobs:
         run: python3 tools/ci/check-plan-tables.py
       - name: Check spec-question batch index
         run: python3 tools/ci/check-spec-question-batches.py
+      - name: Dispatch-check mirror — 09 §1.2 ↔ 11 §11.5 (15 §4.8)
+        # Both documents mandated this diff and both credited it to doc 15, which
+        # mandated nothing (SQ-552). It must fail on a frontend precondition with no
+        # backend check behind it — a client refusing an action the runtime accepts.
+        run: python3 tools/ci/check-dispatch-mirror.py
       - name: Bind the quickstart to the executable integration drill
         run: python3 tools/ci/check-quickstart-drill.py
       - name: Bind the pure-XCM integration page to the frozen client ABI
@@ -337,6 +342,35 @@ jobs:
         # boundary a metadata home. A suite carrying the literal would keep passing
         # after the chain moved it.
         run: pnpm run test:chain-client
+
+      - name: CRITICAL_SURFACE and the supported-runtime map vs their sources (10 §5.1, §5.4)
+        # Both are *generated* claims about frozen artifacts. `CRITICAL_SURFACE` re-derives
+        # from `tools/release/surface-manifest.json`; `SUPPORTED_RUNTIMES` is compared in
+        # both directions against `app/fixtures/chain-feed/`, so a stale metadata hash or
+        # half a primary/recovery pair is a build failure rather than a runtime surprise.
+        working-directory: app
+        run: pnpm run surface:check
+
+      - name: Compatibility classifier (10 §5.2, §3.2)
+        # The classifier decides whether the app may sign, so what it is tested on is the
+        # probe outcomes a healthy chain never produces — which is why it is a pure
+        # function over probe results with the PAPI shape adapted separately.
+        working-directory: app
+        run: pnpm run test:descriptors
+
+      - name: Tx machine, the gate and the signer boundary (11 §11.3–§11.4)
+        # 11 §11.4 rule 1 asks for "structurally (the tx machine has no bypass edge), not
+        # by convention", so what this asserts is mostly the shape of the state space:
+        # which states can reach a signer, and what a GatePassed costs to obtain.
+        working-directory: app
+        run: pnpm run test:tx
+
+      - name: smoldot artifact budget (10 §9.3, FE-P4)
+        # A budget nothing measures is a sentence, and the one certain thing about a
+        # dependency's compressed size is that it changes. Fails closed if the pinned
+        # package's layout moved, so a version bump cannot measure nothing and pass.
+        working-directory: app
+        run: pnpm run check:budget
 
   environments:
     name: Environment definitions

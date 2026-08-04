@@ -15,7 +15,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { readdirSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 
@@ -62,6 +62,36 @@ test('the corpus is not empty', () => {
   assert.ok(forbidden.length >= 5, `expected >= 5 forbidden fixtures, found ${forbidden.length}`);
 });
 
+/**
+ * The error each fixture MUST produce, declared in the fixture's own first line.
+ *
+ * Added because "did not compile" is not the property this corpus exists to prove
+ * (V-91). Two fixtures were added and passed while proving nothing: both failed with
+ * **TS2307, module not found**, because the fixture package did not depend on the
+ * packages they were testing. A corpus whose whole purpose is demonstrating rejection
+ * cannot tell rejection from a missing file unless it looks at the reason.
+ *
+ * TS2307 is a legitimate expectation for *some* fixtures — 10 §10.2 makes module
+ * resolution the primary gate, so a forbidden package edge is *supposed* to be
+ * unresolvable. That is exactly why the expectation is per fixture rather than a blanket
+ * ban: the same diagnostic is the proof in one file and the vacuum in another.
+ */
+function expectedError(fixture) {
+  const first = readFileSync(join(fixtureDir, fixture), 'utf8').split('\n', 1)[0];
+  const match = first.match(/^\/\/ expect-error:\s*(TS\d+)\b/);
+  return match?.[1];
+}
+
+test('every forbidden fixture declares the error it must produce', () => {
+  const undeclared = forbidden.filter((f) => expectedError(f) === undefined);
+  assert.deepEqual(
+    undeclared,
+    [],
+    'a fixture with no `// expect-error: TSxxxx` first line can pass by failing for any ' +
+      'reason at all — a missing dependency reads exactly like a working firewall (V-91)',
+  );
+});
+
 for (const fixture of forbidden) {
   test(`firewall rejects: ${fixture}`, () => {
     const { ok, output } = compile(fixture);
@@ -73,5 +103,13 @@ for (const fixture of forbidden) {
         'type system. Do not relax this test; find what stopped rejecting.',
     );
     assert.ok(output.length > 0, `${fixture} failed without diagnostics — check the harness`);
+
+    const expected = expectedError(fixture);
+    assert.ok(
+      output.includes(`error ${expected}`),
+      `${fixture} failed, but not for the declared reason. Expected ${expected}; got:\n${output}\n` +
+        'A fixture that fails for an unrelated reason — most often TS2307 because the ' +
+        'fixture package does not depend on what it is testing — proves nothing.',
+    );
   });
 }

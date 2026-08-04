@@ -1,2 +1,4 @@
-// Generated PAPI descriptor sets per supported spec_version (10 §5). F4.
-export {};
+export * from './critical-surface.js';
+export * from './spec-versions.js';
+export * from './compat.js';
+export * from './probe.js';

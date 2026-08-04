@@ -799,11 +799,37 @@ def _plain_markdown(value: str) -> str:
     return value.replace("**", "").replace("`", "").strip()
 
 
+_SUPERSEDED = re.compile(r"~~.*?~~", re.DOTALL)
+
+
+def _without_superseded(value: str) -> str:
+    """Drop `~~struck-through~~` spans before extracting a normative claim.
+
+    A spec that documents its own corrections has to quote the wording it replaced —
+    that quotation is what makes the correction reviewable. But a quoted claim is
+    indistinguishable from a live one to any parser that greps for the claim's shape,
+    so repairing 09 §1.2(11) *created* a finding: the sentence explaining that
+    `Rejected(BadPreimage)` names nothing constructable still contains the string
+    `Rejected(BadPreimage)`, and `_named_reject_reasons` duly reported it.
+
+    The alternative — never reproducing a superseded string — makes every correction
+    unreviewable to protect a regex, so the convention runs the other way: strike the
+    dead wording through. It reads as superseded to a human at a glance, and it is
+    mechanically excluded here. Any future doc correction quoting its old normative
+    text uses the same marker.
+    """
+    return _SUPERSEDED.sub("", value)
+
+
 def _named_reject_reasons(text: str) -> tuple[str, ...]:
-    """Reject reasons explicitly named as terminal outcomes in checklist prose."""
+    """Reject reasons explicitly named as terminal outcomes in checklist prose.
+
+    Superseded wording is excluded: a document quoting the claim it repealed is not
+    making that claim (`_without_superseded`).
+    """
     found: list[str] = []
     for pattern in (r"Rejected\((\w+)\)", r"RejectReason::(\w+)"):
-        for reason in re.findall(pattern, _plain_markdown(text)):
+        for reason in re.findall(pattern, _without_superseded(_plain_markdown(text))):
             if reason not in found:
                 found.append(reason)
     return tuple(found)
@@ -1023,7 +1049,7 @@ def checklist_t16_causes(repo_root: Path) -> frozenset[str]:
         reason
         for check in backend_execute_checks(repo_root)
         for reason in check.reject_reasons
-        if f"Rejected({reason})" in _plain_markdown(check.detail)
+        if f"Rejected({reason})" in _without_superseded(_plain_markdown(check.detail))
     )
 
 
@@ -1121,10 +1147,17 @@ class WelfareHurdleCase:
     extended: bool
 
 
+# The two `Valid fail — …` rows replaced the single `Valid fail` row in the SQ-552
+# repair. Note what the rename cost before this set was updated: the rows fell out of
+# the partition silently and `analyze_reason_table` reported four *uncovered* cases —
+# a hole, not a mismatch. A scenario allow-list keyed on prose is the fragile part of
+# this module, and it fails in the safe direction (uncovered, never wrongly-covered)
+# only because `uncovered` is itself checked.
 _WELFARE_SCENARIOS = frozenset(
     {
         "Valid pass",
-        "Valid fail",
+        "Valid fail — hurdle missed, series converged",
+        "Valid fail — hurdle missed, series not converged",
         "Full/trailing disagreement (first)",
         "Disagreement/fail after extension",
         "Non-convergence",
@@ -1144,18 +1177,18 @@ def _welfare_row_matches(case: WelfareHurdleCase, row: ReasonTableRow) -> bool:
         raise ScheduleError(f"unsupported boolean truth-table mark {mark!r}")
 
     full_mark, tail_mark, convergence_mark = row.steps[5:8]
-    if row.scenario == "Valid pass":
+    # Every row that spells all three marks out is matched the same way. Before the
+    # SQ-552 repair `Valid fail` needed its own branch, because the row left
+    # convergence as a dash — the wildcard *was* the defect. The two rows that
+    # replaced it pin step 8 explicitly, so the special case is gone with the bug.
+    if row.scenario in {
+        "Valid pass",
+        "Valid fail — hurdle missed, series converged",
+        "Valid fail — hurdle missed, series not converged",
+        "Non-convergence",
+    }:
         return (
             mark_matches(full_mark, case.full_pass)
-            and mark_matches(tail_mark, case.tail_pass)
-            and mark_matches(convergence_mark, case.converged)
-        )
-    if row.scenario == "Valid fail":
-        # "fail", not disagreement: both hurdle windows fail. The dash under
-        # convergence is the bad cell under test, so it remains a wildcard.
-        return (
-            case.full_pass == case.tail_pass
-            and mark_matches(full_mark, case.full_pass)
             and mark_matches(tail_mark, case.tail_pass)
             and mark_matches(convergence_mark, case.converged)
         )
@@ -1163,12 +1196,6 @@ def _welfare_row_matches(case: WelfareHurdleCase, row: ReasonTableRow) -> bool:
         return full_mark == "full ≠ tail" and case.full_pass != case.tail_pass and not case.extended
     if row.scenario == "Disagreement/fail after extension":
         return full_mark == "full ≠ tail again" and case.full_pass != case.tail_pass and case.extended
-    if row.scenario == "Non-convergence":
-        return (
-            mark_matches(full_mark, case.full_pass)
-            and mark_matches(tail_mark, case.tail_pass)
-            and mark_matches(convergence_mark, case.converged)
-        )
     return False
 
 

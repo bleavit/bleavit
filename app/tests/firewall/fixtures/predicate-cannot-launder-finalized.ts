@@ -1,3 +1,4 @@
+// expect-error: TS2322 — a `x is Finalized<T>` predicate asserts the brand it cannot check, so it is a third mint mechanism (V-81)
 // MUST FAIL: a narrowing helper must not be able to mint the 10 §2.1 brand.
 //
 // `forged-finalized.ts` proves a literal cannot inhabit `Finalized<T>` directly. That is

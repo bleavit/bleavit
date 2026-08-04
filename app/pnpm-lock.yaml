@@ -32,6 +32,9 @@ importers:
       '@bleavit/shared-types':
         specifier: workspace:*
         version: link:../shared-types
+      polkadot-api:
+        specifier: 2.1.8
+        version: 2.1.8(esbuild@0.28.1)(rxjs@7.8.2)
 
   packages/contexts:
     dependencies:
@@ -113,6 +116,12 @@ importers:
       '@bleavit/shared-types':
         specifier: workspace:*
         version: link:../shared-types
+      '@bleavit/transaction-builder':
+        specifier: workspace:*
+        version: link:../transaction-builder
+      polkadot-api:
+        specifier: 2.1.8
+        version: 2.1.8(esbuild@0.28.1)(rxjs@7.8.2)
 
   packages/simulation:
     dependencies:
@@ -249,6 +258,15 @@ importers:
         specifier: workspace:*
         version: link:../../packages/providers
 
+  tests/descriptors:
+    dependencies:
+      '@bleavit/descriptors':
+        specifier: workspace:*
+        version: link:../../packages/descriptors
+      '@bleavit/mock-runtime':
+        specifier: workspace:*
+        version: link:../../packages/mock-runtime
+
   tests/firewall:
     dependencies:
       '@bleavit/chain-client':
@@ -257,6 +275,12 @@ importers:
       '@bleavit/shared-types':
         specifier: workspace:*
         version: link:../../packages/shared-types
+      '@bleavit/signing':
+        specifier: workspace:*
+        version: link:../../packages/signing
+      '@bleavit/transaction-builder':
+        specifier: workspace:*
+        version: link:../../packages/transaction-builder
 
   tests/mock-runtime:
     dependencies:
@@ -269,6 +293,24 @@ importers:
       '@bleavit/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
+
+  tests/transaction-builder:
+    dependencies:
+      '@bleavit/chain-client':
+        specifier: workspace:*
+        version: link:../../packages/chain-client
+      '@bleavit/descriptors':
+        specifier: workspace:*
+        version: link:../../packages/descriptors
+      '@bleavit/mock-runtime':
+        specifier: workspace:*
+        version: link:../../packages/mock-runtime
+      '@bleavit/signing':
+        specifier: workspace:*
+        version: link:../../packages/signing
+      '@bleavit/transaction-builder':
+        specifier: workspace:*
+        version: link:../../packages/transaction-builder
 
 packages:
 

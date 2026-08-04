@@ -13,6 +13,9 @@
     },
     {
       "path": "../chain-client"
+    },
+    {
+      "path": "../transaction-builder"
     }
   ]
 }

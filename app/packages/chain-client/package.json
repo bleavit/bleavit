@@ -9,12 +9,17 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./light-client": {
+      "types": "./dist/light-client.d.ts",
+      "default": "./dist/light-client.js"
     }
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@bleavit/shared-types": "workspace:*"
+    "@bleavit/shared-types": "workspace:*",
+    "polkadot-api": "2.1.8"
   }
 }
