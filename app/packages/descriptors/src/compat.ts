@@ -146,7 +146,7 @@ export function surfaceIsProven(classification: CompatClassification, id: string
  * placeholder rather than a design: `tools/release/surface-manifest.json` carries no
  * `call` entries, because doc 02 freezes the read contract and has no extrinsic section,
  * while 10 §5.2 names calls as part of `CRITICAL_SURFACE` and §3.2 makes the per-surface
- * signing unit exactly the call (**SQ-574**). Until the manifest gains them there is
+ * signing unit exactly the call (**SQ-577**). Until the manifest gains them there is
  * nothing to probe, and INV-FE-12 is explicit about what to do with an unproven
  * capability: it is *absent*, and absence disables the dependent surface with a named
  * reason. The alternative — permitting every call in `restricted` mode because none is
@@ -167,7 +167,7 @@ export function callUnavailableReason(
   }
   return (
     `${call} cannot be signed in restricted mode: this release cannot yet prove a call's ` +
-    'compatibility, because the frozen contract does not enumerate calls (SQ-574). An ' +
+    'compatibility, because the frozen contract does not enumerate calls (SQ-577). An ' +
     'unproven capability is treated as absent (INV-FE-12).'
   );
 }

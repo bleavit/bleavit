@@ -163,7 +163,7 @@ test('an unprobed surface is refused, never counted as passing', () => {
   );
 });
 
-test('signing in restricted mode is fail-closed while calls are unmanifested (SQ-574)', () => {
+test('signing in restricted mode is fail-closed while calls are unmanifested (SQ-577)', () => {
   // doc 02 freezes the *read* contract and has no extrinsic section, so there is nothing
   // to probe a call against. INV-FE-12: an unproven capability is absent, and absence
   // disables the dependent surface with a named reason. Permitting every call because none
@@ -175,9 +175,9 @@ test('signing in restricted mode is fail-closed while calls are unmanifested (SQ
   const probes = allPass().map((p, i) => (i === 0 ? { ...p, compatible: false, level: 'partial' } : p));
   const restricted = classify(2, SUPPORTED_SPEC_VERSIONS, probes);
   assert.equal(callIsProven(restricted, 'market.buy'), false);
-  assert.match(callUnavailableReason(restricted, 'market.buy'), /SQ-574/);
+  assert.match(callUnavailableReason(restricted, 'market.buy'), /SQ-577/);
   assert.match(callUnavailableReason(restricted, 'market.buy'), /INV-FE-12/);
-  assert.equal(MANIFEST.entries.some((e) => e.kind === 'call'), false, 'calls are manifested — SQ-574 has closed, so this placeholder must go');
+  assert.equal(MANIFEST.entries.some((e) => e.kind === 'call'), false, 'calls are manifested — SQ-577 has closed, so this placeholder must go');
 });
 
 test('the compat group of every entry matches its manifest kind', () => {

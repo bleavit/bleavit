@@ -18,7 +18,7 @@
  * single frame) are external formats with their own versioning. Implementing a *plausible*
  * chunking here would be R-2 fabrication — a format that looks right, interoperates with
  * nothing, and fails in front of a user holding an air-gapped device. So framing belongs
- * to the transport, and the standard to verify is raised as SQ-576. The hex path needs no
+ * to the transport, and the standard to verify is raised as SQ-579. The hex path needs no
  * framing and works today.
  *
  * **`metadata-hash` is refused, and that is the load-bearing part.** Whether a Ledger

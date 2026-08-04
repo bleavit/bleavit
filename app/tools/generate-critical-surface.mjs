@@ -93,7 +93,7 @@ const body = `/**
  * the *read* contract (APIs, views, events, storage, constants, identity) and has no
  * extrinsic section at all — while 10 §5.2 names calls as part of \`CRITICAL_SURFACE\` and
  * 10 §3.2 makes \`restricted\` signing "per-surface", whose unit is exactly the call. That
- * gap is SQ-574. Until it closes, \`callIsProven()\` answers \`false\` for every call, which
+ * gap is SQ-577. Until it closes, \`callIsProven()\` answers \`false\` for every call, which
  * is INV-FE-12's fail-closed reading: an unproven capability is *absent*, and absence
  * disables the dependent surface with a named reason.
  */

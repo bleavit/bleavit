@@ -80,7 +80,7 @@ const P1: readonly PreconditionClause[] = [
   // constant and cross-checked against raw `params(mkt.fee)`. **`Market::Fee` is not in
   // the frozen manifest** — the runtime publishes it (`#[pallet::constant] type Fee`) and
   // 02 does not freeze it, so there is no `SurfaceId` to cite and no compat probe covers
-  // it (SQ-578). The first draft of this row cited `constant.market.min_trade`, which is a
+  // it (SQ-581). The first draft of this row cited `constant.market.min_trade`, which is a
   // different constant entirely: the type accepted it because it exists, and the clause
   // read plausibly. That is the friction being worked around instead of investigated, and
   // it is exactly what app-code rule 7 exists to stop.
