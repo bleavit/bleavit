@@ -79,6 +79,81 @@ def source_contract_version() -> int:
     return int(match.group(1))
 
 
+def stale_storage(declared: dict[str, set[str]], md: dict) -> list[str]:
+    """Source-declared storage items this feed's metadata does not carry.
+
+    A separate function purely so the comparison is testable. It was inline first, and a
+    mutation that deleted the comparison broke no test at all — the suite covered the
+    parser and not the check that consumes it, which is the difference between proving a
+    tool reads correctly and proving it objects.
+    """
+    stale: list[str] = []
+    for pallet_name, names in sorted(declared.items()):
+        pallet = md.get("pallets", {}).get(pallet_name)
+        entries = ((pallet or {}).get("storage") or {}).get("entries") or {}
+        for item in sorted(names - set(entries)):
+            stale.append(f"{pallet_name}.{item}")
+    return stale
+
+
+def source_storage_items(profile_features: set[str]) -> dict[str, set[str]]:
+    """`#[pallet::storage]` item names declared by the **in-repo** pallets.
+
+    SQ-582: the pallet-set check above compares *which pallets exist* and never *what
+    they publish*, so a runtime that grew two storage items kept the same 45-pallet set,
+    the same `spec_version` and the same contract version — and the feed went stale under
+    a gate built specifically to catch stale metadata. `QuestionService.LiveExternalDepth`
+    and `ScarcityMultiplier` were live in the runtime and absent from the committed blob,
+    and nothing failed.
+
+    Source-parsed rather than metadata-diffed on purpose: diffing against a freshly built
+    runtime would catch it too, but only on a leg that pays for a wasm build. The
+    declarations are right there in the pallet sources, so the cheap per-commit leg can
+    do it — which is what decides whether the gate runs on every commit or once a release.
+
+    Deliberately **one-directional and in-repo only**: a source-declared item missing from
+    the feed is a failure; an item in the feed with no in-repo declaration is not, because
+    most pallets here are SDK pallets whose source is not in this tree. Over-claiming the
+    other direction would make the gate fire on every upstream pallet and be switched off.
+    """
+    text = RUNTIME_LIB.read_text(encoding="utf-8")
+    block = re.search(r"construct_runtime!\(\s*pub enum Runtime \{(.*?)\n\s*\}\s*\);", text, re.S)
+    if not block:
+        raise SystemExit(f"could not locate construct_runtime! in {RUNTIME_LIB}")
+
+    declared: dict[str, set[str]] = {}
+    pending_feature: str | None = None
+    for raw in block.group(1).splitlines():
+        line = raw.strip()
+        if not line or line.startswith("//"):
+            continue
+        cfg = re.match(r'#\[cfg\(feature\s*=\s*"([^"]+)"\)\]', line)
+        if cfg:
+            pending_feature = cfg.group(1)
+            continue
+        decl = re.match(r"([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([a-z_][a-z0-9_]*)[^=]*=\s*\d+\s*,", line)
+        if not decl:
+            continue
+        runtime_name, crate = decl.group(1), decl.group(2)
+        gated = pending_feature is not None and pending_feature not in profile_features
+        pending_feature = None
+        if gated or not crate.startswith("pallet_"):
+            continue
+        src = REPO / "pallets" / crate[len("pallet_"):].replace("_", "-") / "src" / "lib.rs"
+        if not src.exists():          # an SDK pallet, or one whose source lives elsewhere
+            continue
+        body = src.read_text(encoding="utf-8")
+        names: set[str] = set()
+        for m in re.finditer(
+            r"#\[pallet::storage\](?:\s*#\[[^\]]*\])*\s*pub(?:\s*\(\s*[a-z]+\s*\))?\s+type\s+([A-Za-z_][A-Za-z0-9_]*)",
+            body,
+        ):
+            names.add(m.group(1))
+        if names:
+            declared.setdefault(runtime_name, set()).update(names)
+    return declared
+
+
 def source_pallets(profile_features: set[str]) -> set[str]:
     """Pallet names from `construct_runtime!`, honouring `#[cfg(feature = ...)]`.
 
@@ -166,6 +241,15 @@ def check_feed(metadata_path: Path, info_path: Path | None, features: set[str]) 
         problems += 1
     if extra:
         fail(f"pallets in the feed but absent from construct_runtime!: {', '.join(extra)}")
+        problems += 1
+
+    # 3b. Surface set vs the in-repo pallet sources (SQ-582).
+    stale = stale_storage(source_storage_items(features), md)
+    if stale:
+        fail(
+            "storage declared by the pallet sources but absent from this feed — the feed "
+            f"describes an older runtime: {', '.join(stale)}"
+        )
         problems += 1
 
     # 4. Every frozen surface entry, present and shaped as the manifest froze it.

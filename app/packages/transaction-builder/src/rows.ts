@@ -76,19 +76,17 @@ const P1: readonly PreconditionClause[] = [
   clause('P-1', 'the owning proposal is Trading or Extended', 'storage.epoch.proposals', 'storage'),
   clause('P-1', 'the book exists and its phase is Open', 'storage.market.markets', 'storage'),
   clause('P-1', 'the quoted cost still satisfies max_cost / min_proceeds', 'api.quote', 'runtime-api'),
-  // 11 §11.5 P-1 requires the fee rate be read from the frozen `Market::Fee` metadata
-  // constant and cross-checked against raw `params(mkt.fee)`. **`Market::Fee` is not in
-  // the frozen manifest** — the runtime publishes it (`#[pallet::constant] type Fee`) and
-  // 02 does not freeze it, so there is no `SurfaceId` to cite and no compat probe covers
-  // it (SQ-581). The first draft of this row cited `constant.market.min_trade`, which is a
-  // different constant entirely: the type accepted it because it exists, and the clause
-  // read plausibly. That is the friction being worked around instead of investigated, and
-  // it is exactly what app-code rule 7 exists to stop.
+  // 02 §4/§9 rule 4's cross-check, with both halves named — agreeing with itself is not
+  // a check. The frozen `Market::Fee` metadata constant against raw `params(mkt.fee)`
+  // under the floored `Perbill / 100,000` projection.
   //
-  // Only the raw-parameter half is citable today. Half a cross-check is not a cross-check,
-  // so the fee clause is *absent* rather than half-stated: an evaluator seeing one row
-  // would report agreement between a value and itself.
-  clause('P-1', 'the raw fee parameter is readable', 'api.params', 'runtime-api'),
+  // This clause was absent until SQ-581 was fixed. 02 §9 declared `Market::Fee` frozen and
+  // `surface-manifest.json` never listed it, so there was no `SurfaceId` to cite; an
+  // earlier draft cited `constant.market.min_trade` — a *different* constant that happens
+  // to exist — and both the type checker and a reading eye accepted it. The fix was not a
+  // better citation but the missing manifest entry.
+  clause('P-1', 'the chain fee rate matches the client’s', 'constant.market.fee', 'constant'),
+  clause('P-1', 'the raw fee parameter agrees with the metadata constant', 'api.params', 'runtime-api'),
   clause('P-1', 'the trade is within the per-trade minimum', 'constant.market.min_trade', 'constant'),
   clause('P-1', 'the trade is within the per-trade maximum ratio', 'constant.market.max_trade_ratio', 'constant'),
   clause('P-1', 'trading is enabled by the constitution’s phase flags', 'storage.constitution.phase_flags', 'storage'),

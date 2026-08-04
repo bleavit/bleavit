@@ -668,13 +668,25 @@ fn every_futarchy_call_and_hook_fits_the_normal_class() {
 
 /// `claim_assets` is Public after B10's trap-recovery opening. Keep its
 /// generated proof bound in the same worst-case audit as the futarchy calls.
+///
+/// The pin moved 5,469 -> 5,502 on 2026-08-04 and the cause is a values
+/// adoption, not a code change: `claim_assets` reads `Constitution::Params`
+/// through the inflow-cap adapter, and seating `svc.client_bond`/`svc.price_cap`
+/// added two leaves under that prefix, lengthening the trie path for the key it
+/// reads (`Measured` 2,004 -> 2,037; reads/writes unchanged at 6/4). Measured
+/// rather than assumed — a build of the identical tree with only those two
+/// `row(...)` calls removed reproduces 5,469. So this literal is a tripwire on
+/// the *state layout*, not only on this pallet's code, and a 13-owned genesis
+/// row can legitimately move it. That is why it is pinned: nothing else in the
+/// per-commit gate set relates a values decision to a block-bounding dimension
+/// (PLAN.md · V-99).
 #[test]
 fn xcm_claim_assets_fits_the_normal_class() {
     let claim =
         <crate::weights::pallet_xcm::WeightInfo<Runtime> as pallet_xcm::WeightInfo>::claim_assets();
     assert_eq!(
         claim.proof_size(),
-        5_469,
+        5_502,
         "claim_assets proof bound drifted"
     );
     assert_fits("pallet_xcm::claim_assets", claim);
