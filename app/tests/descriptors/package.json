@@ -3,9 +3,13 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "scripts": { "test": "node --test *.test.js" },
+  "scripts": {
+    "test": "node --test *.test.js"
+  },
   "dependencies": {
     "@bleavit/descriptors": "workspace:*",
-    "@bleavit/mock-runtime": "workspace:*"
+    "@bleavit/mock-runtime": "workspace:*",
+    "@polkadot-api/descriptors": "workspace:*",
+    "polkadot-api": "2.1.8"
   }
 }
