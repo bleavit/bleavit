@@ -480,9 +480,21 @@ jobs:
         working-directory: app
         run: pnpm run release:build
 
-      - name: Release suite (12 §1, §5.2–§5.3; F11)
+      - name: Release suite (12 §1, §5.2–§5.3; F11/F13)
         working-directory: app
         run: pnpm run test:release
+
+      - name: Signer disjointness (12 §2.2, D-16; F13)
+        # `ArNS controllers ∩ release signers = ∅`, evaluated over **natural persons**. The
+        # key-id reading of that intersection would pass unconditionally and forever — a
+        # minisign key id is never also an Arweave address — which is why §2.2 point 1
+        # requires every key to be mapped to a stable operator before point 2 can mean
+        # anything, and why an unmapped key is refused rather than skipped. Pre-ceremony the
+        # registry is empty and declares a phase gate, which this reports as *unseated*
+        # rather than as a passing separation; `--strict`, what a release gate runs, still
+        # fails on it.
+        working-directory: app
+        run: pnpm run signers:audit
 
   environments:
     name: Environment definitions

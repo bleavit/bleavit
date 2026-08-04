@@ -1,0 +1,12 @@
+{
+  "_doc": "The 12 §2.2 signer registry, machine-readable. `SIGNERS.md` is the human-facing mirror required by §2.2 point 1; this file is what the disjointness check reads, so the two are one artifact in two renderings rather than two lists to keep in step.",
+  "_phase_gate": "No key ceremony has been held (12 §2.1), no ANT is registered, and no monitor operator is seated. Every population below is therefore EMPTY, and `checkDisjointness` reports that as 'disjoint for want of members' rather than as a passing separation — a different claim, and not one a release may rest on. `checkControllerQuorum` reports the 12 §4.2 launch blocker.",
+  "_residual": "12 §2.2 declares it and nothing here narrows it: the check operates on DECLARED identities, so one person under two identities defeats it. That is an organizational-honesty limit with its own threat row in doc 14; the mitigations are the ceremony's multi-party witness requirement and the attestor sign-off.",
+  "_populations": {
+    "release-signer": "minisign keys that sign release.json's hash (12 §2.1)",
+    "arns-controller": "ANT controller addresses for the `futarchy` name (12 §4.2)",
+    "monitor-operator": "out-of-band attestation-monitor operators (12 §5.2) — MUST NOT be ArNS controllers",
+    "attestor": "independent builders' minisign keys (12 §1.4 gate 2) — MAY overlap release signers"
+  },
+  "entries": []
+}

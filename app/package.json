@@ -37,7 +37,8 @@
     "check:chain-literals": "node tools/check-chain-literals.mjs",
     "check:chain-literals:witness": "node tools/check-chain-literals.mjs --witness",
     "release:build": "node tools/release/build.mjs",
-    "release:check": "node tools/release/build.mjs --check"
+    "release:check": "node tools/release/build.mjs --check",
+    "signers:audit": "node tools/verify-release/cli.mjs signers audit"
   },
   "devDependencies": {
     "dependency-cruiser": "17.0.1",
