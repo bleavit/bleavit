@@ -1,5 +1,5 @@
 /**
- * GENERATED — do not edit. Source: `tools/release/surface-manifest.json` (contract v26).
+ * GENERATED — do not edit. Source: `tools/release/surface-manifest.json` (contract v27).
  * Regenerate: `pnpm -C app run surface:generate`; verified by `pnpm -C app run surface:check`.
  *
  * 10 §5.2's `CRITICAL_SURFACE`: every runtime API, storage item, constant and event the
@@ -29,7 +29,7 @@ export interface CriticalSurfaceEntry {
   readonly citation: string;
 }
 
-export const INTEGRATION_CONTRACT_VERSION = 26;
+export const INTEGRATION_CONTRACT_VERSION = 27;
 
 /** Manifest entries with no metadata surface to probe (raw fixed-layout key, chain properties). */
 export const UNPROBED_MANIFEST_ENTRIES = 2;
@@ -306,6 +306,7 @@ export type SurfaceId =
   | "storage.oracle.watchtowers"
   | "storage.preimage.preimage_for"
   | "storage.preimage.status_for"
+  | "storage.proxy.proxies"
   | "storage.question_service.questions"
   | "storage.question_service.reports"
   | "storage.referenda.deciding_count"
@@ -585,6 +586,7 @@ export const CRITICAL_SURFACE: readonly CriticalSurfaceEntry[] = [
   { id: "storage.oracle.watchtowers", compatGroup: "query", pallet: "Oracle", member: "Watchtowers", required: true, citation: "02 §7.2" },
   { id: "storage.preimage.preimage_for", compatGroup: "query", pallet: "Preimage", member: "PreimageFor", required: true, citation: "02 §7.6" },
   { id: "storage.preimage.status_for", compatGroup: "query", pallet: "Preimage", member: "StatusFor", required: true, citation: "02 §7.6" },
+  { id: "storage.proxy.proxies", compatGroup: "query", pallet: "Proxy", member: "Proxies", required: true, citation: "02 §7.6" },
   { id: "storage.question_service.questions", compatGroup: "query", pallet: "QuestionService", member: "Questions", required: true, citation: "02 §4a; 02 §7" },
   { id: "storage.question_service.reports", compatGroup: "query", pallet: "QuestionService", member: "Reports", required: true, citation: "02 §4a; 02 §7" },
   { id: "storage.referenda.deciding_count", compatGroup: "query", pallet: "Referenda", member: "DecidingCount", required: true, citation: "02 §7.6" },

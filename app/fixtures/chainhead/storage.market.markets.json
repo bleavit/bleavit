@@ -1,13 +1,13 @@
 {
   "headers": {
-    "pinned_block": "0x19b3e843c128ea3c2e2b107ccd19e2cc3c367830af0f76182abaf87385b40fee"
+    "pinned_block": "0x245c24380b4af110930a55ee253ad4eedcd33ab7ca993c0360f4fb3ebf74e45e"
   },
   "requests": [
     {
       "method": "chainHead_v1_storage",
       "params": [
         "subscription-1",
-        "0x19b3e843c128ea3c2e2b107ccd19e2cc3c367830af0f76182abaf87385b40fee",
+        "0x245c24380b4af110930a55ee253ad4eedcd33ab7ca993c0360f4fb3ebf74e45e",
         [
           {
             "key": "0x5ebf094108ead4fefa73f7a3b13cb4a7d8426954fc0e154310293fc43493f582",

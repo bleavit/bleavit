@@ -1,11 +1,11 @@
 {
   "blocked_by": {},
   "metadata_error": null,
-  "metadata_sha256": "410fe99392681a65c2bde3f44e31b00ede8fd5dabbab77f5be6e269f2d7a6074",
+  "metadata_sha256": "39201b6efecf23bbc5f21ca80534765c44174a1d14d4e3eaac4577bb8c079513",
   "metadata_version": 15,
   "missing": [],
   "mode": "chainHead-v1",
-  "pinned_block": "0x19b3e843c128ea3c2e2b107ccd19e2cc3c367830af0f76182abaf87385b40fee",
+  "pinned_block": "0x245c24380b4af110930a55ee253ad4eedcd33ab7ca993c0360f4fb3ebf74e45e",
   "recorded": [
     "api.account_positions",
     "api.decision_stats",
@@ -270,6 +270,7 @@
     "storage.oracle.watchtowers",
     "storage.preimage.preimage_for",
     "storage.preimage.status_for",
+    "storage.proxy.proxies",
     "storage.question_service.questions",
     "storage.question_service.reports",
     "storage.referenda.deciding_count",
@@ -289,7 +290,7 @@
   ],
   "recovery_metadata_error": null,
   "recovery_metadata_present": true,
-  "recovery_metadata_sha256": "2630aeb275a899d19e90160bb11140ff4f4d4e6703022ac00558a47c4d48bc98",
+  "recovery_metadata_sha256": "417f56a823ba4198bc62930e2cd0a7090ff1291e51131839f2a3b025601ccc7a",
   "recovery_metadata_version": 15,
   "recovery_missing": [],
   "recovery_recorded": [
@@ -554,6 +555,7 @@
     "storage.oracle.watchtowers",
     "storage.preimage.preimage_for",
     "storage.preimage.status_for",
+    "storage.proxy.proxies",
     "storage.question_service.questions",
     "storage.question_service.reports",
     "storage.referenda.deciding_count",

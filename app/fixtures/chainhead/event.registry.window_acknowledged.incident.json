@@ -1,13 +1,13 @@
 {
   "headers": {
-    "pinned_block": "0x19b3e843c128ea3c2e2b107ccd19e2cc3c367830af0f76182abaf87385b40fee"
+    "pinned_block": "0x245c24380b4af110930a55ee253ad4eedcd33ab7ca993c0360f4fb3ebf74e45e"
   },
   "requests": [
     {
       "method": "chainHead_v1_storage",
       "params": [
         "subscription-1",
-        "0x19b3e843c128ea3c2e2b107ccd19e2cc3c367830af0f76182abaf87385b40fee",
+        "0x245c24380b4af110930a55ee253ad4eedcd33ab7ca993c0360f4fb3ebf74e45e",
         [
           {
             "key": "0x26aa394eea5630e07c48ae0c9558cef780d41e5e16056765bc8461851072c9d7",
@@ -48,7 +48,7 @@
       "method": "state_getStorage",
       "params": [
         "0x26aa394eea5630e07c48ae0c9558cef780d41e5e16056765bc8461851072c9d7",
-        "0x19b3e843c128ea3c2e2b107ccd19e2cc3c367830af0f76182abaf87385b40fee"
+        "0x245c24380b4af110930a55ee253ad4eedcd33ab7ca993c0360f4fb3ebf74e45e"
       ],
       "response": "0x0800000000000000226cf83e5517020000000100000000002261c91900020000"
     },
