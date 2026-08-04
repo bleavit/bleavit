@@ -255,6 +255,12 @@ importers:
         specifier: workspace:*
         version: link:../../packages/mock-runtime
 
+  tests/contexts:
+    dependencies:
+      '@bleavit/contexts':
+        specifier: workspace:*
+        version: link:../../packages/contexts
+
   tests/depcruise-witness:
     dependencies:
       '@bleavit/providers':

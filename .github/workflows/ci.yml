@@ -408,6 +408,19 @@ jobs:
         working-directory: app
         run: pnpm run test:intents
 
+      - name: Export scope, consent and the capsule digest (F20, 11 §11.14.4)
+        # Two honesty properties rather than correctness ones. Consent is PER EXPORT and
+        # never inherited — opt-in alone is satisfied by a checkbox that remembers, and a
+        # remembered scope is how a user who shared holdings once ships them forever
+        # after; `defaultScope()` therefore takes no argument it could inherit from.
+        # And pseudonymization is labelled for what it does NOT do: it replaces the
+        # address and leaves the holdings, which remain a fingerprint. The digest
+        # pre-image is NUL-terminated so a receipt's digest cannot validate a context,
+        # and the package exports nothing that could pass for authentication — capsules
+        # are deliberately unsigned (10 §13.1).
+        working-directory: app
+        run: pnpm run test:contexts
+
       - name: smoldot artifact budget (10 §9.3, FE-P4)
         # A budget nothing measures is a sentence, and the one certain thing about a
         # dependency's compressed size is that it changes. Fails closed if the pinned

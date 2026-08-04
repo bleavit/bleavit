@@ -1,2 +1,3 @@
-// bleavit.context.v1 export. Input type is Finalized<T>, so export from unverified state is untypeable. F20.
-export {};
+// `bleavit.context.v1` — export scope, consent, canonical JSON and the digest. F20.
+export * from './scope.js';
+export * from './canonical.js';
