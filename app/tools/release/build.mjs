@@ -23,7 +23,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -68,6 +68,12 @@ const RECIPE_INPUTS = [
   'tools/release/build.mjs',
 ];
 
+/**
+ * Directories copied verbatim into the release tree so a producer can obtain them from the
+ * client they are actually running, rather than from a code host (F21).
+ */
+const PRODUCER_ASSETS = ['schemas', 'skills'];
+
 /** The one file in the tree that is not hash-pinned by the worker (see `sw.ts`). */
 const SIGNED_METADATA = ['release.json'];
 
@@ -89,6 +95,26 @@ function buildTree() {
     '--minify-syntax=false',
     `--outfile=${join(DIST, 'sw.js')}`,
   ]);
+}
+
+/**
+ * The two directories a *producer* needs, copied into the release tree (F21).
+ *
+ * `schemas/` and `skills/` are what somebody hands their analysis tool so that what comes
+ * back is something this client will accept. Leaving them out of the bundle would make the
+ * documented way to use a released client depend on fetching files from a code host —
+ * which is the shape of dependency D-21 exists to remove, even though the handoff being
+ * convenience-only (10 §13.5) means no invariant would actually be falsified.
+ *
+ * Copied **before** anything is hashed, so they land in the worker's baked map like every
+ * other file: pinned, verified on read, and refusable if they are not what the release
+ * published. A static directory copied in after the map is written would be a same-origin
+ * path the worker refuses — fail-closed, at the user, for no reason.
+ */
+function copyProducerAssets() {
+  for (const name of PRODUCER_ASSETS) {
+    cpSync(join(APP_ROOT, name), join(DIST, name), { recursive: true });
+  }
 }
 
 function substitute(path, placeholder, replacement, what) {
@@ -207,7 +233,10 @@ export function pipeline({ check = false, production = false } = {}) {
   const declared = readDeclaredSources(SOURCES);
   const blockers = [];
 
-  if (!check) buildTree();
+  if (!check) {
+    buildTree();
+    copyProducerAssets();
+  }
 
   // 3 — determinism, before anything is hashed.
   const files = walkTree(DIST);

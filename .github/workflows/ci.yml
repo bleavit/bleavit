@@ -439,6 +439,29 @@ jobs:
         working-directory: app
         run: pnpm run test:intents
 
+      - name: The portable skill and its published corpus (F21, 10 §13; 11 §11.14)
+        # `app/skills/` is the producer side of the handoff — what a user hands their
+        # analysis tool so what comes back is something this client accepts. Two things
+        # are generated and verified rather than written, for the same reason.
+        # The VENDOR INSTRUCTION FILES are assembled from SKILL.md + reference/, because
+        # the same safety rules must reach a directory-shaped Agent Skill, a ChatGPT
+        # instruction TEXT BOX with no filesystem, and a plain prompt. Three hand-written
+        # copies agree on day one and diverge at the first amendment — invisibly, since
+        # nobody diffs a ChatGPT instruction box against a repository, and a stale copy is
+        # a producer operating under the previous version of the safety argument. The
+        # generator also fails on a pointer to a file the inlined reader cannot open: an
+        # instruction that cannot be followed teaches the reader to skip instructions.
+        # The EXAMPLES carry their expected verdict in the filename and are run through
+        # the REAL parser. A published example that no longer does what it says is worse
+        # than none — somebody debugging against a stale corpus concludes the client is
+        # wrong, and the natural next move (loosen the document until it passes) is what
+        # reference/safety.md rule 7 exists to prevent. Coverage is asserted over exactly
+        # the nine codes an INBOUND DOCUMENT can cause; -011 needs live chain state and
+        # -012/-013 are export-side, and the checker names those exclusions rather than
+        # letting "we cover the family" quietly mean "we cover the easy ones".
+        working-directory: app
+        run: pnpm run skills:check
+
       - name: Published handoff schemas match the parser (F20, 10 §13.1-§13.2)
         # `app/schemas/` is a promise to whoever writes a producer, so it is generated
         # from the parser's own declarations and byte-compared here. The specific defect

@@ -1,0 +1,17 @@
+{
+  "schema": "bleavit.intent.v1",
+  "binding": {
+    "genesisHash": "0x91b171bb158e2d3848fa23a9f1c25182fb8e20313b2c1eb49219da7a70ce90c3",
+    "specVersion": 2,
+    "contractVersion": 27
+  },
+  "action": {
+    "kind": "close_position",
+    "id": "7",
+    "fractionPpm": 250000
+  },
+  "limits": {
+    "minProceeds": "1000000"
+  },
+  "digest": "c80948963a0ff520a1e1a0526d96b6f1d7cccb337548bd7766909a52ba7a25fb"
+}

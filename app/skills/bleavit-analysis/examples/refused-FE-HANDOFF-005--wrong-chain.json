@@ -1,0 +1,17 @@
+{
+  "schema": "bleavit.intent.v1",
+  "binding": {
+    "genesisHash": "0xabababababababababababababababababababababababababababababababab",
+    "specVersion": 2,
+    "contractVersion": 27
+  },
+  "action": {
+    "kind": "prepare_pass_position",
+    "id": "7",
+    "collateral": "25000000"
+  },
+  "limits": {
+    "maxCost": "26000000"
+  },
+  "digest": "ef2dd68f8a8999627db78e4afdb8ee700672b01f79fc97762df7e3503e7212d7"
+}

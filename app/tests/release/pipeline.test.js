@@ -42,6 +42,52 @@ const built = pipeline();
 const indexHtml = readFileSync(join(DIST, 'index.html'), 'utf8');
 const worker = readFileSync(join(DIST, 'sw.js'), 'utf8');
 
+/**
+ * The producer assets ship, and ship PINNED — F21.
+ *
+ * `skills/` and `schemas/` are what a user hands their analysis tool, and the instructions
+ * inside them say they ship with the client. That sentence has to be true: a producer told
+ * to look in `schemas/` and finding nothing there falls back to whatever the model
+ * remembers about the format, which is the one input this whole subsystem is built to
+ * distrust.
+ *
+ * The pinning half is the part a copy step alone would get wrong. Files copied in **after**
+ * the worker's map is baked are same-origin paths the release does not contain, and the
+ * worker refuses those — fail-closed, at the user, for no reason at all. So the assertion
+ * is not "the files exist" but "the files exist AND the worker will serve them".
+ */
+test('the producer assets are in the release tree and pinned by the worker', () => {
+  const map = readBakedAssetMap(worker);
+  const required = [
+    'schemas/bleavit.intent.v1.schema.json',
+    'schemas/bleavit.context.v1.schema.json',
+    'schemas/bleavit.receipt.v1.schema.json',
+    'skills/bleavit-analysis/SKILL.md',
+    'skills/bleavit-analysis/INSTRUCTIONS-chatgpt.md',
+    'skills/bleavit-analysis/INSTRUCTIONS-generic.md',
+    'skills/bleavit-analysis/reference/safety.md',
+    'skills/bleavit-analysis/reference/formats.md',
+  ];
+  for (const path of required) {
+    const onDisk = readFileSync(join(DIST, path));
+    assert.equal(
+      map[path],
+      createHash('sha256').update(onDisk).digest('hex'),
+      `${path} is not pinned to its own bytes — the worker would refuse it`,
+    );
+  }
+  // The corpus ships whole rather than as a sample: a producer debugging a refusal needs
+  // the case that produces THEIR code, and there is no way to know in advance which.
+  const examples = Object.keys(map).filter((path) =>
+    path.startsWith('skills/bleavit-analysis/examples/'),
+  );
+  assert.ok(examples.length >= 16, `only ${examples.length} examples reached the release tree`);
+  assert.ok(
+    examples.some((path) => path.includes('refused-FE-HANDOFF-004')),
+    'the foreign-key-in-action case is the one this format exists for; it must ship',
+  );
+});
+
 test('no placeholder survives into the built tree', () => {
   assert.ok(!indexHtml.includes(CONNECT_SRC_PLACEHOLDER));
   assert.ok(!worker.includes(ASSET_MAP_PLACEHOLDER));

@@ -1,0 +1,17 @@
+{
+  "schema": "bleavit.intent.v1",
+  "binding": {
+    "genesisHash": "0x91b171bb158e2d3848fa23a9f1c25182fb8e20313b2c1eb49219da7a70ce90c3",
+    "specVersion": 2,
+    "contractVersion": 27
+  },
+  "action": {
+    "kind": "prepare_fail_position",
+    "id": "7",
+    "collateral": "5000000"
+  },
+  "limits": {
+    "maxCost": "26000000"
+  },
+  "digest": "e20feb8a49d1a679a847f04a412e9f416898af91bb73b36d6ed88c29d8d5d353"
+}
