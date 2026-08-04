@@ -206,6 +206,9 @@ importers:
 
   src/application:
     dependencies:
+      '@bleavit/chain-client':
+        specifier: workspace:*
+        version: link:../../packages/chain-client
       '@bleavit/features-analysis':
         specifier: workspace:*
         version: link:../features/analysis

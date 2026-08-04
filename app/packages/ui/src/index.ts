@@ -41,6 +41,6 @@ export {
   type AboveTheFold,
   type MeaningChangingFact,
 } from './disclosure.js';
-export { Button, DataTable, Notice, Panel, Refusal } from './chrome.js';
+export { Button, DataTable, Notice, Panel, Refusal, Undecodable } from './chrome.js';
 export { abbreviateIdentifier, formatBaseUnits, formatCount, formatPpm } from './format.js';
 export { mount } from './mount.js';

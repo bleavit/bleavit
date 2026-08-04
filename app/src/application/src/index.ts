@@ -20,3 +20,12 @@ export {
   type ScreenArea,
 } from './screens.js';
 export { EpochHeader, Shell, sudoBannerFor, type ShellChainState } from './shell.js';
+export {
+  SHELL_READS,
+  assertOnePin,
+  readShellState,
+  type Decoded,
+  type ShellDecoders,
+  type ShellRead,
+  type UndecodableRead,
+} from './chain-reads.js';

@@ -157,3 +157,39 @@ export function DataTable({
     </table>
   );
 }
+
+/**
+ * Data the client could not decode — INV-FE-12 / app-code rule 10.
+ *
+ * > undecodable data renders as raw SCALE with a warning; never guess at encodings.
+ *
+ * Deliberately **not** a `VerificationStatus`. The bytes were read from finalized state and
+ * are perfectly authentic; what failed is the client's ability to interpret them, which is
+ * a different claim and belongs in a different place. Giving it a status would put a
+ * *provenance* label on a *decoding* failure, and the six statuses would then answer two
+ * questions at once — after which "verified" would no longer mean one thing.
+ *
+ * The raw hex is rendered rather than hidden because it is the only true thing available:
+ * a user can take it to a block explorer, and a support conversation can proceed. An empty
+ * space or an em dash would say "there is nothing here", which is false.
+ */
+export function Undecodable({
+  label,
+  rawHex,
+  reason,
+}: {
+  readonly label: string;
+  readonly rawHex: string;
+  readonly reason: string;
+}) {
+  return (
+    <div className="undecodable" data-undecodable={label} role="alert">
+      <strong className="undecodable__label">{label}</strong>
+      <p className="undecodable__reason">
+        This client could not decode this value: {reason}. It is not guessing at it. The raw
+        bytes as read from finalized state are below.
+      </p>
+      <code className="undecodable__raw">{rawHex}</code>
+    </div>
+  );
+}

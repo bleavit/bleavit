@@ -21,7 +21,10 @@ import {
   Shell,
   navigationFor,
   placementOf,
+  SHELL_READS,
+  assertOnePin,
   reachableScreens,
+  readShellState,
   sudoBannerFor,
 } from '@bleavit/application';
 import {
@@ -34,7 +37,7 @@ import {
 } from '@bleavit/features-tx';
 import { ImportRefused, ImportReview, UnlabellableClampError } from '@bleavit/features-handoff';
 import { ShareContext } from '@bleavit/features-handoff';
-import { DeferredMeaningChangingFactError, Disclosure } from '@bleavit/ui';
+import { DeferredMeaningChangingFactError, Disclosure, Undecodable } from '@bleavit/ui';
 import { externalProposal } from '@bleavit/shared-types';
 import { defaultScope } from '@bleavit/contexts';
 import { refuse } from '@bleavit/handoff-envelope';
@@ -550,4 +553,103 @@ test('the share screen has no persistence surface at all', async () => {
       `${name} looks like a persistence surface on the handoff unit`,
     );
   }
+});
+
+// -------------------------------------------------------------- S1's reads
+
+/** A `FinalizedReader`-shaped double: one pin, and storage answers it was given. */
+function readerDouble(pin, values) {
+  return {
+    at: pin,
+    async storage(key) {
+      const raw = values[key];
+      return {
+        value: raw === undefined ? [] : [{ key, value: raw }],
+        status: { kind: 'verified-finalized', blockHash: pin.blockHash, blockNumber: pin.blockNumber },
+      };
+    },
+  };
+}
+
+const DECODERS_OK = {
+  epochOf: () => ({ ok: true, value: { epoch: 7, phase: 'Trade' } }),
+  phaseFlags: () => ({ ok: true, value: { governancePhase: 4 } }),
+};
+
+test('every leaf of the shell model comes from the reader’s one pinned block', async () => {
+  const pin = { blockHash: '0xbeef', blockNumber: 42 };
+  const reader = readerDouble(pin, { [SHELL_READS.epochOf]: '0x01', [SHELL_READS.phaseFlags]: '0x04' });
+  const { state, undecodable } = await readShellState(reader, DECODERS_OK);
+  assert.deepEqual(undecodable, []);
+  for (const leaf of [state.epoch, state.phaseLabel, state.finalizedHeight, state.bootstrapPhase]) {
+    assert.equal(leaf.status.blockHash, '0xbeef');
+    assert.equal(leaf.status.blockNumber, 42);
+  }
+});
+
+test('an undecodable read renders raw SCALE and is never guessed at', async () => {
+  const pin = { blockHash: '0xbeef', blockNumber: 42 };
+  const reader = readerDouble(pin, {
+    [SHELL_READS.epochOf]: '0xdeadbeef',
+    [SHELL_READS.phaseFlags]: '0x04',
+  });
+  const { state, undecodable } = await readShellState(reader, {
+    ...DECODERS_OK,
+    epochOf: () => ({ ok: false, reason: 'variant index 9 is not in this enum' }),
+  });
+  assert.equal(undecodable.length, 1);
+  assert.equal(undecodable[0].label, SHELL_READS.epochOf);
+  assert.equal(undecodable[0].rawHex, '0xdeadbeef');
+  // The bytes reach the screen; a substituted value would be the guess rule 10 forbids.
+  const html = renderToStaticMarkup(h(Undecodable, undecodable[0]));
+  assert.ok(html.includes('0xdeadbeef'), html);
+  assert.ok(/could not decode/.test(html), html);
+  assert.equal(state.phaseLabel.value, 'unknown');
+});
+
+test('an unreadable PhaseFlags fails closed to the banner, not to post-sudo', async () => {
+  const pin = { blockHash: '0xbeef', blockNumber: 42 };
+  // The key returns nothing at all — the case where a substituted 4 would silently claim
+  // sudo has been removed.
+  const reader = readerDouble(pin, { [SHELL_READS.epochOf]: '0x01' });
+  const { state, undecodable } = await readShellState(reader, DECODERS_OK);
+  assert.equal(state.bootstrapPhase, undefined);
+  assert.notEqual(sudoBannerFor(state.bootstrapPhase), null);
+  assert.ok(undecodable.some((row) => row.label === SHELL_READS.phaseFlags));
+});
+
+test('a model assembled from two blocks is refused rather than rendered', () => {
+  // The guard is tested DIRECTLY, and the first version of this test was not: it drove
+  // `readShellState`, which stamps every leaf from `reader.at`, so the only thing it could
+  // assert was that two hashes the test wrote itself were different. That proved nothing
+  // about the guard — the same vacuous shape this repository keeps finding.
+  const at = { blockHash: '0xbeef', blockNumber: 42 };
+  const ok = (value) => ({ value, status: { kind: 'verified-finalized', ...at } });
+  const consistent = {
+    epoch: ok(7),
+    phaseLabel: ok('Trade'),
+    finalizedHeight: ok(42),
+    bootstrapPhase: ok(4),
+  };
+  assert.doesNotThrow(() => assertOnePin(consistent, at.blockHash));
+
+  // One leaf from a different block: a header showing the epoch at one block and the phase
+  // at another is a view that never existed, and nothing on screen distinguishes it.
+  for (const field of ['epoch', 'phaseLabel', 'finalizedHeight', 'bootstrapPhase']) {
+    const mixed = {
+      ...consistent,
+      [field]: {
+        value: consistent[field].value,
+        status: { kind: 'verified-finalized', blockHash: '0xcafe', blockNumber: 43 },
+      },
+    };
+    assert.throws(() => assertOnePin(mixed, at.blockHash), /mixes blocks/, field);
+  }
+
+  // A leaf whose status carries no block at all — a provider or external-proposal value
+  // reaching the header — is refused too, rather than skipped for lack of a hash.
+  assert.throws(
+    () => assertOnePin({ ...consistent, epoch: { value: 7, status: { kind: 'external-proposal' } } }, at.blockHash),
+    /mixes blocks/,
+  );
 });
