@@ -19,6 +19,8 @@ import assert from 'node:assert/strict';
 import {
   assertCheckable,
   buildPanel,
+  classifyCheckpointAge,
+  mayClaimVerified,
   mayOperate,
   runSelfCheck,
   verifyChainIdentity,
@@ -282,4 +284,81 @@ test('self-check findings reach the user as warnings', () => {
   assert.match(panel.warnings[0], /not the file that was published/);
   // A tampered bundle on the right chain still must not read as merely informational.
   assert.notEqual(panel.status, 'verified');
+});
+
+// ------------------------------------------- the long-range checkpoint bound (10 §2.4)
+
+const DAY = 24 * 60 * 60 * 1000;
+// Verified 2026-08-05 against the Fellowship Polkadot relay runtime and the Paseo relay
+// runtime, which agree exactly. Written here as the values the release document carries,
+// not as a client-side default — the module takes them as an argument for that reason.
+const RELAY_BOUND = { bondingDurationEras: 28, slashDeferDurationEras: 27, eraMillis: DAY };
+const at = (ageDays) => classifyCheckpointAge(0, ageDays * DAY, RELAY_BOUND);
+
+test('a fresh checkpoint is fresh, and the boundary is the day it lapses', () => {
+  assert.equal(at(0).kind, 'fresh');
+  assert.equal(at(26).kind, 'fresh');
+  // 27 eras: the slash-deferral window closes, so the deterrent has lapsed.
+  assert.equal(at(27).kind, 'warn');
+  assert.equal(at(27.9).kind, 'warn');
+  // 28 eras: the stake itself may be withdrawn.
+  assert.equal(at(28).kind, 'expired');
+  assert.equal(at(365).kind, 'expired');
+});
+
+test('expiry refuses the verified claim; warn does not', () => {
+  // The distinction 10 §2.4 rule 1 turns on: past the bound the claim is FALSE, not weaker.
+  assert.equal(mayClaimVerified(at(26)), true);
+  assert.equal(mayClaimVerified(at(27)), true);
+  assert.equal(mayClaimVerified(at(28)), false);
+});
+
+test('a device clock behind the checkpoint refuses rather than reading age zero', () => {
+  // The cheapest attack on this control is to set the clock back. Reading that as an age
+  // of zero would disable the whole check silently.
+  const verdict = classifyCheckpointAge(100 * DAY, 1 * DAY, RELAY_BOUND);
+  assert.equal(verdict.kind, 'indeterminate');
+  assert.match(verdict.message, /clock/);
+  assert.equal(mayClaimVerified(verdict), false);
+});
+
+test('an age that cannot be established sits with expired, never with fresh', () => {
+  // Fail-open here would be the same defect `chainIdentityVerified` was renamed to avoid:
+  // "never checked" landing on the same side as "checked and fine".
+  for (const bad of [
+    classifyCheckpointAge(Number.NaN, 0, RELAY_BOUND),
+    classifyCheckpointAge(0, Number.POSITIVE_INFINITY, RELAY_BOUND),
+    classifyCheckpointAge(0, DAY, { ...RELAY_BOUND, eraMillis: 0 }),
+    classifyCheckpointAge(0, DAY, { ...RELAY_BOUND, bondingDurationEras: 0 }),
+  ]) {
+    assert.equal(bad.kind, 'indeterminate', JSON.stringify(bad));
+    assert.equal(mayClaimVerified(bad), false);
+  }
+});
+
+test('a document claiming the deterrent outlives the stake is refused', () => {
+  // Not a hypothetical shape to guard for its own sake: it is the ordering the whole
+  // derivation rests on, and a document that inverts it is not describing this chain.
+  const inverted = classifyCheckpointAge(0, DAY, {
+    ...RELAY_BOUND,
+    slashDeferDurationEras: 29,
+  });
+  assert.equal(inverted.kind, 'indeterminate');
+  assert.match(inverted.message, /slash-defer/);
+});
+
+test('the bound moves with the chain rather than being baked in', () => {
+  // 10 §2.4's last paragraph: the figures come from the release document, which is produced
+  // from verified relay constants. A chain with a 7-day bonding duration must expire at 7.
+  const kusamaLike = { bondingDurationEras: 7, slashDeferDurationEras: 6, eraMillis: DAY };
+  assert.equal(classifyCheckpointAge(0, 5 * DAY, kusamaLike).kind, 'fresh');
+  assert.equal(classifyCheckpointAge(0, 6 * DAY, kusamaLike).kind, 'warn');
+  assert.equal(classifyCheckpointAge(0, 7 * DAY, kusamaLike).kind, 'expired');
+});
+
+test('the messages say what lapsed and what to do about it', () => {
+  assert.match(at(27).message, /deter|penalty/i);
+  assert.match(at(27).message, /newer release/);
+  assert.match(at(28).message, /withdrawn their stake|bonding duration/);
+  assert.match(at(28).message, /newer release/);
 });
