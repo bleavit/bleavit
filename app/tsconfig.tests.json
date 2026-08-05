@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+
+  // Type-checking for the test and tool trees — `pnpm run check:types`.
+  //
+  // Node 22.18 runs `.ts` files directly by stripping types, which is why the suites can be
+  // TypeScript with no build step and no transpiler in the dependency graph. But stripping
+  // is **not** checking: it deletes the annotations and runs whatever is left, so a suite
+  // full of wrong types executes exactly as before. This project is the half that makes the
+  // migration worth anything, and `check:types` runs in `pnpm test`.
+  //
+  // `include` grows one slice at a time, deliberately. Adding every directory at once would
+  // leave ~1,500 errors sitting red, and a gate that cannot be switched on is a gate nobody
+  // switches on — the pressure would then be to silence errors with `any`, which reproduces
+  // the untyped tree with extra ceremony. A slice enters this list only when it is clean.
+  //
+  // `tests/firewall/fixtures/` is excluded and must stay excluded: those files are the
+  // negative-compilation corpus and are *required* to fail `tsc`. They are compiled one at a
+  // time by `firewall.test.ts`, each against its declared `// expect-error: TSxxxx`.
+  "extends": "./tsconfig.base.json",
+  "compilerOptions": {
+    "composite": false,
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false,
+    "noEmit": true,
+    "types": ["node"]
+  },
+  "include": [
+    "tests/llm-handoff/**/*.ts",
+    "tests/providers/**/*.ts",
+    "tests/firewall/*.ts",
+    "tests/mock-runtime/**/*.ts"
+  ],
+  "exclude": ["**/node_modules/**", "**/dist/**", "tests/firewall/fixtures/**"]
+}

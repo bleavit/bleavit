@@ -15,6 +15,7 @@ import {
   effectiveCoverage,
   shouldAutoDisable,
 } from '@bleavit/providers';
+import type { Provider } from '@bleavit/providers';
 
 test('the shipped provider list is empty, from a function with nothing to inherit', () => {
   // 10 §8.1: strictly opt-in in every mode. A configurable default is how "opt-in" quietly
@@ -52,7 +53,13 @@ test('a round that really did check is reported as meaningful', () => {
 test('an auto-disabled provider always carries a reason', () => {
   // A source that vanishes with no explanation reads as a broken app, and the user
   // re-enables it.
-  const provider = { id: 'snapshots.example', kind: 'snapshot', health: { kind: 'healthy' } };
+  // Annotated rather than inferred: without it `kind` widens to `string` and the fixture is
+  // not a `Provider` at all — which is precisely what a suite of object literals hides.
+  const provider: Provider = {
+    id: 'snapshots.example',
+    kind: 'snapshot',
+    health: { kind: 'healthy' },
+  };
   const after = afterSampling(provider, { rowsChecked: 64, mismatches: 3, unverifiable: 0 });
   assert.equal(after.health.kind, 'disabled');
   assert.equal(after.health.by, 'auto');

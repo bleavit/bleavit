@@ -37,6 +37,7 @@ import {
   recoveryMetadataPresence,
   UnrecordedRequestError,
 } from '@bleavit/mock-runtime';
+import type { MetadataPresence, RecordedRequest } from '@bleavit/mock-runtime';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIXTURE_DIR = resolve(HERE, '..', '..', 'fixtures', 'chainhead');
@@ -55,11 +56,69 @@ function loadBundle() {
 }
 
 /** Decode a little-endian unsigned integer from the recorder's `0x…` constant value. */
-function decodeUint(hex) {
+function decodeUint(hex: string): bigint {
   const bytes = hex.slice(2).match(/../g) ?? [];
   let value = 0n;
-  for (let i = bytes.length - 1; i >= 0; i -= 1) value = (value << 8n) | BigInt(parseInt(bytes[i], 16));
+  // Little-endian, folded from the last byte down. Iterated by value rather than by index:
+  // an indexed read is `string | undefined` under `noUncheckedIndexedAccess`, and the usual
+  // silencer (`bytes[i]!`) asserts a bound instead of removing it.
+  for (const byte of [...bytes].reverse()) value = (value << 8n) | BigInt(parseInt(byte, 16));
   return value;
+}
+
+/**
+ * Read `layout.value`, refusing a layout that has none.
+ *
+ * `MetadataPresence.layout` is `unknown` in the package deliberately: a constant's layout and
+ * a storage item's layout are different shapes, and INV-FE-12 forbids guessing at a decoded
+ * one. The right move is therefore for the *consumer* to state the shape it needs and fail
+ * when it is absent — not for the package to widen a promise it cannot keep, and not for this
+ * file to assert past the question with a cast.
+ */
+function layoutValue(presence: MetadataPresence): string {
+  const layout: unknown = presence.layout;
+  if (typeof layout !== 'object' || layout === null || !('value' in layout)) {
+    assert.fail('the metadata layout carries no `value` field');
+  }
+  const value: unknown = layout.value;
+  if (typeof value !== 'string') assert.fail('the metadata layout `value` is not a string');
+  return value;
+}
+
+/**
+ * The first item of a recorded `chainHead_v1_storage` call — `params[2]` is the item list.
+ *
+ * Validated rather than indexed blindly for the same reason as `layoutValue`: the recorded
+ * params are `unknown` at the type level, and `params[2][0].key` on a transcript that does not
+ * have that shape throws a `TypeError` naming nothing. Here the failure names the transcript.
+ */
+type StorageQueryType = 'value' | 'descendantsValues';
+
+function firstStorageItem(
+  params: unknown,
+): { readonly key: string; readonly type: StorageQueryType } {
+  if (!Array.isArray(params)) {
+    assert.fail('the recorded request carries no params array');
+  }
+  const items: unknown = params[2];
+  if (!Array.isArray(items) || items.length === 0) {
+    assert.fail('the recorded chainHead_v1_storage call carries no storage items');
+  }
+  const item: unknown = items[0];
+  if (typeof item !== 'object' || item === null || !('key' in item) || !('type' in item)) {
+    assert.fail('the recorded storage item carries no `key`/`type`');
+  }
+  const { key, type } = item;
+  if (typeof key !== 'string' || typeof type !== 'string') {
+    assert.fail('the recorded storage item `key`/`type` are not strings');
+  }
+  if (type !== 'value' && type !== 'descendantsValues') {
+    // chainHead defines exactly these two query kinds. A transcript naming a third is one
+    // this suite cannot replay, and saying so beats passing it to a function that would
+    // default it to `value` and read the wrong thing.
+    assert.fail(`the recorded storage item asks for an unknown query type: ${type}`);
+  }
+  return { key, type };
 }
 
 const bundle = loadBundle();
@@ -75,12 +134,16 @@ test('the recording is strictly ready and was taken over chainHead v1', () => {
   assert.equal(report.recovery_metadata_present, true, '10 §5.1: the paired recovery runtime must be recorded too');
   // v14 has no runtime-APIs section at all, so a v14 recording cannot describe one
   // frozen `FutarchyApi` method (V-75).
+  // Narrowed first: the recorder writes `null` when metadata could not be read at all, and
+  // `null >= 15` is `false` in JS but reads to a human as "absent, so unchecked". Failing on
+  // absence explicitly keeps the two apart.
+  assert.ok(report.metadata_version !== null, 'the recording carries no metadata version at all');
   assert.ok(report.metadata_version >= 15, `metadata v${report.metadata_version} predates the runtime-APIs section`);
 });
 
 test('every frozen surface entry has a fixture, and every fixture a manifest entry', () => {
   const manifest = JSON.parse(readFileSync(MANIFEST, 'utf8'));
-  const expected = new Set(manifest.entries.map((e) => e.id));
+  const expected = new Set<string>(manifest.entries.map((e: { id: string }) => e.id));
   const recorded = new Set(bundle.fixtures.keys());
 
   const unrecorded = [...expected].filter((s) => !recorded.has(s)).sort();
@@ -131,7 +194,7 @@ test('FE-R1 bounds are exactly 02 §9\'s frozen values', () => {
   for (const [surface, expected] of Object.entries(bounds)) {
     const presence = metadataPresence(runtime, surface, 'constant');
     assert.equal(presence.present, true, `${surface} absent from metadata`);
-    const actual = decodeUint(presence.layout.value);
+    const actual = decodeUint(layoutValue(presence));
     assert.equal(actual, expected, `${surface}: chain says ${actual}, 02 §9 freezes ${expected}`);
   }
 });
@@ -144,7 +207,7 @@ test('both ledger domains are served separately and neither is merged (11 §11.2
   const service = [...bundle.fixtures.keys()].filter((s) => s.startsWith('storage.service_ledger.'));
   assert.ok(primary.length > 0 && service.length > 0, 'both ledger instances must be recorded');
   // The same item names on both sides — two instances of one pallet, not one merged view.
-  const strip = (p) => p.map((s) => s.split('.').slice(2).join('.')).sort();
+  const strip = (p: readonly string[]): string[] => p.map((s) => s.split('.').slice(2).join('.')).sort();
   assert.deepEqual(strip(primary), strip(service), 'the two ledger instances expose different items');
 
   assert.ok(bundle.fixtures.has('api.account_positions'), 'primary domain position view');
@@ -181,8 +244,13 @@ test('storage and runtime-API reads replay through the chainHead transcript', ()
   assert.match(status, /^0x[0-9a-f]+$/);
   assert.ok(status.length > 2, 'epoch_status returned an empty body');
   // ...and a storage read that resolves to at least one item.
-  const key = bundle.fixtures.get('storage.epoch.recent_cohort_summaries')
-    .requests.find((r) => r.method === 'chainHead_v1_storage').params[2][0];
+  const cohortFixture = bundle.fixtures.get('storage.epoch.recent_cohort_summaries');
+  assert.ok(cohortFixture, 'no RecentCohortSummaries fixture was recorded');
+  const storageRequest = cohortFixture.requests.find(
+    (r: RecordedRequest) => r.method === 'chainHead_v1_storage',
+  );
+  assert.ok(storageRequest, 'the RecentCohortSummaries fixture records no chainHead_v1_storage call');
+  const key = firstStorageItem(storageRequest.params);
   const items = chainHeadStorageValue(runtime, key.key, key.type);
   assert.ok(Array.isArray(items), 'RecentCohortSummaries did not replay');
 });
@@ -229,7 +297,7 @@ test('System.Events freezes its container while §6 freezes the payload (SQ-580)
   const presence = metadataPresence(runtime, 'storage.system.events', 'storage');
   assert.equal(presence.present, true, presence.detail);
   assert.equal(presence.layout_matches, true, presence.detail);
-  const value = presence.layout.value;
+  const value = layoutValue(presence);
   for (const part of ['EventRecord', 'phase', 'topics', 'bleavit_runtime::RuntimeEvent']) {
     assert.ok(value.includes(part), `System.Events layout lost ${part}`);
   }

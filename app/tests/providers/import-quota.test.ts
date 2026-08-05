@@ -51,8 +51,14 @@ test('both bounds are enforced — either alone is trivially evaded', () => {
 
 test('a malformed chunk measurement throws rather than walking the meter backwards', () => {
   // Treating a negative as zero would let a producer under-report its way past the bound.
-  for (const bad of [[-1, 0], [0, -1], [1.5, 0], [0, 1.5]]) {
-    assert.throws(() => admitChunk(EMPTY_QUOTA, bad[0], bad[1]), RangeError);
+  const malformed: ReadonlyArray<readonly [bytes: number, rows: number]> = [
+    [-1, 0],
+    [0, -1],
+    [1.5, 0],
+    [0, 1.5],
+  ];
+  for (const [bytes, rows] of malformed) {
+    assert.throws(() => admitChunk(EMPTY_QUOTA, bytes, rows), RangeError);
   }
 });
 
@@ -101,7 +107,14 @@ test('a snapshot that fits evicts nothing, so the preview is not vacuous', () =>
 test('an infeasible import is REPORTED, not thrown — the user is owed the reason', () => {
   // A plan that refuses to be constructed cannot show why it cannot fit, and "import failed"
   // with no explanation is what makes somebody delete their local data by hand and retry.
-  const plan = planImport({ bytes: 1_000 }, [{ table: 'events', rows: 1, bytes: 10, oldestBlock: 1 }], 100);
+  // `rows` was missing here until the type-check pass caught it. `planImport` reads only
+  // `incoming.bytes`, so the omission changed no behaviour and no assertion — a fixture that
+  // was not a `QuotaState` at all, sitting in a green suite.
+  const plan = planImport(
+    { bytes: 1_000, rows: 1 },
+    [{ table: 'events', rows: 1, bytes: 10, oldestBlock: 1 }],
+    100,
+  );
   assert.equal(plan.infeasible, true);
   assert.match(previewCopy(plan), /Nothing has been imported and nothing has been deleted/);
 });

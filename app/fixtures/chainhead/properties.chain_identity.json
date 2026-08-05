@@ -1,17 +1,1 @@
-{
-  "headers": {
-    "pinned_block": "0x245c24380b4af110930a55ee253ad4eedcd33ab7ca993c0360f4fb3ebf74e45e"
-  },
-  "requests": [
-    {
-      "method": "system_properties",
-      "params": [],
-      "response": {
-        "ss58Format": 7777,
-        "tokenDecimals": 12,
-        "tokenSymbol": "VIT"
-      }
-    }
-  ],
-  "surface": "properties.chain_identity"
-}
+{"headers":{"pinned_block":"0x245c24380b4af110930a55ee253ad4eedcd33ab7ca993c0360f4fb3ebf74e45e"},"requests":[{"method":"system_properties","params":[],"response":{"ss58Format":7777,"tokenDecimals":12,"tokenSymbol":"VIT"}}],"surface":"properties.chain_identity"}

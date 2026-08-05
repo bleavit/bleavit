@@ -94,7 +94,11 @@ test('the length is measured on the encoded URL, not on the capsule', () => {
 });
 
 test('a vendor that publishes no limit has no URL transport at all', () => {
-  const unlimited = { ...VENDOR, maxUrlChars: undefined };
+  // The property is OMITTED, not set to `undefined`. Under `exactOptionalPropertyTypes` an
+  // explicit `undefined` is not the same as absence, and the distinction is real rather than
+  // pedantic: production happens to test `=== undefined`, but an `in` or `Object.keys` check
+  // would see a vendor that *declares* a limit of nothing.
+  const { maxUrlChars: _published, ...unlimited } = VENDOR;
   const choice = chooseTransport('{"a":1}', ALL, unlimited.id, [unlimited]);
   assert.notEqual(choice.kind, 'vendor-url');
 });
@@ -110,7 +114,9 @@ test('the emitted URL round-trips to the exact capsule — no loss anywhere in t
   const capsule = '{"schema":"bleavit.receipt.v1","n":"9007199254740993"}';
   const choice = chooseTransport(capsule, ALL, VENDOR.id, [VENDOR]);
   assert.equal(choice.kind, 'vendor-url');
-  assert.equal(decodeURIComponent(new URL(choice.url).searchParams.get('q')), capsule);
+  const q = new URL(choice.url).searchParams.get('q');
+  assert.ok(q !== null, 'the emitted URL carries no `q` parameter at all');
+  assert.equal(decodeURIComponent(q), capsule);
 });
 
 /* --------------------------------------------------- the fail-closed capability lattice */
