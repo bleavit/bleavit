@@ -143,7 +143,7 @@ import {
   Undecodable,
   aboveTheFold,
 } from '@bleavit/ui';
-import type { Combined, Verified } from '@bleavit/shared-types';
+import type { HexString, Combined, Verified } from '@bleavit/shared-types';
 import type { FinalizedBlockRef } from '@bleavit/chain-client';
 // `finalize` is test-only on purpose — see packages/chain-client/src/testing.ts.
 import { finalize } from '@bleavit/chain-client/testing';
@@ -187,6 +187,12 @@ import { classifyCheckpointAge } from '@bleavit/verify';
 import type { VerificationPanel } from '@bleavit/verify';
 import type { Fixture } from '@bleavit/mock-runtime';
 
+/** The chain identity every verified fixture in this file is read against (F18).
+ *  A named constant rather than a literal per site: the point of the field is that two
+ *  reads agree on it, and copies of a hex string agree until one is edited. */
+const TEST_CHAIN = `0x${'ce'.repeat(32)}` as HexString;
+
+
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '../../..');
 const DOC11 = join(REPO, 'docs/architecture/11-frontend-workflows.md');
 
@@ -196,9 +202,9 @@ const DOC11 = join(REPO, 'docs/architecture/11-frontend-workflows.md');
 // `blockHash` from widening to `string` and the status from matching nothing.
 const finalized = <T>(value: T, blockNumber = 1_000_000): Verified<T> => ({
   value,
-  status: { kind: 'verified-finalized', blockHash: '0xdead', blockNumber },
+  status: { kind: 'verified-finalized', chain: TEST_CHAIN, blockHash: '0xdead', blockNumber },
 });
-const AT: FinalizedBlockRef = { blockHash: '0xdead', blockNumber: 1_000_000 };
+const AT: FinalizedBlockRef = { chain: TEST_CHAIN, blockHash: '0xdead', blockNumber: 1_000_000 };
 /**
  * Whether a labelled button is really disabled.
  *
@@ -227,7 +233,7 @@ const pinOf = (leaf: Verified<unknown>): FinalizedBlockRef => {
     status.kind === 'verified-finalized' || status.kind === 'verified-best',
     `a shell leaf carries ${status.kind}, which names no block`,
   );
-  return { blockHash: status.blockHash, blockNumber: status.blockNumber };
+  return { chain: TEST_CHAIN, blockHash: status.blockHash, blockNumber: status.blockNumber };
 };
 
 const stated = <T,>(combined: Combined<T>): T => {
@@ -851,19 +857,19 @@ const DECODERS_OK: ShellDecoders = {
 };
 
 test('every leaf of the shell model comes from the reader’s one pinned block', async () => {
-  const pin: FinalizedBlockRef = { blockHash: '0xbeef', blockNumber: 42 };
+  const pin: FinalizedBlockRef = { chain: TEST_CHAIN, blockHash: '0xbeef', blockNumber: 42 };
   const reader = readerDouble(pin, { [SHELL_READS.epochOf]: '0x01', [SHELL_READS.phaseFlags]: '0x04' });
   const { state, undecodable } = await readShellState(reader, DECODERS_OK);
   assert.deepEqual(undecodable, []);
   const leaves = [state.epoch, state.phaseLabel, state.finalizedHeight, state.phaseFlags];
   for (const leaf of leaves) {
     assert.ok(leaf, 'a shell leaf is missing entirely');
-    assert.deepEqual(pinOf(leaf), { blockHash: '0xbeef', blockNumber: 42 });
+    assert.deepEqual(pinOf(leaf), { chain: TEST_CHAIN, blockHash: '0xbeef', blockNumber: 42 });
   }
 });
 
 test('an undecodable read renders raw SCALE and is never guessed at', async () => {
-  const pin: FinalizedBlockRef = { blockHash: '0xbeef', blockNumber: 42 };
+  const pin: FinalizedBlockRef = { chain: TEST_CHAIN, blockHash: '0xbeef', blockNumber: 42 };
   const reader = readerDouble(pin, {
     [SHELL_READS.epochOf]: '0xdeadbeef',
     [SHELL_READS.phaseFlags]: '0x04',
@@ -885,7 +891,7 @@ test('an undecodable read renders raw SCALE and is never guessed at', async () =
 });
 
 test('an unreadable PhaseFlags fails closed to the banner, not to post-sudo', async () => {
-  const pin: FinalizedBlockRef = { blockHash: '0xbeef', blockNumber: 42 };
+  const pin: FinalizedBlockRef = { chain: TEST_CHAIN, blockHash: '0xbeef', blockNumber: 42 };
   // The key returns nothing at all — the case where a substituted 4 would silently claim
   // sudo has been removed.
   const reader = readerDouble(pin, { [SHELL_READS.epochOf]: '0x01' });
@@ -900,7 +906,7 @@ test('a model assembled from two blocks is refused rather than rendered', () => 
   // `readShellState`, which stamps every leaf from `reader.at`, so the only thing it could
   // assert was that two hashes the test wrote itself were different. That proved nothing
   // about the guard — the same vacuous shape this repository keeps finding.
-  const at: FinalizedBlockRef = { blockHash: '0xbeef', blockNumber: 42 };
+  const at: FinalizedBlockRef = { chain: TEST_CHAIN, blockHash: '0xbeef', blockNumber: 42 };
   const ok = <T,>(value: T): Verified<T> => ({ value, status: { kind: 'verified-finalized', ...at } });
   const consistent: ShellChainState = {
     epoch: ok(7),
@@ -920,7 +926,7 @@ test('a model assembled from two blocks is refused rather than rendered', () => 
       ...consistent,
       [field]: {
         value: leaf.value,
-        status: { kind: 'verified-finalized', blockHash: '0xcafe', blockNumber: 43 },
+        status: { kind: 'verified-finalized', chain: TEST_CHAIN, blockHash: '0xcafe', blockNumber: 43 },
       },
     };
     assert.throws(() => assertOnePin(mixed, at.blockHash), /mixes blocks/, field);
@@ -1079,7 +1085,7 @@ test('a sealed proposal does render its statistics', () => {
 });
 
 test('the proposal list is cross-checked against its own storage prefix (FE-P2)', async () => {
-  const pin: FinalizedBlockRef = { blockHash: '0xbeef', blockNumber: 42 };
+  const pin: FinalizedBlockRef = { chain: TEST_CHAIN, blockHash: '0xbeef', blockNumber: 42 };
   let asked: { api: string; storagePrefix: string } | undefined;
   const reader: ProposalsReader = {
     at: pin,
@@ -1108,7 +1114,7 @@ test('the proposal list is cross-checked against its own storage prefix (FE-P2)'
 test('a prefix key with no value is reported, never silently dropped', async () => {
   // The failure this catches shortens the list and passes: the remaining entries decode
   // perfectly, the screen shows fewer proposals than the chain has, and nothing says so.
-  const pin: FinalizedBlockRef = { blockHash: '0xbeef', blockNumber: 42 };
+  const pin: FinalizedBlockRef = { chain: TEST_CHAIN, blockHash: '0xbeef', blockNumber: 42 };
   const reader: ProposalsReader = {
     at: pin,
     async crossCheckedCall() {
@@ -1186,7 +1192,7 @@ test('Blocked renders the failures only — rule 5’s diff view, not a padded s
   // back to `failed` and pass. Mutation M34 survived on exactly that. The dangerous session
   // is `Blocked` reached *after* a gate once passed — a full set of rows that were true at
   // a block B′ has already moved past.
-  const stale = gatePassedAt({ blockHash: '0xold', blockNumber: 999 }, [
+  const stale = gatePassedAt({ chain: TEST_CHAIN, blockHash: '0xold', blockNumber: 999 }, [
     PASSING_ROW,
     { ...PASSING_ROW, id: 'P-3' },
   ]);
@@ -1353,7 +1359,7 @@ test('the recorded chain bytes reach the shell as the right model', async () => 
   const { loadCodecs } = await import('@bleavit/chain-client');
   const codecs = await loadCodecs(bleavit);
 
-  const pin: FinalizedBlockRef = { blockHash: '0xbeef', blockNumber: 4242 };
+  const pin: FinalizedBlockRef = { chain: TEST_CHAIN, blockHash: '0xbeef', blockNumber: 4242 };
   const reader = readerDouble(pin, {
     [SHELL_READS.epochOf]: recordedStorageValue('storage.epoch.epoch_of.json'),
     [SHELL_READS.phaseFlags]: recordedStorageValue('storage.constitution.phase_flags.json'),
@@ -1402,7 +1408,7 @@ test('a runtime whose EpochOf shape moved fails loudly rather than rendering NaN
     epochOf: () => ({ ok: true, value: { somethingElse: 1 } }),
     phaseFlags: () => ({ ok: true, value: 0 }),
   };
-  const pin = { blockHash: '0xbeef', blockNumber: 1 };
+  const pin = { chain: TEST_CHAIN, blockHash: '0xbeef', blockNumber: 1 };
   // The shape check lives in `shellDecoders`, so drive it directly with a stub codec set.
   const { shellDecoders: build } = await import('@bleavit/application');
   const stub = { query: { Epoch: { EpochOf: { value: { dec: () => ({ somethingElse: 1 }) } } },
@@ -1714,7 +1720,7 @@ test('reads spanning two blocks say so, rather than silently hiding the warning'
   const staleWindow: ExecutionWindow = {
     maturity: finalized(1_000),
     graceEnd: finalized(2_000, 1_000_000),
-    now: { value: 1_500, status: { kind: 'verified-finalized', blockHash: '0xbeef', blockNumber: 999_000 } },
+    now: { value: 1_500, status: { kind: 'verified-finalized', chain: TEST_CHAIN, blockHash: '0xbeef', blockNumber: 999_000 } },
   };
   const link: ReferendumLink = {
     kind: 'ongoing', index: finalized('9'),
@@ -2144,7 +2150,7 @@ test('an allowance read across two blocks is refused, not rendered', () => {
   const split = allowanceRemaining({
     power: 'delay_once',
     used: finalized(3, 1_000_000),
-    limit: { value: 5, status: { kind: 'verified-finalized', blockHash: '0xbeef', blockNumber: 999_000 } },
+    limit: { value: 5, status: { kind: 'verified-finalized', chain: TEST_CHAIN, blockHash: '0xbeef', blockNumber: 999_000 } },
   });
   assert.equal(split.kind, 'incomparable');
   assert.match(split.reason, /different blocks/);
@@ -2166,7 +2172,7 @@ test('a power whose remaining allowance cannot be established is not offered', (
     {
       power: 'delay_once',
       used: finalized(0, 1_000_000),
-      limit: { value: 5, status: { kind: 'verified-finalized', blockHash: '0xbeef', blockNumber: 999_000 } },
+      limit: { value: 5, status: { kind: 'verified-finalized', chain: TEST_CHAIN, blockHash: '0xbeef', blockNumber: 999_000 } },
     },
     undefined,
   );
@@ -2232,12 +2238,12 @@ test('the claimable figure carries the provenance of every read it came from', (
 
 test('a claim across two blocks is refused rather than shown — this is somebody’s money', () => {
   const split = claimableNow(
-    STREAM({ claimed: { value: 0n, status: { kind: 'verified-finalized', blockHash: '0xbeef', blockNumber: 999_000 } } }),
+    STREAM({ claimed: { value: 0n, status: { kind: 'verified-finalized', chain: TEST_CHAIN, blockHash: '0xbeef', blockNumber: 999_000 } } }),
     finalized(600),
   );
   assert.equal(split.kind, 'incomparable');
   const blocks = claimBlocks({
-    stream: STREAM({ claimed: { value: 0n, status: { kind: 'verified-finalized', blockHash: '0xbeef', blockNumber: 999_000 } } }),
+    stream: STREAM({ claimed: { value: 0n, status: { kind: 'verified-finalized', chain: TEST_CHAIN, blockHash: '0xbeef', blockNumber: 999_000 } } }),
     callerIsRecipient: true,
     now: finalized(600),
   });
@@ -2477,7 +2483,7 @@ test('a propose panel offers nothing when the allowance cannot be established', 
       meter: {
         power: 'pause_intake',
         used: finalized(0, 1_000_000),
-        limit: { value: 3, status: { kind: 'verified-finalized', blockHash: '0xbeef', blockNumber: 9 } },
+        limit: { value: 3, status: { kind: 'verified-finalized', chain: TEST_CHAIN, blockHash: '0xbeef', blockNumber: 9 } },
       },
       onPropose: () => {},
     }),
@@ -2575,7 +2581,7 @@ test('INSURANCE renders its classification and never a bare balance beside it', 
 
 test('a claimable amount derived across two blocks is withheld in the streams table', () => {
   const stream = STREAM({
-    claimed: { value: 0n, status: { kind: 'verified-finalized', blockHash: '0xbeef', blockNumber: 9 } },
+    claimed: { value: 0n, status: { kind: 'verified-finalized', chain: TEST_CHAIN, blockHash: '0xbeef', blockNumber: 9 } },
   });
   const html = renderToStaticMarkup(
     h(TreasuryStreams, {

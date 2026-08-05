@@ -29,13 +29,19 @@ import type { HexString } from '@bleavit/shared-types';
 
 import { argsFor, bundle, keyFor, recordedProvider, sentWith } from './recorded-provider.ts';
 
+/** The chain identity every verified fixture in this file is read against (F18).
+ *  A named constant rather than a literal per site: the point of the field is that two
+ *  reads agree on it, and copies of a hex string agree until one is edited. */
+const TEST_CHAIN = `0x${'ce'.repeat(32)}` as HexString;
+
+
 const fixtures = bundle();
 const runtime = () => createMockRuntime(fixtures);
 
 test('open() follows the chain and learns its finalized block from the transcripts', async () => {
   const mock = runtime();
   const { provider, sent } = recordedProvider(mock);
-  const connection = await ChainHeadConnection.open(provider);
+  const connection = await ChainHeadConnection.open(provider, { chain: TEST_CHAIN });
 
   const first = sent[0];
   assert.ok(first, 'the transport sent nothing at all');
@@ -72,7 +78,7 @@ test('the block number is decoded from real recorded headers, in every compact m
 test('a storage read replays the recorded operation handshake', async () => {
   const mock = runtime();
   const { provider, sent } = recordedProvider(mock);
-  const connection = await ChainHeadConnection.open(provider);
+  const connection = await ChainHeadConnection.open(provider, { chain: TEST_CHAIN });
   const pin = await connection.pinnedBlock();
   const { key, type } = keyFor(fixtures, 'storage.epoch.recent_cohort_summaries');
 
@@ -86,7 +92,7 @@ test('a storage read replays the recorded operation handshake', async () => {
 test('a runtime call returns the recorded output', async () => {
   const mock = runtime();
   const { provider } = recordedProvider(mock);
-  const connection = await ChainHeadConnection.open(provider);
+  const connection = await ChainHeadConnection.open(provider, { chain: TEST_CHAIN });
   const pin = await connection.pinnedBlock();
   const output = await connection.call(
     pin,
@@ -112,7 +118,7 @@ test('V-84: a reader reads at ITS OWN pin after the finalized head advances', as
       return true;
     },
   });
-  const connection = await ChainHeadConnection.open(provider);
+  const connection = await ChainHeadConnection.open(provider, { chain: TEST_CHAIN });
   const reader = await FinalizedReader.open(connection);
   const original = reader.at.blockHash;
 
@@ -135,7 +141,7 @@ test('the head advancing does not kill a reader (that is what pinning is for)', 
   // have a useful life of one block time, which is not a safety property, just an outage.
   const mock = runtime();
   const { provider, state } = recordedProvider(mock);
-  const connection = await ChainHeadConnection.open(provider);
+  const connection = await ChainHeadConnection.open(provider, { chain: TEST_CHAIN });
   const reader = await FinalizedReader.open(connection);
 
   state.followEvent({ event: 'finalized', finalizedBlockHashes: [`0x${'cd'.repeat(32)}`] });
@@ -157,7 +163,7 @@ test('limitReached is a refusal, never an empty result', async () => {
       return true;
     },
   });
-  const connection = await ChainHeadConnection.open(provider);
+  const connection = await ChainHeadConnection.open(provider, { chain: TEST_CHAIN });
   const pin = await connection.pinnedBlock();
   await assert.rejects(
     () => connection.storage(pin, '0x00', 'value'),
@@ -175,7 +181,7 @@ test('operationError rejects, and names the unpinned-block possibility', async (
       return true;
     },
   });
-  const connection = await ChainHeadConnection.open(provider);
+  const connection = await ChainHeadConnection.open(provider, { chain: TEST_CHAIN });
   const pin = await connection.pinnedBlock();
   await assert.rejects(
     () => connection.call(pin, 'FutarchyApi_epoch_status'),
@@ -200,7 +206,7 @@ test('a paused operation is continued, not left hanging', async () => {
       return true;
     },
   });
-  const connection = await ChainHeadConnection.open(provider);
+  const connection = await ChainHeadConnection.open(provider, { chain: TEST_CHAIN });
   const pin = await connection.pinnedBlock();
   const items = await connection.storage(pin, '0x00', 'descendantsValues');
 
@@ -226,7 +232,7 @@ test('a stopped subscription fails every pending and every future read', async (
       return true;
     },
   });
-  const connection = await ChainHeadConnection.open(provider);
+  const connection = await ChainHeadConnection.open(provider, { chain: TEST_CHAIN });
   const pin = await connection.pinnedBlock();
 
   await assert.rejects(() => connection.storage(pin, '0x00', 'value'), SubscriptionStoppedError);
@@ -243,7 +249,7 @@ test('an unpinned block yields no block number rather than a guessed one', async
       return true;
     },
   });
-  const connection = await ChainHeadConnection.open(provider);
+  const connection = await ChainHeadConnection.open(provider, { chain: TEST_CHAIN });
   await assert.rejects(
     () => connection.pinnedBlock(),
     (error) => error instanceof ChainHeadError && /not pinned/.test(error.message),
@@ -256,7 +262,7 @@ test('the transport asks for nothing the recording does not contain', async () =
   // argument or a different block would fail here rather than pass on a humoured answer.
   const mock = runtime();
   const { provider } = recordedProvider(mock);
-  const connection = await ChainHeadConnection.open(provider);
+  const connection = await ChainHeadConnection.open(provider, { chain: TEST_CHAIN });
   const reader = await FinalizedReader.open(connection);
   const { key, type } = keyFor(fixtures, 'storage.ledger.positions');
   await reader.storage(key, type);
@@ -285,7 +291,7 @@ test('V-85: an operation event that arrives before the started response is not l
       return true;
     },
   });
-  const connection = await ChainHeadConnection.open(provider);
+  const connection = await ChainHeadConnection.open(provider, { chain: TEST_CHAIN });
   const pin = await connection.pinnedBlock();
   assert.equal(await connection.call(pin, 'FutarchyApi_epoch_status'), '0xbeef');
 });
@@ -296,7 +302,7 @@ test('buffered events for operations that never register are bounded', async () 
   // only ever fail a read, never complete one wrongly.
   const mock = runtime();
   const { provider, state } = recordedProvider(mock);
-  const connection = await ChainHeadConnection.open(provider);
+  const connection = await ChainHeadConnection.open(provider, { chain: TEST_CHAIN });
   for (let i = 0; i < 5000; i += 1) {
     state.followEvent({ event: 'operationCallDone', operationId: `ghost-${i}`, output: '0x00' });
   }
@@ -330,7 +336,7 @@ test('V-93: a subscription that stops before initialized fails boot rather than 
     setTimeout(() => reject(new Error('open() never settled — the boot hang is back')), 2000).unref();
   });
   await assert.rejects(
-    () => Promise.race([ChainHeadConnection.open(provider), hang]),
+    () => Promise.race([ChainHeadConnection.open(provider, { chain: TEST_CHAIN }), hang]),
     SubscriptionStoppedError,
   );
 });
@@ -354,7 +360,7 @@ test('V-94: a discarded storage item is a refusal, never an empty result', async
       return true;
     },
   });
-  const connection = await ChainHeadConnection.open(provider);
+  const connection = await ChainHeadConnection.open(provider, { chain: TEST_CHAIN });
   const pin = await connection.pinnedBlock();
 
   await assert.rejects(
@@ -370,7 +376,7 @@ test('V-94: discardedItems: 0 still resolves — the guard is not "always refuse
   // equally satisfied by "rejects on everything".
   const mock = runtime();
   const { provider } = recordedProvider(mock);
-  const connection = await ChainHeadConnection.open(provider);
+  const connection = await ChainHeadConnection.open(provider, { chain: TEST_CHAIN });
   const pin = await connection.pinnedBlock();
   const { key, type } = keyFor(fixtures, 'storage.ledger.positions');
 
@@ -385,7 +391,7 @@ test('V-95: pins are released as finality advances, and never the current head',
   // long enough that nobody connects the two events.
   const mock = runtime();
   const { provider, sent, state } = recordedProvider(mock);
-  const connection = await ChainHeadConnection.open(provider, { pinWindow: 4 });
+  const connection = await ChainHeadConnection.open(provider, { chain: TEST_CHAIN, pinWindow: 4 });
 
   const hash = (n: number): HexString => `0x${n.toString(16).padStart(64, '0')}`;
   for (let n = 2; n <= 40; n += 1) {
@@ -412,7 +418,7 @@ test('V-95: the finalized head survives a flood of unfinalized announcements', a
   // block every reader is about to pin.
   const mock = runtime();
   const { provider, sent, state } = recordedProvider(mock);
-  const connection = await ChainHeadConnection.open(provider, { pinWindow: 4 });
+  const connection = await ChainHeadConnection.open(provider, { chain: TEST_CHAIN, pinWindow: 4 });
   const head = (await connection.pinnedBlock()).blockHash;
 
   for (let n = 2; n <= 20; n += 1) {
@@ -433,7 +439,7 @@ test('V-95: the finalized head survives a flood of unfinalized announcements', a
 test('V-95: pruned blocks are released immediately', async () => {
   const mock = runtime();
   const { provider, sent, state } = recordedProvider(mock);
-  await ChainHeadConnection.open(provider, { pinWindow: 64 });
+  await ChainHeadConnection.open(provider, { chain: TEST_CHAIN, pinWindow: 64 });
 
   const orphan: HexString = `0x${'ab'.repeat(32)}`;
   const head: HexString = `0x${'cd'.repeat(32)}`;
@@ -464,7 +470,7 @@ test('V-95: the block-number cache is evicted with the pin it belongs to', async
       return true;
     },
   });
-  const connection = await ChainHeadConnection.open(provider, { pinWindow: 2 });
+  const connection = await ChainHeadConnection.open(provider, { chain: TEST_CHAIN, pinWindow: 2 });
 
   const hash = (n: number): HexString => `0x${n.toString(16).padStart(64, '0')}`;
   for (let n = 2; n <= 20; n += 1) {
@@ -488,7 +494,7 @@ test('onFinalized emits EVERY hash in a multi-block finalization, in order', asy
   // always on tells a user nothing.
   const mock = runtime();
   const { provider, state } = recordedProvider(mock);
-  const connection = await ChainHeadConnection.open(provider);
+  const connection = await ChainHeadConnection.open(provider, { chain: TEST_CHAIN });
 
   const seen: HexString[] = [];
   const unsubscribe = connection.onFinalized((hash) => seen.push(hash));
@@ -526,7 +532,7 @@ test('a finalized hash is emitted while it is still pinned', async () => {
   // behind it.
   const mock = runtime();
   const { provider, state } = recordedProvider(mock);
-  const connection = await ChainHeadConnection.open(provider);
+  const connection = await ChainHeadConnection.open(provider, { chain: TEST_CHAIN });
 
   const pinnedWhenSeen: number[] = [];
   connection.onFinalized(() => pinnedWhenSeen.push(connection.pinnedCountForTest()));

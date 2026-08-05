@@ -46,6 +46,11 @@ import type { ChainBinding } from '@bleavit/handoff-envelope';
 import type { DomainBoundary, FinalizedBlockRef } from '@bleavit/chain-client';
 import { finalize } from '@bleavit/chain-client/testing';
 
+/** The chain identity every pin in this file is read against (F18). Named, not inlined:
+ *  the field exists so two reads can agree on it, and copies agree until one is edited. */
+const TEST_CHAIN = `0x${'ce'.repeat(32)}` as `0x${string}`;
+
+
 /**
  * A real `Finalized<T>`, from the real construction site (V-118).
  *
@@ -58,7 +63,7 @@ import { finalize } from '@bleavit/chain-client/testing';
  * Reaching it needs the deliberate `@bleavit/chain-client/testing` subpath, which
  * `no-finalized-minting-outside-chain-client` forbids production code from importing.
  */
-const AT: FinalizedBlockRef = { blockHash: `0x${'11'.repeat(32)}`, blockNumber: 7 };
+const AT: FinalizedBlockRef = { chain: TEST_CHAIN, blockHash: `0x${'11'.repeat(32)}`, blockNumber: 7 };
 const finalized = <T,>(value: T) => finalize(value, AT);
 
 /**

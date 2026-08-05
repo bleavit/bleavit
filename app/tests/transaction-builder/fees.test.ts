@@ -26,8 +26,13 @@ import { finalize } from '@bleavit/chain-client/testing';
 import type { Finalized, FinalizedBlockRef } from '@bleavit/chain-client';
 import type { HexString } from '@bleavit/shared-types';
 
+/** The chain identity every pin in this file is read against (F18). Named, not inlined:
+ *  the field exists so two reads can agree on it, and copies agree until one is edited. */
+const TEST_CHAIN = `0x${'ce'.repeat(32)}` as `0x${string}`;
+
+
 const SCALE = 1_000_000n;
-const PIN = { blockHash: `0x${'11'.repeat(32)}` as const, blockNumber: 1 };
+const PIN = { chain: TEST_CHAIN, blockHash: `0x${'11'.repeat(32)}` as const, blockNumber: 1 };
 const finalized = <T>(value: T): Finalized<T> => finalize(value, PIN);
 const rate = (value: bigint, reference = 1_000_000n): Finalized<VitUsdcRate> =>
   finalized({ value, reference, scale: SCALE });
@@ -36,7 +41,7 @@ const rate = (value: bigint, reference = 1_000_000n): Finalized<VitUsdcRate> =>
 const GATE_PREP: TxPreparation = {
   scaleHex: '0x0403aabbcc',
   builtFor: { specVersion: 2, metadataHash: `0x${'ab'.repeat(32)}` },
-  preparedAt: { blockHash: `0x${'22'.repeat(32)}`, blockNumber: 99 },
+  preparedAt: { chain: TEST_CHAIN, blockHash: `0x${'22'.repeat(32)}`, blockNumber: 99 },
   requires: ['P-1'],
 };
 
@@ -49,7 +54,7 @@ const GATE_PREP: TxPreparation = {
  * suite then proves they refuse a mismatched one.
  */
 const gatePin = (blockHash: HexString = `0x${'11'.repeat(32)}`, blockNumber = 1): GatePassed => {
-  const at: FinalizedBlockRef = { blockHash, blockNumber };
+  const at: FinalizedBlockRef = { chain: TEST_CHAIN, blockHash, blockNumber };
   const outcome = gate(GATE_PREP, at, GATE_PREP.builtFor, [
     { id: 'P-1', ok: true, requirement: 'r', expected: 'e', actual: 'a', at },
   ]);

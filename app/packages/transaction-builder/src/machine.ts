@@ -275,10 +275,21 @@ export function txTransitionEdges(): readonly (readonly [TxState, TxState])[] {
   const prep: TxPreparation = {
     scaleHex: '0x00',
     builtFor: { specVersion: 1, metadataHash: '0x00' },
-    preparedAt: { blockHash: `0x${'00'.repeat(32)}` as HexString, blockNumber: 0 },
+    // Same chain as `pin` below: this enumerator walks the real machine, and a preparation
+    // built against one chain gated by a pin from another is a transition the machine must
+    // refuse, not one an edge enumerator should be exercising.
+    preparedAt: {
+      chain: `0x${'ce'.repeat(32)}` as HexString,
+      blockHash: `0x${'00'.repeat(32)}` as HexString,
+      blockNumber: 0,
+    },
     requires: ['P-1'],
   };
-  const pin: FinalizedBlockRef = { blockHash: `0x${'11'.repeat(32)}` as HexString, blockNumber: 1 };
+  const pin: FinalizedBlockRef = {
+    chain: `0x${'ce'.repeat(32)}` as HexString,
+    blockHash: `0x${'11'.repeat(32)}` as HexString,
+    blockNumber: 1,
+  };
   // The passing gate has to be built from a **covered** row now, and that is the point of
   // the change rather than a cost of it: this enumerator previously minted its `proceed`
   // from `gate(prep, pin, prep.builtFor, [])` — an empty read set — which is exactly the
