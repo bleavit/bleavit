@@ -157,6 +157,8 @@ interface HasherRow {
   readonly input: string;
   readonly Blake2_128Concat: string;
   readonly Twox64Concat: string;
+  /** The input verbatim. Published anyway, so it is checked rather than taken on trust. */
+  readonly Identity: string;
 }
 
 interface RuntimeFixture {
@@ -341,6 +343,12 @@ test('the runtime fixture still carries every shape it exists to carry', () => {
   const hashers = new Set(fixture.entries.flatMap((e) => e.hashers));
   assert.ok(hashers.has('Blake2_128Concat'), 'no Blake2_128Concat entry');
   assert.ok(hashers.has('Twox64Concat'), 'no Twox64Concat entry — the hasher a balance-only client never meets');
+  assert.ok(
+    hashers.has('Identity'),
+    'no Identity entry. It is the one that goes missing by looking at the wrong artifact: no ' +
+      'in-repo pallet declares it, while the shipped metadata carries four items under it — ' +
+      'including Preimage.StatusFor and Preimage.PreimageFor, both frozen 02 §7.6 reads.',
+  );
 
   const arities = new Set(fixture.entries.map((e) => e.hashers.length));
   for (const arity of [0, 1, 2, 3]) {
@@ -366,7 +374,7 @@ test('the two hashers are computed correctly, including their concat suffix', ()
   assert.ok(fixture.hashers.length > 0, 'the hasher section is empty');
   for (const row of fixture.hashers) {
     const input = bytes(row.input);
-    for (const hasher of ['Blake2_128Concat', 'Twox64Concat'] as const) {
+    for (const hasher of ['Blake2_128Concat', 'Twox64Concat', 'Identity'] as const) {
       const built = storageKey('X', 'Y', [{ hasher, encoded: input }]);
       const prefix = storagePrefix('X', 'Y');
       assert.equal(
@@ -390,6 +398,10 @@ test('the concat suffix is present — a digest alone is a map prefix, not an en
   for (const [hasher, digestBytes] of [
     ['Blake2_128Concat', 16],
     ['Twox64Concat', 8],
+    // Identity's digest is zero bytes wide: the key IS its input. Included here rather
+    // than exempted, because "append the input after a 0-byte digest" is exactly the
+    // property, and an implementation that hashed anything at all fails this row.
+    ['Identity', 0],
   ] as const) {
     const suffix = bytes(`0x${storageKey('X', 'Y', [{ hasher, encoded: input }]).slice(storagePrefix('X', 'Y').length)}`);
     assert.equal(
@@ -410,7 +422,14 @@ test('an unknown hasher is refused, never degraded to a shorter key', () => {
   // request the node happily answers with the whole map. Reachable from metadata, which is
   // untyped at runtime, so the cast is the honest shape of the call site.
   assert.throws(
-    () => storageKey('Epoch', 'Proposals', [{ hasher: 'Identity' as StorageHasher, encoded: new Uint8Array([1]) }]),
+    () =>
+      storageKey('Epoch', 'Proposals', [
+        // `Blake2128Concat` — METADATA's spelling, one underscore away from FRAME's. This is
+        // the realistic unknown-hasher case, not an invented name: a metadata-driven caller
+        // that forgot to map spellings arrives here, and a silent fallback would hand it a
+        // key that is a map prefix.
+        { hasher: 'Blake2128Concat' as StorageHasher, encoded: new Uint8Array([1]) },
+      ]),
     UnsupportedHasherError,
   );
   // And a zero-key call is NOT an error — that is exactly a plain value's key.

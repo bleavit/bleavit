@@ -139,6 +139,21 @@ struct Entry {
 
 const BLAKE2_128_CONCAT: &str = "Blake2_128Concat";
 const TWOX_64_CONCAT: &str = "Twox64Concat";
+/// The third hasher on the client's read surface, and the one easiest to omit.
+///
+/// **No in-repo pallet uses it**, which is exactly why the client's first
+/// `StorageHasher` union left it out — and that was a defect, found by counting
+/// hashers in the shipped metadata rather than by reading this repository's
+/// pallets: `pallet_preimage` uses `Identity` for `StatusFor`, `RequestStatusFor`
+/// and `PreimageFor`, and the first two are on the 02 §7.6 read surface backing
+/// 11 §11.5's P-10 preimage preconditions. A client that cannot key them cannot
+/// mirror two dispatch checks.
+///
+/// `Identity` is the degenerate hasher — the key *is* its own SCALE encoding,
+/// with no digest and nothing appended. That makes it the one hasher whose
+/// output a reviewer will not notice is wrong, because a plausible-looking key
+/// comes out either way.
+const IDENTITY: &str = "Identity";
 
 fn entries() -> Vec<Entry> {
     let holder = account(7);
@@ -154,6 +169,10 @@ fn entries() -> Vec<Entry> {
         side: ScalarSide::Short,
     };
     let usdc = crate::usdc_location();
+    // Bytes that are not a hash of anything, so an `Identity` implementation that
+    // "helpfully" hashed its input would produce a visibly different key rather
+    // than another well-formed 32-byte value.
+    let preimage_hash = sp_core::H256::from([0x5au8; 32]);
 
     vec![
         Entry {
@@ -265,6 +284,27 @@ fn entries() -> Vec<Entry> {
             ),
         },
         Entry {
+            name: "preimage_status_for",
+            pallet: "Preimage",
+            item: "StatusFor",
+            hashers: vec![IDENTITY],
+            preimages: vec![preimage_hash.encode()],
+            key_description: "map H256 -> RequestStatus under the IDENTITY hasher: the key is \
+                              its own encoding, with no digest and nothing appended"
+                .into(),
+            // `StatusFor` is **deprecated upstream** in favour of `RequestStatusFor`, and
+            // this fixture keys it anyway because it is what the contract freezes:
+            // `tools/release/surface-manifest.json` publishes `storage.preimage.status_for`
+            // (02 §7.6) and 11 §11.5's P-10 rows read it. Keying the non-deprecated map
+            // instead would test a surface the client does not use and leave the one it
+            // does unverified. Both are `Identity`-hashed and both are live in this
+            // runtime's metadata, so the allow costs nothing today — but the day the SDK
+            // removes `StatusFor`, this line is where it surfaces, which is better than
+            // the client discovering it against a live chain.
+            #[allow(deprecated)]
+            key: pallet_preimage::StatusFor::<Runtime>::hashed_key_for(preimage_hash),
+        },
+        Entry {
             name: "system_account",
             pallet: "System",
             item: "Account",
@@ -320,7 +360,8 @@ fn render() -> String {
     for (name, input) in hasher_inputs() {
         hasher_rows.push(format!(
             "  {{\n   \"name\": \"{name}\",\n   \"input\": \"{}\",\n   \
-             \"Blake2_128Concat\": \"{}\",\n   \"Twox64Concat\": \"{}\"\n  }}",
+             \"Blake2_128Concat\": \"{}\",\n   \"Twox64Concat\": \"{}\",\n   \
+             \"Identity\": \"{}\"\n  }}",
             hex(&input),
             hex(&sp_io::hashing::blake2_128(&input)
                 .iter()
@@ -332,6 +373,10 @@ fn render() -> String {
                 .copied()
                 .chain(input.iter().copied())
                 .collect::<Vec<u8>>()),
+            // The input verbatim. Published anyway, so the client's `Identity` is
+            // checked by the same mechanism as the other two rather than being the
+            // one hasher taken on trust because it looks too simple to get wrong.
+            hex(&input),
         ));
     }
 
@@ -473,6 +518,9 @@ mod tests {
                     TWOX_64_CONCAT => {
                         rebuilt.extend_from_slice(&sp_io::hashing::twox_64(preimage));
                     }
+                    // No digest at all. The `extend_from_slice(preimage)` below is
+                    // the whole of it, which is why this arm looks empty and is not.
+                    IDENTITY => {}
                     other => panic!("entry {} names an unknown hasher {other}", entry.name),
                 }
                 rebuilt.extend_from_slice(preimage);
@@ -511,8 +559,14 @@ mod tests {
         let all = entries();
         let hashers: BTreeSet<&str> = all.iter().flat_map(|e| e.hashers.iter().copied()).collect();
         assert!(
-            hashers.contains(BLAKE2_128_CONCAT) && hashers.contains(TWOX_64_CONCAT),
-            "both read-surface hashers must appear; found {hashers:?}"
+            hashers.contains(BLAKE2_128_CONCAT)
+                && hashers.contains(TWOX_64_CONCAT)
+                && hashers.contains(IDENTITY),
+            "all three read-surface hashers must appear; found {hashers:?}. \
+             `Identity` is the one to check: no in-repo pallet uses it, so reading \
+             this repository's pallets says it is unused — while the shipped \
+             metadata carries four items under it, two of them on the client's \
+             read surface (`Preimage.StatusFor`, `Preimage.PreimageFor`)"
         );
 
         let arities: BTreeSet<usize> = all.iter().map(|e| e.hashers.len()).collect();

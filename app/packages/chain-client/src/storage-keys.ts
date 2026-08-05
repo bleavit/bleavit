@@ -10,16 +10,18 @@
  * This module shipped with {@link storagePrefix} alone (V-156), and the reason is worth
  * keeping because it is what shaped {@link storageKey}'s signature.
  *
- * The prefix is checkable against ground truth: `app/fixtures/chainhead/` records 65 real
- * storage requests, and every one of their keys is exactly 32 bytes — a prefix — because
- * the recorder reads whole maps with `descendantsValues` and never a single entry. So the
- * corpus certifies the prefix completely and certifies **nothing whatever** about hasher
- * application: it never issued a key that used one.
+ * The prefix is checkable against ground truth: `app/fixtures/chainhead/` records real
+ * storage requests, and 65 of its 67 key items are exactly 32 bytes — a prefix — because
+ * the recorder reads whole maps with `descendantsValues`. The other **two** are
+ * single-entry reads of `ForeignAssets.{Asset,Metadata}(usdcLocation)` and do carry a real
+ * `Blake2_128Concat` (V-159 — an earlier version of this comment said *every* key was a
+ * prefix, which was false).
  *
- * That left two ways to build the args half, and both were worse than not having one.
- * Test it against the same corpus, and the suite reports every surface covered while
- * exercising no hasher at all. Test it against `@polkadot-api/substrate-bindings`, and it
- * tests the library this module is built from against itself.
+ * So the corpus certifies the prefix completely and certifies one hasher, on one key type,
+ * in one pallet. That is not enough to build on: no `Twox64Concat`, no `Identity`, no
+ * multi-key map, no tuple key. And the alternative — testing against
+ * `@polkadot-api/substrate-bindings` — tests the library this module is built from against
+ * itself.
  *
  * This matters more than a normal gap because **a wrong storage key does not fail**. It
  * returns no value, and an absent value is indistinguishable from an account that holds
@@ -50,7 +52,7 @@
  * perfectly well-formed key for a storage item that does not exist.
  */
 
-import { Blake2128Concat, Twox64Concat, Twox128 } from '@polkadot-api/substrate-bindings';
+import { Blake2128Concat, Identity, Twox64Concat, Twox128 } from '@polkadot-api/substrate-bindings';
 import type { HexString } from '@bleavit/shared-types';
 
 const encoder = new TextEncoder();
@@ -68,8 +70,24 @@ function hex(bytes: Uint8Array): string {
  * surface — and the failure mode of a storage hasher is silence, so untested is not a
  * risk this module can carry. A metadata-driven caller meeting anything else gets a
  * refusal from {@link storageKey} rather than a guess.
+ *
+ * **`Identity` was missing from the first version, and the way it was missing is the
+ * point.** It was omitted after checking which hashers *this repository's pallets*
+ * declare — `Blake2_128Concat` and `Twox64Concat`, and nothing else. But the read
+ * surface is not this repository's pallets: counting hashers in the shipped
+ * `metadata.scale` gives 130 `Blake2128Concat`, 50 `Twox64Concat` and **4 `Identity`**,
+ * three of them in `pallet_preimage` — and `Preimage.StatusFor` and
+ * `Preimage.PreimageFor` are frozen 02 §7.6 reads backing 11 §11.5's P-10 preconditions
+ * (*"the payload preimage is noted with a matching hash and length"*, *"pinned and cannot
+ * be reaped"*). A client that cannot key them cannot mirror two dispatch checks. So: ask
+ * the artifact, not the source tree.
+ *
+ * Note the spelling. Metadata tags it `Blake2128Concat`; FRAME and the Rust fixture spell
+ * it `Blake2_128Concat`. A metadata-driven caller must map, and the two differ by exactly
+ * one underscore — which is why {@link storageKey} refuses an unknown name loudly instead
+ * of falling back.
  */
-export type StorageHasher = 'Blake2_128Concat' | 'Twox64Concat';
+export type StorageHasher = 'Blake2_128Concat' | 'Twox64Concat' | 'Identity';
 
 /** One key argument: the hasher metadata declares for it, and its SCALE encoding. */
 export interface StorageKeyArg {
@@ -87,9 +105,11 @@ export interface StorageKeyArg {
 export class UnsupportedHasherError extends Error {
   constructor(hasher: string) {
     super(
-      `${hasher} is not a hasher this client builds keys for (02 §7 uses Blake2_128Concat ` +
-        'and Twox64Concat). Refusing rather than returning a shorter key, which the node ' +
-        'would answer as a map prefix.',
+      `${hasher} is not a hasher this client builds keys for (this runtime's read surface ` +
+        'uses Blake2_128Concat, Twox64Concat and Identity). Refusing rather than returning ' +
+        'a shorter key, which the node would answer as a map prefix. If this came from ' +
+        "metadata, check the spelling: metadata tags it `Blake2128Concat`, FRAME spells it " +
+        '`Blake2_128Concat`.',
     );
     this.name = 'UnsupportedHasherError';
   }
@@ -99,6 +119,12 @@ const HASHERS: Readonly<Record<StorageHasher, (encoded: Uint8Array) => Uint8Arra
   Object.freeze({
     Blake2_128Concat: Blake2128Concat,
     Twox64Concat: Twox64Concat,
+    // The degenerate hasher: the key IS its own SCALE encoding, no digest and nothing
+    // appended. Taken from the bindings rather than written as `(x) => x` so all three
+    // come from one place, and pinned by a fixture vector like the other two — the
+    // hasher that looks too simple to get wrong is the one whose wrong output nobody
+    // notices, because a plausible key comes out either way.
+    Identity,
   });
 
 /**
