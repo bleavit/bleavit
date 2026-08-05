@@ -24,6 +24,14 @@ import {
   requireCapability,
 } from '@bleavit/signing';
 import * as signingExports from '@bleavit/signing';
+import type {
+  InjectedExtensionLike,
+  PjsSignerApi,
+  PolkadotSignerLike,
+  SigningRequest,
+} from '@bleavit/signing';
+import { gate } from '@bleavit/transaction-builder';
+import type { GatePassed, TxPreparation } from '@bleavit/transaction-builder';
 
 const ALICE = '5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY';
 const BOB = '5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty';
@@ -35,10 +43,16 @@ const BOB = '5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty';
  *   to call it. `record` captures which channel was used, so a test can assert the signing
  *   path rather than only the descriptor.
  */
-const signerFor = (address, opts = {}) => ({
+interface SignerOptions {
+  /** Captures which channel was used, so a test can assert the signing path. */
+  readonly record?: string[];
+  readonly withSignTx?: boolean;
+}
+
+const signerFor = (address: string, opts: SignerOptions = {}): PolkadotSignerLike => ({
   publicKey: new Uint8Array(32),
   // Deterministic and payload-derived, so a test cannot pass on a constant.
-  signBytes: async (data) => {
+  signBytes: async (data: Uint8Array) => {
     opts.record?.push('signBytes');
     return Uint8Array.from([data.length & 0xff, address.charCodeAt(1) & 0xff, 0xab]);
   },
@@ -52,24 +66,65 @@ const signerFor = (address, opts = {}) => ({
     : {}),
 });
 
-function fakeApi(extensions, accounts = [ALICE], opts = {}) {
+function fakeApi(
+  extensions: readonly string[],
+  accounts: readonly string[] = [ALICE],
+  opts: SignerOptions = {},
+): { api: PjsSignerApi; setAccounts: (next: readonly string[]) => void } {
   let live = accounts;
   return {
     api: {
       getInjectedExtensions: () => extensions,
-      connectInjectedExtension: async (name) => ({
+      connectInjectedExtension: async (name: string): Promise<InjectedExtensionLike> => ({
         name,
         getAccounts: () => live.map((address) => ({ address, polkadotSigner: signerFor(address, opts) })),
       }),
     },
-    setAccounts: (next) => { live = next; },
+    setAccounts: (next: readonly string[]) => { live = next; },
   };
 }
 
-const request = (account) => ({
-  prep: { scaleHex: '0x0102030405', call: 'market.buy' },
-  window: { at: { blockHash: `0x${'11'.repeat(32)}`, blockNumber: 7 }, results: [] },
-  account,
+const PREP: TxPreparation = {
+  scaleHex: '0x0102030405',
+  builtFor: { specVersion: 2, metadataHash: `0x${'ab'.repeat(32)}` },
+  preparedAt: { blockHash: `0x${'22'.repeat(32)}`, blockNumber: 6 },
+  requires: ['P-1'],
+};
+
+/** A real gate proof — `GatePassed` is branded and only `gate()` mints one (10 §2.1). */
+const WINDOW: GatePassed = (() => {
+  const at = { blockHash: `0x${'11'.repeat(32)}` as const, blockNumber: 7 };
+  const outcome = gate(PREP, at, PREP.builtFor, [
+    { id: 'P-1', ok: true, requirement: 'r', expected: 'e', actual: 'a', at },
+  ]);
+  assert.equal(outcome.kind, 'proceed', 'the gate fixture no longer opens');
+  return outcome.passed;
+})();
+
+const request = (account: string): SigningRequest => ({ prep: PREP, window: WINDOW, account });
+
+/**
+ * A signer that must never be reached — `requireCapability` refuses before it would be.
+ *
+ * Present because `SignerAdapter` requires it, and a throw rather than a stub: if the
+ * refusal under test ever stopped happening, this would say so instead of returning a
+ * signature nobody checked.
+ */
+const notSigned = (): Promise<never> => {
+  throw new Error('requireCapability let a call through to the signer');
+};
+
+/**
+ * A preparation carrying bytes the type refuses.
+ *
+ * `TxPreparation.scaleHex` is `0x${string}`, and the corpus below is exactly the strings
+ * that are *not* that — an unprefixed pair, a hex-looking string with a non-hex digit.
+ * The adapter's runtime guard is the subject (INV-FE-14: the exact raw SCALE bytes), and
+ * the compile-time half being right is why the cast is needed to ask the question.
+ */
+const withPayloadHex = (scaleHex: string): SigningRequest => ({
+  ...request(ALICE),
+  prep: { ...PREP, scaleHex: scaleHex as TxPreparation['scaleHex'] },
 });
 
 test('an absent extension is named, not surfaced as a generic failure', async () => {
@@ -145,7 +200,7 @@ test('the signature really is produced by the channel the capabilities describe'
   // signing path, which is exactly how a grant and a channel disagreed through two rounds
   // of review. If `sign()` is ever routed through `signTx`, this fails and the capability
   // has to be revisited in the same edit.
-  const called = [];
+  const called: string[] = [];
   const { api } = fakeApi(['talisman'], [ALICE], { withSignTx: true, record: called });
   const adapter = await connectInjected(api, 'talisman', 'Bleavit');
   await adapter.sign(request(ALICE));
@@ -208,9 +263,15 @@ test('a capability cannot be declared without the thing that performs it (#18)',
   // merely renders full hex could advertise itself as decode- and hash-capable. INV-FE-12
   // says an unproven capability is *absent*; a self-declared set makes "proven" and
   // "claimed" the same word.
-  assert.throws(() => grantsDecodedPayload({ kind: 'sign-tx', signTx: undefined }), TypeError);
-  assert.throws(() => grantsDecodedPayload({ kind: 'sign-tx', signTx: 'yes I can' }), TypeError);
-  assert.throws(() => grantsHashedPayload({ kind: 'hasher', hasher: null }), TypeError);
+  // Each argument is deliberately outside its parameter type. That IS the test: the
+  // sentence above says a self-declared set makes "proven" and "claimed" the same word,
+  // and these are what a transport that merely *claims* the capability supplies — a
+  // missing function, a string where a function belongs, a null hasher. The runtime check
+  // is what makes the grant evidence rather than assertion, so the suite has to reach it.
+  const claimed = <T>(evidence: unknown): T => evidence as T;
+  assert.throws(() => grantsDecodedPayload(claimed({ kind: 'sign-tx', signTx: undefined })), TypeError);
+  assert.throws(() => grantsDecodedPayload(claimed({ kind: 'sign-tx', signTx: 'yes I can' })), TypeError);
+  assert.throws(() => grantsHashedPayload(claimed({ kind: 'hasher', hasher: null })), TypeError);
   // An attestation needs a stated basis, not a bare assertion.
   assert.throws(() => grantsDecodedPayload({ kind: 'attested-flow', basis: 'trust me' }), TypeError);
   assert.throws(() => grantsExternalKeyCustody('sure'), TypeError);
@@ -254,7 +315,7 @@ test('a descriptor’s capabilities are derived from its grants, never supplied 
   );
   // requireCapability still refuses what was never granted.
   assert.throws(
-    () => requireCapability({ descriptor: d }, 'decoded-payload', 'FE-P6.'),
+    () => requireCapability({ descriptor: d, sign: notSigned }, 'decoded-payload', 'FE-P6.'),
     /decoded-payload capability is not proven/,
   );
 });
@@ -279,7 +340,7 @@ test('a non-hex payload is refused rather than signed as zero bytes (#20)', asyn
   // byte the payload never contained. INV-FE-14 requires the exact raw SCALE bytes.
   const { api } = fakeApi(['talisman'], [ALICE]);
   const adapter = await connectInjected(api, 'talisman', 'Bleavit');
-  const withPayload = (scaleHex) => ({ ...request(ALICE), prep: { scaleHex, call: 'market.buy' } });
+  const withPayload = withPayloadHex;
 
   await assert.rejects(() => adapter.sign(withPayload('0xzz')), /not 0x-prefixed hex/);
   await assert.rejects(() => adapter.sign(withPayload('0x01g2')), /not 0x-prefixed hex/);

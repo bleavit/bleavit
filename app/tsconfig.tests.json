@@ -46,7 +46,8 @@
     "tests/verify/**/*.ts",
     "tests/descriptors/**/*.ts",
     "tests/chain-client/**/*.ts",
-    "tests/local-index/**/*.ts"
+    "tests/local-index/**/*.ts",
+    "tests/transaction-builder/**/*.ts"
   ],
   // `tests/descriptors/types/*-witness.ts` joins the same class as the firewall fixtures:
   // it is an anti-vacuity control that MUST fail `tsc`, and `compat.test.ts` compiles it

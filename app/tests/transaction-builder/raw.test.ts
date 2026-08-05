@@ -18,13 +18,19 @@ import {
   rawPayloadSigner,
   requireCapability,
 } from '@bleavit/signing';
+import type { RawPayloadPresentation, SigningRequest } from '@bleavit/signing';
+import { gate } from '@bleavit/transaction-builder';
+import type { GatePassed, TxPreparation } from '@bleavit/transaction-builder';
 
 const ALICE = '5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY';
 const SIG64 = `0x${'ab'.repeat(64)}`;
 const PAYLOAD = '0x0102030405';
 
-const transport = (respond) => {
-  const seen = [];
+/** What a transport may answer with: a signature, or a function of the presentation. */
+type Respond = string | ((presentation: RawPayloadPresentation) => string | Promise<string>);
+
+const transport = (respond: Respond) => {
+  const seen: RawPayloadPresentation[] = [];
   return {
     seen,
     adapter: rawPayloadSigner({
@@ -32,17 +38,43 @@ const transport = (respond) => {
       label: 'Air-gapped device (QR)',
       present: async (presentation) => {
         seen.push(presentation);
-        return typeof respond === 'function' ? respond(presentation) : respond;
+        return typeof respond === 'function' ? await respond(presentation) : respond;
       },
     }),
   };
 };
 
-const request = () => ({
-  prep: { scaleHex: PAYLOAD, call: 'market.buy' },
-  window: { at: { blockHash: `0x${'11'.repeat(32)}`, blockNumber: 42 }, results: [] },
-  account: ALICE,
-});
+const PREP: TxPreparation = {
+  scaleHex: PAYLOAD,
+  builtFor: { specVersion: 2, metadataHash: `0x${'ab'.repeat(32)}` },
+  preparedAt: { blockHash: `0x${'22'.repeat(32)}`, blockNumber: 41 },
+  requires: ['P-1'],
+};
+
+/**
+ * A real gate proof at block 42.
+ *
+ * `GatePassed`'s brand is a non-exported `unique symbol`, so it is obtained by running the
+ * gate rather than written — the same discipline `fees.test.ts` follows, and the reason
+ * `as unknown as` is banned workspace-wide (10 §2.1).
+ */
+const WINDOW: GatePassed = (() => {
+  const at = { blockHash: `0x${'11'.repeat(32)}` as const, blockNumber: 42 };
+  const outcome = gate(PREP, at, PREP.builtFor, [
+    { id: 'P-1', ok: true, requirement: 'r', expected: 'e', actual: 'a', at },
+  ]);
+  assert.equal(outcome.kind, 'proceed', 'the gate fixture no longer opens');
+  return outcome.passed;
+})();
+
+/** The nth presentation the transport received, or a throw naming how many it saw. */
+const shown = (seen: readonly RawPayloadPresentation[], index = 0): RawPayloadPresentation => {
+  const presentation = seen[index];
+  if (presentation === undefined) throw new Error(`the transport was shown ${seen.length} presentation(s)`);
+  return presentation;
+};
+
+const request = (): SigningRequest => ({ prep: PREP, window: WINDOW, account: ALICE });
 
 test('the transport is handed exactly the prepared payload', async () => {
   // The single property the whole module exists for: no edit between presentation and
@@ -50,9 +82,9 @@ test('the transport is handed exactly the prepared payload', async () => {
   const { adapter, seen } = transport(SIG64);
   await adapter.sign(request());
   assert.equal(seen.length, 1);
-  assert.equal(seen[0].payloadHex, PAYLOAD);
-  assert.equal(seen[0].account, ALICE);
-  assert.equal(seen[0].atBlock, 42);
+  assert.equal(shown(seen).payloadHex, PAYLOAD);
+  assert.equal(shown(seen).account, ALICE);
+  assert.equal(shown(seen).atBlock, 42);
 });
 
 test('the presentation states the 256-block era, not the in-app 64', async () => {
@@ -60,7 +92,7 @@ test('the presentation states the 256-block era, not the in-app 64', async () =>
   // implicit — it is the price of the air gap.
   const { adapter, seen } = transport(SIG64);
   await adapter.sign(request());
-  assert.equal(seen[0].mortalityBlocks, RAW_EXTERNAL_ERA_BLOCKS);
+  assert.equal(shown(seen).mortalityBlocks, RAW_EXTERNAL_ERA_BLOCKS);
   assert.equal(RAW_EXTERNAL_ERA_BLOCKS, 256);
 });
 
@@ -137,6 +169,8 @@ test('the adapter is registrable and names its transport', async () => {
   const registry = new SignerRegistry();
   registry.register(adapter);
   assert.match(adapter.descriptor.id, /:qr$/);
-  assert.equal(registry.list()[0].label, 'Air-gapped device (QR)');
+  const listed = registry.list()[0];
+  assert.ok(listed, 'the registry lists nothing after a register()');
+  assert.equal(listed.label, 'Air-gapped device (QR)');
   assert.equal(registry.supporting('metadata-hash').length, 0);
 });
