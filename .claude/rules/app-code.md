@@ -164,11 +164,23 @@ Practical consequences:
     **The same applies to the negative-compilation corpus** (V-91): a fixture must declare the
     error it produces (`// expect-error: TSxxxx` on line 1), because "did not compile" is also
     what a missing dependency looks like.
-14. **Pinned versions.** The stack pins live in 01 §9 / 10 — PAPI 2.x, smoldot 3.x,
+14. **No control characters in source, and `cat -A` is how you find them.** Twice in one
+    session a byte below 0x20 reached a source file and broke something in a way that read
+    as a logic error: a literal **NUL** in `tests/receipts` (which made git classify the
+    file as binary, so its diffs showed no lines and `grep` skipped it silently), and a
+    literal **backspace** inside a regex, produced by writing `\b` through a shell heredoc
+    — the pattern then matched nothing while the assertion failed on a string that plainly
+    contained the word. Neither is visible in an editor or in a diff. **Prefer writing
+    files with the Write tool or a Python heredoc over shell interpolation for anything
+    containing backslash escapes**, and reach for `cat -A` the moment an assertion fails
+    against a value that obviously satisfies it. The tree is currently clean; a sweep is
+    four lines of Python over every source file.
+
+15. **Pinned versions.** The stack pins live in 01 §9 / 10 — PAPI 2.x, smoldot 3.x,
     Vite 8, Dexie 4, Tauri 2.x. Do not bump majors without a PLAN.md decision-log
     entry. `app/` is its own pnpm workspace and its own cargo workspace (excluded from
     the root one); never let its dependency tree reach the runtime pins.
-15. **The release tree is derived, and its inputs are what you edit (F11, 12 §1/§5).**
+16. **The release tree is derived, and its inputs are what you edit (F11, 12 §1/§5).**
     `app/dist/` and `app/release-out/` are build output. The committed inputs are
     `app/tools/release/sources/`: where each `connect-src` class comes from, the
     INV-FE-11 chain-identity pins, the signing keyring, the 15 §4.8 diff baseline.
