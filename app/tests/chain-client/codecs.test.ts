@@ -11,12 +11,53 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { bleavit } from '@polkadot-api/descriptors';
 import { decodeStorage, loadCodecs, storageDecoder } from '@bleavit/chain-client';
+import type { ChainCodecs, DecodeResult } from '@bleavit/chain-client';
 
 const codecs = await loadCodecs(bleavit);
 
+/** PAPI's encode/decode pair for one storage item, as far as this suite needs it. */
+interface ValueCodec {
+  enc(value: unknown): string;
+  dec(raw: string): unknown;
+}
+
+/**
+ * Reach a storage codec by name, narrowing at runtime.
+ *
+ * `ChainCodecs.query` is `unknown` deliberately (see the comment on it in `codecs.ts`):
+ * the lookup is by *string*, so no static type relates the argument to the result. This
+ * suite therefore does the same runtime narrowing the module under test does, rather than
+ * asserting a shape the compiler cannot check — and it throws rather than returning
+ * `undefined`, so a missing codec is reported as itself instead of as a property access on
+ * `undefined` three lines later.
+ */
+function valueCodec(surface: ChainCodecs, pallet: string, item: string): ValueCodec {
+  const query = surface.query as Record<string, Record<string, unknown> | undefined>;
+  const entry = query[pallet]?.[item] as { value?: unknown } | undefined;
+  const value = entry?.value;
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    typeof (value as { dec?: unknown }).dec !== 'function' ||
+    typeof (value as { enc?: unknown }).enc !== 'function'
+  ) {
+    throw new Error(`${pallet}.${item} has no encode/decode pair on the codec surface`);
+  }
+  return value as ValueCodec;
+}
+
+/** The reason a decode refused, or a throw if it did not refuse at all. */
+function refusal(result: DecodeResult<unknown>): string {
+  assert.equal(result.ok, false, `expected a refusal, got ${JSON.stringify(result)}`);
+  return result.reason;
+}
+
 test('codecs are built from descriptors alone — no client, no network', () => {
   assert.ok(codecs.query, 'the codec surface has no query group');
-  assert.ok(codecs.query.Constitution?.PhaseFlags, 'a known storage item has no codec');
+  assert.doesNotThrow(
+    () => valueCodec(codecs, 'Constitution', 'PhaseFlags'),
+    'a known storage item has no codec',
+  );
 });
 
 test('a real storage value round-trips through the real codec', () => {
@@ -24,8 +65,8 @@ test('a real storage value round-trips through the real codec', () => {
   // the codec both ways is deliberate: this asserts the *wiring* — that `decodeStorage`
   // reaches the right codec and returns its value — and not that PAPI can encode, which is
   // PAPI's own business.
-  const codec = codecs.query.Constitution.PhaseFlags;
-  const encoded = codec.value.enc(codec.value.dec(codec.value.enc(0)));
+  const codec = valueCodec(codecs, 'Constitution', 'PhaseFlags');
+  const encoded = codec.enc(codec.dec(codec.enc(0)));
   const result = decodeStorage(codecs, 'Constitution', 'PhaseFlags', encoded);
   assert.equal(result.ok, true, JSON.stringify(result));
 });
@@ -37,7 +78,7 @@ test('an unknown storage entry is reported, not thrown', () => {
   for (const [pallet, item] of [
     ['NoSuchPallet', 'X'],
     ['Constitution', 'NoSuchItem'],
-  ]) {
+  ] as const) {
     const result = decodeStorage(codecs, pallet, item, '0x00');
     assert.equal(result.ok, false, `${pallet}.${item} decoded to something`);
     assert.match(result.reason, new RegExp(`no storage entry "${pallet}\\.${item}"`));
@@ -93,5 +134,5 @@ test('the bound decoder really is bound to the item it was given', () => {
 
   // And the pallet half, for the same reason.
   const otherPallet = storageDecoder(codecs, 'NotAPalletEither', 'PhaseFlags');
-  assert.match(otherPallet('0x00').reason, /NotAPalletEither/);
+  assert.match(refusal(otherPallet('0x00')), /NotAPalletEither/);
 });

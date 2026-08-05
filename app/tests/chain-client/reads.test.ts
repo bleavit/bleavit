@@ -24,9 +24,11 @@ import {
   positionSourceFor,
   providerRead,
 } from '@bleavit/chain-client';
+import type { ChainHeadTransport, LedgerDomain } from '@bleavit/chain-client';
 import { createMockRuntime } from '@bleavit/mock-runtime';
+import type { HexString } from '@bleavit/shared-types';
 
-import { argsFor, bundle, keyFor, recordedProvider } from './recorded-provider.mjs';
+import { argsFor, bundle, keyFor, recordedProvider } from './recorded-provider.ts';
 
 const fixtures = bundle();
 
@@ -54,7 +56,10 @@ test('a runtime-API result is finalized at the same block', async () => {
 
 test('the FE-P2 cross-check pairs each domain view with its OWN prefix (10 §11)', async () => {
   const r = await reader();
-  for (const domain of ['primary', 'service']) {
+  // `as const satisfies` rather than a bare literal: the loop feeds `positionSourceFor`,
+  // so a mistyped domain would otherwise be a plain string and fail at runtime instead of
+  // being checked against the union the two ledgers actually publish.
+  for (const domain of ['primary', 'service'] as const satisfies readonly LedgerDomain[]) {
     const source = positionSourceFor(domain);
     const prefix = keyFor(
       fixtures,
@@ -84,7 +89,7 @@ test('both legs of the cross-check are issued at the same block', async () => {
   // witness leg that re-read "the current head" agreed with the call leg by coincidence
   // and the assertion passed on a broken implementation — a vacuous test that looked like
   // a real one (caught by mutation R1).
-  const moved = `0x${'ab'.repeat(32)}`;
+  const moved: HexString = `0x${'ab'.repeat(32)}`;
   let calls = 0;
   const { provider, sent, state } = recordedProvider(createMockRuntime(fixtures), {
     intercept(request) {
@@ -116,7 +121,10 @@ test('both legs of the cross-check are issued at the same block', async () => {
 });
 
 test('a malformed pin is refused when the reader is opened', async () => {
-  const transport = {
+  // Annotated so the shape is checked against the real port; `0xdead` is still a
+  // well-formed `0x…` string, and the malformation under test is its *length*, which
+  // only the runtime check can see.
+  const transport: ChainHeadTransport = {
     pinnedBlock: async () => ({ blockHash: '0xdead', blockNumber: 1 }),
     storage: async () => [],
     call: async () => '0x',
@@ -131,7 +139,8 @@ test('attaching a domain refuses a value from a different block', async () => {
   assert.equal(r.domained(1n, good, boundary).value.domain, 'primary');
   assert.equal(r.domained(1n << 63n, good, boundary).value.domain, 'service');
 
-  const foreign = { ...good, status: { ...good.status, blockHash: `0x${'cd'.repeat(32)}` } };
+  const otherBlock: HexString = `0x${'cd'.repeat(32)}`;
+  const foreign = { ...good, status: { ...good.status, blockHash: otherBlock } };
   assert.throws(() => r.domained(1n, foreign, boundary), UnverifiedReadError);
 });
 
