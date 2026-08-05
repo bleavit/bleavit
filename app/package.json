@@ -57,8 +57,8 @@
     "test:providers": "node tools/run-suite.ts \"tests/providers/*.test.{js,ts}\"",
     "check:above-fold": "node tools/check-above-fold-facts.mjs",
     "check:types": "tsc -p tsconfig.tests.json",
-    "check:smoldot-surface": "node --experimental-strip-types tools/check-smoldot-surface.ts",
-    "check:smoldot-surface:witness": "node --experimental-strip-types tools/check-smoldot-surface.ts --witness"
+    "check:smoldot-surface": "node tools/check-smoldot-surface.ts",
+    "check:smoldot-surface:witness": "node tools/check-smoldot-surface.ts --witness"
   },
   "devDependencies": {
     "@polkadot-api/substrate-bindings": "0.20.3",
