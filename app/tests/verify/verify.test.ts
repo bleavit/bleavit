@@ -26,16 +26,39 @@ import {
   runSelfCheck,
   verifyChainIdentity,
 } from '@bleavit/verify';
+import type { Hash32, ReleaseIdentity } from '@bleavit/verify';
 import * as verifyModule from '@bleavit/verify';
 
-const h = (n) => `0x${String(n).repeat(2).padEnd(64, '0')}`;
+/**
+ * A 32-byte hash fixture.
+ *
+ * The return type is `Hash32` (`` `0x${string}` ``), not `string`: an untyped template
+ * expression infers as `string`, which then fails to satisfy every field in
+ * `ReleaseIdentity` — and widening those fields to `string` would delete the one thing the
+ * brand buys, which is that a hash missing its `0x` prefix cannot be written at all.
+ */
+const h = (n: number): Hash32 => `0x${String(n).repeat(2).padEnd(64, '0')}`;
+
+/** A row the panel must contain, or a failure naming the label it lacks. */
+function panelRow<T extends { readonly label: string }>(rows: readonly T[], label: string): T {
+  const row = rows.find((r) => r.label === label);
+  assert.ok(row, `the panel has no row labelled "${label}"`);
+  return row;
+}
+
+/** The first finding, or a failure saying there was none — never `findings[0]!`. */
+function finding<T>(findings: readonly T[], index = 0): T {
+  const value = findings[index];
+  assert.ok(value !== undefined, `expected a finding at ${index}, got ${findings.length}`);
+  return value;
+}
 
 // A well-formed Arweave TXID: 43 base64url characters. Shaped correctly because
 // `parseReleaseDocument` enforces it, and a fixture that could not survive the parser is a
 // fixture describing a document that cannot exist.
 const ASSET_MANIFEST = 'aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789-_abcde';
 
-const IDENTITY = {
+const IDENTITY: ReleaseIdentity = {
   arweaveManifestTxId: ASSET_MANIFEST,
   sourceCommit: '3e0985e656549d987ff20a78d00de185f6f28381',
   perFileHashes: { 'index.html': h(11), 'app.js': h(22), 'sw.js': h(33) },
@@ -110,18 +133,20 @@ test('a changed file is reported as changed', () => {
   const result = runSelfCheck(IDENTITY, { ...IDENTITY.perFileHashes, 'app.js': h(12) });
   assert.equal(result.ok, false);
   assert.equal(result.findings.length, 1);
-  assert.equal(result.findings[0].kind, 'changed');
-  assert.equal(result.findings[0].path, 'app.js');
+  assert.equal(finding(result.findings).kind, 'changed');
+  assert.equal(finding(result.findings).path, 'app.js');
   assert.equal(result.verifiedCount, 2);
 });
 
 test('a missing file is reported, and is not silently a pass', () => {
-  const served = { ...IDENTITY.perFileHashes };
+  // Annotated so `delete` is legal: a spread of a known-keys object produces required
+  // properties, and TypeScript refuses `delete` on one.
+  const served: Record<string, Hash32> = { ...IDENTITY.perFileHashes };
   delete served['sw.js'];
   const result = runSelfCheck(IDENTITY, served);
   assert.equal(result.ok, false);
-  assert.equal(result.findings[0].kind, 'missing');
-  assert.equal(result.findings[0].path, 'sw.js');
+  assert.equal(finding(result.findings).kind, 'missing');
+  assert.equal(finding(result.findings).path, 'sw.js');
 });
 
 test('an UNEXPECTED served file is reported — the direction a manifest loop cannot see', () => {
@@ -131,8 +156,8 @@ test('an UNEXPECTED served file is reported — the direction a manifest loop ca
   const result = runSelfCheck(IDENTITY, { ...IDENTITY.perFileHashes, 'payload.js': h(12) });
   assert.equal(result.ok, false, 'an extra served file passed the self-check');
   assert.equal(result.findings.length, 1);
-  assert.equal(result.findings[0].kind, 'unexpected');
-  assert.equal(result.findings[0].path, 'payload.js');
+  assert.equal(finding(result.findings).kind, 'unexpected');
+  assert.equal(finding(result.findings).path, 'payload.js');
   // ...and every signed file still verified, which is exactly why it needs its own finding.
   assert.equal(result.verifiedCount, 3);
 });
@@ -190,7 +215,7 @@ test('a prototype-carried entry cannot hide a tamper (own keys only)', () => {
   // `Object.entries` does not. `Object.create({'app.js': good})` therefore made
   // `served['app.js']` return the good hash at comparison time while the enumeration
   // never listed it — so a tampered `app.js` was neither compared nor reported.
-  const served = Object.create({ 'app.js': h(22) });
+  const served: Record<string, Hash32> = Object.create({ 'app.js': h(22) });
   served['index.html'] = h(11);
   served['sw.js'] = h(33);
   const result = runSelfCheck(IDENTITY, served);
@@ -199,7 +224,7 @@ test('a prototype-carried entry cannot hide a tamper (own keys only)', () => {
 
   // ...and the reverse: an inherited *manifest* entry must not suppress the
   // unexpected-file finding for a served file nobody signed.
-  const inheritedManifest = Object.create({ 'payload.js': h(44) });
+  const inheritedManifest: Record<string, Hash32> = Object.create({ 'payload.js': h(44) });
   inheritedManifest['index.html'] = h(11);
   const reverse = runSelfCheck(
     { ...IDENTITY, perFileHashes: inheritedManifest },
@@ -231,8 +256,12 @@ test('the panel renders with no chain and no self-check (FE-BOOT-002)', () => {
 test('buildPanel is synchronous and takes no chain handle', () => {
   // If it ever returns a promise, the panel has acquired a dependency on something that
   // can be down — and it would be down in exactly the incident it exists for.
-  const panel = buildPanel(IDENTITY);
-  assert.equal(typeof panel.then, 'undefined');
+  // Half of this is now a compile-time fact: were `buildPanel` async its declared return
+  // type would be `Promise<VerificationPanel>` and `.then` would typecheck. The runtime
+  // check stays, because it also catches a non-Promise thenable, and it is narrowed here
+  // rather than by giving `VerificationPanel` a `then` member it must not have.
+  const panel: unknown = buildPanel(IDENTITY);
+  assert.equal(typeof (panel as { then?: unknown }).then, 'undefined');
   // The arity bound is a proxy for "no chain handle got added". It moved to 4 when the
   // observed base TXID arrived — which is a `BaseTxidVerdict` the caller already resolved
   // from `location`, not a connection, so the property this test guards is intact.
@@ -282,7 +311,7 @@ test('a terminal chain verdict stops the app and says why', () => {
   assert.equal(panel.status, 'divergent');
   assert.equal(panel.chainIdentityVerified, false);
   assert.equal(panel.warnings.length, 1);
-  assert.match(panel.warnings[0], /different chain/);
+  assert.match(finding(panel.warnings), /different chain/);
 });
 
 test('self-check findings reach the user as warnings', () => {
@@ -290,7 +319,7 @@ test('self-check findings reach the user as warnings', () => {
   const panel = buildPanel(IDENTITY, tampered, { kind: 'verified' });
   assert.equal(panel.status, 'divergent');
   assert.equal(panel.warnings.length, 1);
-  assert.match(panel.warnings[0], /not the file that was published/);
+  assert.match(finding(panel.warnings), /not the file that was published/);
   // A tampered bundle on the right chain still must not read as merely informational.
   assert.notEqual(panel.status, 'verified');
 });
@@ -302,7 +331,7 @@ const DAY = 24 * 60 * 60 * 1000;
 // runtime, which agree exactly. Written here as the values the release document carries,
 // not as a client-side default — the module takes them as an argument for that reason.
 const RELAY_BOUND = { bondingDurationEras: 28, slashDeferDurationEras: 27, eraMillis: DAY };
-const at = (ageDays) => classifyCheckpointAge(0, ageDays * DAY, RELAY_BOUND);
+const at = (ageDays: number) => classifyCheckpointAge(0, ageDays * DAY, RELAY_BOUND);
 
 test('a fresh checkpoint is fresh, and the boundary is the day it lapses', () => {
   assert.equal(at(0).kind, 'fresh');
@@ -366,10 +395,18 @@ test('the bound moves with the chain rather than being baked in', () => {
 });
 
 test('the messages say what lapsed and what to do about it', () => {
-  assert.match(at(27).message, /deter|penalty/i);
-  assert.match(at(27).message, /newer release/);
-  assert.match(at(28).message, /withdrawn their stake|bonding duration/);
-  assert.match(at(28).message, /newer release/);
+  // `fresh` carries no message — deliberately, since there is nothing to say — so the
+  // message is read through a narrowing accessor rather than by making it optional on
+  // every arm, which would let a lapsed verdict ship with nothing to tell the user.
+  const messageAt = (days: number): string => {
+    const verdict = at(days);
+    assert.ok(verdict.kind !== 'fresh', `day ${days} classified as fresh; it should have lapsed`);
+    return verdict.message;
+  };
+  assert.match(messageAt(27), /deter|penalty/i);
+  assert.match(messageAt(27), /newer release/);
+  assert.match(messageAt(28), /withdrawn their stake|bonding duration/);
+  assert.match(messageAt(28), /newer release/);
 });
 
 // --- the base TXID, observed from `location` (12 §1.2) ---------------------
@@ -422,29 +459,34 @@ test('an ArNS name and a dev server are `not-content-addressed`, with a reason',
   for (const href of ['https://v1-2-3_futarchy.arweave.net/', 'http://localhost:5173/', 'not a url']) {
     const verdict = resolveBaseTxid(href);
     assert.equal(verdict.kind, 'not-content-addressed', href);
+    assert.ok(verdict.kind === 'not-content-addressed');
     assert.ok(verdict.detail.length > 0, `${href} gave no reason`);
   }
-  assert.match(resolveBaseTxid('https://v1-2-3_futarchy.arweave.net/').detail, /ArNS/);
+  const arns = resolveBaseTxid('https://v1-2-3_futarchy.arweave.net/');
+  assert.ok(arns.kind === 'not-content-addressed');
+  assert.match(arns.detail, /ArNS/);
 });
 
 test('the panel renders the observed address beside the pinned one, and never as a warning', () => {
   // "the verification CLI checks both" — the pinned asset manifest and what was served.
   const served = resolveBaseTxid(`https://arweave.net/${'Z'.repeat(43)}/`);
   const panel = buildPanel(IDENTITY, undefined, undefined, served);
-  const row = panel.rows.find((r) => r.label === 'Served from (Arweave TXID)');
-  assert.ok(row, 'the observed address is missing from the panel');
+  const row = panelRow(panel.rows, 'Served from (Arweave TXID)');
   assert.equal(row.kind, 'observed');
   assert.equal(row.value, 'Z'.repeat(43));
   // The pinned row is a DIFFERENT row with a different address: conflating them would hide
   // exactly the substitution this pair exists to expose.
-  const pinned = panel.rows.find((r) => r.label === 'Release assets (Arweave TXID)');
+  const pinned = panelRow(panel.rows, 'Release assets (Arweave TXID)');
   assert.equal(pinned.kind, 'pinned');
   assert.notEqual(pinned.value, row.value);
 
   // Running off a dev server is not a divergence, so it must not become a warning.
   const local = buildPanel(IDENTITY, undefined, undefined, resolveBaseTxid('http://localhost:5173/'));
   assert.deepEqual(local.warnings, []);
-  assert.equal(local.rows.find((r) => r.label === 'Served from (Arweave TXID)').value, 'not a content address');
+  assert.equal(
+    panelRow(local.rows, 'Served from (Arweave TXID)').value,
+    'not a content address',
+  );
 
   // And absent entirely when it was not resolved — no invented row.
   assert.equal(buildPanel(IDENTITY).rows.some((r) => r.label === 'Served from (Arweave TXID)'), false);

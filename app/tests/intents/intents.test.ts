@@ -41,6 +41,14 @@ import {
   clampLimits,
   narrowMaxAge,
 } from '@bleavit/intents';
+import type {
+  AdmissionContext,
+  ClampInputs,
+  ClampResult,
+  ClampedLimits,
+  Clamped,
+  IntentLimits,
+} from '@bleavit/intents';
 
 const LIVE = {
   genesisHash: '0x91b171bb158e2d3848fa23a9f1c25182fb8e20313b2c1eb49219da7a70ce90c3',
@@ -50,11 +58,32 @@ const LIVE = {
 const NOW = 1_000;
 
 /** The producer's hash. Callers supply their own primitive (10 §13.1); this is node's. */
-const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
+const sha256 = (bytes: Uint8Array): string => createHash('sha256').update(bytes).digest('hex');
 
-const ctx = (over = {}) => ({ live: LIVE, currentBlock: NOW, digest: sha256, ...over });
+/**
+ * A document body before signing.
+ *
+ * The members are `unknown` because this corpus exists to build documents the parser must
+ * **refuse** — a foreign key inside a closed core, a non-canonical id, a padded blob. Typing
+ * them as the valid shapes would make every hostile fixture a compile error, which is the
+ * corpus declining to state its own negative cases.
+ */
+interface DocumentBody {
+  readonly schema: unknown;
+  readonly binding: Record<string, unknown>;
+  readonly action: Record<string, unknown>;
+  readonly limits?: Record<string, unknown>;
+  readonly [key: string]: unknown;
+}
 
-const core = (d) => ({
+const ctx = (over: Partial<AdmissionContext> = {}): AdmissionContext => ({
+  live: LIVE,
+  currentBlock: NOW,
+  digest: sha256,
+  ...over,
+});
+
+const core = (d: DocumentBody): Record<string, unknown> => ({
   schema: d.schema,
   binding: d.binding,
   action: d.action,
@@ -62,10 +91,10 @@ const core = (d) => ({
 });
 
 /** A document as a producer would emit it: the core, then the digest over that core. */
-const sign = (d, tag = INTENT_DOMAIN_TAG) =>
+const sign = (d: DocumentBody, tag: string = INTENT_DOMAIN_TAG): string =>
   JSON.stringify({ ...d, digest: sha256(digestPreimage(tag, core(d))) });
 
-const body = (over = {}) => ({
+const body = (over: Record<string, unknown> = {}): DocumentBody => ({
   schema: INTENT_SCHEMA,
   binding: { ...LIVE },
   action: { kind: 'prepare_pass_position', id: '7', collateral: '1000000' },
@@ -73,17 +102,18 @@ const body = (over = {}) => ({
   ...over,
 });
 
-const admit = (text, c = ctx()) => admitIntent(text, c);
-const admitDoc = (over = {}, c = ctx()) => admit(sign(body(over)), c);
+const admit = (text: unknown, c: AdmissionContext = ctx()) => admitIntent(text, c);
+const admitDoc = (over: Record<string, unknown> = {}, c: AdmissionContext = ctx()) =>
+  admit(sign(body(over)), c);
 
-async function refusalOf(over = {}, c = ctx()) {
+async function refusalOf(over: Record<string, unknown> = {}, c: AdmissionContext = ctx()) {
   const r = await admitDoc(over, c);
   assert.equal(r.ok, false, 'document was accepted but should have been refused');
   return r.refusal.code;
 }
 
 /** For inputs that are not documents-with-overrides: raw text, and non-text entirely. */
-async function refusalOfRaw(value, c = ctx()) {
+async function refusalOfRaw(value: unknown, c: AdmissionContext = ctx()) {
   const r = await admit(value, c);
   assert.equal(r.ok, false, 'input was accepted but should have been refused');
   return r.refusal.code;
@@ -150,7 +180,13 @@ test('a top-level annotation does NOT break the digest', async () => {
 });
 
 test('there is no unchecked path: admission requires a digest function', async () => {
-  await assert.rejects(() => admitIntent(sign(body()), { live: LIVE, currentBlock: NOW }), TypeError);
+  // `AdmissionContext.digest` is required, so this call cannot be written directly — which is
+  // the compile-time half of the very property under test. The runtime half still needs
+  // proving, because a JavaScript caller has no compiler; hence one named escape rather than
+  // an optional `digest`, which would make the check default to off (the `assertCheckable`
+  // defect this test cites).
+  const withoutDigest = { live: LIVE, currentBlock: NOW } as AdmissionContext;
+  await assert.rejects(() => admitIntent(sign(body()), withoutDigest), TypeError);
   // ...and no exported entry point performs the structural parse without it. A gate the
   // caller can decline to use is the `assertCheckable` defect in `packages/verify`.
   assert.equal('parseIntent' in intentsModule, false, 'a digest-free parse entry point exists');
@@ -163,7 +199,7 @@ test('a digest function that returns garbage is a programmer error, not a refusa
 });
 
 test('an async digest is supported, because SubtleCrypto is async', async () => {
-  const r = await admitDoc({}, ctx({ digest: async (bytes) => sha256(bytes) }));
+  const r = await admitDoc({}, ctx({ digest: async (bytes: Uint8Array) => sha256(bytes) }));
   assert.equal(r.ok, true, r.ok === false ? r.refusal.detail : '');
 });
 
@@ -282,7 +318,7 @@ test('the input is text; a caller-built object is refused', async () => {
  * refusal test whose document has a second reason to be refused proves nothing about the
  * first.
  */
-const oversized = (padding) => {
+const oversized = (padding: unknown): string => {
   const doc = JSON.parse(sign(body()));
   doc.padding = padding;
   return JSON.stringify(doc);
@@ -294,11 +330,11 @@ test('the padded fixtures are otherwise valid, or the bound tests prove nothing'
 });
 
 test('an over-deep document is refused before it is read semantically', async () => {
-  let nested = { deep: true };
+  let nested: unknown = { deep: true };
   for (let i = 0; i < MAX_DEPTH + 3; i += 1) nested = { nested };
   assert.equal(await refusalOfRaw(oversized(nested)), 'FE-HANDOFF-002');
   // Arrays nest too. A guard that walks only objects leaves this unbounded.
-  let arrays = [1];
+  let arrays: unknown = [1];
   for (let i = 0; i < MAX_DEPTH + 3; i += 1) arrays = [arrays];
   assert.equal(await refusalOfRaw(oversized(arrays)), 'FE-HANDOFF-002');
 });
@@ -471,7 +507,7 @@ test('a buy ceiling and a sell floor in one document are refused', async () => {
 test('a deadline already past on arrival is FE-HANDOFF-008', async () => {
   // 11 §11.14.1 lists expiry among the *admission* checks — properties of a file. The
   // document never becomes a transaction.
-  const buy = (deadlineBlock) => ({ limits: { maxCost: '1100000', deadlineBlock } });
+  const buy = (deadlineBlock: number) => ({ limits: { maxCost: '1100000', deadlineBlock } });
   assert.equal(await refusalOf(buy(NOW - 1)), 'FE-HANDOFF-008');
   assert.equal(await refusalOf(buy(NOW)), 'FE-HANDOFF-008');
   assert.equal((await admitDoc(buy(NOW + 1))).ok, true);
@@ -521,15 +557,19 @@ test('required fields are read as OWN properties, never inherited', async () => 
   // `Object.prototype` pollution a document of `{"schema":"…"}` alone could be admitted on
   // an inherited binding, action, limits and digest that the closed-shape scan never sees.
   const polluted = ['binding', 'action', 'limits', 'digest'];
-  const original = Object.fromEntries(polluted.map((k) => [k, Object.prototype[k]]));
-  const template = JSON.parse(sign(body()));
+  // `Object.prototype` is typed as `Object`, which has no index signature — so writing to it
+  // is a compile error, and writing to it is precisely the attack being reproduced. Narrowed
+  // once, here, rather than widening any production type.
+  const proto = Object.prototype as Record<string, unknown>;
+  const original = Object.fromEntries(polluted.map((k) => [k, proto[k]]));
+  const template = JSON.parse(sign(body())) as Record<string, unknown>;
   try {
-    for (const key of polluted) Object.prototype[key] = template[key];
+    for (const key of polluted) proto[key] = template[key];
     assert.equal(await refusalOfRaw(JSON.stringify({ schema: INTENT_SCHEMA })), 'FE-HANDOFF-002');
   } finally {
     for (const key of polluted) {
-      if (original[key] === undefined) delete Object.prototype[key];
-      else Object.prototype[key] = original[key];
+      if (original[key] === undefined) delete proto[key];
+      else proto[key] = original[key];
     }
   }
 });
@@ -577,8 +617,15 @@ test('the digest must be exactly 64 lowercase hex characters', async () => {
 test('FE-HANDOFF-009 is retired and never emitted', () => {
   // 10 §13.3: "retired and MUST NOT be reassigned". A reused code makes two different
   // failures indistinguishable in every record written before and after the reuse.
-  assert.ok(RETIRED_CODES.includes('FE-HANDOFF-009'));
-  assert.equal(REFUSAL_CODES.includes('FE-HANDOFF-009'), false, 'a retired code was reassigned');
+  // `HandoffRefusalCode` does not contain the retired code — that absence is the property
+  // under test, so the membership questions are asked of the arrays widened to `string`,
+  // never by adding the code back to the union to make the call typecheck.
+  assert.ok((RETIRED_CODES as readonly string[]).includes('FE-HANDOFF-009'));
+  assert.equal(
+    (REFUSAL_CODES as readonly string[]).includes('FE-HANDOFF-009'),
+    false,
+    'a retired code was reassigned',
+  );
 });
 
 test('the family is 001..013 with exactly the retired gap', () => {
@@ -617,8 +664,27 @@ test('no refusal echoes a document-supplied string (10 §13.4)', async () => {
 
 // --- clamping -------------------------------------------------------------
 
-const clampCtx = (over = {}) => ({ currentBlock: 10, chainDeadlineBlock: 100, ...over });
-const clamped = (limits, inputs) => {
+const clampCtx = (over: Partial<ClampInputs> = {}): ClampInputs => ({
+  currentBlock: 10,
+  chainDeadlineBlock: 100,
+  ...over,
+});
+/**
+ * A clamped monetary limit, or a failure naming the one that is missing.
+ *
+ * `ClampedLimits.maxCost` and `.minProceeds` are optional because a prepare has one and a
+ * close the other. Reading them with `!` would be the wrong repair here specifically: the
+ * defect this file was written around is a stated limit being **silently dropped** rather
+ * than refused, so a non-null assertion would suppress exactly the symptom under test and
+ * the failure would surface as `undefined.encoded` several lines later.
+ */
+function bound(limits: ClampedLimits, which: 'maxCost' | 'minProceeds'): Clamped<bigint> {
+  const value = limits[which];
+  assert.ok(value !== undefined, `the clamp produced no ${which} at all`);
+  return value;
+}
+
+const clamped = (limits: IntentLimits, inputs: ClampInputs): ClampedLimits => {
   const c = clampLimits(limits, inputs);
   assert.equal(c.ok, true, c.ok === false ? c.refusal.detail : '');
   return c.limits;
@@ -626,37 +692,37 @@ const clamped = (limits, inputs) => {
 
 test('a ceiling is narrowed, never widened', () => {
   const c = clamped({ maxCost: 5000n }, clampCtx({ chainMaxCost: 3000n }));
-  assert.equal(c.maxCost.encoded, 3000n, 'the tool widened the ceiling');
-  assert.equal(c.maxCost.boundBy, 'chain');
-  assert.equal(c.maxCost.narrowed, true);
+  assert.equal(bound(c, 'maxCost').encoded, 3000n, 'the tool widened the ceiling');
+  assert.equal(bound(c, 'maxCost').boundBy, 'chain');
+  assert.equal(bound(c, 'maxCost').narrowed, true);
 });
 
 test('a tighter ceiling from the tool is honoured', () => {
   const c = clamped({ maxCost: 1000n }, clampCtx({ chainMaxCost: 3000n }));
-  assert.equal(c.maxCost.encoded, 1000n);
-  assert.equal(c.maxCost.boundBy, 'intent');
-  assert.equal(c.maxCost.narrowed, false);
+  assert.equal(bound(c, 'maxCost').encoded, 1000n);
+  assert.equal(bound(c, 'maxCost').boundBy, 'intent');
+  assert.equal(bound(c, 'maxCost').narrowed, false);
 });
 
 test('a floor is raised, never lowered', () => {
   const c = clamped({ minProceeds: 100n }, clampCtx({ chainMinProceeds: 500n }));
-  assert.equal(c.minProceeds.encoded, 500n, 'the tool lowered the proceeds floor');
-  assert.equal(c.minProceeds.narrowed, true);
+  assert.equal(bound(c, 'minProceeds').encoded, 500n, 'the tool lowered the proceeds floor');
+  assert.equal(bound(c, 'minProceeds').narrowed, true);
 });
 
 test('a policy cap binds when it is the tightest', () => {
   const c = clamped({ maxCost: 5000n }, clampCtx({ chainMaxCost: 3000n, policyMaxCost: 900n }));
-  assert.equal(c.maxCost.encoded, 900n);
-  assert.equal(c.maxCost.boundBy, 'policy');
+  assert.equal(bound(c, 'maxCost').encoded, 900n);
+  assert.equal(bound(c, 'maxCost').boundBy, 'policy');
 });
 
 test('the asked value is kept alongside the encoded one, not overwritten', () => {
   // Two facts with two provenances — one `external-proposal`, one chain-derived. The
   // difference is shown, not silently applied (11 §11.14.3).
   const c = clamped({ maxCost: 5000n }, clampCtx({ chainMaxCost: 3000n }));
-  assert.equal(c.maxCost.asked, 5000n);
-  assert.equal(c.maxCost.chain, 3000n);
-  assert.notEqual(c.maxCost.asked, c.maxCost.encoded);
+  assert.equal(bound(c, 'maxCost').asked, 5000n);
+  assert.equal(bound(c, 'maxCost').chain, 3000n);
+  assert.notEqual(bound(c, 'maxCost').asked, bound(c, 'maxCost').encoded);
   assert.equal(c.anyNarrowed, true);
 });
 
@@ -705,11 +771,13 @@ test('clamping returns a refusal rather than throwing — and it IS a refusal', 
   // contract with the user is that every rejection arrives as a coded refusal. Asserting
   // only `doesNotThrow` passed on a SUCCESSFUL clamp too, so it never checked the thing it
   // was named for.
-  let result;
+  let result: ClampResult | undefined;
   assert.doesNotThrow(() => {
     result = clampLimits({ deadlineBlock: 5 }, clampCtx({ chainMaxCost: 1n, currentBlock: 10 }));
   });
+  assert.ok(result !== undefined, 'the clamp returned nothing at all');
   assert.equal(result.ok, false, 'an expired deadline was clamped rather than refused');
+  assert.ok(result.ok === false);
   assert.equal(result.refusal.code, 'FE-HANDOFF-011');
   assert.equal(typeof result.refusal.message, 'string');
 });

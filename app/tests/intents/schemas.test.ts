@@ -50,12 +50,40 @@ import { INTENT_DOMAIN_TAG, INTENT_SCHEMA, admitIntent } from '@bleavit/intents'
 const SCHEMA_DIR = join(dirname(fileURLToPath(import.meta.url)), '../../schemas');
 const intentSchema = JSON.parse(
   readFileSync(join(SCHEMA_DIR, `${INTENT_SCHEMA}.schema.json`), 'utf8'),
-);
+) as JsonSchema;
 
 /* ------------------------------------------------------------------ the validator */
 
+/**
+ * The JSON Schema subset this validator implements — the type form of `KNOWN` below.
+ *
+ * The two are deliberately both present and neither is redundant. This interface is what the
+ * *test* may write; `KNOWN` is what a **schema file read off disk** is checked against at
+ * runtime, and that check is the load-bearing one: a keyword nobody implemented must be a
+ * hard error rather than something silently skipped, since a validator that ignores what it
+ * does not understand reports success over a subset it never names.
+ */
+interface JsonSchema {
+  readonly $schema?: string;
+  readonly $id?: string;
+  readonly $comment?: string;
+  readonly title?: string;
+  readonly description?: string;
+  readonly type?: string;
+  readonly properties?: Readonly<Record<string, JsonSchema>>;
+  readonly required?: readonly string[];
+  readonly additionalProperties?: boolean;
+  readonly enum?: readonly unknown[];
+  readonly const?: unknown;
+  readonly pattern?: string;
+  readonly minimum?: number;
+  readonly maximum?: number;
+  readonly items?: JsonSchema;
+  readonly oneOf?: readonly JsonSchema[];
+}
+
 /** Every keyword this validator implements. Anything else is a hard error. */
-const KNOWN = new Set([
+const KNOWN: ReadonlySet<string> = new Set([
   '$schema',
   '$id',
   '$comment',
@@ -83,7 +111,7 @@ class UnknownKeyword extends Error {}
  * schemas and refuses to guess at anything else — a validator that skips what it does not
  * understand reports success having checked a subset it never names.
  */
-function validate(value, schema, path = '$') {
+function validate(value: unknown, schema: JsonSchema, path = '$'): string[] {
   for (const keyword of Object.keys(schema)) {
     if (!KNOWN.has(keyword)) {
       throw new UnknownKeyword(
@@ -94,8 +122,8 @@ function validate(value, schema, path = '$') {
     }
   }
 
-  const errors = [];
-  const fail = (why) => errors.push(`${path}: ${why}`);
+  const errors: string[] = [];
+  const fail = (why: string): number => errors.push(`${path}: ${why}`);
 
   if (schema.const !== undefined && value !== schema.const) fail(`expected const ${schema.const}`);
   if (schema.enum !== undefined && !schema.enum.includes(value)) fail('not in enum');
@@ -121,14 +149,15 @@ function validate(value, schema, path = '$') {
   }
 
   if (Array.isArray(value) && schema.items !== undefined) {
-    value.forEach((item, i) => errors.push(...validate(item, schema.items, `${path}[${i}]`)));
+    const items = schema.items;
+    value.forEach((item, i) => errors.push(...validate(item, items, `${path}[${i}]`)));
   }
 
   if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
     for (const key of schema.required ?? []) {
       if (!Object.hasOwn(value, key)) fail(`missing required "${key}"`);
     }
-    for (const [key, member] of Object.entries(value)) {
+    for (const [key, member] of Object.entries(value as Record<string, unknown>)) {
       const sub = schema.properties?.[key];
       if (sub !== undefined) {
         errors.push(...validate(member, sub, `${path}.${key}`));
@@ -146,7 +175,7 @@ function validate(value, schema, path = '$') {
   return errors;
 }
 
-const valid = (document) => validate(document, intentSchema).length === 0;
+const valid = (document: unknown): boolean => validate(document, intentSchema).length === 0;
 
 /* --------------------------------------------------------------------- the corpus */
 
@@ -156,13 +185,37 @@ const LIVE = {
   contractVersion: 24,
 };
 const NOW = 1_000;
-const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
+const sha256 = (bytes: Uint8Array): string => createHash('sha256').update(bytes).digest('hex');
 const ctx = { live: LIVE, currentBlock: NOW, digest: sha256 };
 
-const core = (d) => ({ schema: d.schema, binding: d.binding, action: d.action, limits: d.limits });
-const sign = (d) => ({ ...d, digest: sha256(digestPreimage(INTENT_DOMAIN_TAG, core(d))) });
+/**
+ * A document body, before signing.
+ *
+ * The four core members are `unknown` because this corpus deliberately builds documents the
+ * parser must **refuse** — a foreign key inside `action`, a `fractionPpm` out of range, an id
+ * that is not canonical decimal. Typing them as the valid shapes would make every hostile
+ * fixture a compile error, which is the corpus refusing to state its own negative cases.
+ */
+interface DocumentBody {
+  readonly schema: unknown;
+  readonly binding: unknown;
+  readonly action: unknown;
+  readonly limits?: unknown;
+  readonly [key: string]: unknown;
+}
 
-const body = (over = {}) => ({
+const core = (d: DocumentBody): Record<string, unknown> => ({
+  schema: d.schema,
+  binding: d.binding,
+  action: d.action,
+  limits: d.limits,
+});
+const sign = (d: DocumentBody): DocumentBody => ({
+  ...d,
+  digest: sha256(digestPreimage(INTENT_DOMAIN_TAG, core(d))),
+});
+
+const body = (over: Record<string, unknown> = {}): DocumentBody => ({
   schema: INTENT_SCHEMA,
   binding: { ...LIVE },
   action: { kind: 'prepare_pass_position', id: '7', collateral: '1000000' },
@@ -171,7 +224,7 @@ const body = (over = {}) => ({
 });
 
 /** Documents the parser must ADMIT. Each must therefore validate. */
-const ADMITTED = [
+const ADMITTED: ReadonlyArray<readonly [string, DocumentBody]> = [
   ['a prepare with a cost ceiling', body()],
   ['a fail-side prepare', body({ action: { kind: 'prepare_fail_position', id: '9', collateral: '5' } })],
   [
@@ -194,7 +247,7 @@ const ADMITTED = [
 ];
 
 /** Documents that are WELL FORMED and still refused — the admission/precondition gap. */
-const WELL_FORMED_BUT_REFUSED = [
+const WELL_FORMED_BUT_REFUSED: ReadonlyArray<readonly [string, DocumentBody]> = [
   ['a stale deadline', body({ limits: { maxCost: '2', deadlineBlock: NOW - 1 } })],
   ['a foreign chain', body({ binding: { ...LIVE, genesisHash: `0x${'ab'.repeat(32)}` } })],
   ['a newer runtime', body({ binding: { ...LIVE, specVersion: LIVE.specVersion + 1 } })],
@@ -222,7 +275,7 @@ test('the required monetary limit and its direction are PUBLISHED, not just enfo
   // following it emits `"limits": {}`, validates cleanly, and is refused at the user with
   // no way to have known — and the wrong direction is worse, because a proceeds floor on a
   // purchase sits on the confirm screen looking like protection while binding nothing.
-  const cases = [
+  const cases: ReadonlyArray<readonly [string, DocumentBody]> = [
     ['a prepare with no limits', body({ limits: {} })],
     ['a close with no limits', body({ action: { kind: 'close_position', id: '3', fractionPpm: 1 }, limits: {} })],
     ['a prepare carrying a proceeds floor', body({ limits: { minProceeds: '1' } })],
@@ -244,7 +297,10 @@ test('the required monetary limit and its direction are PUBLISHED, not just enfo
 test('a foreign key inside a closed core is refused by BOTH — the published asymmetry', async () => {
   for (const container of ['action', 'limits', 'binding']) {
     const document = body();
-    const hostile = sign({ ...document, [container]: { ...document[container], callData: '0xdead' } });
+    const hostile = sign({
+      ...document,
+      [container]: { ...(document[container] as Record<string, unknown>), callData: '0xdead' },
+    });
     const result = await admitIntent(JSON.stringify(hostile), ctx);
     assert.equal(result.ok, false, `${container}: the parser admitted a foreign key`);
     assert.equal(result.refusal.code, 'FE-HANDOFF-004');
@@ -279,7 +335,10 @@ test('the schema cannot express a precondition, and does not pretend to', async 
 
 test('a tampered document validates and is still refused — the digest is not a shape', async () => {
   const signed = sign(body());
-  const tampered = { ...signed, action: { ...signed.action, collateral: '999999999' } };
+  const tampered = {
+    ...signed,
+    action: { ...(signed.action as Record<string, unknown>), collateral: '999999999' },
+  };
   assert.equal(valid(tampered), true, 'a tampered document is still well formed');
   const result = await admitIntent(JSON.stringify(tampered), ctx);
   assert.equal(result.ok, false);
@@ -344,7 +403,7 @@ test('a non-canonical decimal STRING is rejected by both — the pattern, not ju
 });
 
 test('fractionPpm is bounded at 1..1_000_000 inclusive', () => {
-  const close = (fractionPpm) =>
+  const close = (fractionPpm: number): DocumentBody =>
     sign(
       body({
         action: { kind: 'close_position', id: '3', fractionPpm },
@@ -359,9 +418,21 @@ test('fractionPpm is bounded at 1..1_000_000 inclusive', () => {
 
 /* ------------------------------------------- the validator must be able to say no */
 
+/**
+ * A schema carrying a keyword this validator does not implement.
+ *
+ * `JsonSchema` deliberately does not admit one — that is the point of the type — so the
+ * negative control below needs a named way past it. Widening `JsonSchema` with an index
+ * signature would be the wrong repair: every call site could then invent a keyword, the
+ * compile-time half of the check would go vacuous, and only the runtime half this very test
+ * exists to prove would be left standing.
+ */
+const withUnimplementedKeyword = (schema: Record<string, unknown>): JsonSchema =>
+  schema as JsonSchema;
+
 test('the validator refuses a keyword it does not implement', () => {
   assert.throws(
-    () => validate({}, { type: 'object', minProperties: 1 }),
+    () => validate({}, withUnimplementedKeyword({ type: 'object', minProperties: 1 })),
     UnknownKeyword,
     'an unimplemented keyword was silently ignored, which makes every test above weaker ' +
       'than it reads',
@@ -372,7 +443,7 @@ test('each implemented keyword has a negative control', () => {
   // Without this, a validator whose `pattern` branch never ran would pass every test in
   // this file: all of them assert that valid documents validate, and a validator that
   // accepts everything does that perfectly.
-  const cases = [
+  const cases: ReadonlyArray<readonly [string, JsonSchema, unknown]> = [
     ['const', { const: 'a' }, 'b'],
     ['enum', { enum: ['a'] }, 'b'],
     ['type', { type: 'string' }, 1],

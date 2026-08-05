@@ -36,14 +36,76 @@ import {
   runtimeFor,
   surfaceIsProven,
 } from '@bleavit/descriptors';
+import type {
+  AnyCompatHelper,
+  CompatClassification,
+  CompatSurface,
+  CriticalSurfaceEntry,
+  SurfaceProbe,
+} from '@bleavit/descriptors';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const MANIFEST = JSON.parse(
+const MANIFEST: SurfaceManifest = JSON.parse(
   readFileSync(resolve(HERE, '..', '..', '..', 'tools', 'release', 'surface-manifest.json'), 'utf8'),
 );
 
-const allPass = (surface = CRITICAL_SURFACE) =>
+const allPass = (surface: readonly CriticalSurfaceEntry[] = CRITICAL_SURFACE): SurfaceProbe[] =>
   surface.map((e) => ({ id: e.id, compatible: true, level: 'identical' }));
+
+/**
+ * A `CRITICAL_SURFACE` entry by position, or a failure saying the list is shorter.
+ *
+ * `noUncheckedIndexedAccess` types `surfaceAt(3)` as possibly `undefined`, and that
+ * is not pedantry here: the list is **generated** from the release manifest, so an entry
+ * being dropped is a real event, and these tests address entries by index. Reading through
+ * `!` would turn a shrunken surface into `undefined.id` several lines later instead of a
+ * failure naming the index that vanished.
+ */
+function surfaceAt(index: number): CriticalSurfaceEntry {
+  const entry = CRITICAL_SURFACE[index];
+  assert.ok(entry, `CRITICAL_SURFACE has no entry ${index} (length ${CRITICAL_SURFACE.length})`);
+  return entry;
+}
+
+/** The first element, or a failure saying there was none. */
+function first<T>(items: readonly T[], what: string): T {
+  const value = items[0];
+  assert.ok(value !== undefined, `expected at least one ${what}, got none`);
+  return value;
+}
+
+/**
+ * `tools/release/surface-manifest.json`, as far as this suite reads it.
+ *
+ * The entries are the generator's input; `CRITICAL_SURFACE` is its output, and the tests
+ * below compare the two. Only `id` and `kind` are read here, so only those are declared —
+ * this is a description of what the suite consumes, not a second copy of the manifest schema.
+ */
+interface SurfaceManifest {
+  readonly integration_contract_version: number;
+  readonly entries: ReadonlyArray<{ readonly id: string; readonly kind: string }>;
+}
+
+/**
+ * Why a call is unavailable, or a failure if the classifier said it is available.
+ *
+ * `callUnavailableReason` returns `undefined` for `full` — the honest signature, since a
+ * usable call has no reason to give. Asserting a regex against `undefined` would otherwise
+ * fail with "expected string" rather than with "the classifier considers this call fine",
+ * which is the fact that actually went wrong.
+ */
+function reasonFor(classification: CompatClassification, call: string): string {
+  const reason = callUnavailableReason(classification, call);
+  assert.ok(reason !== undefined, `${call} is available; expected it to be unavailable`);
+  return reason;
+}
+
+/** The probe for `id`, or a failure saying it is absent from the report. */
+function probeFor(probes: readonly SurfaceProbe[], id: string): SurfaceProbe {
+  const probe = probes.find((p) => p.id === id);
+  assert.ok(probe, `the probe report has no entry for ${id}`);
+  return probe;
+}
 
 
 /**
@@ -54,7 +116,7 @@ const allPass = (surface = CRITICAL_SURFACE) =>
  * declaration files' *internals*, not the assignment being asserted, which is in our own
  * source. The witness is what proves that distinction holds.
  */
-function compileTypes(relative) {
+function compileTypes(relative: string): { ok: boolean; output: string } {
   const tsc = resolve(dirname(fileURLToPath(import.meta.url)), '../../node_modules/.bin/tsc');
   try {
     execFileSync(
@@ -69,7 +131,10 @@ function compileTypes(relative) {
     );
     return { ok: true, output: '' };
   } catch (err) {
-    return { ok: false, output: `${err.stdout ?? ''}${err.stderr ?? ''}` };
+    // `execFileSync` throws an Error carrying the child's streams; `unknown` is the honest
+    // type for a caught value, so the two fields are read through a narrow shape.
+    const failure = err as { stdout?: string; stderr?: string };
+    return { ok: false, output: `${failure.stdout ?? ''}${failure.stderr ?? ''}` };
   }
 }
 
@@ -129,9 +194,9 @@ test('an unsupported spec_version is read-only-incompatible, whatever the probes
   const result = classify(99, SUPPORTED_SPEC_VERSIONS, allPass());
   assert.equal(result.mode, 'read-only-incompatible');
   assert.deepEqual(result.proven, []);
-  assert.equal(surfaceIsProven(result, CRITICAL_SURFACE[0].id), false);
+  assert.equal(surfaceIsProven(result, surfaceAt(0).id), false);
   assert.equal(callIsProven(result, 'market.buy'), false);
-  assert.match(callUnavailableReason(result, 'market.buy'), /newer release/);
+  assert.match(reasonFor(result, 'market.buy'), /newer release/);
 });
 
 test('a fully passing probe set is full, and both live runtimes classify', () => {
@@ -147,24 +212,28 @@ test('a partial failure is restricted with NAMED surfaces, never a lazy Ready', 
   // 10 §3.1: "it does not pretend to be `Ready` and fail lazily". The naming is the
   // product requirement — a restricted mode that cannot say what is disabled is an
   // unexplained outage.
-  const probes = allPass().map((p, i) =>
+  const probes: SurfaceProbe[] = allPass().map((p, i) =>
     i === 3 ? { ...p, compatible: false, level: 'incompatible' } : p,
   );
   const result = classify(2, SUPPORTED_SPEC_VERSIONS, probes);
   assert.equal(result.mode, 'restricted');
   assert.equal(result.disabled.length, 1);
-  assert.equal(result.disabled[0].id, CRITICAL_SURFACE[3].id);
-  assert.match(result.disabled[0].reason, /absent from this runtime/);
-  assert.match(result.disabled[0].reason, /02 §/, 'the reason must cite the contract section');
-  assert.equal(surfaceIsProven(result, CRITICAL_SURFACE[3].id), false);
-  assert.equal(surfaceIsProven(result, CRITICAL_SURFACE[0].id), true);
+  assert.equal(first(result.disabled, 'disabled surface').id, surfaceAt(3).id);
+  assert.match(first(result.disabled, 'disabled surface').reason, /absent from this runtime/);
+  assert.match(first(result.disabled, 'disabled surface').reason, /02 §/, 'the reason must cite the contract section');
+  assert.equal(surfaceIsProven(result, surfaceAt(3).id), false);
+  assert.equal(surfaceIsProven(result, surfaceAt(0).id), true);
 });
 
 test('massive breakage is still restricted, not read-only-incompatible', () => {
   // Collapsing "lots of failures" into read-only-incompatible would take the app offline
   // for a partial upgrade it could have survived. The mode is a function of coverage,
   // not of damage.
-  const probes = allPass().map((p) => ({ ...p, compatible: false, level: 'incompatible' }));
+  const probes: SurfaceProbe[] = allPass().map((p) => ({
+    ...p,
+    compatible: false,
+    level: 'incompatible',
+  }));
   const result = classify(2, SUPPORTED_SPEC_VERSIONS, probes);
   assert.equal(result.mode, 'restricted');
   assert.equal(result.disabled.length, CRITICAL_SURFACE.length);
@@ -175,11 +244,13 @@ test('a `partial` level is a failure, and reads differently from an absent surfa
   // PAPI's `isCompatible()` defaults its threshold to BackwardsCompatible, so Partial is
   // not a pass (V-87). The level is still carried, because "changed shape" and "gone"
   // need different copy.
-  const probes = allPass().map((p, i) => (i === 0 ? { ...p, compatible: false, level: 'partial' } : p));
+  const probes: SurfaceProbe[] = allPass().map((p, i) =>
+    i === 0 ? { ...p, compatible: false, level: 'partial' } : p,
+  );
   const result = classify(2, SUPPORTED_SPEC_VERSIONS, probes);
   assert.equal(result.mode, 'restricted');
-  assert.match(result.disabled[0].reason, /changed shape/);
-  assert.doesNotMatch(result.disabled[0].reason, /absent/);
+  assert.match(first(result.disabled, 'disabled surface').reason, /changed shape/);
+  assert.doesNotMatch(first(result.disabled, 'disabled surface').reason, /absent/);
 });
 
 test('an unprobed surface is refused, never counted as passing', () => {
@@ -199,21 +270,33 @@ test('signing in restricted mode is fail-closed while calls are unmanifested (SQ
   // is known to be broken would sign against a call surface that was never checked.
   const full = classify(2, SUPPORTED_SPEC_VERSIONS, allPass());
   assert.equal(callIsProven(full, 'market.buy'), true);
+  // The raw accessor here, not `reasonFor`: this asserts there is *no* reason, which is
+  // what `full` means. `reasonFor` fails when a call is available, so using it would invert
+  // the assertion — and it did, until the suite caught it.
   assert.equal(callUnavailableReason(full, 'market.buy'), undefined);
 
-  const probes = allPass().map((p, i) => (i === 0 ? { ...p, compatible: false, level: 'partial' } : p));
+  const probes: SurfaceProbe[] = allPass().map((p, i) =>
+    i === 0 ? { ...p, compatible: false, level: 'partial' } : p,
+  );
   const restricted = classify(2, SUPPORTED_SPEC_VERSIONS, probes);
   assert.equal(callIsProven(restricted, 'market.buy'), false);
-  assert.match(callUnavailableReason(restricted, 'market.buy'), /SQ-577/);
-  assert.match(callUnavailableReason(restricted, 'market.buy'), /INV-FE-12/);
+  assert.match(reasonFor(restricted, 'market.buy'), /SQ-577/);
+  assert.match(reasonFor(restricted, 'market.buy'), /INV-FE-12/);
   assert.equal(MANIFEST.entries.some((e) => e.kind === 'call'), false, 'calls are manifested — SQ-577 has closed, so this placeholder must go');
 });
 
 test('the compat group of every entry matches its manifest kind', () => {
-  const expected = { runtime_api: 'apis', storage: 'query', constant: 'constants', event: 'event' };
+  const expected: Readonly<Record<string, string>> = {
+    runtime_api: 'apis',
+    storage: 'query',
+    constant: 'constants',
+    event: 'event',
+  };
   const byId = new Map(MANIFEST.entries.map((e) => [e.id, e]));
   for (const entry of CRITICAL_SURFACE) {
-    assert.equal(entry.compatGroup, expected[byId.get(entry.id).kind], entry.id);
+    const manifested = byId.get(entry.id);
+    assert.ok(manifested, `${entry.id} is in CRITICAL_SURFACE but not in the manifest`);
+    assert.equal(entry.compatGroup, expected[manifested.kind], entry.id);
   }
 });
 
@@ -234,14 +317,24 @@ test('the CompatibilityLevel mapping matches PAPI\'s real enum (V-87)', async ()
 });
 
 /** A compat surface double: `identical` everywhere unless overridden. */
-function compatSurface(overrides = {}) {
-  const helper = (level, compatible) => ({ level, isCompatible: () => compatible });
-  const groups = { apis: {}, query: {}, constants: {}, event: {} };
+type CompatOverride = 'absent' | { readonly level?: number; readonly compatible?: boolean };
+
+function compatSurface(overrides: Readonly<Record<string, CompatOverride>> = {}): CompatSurface {
+  const helper = (level: number, compatible: boolean) => ({
+    level,
+    isCompatible: () => compatible,
+  });
+  const groups: {
+    [K in keyof CompatSurface]: Record<string, Record<string, AnyCompatHelper>>;
+  } = { apis: {}, query: {}, constants: {}, event: {} };
   for (const entry of CRITICAL_SURFACE) {
-    const over = overrides[entry.id];
+    const raw = overrides[entry.id];
+    const over = raw === 'absent' || raw === undefined ? undefined : raw;
     groups[entry.compatGroup][entry.pallet] ??= {};
-    if (over === 'absent') continue;
-    groups[entry.compatGroup][entry.pallet][entry.member] =
+    if (raw === 'absent') continue;
+    const pallet = groups[entry.compatGroup][entry.pallet];
+    assert.ok(pallet, 'the pallet bucket was just created');
+    pallet[entry.member] =
       entry.compatGroup === 'query' || entry.compatGroup === 'apis'
         ? { args: helper(3, true), value: helper(over?.level ?? 3, over?.compatible ?? true), isCompatible: () => over?.compatible ?? true }
         : helper(over?.level ?? 3, over?.compatible ?? true);
@@ -256,11 +349,11 @@ test('the probe covers every entry, and an unlookupable helper is incompatible',
   assert.equal(probes.length, CRITICAL_SURFACE.length);
   assert.equal(classify(2, SUPPORTED_SPEC_VERSIONS, probes).mode, 'full');
 
-  const missing = CRITICAL_SURFACE[7].id;
+  const missing = surfaceAt(7).id;
   const withHole = probeCriticalSurface(compatSurface({ [missing]: 'absent' }));
   assert.equal(withHole.length, CRITICAL_SURFACE.length, 'the probe dropped an entry it could not look up');
-  assert.equal(withHole.find((p) => p.id === missing).compatible, false);
-  assert.equal(withHole.find((p) => p.id === missing).level, 'incompatible');
+  assert.equal(probeFor(withHole, missing).compatible, false);
+  assert.equal(probeFor(withHole, missing).level, 'incompatible');
 });
 
 test('the probe reports min(args, value) for the two-sided helpers', () => {
@@ -268,8 +361,11 @@ test('the probe reports min(args, value) for the two-sided helpers', () => {
   // Reading a missing top-level `level` would name as `incompatible` beside a `true`
   // verdict — a report that contradicts itself.
   const twoSided = CRITICAL_SURFACE.find((e) => e.compatGroup === 'apis');
-  const probes = probeCriticalSurface(compatSurface({ [twoSided.id]: { level: 1, compatible: false } }));
-  const probe = probes.find((p) => p.id === twoSided.id);
+  assert.ok(twoSided, 'no runtime-API entry in CRITICAL_SURFACE to exercise the two-sided path');
+  const probes = probeCriticalSurface(
+    compatSurface({ [twoSided.id]: { level: 1, compatible: false } }),
+  );
+  const probe = probeFor(probes, twoSided.id);
   assert.equal(probe.level, 'partial');
   assert.equal(probe.compatible, false);
   assert.equal(classify(2, SUPPORTED_SPEC_VERSIONS, probes).mode, 'restricted');
@@ -278,13 +374,20 @@ test('the probe reports min(args, value) for the two-sided helpers', () => {
 test('the probe asks PAPI with no threshold argument', () => {
   // PAPI's default is BackwardsCompatible. Passing our own would be a second opinion about
   // safety with no basis — and passing `Partial` would silently widen what counts as safe.
-  const seen = [];
+  const seen: number[] = [];
   const surface = compatSurface();
-  for (const group of Object.values(surface)) {
-    for (const pallet of Object.values(group)) {
+  const groupNames = ['apis', 'query', 'constants', 'event'] as const;
+  for (const groupName of groupNames) {
+    for (const pallet of Object.values(surface[groupName])) {
       for (const [name, helper] of Object.entries(pallet)) {
-        const inner = helper.isCompatible;
-        pallet[name] = { ...helper, isCompatible: (...args) => { seen.push(args.length); return inner(...args); } };
+        const inner = helper.isCompatible.bind(helper);
+        pallet[name] = {
+          ...helper,
+          isCompatible: (...args: readonly [number?]) => {
+            seen.push(args.length);
+            return inner(...args);
+          },
+        };
       }
     }
   }

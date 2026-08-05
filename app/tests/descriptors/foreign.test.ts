@@ -26,6 +26,7 @@ import {
   surfaceIsProven,
   withdrawIsBlockedBy,
 } from '@bleavit/descriptors';
+import type { ForeignObservation, SurfaceProbe } from '@bleavit/descriptors';
 
 const PIN = {
   label: 'Asset Hub',
@@ -33,10 +34,23 @@ const PIN = {
   supportedSpecVersions: [1_004_000, 1_004_001],
 };
 
-const allProven = () =>
+const allProven = (): SurfaceProbe[] =>
   FOREIGN_SURFACE.map((entry) => ({ id: entry.id, compatible: true, level: 'identical' }));
 
-const observation = (over = {}) => ({
+/**
+ * A verdict's reason, or a failure saying it gave none.
+ *
+ * `ForeignVerdict.reason` is `string | undefined` because a `proven` verdict has nothing to
+ * explain. Every assertion below is on a *blocking* verdict, where a missing reason is the
+ * defect — 10 §5.2 requires the deposit leg to be disabled *with a named reason* — so an
+ * absent one should fail here rather than be silently matched against `undefined`.
+ */
+function reasonOf(verdict: { readonly reason: string | undefined }): string {
+  assert.ok(verdict.reason !== undefined, 'the verdict blocks the deposit leg without saying why');
+  return verdict.reason;
+}
+
+const observation = (over: Partial<ForeignObservation> = {}): ForeignObservation => ({
   chainLabel: 'Asset Hub',
   genesisHash: PIN.genesisHash,
   specVersion: 1_004_000,
@@ -96,8 +110,8 @@ test('with no pin the verdict is unreachable and the deposit leg is blocked, not
   const verdict = classifyForeign(observation(), []);
   assert.equal(verdict.mode, 'unreachable');
   assert.equal(depositMayProceed(verdict), false);
-  assert.match(verdict.reason, /pins no Asset Hub runtime/);
-  assert.match(verdict.reason, /every other part of the app is unaffected/);
+  assert.match(reasonOf(verdict), /pins no Asset Hub runtime/);
+  assert.match(reasonOf(verdict), /every other part of the app is unaffected/);
 });
 
 /* ------------------------------------------------------------------- identity vs compat */
@@ -105,8 +119,8 @@ test('with no pin the verdict is unreachable and the deposit leg is blocked, not
 test('a genesis mismatch is wrong-chain, never unsupported — a different chain, not an older one', () => {
   const verdict = classifyForeign(observation({ genesisHash: '0xdead' }), [PIN]);
   assert.equal(verdict.mode, 'wrong-chain');
-  assert.match(verdict.reason, /different chain/);
-  assert.match(verdict.reason, /retrying will not change this/);
+  assert.match(reasonOf(verdict), /different chain/);
+  assert.match(reasonOf(verdict), /retrying will not change this/);
 });
 
 test('identity is checked before compatibility, so a wrong chain never yields a spec verdict', () => {
@@ -149,7 +163,11 @@ test('an unprobed frozen surface is refused, not counted as passing', () => {
 
 test('a probe for a surface nobody froze does not stand in for a missing one', () => {
   const wrong = allProven().slice(1);
-  wrong.push({ id: 'assethub.Something.Else', compatible: true, level: 'identical' });
+  // A deliberately *unfrozen* id: the point is that coverage is checked by identity, not by
+  // count. `SurfaceProbe.id` is a plain `string`, so this needs no escape — but the array
+  // came from `FOREIGN_SURFACE`, whose element ids are literal types, hence the annotation.
+  const foreign: SurfaceProbe = { id: 'assethub.Something.Else', compatible: true, level: 'identical' };
+  wrong.push(foreign);
   assert.throws(
     () => classifyForeign(observation({ probes: wrong }), [PIN]),
     ForeignProbeCoverageError,
@@ -172,7 +190,7 @@ test('one disabled surface is restricted, and restricted still blocks the deposi
   assert.equal(verdict.mode, 'restricted');
   assert.equal(depositMayProceed(verdict), false);
   assert.equal(verdict.disabled.length, 1);
-  assert.match(verdict.reason, /Deposits are disabled/);
+  assert.match(reasonOf(verdict), /Deposits are disabled/);
 });
 
 test('a broken read blocks the deposit just as a broken call does', () => {
