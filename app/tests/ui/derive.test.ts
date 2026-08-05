@@ -44,11 +44,16 @@ const PROPOSAL: VerificationStatus = { kind: 'external-proposal' };
 /**
  * Narrow `combineStatus`'s union to the arm the test expects.
  *
- * `assert.equal(result.kind, 'stated')` does not narrow — it is not an assertion signature —
- * so every `result.status` after one was reaching into an arm TypeScript could not see. The
- * helpers are also better tests than the pattern they replace: when the wrong arm comes back
- * they report the refusal's **own reason**, where `assert.equal('incomparable', 'stated')`
+ * These exist for the **failure message**, not for the narrowing. When the wrong arm comes
+ * back they report the refusal's own reason, where `assert.equal('incomparable', 'stated')`
  * reports only that two strings differ and leaves the diagnosis to a rerun.
+ *
+ * An earlier version of this comment claimed `assert.equal(result.kind, 'stated')` cannot
+ * narrow. Measured under this repo's toolchain, that is wrong and worth stating precisely,
+ * because it decides whether a suite needs helpers at all: **`node:assert/strict`'s `equal`
+ * is an alias for `strictEqual`, which carries `asserts actual is T`, so it does narrow** —
+ * while plain `node:assert`'s `equal` (`==` semantics) does not. Every suite here imports the
+ * strict namespace, so the distinction never bites; it would the moment one did not.
  */
 function stated(result: ReturnType<typeof combineStatus>): VerificationStatus {
   assert.ok(

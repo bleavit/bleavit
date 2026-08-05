@@ -24,16 +24,28 @@ import {
 } from '@bleavit/chain-client';
 import type {
   AddChainOptionsLike,
+  AssetHubLeg,
   BundledChain,
   PinnedChainSpec,
   SmoldotChainLike,
   SmoldotClientLike,
   TopologyOptions,
 } from '@bleavit/chain-client';
+// The consumer of the leg's verdict, imported so the two are bound by a test rather than by
+// a convention: what `attachAssetHub` reports has to be what `classifyForeign` can read.
+import { classifyForeign } from '@bleavit/descriptors';
 import type { HexString } from '@bleavit/shared-types';
 
 const RELAY_GENESIS: HexString = `0x${'11'.repeat(32)}`;
 const PARA_GENESIS: HexString = `0x${'22'.repeat(32)}`;
+const ASSET_HUB_GENESIS: HexString = `0x${'33'.repeat(32)}`;
+
+/** What each fixture chain answers the identity probe with, by its spec `id`. */
+const GENESIS_BY_ID: Readonly<Record<string, HexString>> = {
+  'paseo-local': RELAY_GENESIS,
+  bleavit: PARA_GENESIS,
+  'asset-hub': ASSET_HUB_GENESIS,
+};
 
 /** A pin with the hash left out — `bundled()` computes it from the bytes it is given. */
 type UnhashedPin = Omit<PinnedChainSpec, 'sha256'>;
@@ -114,16 +126,27 @@ function nthCall(calls: FakeClient['calls'], n: number): FakeClient['calls'][num
   return call;
 }
 
-/** Answer the identity probe honestly: relay first, then parachain (that is the order). */
+/**
+ * Answer the identity probe honestly, keyed on **which chain is being probed**.
+ *
+ * Was a call counter — relay first, then parachain. That is no longer sufficient now a
+ * third chain can attach at an arbitrary later moment, and a counter would have answered
+ * the Asset Hub probe with the parachain's genesis: the fixture would then agree with a
+ * defect where the topology probed the wrong chain object.
+ */
 function start(
   client: SmoldotClientLike<FakeChain>,
   specs: { relay: BundledChain; para: BundledChain },
   options: Partial<TopologyOptions<FakeChain>> = {},
 ) {
-  let probes = 0;
   return startTopology(client, {
     ...specs,
-    genesisHashOf: async () => (probes++ === 0 ? RELAY_GENESIS : PARA_GENESIS),
+    genesisHashOf: async (chain) => {
+      const id = String((JSON.parse(chain.options.chainSpec) as { id?: unknown }).id);
+      const genesis = GENESIS_BY_ID[id];
+      if (genesis === undefined) throw new Error(`no genesis fixture for chain id ${JSON.stringify(id)}`);
+      return genesis;
+    },
     ...options,
   });
 }
@@ -290,4 +313,289 @@ test('the relay and parachain slots cannot be swapped', async () => {
   const { client, calls } = fakeClient();
   await assert.rejects(() => start(client, { relay: specs.para, para: specs.relay }), TopologyError);
   assert.equal(calls.length, 0);
+});
+
+/* ------------------------------------------------ the lazy Asset Hub leg — 11 §11.9.1, E17 */
+
+/**
+ * A bundled Asset Hub spec. `pin` overrides land on the pin, `spec` overrides on the bytes,
+ * so a test can make exactly one of the two wrong — which is what most of these are about.
+ */
+async function assetHubBundle(
+  overrides: { spec?: Record<string, unknown>; pin?: Partial<UnhashedPin> } = {},
+): Promise<BundledChain> {
+  const text = specText({
+    id: 'asset-hub',
+    name: 'Asset Hub',
+    relayChain: 'paseo-local',
+    ...overrides.spec,
+  });
+  return bundled(text, {
+    id: 'asset-hub',
+    kind: 'para',
+    genesisHash: ASSET_HUB_GENESIS,
+    relayChainId: 'paseo-local',
+    ...overrides.pin,
+  });
+}
+
+/** Narrow to the attached arm, reporting the refusal's own reason when it is not. */
+function attached<C extends SmoldotChainLike>(
+  leg: AssetHubLeg<C>,
+): Extract<AssetHubLeg<C>, { kind: 'attached' }> {
+  assert.ok(
+    leg.kind === 'attached',
+    `expected an attached Asset Hub leg, got ${leg.kind}: ${leg.kind === 'attached' ? '' : leg.reason}`,
+  );
+  return leg;
+}
+
+/** Narrow to a refusing arm — deliberately widened, so a caller reads only `reason`. */
+function refused<C extends SmoldotChainLike>(
+  leg: AssetHubLeg<C>,
+): { readonly kind: string; readonly reason: string } {
+  assert.ok(leg.kind !== 'attached', 'expected the Asset Hub leg to be refused; it attached');
+  return leg;
+}
+
+test('boot connects TWO chains — Asset Hub is attached later, or never (E17)', async () => {
+  // 11 E17: "AH connection syncs on entering the flow (lazy — the AH chain is not connected
+  // at boot)", and 10 §9.3 budgets its chain spec as lazy too. A session that never opens
+  // the funding flow must never pay for a third chain's memory and sync — and an Asset Hub
+  // failure must never happen during boot, where the only thing it could do is degrade a
+  // state that has nothing to do with it.
+  const specs = await pair();
+  const { client, calls } = fakeClient();
+  const topology = await start(client, specs);
+  assert.equal(calls.length, 2, 'boot added a chain the funding flow had not asked for');
+
+  const leg = attached(await topology.attachAssetHub(await assetHubBundle()));
+  assert.equal(calls.length, 3);
+  assert.equal(leg.chain, nthCall(calls, 2).chain);
+});
+
+test('the Asset Hub chain is linked to the relay Chain OBJECT the topology already holds', async () => {
+  // Same rule as the parachain's, and the reason `attachAssetHub` is a method: there is no
+  // other client and no other relay in scope, so "same smoldot instance" is not a rule
+  // anyone has to remember. Passing `[]` would let smoldot resolve the relay by `id` against
+  // every chain in the client.
+  const specs = await pair();
+  const { client, calls } = fakeClient();
+  const topology = await start(client, specs);
+  await topology.attachAssetHub(await assetHubBundle());
+  assert.deepEqual(nthCall(calls, 2).options.potentialRelayChains, [nthCall(calls, 0).chain]);
+  assert.equal(nthCall(calls, 0).chain, topology.relay);
+});
+
+test('a wrong Asset Hub genesis removes THAT chain and leaves the app running', async () => {
+  // The whole asymmetry in one test. A wrong parachain genesis is terminal for the client;
+  // a wrong Asset Hub genesis blocks deposits and nothing else. If this ever tears down the
+  // topology, every screen goes dark for a leg most sessions never use.
+  const specs = await pair();
+  const { client, calls, removed } = fakeClient();
+  const topology = await start(client, specs);
+  const leg = await topology.attachAssetHub(
+    await assetHubBundle({ pin: { genesisHash: `0x${'ff'.repeat(32)}` } }),
+  );
+
+  assert.equal(leg.kind, 'wrong-chain');
+  assert.deepEqual(removed, [nthCall(calls, 2).chain], 'the wrong Asset Hub chain was left syncing');
+  assert.equal(removed.includes(topology.relay), false, 'the relay was torn down by an Asset Hub failure');
+  assert.equal(removed.includes(topology.para), false, 'the parachain was torn down by an Asset Hub failure');
+});
+
+test('a wrong Asset Hub genesis is reported as wrong-chain, carrying the hash that answered', async () => {
+  // The reason this arm exists at all. `classifyForeign` separates "could not be reached —
+  // retry" from "a different chain — retrying will not change this", and it draws that
+  // distinction from whether the observation carries a genesis hash. A leg that removed the
+  // chain and reported `unavailable` would be truthful about the outcome and wrong about the
+  // remedy: the user would retry a sync that can never succeed.
+  const specs = await pair();
+  const { client } = fakeClient();
+  const topology = await start(client, specs);
+  const impostor: HexString = `0x${'ff'.repeat(32)}`;
+  const leg = await topology.attachAssetHub(await assetHubBundle({ pin: { genesisHash: impostor } }));
+
+  assert.ok(leg.kind === 'wrong-chain', `expected wrong-chain, got ${leg.kind}`);
+  assert.equal(leg.genesisHash, ASSET_HUB_GENESIS, 'the hash reported is not the one that answered');
+  assert.match(leg.reason, /different chain/);
+  assert.doesNotMatch(leg.reason, /retry(?!ing will not)/i);
+
+  // And the consequence, through the module that actually decides it. Both directions are
+  // asserted, because "wrong-chain" from one call proves nothing unless a hash-less
+  // observation demonstrably yields something else.
+  const observe = (genesisHash: string | undefined) =>
+    classifyForeign({ chainLabel: 'Asset Hub', genesisHash, specVersion: undefined, probes: [] }).mode;
+  assert.equal(observe(leg.genesisHash), 'wrong-chain');
+  assert.equal(observe(undefined), 'unreachable');
+});
+
+test('every Asset Hub failure is a returned value, never a throw', async () => {
+  // A throw would have to be caught by every call site and turned back into exactly this
+  // union, and the one call site that let it propagate would take a screen down for a leg
+  // that only blocks deposits.
+  const specs = await pair();
+  const intact = await assetHubBundle();
+  const cases: readonly (readonly [string, BundledChain])[] = [
+    ['a relay spec in the Asset Hub slot', (await pair()).relay],
+    // The pin is the field `bundled()` computes, so this one is built by hand: it is the
+    // *substituted bytes* case, and it has to break the hash rather than the spec.
+    ['bytes that do not match the pin', { ...intact, pinned: { ...intact.pinned, sha256: `0x${'00'.repeat(32)}` } }],
+    ['a spec naming a relay we did not bundle', await assetHubBundle({
+      spec: { relayChain: 'westend' },
+      pin: { relayChainId: 'westend' },
+    })],
+    ['nothing to dial', await assetHubBundle({ spec: { bootNodes: [] } })],
+    ['a non-raw spec', await assetHubBundle({ spec: { genesis: { runtimeGenesis: { code: '0x00' } } } })],
+    ['the parachain\'s own genesis', await assetHubBundle({ pin: { genesisHash: PARA_GENESIS } })],
+    ['a wrong genesis', await assetHubBundle({ pin: { genesisHash: `0x${'ff'.repeat(32)}` } })],
+  ];
+
+  for (const [label, bundle] of cases) {
+    const { client } = fakeClient();
+    const topology = await start(client, specs);
+    const leg = await topology.attachAssetHub(bundle);
+    assert.ok(leg.kind !== 'attached', `${label}: the Asset Hub leg attached and should not have`);
+    assert.ok(refused(leg).reason.length > 0, `${label}: the refusal carried no reason`);
+  }
+});
+
+test('an Asset Hub bundle pinning one of OUR genesis hashes is refused', async () => {
+  // A build that put the Bleavit bundle in the Asset Hub slot would pass every other check:
+  // the bytes match their own pin, the relay linkage is right, and the probed genesis equals
+  // the pinned one. The deposit screen would then read USDC balances off the futarchy chain
+  // and label them Asset Hub — wrong in the dangerous direction, and invisible, because both
+  // chains answer every read they are asked consistently.
+  const specs = await pair();
+  for (const genesisHash of [PARA_GENESIS, RELAY_GENESIS]) {
+    const { client, calls } = fakeClient();
+    const topology = await start(client, specs);
+    const leg = await topology.attachAssetHub(await assetHubBundle({ pin: { genesisHash } }));
+    assert.match(refused(leg).reason, /not a second chain/);
+    assert.equal(calls.length, 2, 'the duplicate chain was added before being refused');
+  }
+});
+
+test('an Asset Hub spec naming a different relay never gets added', async () => {
+  // smoldot would form no linkage and the chain would sit un-finalized, which on screen is
+  // indistinguishable from slow sync — so the user would wait rather than see a diagnosis.
+  const specs = await pair();
+  const { client, calls } = fakeClient();
+  const topology = await start(client, specs);
+  const leg = await topology.attachAssetHub(
+    await assetHubBundle({ spec: { relayChain: 'westend' }, pin: { relayChainId: 'westend' } }),
+  );
+  assert.match(refused(leg).reason, /slow sync/);
+  assert.equal(calls.length, 2);
+});
+
+test('detach removes the Asset Hub chain alone', async () => {
+  const specs = await pair();
+  const { client, calls, removed } = fakeClient();
+  const topology = await start(client, specs);
+  const leg = attached(await topology.attachAssetHub(await assetHubBundle()));
+
+  leg.detach();
+  assert.deepEqual(removed, [nthCall(calls, 2).chain]);
+  // Idempotent by membership, not by swallowed exception. `remove()` throws on an already
+  // removed chain and the topology discards that — which makes a double removal *look*
+  // harmless while being exactly how a real one would hide.
+  leg.detach();
+  assert.deepEqual(removed, [nthCall(calls, 2).chain]);
+});
+
+test('a STALE leg detaching does not disown the chain that replaced it', async () => {
+  // The sequence is ordinary: a screen attaches, unmounts, remounts — and then the first
+  // screen's cleanup runs late. Clearing the cache on that call would leave the second
+  // chain live but unreferenced, and send the next entry into the flow to add a third.
+  // Both would sync; neither would be reachable.
+  const specs = await pair();
+  const { client, calls, removed } = fakeClient();
+  const topology = await start(client, specs);
+
+  const first = attached(await topology.attachAssetHub(await assetHubBundle()));
+  first.detach();
+  const second = attached(await topology.attachAssetHub(await assetHubBundle()));
+
+  first.detach(); // the late cleanup
+  assert.equal(removed.includes(second.chain), false, 'a stale detach removed the live chain');
+
+  const third = attached(await topology.attachAssetHub(await assetHubBundle()));
+  assert.equal(third.chain, second.chain, 'a stale detach cleared the cache and added a third chain');
+  assert.equal(calls.length, 4, 'one chain per attach, and the stale detach added none');
+});
+
+test('stop() removes an attached Asset Hub chain too', async () => {
+  // The leak this closes: `getSmProvider`'s factory builds a *fresh topology* on every
+  // reconnect, so a lazily-attached chain that `stop()` did not own would outlive the
+  // topology that added it — and go on syncing, unreferenced, for the rest of the session.
+  const specs = await pair();
+  const { client, removed } = fakeClient();
+  const topology = await start(client, specs);
+  const leg = attached(await topology.attachAssetHub(await assetHubBundle()));
+
+  topology.stop();
+  assert.equal(removed.length, 3);
+  assert.ok(removed.includes(leg.chain), 'stop() left the Asset Hub chain running');
+});
+
+test('a successful attach is cached; a failed one stays retryable', async () => {
+  // Two rules with two different reasons. Re-entering the funding flow must not add a chain
+  // each time — and E17's recovery action is literally "retry AH sync", which a cached
+  // failure would turn into a button that does nothing for the rest of the session.
+  const specs = await pair();
+  const { client, calls } = fakeClient();
+  const topology = await start(client, specs);
+
+  const first = attached(await topology.attachAssetHub(await assetHubBundle()));
+  const second = attached(await topology.attachAssetHub(await assetHubBundle()));
+  assert.equal(calls.length, 3, 'a second entry into the funding flow added a second chain');
+  assert.equal(first.chain, second.chain);
+
+  // After a detach the next attach is a fresh chain, not the cached one.
+  first.detach();
+  const third = attached(await topology.attachAssetHub(await assetHubBundle()));
+  assert.equal(calls.length, 4);
+  assert.notEqual(third.chain, first.chain);
+});
+
+test('a retry after a transient failure succeeds', async () => {
+  // The failure that is genuinely worth retrying: the chain was added but the identity probe
+  // did not answer. Nothing about the release is wrong, so a second attempt must be allowed
+  // to attach — and it must attach the chain, not return the remembered failure.
+  const specs = await pair();
+  const { client, removed } = fakeClient();
+  let failNext = true;
+  const topology = await startTopology(client, {
+    ...specs,
+    genesisHashOf: async (chain) => {
+      const id = String((JSON.parse(chain.options.chainSpec) as { id?: unknown }).id);
+      if (id === 'asset-hub' && failNext) {
+        failNext = false;
+        throw new Error('no response');
+      }
+      const genesis = GENESIS_BY_ID[id];
+      if (genesis === undefined) throw new Error(`no genesis fixture for chain id ${JSON.stringify(id)}`);
+      return genesis;
+    },
+  });
+
+  const failed = await topology.attachAssetHub(await assetHubBundle());
+  assert.equal(failed.kind, 'unavailable');
+  assert.equal(removed.length, 1, 'the half-attached Asset Hub chain was left running');
+
+  const retried = attached(await topology.attachAssetHub(await assetHubBundle()));
+  assert.equal(retried.genesisHash, ASSET_HUB_GENESIS);
+});
+
+test('every Asset Hub refusal says deposits alone are affected', async () => {
+  // The copy carries the scope, because the leg is reported on a screen that has no idea
+  // what else the client can still do. A reason that said only "Asset Hub is unavailable"
+  // reads, to a user, as an outage.
+  const specs = await pair();
+  const { client } = fakeClient();
+  const topology = await start(client, specs);
+  const leg = await topology.attachAssetHub(await assetHubBundle({ spec: { bootNodes: [] } }));
+  assert.match(refused(leg).reason, /Deposits are unavailable/);
+  assert.match(refused(leg).reason, /nothing else in the app is affected/);
 });

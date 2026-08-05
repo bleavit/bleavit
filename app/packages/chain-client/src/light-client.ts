@@ -30,6 +30,10 @@ import { startFromWorker } from 'polkadot-api/smoldot/from-worker';
 import type { HexString } from '@bleavit/shared-types';
 import { ChainHeadConnection, type JsonRpcProviderLike } from './transport.js';
 import {
+  assetHubConnector,
+  type AssetHubConnection as AssetHubLegConnection,
+} from './asset-hub.js';
+import {
   startTopology,
   type BundledChain,
   type SmoldotClientLike,
@@ -68,9 +72,21 @@ export interface LightClientOptions {
   readonly extraBootnodes?: readonly string[];
 }
 
+/** 11 §11.9.1's second light client, at this package's transport type. */
+export type AssetHubConnection = AssetHubLegConnection<ChainHeadConnection>;
+
 export interface LightClient {
   readonly transport: ChainHeadConnection;
   readonly topology: Topology<RealSmoldotChain>;
+  /**
+   * Connect Asset Hub — **lazily**, on entering the funding flow (11 E17).
+   *
+   * Called by the deposit screen, never by boot. Repeat calls return the same connection:
+   * `getSmProvider` keeps a `WeakSet` of chains it has been handed and refuses a repeat with
+   * a console warning rather than an error, so a second provider over the same `Chain` would
+   * yield a transport connected to nothing while reporting no failure.
+   */
+  connectAssetHub(assetHub: BundledChain): Promise<AssetHubConnection>;
   stop(): Promise<void>;
 }
 
@@ -148,12 +164,38 @@ export async function startLightClient(options: LightClientOptions): Promise<Lig
 
   if (latest === undefined) throw new Error('the provider connected without building a topology');
 
+  const topology = latest;
+  /**
+   * The Asset Hub leg. Every rule about sequencing and repeat calls lives in `asset-hub.ts`,
+   * where it is executed by tests; what is supplied here is only the two things that need
+   * PAPI — how a chain becomes a transport, and how that transport closes.
+   */
+  const assetHub = assetHubConnector<RealSmoldotChain, ChainHeadConnection>({
+    attach: (bundled) => topology.attachAssetHub(bundled),
+    // Safe to build the provider here, and only here, because the genesis probe has already
+    // run — inside `attachAssetHub`, before this callback. `probeGenesisHash` drives
+    // `nextJsonRpcResponse()` directly and two consumers of that method race for every
+    // response, so it may only be used before a provider attaches its own reader.
+    openTransport: async (chain, bundled) =>
+      ChainHeadConnection.open(asTransportProvider(getSmProvider(async () => chain)), {
+        // The pin, not the probe — and here the distinction has teeth the local one does
+        // not: this identity is what every Asset Hub `Finalized<T>` carries, so it is what
+        // stops an Asset Hub balance combining with a futarchy read (F18).
+        chain: bundled.pinned.genesisHash,
+      }),
+    closeTransport: (connection) => {
+      connection.close();
+    },
+  });
+
   return {
     transport,
-    topology: latest,
+    topology,
+    connectAssetHub: (bundled) => assetHub.connect(bundled),
     async stop() {
       transport.close();
-      for (const topology of topologies) topology.stop();
+      assetHub.close();
+      for (const each of topologies) each.stop();
       await client.terminate();
     },
   };

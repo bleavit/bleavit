@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "@bleavit/chain-client": "workspace:*",
+    "@bleavit/descriptors": "workspace:*",
     "@bleavit/mock-runtime": "workspace:*",
     "@bleavit/shared-types": "workspace:*",
     "@polkadot-api/descriptors": "workspace:*"
