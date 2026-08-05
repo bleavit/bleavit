@@ -100,14 +100,14 @@ _ARCHITECTURE = {
 
 # Anchors for the SQ-552 witnesses. Kept as module constants so a document edit that
 # moves them fails one obvious place rather than three tests with three stack traces.
-_FE_ROW_13 = (
-    "| 13. Batch bounds | decoded batch \u2264 16 calls, \u2264 64 KiB, declared weight "
+_FE_ROW_14 = (
+    "| 14. Batch bounds | decoded batch \u2264 16 calls, \u2264 64 KiB, declared weight "
     "\u2264 25% block limit *(normative values: [13](13-parameters.md))*; SafetyFilter "
     "closure over nested wrappers incl. `proxy_announced`, `as_multi_threshold_1` "
     "(static check on the preimage) |"
 )
-_FE_ROW_14 = (
-    "| 14. **Descriptor lead time (CODE/META)** | `now \u2265 authorized_at + "
+_FE_ROW_15 = (
+    "| 15. **Descriptor lead time (CODE/META)** | `now \u2265 authorized_at + "
     "DescriptorLeadTime` (43,200 blocks = 72 h *(normative value: "
     "[13](13-parameters.md))*) per D-14/[09](09-execution-upgrades-and-rollout.md) |"
 )
@@ -640,11 +640,13 @@ class TestSnapshotRetention(unittest.TestCase):
 class TestExecuteChecklistContract(unittest.TestCase):
     """09 §1.2 ↔ 11 §11.5, parsed from the documents and diffed by row."""
 
-    def test_the_documents_publish_thirteen_backend_and_thirteen_frontend_rows(self):
+    def test_the_documents_publish_thirteen_backend_and_fourteen_frontend_rows(self):
         backend = backend_execute_checks(REPO_ROOT)
         frontend = frontend_execute_checks(REPO_ROOT)
         self.assertEqual([check.index for check in backend], list(range(1, 14)))
-        self.assertEqual([check.index for check in frontend], list(range(1, 14)))
+        # Fourteen since 2026-08-05: row 12 bundled the never-waived dead-man latch with
+        # the expedited-waivable PB-LEDGER-FREEZE, and was split.
+        self.assertEqual([check.index for check in frontend], list(range(1, 15)))
         self.assertEqual((backend[0].name, backend[-1].name), ("Queue state", "Record"))
         self.assertEqual(
             (frontend[0].name, frontend[-1].name),
@@ -658,14 +660,14 @@ class TestExecuteChecklistContract(unittest.TestCase):
         residual difference is entirely accounted for: backend items 1 and 10 each
         split into two frontend rows, and items 12–13 are the *effects* of passing
         (dispatch, record), which have nothing to pre-check. The one row that was a
-        real defect — FE 14, an `apply_authorized_upgrade` check owned by 09 §2.2,
+        real defect — the `apply_authorized_upgrade` check owned by 09 §2.2,
         gating `execute` on a clock `execute` itself starts — is gone.
         """
         diff = execute_checklist_diff(REPO_ROOT)
         self.assertFalse(diff.bijective)
         self.assertEqual(
             diff.one_to_one,
-            ((2, 3), (3, 4), (4, 5), (5, 6), (6, 7), (7, 8), (8, 9), (9, 10), (11, 13)),
+            ((2, 3), (3, 4), (4, 5), (5, 6), (6, 7), (7, 8), (8, 9), (9, 10), (11, 14)),
         )
         mismatches = {finding.key: finding for finding in diff.mismatches}
         self.assertEqual(
@@ -678,22 +680,25 @@ class TestExecuteChecklistContract(unittest.TestCase):
             },
         )
         self.assertEqual(mismatches["backend:1:split"].frontend_rows, (1, 2))
-        self.assertEqual(mismatches["backend:10:split"].frontend_rows, (11, 12))
+        # Three rows, not two: §1.2(10) is two `ensure!`s of opposite waivability, and the
+        # frontend now states each separately rather than bundling the latch with the
+        # freeze the expedited lane waives.
+        self.assertEqual(mismatches["backend:10:split"].frontend_rows, (11, 12, 13))
 
-    def test_reinstating_frontend_row_14_is_caught(self):
+    def test_reinstating_the_retired_descriptor_row_is_caught(self):
         """Witness. The deleted row must still be detectable if it comes back.
 
         A checker is only worth its green run if it can go red. `_FRONTEND_CHECK_ATOMS`
-        deliberately retains its entry for index 14 so this witness parses rather than
+        deliberately retains its entry for index 15 so this witness parses rather than
         raising `ScheduleError` — the classification is kept alive precisely so the
         defect stays reproducible.
         """
-        with _mutated_repo(doc_11=(_FE_ROW_13, f"{_FE_ROW_13}\n{_FE_ROW_14}")) as root:
+        with _mutated_repo(doc_11=(_FE_ROW_14, f"{_FE_ROW_14}\n{_FE_ROW_15}")) as root:
             diff = execute_checklist_diff(root)
         mismatches = {finding.key: finding for finding in diff.mismatches}
-        self.assertIn("frontend:14:unmatched", mismatches)
+        self.assertIn("frontend:15:unmatched", mismatches)
         self.assertIn(
-            "apply_authorized_upgrade", mismatches["frontend:14:unmatched"].why
+            "apply_authorized_upgrade", mismatches["frontend:15:unmatched"].why
         )
 
     def test_every_named_terminal_reason_is_a_frozen_02_reason(self):

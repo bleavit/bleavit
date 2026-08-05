@@ -759,7 +759,13 @@ _BACKEND_CHECK_ATOMS: dict[int, tuple[str, ...]] = {
     7: ("rate-meters",),
     8: ("resource-locks",),
     9: ("guardian-suspension",),
-    10: ("gate-flags", "dead-man-freezes"),
+    # Three atoms since 2026-08-05. §1.2(10) is **two** `ensure!`s with opposite
+    # waivability, and 11 §11.5 row 12 used to bundle them into one row: the dead-man latch
+    # (never waived) beside PB-LEDGER-FREEZE (waived by the D-9 expedited lane). They are
+    # two bits of one storage item, `Constitution.PhaseFlags`, which is what made the
+    # conflation easy to write and impossible to satisfy correctly — no single grouping of
+    # that row could be right. The split is the spec repair; the third atom is it.
+    10: ("gate-flags", "dead-man-freezes", "triggering-freezes"),
     11: ("batch-bounds",),
     12: ("dispatch",),
     13: ("record",),
@@ -778,8 +784,14 @@ _FRONTEND_CHECK_ATOMS: dict[int, tuple[str, ...]] = {
     10: ("guardian-suspension",),
     11: ("gate-flags",),
     12: ("dead-man-freezes",),
-    13: ("batch-bounds",),
-    14: ("descriptor-lead-time",),
+    13: ("triggering-freezes",),
+    14: ("batch-bounds",),
+    # Retired, and deliberately kept classified. Row 15 is the `apply_authorized_upgrade`
+    # check SQ-552 deleted — gating `execute` on a clock `execute` itself starts. The entry
+    # survives so the witness below can reinstate the row and watch the diff go red; without
+    # it the parser would raise `ScheduleError` on an unclassified row and the witness would
+    # pass for the wrong reason. Its index moved 14 -> 15 when row 12 was split.
+    15: ("descriptor-lead-time",),
 }
 
 
