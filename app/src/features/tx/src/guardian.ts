@@ -27,6 +27,7 @@
  */
 
 import { combine2, type Combined, type Verified } from '@bleavit/shared-types';
+import type { EvidenceState } from './evidence.js';
 
 /** The five powers §11.8.2 names. Closed, so a form cannot invent a sixth. */
 export type GuardianPower =
@@ -82,6 +83,14 @@ export interface PendingAction {
 
 export interface ApprovalContext {
   readonly action: PendingAction;
+  /**
+   * The resolved justification document — §11.8.2 via §11.8.1's evidence rules.
+   *
+   * Required, and a **state** rather than an optional string: an optional field would let a
+   * console render nothing and read as "no justification was filed", which is a different
+   * fact from "this device could not fetch it". `EvidenceState` keeps them apart.
+   */
+  readonly justification: EvidenceState;
   readonly callerIsMember: boolean;
   readonly callerHasApproved: boolean;
   readonly now: Verified<number>;

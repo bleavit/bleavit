@@ -104,6 +104,10 @@ import {
   UpgradeHashMismatch,
   snapshotStaleness,
   stalenessCopy,
+  admitEvidence,
+  evidenceUnavailable,
+  EvidencePanel,
+  EVIDENCE_UNRETRIEVABLE,
 } from '@bleavit/features-tx';
 import { ImportRefused, ImportReview, UnlabellableClampError } from '@bleavit/features-handoff';
 import { ShareContext } from '@bleavit/features-handoff';
@@ -1890,6 +1894,8 @@ test('an unregistered screen renders as pending rather than blank', () => {
 
 // --------------------------------------------------- S15 the guardian console (F17)
 
+const JUSTIFICATION = () =>
+  admitEvidence(new TextEncoder().encode('why this action'), finalized('0xjust'), () => '0xjust');
 const CALL = (pallet = 'Constitution', call = 'set_param') => ({
   kind: 'decoded', pallet: finalized(pallet), call: finalized(call), args: [finalized('42')],
 });
@@ -2252,6 +2258,7 @@ test('a blocked approval lists EVERY reason, not the first', () => {
         callerIsMember: false,
         callerHasApproved: true,
         now: finalized(99_999),
+        justification: JUSTIFICATION(),
       },
       onApprove: () => {},
     }),
@@ -2529,6 +2536,7 @@ test('the approve flow renders every call in the batch, decoded', () => {
         callerIsMember: true,
         callerHasApproved: false,
         now: finalized(100),
+        justification: JUSTIFICATION(),
       },
       onApprove: () => {},
     }),
@@ -2565,6 +2573,7 @@ test('an undecodable call blocks the approval and renders as raw bytes, never a 
         callerIsMember: true,
         callerHasApproved: false,
         now: finalized(100),
+        justification: JUSTIFICATION(),
       },
       onApprove: () => {},
     }),
@@ -2628,4 +2637,64 @@ test('an engaged dead-man rule is a danger notice, not a staleness count', () =>
   );
   assert.ok(!fine.includes('data-severity="danger"'), fine);
   assert.match(fine, /The welfare snapshot is current/);
+});
+
+// ---------------------------------------- §11.8.1 content-addressed evidence (F17)
+
+test('evidence is admitted only when the received bytes re-hash to the recorded hash', () => {
+  // A content address exists so the channel serving it need not be trusted, and an evidence
+  // gateway is an arbitrary host in the one place a dispute is being decided.
+  const bytes = new TextEncoder().encode('the filing');
+  const ok = admitEvidence(bytes, finalized('0xabc'), () => '0xabc');
+  assert.equal(ok.kind, 'admitted');
+  assert.equal(ok.text, 'the filing');
+
+  const wrong = admitEvidence(bytes, finalized('0xabc'), () => '0xdef');
+  assert.equal(wrong.kind, 'hash-mismatch');
+  assert.equal(wrong.expected, '0xabc');
+  assert.equal(wrong.computed, '0xdef');
+});
+
+test('the hash function is a REQUIRED argument, so admission cannot default to unchecked', () => {
+  // The `FE-HANDOFF-010` lesson: an optional digest function is a digest check that defaults
+  // off. `admitEvidence.length` is 3 — there is no arity at which the hash can be omitted.
+  assert.equal(admitEvidence.length, 3);
+});
+
+test('unavailable and mismatched are DIFFERENT facts, and neither is silent', () => {
+  // 07 adjudicates unobtainable evidence as absent, so a blank panel would let a reader
+  // conclude none was filed. The mismatch arm additionally says another gateway may help —
+  // this one served something else.
+  const missing = evidenceUnavailable(3);
+  const html = renderToStaticMarkup(h(EvidencePanel, { state: missing, label: 'Evidence' }));
+  assert.ok(html.includes(EVIDENCE_UNRETRIEVABLE), html);
+  assert.match(html, /Sources tried: 3/);
+
+  const mismatch = admitEvidence(new Uint8Array([1]), finalized('0xabc'), () => '0xdef');
+  const mismatchHtml = renderToStaticMarkup(
+    h(EvidencePanel, { state: mismatch, label: 'Evidence' }),
+  );
+  assert.match(mismatchHtml, /does not match the hash recorded on chain/);
+  assert.match(mismatchHtml, /Trying a different gateway may retrieve the real document/);
+  assert.ok(!html.includes('different gateway'), 'the unavailable arm must not claim a mismatch');
+});
+
+test('evidence renders as text, and markup in it stays text', () => {
+  // Adversary-chosen bytes inside the console of the most privileged actors. The whole-app
+  // control is `check:no-html-sinks`; this asserts the component itself escapes.
+  const hostile = new TextEncoder().encode('<img src=x onerror="alert(1)">');
+  const state = admitEvidence(hostile, finalized('0xh'), () => '0xh');
+  const html = renderToStaticMarkup(h(EvidencePanel, { state, label: 'Evidence' }));
+  assert.ok(!html.includes('<img'), `markup was not escaped: ${html}`);
+  assert.match(html, /&lt;img/);
+});
+
+test('invalid UTF-8 shows replacement characters rather than blanking the document', () => {
+  // Refusing to display on one bad byte would hand a filer a way to make their own evidence
+  // unreadable while still hashing correctly. Replacement characters are visible; a blank
+  // panel is not.
+  const state = admitEvidence(new Uint8Array([0xff, 0x41]), finalized('0xu'), () => '0xu');
+  assert.equal(state.kind, 'admitted');
+  assert.match(state.text, /A$/);
+  assert.ok(state.text.includes('\uFFFD'), JSON.stringify(state.text));
 });

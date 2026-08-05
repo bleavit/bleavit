@@ -51,6 +51,7 @@ import {
   type PendingAction,
   type TriggerState,
 } from './guardian.js';
+import { EvidencePanel } from './operator-consoles.js';
 
 /** Release copy for the five powers. Closed over `GuardianPower`, so a sixth cannot slip in. */
 const POWER_LABEL: Readonly<Record<GuardianPower, string>> = Object.freeze({
@@ -110,8 +111,13 @@ export function ApproveAction({
       <Field label="Power">
         <Identifier datum={context.action.power} />
       </Field>
+      {/* §11.8.2 wants the *resolved* justification document, under §11.8.1's evidence
+          rules: re-hashed before rendering, and unavailable-or-mismatched stated rather than
+          silently omitted. The hash always shows — it is what a reader checks a document
+          against elsewhere if this device cannot fetch one. */}
       <Field label="Justification">
         <Identifier datum={context.action.justificationHash} />
+        <EvidencePanel state={context.justification} label="Justification document" />
       </Field>
 
       {/* §11.8.2: the exact enumerated batch, "decoded and displayed, never summarized away".

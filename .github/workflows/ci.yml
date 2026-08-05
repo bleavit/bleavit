@@ -596,6 +596,19 @@ jobs:
         working-directory: app
         run: pnpm run check:render-provenance && pnpm run check:render-provenance:witness
 
+      - name: No markup or code sinks anywhere in app source (11 §11.8.1)
+        # Evidence is bytes an adversary chose, displayed inside the console operated by the
+        # system's most privileged actors; 10 §13.2's imported documents are the same shape
+        # from another direction. §11.8.1's "rendered as text/structured data only, never
+        # HTML" is not enforceable by a type — `evidence.text` is a `string` and
+        # `dangerouslySetInnerHTML={{ __html: text }}` typechecks perfectly. The sink list is
+        # closed rather than a pattern, because "anything ending in HTML" fires on
+        # `escapeHtml`/`parseHtml` and gets switched off. AST-based, so a sink named inside a
+        # comment or a string literal is simply not a property access. The witness proves each
+        # form is still detectable and that the near-miss controls stay silent.
+        working-directory: app
+        run: pnpm run check:no-html-sinks && pnpm run check:no-html-sinks:witness
+
       - name: Release pipeline and its bundle controls (12 §1, §5; F11)
         # Builds the tree and runs every distribution gate over it, per commit. A release
         # pipeline that only runs at a tag is a release pipeline first debugged during a

@@ -43,6 +43,7 @@ import {
   type ReactNode,
 } from '@bleavit/ui';
 import type { Combined, Verified } from '@bleavit/shared-types';
+import { evidenceCopy, type EvidenceState } from './evidence.js';
 import {
   checkRegistration,
   registrationCaveat,
@@ -456,5 +457,39 @@ export function UpgradeHashMismatch({
       detail={`Authorized: ${expected} — computed from the downloaded bytes: ${computed}.`}
       recovery="Obtain the artifact whose hash matches the authorized one. Re-downloading the same file will not change this result, and these bytes are never offered to a wallet."
     />
+  );
+}
+
+/**
+ * Content-addressed evidence, rendered under §11.8.1's rules.
+ *
+ * Text only — `<pre>`, never markup. `check:no-html-sinks` is what actually enforces that
+ * across the app; this component simply has nowhere to put HTML even if somebody wanted to.
+ *
+ * The two failure arms render as a **notice**, not as an empty panel, because "this device
+ * could not obtain the evidence" and "no evidence was filed" are different facts and 07
+ * adjudicates on the second.
+ */
+export function EvidencePanel({
+  state,
+  label,
+}: {
+  readonly state: EvidenceState;
+  readonly label: string;
+}): ReactNode {
+  const copy = evidenceCopy(state);
+  if (state.kind === 'admitted') {
+    return (
+      <div className="evidence">
+        <span className="evidence__label">{label}</span>
+        {/* Text, always. The bytes were chosen by whoever filed this. */}
+        <pre className="evidence__text">{state.text}</pre>
+      </div>
+    );
+  }
+  return (
+    <Notice severity="caution" heading={label}>
+      {copy}
+    </Notice>
   );
 }

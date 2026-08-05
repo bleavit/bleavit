@@ -147,3 +147,11 @@ export {
   SnapshotCrank,
   TreasuryStreams,
 } from './operator-consoles.js';
+export {
+  EVIDENCE_UNRETRIEVABLE,
+  admitEvidence,
+  evidenceCopy,
+  evidenceUnavailable,
+  type EvidenceState,
+} from './evidence.js';
+export { EvidencePanel } from './operator-consoles.js';
