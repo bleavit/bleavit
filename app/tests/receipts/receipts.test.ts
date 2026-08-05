@@ -35,7 +35,24 @@ const decode = (bytes) => new TextDecoder().decode(bytes);
  * what this suite checks is the *projection*, and TypeScript checks the provenance at the
  * one place it can be checked.
  */
-const finalized = (value) => ({ value, status: { kind: 'verified-finalized' } });
+/**
+ * A complete `Finalized<T>` fixture.
+ *
+ * Two things the untyped version got wrong, both invisible at runtime. `as const` on the
+ * discriminant: without it `kind` widens to `string` and the value stops being a
+ * `Verified<T>` at all. And **`blockHash`/`blockNumber` are required** — the status this
+ * helper claimed was `verified-finalized` carried no block, which is the one thing that
+ * status *means*. Every assertion in this file has been running against a provenance label
+ * with nothing behind it, which is exactly the condition 10 §2.1 exists to make untypeable.
+ */
+const finalized = <T,>(value: T) => ({
+  value,
+  status: {
+    kind: 'verified-finalized' as const,
+    blockHash: `0x${'11'.repeat(32)}` as const,
+    blockNumber: 7,
+  },
+});
 
 const BINDING = {
   genesisHash: '0x91b171bb158e2d3848fa23a9f1c25182fb8e20313b2c1eb49219da7a70ce90c3',

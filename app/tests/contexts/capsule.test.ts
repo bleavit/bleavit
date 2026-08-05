@@ -40,7 +40,24 @@ import { REFUSAL_CODES, RETIRED_CODES } from '@bleavit/handoff-envelope';
  * around: TypeScript checks provenance at the one place it can be checked, and this suite
  * checks the projection.
  */
-const finalized = (value) => ({ value, status: { kind: 'verified-finalized' } });
+/**
+ * A complete `Finalized<T>` fixture.
+ *
+ * Two things the untyped version got wrong, both invisible at runtime. `as const` on the
+ * discriminant: without it `kind` widens to `string` and the value stops being a
+ * `Verified<T>` at all. And **`blockHash`/`blockNumber` are required** — the status this
+ * helper claimed was `verified-finalized` carried no block, which is the one thing that
+ * status *means*. Every assertion in this file has been running against a provenance label
+ * with nothing behind it, which is exactly the condition 10 §2.1 exists to make untypeable.
+ */
+const finalized = <T,>(value: T) => ({
+  value,
+  status: {
+    kind: 'verified-finalized' as const,
+    blockHash: `0x${'11'.repeat(32)}` as const,
+    blockNumber: 7,
+  },
+});
 
 /**
  * Capture a refusal so its code, detail and recovery can be asserted.
