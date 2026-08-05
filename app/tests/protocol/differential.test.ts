@@ -40,8 +40,9 @@ import {
   makerWorstCaseLoss,
   toRaw,
 } from '@bleavit/protocol';
+import type { Fixed, LmsrSide } from '@bleavit/protocol';
 
-import { absDiff, bigFrom, catchThrown, decimalToRaw64x64, loadCorpus } from './corpus.js';
+import { absDiff, bigFrom, catchThrown, decimalToRaw64x64, loadCorpus } from './corpus.ts';
 
 const corpus = loadCorpus();
 
@@ -61,7 +62,7 @@ const PRICE_MAX_ULP = 8n;
  * for every `b ≤ 10⁹` USDC, so the whole error band is invisible at the
  * currency grid where the charge is actually taken.
  */
-function costUlpBound(bWholeUsdc) {
+function costUlpBound(bWholeUsdc: bigint): bigint {
   return 8n * BigInt(bWholeUsdc);
 }
 
@@ -70,11 +71,27 @@ const B_10K = fromInteger(B_10K_WHOLE);
 const B_10K_COST_ULP = costUlpBound(B_10K_WHOLE);
 
 /** Whole USDC as 64.64, the unit every LMSR entry point takes. */
-function usdc(text) {
+function usdc(text: string | number): Fixed {
   return fromRaw(decimalToRaw64x64(String(text)));
 }
 
-function assertWithinUlp(actual, expected, maxUlp, what) {
+/**
+ * A corpus `side` field as the kernel's own `LmsrSide`.
+ *
+ * Checked rather than asserted, because the kernel branches on
+ * `side === 'long'` and treats everything else as SHORT. A corpus regenerated
+ * with `"LONG"` would therefore quote the *opposite* side, and V6 — a refusal
+ * test — would still see a refusal and still pass, having exercised a trade it
+ * was not written to exercise.
+ */
+function lmsrSide(text: string): LmsrSide {
+  if (text !== 'long' && text !== 'short') {
+    throw new Error(`the corpus states side ${JSON.stringify(text)}; the kernel knows long/short`);
+  }
+  return text;
+}
+
+function assertWithinUlp(actual: bigint, expected: bigint, maxUlp: bigint, what: string): void {
   const delta = absDiff(actual, expected);
   assert.ok(
     delta <= maxUlp,
@@ -185,7 +202,7 @@ test('V6 — a trade leaving the price domain is refused, and the edge itself is
   assert.equal(toRaw(qLong), toRaw(b) * LMSR_DOMAIN_BOUND, 'V6 state is not the exact edge');
   assert.doesNotThrow(() => lmsrCost(qLong, qShort, b));
 
-  const error = catchThrown(() => lmsrBuyCost(qLong, qShort, b, V6.side, usdc(V6.amount)));
+  const error = catchThrown(() => lmsrBuyCost(qLong, qShort, b, lmsrSide(V6.side), usdc(V6.amount)));
   assert.ok(error instanceof ProtocolError, `V6 refused with ${error}`);
   assert.equal(error.code, V6.error);
 });
@@ -221,11 +238,15 @@ test('the cost function is symmetric under swapping the two sides', () => {
   // it: C(a,b) = C(b,a). The corpus carries such pairs, so a violation would
   // also break the row above — this states the property directly.
   const b = usdc(10_000);
-  for (const [long, short] of [
+  // Declared as tuples: under `noUncheckedIndexedAccess` a `bigint[][]` element
+  // destructures to `bigint | undefined`, so a row of the wrong arity would be
+  // a runtime surprise rather than a compile error.
+  const mirroredPairs: ReadonlyArray<readonly [bigint, bigint]> = [
     [2500n, 0n],
     [12345n, 6789n],
     [240_000n, 0n],
-  ]) {
+  ];
+  for (const [long, short] of mirroredPairs) {
     const forward = lmsrCost(fromInteger(long), fromInteger(short), b);
     const mirrored = lmsrCost(fromInteger(short), fromInteger(long), b);
     assert.equal(toRaw(forward), toRaw(mirrored), `C(${long},${short}) ≠ C(${short},${long})`);

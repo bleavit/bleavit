@@ -43,8 +43,9 @@ import {
   USDC_ONE,
   withinTradeBounds,
 } from '@bleavit/protocol';
+import type { Fixed, LmsrSide } from '@bleavit/protocol';
 
-import { absDiff, catchThrown, decimalToRational, loadCorpus } from './corpus.js';
+import { absDiff, catchThrown, decimalToRational, loadCorpus } from './corpus.ts';
 
 const corpus = loadCorpus();
 
@@ -59,7 +60,7 @@ const LAUNCH_BOUNDS = {
 };
 const LAUNCH_FEE_BPS = 30n;
 
-function usdcFixed(whole) {
+function usdcFixed(whole: bigint | number): Fixed {
   return fromInteger(BigInt(whole));
 }
 
@@ -90,7 +91,7 @@ test('path-independence: reaching a state in steps costs exactly what reaching i
 test('path-independence: the order of interleaved long and short buys does not change the total', () => {
   const b = usdcFixed(10_000);
 
-  function walk(steps) {
+  function walk(steps: ReadonlyArray<readonly [LmsrSide, bigint]>) {
     let long = 0n;
     let short = 0n;
     let total = 0n;
@@ -174,7 +175,7 @@ test('one-sided drain rises monotonically toward b·ln 2 and never passes it', (
   const b = usdcFixed(10_000);
   const bound = toRaw(makerWorstCaseLoss(b));
 
-  function drainAt(x) {
+  function drainAt(x: bigint): bigint {
     const delta = usdcFixed(10_000n * x);
     return toRaw(delta) - toRaw(lmsrBuyCost(usdcFixed(0), usdcFixed(0), b, 'long', delta));
   }
@@ -249,7 +250,9 @@ test('exp2 and log2 invert each other across the domain', () => {
 });
 
 test('exp2 is multiplicative, which exercises the factor table combinatorially', () => {
-  const pairs = [
+  // Tuples, not `bigint[][]`: `noUncheckedIndexedAccess` would otherwise
+  // destructure each row to `bigint | undefined`.
+  const pairs: ReadonlyArray<readonly [bigint, bigint]> = [
     [1n << 62n, 1n << 61n],
     [(5n << 64n) / 4n, (7n << 64n) / 8n],
     [3n << 64n, (11n << 64n) / 16n],
