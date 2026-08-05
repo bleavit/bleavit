@@ -17,6 +17,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
+import { blake2b } from '@noble/hashes/blake2b';
+
 import {
   NO_WRAPPER,
   PROXY_DELEGATION_SURFACE,
@@ -27,34 +29,77 @@ import {
   proxyTypeCovers,
   splitsIdentity,
   wrapperRefusalReason,
+  deriveMultisigAccount,
+  multisigWrapper,
 } from '@bleavit/transaction-builder';
+import type {
+  AccountId,
+  ApprovalStep,
+  DelegationEvidence,
+  ProxyAdmission,
+  ProxyDelegation,
+  CallWrapper,
+  MultisigEntry,
+  MultisigKey,
+  MultisigRead,
+  PublicKeyHex,
+  Timepoint,
+} from '@bleavit/transaction-builder';
+// `finalize` is test-only on purpose — see packages/chain-client/src/testing.ts.
+import { finalize } from '@bleavit/chain-client/testing';
+import type { Finalized } from '@bleavit/chain-client';
 import { CRITICAL_SURFACE } from '@bleavit/descriptors';
 
-const SIGNER = '5Signer';
-const REAL = '5Real';
-const MULTI = '5Multisig';
-const OTHER = '5Other';
+const blake2b256 = (bytes: Uint8Array): Uint8Array => blake2b(bytes, { dkLen: 32 });
+/** A 32-byte public key, which is what `deriveMultisigAccount` requires. */
+const key = (byte: string): PublicKeyHex => `0x${byte.repeat(32)}`;
 
-// A finalized read in the shape chain-client hands back; the brand has no runtime
-// representation, so a plain object is the right test input (see fees.test.js).
-const finalized = (value) => ({
-  value,
-  status: { kind: 'verified-finalized', blockHash: `0x${'22'.repeat(32)}`, blockNumber: 7 },
-});
+const SIGNER: AccountId = key('11');
+const REAL: AccountId = '5Real';
+const OTHER: AccountId = key('22');
 
-const proxy = (proxyType) => ({ kind: 'proxy', real: REAL, proxyType });
-const multisig = (threshold) => ({ kind: 'multisig', multisig: MULTI, threshold, otherSignatories: [OTHER] });
+/**
+ * The wrapper is built through the **production** constructor, not written as a literal.
+ *
+ * `CallWrapper`'s `multisig` field is branded, mintable only by `deriveMultisigAccount`,
+ * and that is the finding this suite is about: a caller-supplied account fails in the
+ * dangerous direction, because every 11 §11.5 row reads it and a wrong one reports a
+ * healthy balance for an address the transaction never acts as. A fixture that cast past
+ * the brand would be asserting against a wrapper the client cannot actually produce.
+ */
+const multisig = (threshold: number): CallWrapper => {
+  // Enough signatories for the threshold to be meetable: `deriveMultisigAccount` refuses
+  // a threshold above the set size, which is the same refusal the runtime makes, and a
+  // fixture that dodged it would describe a multisig that can never dispatch.
+  const extras = Array.from({ length: Math.max(0, threshold - 2) }, (_, i) =>
+    key((0x30 + i).toString(16)),
+  );
+  const signatories = [SIGNER, OTHER, ...extras];
+  return multisigWrapper(deriveMultisigAccount(signatories, threshold, blake2b256), SIGNER);
+};
+
+/** The derived account for the 2-of-2 used throughout, for the reads keyed on it. */
+const MULTI: AccountId = deriveMultisigAccount([SIGNER, OTHER], 2, blake2b256).account;
+
+const finalized = <T>(value: T): Finalized<T> =>
+  finalize(value, { blockHash: `0x${'22'.repeat(32)}`, blockNumber: 7 });
+
+const proxy = (proxyType: string | undefined): CallWrapper => ({ kind: 'proxy', real: REAL, proxyType });
 /**
  * The `(multisig, callHash)` key every `Multisig.Multisigs` read belongs to (02 §7.6).
  * Carried by the helpers because a read without its key is what finding #4 was about.
  */
-const KEY = { multisig: MULTI, callHash: `0x${'ab'.repeat(32)}` };
-const OTHER_KEY = { multisig: MULTI, callHash: `0x${'cd'.repeat(32)}` };
+const KEY: MultisigKey = { multisig: MULTI, callHash: `0x${'ab'.repeat(32)}` };
+const OTHER_KEY: MultisigKey = { multisig: MULTI, callHash: `0x${'cd'.repeat(32)}` };
 
-const read = (entry, key = KEY) => finalized({ key, entry });
-const absent = (key = KEY) => read(null, key);
-const entry = (approvals, when = { height: 100, index: 2 }, key = KEY) =>
-  read({ when, deposit: 1n, depositor: OTHER, approvals }, key);
+const read = (entry: MultisigEntry | null, key: MultisigKey = KEY): Finalized<MultisigRead> =>
+  finalized({ key, entry });
+const absent = (key: MultisigKey = KEY): Finalized<MultisigRead> => read(null, key);
+const entry = (
+  approvals: readonly AccountId[],
+  when: Timepoint = { height: 100, index: 2 },
+  key: MultisigKey = KEY,
+): Finalized<MultisigRead> => read({ when, deposit: 1n, depositor: OTHER, approvals }, key);
 
 test('an unwrapped call has one identity', () => {
   assert.equal(actingAccount(NO_WRAPPER, SIGNER), SIGNER);
@@ -122,7 +167,7 @@ test('a signer who already approved is refused before paying for the rejection',
   const step = deriveApproval(entry([OTHER, SIGNER]), KEY, SIGNER, 3);
   assert.equal(step.kind, 'already-approved');
   assert.deepEqual(step.maybeTimepoint, { height: 100, index: 2 });
-  const reason = wrapperRefusalReason(step);
+  const reason = refusalFor(step);
   assert.match(reason, /already approved/);
   assert.match(reason, /2 of 3/);
 });
@@ -165,7 +210,7 @@ test('the already-approved refusal survives while the threshold is still short',
   // returns `AlreadyApproved`.
   const step = deriveApproval(entry([OTHER, SIGNER]), KEY, SIGNER, 3);
   assert.equal(step.kind, 'already-approved');
-  assert.match(wrapperRefusalReason(step), /already approved/);
+  assert.match(refusalFor(step), /already approved/);
 });
 
 test('the threshold-met boundary is exact, not approximate', () => {
@@ -212,6 +257,7 @@ test('threshold 1 executes on the opening approval', () => {
   // ...and it must NOT execute at any higher threshold, or the flag says nothing.
   for (const threshold of [2, 3, 7]) {
     const later = deriveApproval(absent(), KEY, SIGNER, threshold);
+    assert.equal(later.kind, 'first');
     assert.equal(later.executes, false, `opening approval executed at threshold ${threshold}`);
   }
 });
@@ -250,14 +296,19 @@ test('threshold 1 dispatches as_multi_threshold_1, never as_multi (#5)', () => {
   // check 13 already names in the SafetyFilter closure. Marking threshold 1 as executing
   // "through as_multi" described a call the runtime refuses outright.
   const one = deriveApproval(absent(), KEY, SIGNER, 1);
+  assert.equal(one.kind, 'first');
   assert.equal(one.dispatch, 'as_multi_threshold_1');
   assert.equal(one.executes, true);
   assert.equal(one.maybeTimepoint, undefined, 'as_multi_threshold_1 takes no timepoint');
 
   // Every threshold >= 2 uses as_multi, or the distinction is decorative.
   for (const threshold of [2, 3, 64]) {
-    assert.equal(deriveApproval(absent(), KEY, SIGNER, threshold).dispatch, 'as_multi');
-    assert.equal(deriveApproval(entry([OTHER]), KEY, SIGNER, threshold).dispatch, 'as_multi');
+    const opening = deriveApproval(absent(), KEY, SIGNER, threshold);
+    assert.equal(opening.kind, 'first');
+    assert.equal(opening.dispatch, 'as_multi');
+    const next = deriveApproval(entry([OTHER]), KEY, SIGNER, threshold);
+    assert.equal(next.kind, 'subsequent');
+    assert.equal(next.dispatch, 'as_multi');
   }
 });
 
@@ -273,9 +324,31 @@ test('threshold 1 ignores any stored entry rather than reporting a queue (#5)', 
 
 /* --------------------------------------------------------- #3 proxy delegation */
 
-const delegation = (over = {}) => ({ delegate: SIGNER, proxyType: 'Any', delay: 0, ...over });
-const readDelegations = (...delegations) =>
-  ({ kind: 'read', read: finalized({ real: REAL, delegations }) });
+const delegation = (over: Partial<ProxyDelegation> = {}): ProxyDelegation => ({
+  delegate: SIGNER,
+  proxyType: 'Any',
+  delay: 0,
+  ...over,
+});
+const readDelegationsFor = (
+  real: AccountId,
+  ...delegations: readonly ProxyDelegation[]
+): DelegationEvidence => ({ kind: 'read', read: finalized({ real, delegations }) });
+const readDelegations = (...delegations: readonly ProxyDelegation[]): DelegationEvidence =>
+  readDelegationsFor(REAL, ...delegations);
+
+/** The refusal a step carries, or a throw if it carries none. */
+const refusalFor = (step: ApprovalStep): string => {
+  const reason = wrapperRefusalReason(step);
+  assert.ok(reason, `expected a refusal for a ${step.kind} step, got none`);
+  return reason;
+};
+
+/** The reason an admission refused, or a throw if it did not refuse. */
+const admissionReason = (admission: ProxyAdmission): string => {
+  assert.equal(admission.ok, false, 'expected a refusal, got an admitted delegation');
+  return admission.reason;
+};
 
 test('a proxy wrapper with no delegation on chain is refused (#3)', () => {
   // The check did not exist. A wrapper could name `real = R` with proxyType 'Any', every
@@ -316,16 +389,16 @@ test('a delegation read taken for another account is refused, not reused (SQ-590
   // its emptiness is the dangerous half: reported as "no delegation" it is indistinguishable
   // from a genuine absence, while reported as an admission it authorises a call the runtime
   // rejects with NotProxy. Refusing is the only reading that is about this transaction.
-  const elsewhere = { kind: 'read', read: finalized({ real: OTHER, delegations: [delegation()] }) };
+  const elsewhere = readDelegationsFor(OTHER, delegation());
   const wrong = proxyAdmits(elsewhere, REAL, SIGNER, 'ledger.split');
   assert.equal(wrong.ok, false);
-  assert.match(wrong.reason, /Refusing to decide one account's proxy rights/);
+  assert.match(admissionReason(wrong), /Refusing to decide one account's proxy rights/);
 
   // An EMPTY read at the wrong key is refused too — the direction an implementation that
   // only checked the key when a delegation was present would get wrong, exactly as the
   // multisig stale-absence case above.
-  const emptyElsewhere = { kind: 'read', read: finalized({ real: OTHER, delegations: [] }) };
-  assert.match(proxyAdmits(emptyElsewhere, REAL, SIGNER, 'x').reason, /Refusing to decide/);
+  const emptyElsewhere = readDelegationsFor(OTHER);
+  assert.match(admissionReason(proxyAdmits(emptyElsewhere, REAL, SIGNER, 'x')), /Refusing to decide/);
 });
 
 test('the STORED proxy type governs, not the one the wrapper claims (#3)', () => {

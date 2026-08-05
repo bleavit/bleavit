@@ -29,30 +29,51 @@ import {
   reduce,
   txTransitionEdges,
 } from '@bleavit/transaction-builder';
+import type {
+  GatePassed,
+  PreconditionResult,
+  PreconditionRow,
+  PreconditionRowId,
+  TxPreparation,
+  TxSession,
+  TxState,
+  TxEvent,
+} from '@bleavit/transaction-builder';
+import type { FinalizedBlockRef } from '@bleavit/chain-client';
 import { INJECTED_DESCRIPTOR, RAW_PAYLOAD_DESCRIPTOR, SignerCapabilityError, SignerRegistry, requireCapability } from '@bleavit/signing';
 import { MOCK_SIGNER_DESCRIPTOR, MockSigner } from '@bleavit/signing/testing';
+// `finalize` is test-only on purpose — see packages/chain-client/src/testing.ts.
+import { finalize } from '@bleavit/chain-client/testing';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const DOC = resolve(HERE, '..', '..', '..', 'docs', 'architecture', '11-frontend-workflows.md');
 
-const PIN = { blockHash: `0x${'11'.repeat(32)}`, blockNumber: 100 };
-const BUILT_FOR = { specVersion: 2, metadataHash: `0x${'ab'.repeat(32)}` };
+const PIN: FinalizedBlockRef = { blockHash: `0x${'11'.repeat(32)}`, blockNumber: 100 };
+const BUILT_FOR: TxPreparation['builtFor'] = { specVersion: 2, metadataHash: `0x${'ab'.repeat(32)}` };
 // `requires` is the rows this call declares. It is required and non-empty: without it the
 // gate could not distinguish "every precondition holds" from "nobody read one", and those
 // were the same value — every check in `gate` is a filter, and a filter over an empty array
 // is empty. An adversarial review found `gate(PREP, PIN, BUILT_FOR, [])` returning `proceed`.
-const PREP = {
+const PREP: TxPreparation = {
   scaleHex: '0x0403aabbcc',
   builtFor: BUILT_FOR,
   preparedAt: { blockHash: `0x${'22'.repeat(32)}`, blockNumber: 99 },
   requires: ['P-1'],
 };
 
-const okRow = (id) => ({ id, ok: true, requirement: 'r', expected: 'e', actual: 'a', at: PIN });
-const failRow = (id) => ({ ...okRow(id), ok: false });
+const okRow = (id: PreconditionRowId): PreconditionResult =>
+  ({ id, ok: true, requirement: 'r', expected: 'e', actual: 'a', at: PIN });
+const failRow = (id: PreconditionRowId): PreconditionResult => ({ ...okRow(id), ok: false });
+
+/** The gate proof a signing session carries, or a throw if the gate never opened. */
+function windowOf(session: TxSession): GatePassed {
+  const { signingWindow } = session;
+  assert.ok(signingWindow, `no gate proof in state ${session.state}`);
+  return signingWindow;
+}
 
 /** Drive a session to AwaitingSignature the only way the machine allows. */
-function toAwaitingSignature(results = [okRow('P-1')]) {
+function toAwaitingSignature(results: readonly PreconditionResult[] = [okRow('P-1')]): TxSession {
   let s = reduce(INITIAL_TX_SESSION, { type: 'prepared', prep: PREP });
   s = reduce(s, { type: 'submit-requested' });
   return reduce(s, { type: 'gate-result', outcome: gate(PREP, PIN, BUILT_FOR, results) });
@@ -77,11 +98,18 @@ test('AwaitingSignature is reachable ONLY from Refreshing, and only with a passe
   assert.deepEqual(inbound, [['Refreshing', 'AwaitingSignature']]);
 
   // And from Refreshing, only a `proceed` outcome opens it.
-  const refreshing = { ...INITIAL_TX_SESSION, state: 'Refreshing', prep: PREP };
+  const refreshing: TxSession = { ...INITIAL_TX_SESSION, state: 'Refreshing', prep: PREP };
   const blocked = gate(PREP, PIN, BUILT_FOR, [failRow('P-1')]);
   assert.equal(reduce(refreshing, { type: 'gate-result', outcome: blocked }).state, 'Blocked');
-  for (const type of ['signed', 'prepared', 'submit-requested', 'edit', 'finalized']) {
-    assert.equal(reduce(refreshing, { type, prep: PREP }).state, 'Refreshing', `${type} bypassed the gate`);
+  const bypasses = [
+    { type: 'signed' },
+    { type: 'prepared', prep: PREP },
+    { type: 'submit-requested' },
+    { type: 'edit' },
+    { type: 'finalized' },
+  ] as const satisfies readonly TxEvent[];
+  for (const event of bypasses) {
+    assert.equal(reduce(refreshing, event).state, 'Refreshing', `${event.type} bypassed the gate`);
   }
 });
 
@@ -98,7 +126,7 @@ test('a gate over zero reads is BLOCKED — it certifies nothing (adversarial re
 });
 
 test('a declared row with no result blocks, naming the row', () => {
-  const twoRows = { ...PREP, requires: ['P-1', 'P-3'] };
+  const twoRows: TxPreparation = { ...PREP, requires: ['P-1', 'P-3'] };
   const outcome = gate(twoRows, PIN, BUILT_FOR, [okRow('P-1')]);
   assert.equal(outcome.kind, 'blocked');
   assert.match(outcome.detail, /P-3/);
@@ -107,14 +135,15 @@ test('a declared row with no result blocks, naming the row', () => {
 test('a preparation declaring no rows at all is refused rather than trivially passing', () => {
   // 11 §11.5 gives every call at least one row, so an empty `requires` is a defect in the
   // builder — and the fail-open reading of it is a signature nothing gated.
-  const outcome = gate({ ...PREP, requires: [] }, PIN, BUILT_FOR, []);
+  const noRows: TxPreparation = { ...PREP, requires: [] };
+  const outcome = gate(noRows, PIN, BUILT_FOR, []);
   assert.equal(outcome.kind, 'blocked');
   assert.match(outcome.detail, /declares no precondition rows/);
 });
 
 test('extra results beyond the declared set do not substitute for a missing one', () => {
   // A count-based coverage check would pass this: two declared, two supplied.
-  const twoRows = { ...PREP, requires: ['P-1', 'P-3'] };
+  const twoRows: TxPreparation = { ...PREP, requires: ['P-1', 'P-3'] };
   const outcome = gate(twoRows, PIN, BUILT_FOR, [okRow('P-1'), okRow('P-7')]);
   assert.equal(outcome.kind, 'blocked');
   assert.match(outcome.detail, /P-3/);
@@ -136,7 +165,8 @@ test('a session in AwaitingSignature carries the gate proof, and nothing else do
   assert.ok(signing.signingWindow, 'no gate proof was carried into the signing state');
   assert.equal(signing.signingWindow.at.blockHash, PIN.blockHash);
 
-  for (const state of ['Draft', 'Prepared', 'Refreshing', 'Blocked', 'Broadcast']) {
+  const preSigning = ['Draft', 'Prepared', 'Refreshing', 'Blocked', 'Broadcast'] as const satisfies readonly TxState[];
+  for (const state of preSigning) {
     assert.equal(
       reduce({ ...INITIAL_TX_SESSION, state }, { type: 'signed' }).signingWindow,
       undefined,
@@ -166,6 +196,7 @@ test('FE-TX-007 is checked before the preconditions, not alongside them', () => 
 
   // A changed metadata hash at the same spec_version is equally disqualifying.
   const rehashed = gate(PREP, PIN, { specVersion: 2, metadataHash: `0x${'cd'.repeat(32)}` }, [okRow('P-1')]);
+  assert.equal(rehashed.kind, 'blocked');
   assert.equal(rehashed.code, 'FE-TX-007');
 });
 
@@ -186,7 +217,10 @@ test('a blocked gate returns to Draft with the preparation preserved (rule 5)', 
 test('preconditions read at different blocks cannot authorise a signature (INV-FE-2)', () => {
   // Not a precondition failure — a defect in how the batch was read. Passing it would
   // certify a conjunction that was never simultaneously true.
-  const elsewhere = { ...okRow('P-3'), at: { blockHash: `0x${'99'.repeat(32)}`, blockNumber: 101 } };
+  const elsewhere: PreconditionResult = {
+    ...okRow('P-3'),
+    at: { blockHash: `0x${'99'.repeat(32)}`, blockNumber: 101 },
+  };
   const outcome = gate(PREP, PIN, BUILT_FOR, [okRow('P-1'), elsewhere]);
   assert.equal(outcome.kind, 'blocked');
   assert.deepEqual(outcome.failed.map((f) => f.id), ['P-3']);
@@ -198,7 +232,8 @@ test('InBestBlock is not success: retraction and dropping are both live edges', 
   assert.ok(edges.has('InBestBlock>Finalized'));
   assert.ok(edges.has('InBestBlock>Retracted'), 'a transaction that went backwards has nowhere to go');
   assert.ok(edges.has('InBestBlock>Dropped'));
-  for (const terminal of ['Finalized', 'Dropped', 'Retracted']) {
+  const terminals = ['Finalized', 'Dropped', 'Retracted'] as const satisfies readonly TxState[];
+  for (const terminal of terminals) {
     assert.ok(TX_TERMINAL_STATES.has(terminal));
     assert.equal(reduce({ ...INITIAL_TX_SESSION, state: terminal }, { type: 'edit' }).state, terminal);
   }
@@ -207,15 +242,14 @@ test('InBestBlock is not success: retraction and dropping are both live edges', 
 test('a precondition is evaluated from a finalized read and reports both sides', () => {
   // Rule 3: expected and actual both render. A gate that reported only "failed" leaves the
   // user unable to tell a stale form from a moved chain.
-  const row = {
+  const row: PreconditionRow<bigint> = {
     id: 'P-1',
     requirement: 'the account holds at least the trade cost',
     source: { kind: 'storage', key: '0xdead', query: 'value' },
-    satisfiedBy: (v) => v >= 1000n,
+    satisfiedBy: (v: bigint) => v >= 1000n,
     expected: () => '>= 1000',
   };
-  const read = { value: 999n, status: { kind: 'verified-finalized', blockHash: PIN.blockHash, blockNumber: PIN.blockNumber } };
-  const result = evaluate(row, read);
+  const result = evaluate(row, finalize(999n, PIN));
   assert.equal(result.ok, false);
   assert.equal(result.expected, '>= 1000');
   assert.equal(result.actual, '999');
@@ -230,12 +264,15 @@ test('a signer cannot be called without the gate proof', async () => {
   // can say which block the signature is being taken against.
   const signer = new MockSigner();
   const session = toAwaitingSignature();
-  const signed = await signer.sign({ prep: PREP, window: session.signingWindow, account: '5Grw' });
+  const window = windowOf(session);
+  const signed = await signer.sign({ prep: PREP, window, account: '5Grw' });
   assert.equal(signed.signerId, 'mock');
   assert.equal(signer.seen.length, 1);
-  assert.equal(signer.seen[0].window.at.blockHash, PIN.blockHash);
+  const seen = signer.seen[0];
+  assert.ok(seen, 'the signer recorded no request');
+  assert.equal(seen.window.at.blockHash, PIN.blockHash);
   // Anti-substitution (11 §11.3): the bytes that reach the signer are `prep.scaleHex`.
-  assert.equal(signer.seen[0].prep.scaleHex, PREP.scaleHex);
+  assert.equal(seen.prep.scaleHex, PREP.scaleHex);
 });
 
 test('the registry refuses a test-only signer (INV-FE-5)', () => {
@@ -274,7 +311,7 @@ test('the mock signature is derived from the payload, not constant', () => {
   // A constant signature could not tell a test whether the right bytes ever reached the
   // signer — which is the only thing 11 §11.3's anti-substitution rule is about.
   const signer = new MockSigner();
-  const window = toAwaitingSignature().signingWindow;
+  const window = windowOf(toAwaitingSignature());
   return Promise.all([
     signer.sign({ prep: PREP, window, account: '5Grw' }),
     signer.sign({ prep: { ...PREP, scaleHex: '0x0403ddeeff' }, window, account: '5Grw' }),

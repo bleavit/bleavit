@@ -513,6 +513,9 @@ importers:
       '@bleavit/mock-runtime':
         specifier: workspace:*
         version: link:../../packages/mock-runtime
+      '@bleavit/shared-types':
+        specifier: workspace:*
+        version: link:../../packages/shared-types
       '@bleavit/signing':
         specifier: workspace:*
         version: link:../../packages/signing

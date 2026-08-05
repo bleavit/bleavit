@@ -15,29 +15,47 @@ import {
   PHASE_PROXIMITY_WARNING_BLOCKS,
   admitRate,
   estimateFee,
+  gate,
   mortalityFor,
   nonceFor,
   phaseBoundaryWarning,
 } from '@bleavit/transaction-builder';
+import type { GatePassed, TxPreparation, VitUsdcRate } from '@bleavit/transaction-builder';
+// `finalize` is test-only on purpose — see packages/chain-client/src/testing.ts.
+import { finalize } from '@bleavit/chain-client/testing';
+import type { Finalized, FinalizedBlockRef } from '@bleavit/chain-client';
+import type { HexString } from '@bleavit/shared-types';
 
 const SCALE = 1_000_000n;
-// A finalized read, in the shape chain-client hands back. The brand has no runtime
-// representation, so a plain object is the right test input — the *type* is the control,
-// and `tests/firewall` is where that is proven.
-const finalized = (value) => ({ value, status: { kind: 'verified-finalized', blockHash: `0x${'11'.repeat(32)}`, blockNumber: 1 } });
-const rate = (value, reference = 1_000_000n) => finalized({ value, reference, scale: SCALE });
+const PIN = { blockHash: `0x${'11'.repeat(32)}` as const, blockNumber: 1 };
+const finalized = <T>(value: T): Finalized<T> => finalize(value, PIN);
+const rate = (value: bigint, reference = 1_000_000n): Finalized<VitUsdcRate> =>
+  finalized({ value, reference, scale: SCALE });
+
+/** The preparation the gate fixture below runs over. Its contents are not the subject. */
+const GATE_PREP: TxPreparation = {
+  scaleHex: '0x0403aabbcc',
+  builtFor: { specVersion: 2, metadataHash: `0x${'ab'.repeat(32)}` },
+  preparedAt: { blockHash: `0x${'22'.repeat(32)}`, blockNumber: 99 },
+  requires: ['P-1'],
+};
 
 /**
- * A stand-in for `GatePassed`, pinned to the same block `finalized()` reads at.
+ * A real `GatePassed`, pinned to a chosen block.
  *
- * The brand is a non-exported `unique symbol`, so a test cannot mint a real one — and that
- * is the property being exercised rather than dodged: what these functions now require is
- * *the gate's own pin*, and the suite proves they refuse a mismatched one.
+ * The brand is a non-exported `unique symbol`, so a test cannot mint one — and that is the
+ * property being exercised rather than dodged: what these functions require is *the gate's
+ * own pin*, so the fixture is obtained by running the gate, the only way anything can. The
+ * suite then proves they refuse a mismatched one.
  */
-const gatePin = (blockHash = `0x${'11'.repeat(32)}`, blockNumber = 1) => ({
-  at: { blockHash, blockNumber },
-  results: [],
-});
+const gatePin = (blockHash: HexString = `0x${'11'.repeat(32)}`, blockNumber = 1): GatePassed => {
+  const at: FinalizedBlockRef = { blockHash, blockNumber };
+  const outcome = gate(GATE_PREP, at, GATE_PREP.builtFor, [
+    { id: 'P-1', ok: true, requirement: 'r', expected: 'e', actual: 'a', at },
+  ]);
+  assert.equal(outcome.kind, 'proceed', 'the gate fixture no longer opens');
+  return outcome.passed;
+};
 
 test('a rate inside [0.1x, 10x] of its reference is admitted', () => {
   assert.equal(admitRate(rate(1_000_000n)).value, 1_000_000n);

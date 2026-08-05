@@ -32,18 +32,70 @@ import {
   accountForClause,
   clauseGroupsFor,
   clausesNeedingOtherAccounts,
+  deriveMultisigAccount,
+  multisigWrapper,
   crankStaleness,
   discloseLock,
   governanceRowsFor,
   lockPeriods,
   rowsFor,
 } from '@bleavit/transaction-builder';
+import type {
+  CallWrapper,
+  CrankCall,
+  FeeAsset,
+  GovernanceRowId,
+  PreconditionClause,
+  PreconditionRowId,
+} from '@bleavit/transaction-builder';
 import { CRITICAL_SURFACE } from '@bleavit/descriptors';
+import { blake2b } from '@noble/hashes/blake2b';
+import type { SurfaceId } from '@bleavit/descriptors';
 
+// `satisfies` rather than a bare literal: 11 §11.5's fifteen rows are checked against the
+// union `rows.ts` publishes, so a row added there without one here (or vice versa) is a
+// compile error rather than a `deepEqual` nobody re-reads.
 const ROW_IDS = [
   'P-1', 'P-2', 'P-3', 'P-4', 'P-5', 'P-6', 'P-7', 'P-8',
   'P-9', 'P-10', 'P-11', 'P-12', 'P-13', 'P-14', 'P-15',
-];
+] as const satisfies readonly PreconditionRowId[];
+
+/**
+ * A multisig wrapper built the only way the client can build one.
+ *
+ * `CallWrapper`'s `multisig` field is branded and `deriveMultisigAccount` is its sole
+ * mint, so a literal `'5Multi'` is a wrapper the production path cannot produce — and the
+ * account is exactly what every clause with subject `acting` resolves to.
+ */
+function multisigFixture(): Extract<CallWrapper, { kind: 'multisig' }> {
+  const key = (byte: string): string => `0x${byte.repeat(32)}`;
+  const derivation = deriveMultisigAccount(
+    [key('11'), key('22')],
+    2,
+    (bytes: Uint8Array) => blake2b(bytes, { dkLen: 32 }),
+  );
+  const wrapper = multisigWrapper(derivation, key('11'));
+  assert.equal(wrapper.kind, 'multisig');
+  return wrapper;
+}
+
+/** The nth element, or a throw naming how many there were. */
+function nth<T>(items: readonly T[], index: number, what: string): T {
+  const item = items.at(index);
+  if (item === undefined) throw new Error(`expected a ${what} at ${index}; there are ${items.length}`);
+  return item;
+}
+
+/** A clause matching a predicate, or a throw naming what was searched for. */
+function clauseWhere(
+  clauses: readonly PreconditionClause[],
+  predicate: (clause: PreconditionClause) => boolean,
+  what: string,
+): PreconditionClause {
+  const found = clauses.find(predicate);
+  if (found === undefined) throw new Error(`no clause matching ${what} among ${clauses.length}`);
+  return found;
+}
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '../../..');
 
@@ -96,7 +148,7 @@ test('the constants-API clauses are the ones 11 §11.5 marks [C]', () => {
     'constant.ledger.max_positions_per_account',
     'constant.market.min_trade',
     'constant.market.max_trade_ratio',
-  ]) {
+  ] as const satisfies readonly SurfaceId[]) {
     assert.ok(cited.has(required), `11 §11.5 marks ${required} [C] and no clause reads it`);
   }
 });
@@ -131,7 +183,7 @@ const P12_REQUIRED_SURFACES = [
   'storage.constitution.phase_flags',              // 12 DEAD_MAN_ENGAGED / 13 LEDGER_FROZEN
   'storage.execution_guard.migration_halt',        // 13 — MigrationHalt (waivable)
   'storage.execution_guard.expedited',             // 13 — the D-9 exemption
-];
+] as const satisfies readonly SurfaceId[];
 
 test('P-12 reads every surface its fourteen dispatch checks need', () => {
   const cited = new Set(rowsFor('P-12', 'USDC').map((c) => c.surface));
@@ -187,7 +239,7 @@ const DEAD_MAN = ['the dead-man switch is not engaged', 'the dead-man phase flag
 const EXPEDITED = 'or this proposal holds the expedited exemption';
 
 /** Every P-12 group holds, given the checks currently reading clear. */
-function p12Satisfied(satisfied) {
+function p12Satisfied(satisfied: ReadonlySet<string>): boolean {
   return clauseGroupsFor('P-12', 'USDC').every((group) =>
     group.some((clause) => satisfied.has(clause.requirement)),
   );
@@ -206,7 +258,7 @@ test('the expedited exemption waives the triggering freeze — and nothing else'
   }
   // The freezes it waives are the two the runtime waives, and no others.
   assert.deepEqual(
-    sharing.map((g) => g.find((c) => c.requirement !== EXPEDITED).requirement).sort(),
+    sharing.map((g) => clauseWhere(g, (c) => c.requirement !== EXPEDITED, 'the waived freeze').requirement).sort(),
     ['PB-LEDGER-FREEZE is clear', 'no migration halt is in force'],
   );
 
@@ -268,7 +320,10 @@ test('the P-12 grouping evaluates the way the runtime does', () => {
 test('rowsFor refuses an unknown row rather than returning an empty set', () => {
   // An empty precondition set is indistinguishable from "nothing to check", and a call
   // that reached the gate with no rows would pass it (11 §11.4 rule 1).
-  assert.throws(() => rowsFor('P-99', 'USDC'), /refusing to treat that as "nothing to check"/);
+  // Deliberately outside `PreconditionRowId`: the refusal is what an untyped caller —
+  // a rehydrated draft, a handoff document naming a row this release does not have —
+  // must meet, and an empty set would read as "nothing to check".
+  assert.throws(() => rowsFor('P-99' as PreconditionRowId, 'USDC'), /refusing to treat that as "nothing to check"/);
 });
 
 // ---------------------------------------------------------------------------
@@ -324,10 +379,10 @@ test('an unwrapped call resolves every clause to the signer', () => {
 
 test('a proxy sends acting clauses to `real` and fee clauses to the signer', () => {
   const SIGNER = '5Signer';
-  const wrapper = { kind: 'proxy', real: '5Real', proxyType: 'Any' };
+  const wrapper: CallWrapper = { kind: 'proxy', real: '5Real', proxyType: 'Any' };
   const p3 = rowsFor('P-3', 'USDC');
-  const amount = p3.find((c) => c.requirement.includes('covers the amount'));
-  const fee = p3.find((c) => c.requirement.includes('fee headroom'));
+  const amount = clauseWhere(p3, (c) => c.requirement.includes('covers the amount'), 'the amount clause');
+  const fee = clauseWhere(p3, (c) => c.requirement.includes('fee headroom'), 'the fee-headroom clause');
   assert.equal(accountForClause(amount, wrapper, SIGNER), '5Real');
   assert.equal(accountForClause(fee, wrapper, SIGNER), SIGNER);
   // The two must differ, or the split is decorative.
@@ -336,9 +391,9 @@ test('a proxy sends acting clauses to `real` and fee clauses to the signer', () 
 
 test('a multisig sends acting clauses to the multisig account', () => {
   const SIGNER = '5Signer';
-  const wrapper = { kind: 'multisig', multisig: '5Multi', threshold: 2, otherSignatories: ['5Other'] };
-  const acting = ALL_CLAUSES.find((c) => c.subject === 'acting');
-  assert.equal(accountForClause(acting, wrapper, SIGNER), '5Multi');
+  const wrapper = multisigFixture();
+  const acting = clauseWhere(ALL_CLAUSES, (c) => c.subject === 'acting', 'an acting-subject clause');
+  assert.equal(accountForClause(acting, wrapper, SIGNER), wrapper.multisig);
   assert.equal(accountForClause({ ...acting, subject: 'signer' }, wrapper, SIGNER), SIGNER);
 });
 
@@ -356,7 +411,7 @@ test('wrapping actually moves reads off the signer', () => {
   // Anti-vacuity for the whole mechanism: if no row had an account-scoped clause, every
   // test above would pass while the wrapper changed nothing that gets read.
   const SIGNER = '5Signer';
-  const proxied = { kind: 'proxy', real: '5Real', proxyType: 'Any' };
+  const proxied: CallWrapper = { kind: 'proxy', real: '5Real', proxyType: 'Any' };
   assert.equal(clausesNeedingOtherAccounts('P-1', NO_WRAPPER, SIGNER, 'USDC').length, 0);
   assert.ok(
     clausesNeedingOtherAccounts('P-1', proxied, SIGNER, 'USDC').length >= 2,
@@ -414,7 +469,7 @@ test('the P-9 surface is a real frozen surface, not a plausible string', () => {
  * ========================================================================== */
 
 /** Every clause of every row, at both fee selections — the corpus these scans run over. */
-const EVERY_CLAUSE = ['VIT', 'USDC'].flatMap((asset) =>
+const EVERY_CLAUSE = (['VIT', 'USDC'] as const satisfies readonly FeeAsset[]).flatMap((asset) =>
   ROW_IDS.flatMap((id) => rowsFor(id, asset)),
 );
 
@@ -422,13 +477,18 @@ test('the fee asset is required, and omitting it throws rather than dropping a c
   // The defect this guards: filtering by an absent asset matches no fee clause, so the row
   // comes back MINUS its headroom check and reads as a row that passed. The type system
   // cannot reach an untyped JS caller; this throw can.
-  assert.throws(() => rowsFor('P-3'), /needs the selected fee asset/);
-  assert.throws(() => rowsFor('P-3', 'DOT'), /needs the selected fee asset/);
-  assert.throws(() => rowsFor('P-3', null), /needs the selected fee asset/);
+  // Each argument here is deliberately outside the signature. That is the whole test: the
+  // comment above says "the type system cannot reach an untyped JS caller", and these three
+  // are what such a caller supplies — a forgotten argument, a chain asset this release does
+  // not price fees in, and an explicit null from a cleared form field.
+  const untypedFeeAsset = (value: unknown): FeeAsset => value as FeeAsset;
+  assert.throws(() => rowsFor('P-3', untypedFeeAsset(undefined)), /needs the selected fee asset/);
+  assert.throws(() => rowsFor('P-3', untypedFeeAsset('DOT')), /needs the selected fee asset/);
+  assert.throws(() => rowsFor('P-3', untypedFeeAsset(null)), /needs the selected fee asset/);
 });
 
 test('fee headroom is read from a different pallet per currency (11 §11.3)', () => {
-  const headroom = (asset) =>
+  const headroom = (asset: FeeAsset): readonly PreconditionClause[] =>
     rowsFor('P-3', asset).filter((c) => c.requirement.includes('fee headroom'));
   const vit = headroom('VIT');
   const usdc = headroom('USDC');
@@ -436,9 +496,9 @@ test('fee headroom is read from a different pallet per currency (11 §11.3)', ()
   // holds only one currency.
   assert.equal(vit.length, 1, 'VIT selection must yield exactly one headroom clause');
   assert.equal(usdc.length, 1, 'USDC selection must yield exactly one headroom clause');
-  assert.equal(vit[0].surface, 'storage.system.account');
-  assert.equal(usdc[0].surface, 'storage.foreign_assets.account');
-  assert.notEqual(vit[0].surface, usdc[0].surface, 'the split is decorative if both read the same item');
+  assert.equal(nth(vit, 0, 'headroom clause').surface, 'storage.system.account');
+  assert.equal(nth(usdc, 0, 'headroom clause').surface, 'storage.foreign_assets.account');
+  assert.notEqual(nth(vit, 0, 'headroom clause').surface, nth(usdc, 0, 'headroom clause').surface, 'the split is decorative if both read the same item');
 });
 
 test('no clause cites PositionTotals for a per-account position count (#9)', () => {
@@ -454,7 +514,7 @@ test('no clause cites PositionTotals for a per-account position count (#9)', () 
     'a position-count clause reads per-position supply, which is not the enforced bound',
   );
   // ...and the count is actually read, from the chain's own answer.
-  for (const row of ['P-3', 'P-9']) {
+  for (const row of ['P-3', 'P-9'] as const satisfies readonly PreconditionRowId[]) {
     const counted = rowsFor(row, 'USDC').find((c) => /position count/i.test(c.requirement));
     assert.ok(counted, `${row} lost its position-count clause`);
     assert.equal(counted.surface, 'api.account_positions');
@@ -476,7 +536,7 @@ test('the ledger freeze is never inferred from the constitution phase flags (#8)
     );
   }
   // Every ledger and market row that the freeze blocks must declare it.
-  for (const row of ['P-1', 'P-2', 'P-3', 'P-4']) {
+  for (const row of ['P-1', 'P-2', 'P-3', 'P-4'] as const satisfies readonly PreconditionRowId[]) {
     assert.ok(
       rowsFor(row, 'USDC').some((c) => /PB-LEDGER-FREEZE/.test(c.requirement)),
       `${row} is blocked by PB-LEDGER-FREEZE and does not check it`,
@@ -503,7 +563,7 @@ test('P-2 carries P-1’s book, quote and balance clauses rather than citing the
   // "book state + slippage recheck **as P-1**" is a clause set, not a cross-reference a
   // reader supplies. A Baseline buy by an account with no USDC passed every declared clause.
   const p2 = rowsFor('P-2', 'USDC');
-  const has = (re) => p2.some((c) => re.test(c.requirement));
+  const has = (re: RegExp): boolean => p2.some((c) => re.test(c.requirement));
   assert.ok(has(/max_cost \/ min_proceeds/), 'P-2 has no slippage clause');
   assert.ok(has(/recompute agree/), 'P-2 never compares the chain quote to its own');
   assert.ok(has(/USDC balance covers/), 'P-2 never checks the buyer can pay');
@@ -514,7 +574,7 @@ test('P-6 and P-7 read their settlement clause as a disjunction (#11)', () => {
   // 11 §11.5: "proposal vault ScalarSettled, **or** Baseline position view BaselineSettled".
   // Flat, these evaluate conjunctively and block BOTH lawful redemptions — no account holds
   // the two states at once.
-  for (const row of ['P-6', 'P-7']) {
+  for (const row of ['P-6', 'P-7'] as const satisfies readonly PreconditionRowId[]) {
     const groups = clauseGroupsFor(row, 'USDC');
     const alternative = groups.find((g) => g.length > 1);
     assert.ok(alternative, `${row}'s settlement clause is a conjunction; it blocks the lawful case`);
@@ -533,7 +593,7 @@ test('P-6 and P-7 read their settlement clause as a disjunction (#11)', () => {
 test('the redemption fee is cross-checked against its metadata constant (#12)', () => {
   // Reading only `params` is the SQ-581 shape: a value that agrees with itself is not a
   // check. The point is to catch a metadata surface that drifted from what is charged.
-  for (const row of ['P-6', 'P-7']) {
+  for (const row of ['P-6', 'P-7'] as const satisfies readonly PreconditionRowId[]) {
     const fee = rowsFor(row, 'USDC').filter((c) => /redemption-fee/.test(c.requirement));
     const surfaces = new Set(fee.map((c) => c.surface));
     assert.ok(surfaces.has('constant.ledger.redemption_fee'), `${row} never reads the frozen constant`);
@@ -543,7 +603,7 @@ test('the redemption fee is cross-checked against its metadata constant (#12)', 
 
 test('balance clauses state an amount rather than mere possession (#13)', () => {
   // "you hold the position" passes for a holder of 1 signing a redemption of 2.
-  const p8 = rowsFor('P-8', 'USDC').find((c) => c.subject === 'acting');
+  const p8 = clauseWhere(rowsFor('P-8', 'USDC'), (c) => c.subject === 'acting', 'P-8 acting clause');
   assert.match(p8.requirement, /at least the amount/);
   // P-9's deposit needs the recipient's balance, not just the constant that sizes it.
   const p9 = rowsFor('P-9', 'USDC');
@@ -589,7 +649,10 @@ test('every crank has its own staleness read, or a named refusal (#16)', () => {
   // epoch item survived it — three surfaces remained, and the crank was reading state
   // unrelated to whether it has work. Correspondence is the whole content of P-15, so
   // correspondence is what gets pinned.
-  const EXPECTED = {
+  // Partial because the two unreadable cranks have no surface at all — and a *readable*
+  // crank missing from this map is caught below rather than compared against `undefined`,
+  // which would pass for whichever surface it happened to read.
+  const EXPECTED: Partial<Record<CrankCall, SurfaceId>> = {
     'epoch.tick': 'storage.epoch.epoch_of',
     'market.crank_observe': 'storage.market.markets',
     'market.reap': 'storage.market.markets',
@@ -598,14 +661,18 @@ test('every crank has its own staleness read, or a named refusal (#16)', () => {
   for (const call of CRANK_CALLS) {
     const staleness = crankStaleness(call);
     if (staleness.kind === 'readable') {
-      assert.equal(staleness.clause.surface, EXPECTED[call], `${call} reads the wrong state to decide it has work`);
+      const expected = EXPECTED[call];
+      assert.ok(expected, `${call} became readable and this test declares no surface for it`);
+      assert.equal(staleness.clause.surface, expected, `${call} reads the wrong state to decide it has work`);
     } else {
       // An unreadable condition must SAY so and point at the override, not go quiet.
       assert.match(staleness.reason, /expert override/);
       assert.ok(staleness.reason.length > 40, `${call}'s refusal gives the user nothing to act on`);
     }
   }
-  assert.throws(() => crankStaleness('market.nonexistent'), /refusing to assume it has work/);
+  // Deliberately outside `CrankCall`: a keeper UI reading a call name off a URL is the
+  // untyped caller, and "nothing to crank" is the reading that must not happen.
+  assert.throws(() => crankStaleness('market.nonexistent' as CrankCall), /refusing to assume it has work/);
 });
 
 test('the two unreadable cranks are exactly the ones with no frozen surface', () => {
@@ -635,8 +702,8 @@ test('G-5 reads the unlock TARGET, not the caller', () => {
   // somebody unlocks for a friend — and the chain then refuses. P-9's lesson, new place.
   const clauses = governanceRowsFor('G-5');
   assert.equal(clauses.length, 1);
-  assert.equal(clauses[0].subject, 'recipient');
-  assert.equal(clauses[0].surface, 'storage.conviction_voting.class_locks_for');
+  assert.equal(nth(clauses, 0, 'clause').subject, 'recipient');
+  assert.equal(nth(clauses, 0, 'clause').surface, 'storage.conviction_voting.class_locks_for');
 });
 
 test('a delegation target is a recipient read, not an echo of the form', () => {
@@ -658,7 +725,7 @@ test('conviction-voting rows are subject `acting`, never `signer`', () => {
   // Under a proxy, `conviction_voting` operates on the proxied account's votes and locks,
   // while the fee and nonce stay with the signer. A row that resolved one account for both
   // checks the wrong one and fails green — P-3's finding.
-  for (const row of ['G-1', 'G-3', 'G-4']) {
+  for (const row of ['G-1', 'G-3', 'G-4'] as const satisfies readonly GovernanceRowId[]) {
     for (const c of governanceRowsFor(row)) {
       assert.ok(
         c.subject !== 'signer',
