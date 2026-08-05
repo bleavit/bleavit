@@ -147,7 +147,7 @@ export function ReferendaList({
 
 export function ReferendumDetail({ referendum }: { readonly referendum: Referendum }) {
   return (
-    <Panel title={`Referendum ${referendum.index.value}`}>
+    <Panel title="Referendum" subject={<Identifier datum={referendum.index} />}>
       <Field label="Track">
         <Phrase datum={referendum.track} />
       </Field>

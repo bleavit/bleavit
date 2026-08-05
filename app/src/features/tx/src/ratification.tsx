@@ -35,13 +35,14 @@ import {
   BlockRef,
   Button,
   Count,
+  Derived,
   Field,
   Notice,
   Panel,
   Phrase,
   type ReactNode,
 } from '@bleavit/ui';
-import type { Verified } from '@bleavit/shared-types';
+import { combine2, combineStatus, type Verified } from '@bleavit/shared-types';
 
 /** What the referendum side says. The guard cannot answer any of this. */
 export type ReferendumLink =
@@ -81,21 +82,45 @@ export interface ExecutionWindow {
 /**
  * Whether ratification can still complete inside the execution window.
  *
- * Pure arithmetic over blocks. `false` means the periods genuinely do not fit — the
- * warning it drives states the proposal *will* reject with `NotRatified`, and a false
- * positive tells a proposer to abandon something still live.
+ * Pure arithmetic over blocks. `no` means the periods genuinely do not fit — the warning it
+ * drives states the proposal *will* reject with `NotRatified`, and a false positive tells a
+ * proposer to abandon something still live.
  *
- * A referendum that is already approved, or one nobody has submitted, is **not** decidable
- * this way and returns `undefined`: there is no remaining-period figure to compare, and
- * inventing one would produce a confident answer about a question that was not asked.
+ * A referendum that is already approved, or one nobody has submitted, is **not decidable**
+ * this way: there is no remaining-period figure to compare, and inventing one would produce a
+ * confident answer about a question that was not asked.
+ *
+ * ## Reads that span two blocks are their own answer, not silence
+ *
+ * The comparison consumes three reads. If they were taken at different blocks the result is
+ * true of none of them — and here silence is the *unsafe* direction, because the panel shows
+ * its warning on `no` and shows nothing otherwise. An indeterminate answer folded into
+ * "not applicable" would hide a real "this cannot complete" behind a blank space.
+ *
+ * So `indeterminate` is a distinct arm carrying its reason, and the panel renders it.
  */
+export type Completability =
+  | { readonly kind: 'yes' }
+  | { readonly kind: 'no' }
+  /** The referendum is approved or unsubmitted — the question does not apply. */
+  | { readonly kind: 'not-applicable' }
+  | { readonly kind: 'indeterminate'; readonly reason: string };
+
 export function canStillComplete(
   referendum: ReferendumLink,
   window: ExecutionWindow,
-): boolean | undefined {
-  if (referendum.kind !== 'ongoing') return undefined;
+): Completability {
+  if (referendum.kind !== 'ongoing') return { kind: 'not-applicable' };
+  const combined = combineStatus([
+    window.graceEnd.status,
+    window.now.status,
+    referendum.blocksStillNeeded.status,
+  ]);
+  if (combined.kind === 'incomparable') {
+    return { kind: 'indeterminate', reason: combined.reason };
+  }
   const remaining = window.graceEnd.value - window.now.value;
-  return referendum.blocksStillNeeded.value <= remaining;
+  return referendum.blocksStillNeeded.value <= remaining ? { kind: 'yes' } : { kind: 'no' };
 }
 
 const CANNOT_COMPLETE =
@@ -114,8 +139,10 @@ export function RatificationPanel({
   readonly onSubmitReferendum: () => void;
   readonly onBindIndex: () => void;
 }): ReactNode {
-  const stillCompletable =
-    view.kind === 'no-passed-record' ? canStillComplete(view.referendum, window) : undefined;
+  const stillCompletable: Completability =
+    view.kind === 'no-passed-record'
+      ? canStillComplete(view.referendum, window)
+      : { kind: 'not-applicable' };
 
   return (
     <Panel title="Ratification">
@@ -125,8 +152,12 @@ export function RatificationPanel({
       <Field label="Execution window">
         <BlockRef datum={window.maturity} name="opens at" />
         <BlockRef datum={window.graceEnd} name="closes at" />
-        <Count
-          datum={{ value: window.graceEnd.value - window.now.value, status: window.now.status }}
+        {/* The remaining count is arithmetic over two reads, so it carries the *weaker* of
+            their statuses and refuses outright when they were read at different blocks —
+            a countdown spanning two blocks is a deadline for neither. */}
+        <Derived
+          combined={combine2(window.graceEnd, window.now, (end, now) => end - now)}
+          render={(blocks) => String(blocks)}
           name="blocks remaining"
         />
       </Field>
@@ -168,7 +199,16 @@ export function RatificationPanel({
             </Notice>
           ) : null}
 
-          {stillCompletable === false ? (
+          {/* Rendered, not folded into silence: this panel warns on `no` and shows nothing
+              otherwise, so an indeterminate answer treated as "not applicable" would hide a
+              real "this cannot complete" behind a blank space. */}
+          {stillCompletable.kind === 'indeterminate' ? (
+            <Notice severity="caution" heading="Whether this can still complete is unknown">
+              {stillCompletable.reason}
+            </Notice>
+          ) : null}
+
+          {stillCompletable.kind === 'no' ? (
             <Notice severity="danger" heading="Ratification can no longer complete in time">
               {CANNOT_COMPLETE}
               <BlockRef datum={view.referendum.kind === 'ongoing' ? view.referendum.blocksStillNeeded : window.now} name="blocks it still needs" />

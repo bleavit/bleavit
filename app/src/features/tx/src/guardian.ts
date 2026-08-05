@@ -26,7 +26,7 @@
  * another screen.
  */
 
-import type { Verified } from '@bleavit/shared-types';
+import { combine2, type Combined, type Verified } from '@bleavit/shared-types';
 
 /** The five powers §11.8.2 names. Closed, so a form cannot invent a sixth. */
 export type GuardianPower =
@@ -147,10 +147,25 @@ export interface AllowanceMeter {
   readonly limit: Verified<number>;
 }
 
-export function allowanceRemaining(meter: AllowanceMeter): number {
+/**
+ * How much of this power's allowance is left — a value derived from **two** reads.
+ *
+ * Returns a `Combined<number>` rather than a number, so the two ways the figure can be
+ * unsound cannot be dropped on the floor:
+ *
+ * - `used` from a provider and `limit` from the light client makes the difference
+ *   *unverified*, and it must not inherit `limit`'s badge (INV-FE-1);
+ * - the two read at *different blocks* makes the difference true of neither, which no badge
+ *   can express — so `combine` refuses, and `proposalBlocks` turns that refusal into a block.
+ *
+ * Fail-closed by construction: a guardian power whose remaining allowance this client cannot
+ * establish is not offered. These are the five most privileged actions in the system, and
+ * "we could not check the budget" is not a reason to spend it.
+ */
+export function allowanceRemaining(meter: AllowanceMeter): Combined<number> {
   // Never negative: a meter that has somehow overrun reads as zero remaining rather than
   // as a negative that arithmetic elsewhere would treat as headroom.
-  return Math.max(0, meter.limit.value - meter.used.value);
+  return combine2(meter.limit, meter.used, (limit, used) => Math.max(0, limit - used));
 }
 
 export function proposalBlocks(
@@ -158,7 +173,15 @@ export function proposalBlocks(
   trigger: TriggerState | undefined,
 ): readonly GuardianBlock[] {
   const blocks: GuardianBlock[] = [];
-  if (allowanceRemaining(meter) <= 0) {
+  const remaining = allowanceRemaining(meter);
+  if (remaining.kind === 'incomparable') {
+    blocks.push({
+      check: 'Allowance',
+      detail:
+        `This client cannot establish how much ${meter.power} allowance remains. ` +
+        `${remaining.reason} Until it can, the power is not offered.`,
+    });
+  } else if (remaining.datum.value <= 0) {
     blocks.push({
       check: 'Allowance',
       detail: `No ${meter.power} allowance remains in this window.`,

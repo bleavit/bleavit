@@ -9,18 +9,36 @@
 
 import type { ReactNode } from 'react';
 
+/**
+ * A titled section.
+ *
+ * `title` is a **string the release wrote** — never a chain value. `subject` is the slot for
+ * *which object* the panel is about ("Referendum 42", "Approve action 0x…"), and it takes a
+ * `ReactNode` so the identifier arrives as a badged data component.
+ *
+ * The split exists because interpolating the identifier into the title was the natural thing
+ * to write and put an unbadged chain value in the heading — a user acting confidently on the
+ * wrong object while every figure below it carries a correct badge for something else. The
+ * heading is exactly where that is least likely to be questioned. `check-render-provenance`
+ * fails the build on the interpolated form.
+ */
 export function Panel({
   title,
+  subject,
   children,
   tone = 'plain',
 }: {
   readonly title: string;
+  readonly subject?: ReactNode;
   readonly children: ReactNode;
   readonly tone?: 'plain' | 'advanced';
 }) {
   return (
     <section className={`panel panel--${tone}`} aria-label={title}>
-      <h2 className="panel__title">{title}</h2>
+      <h2 className="panel__title">
+        {title}
+        {subject === undefined ? null : <span className="panel__subject">{subject}</span>}
+      </h2>
       <div className="panel__body">{children}</div>
     </section>
   );
@@ -88,6 +106,7 @@ export function Button({
   intent = 'secondary',
   disabled = false,
   disabledReason,
+  describedBy,
 }: {
   readonly label: string;
   readonly onClick: () => void;
@@ -99,6 +118,15 @@ export function Button({
    * fallback."* A greyed-out button with no explanation is the silent fallback.
    */
   readonly disabledReason?: string;
+  /**
+   * The id of the element naming *which* object this button acts on.
+   *
+   * Needed wherever a list repeats a generic label — several "Unlock" buttons, one per class
+   * lock. The subject cannot go in `label`, because it is a chain read and would arrive
+   * unbadged (`check-render-provenance`); it renders as a badged datum beside the button and
+   * this binds the two for anyone who reaches the button without seeing the row.
+   */
+  readonly describedBy?: string;
 }) {
   if (disabled && (disabledReason === undefined || disabledReason.length === 0)) {
     throw new Error(
@@ -115,6 +143,7 @@ export function Button({
       disabled={disabled}
       title={disabledReason}
       aria-disabled={disabled}
+      aria-describedby={describedBy}
     >
       {label}
     </button>

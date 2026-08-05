@@ -1486,9 +1486,9 @@ test('the cannot-complete warning is arithmetic, and only fires when it truly ca
     ayes: finalized(1n), nays: finalized(0n), blocksStillNeeded: finalized(needed),
   });
   // 500 blocks remain (graceEnd 2000 − now 1500).
-  assert.equal(canStillComplete(link(499), WINDOW), true);
-  assert.equal(canStillComplete(link(500), WINDOW), true, 'exactly fitting must not warn');
-  assert.equal(canStillComplete(link(501), WINDOW), false);
+  assert.equal(canStillComplete(link(499), WINDOW).kind, 'yes');
+  assert.equal(canStillComplete(link(500), WINDOW).kind, 'yes', 'exactly fitting must not warn');
+  assert.equal(canStillComplete(link(501), WINDOW).kind, 'no');
 
   const html = renderToStaticMarkup(
     h(RatificationPanel, panelProps({ kind: 'no-passed-record', referendum: link(900) })),
@@ -1497,14 +1497,51 @@ test('the cannot-complete warning is arithmetic, and only fires when it truly ca
   assert.ok(html.includes('data-severity="danger"'), html);
 });
 
+test('reads spanning two blocks say so, rather than silently hiding the warning', () => {
+  // The panel warns on `no` and shows nothing otherwise, so folding an indeterminate answer
+  // into "not applicable" would hide a real "this cannot complete" behind a blank space.
+  // That is the unsafe direction, so it gets its own arm and its own notice.
+  const staleWindow = {
+    maturity: finalized(1_000),
+    graceEnd: finalized(2_000, 1_000_000),
+    now: { value: 1_500, status: { kind: 'verified-finalized', blockHash: '0xbeef', blockNumber: 999_000 } },
+  };
+  const link = {
+    kind: 'ongoing', index: finalized('9'),
+    ayes: finalized(1n), nays: finalized(0n), blocksStillNeeded: finalized(900),
+  };
+  const verdict = canStillComplete(link, staleWindow);
+  assert.equal(verdict.kind, 'indeterminate');
+
+  // 900 needed against 500 remaining would have warned; the panel must not, and must not be
+  // silent either.
+  const html = renderToStaticMarkup(
+    h(RatificationPanel, {
+      view: { kind: 'no-passed-record', referendum: link },
+      window: staleWindow,
+      onSubmitReferendum: () => {},
+      onBindIndex: () => {},
+    }),
+  );
+  assert.ok(!html.includes(CANNOT_COMPLETE), 'must not claim a verdict it cannot reach');
+  assert.match(html, /Whether this can still complete is unknown/);
+  assert.match(html, /different blocks/);
+  // And the countdown itself is withheld rather than computed across the two.
+  assert.match(html, /Not available/);
+  assert.ok(!html.includes('>500<'), 'the cross-block difference must not be rendered');
+});
+
 test('a question that was not asked gets no confident answer', () => {
   // None-submitted and already-approved have no remaining-period figure to compare;
   // inventing one would produce a confident answer to a different question.
-  assert.equal(canStillComplete({ kind: 'none-submitted' }, WINDOW), undefined);
-  assert.equal(canStillComplete({ kind: 'rejected', index: finalized('9') }, WINDOW), undefined);
+  assert.equal(canStillComplete({ kind: 'none-submitted' }, WINDOW).kind, 'not-applicable');
   assert.equal(
-    canStillComplete({ kind: 'approved-not-recorded', index: finalized('9') }, WINDOW),
-    undefined,
+    canStillComplete({ kind: 'rejected', index: finalized('9') }, WINDOW).kind,
+    'not-applicable',
+  );
+  assert.equal(
+    canStillComplete({ kind: 'approved-not-recorded', index: finalized('9') }, WINDOW).kind,
+    'not-applicable',
   );
   for (const referendum of [
     { kind: 'none-submitted' },
@@ -1869,8 +1906,49 @@ test('every approval blocker is reported together', () => {
 
 test('an overrun allowance reads as zero remaining, never as negative headroom', () => {
   // A negative would be treated as headroom by any arithmetic downstream.
-  assert.equal(allowanceRemaining({ power: 'delay_once', used: finalized(3), limit: finalized(5) }), 2);
-  assert.equal(allowanceRemaining({ power: 'delay_once', used: finalized(9), limit: finalized(5) }), 0);
+  const two = allowanceRemaining({ power: 'delay_once', used: finalized(3), limit: finalized(5) });
+  assert.equal(two.kind, 'stated');
+  assert.equal(two.datum.value, 2);
+  const overrun = allowanceRemaining({ power: 'delay_once', used: finalized(9), limit: finalized(5) });
+  assert.equal(overrun.kind, 'stated');
+  assert.equal(overrun.datum.value, 0);
+});
+
+test('an allowance read across two blocks is refused, not rendered', () => {
+  // `limit` at one block and `used` at another describe no single budget. The figure is not
+  // weakened — it is withheld, and `proposalBlocks` turns that into a block on the most
+  // privileged actions in the system.
+  const split = allowanceRemaining({
+    power: 'delay_once',
+    used: finalized(3, 1_000_000),
+    limit: { value: 5, status: { kind: 'verified-finalized', blockHash: '0xbeef', blockNumber: 999_000 } },
+  });
+  assert.equal(split.kind, 'incomparable');
+  assert.match(split.reason, /different blocks/);
+});
+
+test('an allowance derived from provider data is never rendered as verified', () => {
+  const mixed = allowanceRemaining({
+    power: 'delay_once',
+    used: { value: 3, status: { kind: 'provider', providerId: 'p', sampled: false } },
+    limit: finalized(5),
+  });
+  assert.equal(mixed.kind, 'stated');
+  assert.equal(mixed.datum.status.kind, 'provider', 'the light-client badge must not be inherited');
+});
+
+test('a power whose remaining allowance cannot be established is not offered', () => {
+  // Fail-closed: "we could not check the budget" is not a reason to spend it.
+  const blocks = proposalBlocks(
+    {
+      power: 'delay_once',
+      used: finalized(0, 1_000_000),
+      limit: { value: 5, status: { kind: 'verified-finalized', blockHash: '0xbeef', blockNumber: 999_000 } },
+    },
+    undefined,
+  );
+  assert.deepEqual(blocks.map((b) => b.check), ['Allowance']);
+  assert.match(blocks[0].detail, /cannot establish/);
 });
 
 test('the unratified-action consequence names the guardian own bond', () => {

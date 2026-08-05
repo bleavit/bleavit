@@ -35,6 +35,7 @@ import {
   Identifier,
   Notice,
   Panel,
+  Phrase,
   type AboveTheFold,
   type ReactNode,
 } from '@bleavit/ui';
@@ -246,11 +247,20 @@ export function UnlockForm({
         </Notice>
       ) : null}
 
+      {/* The track name is a chain read, so it renders badged as the field's content rather
+          than as its label or inside the button's text — an unbadged track name here would
+          let a user unlock against a class they were told the wrong name for. The button
+          stays generically labelled and is bound to the track by `aria-describedby`, which
+          is what a screen reader needs to tell two Unlock buttons apart. */}
       {locks.map((lock) => (
-        <Field label={lock.track.value} key={lock.track.value}>
+        <Field label="Class lock" key={lock.track.value}>
+          <span id={`lock-track-${lock.track.value}`}>
+            <Phrase datum={lock.track} name="track" />
+          </span>
           <BlockRef datum={lock.unlocksAt} name="unlocks at" />
           <Button
-            label={`Unlock ${lock.track.value}`}
+            label="Unlock"
+            describedBy={`lock-track-${lock.track.value}`}
             onClick={() => onUnlock(lock.track.value)}
             disabled={!lock.expired}
             {...(lock.expired

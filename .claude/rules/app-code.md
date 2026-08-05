@@ -28,6 +28,20 @@ Practical consequences:
    belt-and-braces extra. Never put the brand in
    `shared-types`: if the universal sink package can construct it, 10 §2.1 is void
    silently, with green CI. UI components reject unlabeled values by type.
+
+   **A third control covers the render edge**: `<Panel title={`Referendum ${id.value}`}>`
+   typechecks perfectly and puts a chain read on screen with no badge, because the payload
+   of a `Verified<string>` is a `string`. `app/tools/check-render-provenance.mjs`
+   (+ `:witness`) is type-aware for a reason — a syntactic version fires on `key={...}`,
+   on `event.currentTarget.value` and on the verification panel's release-constant rows,
+   and a gate that fires on correct code gets switched off. Its **rule B** is the one that
+   is easy to write by accident: a value derived from two reads carrying *one* input's
+   status promotes provider data to verified **by arithmetic**, which no badge type and no
+   firewall rule can see. Use `combine`/`combine2` from `@bleavit/shared-types` — the
+   result takes the weakest input's status, and two verified reads at **different blocks**
+   refuse outright rather than claiming a block neither describes. Render the refusal with
+   `<Derived>`; a missing figure must look missing, since rendering nothing is how "we
+   cannot say" becomes indistinguishable from zero.
 3. **Package firewall (INV-FE-3, 10 §10).** Respect the dependency-cruiser boundaries:
    `signing` and `transaction-builder` never import `providers`/`local-index`;
    nothing above `chain-client` bypasses it; `src/features/tx/**` never imports

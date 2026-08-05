@@ -580,6 +580,22 @@ jobs:
         working-directory: app
         run: pnpm run check:chain-literals && pnpm run check:chain-literals:witness
 
+      - name: Chain values reach the screen with their badge (10 §2.1 / INV-FE-9)
+        # The other half of the provenance control, and the half `Verified<T>` cannot enforce:
+        # `<Panel title={`Referendum ${id.value}`}>` typechecks perfectly and puts a chain
+        # read on screen with no badge beside it. Rule A catches a `Verified<T>` payload
+        # reaching a display position; rule B catches a derived value wearing another read's
+        # status, which promotes provider data to verified by arithmetic. Type-aware on
+        # purpose — a syntactic version fires on `key={...}`, on `event.currentTarget.value`
+        # and on the release-constant rows of the verification panel, and a gate that fires
+        # on correct code gets switched off rather than fixed. The witness leg proves both
+        # rules can still fire, asserts the negative controls stay silent, and checks that
+        # the fixture's own imports resolve — an unresolved type reference still prints as
+        # `Verified<string>` while carrying no members, so the whole gate would inspect
+        # nothing and report only "did not fire".
+        working-directory: app
+        run: pnpm run check:render-provenance && pnpm run check:render-provenance:witness
+
       - name: Release pipeline and its bundle controls (12 §1, §5; F11)
         # Builds the tree and runs every distribution gate over it, per commit. A release
         # pipeline that only runs at a tag is a release pipeline first debugged during a

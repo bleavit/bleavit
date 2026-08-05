@@ -29,7 +29,7 @@
  */
 
 import type { ReactNode } from 'react';
-import type { Verified } from '@bleavit/shared-types';
+import type { Combined, Verified } from '@bleavit/shared-types';
 import { ProvenanceBadge } from './badge.js';
 import { abbreviateIdentifier, formatBaseUnits, formatCount, formatPpm } from './format.js';
 
@@ -252,4 +252,36 @@ export function Field({
       <div className="field__body">{children}</div>
     </div>
   );
+}
+
+/**
+ * A value computed from more than one read — `packages/shared-types`' `Combined<T>`.
+ *
+ * The component exists so that **both arms must be rendered**. A screen holding a
+ * `Combined<T>` can reach `.datum` only after narrowing, but nothing stops it narrowing with
+ * `if (c.kind === 'stated')` and rendering nothing otherwise — and *nothing* is exactly how a
+ * missing figure looks like a figure that is zero, or absent, or still loading.
+ *
+ * Here the `incomparable` arm is a rendered refusal carrying its reason, so the value's
+ * absence is visible and says what to do about it.
+ */
+export function Derived<T>({
+  combined,
+  render,
+  name,
+}: {
+  readonly combined: Combined<T>;
+  readonly render: (value: T) => string;
+  readonly name?: string | undefined;
+}) {
+  if (combined.kind === 'incomparable') {
+    return (
+      <span className="datum datum--incomparable" role="status">
+        {name === undefined ? null : <span className="datum__name">{name}</span>}
+        <span className="datum__unavailable">Not available</span>
+        <span className="datum__reason">{combined.reason}</span>
+      </span>
+    );
+  }
+  return <Datum datum={combined.datum} render={render} {...(name === undefined ? {} : { name })} />;
 }

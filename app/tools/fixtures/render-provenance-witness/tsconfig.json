@@ -1,0 +1,20 @@
+{
+  "extends": "../../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "src",
+    "jsxImportSource": "react",
+    // This fixture is not a workspace package, so pnpm links nothing into a `node_modules`
+    // beside it and `@bleavit/*` does not resolve by name. Mapped explicitly to the built
+    // declarations — without this the checker sees an unresolved type reference, which still
+    // *prints* as `Verified<string>` while carrying no members and no declarations, and the
+    // whole rule inspects nothing while the witness reports only "did not fire".
+    "paths": {
+      "@bleavit/shared-types": ["../../../packages/shared-types/dist/index.d.ts"],
+      "@bleavit/ui": ["../../../packages/ui/dist/index.d.ts"]
+    }
+  },
+  "include": [
+    "src/**/*.tsx"
+  ]
+}

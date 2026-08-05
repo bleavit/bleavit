@@ -24,6 +24,7 @@ export {
   BlockRef,
   Count,
   Datum,
+  Derived,
   Field,
   Identifier,
   Phrase,
