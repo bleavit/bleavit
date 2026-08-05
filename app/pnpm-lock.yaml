@@ -329,6 +329,9 @@ importers:
       '@bleavit/mock-runtime':
         specifier: workspace:*
         version: link:../../packages/mock-runtime
+      '@bleavit/shared-types':
+        specifier: workspace:*
+        version: link:../../packages/shared-types
       '@polkadot-api/descriptors':
         specifier: workspace:*
         version: link:../../packages/papi-descriptors

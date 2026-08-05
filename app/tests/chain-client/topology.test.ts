@@ -22,11 +22,23 @@ import {
   startTopology,
   verifyBundledChainSpec,
 } from '@bleavit/chain-client';
+import type {
+  AddChainOptionsLike,
+  BundledChain,
+  PinnedChainSpec,
+  SmoldotChainLike,
+  SmoldotClientLike,
+  TopologyOptions,
+} from '@bleavit/chain-client';
+import type { HexString } from '@bleavit/shared-types';
 
-const RELAY_GENESIS = `0x${'11'.repeat(32)}`;
-const PARA_GENESIS = `0x${'22'.repeat(32)}`;
+const RELAY_GENESIS: HexString = `0x${'11'.repeat(32)}`;
+const PARA_GENESIS: HexString = `0x${'22'.repeat(32)}`;
 
-function specText(overrides = {}) {
+/** A pin with the hash left out — `bundled()` computes it from the bytes it is given. */
+type UnhashedPin = Omit<PinnedChainSpec, 'sha256'>;
+
+function specText(overrides: Record<string, unknown> = {}): string {
   return JSON.stringify({
     name: 'Bleavit',
     id: 'bleavit',
@@ -37,11 +49,16 @@ function specText(overrides = {}) {
   });
 }
 
-async function bundled(text, pinned) {
+async function bundled(text: string, pinned: UnhashedPin): Promise<BundledChain> {
   return { pinned: { ...pinned, sha256: await chainSpecHash(text) }, chainSpec: text };
 }
 
-async function pair(overrides = {}) {
+interface PairOverrides {
+  readonly relaySpec?: Record<string, unknown>;
+  readonly paraSpec?: Record<string, unknown>;
+}
+
+async function pair(overrides: PairOverrides = {}): Promise<{ relay: BundledChain; para: BundledChain }> {
   const relayText = specText({ id: 'paseo-local', name: 'Paseo Local', ...overrides.relaySpec });
   const paraText = specText({ id: 'bleavit', relayChain: 'paseo-local', ...overrides.paraSpec });
   return {
@@ -55,13 +72,24 @@ async function pair(overrides = {}) {
   };
 }
 
+/** The chain the double hands back, carrying the options it was created from. */
+interface FakeChain extends SmoldotChainLike {
+  readonly options: AddChainOptionsLike<FakeChain>;
+}
+
+interface FakeClient {
+  readonly client: SmoldotClientLike<FakeChain>;
+  readonly calls: { options: AddChainOptionsLike<FakeChain>; chain: FakeChain }[];
+  readonly removed: FakeChain[];
+}
+
 /** A smoldot client double that records what it was asked to do. */
-function fakeClient() {
-  const calls = [];
-  const removed = [];
-  const client = {
+function fakeClient(): FakeClient {
+  const calls: { options: AddChainOptionsLike<FakeChain>; chain: FakeChain }[] = [];
+  const removed: FakeChain[] = [];
+  const client: SmoldotClientLike<FakeChain> = {
     async addChain(options) {
-      const chain = {
+      const chain: FakeChain = {
         options,
         sendJsonRpc() {},
         async nextJsonRpcResponse() {
@@ -79,8 +107,19 @@ function fakeClient() {
   return { client, calls, removed };
 }
 
+/** The nth recorded `addChain`, or a throw naming how many there really were. */
+function nthCall(calls: FakeClient['calls'], n: number): FakeClient['calls'][number] {
+  const call = calls[n];
+  if (call === undefined) throw new Error(`addChain was called ${calls.length} time(s), not ${n + 1}`);
+  return call;
+}
+
 /** Answer the identity probe honestly: relay first, then parachain (that is the order). */
-function start(client, specs, options = {}) {
+function start(
+  client: SmoldotClientLike<FakeChain>,
+  specs: { relay: BundledChain; para: BundledChain },
+  options: Partial<TopologyOptions<FakeChain>> = {},
+) {
   let probes = 0;
   return startTopology(client, {
     ...specs,
@@ -114,7 +153,12 @@ test('a non-raw spec is refused here rather than inside addChain', async () => {
   // smoldot accepts raw specs only, and its failure for a non-raw one reads like a
   // connectivity problem — an hour spent on the network for a packaging defect.
   const text = specText({ genesis: { runtimeGenesis: { code: '0x00' } } });
-  const pinned = { id: 'bleavit', kind: 'relay', sha256: await chainSpecHash(text), genesisHash: RELAY_GENESIS };
+  const pinned: PinnedChainSpec = {
+    id: 'bleavit',
+    kind: 'relay',
+    sha256: await chainSpecHash(text),
+    genesisHash: RELAY_GENESIS,
+  };
   await assert.rejects(
     () => verifyBundledChainSpec(text, pinned),
     (error) => error instanceof ChainSpecIntegrityError && /raw/.test(error.message),
@@ -149,17 +193,20 @@ test('the relay is added first and the parachain is linked to that exact Chain o
   const topology = await start(client, specs);
 
   assert.equal(calls.length, 2);
-  assert.equal(JSON.parse(calls[0].options.chainSpec).id, 'paseo-local');
-  assert.equal(calls[0].options.potentialRelayChains, undefined);
-  assert.equal(JSON.parse(calls[1].options.chainSpec).id, 'bleavit');
-  assert.deepEqual(calls[1].options.potentialRelayChains, [calls[0].chain]);
-  assert.equal(topology.relay, calls[0].chain);
-  assert.equal(topology.para, calls[1].chain);
+  assert.equal(JSON.parse(nthCall(calls, 0).options.chainSpec).id, 'paseo-local');
+  assert.equal(nthCall(calls, 0).options.potentialRelayChains, undefined);
+  assert.equal(JSON.parse(nthCall(calls, 1).options.chainSpec).id, 'bleavit');
+  assert.deepEqual(nthCall(calls, 1).options.potentialRelayChains, [nthCall(calls, 0).chain]);
+  assert.equal(topology.relay, nthCall(calls, 0).chain);
+  assert.equal(topology.para, nthCall(calls, 1).chain);
 });
 
 test('a parachain naming a relay we did not bundle is refused', async () => {
-  const specs = await pair({ paraSpec: { relayChain: 'westend' } });
-  specs.para.pinned = { ...specs.para.pinned, relayChainId: 'westend' };
+  const built = await pair({ paraSpec: { relayChain: 'westend' } });
+  const specs = {
+    relay: built.relay,
+    para: { ...built.para, pinned: { ...built.para.pinned, relayChainId: 'westend' } },
+  };
   const { client, calls } = fakeClient();
   await assert.rejects(() => start(client, specs), TopologyError);
   assert.equal(calls.length, 0);
@@ -178,7 +225,7 @@ test('user bootnodes are added to the bundled set, never substituted for it', as
   const { client, calls } = fakeClient();
   await start(client, specs, { extraBootnodes: ['/dns/local/tcp/30333/ws/p2p/12D3KooWZ'] });
 
-  const relaySpec = JSON.parse(calls[0].options.chainSpec);
+  const relaySpec = JSON.parse(nthCall(calls, 0).options.chainSpec);
   assert.deepEqual(relaySpec.bootNodes, [
     '/dns/a.example/tcp/443/wss/p2p/12D3KooWA',
     '/dns/local/tcp/30333/ws/p2p/12D3KooWZ',

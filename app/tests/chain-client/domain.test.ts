@@ -27,20 +27,30 @@ import {
   positionSourceFor,
   totalWithinDomain,
 } from '@bleavit/chain-client';
+import type { LedgerDomain } from '@bleavit/chain-client';
+import type { Fixture, MetadataPresence } from '@bleavit/mock-runtime';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIXTURE = resolve(HERE, '..', '..', 'fixtures', 'chainhead', 'constant.ledger.service_id_base.json');
 
-/** Read the constant exactly as a client would: from metadata, little-endian. */
-function serviceIdBaseFromMetadata() {
-  const fixture = JSON.parse(readFileSync(FIXTURE, 'utf8'));
+/** The recorder's metadata assertion for one surface, or a throw naming what is absent. */
+function metadataAssertion(path: string): MetadataPresence {
+  const fixture = JSON.parse(readFileSync(path, 'utf8')) as Fixture;
   const presence = fixture.requests.find((r) => r.method === 'metadata_presence');
-  assert.ok(presence, 'the recording carries no metadata_presence for ServiceIdBase');
-  assert.equal(presence.response.present, true, 'ServiceIdBase absent from metadata');
-  const hex = presence.response.layout.value;
+  assert.ok(presence, `${path} carries no metadata_presence recording`);
+  return presence.response as MetadataPresence;
+}
+
+/** Read the constant exactly as a client would: from metadata, little-endian. */
+function serviceIdBaseFromMetadata(): bigint {
+  const presence = metadataAssertion(FIXTURE);
+  assert.equal(presence.present, true, 'ServiceIdBase absent from metadata');
+  const hex = (presence.layout as { value: string }).value;
   const bytes = hex.slice(2).match(/../g) ?? [];
   let value = 0n;
-  for (let i = bytes.length - 1; i >= 0; i -= 1) value = (value << 8n) | BigInt(parseInt(bytes[i], 16));
+  for (let i = bytes.length - 1; i >= 0; i -= 1) {
+    value = (value << 8n) | BigInt(parseInt(bytes[i] as string, 16));
+  }
   return value;
 }
 
@@ -72,7 +82,10 @@ test('a missing or nonsensical constant fails closed rather than defaulting', ()
 test('writes route to two pallets, with no default (11 §11.2a rule 5)', () => {
   assert.equal(ledgerPalletFor('primary'), 'ConditionalLedger');
   assert.equal(ledgerPalletFor('service'), 'ServiceLedger');
-  assert.throws(() => ledgerPalletFor('either'), DomainBoundaryError);
+  // Deliberately outside `LedgerDomain`: the point is that the *runtime* refuses a
+  // third domain, which is what an untyped caller — a rehydrated record, a handoff
+  // document — can still supply. The cast is what lets the test ask that question.
+  assert.throws(() => ledgerPalletFor('either' as LedgerDomain), DomainBoundaryError);
   // Only the market calls are domain-agnostic, because the market pallet routes internally.
   assert.equal(isDomainAgnosticCall('market.buy'), true);
   assert.equal(isDomainAgnosticCall('market.sell'), true);
@@ -125,12 +138,11 @@ test('the two position views are distinct surfaces in the recorded feed', () => 
   // per-domain assertion here would be describing a distinction that does not exist.
   const dir = resolve(HERE, '..', '..', 'fixtures', 'chainhead');
   for (const surface of ['api.account_positions', 'api.service_positions']) {
-    const fixture = JSON.parse(readFileSync(resolve(dir, `${surface}.json`), 'utf8'));
-    const presence = fixture.requests.find((r) => r.method === 'metadata_presence');
-    assert.equal(presence.response.present, true, `${surface} absent from the runtime`);
+    const presence = metadataAssertion(resolve(dir, `${surface}.json`));
+    assert.equal(presence.present, true, `${surface} absent from the runtime`);
   }
   for (const surface of ['storage.ledger.positions', 'storage.service_ledger.positions']) {
-    const fixture = JSON.parse(readFileSync(resolve(dir, `${surface}.json`), 'utf8'));
+    const fixture = JSON.parse(readFileSync(resolve(dir, `${surface}.json`), 'utf8')) as Fixture;
     assert.equal(fixture.surface, surface);
   }
 });

@@ -2,7 +2,7 @@
  * The chainHead-v1 transport — 10 §4.1, §4.2.
  *
  * Driven at the **wire level** by F2's recorded transcripts through a provider shaped
- * exactly like `getSmProvider`'s (`tests/chain-client/recorded-provider.mjs`), so the code
+ * exactly like `getSmProvider`'s (`tests/chain-client/recorded-provider.ts`), so the code
  * exercised here is the code that will run against smoldot: same request ids, same follow
  * subscription, same started/items/done handshake, same demultiplexing.
  *
@@ -25,8 +25,9 @@ import {
   blockNumberFromHeader,
 } from '@bleavit/chain-client';
 import { createMockRuntime } from '@bleavit/mock-runtime';
+import type { HexString } from '@bleavit/shared-types';
 
-import { argsFor, bundle, keyFor, recordedProvider } from './recorded-provider.mjs';
+import { argsFor, bundle, keyFor, recordedProvider, sentWith } from './recorded-provider.ts';
 
 const fixtures = bundle();
 const runtime = () => createMockRuntime(fixtures);
@@ -36,8 +37,10 @@ test('open() follows the chain and learns its finalized block from the transcrip
   const { provider, sent } = recordedProvider(mock);
   const connection = await ChainHeadConnection.open(provider);
 
-  assert.equal(sent[0].method, 'chainHead_v1_follow');
-  assert.deepEqual(sent[0].params, [true], 'withRuntime must be set or chainHead_v1_call is unavailable');
+  const first = sent[0];
+  assert.ok(first, 'the transport sent nothing at all');
+  assert.equal(first.method, 'chainHead_v1_follow');
+  assert.deepEqual(first.params, [true], 'withRuntime must be set or chainHead_v1_call is unavailable');
 
   const pin = await connection.pinnedBlock();
   assert.equal(pin.blockHash, mock.pinnedBlock());
@@ -52,7 +55,8 @@ test('the block number is decoded from real recorded headers, in every compact m
     .flatMap((f) => f.requests)
     .find((r) => r.method === 'chainHead_v1_header');
   assert.ok(recorded, 'no header was recorded — this test would be vacuous');
-  assert.equal(blockNumberFromHeader(recorded.response.direct.result), 1);
+  const header = (recorded.response as { direct: { result: HexString } }).direct.result;
+  assert.equal(blockNumberFromHeader(header), 1);
 
   // The other three SCALE compact modes. A header decoder that only ever meets mode 0
   // works for the first 63 blocks of a chain and then silently reads the wrong number,
@@ -75,7 +79,7 @@ test('a storage read replays the recorded operation handshake', async () => {
   const items = await connection.storage(pin, key, type);
   assert.ok(Array.isArray(items));
 
-  const request = sent.find((r) => r.method === 'chainHead_v1_storage');
+  const request = sentWith(sent, 'chainHead_v1_storage');
   assert.deepEqual(request.params, ['subscription-1', pin.blockHash, [{ key, type }], null]);
 });
 
@@ -97,7 +101,7 @@ test('V-84: a reader reads at ITS OWN pin after the finalized head advances', as
   // could be handed a value read at N+1 and would label it N. The returned value is
   // perfectly valid — only its provenance is a lie — so nothing about the value can
   // detect it. The assertion has to be on the wire.
-  const moved = `0x${'ab'.repeat(32)}`;
+  const moved: HexString = `0x${'ab'.repeat(32)}`;
   const mock = runtime();
   const { provider, sent, state } = recordedProvider(mock, {
     // The transcripts are recorded at a single block, so the *second* block has to be
@@ -121,8 +125,7 @@ test('V-84: a reader reads at ITS OWN pin after the finalized head advances', as
   const { key, type } = keyFor(fixtures, 'storage.constitution.phase_flags');
   await reader.storage(key, type);
 
-  const storageRequests = sent.filter((r) => r.method === 'chainHead_v1_storage');
-  const last = storageRequests.at(-1);
+  const last = sentWith(sent, 'chainHead_v1_storage', 'last');
   assert.equal(last.params[1], original, 'the read was issued against the moved head, not the pin');
   assert.notEqual(last.params[1], moved);
 });
@@ -384,7 +387,7 @@ test('V-95: pins are released as finality advances, and never the current head',
   const { provider, sent, state } = recordedProvider(mock);
   const connection = await ChainHeadConnection.open(provider, { pinWindow: 4 });
 
-  const hash = (n) => `0x${n.toString(16).padStart(64, '0')}`;
+  const hash = (n: number): HexString => `0x${n.toString(16).padStart(64, '0')}`;
   for (let n = 2; n <= 40; n += 1) {
     state.followEvent({ event: 'newBlock', blockHash: hash(n) });
     state.followEvent({ event: 'finalized', finalizedBlockHashes: [hash(n)], prunedBlockHashes: [] });
@@ -432,8 +435,8 @@ test('V-95: pruned blocks are released immediately', async () => {
   const { provider, sent, state } = recordedProvider(mock);
   await ChainHeadConnection.open(provider, { pinWindow: 64 });
 
-  const orphan = `0x${'ab'.repeat(32)}`;
-  const head = `0x${'cd'.repeat(32)}`;
+  const orphan: HexString = `0x${'ab'.repeat(32)}`;
+  const head: HexString = `0x${'cd'.repeat(32)}`;
   state.followEvent({ event: 'newBlock', blockHash: orphan });
   state.followEvent({
     event: 'finalized',
@@ -463,7 +466,7 @@ test('V-95: the block-number cache is evicted with the pin it belongs to', async
   });
   const connection = await ChainHeadConnection.open(provider, { pinWindow: 2 });
 
-  const hash = (n) => `0x${n.toString(16).padStart(64, '0')}`;
+  const hash = (n: number): HexString => `0x${n.toString(16).padStart(64, '0')}`;
   for (let n = 2; n <= 20; n += 1) {
     state.followEvent({ event: 'newBlock', blockHash: hash(n) });
     state.followEvent({ event: 'finalized', finalizedBlockHashes: [hash(n)], prunedBlockHashes: [] });
@@ -487,12 +490,12 @@ test('onFinalized emits EVERY hash in a multi-block finalization, in order', asy
   const { provider, state } = recordedProvider(mock);
   const connection = await ChainHeadConnection.open(provider);
 
-  const seen = [];
+  const seen: HexString[] = [];
   const unsubscribe = connection.onFinalized((hash) => seen.push(hash));
 
-  const a = `0x${'a1'.repeat(32)}`;
-  const b = `0x${'b2'.repeat(32)}`;
-  const c = `0x${'c3'.repeat(32)}`;
+  const a: HexString = `0x${'a1'.repeat(32)}`;
+  const b: HexString = `0x${'b2'.repeat(32)}`;
+  const c: HexString = `0x${'c3'.repeat(32)}`;
   state.followEvent({ event: 'finalized', finalizedBlockHashes: [a, b, c], prunedBlockHashes: [] });
   await new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -525,14 +528,15 @@ test('a finalized hash is emitted while it is still pinned', async () => {
   const { provider, state } = recordedProvider(mock);
   const connection = await ChainHeadConnection.open(provider);
 
-  const pinnedWhenSeen = [];
+  const pinnedWhenSeen: number[] = [];
   connection.onFinalized(() => pinnedWhenSeen.push(connection.pinnedCountForTest()));
 
-  const a = `0x${'e5'.repeat(32)}`;
+  const a: HexString = `0x${'e5'.repeat(32)}`;
   state.followEvent({ event: 'finalized', finalizedBlockHashes: [a], prunedBlockHashes: [] });
   await new Promise((resolve) => setTimeout(resolve, 0));
 
   assert.equal(pinnedWhenSeen.length, 1);
-  assert.ok(pinnedWhenSeen[0] > 0, 'the hash was announced-and-pinned before the listener ran');
+  const firstSeen = pinnedWhenSeen[0];
+  assert.ok(firstSeen !== undefined && firstSeen > 0, 'the hash was announced-and-pinned before the listener ran');
   connection.close();
 });

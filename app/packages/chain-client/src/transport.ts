@@ -56,6 +56,16 @@ export type JsonRpcProviderLike = (
   onMessage: (message: JsonRpcMessageLike) => void,
 ) => JsonRpcConnectionLike;
 
+/**
+ * The two `chainHead_v1_storage` query kinds this client issues.
+ *
+ * Named rather than inlined at `storage()` so a caller deriving the kind from somewhere
+ * else — a recorded transcript, most obviously — narrows against *this* declaration
+ * instead of re-stating the pair. Two copies of a closed set agree until one of them
+ * gains a member.
+ */
+export type StorageQueryType = 'value' | 'descendantsValues';
+
 /* ------------------------------------------------------------------------- errors */
 
 export class ChainHeadError extends Error {
@@ -304,7 +314,7 @@ export class ChainHeadConnection implements ChainHeadTransport {
   async storage(
     at: FinalizedBlockRef,
     key: string,
-    type: 'value' | 'descendantsValues',
+    type: StorageQueryType,
   ): Promise<readonly StorageItem[]> {
     this.#assertLive();
     const started = await this.#request('chainHead_v1_storage', [
