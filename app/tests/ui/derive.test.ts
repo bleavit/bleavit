@@ -14,96 +14,139 @@ import assert from 'node:assert/strict';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { createElement as h } from 'react';
 import { combine, combine2, combineStatus } from '@bleavit/shared-types';
+import type { Combined, HexString, Verified, VerificationStatus } from '@bleavit/shared-types';
 import { Derived } from '@bleavit/ui';
 
-const AT = (n, hash) => ({ kind: 'verified-finalized', blockHash: hash, blockNumber: n });
-const BEST = (n, hash) => ({ kind: 'verified-best', blockHash: hash, blockNumber: n });
-const PROVIDER = { kind: 'provider', providerId: 'p', sampled: false };
-const STALE = { kind: 'stale-cache', asOfBlock: 10, ageMs: 5_000 };
-const LOCAL = { kind: 'derived-local', coverage: { from: 1, to: 2 } };
-const PROPOSAL = { kind: 'external-proposal' };
+// Annotated, not inferred. Without the annotation every `kind` widens to `string` and the
+// fixtures stop being `VerificationStatus` at all — the same widening that silently turned a
+// discriminant into a plain string in the handoff suites.
+const AT = (n: number, hash: HexString): VerificationStatus =>
+  ({ kind: 'verified-finalized', blockHash: hash, blockNumber: n });
+const BEST = (n: number, hash: HexString): VerificationStatus =>
+  ({ kind: 'verified-best', blockHash: hash, blockNumber: n });
+const PROVIDER: VerificationStatus = { kind: 'provider', providerId: 'p', sampled: false };
+const STALE: VerificationStatus = { kind: 'stale-cache', asOfBlock: 10, ageMs: 5_000 };
+const LOCAL: VerificationStatus = {
+  kind: 'derived-local',
+  // `CoverageRef` is `{ranges, holes}` of `{fromBlock, toBlock}`. This fixture said
+  // `{from, to}` — a shape the client never produces, so every assertion that reached
+  // through it was reading a coverage record the type does not admit.
+  coverage: { ranges: [{ fromBlock: 1, toBlock: 2 }], holes: [] },
+};
+const PROPOSAL: VerificationStatus = { kind: 'external-proposal' };
+
+/**
+ * Narrow `combineStatus`'s union to the arm the test expects.
+ *
+ * `assert.equal(result.kind, 'stated')` does not narrow — it is not an assertion signature —
+ * so every `result.status` after one was reaching into an arm TypeScript could not see. The
+ * helpers are also better tests than the pattern they replace: when the wrong arm comes back
+ * they report the refusal's **own reason**, where `assert.equal('incomparable', 'stated')`
+ * reports only that two strings differ and leaves the diagnosis to a rerun.
+ */
+function stated(result: ReturnType<typeof combineStatus>): VerificationStatus {
+  assert.ok(
+    result.kind === 'stated',
+    `expected a statable status, got incomparable: ${result.kind === 'incomparable' ? result.reason : ''}`,
+  );
+  return result.status;
+}
+
+// Widened to the refusing arm alone, so it serves `combineStatus` and `combine`/`combine2`
+// alike: what a caller asserts here is the refusal, and the two unions' `stated` arms differ
+// only in what they carry, which this helper never reads.
+function incomparable(
+  result: { readonly kind: 'stated' } | { readonly kind: 'incomparable'; readonly reason: string },
+): string {
+  assert.ok(result.kind === 'incomparable', 'expected a refusal; the inputs combined');
+  return result.reason;
+}
+
+function statedDatum<T>(result: Combined<T>): Verified<T> {
+  assert.ok(
+    result.kind === 'stated',
+    `expected a value, got incomparable: ${result.kind === 'incomparable' ? result.reason : ''}`,
+  );
+  return result.datum;
+}
 
 test('two finalized reads at the same block combine, keeping that block', () => {
-  const result = combineStatus([AT(100, '0xaa'), AT(100, '0xaa')]);
-  assert.equal(result.kind, 'stated');
-  assert.equal(result.status.kind, 'verified-finalized');
-  assert.equal(result.status.blockHash, '0xaa');
+  const status = stated(combineStatus([AT(100, '0xaa'), AT(100, '0xaa')]));
+  assert.equal(status.kind, 'verified-finalized');
+  assert.deepEqual(status, { kind: 'verified-finalized', blockHash: '0xaa', blockNumber: 100 });
 });
 
 test('a provider input makes the result provider — never the verified input’s badge', () => {
   // The whole reason the module exists. `limit` verified, `used` from a provider: the
   // difference is not a verified fact, and rendering it as one is the promotion INV-FE-1
   // forbids.
-  const result = combineStatus([AT(100, '0xaa'), PROVIDER]);
-  assert.equal(result.kind, 'stated');
-  assert.equal(result.status.kind, 'provider');
+  assert.equal(stated(combineStatus([AT(100, '0xaa'), PROVIDER])).kind, 'provider');
 });
 
 test('the weakest input wins across every pair, in the declared order', () => {
-  const order = [AT(1, '0xaa'), BEST(1, '0xaa'), LOCAL, STALE, PROVIDER, PROPOSAL];
-  for (let i = 0; i < order.length; i += 1) {
-    for (let j = 0; j < order.length; j += 1) {
-      const result = combineStatus([order[i], order[j]]);
-      assert.equal(result.kind, 'stated', `${i},${j} should be statable`);
+  const order: readonly VerificationStatus[] = [
+    AT(1, '0xaa'), BEST(1, '0xaa'), LOCAL, STALE, PROVIDER, PROPOSAL,
+  ];
+  // Iterated by entry rather than by index: under `noUncheckedIndexedAccess` `order[i]` is
+  // possibly-undefined, and the expected value is `i >= j ? a : b` anyway — which says the
+  // rule (*later in the list is weaker*) instead of recomputing it with `Math.max`.
+  for (const [i, a] of order.entries()) {
+    for (const [j, b] of order.entries()) {
       assert.equal(
-        result.status.kind,
-        order[Math.max(i, j)].kind,
-        `combining ${order[i].kind} with ${order[j].kind} must yield the weaker`,
+        stated(combineStatus([a, b])).kind,
+        (i >= j ? a : b).kind,
+        `combining ${a.kind} with ${b.kind} must yield the weaker`,
       );
     }
   }
 });
 
 test('two verified reads at DIFFERENT blocks refuse — no status can express that value', () => {
-  const result = combineStatus([AT(100, '0xaa'), AT(120, '0xbb')]);
-  assert.equal(result.kind, 'incomparable');
-  assert.match(result.reason, /different blocks/);
+  assert.match(incomparable(combineStatus([AT(100, '0xaa'), AT(120, '0xbb')])), /different blocks/);
 });
 
 test('finalized and best at the same hash combine to the weaker, not to incomparable', () => {
   // A block read while best and again after finalization is *one* block. Refusing here would
   // make the common case unrenderable and teach callers to route around the rule.
-  const result = combineStatus([AT(100, '0xaa'), BEST(100, '0xaa')]);
-  assert.equal(result.kind, 'stated');
-  assert.equal(result.status.kind, 'verified-best');
+  assert.equal(stated(combineStatus([AT(100, '0xaa'), BEST(100, '0xaa')])).kind, 'verified-best');
 });
 
 test('an unverified input suppresses the block check rather than forcing incomparable', () => {
   // Once the answer is unverified it asserts nothing about a block, so differing blocks among
   // the verified inputs cannot falsify it. Refusing here would be fail-closed theatre that
   // hides an ordinary provider figure.
-  const result = combineStatus([AT(100, '0xaa'), AT(120, '0xbb'), PROVIDER]);
-  assert.equal(result.kind, 'stated');
-  assert.equal(result.status.kind, 'provider');
+  assert.equal(
+    stated(combineStatus([AT(100, '0xaa'), AT(120, '0xbb'), PROVIDER])).kind,
+    'provider',
+  );
 });
 
 test('zero inputs refuse — a fold over nothing would return the STRONGEST status', () => {
-  const result = combineStatus([]);
-  assert.equal(result.kind, 'incomparable');
+  assert.ok(incomparable(combineStatus([])).length > 0, 'the refusal carried no reason');
 });
 
 test('combine2 computes the value and carries the combined status', () => {
   const a = { value: 500, status: AT(9, '0xaa') };
   const b = { value: 120, status: AT(9, '0xaa') };
-  const result = combine2(a, b, (x, y) => x - y);
-  assert.equal(result.kind, 'stated');
-  assert.equal(result.datum.value, 380);
-  assert.equal(result.datum.status.kind, 'verified-finalized');
+  const datum = statedDatum(combine2(a, b, (x: number, y: number) => x - y));
+  assert.equal(datum.value, 380);
+  assert.equal(datum.status.kind, 'verified-finalized');
 });
 
 test('combine2 refuses across blocks even though the arithmetic would succeed', () => {
   const a = { value: 500, status: AT(9, '0xaa') };
   const b = { value: 120, status: AT(11, '0xbb') };
-  const result = combine2(a, b, (x, y) => x - y);
-  assert.equal(result.kind, 'incomparable');
-  assert.equal(result.datum, undefined);
+  const result = combine2(a, b, (x: number, y: number) => x - y);
+  assert.match(incomparable(result), /different blocks/);
+  // `in`, not `=== undefined`: the refusing arm has no `datum` **field**, which is stronger
+  // than its value being undefined and is what stops a caller reading through the refusal.
+  assert.equal('datum' in result, false, 'the refusal carried a datum');
 });
 
 test('combine attaches an already-computed value', () => {
-  const result = combine(7n, [AT(1, '0xaa'), STALE]);
-  assert.equal(result.kind, 'stated');
-  assert.equal(result.datum.value, 7n);
-  assert.equal(result.datum.status.kind, 'stale-cache');
+  const datum = statedDatum(combine(7n, [AT(1, '0xaa'), STALE]));
+  assert.equal(datum.value, 7n);
+  assert.equal(datum.status.kind, 'stale-cache');
 });
 
 // ---------------------------------------------------------------------------
@@ -114,10 +157,10 @@ test('Derived renders the value with its badge when statable', () => {
   const combined = combine2(
     { value: 500, status: AT(9, '0xaa') },
     { value: 120, status: AT(9, '0xaa') },
-    (x, y) => x - y,
+    (x: number, y: number) => x - y,
   );
   const markup = renderToStaticMarkup(
-    h(Derived, { combined, render: (v) => String(v), name: 'blocks remaining' }),
+    h(Derived<number>, { combined, render: (v: number) => String(v), name: 'blocks remaining' }),
   );
   assert.match(markup, /380/);
   assert.match(markup, /blocks remaining/);
@@ -129,9 +172,9 @@ test('Derived renders the REASON when incomparable — never an empty space', ()
   const combined = combine2(
     { value: 500, status: AT(9, '0xaa') },
     { value: 120, status: AT(11, '0xbb') },
-    (x, y) => x - y,
+    (x: number, y: number) => x - y,
   );
-  const markup = renderToStaticMarkup(h(Derived, { combined, render: (v) => String(v) }));
+  const markup = renderToStaticMarkup(h(Derived<number>, { combined, render: (v: number) => String(v) }));
   assert.match(markup, /Not available/);
   assert.match(markup, /different blocks/);
   // And emphatically not the number it would have computed.
@@ -141,7 +184,9 @@ test('Derived renders the REASON when incomparable — never an empty space', ()
 test('Derived never renders a badge on the incomparable arm', () => {
   // A badge is a claim about provenance; there is no provenance to claim here, and a
   // `verified` badge beside "Not available" would be worse than either alone.
-  const combined = { kind: 'incomparable', reason: 'test reason' };
-  const markup = renderToStaticMarkup(h(Derived, { combined, render: (v) => String(v) }));
+  const combined: Combined<number> = { kind: 'incomparable', reason: 'test reason' };
+  const markup = renderToStaticMarkup(
+    h(Derived<number>, { combined, render: (v: number) => String(v) }),
+  );
   assert.doesNotMatch(markup, /badge/);
 });
