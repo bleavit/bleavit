@@ -1,5 +1,7 @@
-Run ONE spec-driven implementation increment for this repository, following AGENTS.md
-(which you must treat as binding). Protocol:
+Run spec-driven implementation increments for this repository, following AGENTS.md
+(which you must treat as binding). One increment = one milestone, or one clearly-scoped
+slice of a large one. When an increment closes, continue to the next item without waiting
+to be asked (R-5); each increment gets its own full pass of the protocol below. Protocol:
 
 1. ORIENT. Read PLAN.md fully: Current focus, milestone tables, Spec questions, last
    Session log rows. Target = the milestone named at the end of this prompt if any;
@@ -17,7 +19,8 @@ Run ONE spec-driven implementation increment for this repository, following AGEN
    questions with a precise citation; proceed only if a conservative reading is safe, else mark
    the milestone ⛔ and stop.
 
-3. IMPLEMENT. One milestone only. Non-negotiables: no floats / no wall-clock phase
+3. IMPLEMENT. Finish or park the increment cleanly before starting the next one — never
+   carry two half-done milestones. Non-negotiables: no floats / no wall-clock phase
    logic / checked or saturating arithmetic and typed errors everywhere (status-quo
    default, G-1); bounded collections with bounds from 13 §4; storage/event/call names
    byte-identical to 02; parameters never hardcoded (kernel constants from
@@ -39,4 +42,5 @@ Run ONE spec-driven implementation increment for this repository, following AGEN
    with the milestone ID (e.g. `feat(ledger): split/merge families (A2)`). Do not
    commit or push unless the user asked.
 
-Never end the session with the repo changed but PLAN.md stale.
+Then go on to the next item. A session ends when the work or the user says so, not when a
+milestone happens to close. Never end the session with the repo changed but PLAN.md stale.

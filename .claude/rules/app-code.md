@@ -28,6 +28,20 @@ Practical consequences:
    belt-and-braces extra. Never put the brand in
    `shared-types`: if the universal sink package can construct it, 10 §2.1 is void
    silently, with green CI. UI components reject unlabeled values by type.
+
+   **A third control covers the render edge**: `<Panel title={`Referendum ${id.value}`}>`
+   typechecks perfectly and puts a chain read on screen with no badge, because the payload
+   of a `Verified<string>` is a `string`. `app/tools/check-render-provenance.mjs`
+   (+ `:witness`) is type-aware for a reason — a syntactic version fires on `key={...}`,
+   on `event.currentTarget.value` and on the verification panel's release-constant rows,
+   and a gate that fires on correct code gets switched off. Its **rule B** is the one that
+   is easy to write by accident: a value derived from two reads carrying *one* input's
+   status promotes provider data to verified **by arithmetic**, which no badge type and no
+   firewall rule can see. Use `combine`/`combine2` from `@bleavit/shared-types` — the
+   result takes the weakest input's status, and two verified reads at **different blocks**
+   refuse outright rather than claiming a block neither describes. Render the refusal with
+   `<Derived>`; a missing figure must look missing, since rendering nothing is how "we
+   cannot say" becomes indistinguishable from zero.
 3. **Package firewall (INV-FE-3, 10 §10).** Respect the dependency-cruiser boundaries:
    `signing` and `transaction-builder` never import `providers`/`local-index`;
    nothing above `chain-client` bypasses it; `src/features/tx/**` never imports
@@ -74,8 +88,17 @@ Practical consequences:
    same way. Everything that *is* a tunable — `mkt.fee`, `mkt.kappa`,
    `mkt.obs_interval`, `MinTrade`, `MaxTradeRatio` — is a **function argument with
    no default**, so a caller that forgets one gets a type error rather than a stale
-   launch value baked into a quote. When the no-literal gate lands (F11), carry the
-   kernel constants as a classified group, not as UI-only allowlist entries.
+   launch value baked into a quote.
+
+   **The no-literal gate landed with F11**: `pnpm -C app run check:chain-literals`
+   (+ `:witness`). It parses 02 §9's own frozen-constant table and applies two rules —
+   **A**, a frozen constant's *name* bound to a numeric literal (which stays a defect
+   when the value is currently right), and **B**, a distinctive frozen *value* appearing
+   bare, restricted to four-digit-plus values because `32` and `64` are hash widths and
+   array sizes everywhere. Exemptions are **classified groups** in
+   `app/tools/release/sources/chain-literal-classification.json` — a value, in named
+   files, for a stated reason — never line waivers, so a new file cannot inherit one by
+   copying a number. The kernel constants are one such group, as this rule required.
 
    **Corollary — the port reproduces the runtime's integer path, deliberately.**
    Arbitrary-precision decimals would be *more accurate* and would be wrong: 04 §6.1
@@ -155,7 +178,30 @@ Practical consequences:
     **The same applies to the negative-compilation corpus** (V-91): a fixture must declare the
     error it produces (`// expect-error: TSxxxx` on line 1), because "did not compile" is also
     what a missing dependency looks like.
-14. **Pinned versions.** The stack pins live in 01 §9 / 10 — PAPI 2.x, smoldot 3.x,
+14. **No control characters in source, and `cat -A` is how you find them.** Twice in one
+    session a byte below 0x20 reached a source file and broke something in a way that read
+    as a logic error: a literal **NUL** in `tests/receipts` (which made git classify the
+    file as binary, so its diffs showed no lines and `grep` skipped it silently), and a
+    literal **backspace** inside a regex, produced by writing `\b` through a shell heredoc
+    — the pattern then matched nothing while the assertion failed on a string that plainly
+    contained the word. Neither is visible in an editor or in a diff. **Prefer writing
+    files with the Write tool or a Python heredoc over shell interpolation for anything
+    containing backslash escapes**, and reach for `cat -A` the moment an assertion fails
+    against a value that obviously satisfies it. The tree is currently clean; a sweep is
+    four lines of Python over every source file.
+
+15. **Pinned versions.** The stack pins live in 01 §9 / 10 — PAPI 2.x, smoldot 3.x,
     Vite 8, Dexie 4, Tauri 2.x. Do not bump majors without a PLAN.md decision-log
     entry. `app/` is its own pnpm workspace and its own cargo workspace (excluded from
     the root one); never let its dependency tree reach the runtime pins.
+16. **The release tree is derived, and its inputs are what you edit (F11, 12 §1/§5).**
+    `app/dist/` and `app/release-out/` are build output. The committed inputs are
+    `app/tools/release/sources/`: where each `connect-src` class comes from, the
+    INV-FE-11 chain-identity pins, the signing keyring, the 15 §4.8 diff baseline.
+    **Never widen the allowlist by editing the emitted policy** — it is substituted into
+    `index.html` at build time — and never add an external-tool vendor host to any
+    source (D-21, 12 §5.1). An intended addition is a diff to *two* files, the source
+    and `incumbent-connect-src.json`; that second edit is the entire control, because
+    nothing mechanical distinguishes a gateway from a vendor endpoint dressed as one.
+    A pin that cannot exist yet is a **readiness blocker**, never a `null` that ships:
+    `release:build --production` refuses while any stands.

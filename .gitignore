@@ -54,11 +54,15 @@ app/**/dist/
 !app/packages/papi-descriptors/dist/
 !app/packages/papi-descriptors/dist/**
 app/**/*.tsbuildinfo
-# `release-out/` is the release pipeline's output tree — `release:build` writes it and
-# `test:release` reads it. AGENTS.md described it as gitignored and it was not, so a
-# `git add -A` committed 3,712 lines of generated `release.json` + CycloneDX SBOM (V-145).
-# The SBOM in particular is derived *from the lockfile*, so a committed copy is a second
-# artifact that silently disagrees with the recipe the moment dependencies move.
+# `release-out/` is the release pipeline's output tree: `release:build` writes `release.json`
+# and `sbom.cdx.json` (12 §1.1) and `test:release` reads them. They are derived from the tree
+# and the lockfile and would churn on every commit — the committed inputs that decide them are
+# `app/tools/release/sources/`.
+#
+# This rule was added once before and fixed nothing (V-145): a `.gitignore` entry does not
+# untrack a file already in the index, and 3,712 lines of generated `release.json` + CycloneDX
+# SBOM had already been committed by a `git add -A`. The rule and the `git rm --cached` are
+# two separate acts, and only the second removes the artifact.
 app/release-out/
 app/**/release-out/
 app/src-tauri/target/
