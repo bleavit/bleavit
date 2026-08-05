@@ -31,7 +31,7 @@
  * site.
  */
 
-import type { FinalizedReader } from '@bleavit/chain-client';
+import type { Finalized, FinalizedBlockRef, StorageItem } from '@bleavit/chain-client';
 import type { Verified } from '@bleavit/shared-types';
 import type { DecisionStats, ProposalSummary, ProposalView } from './proposals.js';
 
@@ -152,8 +152,26 @@ export function viewFor(
  * its own storage prefix — FE-P2's conservative default (10 §4.2), and the reason the
  * prefix is not a caller-supplied argument.
  */
+/**
+ * What this function needs from a reader: one pin, and the FE-P2 cross-checked call.
+ *
+ * Structural rather than the `FinalizedReader` class for the reason given on
+ * `ShellStateReader`: a class with `#private` fields is nominal, so a suite could only
+ * reach this code through a real transport and a recorded transcript. The narrow port
+ * keeps the *pairing* — api with its own storage prefix — inside the reader, which is what
+ * 10 §11's final bullet requires and what a caller-supplied prefix would defeat.
+ */
+export interface ProposalsReader {
+  readonly at: FinalizedBlockRef;
+  crossCheckedCall(source: {
+    readonly api: string;
+    readonly storagePrefix: string;
+    readonly argsHex?: string;
+  }): Promise<Finalized<{ readonly result: string; readonly witness: readonly StorageItem[] }>>;
+}
+
 export async function readProposals(
-  reader: FinalizedReader,
+  reader: ProposalsReader,
   decoders: ProposalDecoders,
 ): Promise<ProposalsRead> {
   const at = reader.at;

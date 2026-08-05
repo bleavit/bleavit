@@ -41,6 +41,12 @@ import {
   sudoActive,
   sudoBannerFor,
 } from '@bleavit/application';
+import type {
+  ScreenArea,
+  ShellChainState,
+  ShellDecoders,
+  ShellStateReader,
+} from '@bleavit/application';
 import {
   ConfirmSurface,
   EpochShrinkNotice,
@@ -102,8 +108,8 @@ import {
   TreasuryStreams,
   UpgradeCrank,
   UpgradeHashMismatch,
+  UpgradeHashMismatchError,
   snapshotStaleness,
-  stalenessCopy,
   admitEvidence,
   evidenceUnavailable,
   EvidencePanel,
@@ -128,6 +134,7 @@ import {
   WithdrawForm,
 } from '@bleavit/features-tx';
 import { ImportRefused, ImportReview, UnlabellableClampError } from '@bleavit/features-handoff';
+import type { ImportReviewProps } from '@bleavit/features-handoff';
 import { ShareContext } from '@bleavit/features-handoff';
 import {
   AlwaysVisible,
@@ -136,19 +143,62 @@ import {
   Undecodable,
   aboveTheFold,
 } from '@bleavit/ui';
-import { externalProposal } from '@bleavit/shared-types';
+import type { Combined, Verified } from '@bleavit/shared-types';
+import type { FinalizedBlockRef } from '@bleavit/chain-client';
+// `finalize` is test-only on purpose — see packages/chain-client/src/testing.ts.
+import { finalize } from '@bleavit/chain-client/testing';
+import { gate } from '@bleavit/transaction-builder';
+import type {
+  GatePassed,
+  PreconditionResult,
+  PreconditionRowId,
+  TxPreparation,
+  TxSession,
+  TxState,
+} from '@bleavit/transaction-builder';
+import type {
+  AllowanceMeter,
+  ChallengeWindow,
+  DepositProgress,
+  ProposalSummary,
+  ApprovalContext,
+  ApprovedCall,
+  EffectivePower,
+  ReferendumLink,
+  AuthorizedUpgrade,
+  DepositInputs,
+  ExecutionWindow,
+  NavView,
+  OracleBallot,
+  PendingAction,
+  ProposalsReader,
+  RatificationView,
+  RawDecoded,
+  RawEvent,
+  RecomputeInputs,
+  Referendum,
+  RegistrationInputs,
+  Stream,
+} from '@bleavit/features-tx';
 import { defaultScope } from '@bleavit/contexts';
 import { refuse } from '@bleavit/handoff-envelope';
+import type { Clamped, ClampedLimits, Intent } from '@bleavit/intents';
 import { classifyCheckpointAge } from '@bleavit/verify';
+import type { VerificationPanel } from '@bleavit/verify';
+import type { Fixture } from '@bleavit/mock-runtime';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '../../..');
 const DOC11 = join(REPO, 'docs/architecture/11-frontend-workflows.md');
 
-const finalized = (value, blockNumber = 1_000_000) => ({
+// `Verified<T>` deliberately has no brand — screens display it, they do not authorise on
+// it, and 10 §2.1 puts the brand on `Finalized<T>` for the transaction path alone. So a
+// plain object is the right fixture here; the annotation is what keeps `kind` and
+// `blockHash` from widening to `string` and the status from matching nothing.
+const finalized = <T>(value: T, blockNumber = 1_000_000): Verified<T> => ({
   value,
   status: { kind: 'verified-finalized', blockHash: '0xdead', blockNumber },
 });
-const AT = { blockHash: '0xdead', blockNumber: 1_000_000 };
+const AT: FinalizedBlockRef = { blockHash: '0xdead', blockNumber: 1_000_000 };
 /**
  * Whether a labelled button is really disabled.
  *
@@ -157,16 +207,59 @@ const AT = { blockHash: '0xdead', blockNumber: 1_000_000 };
  * nothing. The boolean attribute is `disabled=""`; that is what a browser honours and what
  * this looks for.
  */
-const buttonDisabled = (html, label) => {
+const buttonDisabled = (html: string, label: string): boolean => {
   const tag = new RegExp(`<button[^>]*>${label}</button>`).exec(html);
   assert.ok(tag !== null, `no button labelled "${label}" in:\n${html}`);
   return / disabled=""/.test(tag[0]);
 };
 
 /** Unwrap a `Combined<T>` that must be statable — asserting rather than optional-chaining. */
-const stated = (combined) => {
-  assert.equal(combined.kind, 'stated', combined.reason ?? '');
+/**
+ * The block a leaf was read at, or a throw naming the status that carries none.
+ *
+ * `VerificationStatus` is a union and only two of its six arms have a block — which is the
+ * point of `assertOnePin`, so a helper that optional-chained past it would soften exactly
+ * what the shell must refuse.
+ */
+const pinOf = (leaf: Verified<unknown>): FinalizedBlockRef => {
+  const { status } = leaf;
+  assert.ok(
+    status.kind === 'verified-finalized' || status.kind === 'verified-best',
+    `a shell leaf carries ${status.kind}, which names no block`,
+  );
+  return { blockHash: status.blockHash, blockNumber: status.blockNumber };
+};
+
+const stated = <T,>(combined: Combined<T>): T => {
+  assert.equal(combined.kind, 'stated', combined.kind === 'incomparable' ? combined.reason : '');
   return combined.datum.value;
+};
+
+/**
+ * Copy a function was expected to produce, or a throw.
+ *
+ * These helpers return `string | undefined` on purpose — `undefined` means *no warning*,
+ * and the tests below are about the arms that must warn. Asserting through this rather
+ * than `!` keeps the finding "it said nothing" instead of a match against `undefined`.
+ */
+const copy = (text: string | undefined, what = 'copy'): string => {
+  assert.ok(text, `expected ${what}; got nothing, which renders as no warning at all`);
+  return text;
+};
+
+/** The nth element of a result array, or a throw naming how many there really were. */
+const nth = <T,>(items: readonly T[], index: number, what: string): T => {
+  const item = items.at(index);
+  if (item === undefined) throw new Error(`expected a ${what} at ${index}; there are ${items.length}`);
+  return item;
+};
+
+/** A regex capture group that must have matched, or a throw naming the pattern. */
+const captured = (match: RegExpExecArray | null, group: number, what: string): string => {
+  assert.ok(match, `${what} did not match — this binding must be re-pointed`);
+  const value = match[group];
+  assert.ok(value !== undefined, `${what} matched but capture ${group} is empty`);
+  return value;
 };
 
 // ------------------------------------------------------- the screen inventory
@@ -174,8 +267,8 @@ const stated = (combined) => {
 test('every screen doc 11 §11.2 lists is present in the client', () => {
   const doc = readFileSync(DOC11, 'utf8');
   const table = /^## 11\.2 Screen inventory$([\s\S]*?)^USDC balance reads/m.exec(doc);
-  assert.ok(table, 'the §11.2 inventory table moved — this binding must be re-pointed');
-  const declared = [...table[1].matchAll(/^\| (S\d+) \|/gm)].map((match) => match[1]);
+  const body = captured(table, 1, 'the §11.2 inventory table');
+  const declared = [...body.matchAll(/^\| (S\d+) \|/gm)].map((match) => match[1]);
   // Fail closed on a parse that found nothing: an empty expectation is satisfied by an
   // empty client, which is precisely the state constraint 1 forbids.
   assert.ok(declared.length >= 20, `parsed only ${declared.length} rows out of doc 11`);
@@ -185,10 +278,11 @@ test('every screen doc 11 §11.2 lists is present in the client', () => {
 test('the areas match doc 11 row for row, since placement is derived from them', () => {
   const doc = readFileSync(DOC11, 'utf8');
   const table = /^## 11\.2 Screen inventory$([\s\S]*?)^USDC balance reads/m.exec(doc);
+  const body = captured(table, 1, 'the §11.2 inventory table');
   const declared = new Map(
-    [...table[1].matchAll(/^\| (S\d+) \| [^|]+ \| ([^|]+) \|/gm)].map((match) => [
+    [...body.matchAll(/^\| (S\d+) \| [^|]+ \| ([^|]+) \|/gm)].map((match) => [
       match[1],
-      match[2].trim().replace(/\*\*/g, ''),
+      (match[2] ?? '').trim().replace(/\*\*/g, ''),
     ]),
   );
   assert.ok(declared.size >= 20, `parsed only ${declared.size} areas`);
@@ -201,7 +295,7 @@ test('the areas match doc 11 row for row, since placement is derived from them',
 test('placement is a function of area — handoff first, everything else Advanced', () => {
   assert.equal(placementOf('global'), 'chrome');
   assert.equal(placementOf('handoff'), 'primary');
-  for (const area of ['core', 'FE-14', 'FE-15', 'funding']) {
+  for (const area of ['core', 'FE-14', 'FE-15', 'funding'] as const satisfies readonly ScreenArea[]) {
     assert.equal(placementOf(area), 'advanced', area);
   }
 });
@@ -246,9 +340,9 @@ test('the phase-flag bit table matches 02 §7.3 exactly', () => {
   // rather than silently disagreeing with the runtime.
   const doc = readFileSync(join(REPO, 'docs/architecture/02-integration-contract.md'), 'utf8');
   const sentence = /Bit assignments: ([^|]+?); bits 8–31 reserved/.exec(doc);
-  assert.ok(sentence, 'the §7.3 bit-assignment sentence moved — re-point this binding');
+  const assignments = captured(sentence, 1, 'the §7.3 bit-assignment sentence');
   const declared = Object.fromEntries(
-    sentence[1].split(',').map((part) => {
+    assignments.split(',').map((part) => {
       const [bit, name] = part.split('=').map((x) => x.trim());
       return [name, Number(bit)];
     }),
@@ -307,7 +401,7 @@ test('an unread phase shows the banner — unknown is not post-sudo', () => {
   assert.ok(html.includes('data-severity="danger"'), html);
 });
 
-const shellChain = (phase) => ({
+const shellChain = (phase?: number): ShellChainState => ({
   epoch: finalized(7),
   phaseLabel: finalized('Trade'),
   finalizedHeight: finalized(1_000_000),
@@ -414,20 +508,20 @@ test('an epoch shrink renders slot counts, never money', () => {
 
 // ------------------------------------------------------- confirm and sign
 
-const PREP = {
+const PREP: TxPreparation = {
   scaleHex: '0x0a0b0c0d',
   builtFor: { specVersion: 2, metadataHash: '0xfeed' },
   preparedAt: AT,
   requires: ['P-1'],
 };
 
-const DECODER = () => ({
+const DECODER = (): RawDecoded => ({
   pallet: 'Market',
   call: 'buy',
   args: [{ name: 'max_cost', typeName: 'u128', display: '9.500000 USDC' }],
 });
 
-const PASSING_ROW = {
+const PASSING_ROW: PreconditionResult = {
   id: 'P-1',
   ok: true,
   requirement: 'the proposal is trading',
@@ -522,7 +616,7 @@ test('wrapping the confirm surface in a disclosure fails loudly', () => {
       renderToStaticMarkup(
         h(
           Disclosure,
-          { summary: 'Transaction' },
+          { summary: 'Transaction', children: null },
           h(ConfirmSurface, {
             prep: PREP,
             decoded: decodeForConfirm(PREP.scaleHex, DECODER),
@@ -555,14 +649,20 @@ test('expert mode shows the raw SCALE, and ordinary mode does not', () => {
 
 // ------------------------------------------------------------------- S22
 
-const INTENT = {
+const INTENT: Intent = {
   schema: 'bleavit.intent.v1',
   binding: { genesisHash: '0x91b1', specVersion: 2, contractVersion: 27 },
   action: { kind: 'prepare_pass_position', id: 42n, collateral: 10_000_000n },
   limits: { maxCost: 10_000_000n },
+  // Integrity only — `Intent.digest` authenticates nothing (10 §13.1), and nothing on
+  // these screens may read it as provenance. Present because admission produced it.
+  digest: 'a'.repeat(64),
 };
 
-const reviewProps = (limits, extra = {}) => ({
+const reviewProps = (
+  limits: ClampedLimits,
+  extra: Partial<ImportReviewProps> = {},
+): ImportReviewProps => ({
   intent: INTENT,
   limits,
   resolvedTarget: finalized('Proposal 42 — “Fund the thing” (TREASURY, Trading)'),
@@ -575,14 +675,16 @@ const reviewProps = (limits, extra = {}) => ({
   ...extra,
 });
 
-const CLAMPED = {
-  maxCost: {
-    asked: 10_000_000n,
-    chain: 9_500_000n,
-    encoded: 9_500_000n,
-    boundBy: 'chain',
-    narrowed: true,
-  },
+const MAX_COST: Clamped<bigint> = {
+  asked: 10_000_000n,
+  chain: 9_500_000n,
+  encoded: 9_500_000n,
+  boundBy: 'chain',
+  narrowed: true,
+};
+
+const CLAMPED: ClampedLimits = {
+  maxCost: MAX_COST,
   deadlineBlock: { asked: 1_000_100, chain: 1_000_064, encoded: 1_000_064, boundBy: 'chain', narrowed: true },
   anyNarrowed: true,
 };
@@ -618,7 +720,7 @@ test('the encoded number is badged by where it came from, not by where the file 
       ImportReview,
       reviewProps({
         ...CLAMPED,
-        maxCost: { ...CLAMPED.maxCost, encoded: 9_000_000n, chain: 9_500_000n, boundBy: 'intent', asked: 9_000_000n },
+        maxCost: { ...MAX_COST, encoded: 9_000_000n, chain: 9_500_000n, boundBy: 'intent', asked: 9_000_000n },
       }),
     ),
   );
@@ -637,7 +739,7 @@ test('a policy-bound clamp refuses rather than wearing a status that misdescribe
           ImportReview,
           reviewProps({
             ...CLAMPED,
-            maxCost: { ...CLAMPED.maxCost, boundBy: 'policy' },
+            maxCost: { ...MAX_COST, boundBy: 'policy' },
           }),
         ),
       ),
@@ -668,7 +770,7 @@ test('the export scope starts with no account data and is per export', () => {
   for (const account of ['positions', 'balances', 'address']) {
     const box = new RegExp(`data-scope="${account}"><input type="checkbox"([^>]*)`).exec(html);
     assert.ok(box, `${account} is not offered at all`);
-    assert.ok(!/checked/.test(box[1]), `${account} is on by default`);
+    assert.ok(!/checked/.test(nth(box, 1, 'capture')), `${account} is on by default`);
   }
 });
 
@@ -724,38 +826,44 @@ test('the share screen has no persistence surface at all', async () => {
 
 // -------------------------------------------------------------- S1's reads
 
-/** A `FinalizedReader`-shaped double: one pin, and storage answers it was given. */
-function readerDouble(pin, values) {
+/**
+ * A `FinalizedReader`-shaped double: one pin, and storage answers it was given.
+ *
+ * Typed as `ShellStateReader` — the structural port `readShellState` declares — rather
+ * than the `FinalizedReader` class, which is nominal because of its `#private` fields.
+ * A double satisfying the whole class is impossible, and a suite driving the real reader
+ * would depend on the transport, the codecs and a recorded transcript, so a defect in any
+ * of those would make it agree rather than catch.
+ */
+function readerDouble(pin: FinalizedBlockRef, values: Record<string, string>): ShellStateReader {
   return {
     at: pin,
-    async storage(key) {
+    async storage(key: string) {
       const raw = values[key];
-      return {
-        value: raw === undefined ? [] : [{ key, value: raw }],
-        status: { kind: 'verified-finalized', blockHash: pin.blockHash, blockNumber: pin.blockNumber },
-      };
+      return finalize(raw === undefined ? [] : [{ key, value: raw }], pin);
     },
   };
 }
 
-const DECODERS_OK = {
+const DECODERS_OK: ShellDecoders = {
   epochOf: () => ({ ok: true, value: { epoch: 7, phase: 'Trade' } }),
-  phaseFlags: () => ({ ok: true, value: { governancePhase: 4 } }),
+  phaseFlags: () => ({ ok: true, value: 4 }),
 };
 
 test('every leaf of the shell model comes from the reader’s one pinned block', async () => {
-  const pin = { blockHash: '0xbeef', blockNumber: 42 };
+  const pin: FinalizedBlockRef = { blockHash: '0xbeef', blockNumber: 42 };
   const reader = readerDouble(pin, { [SHELL_READS.epochOf]: '0x01', [SHELL_READS.phaseFlags]: '0x04' });
   const { state, undecodable } = await readShellState(reader, DECODERS_OK);
   assert.deepEqual(undecodable, []);
-  for (const leaf of [state.epoch, state.phaseLabel, state.finalizedHeight, state.phaseFlags]) {
-    assert.equal(leaf.status.blockHash, '0xbeef');
-    assert.equal(leaf.status.blockNumber, 42);
+  const leaves = [state.epoch, state.phaseLabel, state.finalizedHeight, state.phaseFlags];
+  for (const leaf of leaves) {
+    assert.ok(leaf, 'a shell leaf is missing entirely');
+    assert.deepEqual(pinOf(leaf), { blockHash: '0xbeef', blockNumber: 42 });
   }
 });
 
 test('an undecodable read renders raw SCALE and is never guessed at', async () => {
-  const pin = { blockHash: '0xbeef', blockNumber: 42 };
+  const pin: FinalizedBlockRef = { blockHash: '0xbeef', blockNumber: 42 };
   const reader = readerDouble(pin, {
     [SHELL_READS.epochOf]: '0xdeadbeef',
     [SHELL_READS.phaseFlags]: '0x04',
@@ -765,17 +873,19 @@ test('an undecodable read renders raw SCALE and is never guessed at', async () =
     epochOf: () => ({ ok: false, reason: 'variant index 9 is not in this enum' }),
   });
   assert.equal(undecodable.length, 1);
-  assert.equal(undecodable[0].label, SHELL_READS.epochOf);
-  assert.equal(undecodable[0].rawHex, '0xdeadbeef');
+  const row = undecodable[0];
+  assert.ok(row, 'nothing was reported undecodable');
+  assert.equal(row.label, SHELL_READS.epochOf);
+  assert.equal(row.rawHex, '0xdeadbeef');
   // The bytes reach the screen; a substituted value would be the guess rule 10 forbids.
-  const html = renderToStaticMarkup(h(Undecodable, undecodable[0]));
+  const html = renderToStaticMarkup(h(Undecodable, row));
   assert.ok(html.includes('0xdeadbeef'), html);
   assert.ok(/could not decode/.test(html), html);
   assert.equal(state.phaseLabel.value, 'unknown');
 });
 
 test('an unreadable PhaseFlags fails closed to the banner, not to post-sudo', async () => {
-  const pin = { blockHash: '0xbeef', blockNumber: 42 };
+  const pin: FinalizedBlockRef = { blockHash: '0xbeef', blockNumber: 42 };
   // The key returns nothing at all — the case where a substituted 4 would silently claim
   // sudo has been removed.
   const reader = readerDouble(pin, { [SHELL_READS.epochOf]: '0x01' });
@@ -790,9 +900,9 @@ test('a model assembled from two blocks is refused rather than rendered', () => 
   // `readShellState`, which stamps every leaf from `reader.at`, so the only thing it could
   // assert was that two hashes the test wrote itself were different. That proved nothing
   // about the guard — the same vacuous shape this repository keeps finding.
-  const at = { blockHash: '0xbeef', blockNumber: 42 };
-  const ok = (value) => ({ value, status: { kind: 'verified-finalized', ...at } });
-  const consistent = {
+  const at: FinalizedBlockRef = { blockHash: '0xbeef', blockNumber: 42 };
+  const ok = <T,>(value: T): Verified<T> => ({ value, status: { kind: 'verified-finalized', ...at } });
+  const consistent: ShellChainState = {
     epoch: ok(7),
     phaseLabel: ok('Trade'),
     finalizedHeight: ok(42),
@@ -802,11 +912,14 @@ test('a model assembled from two blocks is refused rather than rendered', () => 
 
   // One leaf from a different block: a header showing the epoch at one block and the phase
   // at another is a view that never existed, and nothing on screen distinguishes it.
-  for (const field of ['epoch', 'phaseLabel', 'finalizedHeight', 'phaseFlags']) {
-    const mixed = {
+  const fields = ['epoch', 'phaseLabel', 'finalizedHeight', 'phaseFlags'] as const;
+  for (const field of fields) {
+    const leaf = consistent[field];
+    assert.ok(leaf, `the consistent fixture has no ${field}`);
+    const mixed: ShellChainState = {
       ...consistent,
       [field]: {
-        value: consistent[field].value,
+        value: leaf.value,
         status: { kind: 'verified-finalized', blockHash: '0xcafe', blockNumber: 43 },
       },
     };
@@ -916,10 +1029,12 @@ test('no statistics render while a proposal is still trading', () => {
 });
 
 test('an Extended proposal gets its own copy, not the generic one', () => {
-  const summary = {
+  const summary: ProposalSummary = {
     id: finalized('42'), title: finalized('t'), klass: finalized('P'), state: finalized('Extended'),
   };
-  assert.equal(viewFor(summary, undefined).view.reason, 'extended');
+  const { view } = viewFor(summary, undefined);
+  assert.equal(view.stage, 'pre-decision');
+  assert.equal(view.reason, 'extended');
 });
 
 test('statistics arriving on an open market are refused and reported, not rendered', () => {
@@ -964,16 +1079,16 @@ test('a sealed proposal does render its statistics', () => {
 });
 
 test('the proposal list is cross-checked against its own storage prefix (FE-P2)', async () => {
-  const pin = { blockHash: '0xbeef', blockNumber: 42 };
-  let asked;
-  const reader = {
+  const pin: FinalizedBlockRef = { blockHash: '0xbeef', blockNumber: 42 };
+  let asked: { api: string; storagePrefix: string } | undefined;
+  const reader: ProposalsReader = {
     at: pin,
     async crossCheckedCall(source) {
       asked = source;
-      return {
-        value: { result: '0x00', witness: [{ key: 'k1', value: '0xaa' }, { key: 'k2', value: '0xbb' }] },
-        status: { kind: 'verified-finalized', ...pin },
-      };
+      return finalize(
+        { result: '0x00', witness: [{ key: 'k1', value: '0xaa' }, { key: 'k2', value: '0xbb' }] },
+        pin,
+      );
     },
   };
   const read = await readProposals(reader, {
@@ -987,20 +1102,17 @@ test('the proposal list is cross-checked against its own storage prefix (FE-P2)'
   // one domain's view with the other's keys is what would make the check vacuous.
   assert.deepEqual(asked, { api: PROPOSAL_READS.summaries, storagePrefix: PROPOSAL_READS.proposals });
   assert.equal(read.summaries.length, 2);
-  for (const summary of read.summaries) assert.equal(summary.id.status.blockHash, '0xbeef');
+  for (const summary of read.summaries) assert.equal(pinOf(summary.id).blockHash, '0xbeef');
 });
 
 test('a prefix key with no value is reported, never silently dropped', async () => {
   // The failure this catches shortens the list and passes: the remaining entries decode
   // perfectly, the screen shows fewer proposals than the chain has, and nothing says so.
-  const pin = { blockHash: '0xbeef', blockNumber: 42 };
-  const reader = {
+  const pin: FinalizedBlockRef = { blockHash: '0xbeef', blockNumber: 42 };
+  const reader: ProposalsReader = {
     at: pin,
     async crossCheckedCall() {
-      return {
-        value: { result: '0x00', witness: [{ key: 'k1', value: '0xaa' }, { key: 'k2' }] },
-        status: { kind: 'verified-finalized', ...pin },
-      };
+      return finalize({ result: '0x00', witness: [{ key: 'k1', value: '0xaa' }, { key: 'k2' }] }, pin);
     },
   };
   const read = await readProposals(reader, {
@@ -1012,16 +1124,32 @@ test('a prefix key with no value is reported, never silently dropped', async () 
   });
   assert.equal(read.summaries.length, 1);
   assert.equal(read.undecodable.length, 1);
-  assert.match(read.undecodable[0].label, /Epoch\.Proposals\[k2\]/);
-  assert.match(read.undecodable[0].reason, /carries no value/);
+  const missing = read.undecodable[0];
+  assert.ok(missing, 'the valueless key was not reported');
+  assert.match(missing.label, /Epoch\.Proposals\[k2\]/);
+  assert.match(missing.reason, /carries no value/);
 });
 
 // ------------------------------------------- the confirm surface's gate wiring
 
-const session = (overrides) => ({
+const session = (overrides: Partial<TxSession> = {}): TxSession => ({
   state: 'Draft', prep: undefined, failed: [], lastError: undefined,
   signingWindow: undefined, ...overrides,
 });
+/**
+ * A real `GatePassed` at a chosen block.
+ *
+ * The brand is a non-exported `unique symbol`, so it is obtained by running the gate —
+ * the only thing that can mint one, and the reason `as unknown as` is banned across
+ * `app/` (10 §2.1). The rows are the ones the caller wants the confirm surface to show.
+ */
+const gatePassedAt = (at: FinalizedBlockRef, results: readonly PreconditionResult[]): GatePassed => {
+  const prep: TxPreparation = { ...PREP, requires: results.map((r) => r.id as PreconditionRowId) };
+  const outcome = gate(prep, at, prep.builtFor, results.map((r) => ({ ...r, at, ok: true })));
+  assert.equal(outcome.kind, 'proceed', 'the gate fixture no longer opens');
+  return outcome.passed;
+};
+
 const confirmInputs = () => ({
   decoded: decodeForConfirm(PREP.scaleHex, DECODER),
   sudoActive: false, expert: false, onSign: () => {}, onEdit: () => {},
@@ -1031,7 +1159,7 @@ test('no confirm screen exists before the chain has been re-read', () => {
   // A confirm screen is a statement that the chain was re-read at a named block. In these
   // states that statement is not yet true, so there is nothing to render — not a screen
   // with empty or remembered rows.
-  for (const state of ['Draft', 'Prepared', 'Refreshing']) {
+  for (const state of ['Draft', 'Prepared', 'Refreshing'] as const satisfies readonly TxState[]) {
     assert.equal(
       confirmProps(session({ state, prep: PREP }), confirmInputs()),
       undefined,
@@ -1041,7 +1169,7 @@ test('no confirm screen exists before the chain has been re-read', () => {
 });
 
 test('AwaitingSignature renders the gate’s own passing rows', () => {
-  const passed = { at: AT, results: [PASSING_ROW, { ...PASSING_ROW, id: 'P-2' }] };
+  const passed = gatePassedAt(AT, [PASSING_ROW, { ...PASSING_ROW, id: 'P-2' }]);
   const props = confirmProps(
     session({ state: 'AwaitingSignature', prep: PREP, signingWindow: passed }),
     confirmInputs(),
@@ -1058,7 +1186,10 @@ test('Blocked renders the failures only — rule 5’s diff view, not a padded s
   // back to `failed` and pass. Mutation M34 survived on exactly that. The dangerous session
   // is `Blocked` reached *after* a gate once passed — a full set of rows that were true at
   // a block B′ has already moved past.
-  const stale = { at: { blockHash: '0xold', blockNumber: 999 }, results: [PASSING_ROW, { ...PASSING_ROW, id: 'P-3' }] };
+  const stale = gatePassedAt({ blockHash: '0xold', blockNumber: 999 }, [
+    PASSING_ROW,
+    { ...PASSING_ROW, id: 'P-3' },
+  ]);
   const props = confirmProps(
     session({ state: 'Blocked', prep: PREP, failed, signingWindow: stale }),
     confirmInputs(),
@@ -1079,7 +1210,10 @@ test('signing is offered on the state, never on "every row passes"', () => {
   const props = confirmProps(runtimeChanged, confirmInputs());
   assert.ok(props);
   assert.deepEqual(props.preconditions, []);
-  assert.ok(!props.preconditions.some((r) => !r.ok), 'no row is at fault, by construction');
+  assert.ok(
+    !props.preconditions.some((r: PreconditionResult) => !r.ok),
+    'no row is at fault, by construction',
+  );
 });
 
 test('the confirm controller reaches no signer', async () => {
@@ -1098,7 +1232,7 @@ test('the confirm controller reaches no signer', async () => {
   // entirely. Naming the permitted callee is strictly stronger, and it is a match rather
   // than a strip, so it does not read as sanitization.
   const signCalls = [...source.matchAll(/\b([A-Za-z_$][\w$]*)\s*\(/g)]
-    .map((match) => match[1])
+    .map((match) => match[1] ?? '')
     .filter((name) => /sign/i.test(name));
   assert.deepEqual(
     [...new Set(signCalls)].sort(),
@@ -1109,7 +1243,7 @@ test('the confirm controller reaches no signer', async () => {
 
 // ------------------------------------------------ the verification panel (F10)
 
-const PANEL = {
+const PANEL: VerificationPanel = {
   status: 'unverified',
   rows: [
     { label: 'Release (Arweave TXID)', value: 'txid-abc', kind: 'pinned' },
@@ -1132,7 +1266,7 @@ test('a pin is distinguishable from an observation in words, not only in markup'
   assert.equal(rows.length, PANEL.rows.length, `expected ${PANEL.rows.length} rows: ${html}`);
   for (const [, kind, body] of rows) {
     const expected = kind === 'pinned' ? 'in this bundle' : 'reported by the chain';
-    assert.ok(body.includes(expected), `a ${kind} row carries no words saying so: ${body}`);
+    assert.ok(body?.includes(expected), `a ${kind} row carries no words saying so: ${body}`);
   }
 });
 
@@ -1190,13 +1324,18 @@ test('an indeterminate age is danger too, never quietly info', () => {
 
 // -------------------- end to end: recorded bytes → real codecs → the shell
 
+/** The follow events a recorded exchange replays, as this reader needs them. */
+interface RecordedEvents {
+  readonly events?: readonly { readonly items?: readonly { readonly key: string; readonly value: string }[] }[];
+}
+
 /** The exact values recorded from the runtime at one pinned block. */
-function recordedStorageValue(fixture) {
+function recordedStorageValue(fixture: string): string {
   const doc = JSON.parse(
     readFileSync(join(REPO, 'app/fixtures/chainhead', fixture), 'utf8'),
-  );
+  ) as Fixture;
   for (const request of doc.requests) {
-    for (const event of request.response.events ?? []) {
+    for (const event of (request.response as RecordedEvents).events ?? []) {
       for (const item of event.items ?? []) {
         if (item.value !== undefined) return item.value;
       }
@@ -1214,7 +1353,7 @@ test('the recorded chain bytes reach the shell as the right model', async () => 
   const { loadCodecs } = await import('@bleavit/chain-client');
   const codecs = await loadCodecs(bleavit);
 
-  const pin = { blockHash: '0xbeef', blockNumber: 4242 };
+  const pin: FinalizedBlockRef = { blockHash: '0xbeef', blockNumber: 4242 };
   const reader = readerDouble(pin, {
     [SHELL_READS.epochOf]: recordedStorageValue('storage.epoch.epoch_of.json'),
     [SHELL_READS.phaseFlags]: recordedStorageValue('storage.constitution.phase_flags.json'),
@@ -1224,10 +1363,12 @@ test('the recorded chain bytes reach the shell as the right model', async () => 
   assert.deepEqual(undecodable, [], JSON.stringify(undecodable));
   assert.equal(state.epoch.value, 1);
   assert.equal(state.phaseLabel.value, 'Intake');
-  assert.equal(state.phaseFlags.value, 17);
+  const flags = state.phaseFlags;
+  assert.ok(flags, 'PhaseFlags did not decode from the recorded bytes');
+  assert.equal(flags.value, 17);
 
   // And the consequence that matters: this chain has sudo, so the banner shows.
-  assert.equal(sudoActive(state.phaseFlags.value), true);
+  assert.equal(sudoActive(flags.value), true);
   const html = renderToStaticMarkup(
     h(Shell, { chain: state, handoffEnabled: true, activeScreen: 'S21', children: null }),
   );
@@ -1331,7 +1472,7 @@ test('no response promises a repair the client cannot perform', () => {
 
 // ----------------------------------------------------- S9/S10 governance (F16)
 
-const REF = (over = {}) => ({
+const REF = (over: Partial<Referendum> = {}): Referendum => ({
   index: finalized('7'),
   track: finalized('constitution'),
   status: { kind: 'ongoing' },
@@ -1420,14 +1561,14 @@ test('the conviction lock refuses to sit behind a disclosure', () => {
     }),
   );
   assert.throws(
-    () => renderToStaticMarkup(h(Disclosure, { summary: 'details' }, h(AlwaysVisible, { fold }))),
+    () => renderToStaticMarkup(h(Disclosure, { summary: 'details', children: null }, h(AlwaysVisible, { fold }))),
     DeferredMeaningChangingFactError,
   );
 });
 
 // ------------------------------------------------- S11 the oracle ballot (F16)
 
-const BALLOT = (power) => ({
+const BALLOT = (power: OracleBallot['power']): OracleBallot => ({
   component: finalized('reserve_ratio'),
   epoch: finalized(12),
   rounds: [
@@ -1488,11 +1629,12 @@ test('a counted power renders with its snapshot block beside it', () => {
 test('the ballot always says it is not a routine vote', () => {
   // Rule 4. Unconditional, and there is no prop that could replace it — asserted across
   // every power state so it cannot be conditional on one.
-  for (const power of [
+  const powers: readonly EffectivePower[] = [
     { kind: 'counted', power: finalized(1n), snapshotAt: finalized(1) },
     { kind: 'weightless', lockedAt: finalized(2), snapshotAt: finalized(1) },
     { kind: 'unestablished', reason: 'x' },
-  ]) {
+  ];
+  for (const power of powers) {
     const html = renderToStaticMarkup(
       h(OracleResolutionBallot, { ballot: BALLOT(power), decimals: 6, symbol: 'VIT' }),
     );
@@ -1514,8 +1656,8 @@ test('the dispute lineage shows every round with its bond', () => {
 
 // ------------------------------------------- §11.7.4 the ratification panel (F16)
 
-const WINDOW = { maturity: finalized(1_000), graceEnd: finalized(2_000), now: finalized(1_500) };
-const panelProps = (view) => ({
+const WINDOW: ExecutionWindow = { maturity: finalized(1_000), graceEnd: finalized(2_000), now: finalized(1_500) };
+const panelProps = (view: RatificationView) => ({
   view, window: WINDOW, onSubmitReferendum: () => {}, onBindIndex: () => {},
 });
 
@@ -1524,7 +1666,7 @@ test('the guard record alone cannot produce a lifecycle claim', () => {
   // submitted-but-unbound, submitted and ongoing, or submitted and rejected." A caller
   // holding only the guard's record has nothing to pass for `referendum`, so it cannot
   // build the view at all — the rule is a missing argument rather than a thing to recall.
-  const noRecord = { kind: 'no-passed-record', referendum: { kind: 'none-submitted' } };
+  const noRecord: RatificationView = { kind: 'no-passed-record', referendum: { kind: 'none-submitted' } };
   assert.ok('referendum' in noRecord, 'the arm carries the referendum side');
   const html = renderToStaticMarkup(h(RatificationPanel, panelProps(noRecord)));
   // And it renders as "none submitted", never as "not ratified".
@@ -1533,7 +1675,7 @@ test('the guard record alone cannot produce a lifecycle claim', () => {
 });
 
 test('an ongoing referendum is never shown as unratified', () => {
-  const ongoing = {
+  const ongoing: RatificationView = {
     kind: 'no-passed-record',
     referendum: {
       kind: 'ongoing', index: finalized('9'),
@@ -1549,7 +1691,7 @@ test('an ongoing referendum is never shown as unratified', () => {
 test('the cannot-complete warning is arithmetic, and only fires when it truly cannot', () => {
   // The warning says the proposal WILL reject. A false positive tells a proposer to
   // abandon something still live, so it fires only when the periods genuinely do not fit.
-  const link = (needed) => ({
+  const link = (needed: number): ReferendumLink => ({
     kind: 'ongoing', index: finalized('9'),
     ayes: finalized(1n), nays: finalized(0n), blocksStillNeeded: finalized(needed),
   });
@@ -1569,12 +1711,12 @@ test('reads spanning two blocks say so, rather than silently hiding the warning'
   // The panel warns on `no` and shows nothing otherwise, so folding an indeterminate answer
   // into "not applicable" would hide a real "this cannot complete" behind a blank space.
   // That is the unsafe direction, so it gets its own arm and its own notice.
-  const staleWindow = {
+  const staleWindow: ExecutionWindow = {
     maturity: finalized(1_000),
     graceEnd: finalized(2_000, 1_000_000),
     now: { value: 1_500, status: { kind: 'verified-finalized', blockHash: '0xbeef', blockNumber: 999_000 } },
   };
-  const link = {
+  const link: ReferendumLink = {
     kind: 'ongoing', index: finalized('9'),
     ayes: finalized(1n), nays: finalized(0n), blocksStillNeeded: finalized(900),
   };
@@ -1585,7 +1727,7 @@ test('reads spanning two blocks say so, rather than silently hiding the warning'
   // silent either.
   const html = renderToStaticMarkup(
     h(RatificationPanel, {
-      view: { kind: 'no-passed-record', referendum: link },
+      view: { kind: 'no-passed-record', referendum: link } satisfies RatificationView,
       window: staleWindow,
       onSubmitReferendum: () => {},
       onBindIndex: () => {},
@@ -1611,12 +1753,13 @@ test('a question that was not asked gets no confident answer', () => {
     canStillComplete({ kind: 'approved-not-recorded', index: finalized('9') }, WINDOW).kind,
     'not-applicable',
   );
-  for (const referendum of [
+  const referenda: readonly ReferendumLink[] = [
     { kind: 'none-submitted' },
     { kind: 'approved-not-recorded', index: finalized('9') },
-  ]) {
+  ];
+  for (const referendum of referenda) {
     const html = renderToStaticMarkup(
-      h(RatificationPanel, panelProps({ kind: 'no-passed-record', referendum })),
+      h(RatificationPanel, panelProps({ kind: 'no-passed-record', referendum } satisfies RatificationView)),
     );
     assert.ok(!html.includes(CANNOT_COMPLETE), `${referendum.kind} warned about time`);
   }
@@ -1663,7 +1806,7 @@ test('the vote form renders the lock above the fold, and cannot hide it', () => 
   assert.throws(
     () =>
       renderToStaticMarkup(
-        h(Disclosure, { summary: 'vote' },
+        h(Disclosure, { summary: 'vote', children: null },
           h(VoteForm, {
             intent: { kind: 'standard', aye: true, balance: 1n },
             conviction: 'Locked1x', lock: LOCK_FOLD(),
@@ -1752,7 +1895,7 @@ test('undelegate is disabled with a reason when not delegating', () => {
 
 // ------------------------------------------------------ S12/S13 funding (F18)
 
-const DEPOSIT = (over = {}) => ({
+const DEPOSIT = (over: Partial<DepositInputs> = {}): DepositInputs => ({
   assetHubBalance: finalized(100_000_000n),
   amount: 10_000_000n,
   assetHubFee: 100_000n,
@@ -1767,16 +1910,16 @@ test('Asset Hub finality is never rendered as arrival', () => {
   // XCM delivery is asynchronous. A tracker showing "done" when the AH extrinsic finalized
   // tells a user their money arrived when it has not — and the `credited` arm REQUIRES the
   // futarchy-chain observation, so it cannot be reached from the AH leg alone.
-  const sent = { kind: 'sent-awaiting-arrival', assetHubBlock: finalized(500) };
+  const sent: DepositProgress = { kind: 'sent-awaiting-arrival', assetHubBlock: finalized(500) };
   assert.ok(!('creditedAtLocalBlock' in sent), 'the sent arm must carry no local credit');
-  assert.match(progressCopy(sent), /message was sent, not that the funds have arrived/);
-  assert.match(progressCopy(sent), /awaiting arrival/i);
+  assert.match(copy(progressCopy(sent)), /message was sent, not that the funds have arrived/);
+  assert.match(copy(progressCopy(sent)), /awaiting arrival/i);
 
-  const credited = {
+  const credited: DepositProgress = {
     kind: 'credited', assetHubBlock: finalized(500),
     creditedAtLocalBlock: finalized(900), creditedAmount: finalized(10_000_000n),
   };
-  assert.match(progressCopy(credited), /its own finalized state/);
+  assert.match(copy(progressCopy(credited)), /its own finalized state/);
 });
 
 test('the bootstrap caps read a bit, and an unreadable cap blocks (V-115, D-13)', () => {
@@ -1785,7 +1928,7 @@ test('the bootstrap caps read a bit, and an unreadable cap blocks (V-115, D-13)'
   // boolean the caller derives from bit 4.
   const noCaps = depositBlocks(DEPOSIT({ bootstrapPhase: true }));
   assert.ok(noCaps.some((b) => /exposure caps/i.test(b.check)), JSON.stringify(noCaps));
-  assert.match(noCaps[0].detail, /blocked rather than proceeding without the limit/);
+  assert.match(nth(noCaps, 0, 'block').detail, /blocked rather than proceeding without the limit/);
 
   const overGlobal = depositBlocks(DEPOSIT({
     bootstrapPhase: true,
@@ -1809,7 +1952,7 @@ test('degraded XCM health warns and does not block', () => {
   // I-24 is fail-static: the funds are held, not lost. Blocking would refuse what the chain
   // accepts, which 15 §4.8's mirror rule forbids.
   assert.deepEqual(depositBlocks(DEPOSIT({ xcmHealthy: false })), []);
-  assert.match(xcmWarning({ xcmHealthy: false }), /held, not lost/);
+  assert.match(copy(xcmWarning({ xcmHealthy: false })), /held, not lost/);
   assert.equal(xcmWarning({ xcmHealthy: true }), undefined);
 });
 
@@ -1830,13 +1973,13 @@ test('an unknown destination is distinct from a bad one and from a good one', ()
   // "Degrades to a warning, never silently skipped": collapsing unknown into either of the
   // other two is exactly what silently skipped means.
   assert.equal(destinationWarning(true), undefined);
-  assert.match(destinationWarning(false), /would not survive/);
-  assert.match(destinationWarning(undefined), /has not been established either way/);
+  assert.match(copy(destinationWarning(false)), /would not survive/);
+  assert.match(copy(destinationWarning(undefined)), /has not been established either way/);
 });
 
 // -------------------------------------------------- S17 the upgrade crank (F17)
 
-const AUTHORIZED = {
+const AUTHORIZED: AuthorizedUpgrade = {
   codeHash: finalized('0xaaaa'),
   applicableAt: finalized(5_000),
 };
@@ -1847,7 +1990,8 @@ test('a mismatched artifact hard-blocks and never becomes a submission', () => {
   // a hard block — and this is the most consequential signature the client can produce.
   assert.throws(
     () => verifyArtifact(new Uint8Array([1, 2, 3]), AUTHORIZED, () => '0xbbbb'),
-    (error) => {
+    (error: unknown) => {
+      assert.ok(error instanceof UpgradeHashMismatchError, `not the hard block: ${String(error)}`);
       assert.equal(error.code, 'FE-UPG-001');
       assert.match(error.message, /hard block/);
       assert.match(error.message, /no gateway is retried into acceptance/);
@@ -1928,10 +2072,10 @@ test('an unregistered screen renders as pending rather than blank', () => {
 
 const JUSTIFICATION = () =>
   admitEvidence(new TextEncoder().encode('why this action'), finalized('0xjust'), () => '0xjust');
-const CALL = (pallet = 'Constitution', call = 'set_param') => ({
+const CALL = (pallet = 'Constitution', call = 'set_param'): ApprovedCall => ({
   kind: 'decoded', pallet: finalized(pallet), call: finalized(call), args: [finalized('42')],
 });
-const ACTION = (over = {}) => ({
+const ACTION = (over: Partial<PendingAction> = {}): PendingAction => ({
   actionId: finalized('a1'), power: finalized('activate_playbook'), target: finalized('PB-LEDGER-FREEZE'),
   justificationHash: finalized('0xjh'), approvals: finalized(3),
   threshold: finalized(5), expiresAt: finalized(9_000),
@@ -1947,9 +2091,9 @@ test('an unread trigger is treated exactly as an inactive one', () => {
   assert.equal(mayActivatePlaybook({ kind: 'inactive' }), false);
   assert.equal(mayActivatePlaybook({ kind: 'unread', reason: 'the storage read failed' }), false);
   // And the two refusals say different things, because the guardian's next step differs.
-  assert.match(triggerRefusal({ kind: 'inactive' }), /the condition being absent/);
+  assert.match(copy(triggerRefusal({ kind: 'inactive' })), /the condition being absent/);
   assert.match(
-    triggerRefusal({ kind: 'unread', reason: 'the storage read failed' }),
+    copy(triggerRefusal({ kind: 'unread', reason: 'the storage read failed' })),
     /could not establish/,
   );
   assert.equal(triggerRefusal({ kind: 'active', since: finalized(1) }), undefined);
@@ -1959,22 +2103,26 @@ test('approving twice is its own refusal, not "not eligible"', () => {
   // A guardian who approves again believes they moved the count. Folding this into a
   // generic refusal leaves them unable to tell whether the action is stuck or they are.
   const blocks = approvalBlocks({
-    action: ACTION(), callerIsMember: true, callerHasApproved: true, now: finalized(100),
-  });
+    action: ACTION(), justification: JUSTIFICATION(),
+    callerIsMember: true, callerHasApproved: true, now: finalized(100),
+  } satisfies ApprovalContext);
   assert.equal(blocks.length, 1);
-  assert.equal(blocks[0].check, 'Already approved');
-  assert.match(blocks[0].detail, /does not add to the count/);
+  assert.equal(nth(blocks, 0, 'block').check, 'Already approved');
+  assert.match(nth(blocks, 0, 'block').detail, /does not add to the count/);
 });
 
 test('every approval blocker is reported together', () => {
   const blocks = approvalBlocks({
-    action: ACTION({ expiresAt: finalized(10) }),
+    action: ACTION({ expiresAt: finalized(10) }), justification: JUSTIFICATION(),
     callerIsMember: false, callerHasApproved: true, now: finalized(100),
-  });
+  } satisfies ApprovalContext);
   assert.deepEqual(blocks.map((b) => b.check).sort(), ['Already approved', 'Expiry', 'Membership']);
   // And a clean context blocks nothing, so the checks are not vacuously firing.
   assert.deepEqual(
-    approvalBlocks({ action: ACTION(), callerIsMember: true, callerHasApproved: false, now: finalized(100) }),
+    approvalBlocks({
+      action: ACTION(), justification: JUSTIFICATION(),
+      callerIsMember: true, callerHasApproved: false, now: finalized(100),
+    } satisfies ApprovalContext),
     [],
   );
 });
@@ -2023,7 +2171,7 @@ test('a power whose remaining allowance cannot be established is not offered', (
     undefined,
   );
   assert.deepEqual(blocks.map((b) => b.check), ['Allowance']);
-  assert.match(blocks[0].detail, /cannot establish/);
+  assert.match(nth(blocks, 0, 'block').detail, /cannot establish/);
 });
 
 test('the unratified-action consequence names the guardian own bond', () => {
@@ -2035,10 +2183,10 @@ test('the unratified-action consequence names the guardian own bond', () => {
 });
 
 test('a proposal is blocked by allowance and by trigger independently', () => {
-  const meter = { power: 'activate_playbook', used: finalized(0), limit: finalized(2) };
+  const meter: AllowanceMeter = { power: 'activate_playbook', used: finalized(0), limit: finalized(2) };
   assert.deepEqual(proposalBlocks(meter, { kind: 'active', since: finalized(1) }), []);
   assert.deepEqual(
-    proposalBlocks({ ...meter, used: finalized(2) }, { kind: 'active', since: finalized(1) })
+    proposalBlocks({ ...meter, used: finalized(2) } satisfies AllowanceMeter, { kind: 'active', since: finalized(1) })
       .map((b) => b.check),
     ['Allowance'],
   );
@@ -2052,7 +2200,7 @@ test('a proposal is blocked by allowance and by trigger independently', () => {
 
 // ------------------------------------------------ S16 treasury streams (F17)
 
-const STREAM = (over = {}) => ({
+const STREAM = (over: Partial<Stream> = {}): Stream => ({
   id: finalized('s1'), recipient: finalized('5Grw'),
   total: finalized(1_000_000n), claimed: finalized(0n),
   startBlock: finalized(100), endBlock: finalized(1_100),
@@ -2094,7 +2242,7 @@ test('a claim across two blocks is refused rather than shown — this is somebod
     now: finalized(600),
   });
   assert.deepEqual(blocks.map((b) => b.check), ['Claimable amount']);
-  assert.match(blocks[0].detail, /cannot establish what is claimable/);
+  assert.match(nth(blocks, 0, 'block').detail, /cannot establish what is claimable/);
 });
 
 test('not-started and fully-claimed are different zeros', () => {
@@ -2119,7 +2267,7 @@ test('a stream whose end is not after its start is refused, not divided by', () 
     stream: STREAM({ startBlock: finalized(500), endBlock: finalized(500) }),
     callerIsRecipient: true, now: finalized(900),
   });
-  assert.match(blocks[0].detail, /no vesting schedule can be derived/);
+  assert.match(nth(blocks, 0, 'block').detail, /no vesting schedule can be derived/);
 });
 
 test('vesting stops at the end block rather than continuing past it', () => {
@@ -2142,12 +2290,12 @@ test('INSURANCE is classified against its target, never shown as a bare trend', 
 });
 
 test('an above-target INSURANCE says it is not income and not a surplus', () => {
-  const copy = insuranceCopy({ kind: 'awaiting-overflow', excess: 40n });
-  assert.match(copy, /not protocol income/);
-  assert.match(copy, /not a surplus/);
-  assert.match(copy, /revenue routes entirely to MAIN/);
+  const aboveTarget = copy(insuranceCopy({ kind: 'awaiting-overflow', excess: 40n }));
+  assert.match(aboveTarget, /not protocol income/);
+  assert.match(aboveTarget, /not a surplus/);
+  assert.match(aboveTarget, /revenue routes entirely to MAIN/);
   // And the below-target copy says where it refills from, which is not revenue either.
-  assert.match(insuranceCopy({ kind: 'below-target', shortfall: 1n }), /not funded from revenue/);
+  assert.match(copy(insuranceCopy({ kind: 'below-target', shortfall: 1n })), /not funded from revenue/);
 });
 
 test('only the recipient may claim, and both blocks report together', () => {
@@ -2168,11 +2316,12 @@ test('a crank that would do nothing says so before it costs a fee', () => {
   // The part a user cannot see is that the button looks identical either way.
   const notYet = snapshotCrankState(finalized(7), false, false);
   assert.equal(notYet.kind, 'no-op');
-  assert.match(noOpWarning(notYet), /pay a fee and change nothing/);
+  assert.match(copy(noOpWarning(notYet)), /pay a fee and change nothing/);
 
   const done = snapshotCrankState(finalized(7), true, true);
+  assert.equal(done.kind, 'no-op');
   assert.equal(done.reason, 'already-taken');
-  assert.match(noOpWarning(done), /already been taken/);
+  assert.match(copy(noOpWarning(done)), /already been taken/);
 
   // Ready is distinct, and carries no warning — so the control is not vacuously warning.
   const ready = snapshotCrankState(finalized(7), true, false);
@@ -2191,10 +2340,10 @@ test('the registry copy says a challenge cannot stall a decision', () => {
 test('an unread watchtower extension makes the deadline indeterminate, not the base window', () => {
   // A countdown that ignored an extension tells a challenger they are out of time when
   // they are not — losing them exactly the window the extension exists to grant.
-  const unknown = { kind: 'indeterminate', reason: 'the storage read failed' };
+  const unknown: ChallengeWindow = { kind: 'indeterminate', reason: 'the storage read failed' };
   assert.equal(mayChallenge(unknown), false);
-  assert.match(challengeWindowCopy(unknown), /not assuming the base window/);
-  assert.match(challengeWindowCopy(unknown), /out of time when you are not/);
+  assert.match(copy(challengeWindowCopy(unknown)), /not assuming the base window/);
+  assert.match(copy(challengeWindowCopy(unknown)), /out of time when you are not/);
 
   assert.equal(mayChallenge({ kind: 'open', closesAt: finalized(9_000), extended: true }), true);
   assert.match(
@@ -2206,7 +2355,7 @@ test('an unread watchtower extension makes the deadline indeterminate, not the b
 
 // -------------------------- S14 the reporter console, and SQ-564's stated gap (F17)
 
-const REGISTRATION = (over = {}) => ({
+const REGISTRATION = (over: Partial<RegistrationInputs> = {}): RegistrationInputs => ({
   freeUsdc: finalized(200_000_000_000n),
   reporterStake: finalized(100_000_000_000n),
   alreadyRegistered: finalized(false),
@@ -2259,7 +2408,7 @@ test('the checkable preconditions still work, so the gap is not an excuse', () =
 
 // ------------------------------------------- the rendered operator consoles (F17)
 
-const ACTION_ROW = () => ({
+const ACTION_ROW = (): PendingAction => ({
   actionId: finalized('0xacc'),
   power: finalized('activate_playbook'),
   target: finalized('cohort-42'),
@@ -2393,7 +2542,7 @@ test('a registry filing states what a challenge holds — on every arm of the wi
     { kind: 'open', closesAt: finalized(900), extended: false },
     { kind: 'closed', closedAt: finalized(100) },
     { kind: 'indeterminate', reason: 'the watchtower read failed' },
-  ]) {
+  ] satisfies readonly ChallengeWindow[]) {
     const html = renderToStaticMarkup(
       h(RegistryFiling, { filingId: finalized('0xfile'), window, onChallenge: () => {} }),
     );
@@ -2526,8 +2675,9 @@ test('a pending declaration expires the moment its component exists — in both 
   const wrong = [];
   for (const [id, pending] of Object.entries(PENDING_SCREENS)) {
     const [pkg, name] = pending.component.split('#');
-    const module = modules[pkg];
-    assert.ok(module !== undefined, `${id} names an unknown package ${pkg}`);
+    assert.ok(pkg !== undefined && name !== undefined, `${id} has a malformed component reference`);
+    const module = (modules as Record<string, object>)[pkg];
+    assert.ok(module, `${id} names an unknown package ${pkg}`);
     const exists = name in module;
     if (pending.state === 'built-unwired' && !exists) {
       wrong.push(`${id}: declared built-unwired, but ${pending.component} does not exist`);
@@ -2587,9 +2737,9 @@ test('the approve flow renders every call in the batch, decoded', () => {
   // travels with the component; what is not is concealment that travels with the stylesheet.
   const list = /<ol class="call-batch"([^>]*)>/.exec(html);
   assert.ok(list !== null, `the batch list must render: ${html}`);
-  assert.ok(!/\bhidden\b/.test(list[1]), `the batch list is hidden: ${list[0]}`);
-  assert.ok(!/aria-hidden="true"/.test(list[1]), `the batch list is aria-hidden: ${list[0]}`);
-  assert.ok(!/display:\s*none/.test(list[1]), `the batch list is display:none: ${list[0]}`);
+  assert.ok(!/\bhidden\b/.test(nth(list, 1, 'capture')), `the batch list is hidden: ${nth(list, 0, 'capture')}`);
+  assert.ok(!/aria-hidden="true"/.test(nth(list, 1, 'capture')), `the batch list is aria-hidden: ${nth(list, 0, 'capture')}`);
+  assert.ok(!/display:\s*none/.test(nth(list, 1, 'capture')), `the batch list is display:none: ${nth(list, 0, 'capture')}`);
   assert.ok(!buttonDisabled(html, 'Approve'), 'a fully decoded batch approves');
 });
 
@@ -2621,12 +2771,13 @@ test('an empty batch is refused — it is not a harmless approval', () => {
   // could not be read at all, and approving it puts a signature behind something unseen.
   const blocks = approvalBlocks({
     action: ACTION({ calls: [] }),
+    justification: JUSTIFICATION(),
     callerIsMember: true,
     callerHasApproved: false,
     now: finalized(100),
-  });
+  } satisfies ApprovalContext);
   assert.deepEqual(blocks.map((b) => b.check), ['Empty batch']);
-  assert.match(blocks[0].detail, /nobody has seen/);
+  assert.match(nth(blocks, 0, 'block').detail, /nobody has seen/);
 });
 
 test('snapshot staleness classifies against thresholds it is GIVEN, never ones it knows', () => {
@@ -2734,7 +2885,7 @@ test('invalid UTF-8 shows replacement characters rather than blanking the docume
 
 // ------------------------------------------------ §11.8.3 the nav() view (F17)
 
-const NAV = (over = {}) => ({
+const NAV = (over: Partial<NavView> = {}): NavView => ({
   total: finalized(1_000_000_000n),
   main: finalized(400_000_000n),
   pol: finalized(300_000_000n),
@@ -2771,7 +2922,7 @@ test('under the haircut flag there is NO headline field to render full backing f
   // property at all; `total` exists only as a subordinate, explicitly-labelled line.
   const haircut = navPresentation(NAV({ haircutFlag: finalized(true), spendableNav: finalized(0n) }));
   assert.equal(haircut.kind, 'haircut');
-  assert.equal(haircut.headline, undefined, 'the haircut arm must expose no headline');
+  assert.ok(!('headline' in haircut), 'the haircut arm must expose no headline');
   assert.equal(haircut.headlineSpendable.value, 0n);
   assert.equal(haircut.banner, HAIRCUT_BANNER);
   assert.match(haircut.unbackedTotalLabel, /not backing available to spend/);
@@ -2799,14 +2950,14 @@ test('the haircut banner is persistent and states PB-RESERVE verbatim', () => {
   // stop `nav.total` being rendered in headline position by hand. This is the check for that
   // deliberate bypass — under the flag there is no bare "NAV" field label, only
   // "Spendable NAV" and a "Gross total" that carries its own not-backing caveat.
-  const labels = [...html.matchAll(/<span class="field__label">([^<]*)<\/span>/g)].map((m) => m[1]);
+  const labels = [...html.matchAll(/<span class="field__label">([^<]*)<\/span>/g)].map((m) => m[1] ?? '');
   assert.ok(!labels.includes('NAV'), `full backing rendered as the headline: ${labels}`);
-  assert.ok(labels.includes('Spendable NAV'), labels);
-  assert.ok(labels.includes('Gross total'), labels);
+  assert.ok(labels.includes('Spendable NAV'), labels.join(', '));
+  assert.ok(labels.includes('Gross total'), labels.join(', '));
   // ...and the full-backing render DOES have it, so the assertion is not vacuous.
   const clean = renderToStaticMarkup(h(NavPanel, { nav: NAV(), decimals: 6, symbol: 'USDC' }));
-  const cleanLabels = [...clean.matchAll(/<span class="field__label">([^<]*)<\/span>/g)].map((m) => m[1]);
-  assert.ok(cleanLabels.includes('NAV'), cleanLabels);
+  const cleanLabels = [...clean.matchAll(/<span class="field__label">([^<]*)<\/span>/g)].map((m) => m[1] ?? '');
+  assert.ok(cleanLabels.includes('NAV'), cleanLabels.join(', '));
 });
 
 test('class-floor distance is continuous and measured against SPENDABLE nav', () => {
@@ -2856,7 +3007,7 @@ test('the conservative zeros are explained, not just shown as 0', () => {
 
 // ------------------ §11.8.6 the pallet-bound ingest filter and the filing path (F17)
 
-const REG_EXTENDED = (over = {}) => ({
+const REG_EXTENDED = (over: Partial<RawEvent> = {}): RawEvent => ({
   pallet: 'Registry',
   variant: 'WindowExtended',
   fields: { epoch: 7, filing_id: 42, new_deadline: 9_000 },
@@ -2902,6 +3053,7 @@ test('acknowledgements admit with their watchtower, and a missing field refuses'
     fields: { epoch: 7, filing_id: 42, watchtower: '5Gw...' },
   });
   assert.equal(ack.kind, 'admitted');
+  assert.equal(ack.event.variant, 'WindowAcknowledged');
   assert.equal(ack.event.watchtower, '5Gw...');
 
   // A refusal, never a silent drop: an event this client cannot read is information, and a
@@ -2933,9 +3085,9 @@ test('a filing is blocked by bond, bounds and evidence independently', () => {
   assert.deepEqual(all.map((b) => b.check), ['Filing bond', 'Registry bounds', 'Evidence']);
   // The bond is value-scaled, so the copy says it is read rather than fixed — a client that
   // implied a constant would under-report after the first amendment.
-  assert.match(all[0].detail, /value-scaled/);
+  assert.match(nth(all, 0, 'block').detail, /value-scaled/);
   // Filing without evidence commits a claim that adjudicates as unsupported.
-  assert.match(all[2].detail, /adjudicated as\s+absent/);
+  assert.match(nth(all, 2, 'block').detail, /adjudicated as\s+absent/);
 
   // An EMPTY hash is not a hash. Checking only for `undefined` let `''` through, which is
   // what an unfilled form field actually produces — the mutation that survived first pass.
@@ -2962,7 +3114,7 @@ test('the pending-actions list shows the target, not just the power', () => {
 
 // ------------------------------- §11.8.1 `oracle.recompute_proof` (F17)
 
-const RECOMPUTE = (over = {}) => ({
+const RECOMPUTE = (over: Partial<RecomputeInputs> = {}): RecomputeInputs => ({
   component: 3,
   epoch: 7,
   specVersion: 2,
@@ -3022,7 +3174,8 @@ test('a closed round blocks submission even with a reproduced proof', () => {
 
 // ------------------------------------------ S12/S13 the funding screens (F18)
 
-const DEPOSIT_SCREEN = (over = {}) => ({
+const DEPOSIT_SCREEN = (over: Partial<DepositInputs> = {}): DepositInputs => ({
+  xcmHealthy: true,
   assetHubBalance: finalized(1_000_000_000n),
   amount: 10_000_000n,
   assetHubFee: 100_000n,

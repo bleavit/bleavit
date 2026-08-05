@@ -27,6 +27,7 @@ export {
   type Decoded,
   type ShellDecoders,
   type ShellRead,
+  type ShellStateReader,
   type UndecodableRead,
 } from './chain-reads.js';
 export {
