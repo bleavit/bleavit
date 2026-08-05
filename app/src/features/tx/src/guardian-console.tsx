@@ -73,7 +73,7 @@ export function PendingActions({
     <Panel title="Pending guardian actions">
       <DataTable
         caption="Actions awaiting approval, with how many signatures each still needs"
-        headers={['Action', 'Power', 'Approvals', 'Required', 'Expires']}
+        headers={['Action', 'Power', 'Target', 'Approvals', 'Required', 'Expires']}
         rows={actions.map((action) => ({
           key: action.actionId.value,
           cells: [
@@ -86,6 +86,9 @@ export function PendingActions({
               <Identifier datum={action.actionId} />
             </button>,
             <Identifier datum={action.power} key={`p-${action.actionId.value}`} />,
+            // A power without its target is not actionable: "delay_once" does not say what
+            // is being delayed, and a guardian cannot weigh a re-run without its cohort.
+            <Identifier datum={action.target} key={`tg-${action.actionId.value}`} />,
             // Both numbers, never a percentage: at 4-of-5 versus 5-of-7 a bar looks the
             // same and the decision is entirely different.
             <Count datum={action.approvals} key={`a-${action.actionId.value}`} />,
@@ -110,6 +113,9 @@ export function ApproveAction({
     <Panel title="Approve action" subject={<Identifier datum={context.action.actionId} />}>
       <Field label="Power">
         <Identifier datum={context.action.power} />
+      </Field>
+      <Field label="Target">
+        <Identifier datum={context.action.target} />
       </Field>
       {/* §11.8.2 wants the *resolved* justification document, under §11.8.1's evidence
           rules: re-hashed before rendering, and unavailable-or-mismatched stated rather than

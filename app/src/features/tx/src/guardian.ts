@@ -69,6 +69,14 @@ export type ApprovedCall =
 export interface PendingAction {
   readonly actionId: Verified<string>;
   readonly power: Verified<string>;
+  /**
+   * What the power acts on — §11.8.2's pending list names `target` alongside the power.
+   *
+   * A power without its target is not actionable: "delay_once" says a delay is proposed and
+   * not *what* is being delayed, and a guardian cannot weigh a `force_rerun` without knowing
+   * which cohort it re-runs.
+   */
+  readonly target: Verified<string>;
   readonly justificationHash: Verified<string>;
   readonly approvals: Verified<number>;
   readonly threshold: Verified<number>;

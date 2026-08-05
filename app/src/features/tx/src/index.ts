@@ -135,6 +135,13 @@ export {
   type RegistrationCheck,
   type RegistrationInputs,
   type UncheckableCondition,
+  NonDeterministicComponentError,
+  ProofMismatchError,
+  maySubmitRecompute,
+  recomputeProof,
+  type RecomputeInputs,
+  type RecomputeSubmission,
+  type RecomputedProof,
 } from './reporter.js';
 export { ApproveAction, PendingActions, ProposeAction } from './guardian-console.js';
 export {
@@ -173,3 +180,15 @@ export {
   type WindowedIncome,
 } from './nav.js';
 export { NavPanel } from './operator-consoles.js';
+export {
+  REGISTRY_PALLET,
+  admitRegistryWindowEvent,
+  filingBlocks,
+  type Admission,
+  type FilingBlock,
+  type FilingInputs,
+  type FilingKind,
+  type RawEvent,
+  type RegistryWindowEvent,
+  type RegistryWindowVariant,
+} from './registry-filing.js';

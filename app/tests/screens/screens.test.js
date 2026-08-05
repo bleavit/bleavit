@@ -116,6 +116,13 @@ import {
   floorDistances,
   incomeLabel,
   navPresentation,
+  admitRegistryWindowEvent,
+  filingBlocks,
+  REGISTRY_PALLET,
+  recomputeProof,
+  maySubmitRecompute,
+  ProofMismatchError,
+  NonDeterministicComponentError,
 } from '@bleavit/features-tx';
 import { ImportRefused, ImportReview, UnlabellableClampError } from '@bleavit/features-handoff';
 import { ShareContext } from '@bleavit/features-handoff';
@@ -1908,7 +1915,7 @@ const CALL = (pallet = 'Constitution', call = 'set_param') => ({
   kind: 'decoded', pallet: finalized(pallet), call: finalized(call), args: [finalized('42')],
 });
 const ACTION = (over = {}) => ({
-  actionId: finalized('a1'), power: finalized('activate_playbook'),
+  actionId: finalized('a1'), power: finalized('activate_playbook'), target: finalized('PB-LEDGER-FREEZE'),
   justificationHash: finalized('0xjh'), approvals: finalized(3),
   threshold: finalized(5), expiresAt: finalized(9_000),
   // §11.8.2 requires the exact batch; an action without one cannot be built.
@@ -2238,6 +2245,7 @@ test('the checkable preconditions still work, so the gap is not an excuse', () =
 const ACTION_ROW = () => ({
   actionId: finalized('0xacc'),
   power: finalized('activate_playbook'),
+  target: finalized('cohort-42'),
   justificationHash: finalized('0xjust'),
   approvals: finalized(2),
   threshold: finalized(5),
@@ -2827,4 +2835,170 @@ test('the conservative zeros are explained, not just shown as 0', () => {
   assert.match(html, /Obligations/);
   assert.match(html, /Rolling-meter utilization/);
   assert.match(html, /Class floors/);
+});
+
+// ------------------ §11.8.6 the pallet-bound ingest filter and the filing path (F17)
+
+const REG_EXTENDED = (over = {}) => ({
+  pallet: 'Registry',
+  variant: 'WindowExtended',
+  fields: { epoch: 7, filing_id: 42, new_deadline: 9_000 },
+  ...over,
+});
+
+test('an oracle event of the same name is refused — the filter binds the pallet', () => {
+  // The defect hides perfectly: matching `variant === 'WindowExtended'` compiles, runs, and
+  // ingests oracle events about a different sub-game. The symptom is a registry countdown
+  // that moves when an ORACLE watchtower extends an ORACLE round, and a challenger who
+  // trusted it misses their window.
+  const fromOracle = admitRegistryWindowEvent({
+    pallet: 'Oracle',
+    variant: 'WindowExtended',
+    fields: { component: 3, epoch: 7, round: 2, new_deadline: 9_000 },
+  });
+  assert.equal(fromOracle.kind, 'rejected');
+  assert.match(fromOracle.reason, /came from Oracle, not Registry/);
+
+  // And the registry's own event is admitted, so the refusal is not vacuous.
+  const admitted = admitRegistryWindowEvent(REG_EXTENDED());
+  assert.equal(admitted.kind, 'admitted');
+  assert.equal(admitted.event.variant, 'WindowExtended');
+  assert.equal(admitted.event.filingId, 42);
+  assert.equal(admitted.event.newDeadline, 9_000);
+});
+
+test('a right-pallet, wrong-body event is refused too — checking the label trusts the labeller', () => {
+  // The second direction. One check alone is weaker than it looks: an event labelled
+  // Registry while carrying `component`/`round` is the same failure arriving another way.
+  const mislabelled = admitRegistryWindowEvent(
+    REG_EXTENDED({ fields: { component: 3, epoch: 7, round: 2, filing_id: 42, new_deadline: 9_000 } }),
+  );
+  assert.equal(mislabelled.kind, 'rejected');
+  assert.match(mislabelled.reason, /carries `component`/);
+  assert.match(mislabelled.reason, /label and the body disagree/);
+});
+
+test('acknowledgements admit with their watchtower, and a missing field refuses', () => {
+  const ack = admitRegistryWindowEvent({
+    pallet: REGISTRY_PALLET,
+    variant: 'WindowAcknowledged',
+    fields: { epoch: 7, filing_id: 42, watchtower: '5Gw...' },
+  });
+  assert.equal(ack.kind, 'admitted');
+  assert.equal(ack.event.watchtower, '5Gw...');
+
+  // A refusal, never a silent drop: an event this client cannot read is information, and a
+  // countdown built on a stream nobody audited is how the wrong deadline gets rendered.
+  const truncated = admitRegistryWindowEvent(REG_EXTENDED({ fields: { epoch: 7, filing_id: 42 } }));
+  assert.equal(truncated.kind, 'rejected');
+  assert.match(truncated.reason, /missing `new_deadline`/);
+});
+
+test('a filing is blocked by bond, bounds and evidence independently', () => {
+  const ok = filingBlocks({
+    kind: 'incident',
+    freeUsdc: finalized(1_000n),
+    filingBond: finalized(100n),
+    filingsUsed: finalized(3),
+    filingsBound: finalized(10),
+    evidenceHash: '0xev',
+  });
+  assert.deepEqual(ok, []);
+
+  const all = filingBlocks({
+    kind: 'incident',
+    freeUsdc: finalized(10n),
+    filingBond: finalized(100n),
+    filingsUsed: finalized(10),
+    filingsBound: finalized(10),
+    evidenceHash: undefined,
+  });
+  assert.deepEqual(all.map((b) => b.check), ['Filing bond', 'Registry bounds', 'Evidence']);
+  // The bond is value-scaled, so the copy says it is read rather than fixed — a client that
+  // implied a constant would under-report after the first amendment.
+  assert.match(all[0].detail, /value-scaled/);
+  // Filing without evidence commits a claim that adjudicates as unsupported.
+  assert.match(all[2].detail, /adjudicated as\s+absent/);
+
+  // An EMPTY hash is not a hash. Checking only for `undefined` let `''` through, which is
+  // what an unfilled form field actually produces — the mutation that survived first pass.
+  const empty = filingBlocks({
+    kind: 'milestone',
+    freeUsdc: finalized(1_000n),
+    filingBond: finalized(100n),
+    filingsUsed: finalized(0),
+    filingsBound: finalized(10),
+    evidenceHash: '',
+  });
+  assert.deepEqual(empty.map((b) => b.check), ['Evidence']);
+});
+
+test('the pending-actions list shows the target, not just the power', () => {
+  // "delay_once" says a delay is proposed and not what is being delayed; a guardian cannot
+  // weigh a force_rerun without knowing which cohort it re-runs.
+  const html = renderToStaticMarkup(
+    h(PendingActions, { actions: [ACTION_ROW()], onOpen: () => {} }),
+  );
+  assert.match(html, /Target/);
+  assert.match(html, /cohort-42/);
+});
+
+// ------------------------------- §11.8.1 `oracle.recompute_proof` (F17)
+
+const RECOMPUTE = (over = {}) => ({
+  component: 3,
+  epoch: 7,
+  specVersion: 2,
+  claimedValue1e9: finalized(1_234_000_000n),
+  deterministic: finalized(true),
+  rawData: new Uint8Array([1, 2, 3]),
+  ...over,
+});
+
+test('a proof the client cannot reproduce is never submittable — the type has no path', () => {
+  // §11.8.1: "never submit a proof the client's own recomputation contradicts". A comparison
+  // a caller is asked to remember is not "never", so `RecomputedProof` is branded with one
+  // mint site and `RecomputeSubmission` requires one.
+  assert.throws(
+    () => recomputeProof(RECOMPUTE(), () => 9_999n),
+    (error) => {
+      assert.ok(error instanceof ProofMismatchError);
+      assert.equal(error.claimed, 1_234_000_000n);
+      assert.equal(error.recomputed, 9_999n);
+      assert.match(error.message, /stakes your bond on a number you have already disproved/);
+      return true;
+    },
+  );
+  // Agreement mints it, so the refusal is not vacuous.
+  const proof = recomputeProof(RECOMPUTE(), () => 1_234_000_000n);
+  assert.equal(proof.value1e9, 1_234_000_000n);
+  assert.equal(proof.specVersion, 2);
+});
+
+test('a non-deterministic component is refused rather than evaluated', () => {
+  // The half a client would skip. Running an evaluator over a non-deterministic component
+  // produces a number, and a number that disagrees looks like fraud when it is really a
+  // component nobody promised would reproduce.
+  let evaluated = false;
+  assert.throws(
+    () =>
+      recomputeProof(RECOMPUTE({ deterministic: finalized(false) }), () => {
+        evaluated = true;
+        return 1n;
+      }),
+    NonDeterministicComponentError,
+  );
+  assert.equal(evaluated, false, 'the evaluator must not run on a non-deterministic component');
+});
+
+test('the evaluator is a required argument, so recomputation cannot default off', () => {
+  // The `FE-HANDOFF-010` shape again: an optional check is a check that defaults off.
+  assert.equal(recomputeProof.length, 2);
+});
+
+test('a closed round blocks submission even with a reproduced proof', () => {
+  // §11.8.1's precondition has two halves and both are read at B′.
+  const proof = recomputeProof(RECOMPUTE(), () => 1_234_000_000n);
+  assert.equal(maySubmitRecompute({ proof, roundOpen: finalized(true) }), true);
+  assert.equal(maySubmitRecompute({ proof, roundOpen: finalized(false) }), false);
 });
