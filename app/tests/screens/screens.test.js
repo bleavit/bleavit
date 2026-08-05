@@ -48,7 +48,10 @@ import {
   PROPOSAL_READS,
   ProposalDetail,
   BALLOT_NOT_ROUTINE,
+  CANNOT_COMPLETE,
   OracleResolutionBallot,
+  RatificationPanel,
+  canStillComplete,
   ReferendaList,
   ReferendumDetail,
   decodeForConfirm,
@@ -1395,4 +1398,98 @@ test('the dispute lineage shows every round with its bond', () => {
   );
   assert.ok(html.includes('1.000000 VIT') && html.includes('4.000000 VIT'), html);
   assert.ok(html.includes('0xab') && html.includes('0xcd'), 'evidence hashes are missing');
+});
+
+// ------------------------------------------- §11.7.4 the ratification panel (F16)
+
+const WINDOW = { maturity: finalized(1_000), graceEnd: finalized(2_000), now: finalized(1_500) };
+const panelProps = (view) => ({
+  view, window: WINDOW, onSubmitReferendum: () => {}, onBindIndex: () => {},
+});
+
+test('the guard record alone cannot produce a lifecycle claim', () => {
+  // §11.7.4: "NoPassedRecord ... deliberately does not distinguish never submitted,
+  // submitted-but-unbound, submitted and ongoing, or submitted and rejected." A caller
+  // holding only the guard's record has nothing to pass for `referendum`, so it cannot
+  // build the view at all — the rule is a missing argument rather than a thing to recall.
+  const noRecord = { kind: 'no-passed-record', referendum: { kind: 'none-submitted' } };
+  assert.ok('referendum' in noRecord, 'the arm carries the referendum side');
+  const html = renderToStaticMarkup(h(RatificationPanel, panelProps(noRecord)));
+  // And it renders as "none submitted", never as "not ratified".
+  assert.ok(/No ratification referendum has been submitted/.test(html), html);
+  assert.ok(!/not ratified/i.test(html), `the guard record was rendered as a verdict: ${html}`);
+});
+
+test('an ongoing referendum is never shown as unratified', () => {
+  const ongoing = {
+    kind: 'no-passed-record',
+    referendum: {
+      kind: 'ongoing', index: finalized('9'),
+      ayes: finalized(80n), nays: finalized(10n), blocksStillNeeded: finalized(100),
+    },
+  };
+  const html = renderToStaticMarkup(h(RatificationPanel, panelProps(ongoing)));
+  assert.ok(/>80</.test(html) && /></.test(html), html);
+  assert.ok(!/not ratified|rejected/i.test(html), html);
+  assert.ok(!/no longer complete/.test(html), '100 blocks fit in 500 remaining');
+});
+
+test('the cannot-complete warning is arithmetic, and only fires when it truly cannot', () => {
+  // The warning says the proposal WILL reject. A false positive tells a proposer to
+  // abandon something still live, so it fires only when the periods genuinely do not fit.
+  const link = (needed) => ({
+    kind: 'ongoing', index: finalized('9'),
+    ayes: finalized(1n), nays: finalized(0n), blocksStillNeeded: finalized(needed),
+  });
+  // 500 blocks remain (graceEnd 2000 − now 1500).
+  assert.equal(canStillComplete(link(499), WINDOW), true);
+  assert.equal(canStillComplete(link(500), WINDOW), true, 'exactly fitting must not warn');
+  assert.equal(canStillComplete(link(501), WINDOW), false);
+
+  const html = renderToStaticMarkup(
+    h(RatificationPanel, panelProps({ kind: 'no-passed-record', referendum: link(900) })),
+  );
+  assert.ok(html.includes(CANNOT_COMPLETE), html);
+  assert.ok(html.includes('data-severity="danger"'), html);
+});
+
+test('a question that was not asked gets no confident answer', () => {
+  // None-submitted and already-approved have no remaining-period figure to compare;
+  // inventing one would produce a confident answer to a different question.
+  assert.equal(canStillComplete({ kind: 'none-submitted' }, WINDOW), undefined);
+  assert.equal(canStillComplete({ kind: 'rejected', index: finalized('9') }, WINDOW), undefined);
+  assert.equal(
+    canStillComplete({ kind: 'approved-not-recorded', index: finalized('9') }, WINDOW),
+    undefined,
+  );
+  for (const referendum of [
+    { kind: 'none-submitted' },
+    { kind: 'approved-not-recorded', index: finalized('9') },
+  ]) {
+    const html = renderToStaticMarkup(
+      h(RatificationPanel, panelProps({ kind: 'no-passed-record', referendum })),
+    );
+    assert.ok(!html.includes(CANNOT_COMPLETE), `${referendum.kind} warned about time`);
+  }
+});
+
+test('the window states blocks, not only a countdown', () => {
+  // A countdown alone presents an estimate as the deadline, and on a chain whose blocks
+  // slow down that estimate is wrong in the direction that runs out of time.
+  const html = renderToStaticMarkup(
+    h(RatificationPanel, panelProps({ kind: 'passed', index: finalized('9') })),
+  );
+  assert.ok(html.includes('#1,000') && html.includes('#2,000'), html);
+  assert.ok(/blocks remaining/.test(html), html);
+});
+
+test('approved-but-unrecorded is timing, not failure', () => {
+  const html = renderToStaticMarkup(
+    h(RatificationPanel, panelProps({
+      kind: 'no-passed-record',
+      referendum: { kind: 'approved-not-recorded', index: finalized('9') },
+    })),
+  );
+  assert.ok(/matter of timing rather than a failure/.test(html), html);
+  assert.ok(!html.includes('data-severity="danger"'), html);
 });
