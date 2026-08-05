@@ -118,6 +118,54 @@ def check_text(text: str, name: str) -> list[str]:
     return errors
 
 
+# `V-n` ids that are duplicated in PLAN.md's Verification log today, and are grandfathered
+# rather than silently tolerated.
+#
+# Each is two genuinely different findings sharing one id — V-72 is both the pnpm
+# reproducibility probe and the N10 client integration kit — so a citation to it resolves to
+# neither. They are enumerated instead of renumbered because ten citations reference these
+# four ids and each has to be read to learn which finding it meant; renumbering half of them
+# is worse than the duplicate. Fixing them removes the entry, and the check below fails if an
+# entry names an id that is no longer duplicated, so this list cannot outlive the problem.
+KNOWN_DUPLICATE_VERIFICATION_IDS = frozenset({"V-72", "V-73", "V-98", "V-99"})
+
+VERIFICATION_ROW_RE = re.compile(r"^\| (V-\d+) ", re.MULTILINE)
+
+
+def check_verification_ids(text: str, name: str) -> list[str]:
+    """Every `V-n` in the Verification log names exactly one finding.
+
+    `check-spec-question-batches.py` exists because "a collision survived a merge, because
+    nothing checked id uniqueness". The Verification log had the same hole and the same cause:
+    PLAN.md is appended to by nearly every branch, so two branches adding rows at the same
+    place is the ordinary case, and resolving that conflict by keeping both sides — which is
+    correct — silently admits a duplicate whenever the two picked the same number.
+
+    A duplicated id is not cosmetic. PLAN.md, the architecture docs and commit messages all
+    cite findings as `V-n`, and a reader following a citation to two different findings gets
+    the wrong evidence for the claim they were checking.
+    """
+    if Path(name).name != "PLAN.md":
+        return []
+    seen: dict[str, int] = {}
+    for match in VERIFICATION_ROW_RE.finditer(text):
+        seen[match.group(1)] = seen.get(match.group(1), 0) + 1
+    duplicated = {i for i, n in seen.items() if n > 1}
+    errors = [
+        f"{name}: verification id {i} names {seen[i]} different findings; a citation to it "
+        "resolves to neither"
+        for i in sorted(duplicated - KNOWN_DUPLICATE_VERIFICATION_IDS)
+    ]
+    # The grandfathered list expires mechanically: once an id is renumbered, its entry must
+    # go, or the next duplicate to take that number would be pre-approved by a stale waiver.
+    errors.extend(
+        f"{name}: {i} is listed in KNOWN_DUPLICATE_VERIFICATION_IDS but is no longer "
+        "duplicated; drop the entry rather than leaving it to cover a future collision"
+        for i in sorted(KNOWN_DUPLICATE_VERIFICATION_IDS - duplicated)
+    )
+    return errors
+
+
 def default_targets() -> list[Path]:
     """PLAN.md, the living documents, and every architecture doc.
 
@@ -139,13 +187,15 @@ def main(argv: list[str]) -> int:
             name = str(path.relative_to(ROOT))
         except ValueError:
             name = str(target)
-        errors.extend(check_text(path.read_text(encoding="utf-8"), name))
+        content = path.read_text(encoding="utf-8")
+        errors.extend(check_text(content, name))
+        errors.extend(check_verification_ids(content, name))
     if errors:
-        print("Markdown table structure errors:")
+        print("Markdown table errors:")
         for err in errors:
             print(f"  - {err}")
         return 1
-    print("All Markdown tables are well-formed.")
+    print("All Markdown tables are well-formed; every verification id names one finding.")
     return 0
 
 
