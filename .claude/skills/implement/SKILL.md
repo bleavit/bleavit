@@ -1,17 +1,17 @@
 ---
 name: implement
-description: Run one spec-driven implementation increment for the Bleavit futarchy system — pick (or receive) the next PLAN.md milestone, implement it strictly from docs/architecture/, verify it per doc 15, and update PLAN.md. Use at the start of a working session, when the user says "continue" / "next step" / "weiter", or when a specific milestone is named.
+description: Run spec-driven implementation increments for the Bleavit futarchy system — pick (or receive) the next PLAN.md milestone, implement it strictly from docs/architecture/, verify it per doc 15, update PLAN.md, then continue to the next item. Use at the start of a working session, when the user says "continue" / "next step" / "weiter", or when a specific milestone is named.
 argument-hint: "[milestone-id, e.g. A2]"
 ---
 
-# One spec-driven implementation increment
+# Spec-driven implementation increments
 
 You are executing the core session loop of this repository (AGENTS.md · Session
 protocol). One **increment** = one milestone, or one clearly-scoped slice of a large
-one. When an increment closes, **continue to the next item** rather than handing back:
-there is no one-milestone-per-session limit (AGENTS.md R-5, amended 2026-07-25). Each
-increment still gets its own full loop below — spec first, gates, PLAN update — and
-must be finished or parked with exact resume notes before the next one starts.
+one. When an increment closes, **continue to the next item** rather than handing back
+(AGENTS.md R-5) — a session ends when the work or the user says so. Each increment
+still gets its own full loop below — spec first, gates, PLAN update — and must be
+finished or parked with exact resume notes before the next one starts.
 
 ## 1. Orient
 

@@ -14,7 +14,7 @@ changing its drill helper.
 
 | Skill | Use for |
 |---|---|
-| `/implement [id]` | The session driver: one PLAN.md milestone, spec-first, verified, PLAN updated. Default entry point for "continue"/"next step". |
+| `/implement [id]` | The session driver: PLAN.md milestones, spec-first, verified, PLAN updated — closing one and continuing to the next. Default entry point for "continue"/"next step". |
 | `/spec-audit [scope]` | Compliance sweep of implemented code against `docs/architecture/` (report-only; logs to PLAN.md · Audit log). |
 | `/sync-docs` | Re-true README/PLAN/AGENTS/CLAUDE and the `.claude`/`.codex` assets against the actual repo. |
 | `/new-pallet <name>` | Scaffold a FRAME pallet with spec-cited stubs, mock, test/benchmark stubs, try-state hook. |
@@ -88,6 +88,34 @@ merge back serially.
   inside backticks; escape as `\|`). Standing user instruction (2026-07-17): PLAN.md
   table formatting must never drift/break. Fix the reported rows (same checker as
   the docs CI job: `python3 tools/ci/check-plan-tables.py`) instead of retrying.
+
+- **Stop guard (`guard-track-goal.sh`)** blocks ending a session while a declared track
+  still has open milestones (rule R-5). Added 2026-08-04 by explicit user instruction,
+  after several sessions ended at a milestone boundary and had to be restarted with
+  "continue".
+
+  **It is opt-in and does nothing without `.claude/session-goal`**, a one-line file:
+
+  ```
+  track: F
+  ```
+
+  With it present the hook counts that track's milestone rows in PLAN.md and blocks with
+  the next one named. Two things about it are deliberate and worth knowing before trying
+  to route around it:
+
+  1. **The escape is a sentence, not a switch.** It stands down only when PLAN.md's
+     *Current focus* contains a line beginning `> **PARKED:**`. A genuine external
+     blocker — a credential, a device, an external commitment, a user ruling — is not
+     something more work resolves, so blocking has to be escapable; but the escape is
+     written into the artifact the next session reads. Deleting `.claude/session-goal`
+     to get past it defeats the thing the user asked for.
+  2. **It honours `stop_hook_active`**, so a stop is pushed back at most once per attempt.
+     A hook that could never be satisfied would turn a wrong goal file into a session that
+     cannot end.
+
+  Closing a milestone and writing a report is not stopping, and waiting on CI is not a
+  reason to stop — CI runs on a server while you build.
 
 > There is no longer any write guard on `docs/architecture/`. The spec is editable;
 > change it deliberately per rule R-1 (AGENTS.md · *Changing the specification*).
