@@ -14,11 +14,11 @@ import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { SriError, injectSri, sha384 } from '../../tools/release/sri.mjs';
-import { SbomError, buildSbom, parseLockfile, splitPackageKey } from '../../tools/release/sbom.mjs';
-import { checkDeterminism, environmentProbes } from '../../tools/release/normalize.mjs';
+import { SriError, injectSri, sha384 } from '../../tools/release/sri.ts';
+import { SbomError, buildSbom, parseLockfile, splitPackageKey } from '../../tools/release/sbom.ts';
+import { checkDeterminism, environmentProbes } from '../../tools/release/normalize.ts';
 
-const bytes = (text) => Buffer.from(text, 'utf8');
+const bytes = (text: string): Buffer => Buffer.from(text, 'utf8');
 
 test('every script and stylesheet gains an enforced integrity attribute', () => {
   const html = '<script type="module" src="./assets/a.js"></script><link rel="stylesheet" href="./assets/b.css">';
@@ -97,8 +97,12 @@ test('the SBOM carries no timestamp and no serial number', () => {
   assert.ok(!('timestamp' in sbom));
   assert.ok(!('serialNumber' in sbom));
   assert.ok(!('timestamp' in sbom.metadata));
-  assert.equal(sbom.components[0].purl, 'pkg:npm/vite@8.1.4');
-  assert.equal(sbom.components[0].hashes[0].alg, 'SHA-512');
+  const component = sbom.components[0];
+  assert.ok(component, 'the SBOM lists no components');
+  assert.equal(component.purl, 'pkg:npm/vite@8.1.4');
+  const hash = component.hashes[0];
+  assert.ok(hash, 'the component carries no hash, so the lockfile integrity was dropped');
+  assert.equal(hash.alg, 'SHA-512');
 });
 
 test('the determinism check reports an embedded build path rather than erasing it', () => {
@@ -111,7 +115,7 @@ test('the determinism check reports an embedded build path rather than erasing i
   const probes = environmentProbes({ appRoot: '/home/builder/app', home: '/home/builder' });
   const findings = checkDeterminism(dir, ['assets/a.js', 'assets/b.js'], probes);
   assert.equal(findings.length, 2, 'the build path and the home directory are separate findings');
-  assert.equal(findings[0].path, 'assets/a.js');
+  assert.equal(findings[0]?.path, 'assets/a.js');
 });
 
 test('a clean tree yields no determinism findings', () => {

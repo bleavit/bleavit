@@ -5,7 +5,7 @@
  * §1.3's requirement is that **anyone** can reproduce the verdict with no project
  * infrastructure: clone, build in the pinned container, then compare a local tree against
  * what a gateway serves. This is the entry point for that; the deciding lives in
- * `verdict.mjs` and `registry.mjs` so it can be exercised against the outcomes a healthy
+ * `verdict.ts` and `registry.ts` so it can be exercised against the outcomes a healthy
  * release never produces.
  *
  * Two subcommands run fully offline and are wired into CI today:
@@ -24,21 +24,25 @@ import { readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { checkControllerQuorum, checkDisjointness, parseRegistry } from './registry.mjs';
-import { diffScope } from './verdict.mjs';
+import { checkControllerQuorum, checkDisjointness, parseRegistry } from './registry.ts';
+import type { FileHashes } from './verdict.ts';
+import { diffScope } from './verdict.ts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REGISTRY = resolve(HERE, '../release/sources/signers.json');
 
-function signersAudit(strict) {
-  const document = JSON.parse(readFileSync(REGISTRY, 'utf8'));
+function signersAudit(strict: boolean): number {
+  const document: unknown = JSON.parse(readFileSync(REGISTRY, 'utf8'));
+  const declared = isRecord(document) ? document : {};
+  const phaseGate = declared['_phase_gate'];
   // `parseRegistry` refuses an empty registry, and rightly: a disjointness check over no
   // entries compares nothing. Pre-ceremony that is the true state rather than a defect, so
   // it is reported as a phase gate — but only when the file **declares** one, so emptying a
   // populated registry is still an error, and `--strict` (what a release gate runs) still
   // fails either way.
-  if (Array.isArray(document.entries) && document.entries.length === 0 && document._phase_gate) {
-    console.log(`unseated: ${document._phase_gate}`);
+  const declaredEntries = declared['entries'];
+  if (Array.isArray(declaredEntries) && declaredEntries.length === 0 && phaseGate) {
+    console.log(`unseated: ${String(phaseGate)}`);
     if (strict) {
       console.error('\n--strict: a release may not ship against a registry that declares nobody');
       return 1;
@@ -69,23 +73,46 @@ function signersAudit(strict) {
   return 0;
 }
 
-function diffScopeCommand(incumbentPath, candidatePath) {
-  const read = (path) => JSON.parse(readFileSync(path, 'utf8')).perFileHashes;
+function diffScopeCommand(incumbentPath: string, candidatePath: string): number {
+  // A document with no `perFileHashes` is refused rather than read as `{}`. Typing this
+  // exposed the hole: `{}` against `{}` yields zero out-of-scope files, so `diff-scope`
+  // would have printed "the delta is confined to the scope 12 §1.5 admits" and exited 0
+  // having compared nothing — a false pass on the gate that decides whether a release may
+  // skip the standard lane's 72 h soak.
+  const read = (path: string): FileHashes => {
+    const document: unknown = JSON.parse(readFileSync(path, 'utf8'));
+    const hashes = isRecord(document) ? document['perFileHashes'] : undefined;
+    if (!isRecord(hashes) || Object.keys(hashes).length === 0) {
+      throw new Error(`${path} carries no perFileHashes; there is nothing to compare`);
+    }
+    const out: Record<string, string> = {};
+    for (const [file, hash] of Object.entries(hashes)) {
+      if (typeof hash !== 'string') throw new Error(`${path}: perFileHashes[${file}] is not a digest`);
+      out[file] = hash;
+    }
+    return out;
+  };
   const result = diffScope(read(incumbentPath), read(candidatePath));
   console.log(result.detail);
   for (const entry of result.outOfScope) console.error(`  ${entry.change}: ${entry.path}`);
   return result.admissible ? 0 : 1;
 }
 
-function main(argv) {
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function main(argv: readonly string[]): number {
   const [command, ...rest] = argv;
   switch (command) {
     case 'signers':
       if (rest[0] !== 'audit') break;
       return signersAudit(rest.includes('--strict'));
-    case 'diff-scope':
-      if (rest.length < 2) break;
-      return diffScopeCommand(rest[0], rest[1]);
+    case 'diff-scope': {
+      const [incumbent, candidate] = rest;
+      if (incumbent === undefined || candidate === undefined) break;
+      return diffScopeCommand(incumbent, candidate);
+    }
     case 'compare':
       console.error(
         'compare is not available yet, and it will not pretend to be. It needs a published\n' +

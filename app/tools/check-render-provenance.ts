@@ -30,7 +30,7 @@
  *   (SQ-592: a release-constant-derived value has no `VerificationStatus`, by ruling).
  *
  * A syntactic rule fires on both. A gate that fires on correct code gets switched off — the
- * same reasoning that narrowed `check-chain-literals.mjs`'s rule B to four-digit values. So
+ * same reasoning that narrowed `check-chain-literals.ts`'s rule B to four-digit values. So
  * this one asks the type checker whether the object being unwrapped is a `Verified<T>`, and
  * says nothing otherwise.
  *
@@ -98,7 +98,20 @@ const VERIFIED_DECLARATION = /packages[/\\]shared-types[/\\](src|dist)[/\\]prove
  * The path check also does the job the member check was there for: a future package that
  * happens to export its own `Verified` does not match.
  */
-function isVerifiedType(_checker, type) {
+/** Where a `Verified<T>.value` ends up on screen, or why it is not a render at all. */
+type DisplayPosition =
+  | { readonly kind: 'child' }
+  | { readonly kind: 'attribute'; readonly name: string }
+  | { readonly kind: 'borrowed-status'; readonly borrowedFrom: string };
+
+interface RenderFinding {
+  readonly file: string;
+  readonly line: number;
+  readonly position: DisplayPosition;
+  readonly text: string;
+}
+
+function isVerifiedType(_checker: ts.TypeChecker, type: ts.Type): boolean {
   const symbol = type.getSymbol() ?? type.aliasSymbol;
   if (symbol === undefined) return false;
   if (symbol.getName() !== 'Verified') return false;
@@ -115,9 +128,8 @@ function isVerifiedType(_checker, type) {
  * never reaches JSX — stopping at the first function boundary that is a JSX *handler*, since
  * an argument passed to `onClick` is not on screen even though the call sits inside JSX.
  */
-function displayPosition(node) {
-  let current = node;
-  let parent = node.parent;
+function displayPosition(node: ts.Node): DisplayPosition | undefined {
+  let parent: ts.Node | undefined = node.parent;
   while (parent !== undefined) {
     if (ts.isJsxExpression(parent)) {
       const holder = parent.parent;
@@ -133,7 +145,6 @@ function displayPosition(node) {
     // An arrow/function body inside JSX: only a handler prop short-circuits, and that is
     // handled above when we reach the attribute. A render callback (`rows.map(...)`) must
     // keep walking, because its result *is* rendered.
-    current = parent;
     parent = parent.parent;
   }
   return undefined;
@@ -159,7 +170,7 @@ function displayPosition(node) {
  * literal whose status is written out (`{ kind: 'external-proposal' }`) is not flagged: it
  * claims nothing it did not construct, which is what `externalProposal()` exists to do.
  */
-function borrowedStatus(node) {
+function borrowedStatus(node: ts.Node): { borrowedFrom: string } | undefined {
   if (!ts.isObjectLiteralExpression(node)) return undefined;
   const props = node.properties.filter(ts.isPropertyAssignment);
   const value = props.find((p) => p.name.getText() === 'value');
@@ -171,7 +182,23 @@ function borrowedStatus(node) {
 }
 
 /** Module-resolution failures in a project — used to prove the witness fixture is not empty. */
-function scanDiagnostics(project) {
+function scanDiagnostics(project: string): string[] {
+  const config = parsedConfig(project);
+  const program = ts.createProgram(programOptions(config));
+  return ts
+    .getPreEmitDiagnostics(program)
+    .filter((d) => d.code === 2307 || d.code === 2305) // cannot find module / no exported member
+    .map((d) => ts.flattenDiagnosticMessageText(d.messageText, ' '));
+}
+
+/**
+ * Read a project's `tsconfig.json`, refusing an unreadable one.
+ *
+ * Shared by the scan and the diagnostics leg because they must see the *same* program: an
+ * earlier version built two, and a config change that emptied one silently turned the whole
+ * rule off in that project while the other happened to work.
+ */
+function parsedConfig(project: string): ts.ParsedCommandLine {
   const configPath = join(APP, project, 'tsconfig.json');
   const config = ts.getParsedCommandLineOfConfigFile(configPath, {}, {
     ...ts.sys,
@@ -179,34 +206,32 @@ function scanDiagnostics(project) {
       throw new Error(ts.flattenDiagnosticMessageText(d.messageText, ' '));
     },
   });
-  const program = ts.createProgram({
-    rootNames: config.fileNames,
-    options: { ...config.options, noEmit: true },
-    projectReferences: config.projectReferences,
-  });
-  return ts
-    .getPreEmitDiagnostics(program)
-    .filter((d) => d.code === 2307 || d.code === 2305) // cannot find module / no exported member
-    .map((d) => ts.flattenDiagnosticMessageText(d.messageText, ' '));
+  if (config === undefined) throw new Error(`could not read ${configPath}`);
+  return config;
 }
 
-export function scan({ projects = PROJECTS } = {}) {
-  const findings = [];
-  for (const project of projects) {
-    const configPath = join(APP, project, 'tsconfig.json');
-    const config = ts.getParsedCommandLineOfConfigFile(configPath, {}, {
-      ...ts.sys,
-      onUnRecoverableConfigFileDiagnostic: (d) => {
-        throw new Error(ts.flattenDiagnosticMessageText(d.messageText, ' '));
-      },
-    });
-    if (config === undefined) throw new Error(`could not read ${configPath}`);
+/**
+ * `projectReferences` is omitted rather than passed as `undefined`.
+ *
+ * `exactOptionalPropertyTypes` distinguishes the two, and `CreateProgramOptions` declares
+ * the field optional without admitting `undefined` — so spreading it in unconditionally is
+ * a type error rather than a no-op.
+ */
+function programOptions(config: ts.ParsedCommandLine): ts.CreateProgramOptions {
+  const base = {
+    rootNames: config.fileNames,
+    options: { ...config.options, noEmit: true },
+  };
+  return config.projectReferences === undefined
+    ? base
+    : { ...base, projectReferences: config.projectReferences };
+}
 
-    const program = ts.createProgram({
-      rootNames: config.fileNames,
-      options: { ...config.options, noEmit: true },
-      projectReferences: config.projectReferences,
-    });
+export function scan({ projects = PROJECTS }: { projects?: readonly string[] } = {}): RenderFinding[] {
+  const findings: RenderFinding[] = [];
+  for (const project of projects) {
+    const config = parsedConfig(project);
+    const program = ts.createProgram(programOptions(config));
     const checker = program.getTypeChecker();
 
     for (const source of program.getSourceFiles()) {
@@ -216,7 +241,7 @@ export function scan({ projects = PROJECTS } = {}) {
       if (!rel.endsWith('.tsx')) continue;
       if (EXEMPT.has(rel)) continue;
 
-      const visit = (node) => {
+      const visit = (node: ts.Node): void => {
         const borrowed = borrowedStatus(node);
         if (borrowed !== undefined) {
           const { line } = source.getLineAndCharacterOfPosition(node.getStart());
@@ -281,9 +306,9 @@ const NON_DISPLAY_PROPS = Object.freeze([
  * classified in neither list fails — so adding `subtitle: string` to `Panel` cannot quietly
  * open a position the gate does not watch.
  */
-function checkAttributeCoverage() {
+function checkAttributeCoverage(): string[] {
   const files = ['packages/ui/src/chrome.tsx', 'packages/ui/src/datum.tsx'];
-  const unclassified = [];
+  const unclassified: string[] = [];
   for (const file of files) {
     const source = ts.createSourceFile(
       file,
@@ -292,7 +317,7 @@ function checkAttributeCoverage() {
       true,
       ts.ScriptKind.TSX,
     );
-    const visit = (node) => {
+    const visit = (node: ts.Node): void => {
       if (ts.isPropertySignature(node) && node.type !== undefined) {
         // Only props that are *themselves* text. `Verified<string>` is the correct path (it
         // arrives badged), `(value: T) => string` is a formatter, and `readonly string[]` is
@@ -314,14 +339,16 @@ function checkAttributeCoverage() {
   return unclassified;
 }
 
-function runWitness() {
+function runWitness(): number {
   const source = readFileSync(join(APP, WITNESS, 'src/witness.tsx'), 'utf8').split('\n');
-  const expectations = [];
+  const expectations: { rule: string; kind: string; from: number; to: number }[] = [];
   source.forEach((line, index) => {
     const match = /^\s*\/\/ expect: ([AB]) (\w+)$/.exec(line);
     // The expectation sits on the line before the code it describes; a JSX expression can
     // span lines, so accept a small window rather than an exact line.
-    if (match !== null) expectations.push({ rule: match[1], kind: match[2], from: index + 2, to: index + 5 });
+    if (match !== null && match[1] !== undefined && match[2] !== undefined) {
+      expectations.push({ rule: match[1], kind: match[2], from: index + 2, to: index + 5 });
+    }
   });
   if (expectations.length === 0) {
     console.error('witness: no `// expect:` lines found — the fixture cannot prove anything.');
@@ -367,7 +394,7 @@ function runWitness() {
 
   // Negative controls: anything reported outside a declared window is a false positive, and a
   // gate that fires on correct code gets switched off rather than fixed.
-  const claimed = (finding) =>
+  const claimed = (finding: RenderFinding): boolean =>
     expectations.some((e) => finding.line >= e.from && finding.line <= e.to);
   for (const finding of findings.filter((f) => !claimed(f))) {
     console.error(

@@ -60,8 +60,42 @@ import { resolve } from 'node:path';
  */
 export const OWN_ORIGIN = "'self'";
 
+/**
+ * What the renderer and the diff gate actually read.
+ *
+ * Kept separate from `AllowlistEntry` deliberately: rendering a policy and diffing one
+ * against the incumbent are operations on *hosts*, so demanding a full entry would force
+ * every caller — including the gate's own suite — to invent a `sourceClass` and a
+ * provenance the function never looks at, which is how a fixture starts describing a
+ * classification that was never derived.
+ */
+export interface OriginBearing {
+  readonly origin: string;
+}
+
+/** One admitted origin, with every declaration that contributed it. */
+export interface AllowlistEntry extends OriginBearing {
+  readonly sourceClass: string;
+  readonly provenance: string[];
+}
+
+export interface CollectedAllowlist {
+  readonly entries: readonly AllowlistEntry[];
+  /** Named reasons this tree cannot become a production release. Empty is not absent. */
+  readonly blockers: readonly string[];
+}
+
+/** The five declared source classes. An absent key is refused; an empty list is not. */
+export interface DeclaredSources {
+  readonly bootnodeManifests: readonly string[];
+  readonly chainSpecs: readonly string[];
+  readonly gateways: readonly string[];
+  readonly providers: readonly string[];
+  readonly rpcFallbacks: readonly string[];
+}
+
 export class ConnectSrcError extends Error {
-  constructor(message) {
+  constructor(message: string) {
     super(message);
     this.name = 'ConnectSrcError';
   }
@@ -76,7 +110,7 @@ export class ConnectSrcError extends Error {
  * did not. `/wss/` is required because 12 §6.2's commitment is browser-dialable WSS — a
  * `/tcp/` bootnode is for native peers and contributes no `connect-src` entry.
  */
-export function originFromMultiaddr(multiaddr) {
+export function originFromMultiaddr(multiaddr: string): string | undefined {
   const parts = multiaddr.split('/');
   if (parts[0] !== '') throw new ConnectSrcError(`multiaddr must start with '/': ${multiaddr}`);
   const protocol = parts[1];
@@ -107,14 +141,14 @@ export function originFromMultiaddr(multiaddr) {
  * query, credentials or a non-default trailing slash, because a CSP source expression
  * matches by origin and a path here would read as a restriction that is not enforced.
  */
-export function normaliseOrigin(raw, allowedSchemes) {
+export function normaliseOrigin(raw: unknown, allowedSchemes: readonly string[]): string {
   if (typeof raw !== 'string' || raw.length === 0) {
     throw new ConnectSrcError(`origin must be a non-empty string, got ${JSON.stringify(raw)}`);
   }
   if (raw.includes('*')) {
     throw new ConnectSrcError(`wildcard origins are refused: ${raw}`);
   }
-  let url;
+  let url: URL;
   try {
     url = new URL(raw);
   } catch {
@@ -148,8 +182,53 @@ export function normaliseOrigin(raw, allowedSchemes) {
   return url.port ? `${url.protocol}//${url.hostname}:${url.port}` : `${url.protocol}//${url.hostname}`;
 }
 
-function readJson(path) {
+function readJson(path: string): unknown {
   return JSON.parse(readFileSync(path, 'utf8'));
+}
+
+/**
+ * The narrowing helpers below exist because `JSON.parse` returns `unknown`, and the shape
+ * of a file on disk is a claim rather than a fact.
+ *
+ * Each one **refuses** rather than skipping, and that direction is load-bearing here: a
+ * skipped operator is a bootnode the release meant to allow whose origin never reaches the
+ * policy, and the symptom is a light client that cannot connect — met by a user, not by CI.
+ * The one deliberate tolerance is an *absent* list, which is how a manifest declares that
+ * an operator publishes nothing browser-dialable.
+ */
+function isJsonObject(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function objectAt(value: unknown, what: string): Readonly<Record<string, unknown>> {
+  if (!isJsonObject(value)) throw new ConnectSrcError(`${what} is not a JSON object`);
+  return value;
+}
+
+function multiaddrsFrom(value: unknown, what: string): readonly string[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value)) throw new ConnectSrcError(`${what}: multiaddrs is not an array`);
+  const out: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== 'string') {
+      throw new ConnectSrcError(`${what}: a multiaddr is ${JSON.stringify(entry)}, not a string`);
+    }
+    out.push(entry);
+  }
+  return out;
+}
+
+/** An array of declared paths or origins. `what` names the key for the refusal message. */
+function stringsFrom(value: unknown, what: string): readonly string[] {
+  if (!Array.isArray(value)) throw new ConnectSrcError(`release sources: ${what} must be an array`);
+  const out: string[] = [];
+  for (const entry of value) {
+    if (typeof entry !== 'string') {
+      throw new ConnectSrcError(`release sources: ${what} holds ${JSON.stringify(entry)}, not a string`);
+    }
+    out.push(entry);
+  }
+  return out;
 }
 
 /**
@@ -159,10 +238,10 @@ function readJson(path) {
  * (pre-launch, the operator programs genuinely have no members yet) and is not silence
  * either — it is a named reason this tree cannot become a production release.
  */
-export function collectAllowlist(repoRoot, declared) {
-  const entries = new Map();
-  const blockers = [];
-  const add = (origin, sourceClass, provenance) => {
+export function collectAllowlist(repoRoot: string, declared: DeclaredSources): CollectedAllowlist {
+  const entries = new Map<string, AllowlistEntry>();
+  const blockers: string[] = [];
+  const add = (origin: string, sourceClass: string, provenance: string): void => {
     const existing = entries.get(origin);
     if (existing) {
       existing.provenance.push(provenance);
@@ -173,27 +252,30 @@ export function collectAllowlist(repoRoot, declared) {
 
   for (const relative of declared.bootnodeManifests) {
     const path = resolve(repoRoot, relative);
-    const manifest = readJson(path);
-    const operators = manifest.operators;
+    const manifest = objectAt(readJson(path), `${relative}: bootnode manifest`);
+    const operators = manifest['operators'];
     if (!Array.isArray(operators)) {
       throw new ConnectSrcError(`${relative}: bootnode manifest has no operators array`);
     }
     if (operators.length === 0) {
       blockers.push(`${relative} lists no bootnode operators (12 §6.2 program not yet seated)`);
     }
-    for (const operator of operators) {
-      for (const multiaddr of operator.multiaddrs ?? []) {
+    for (const [index, raw] of operators.entries()) {
+      const operator = objectAt(raw, `${relative}: operators[${index}]`);
+      const name = operator['name'];
+      const label = typeof name === 'string' ? name : `operators[${index}]`;
+      for (const multiaddr of multiaddrsFrom(operator['multiaddrs'], `${relative}:${label}`)) {
         const origin = originFromMultiaddr(multiaddr);
-        if (origin) add(origin, 'bootnode', `${relative}:${operator.name}`);
+        if (origin) add(origin, 'bootnode', `${relative}:${label}`);
       }
     }
   }
 
   for (const relative of declared.chainSpecs) {
     const path = resolve(repoRoot, relative);
-    let spec;
+    let spec: Readonly<Record<string, unknown>>;
     try {
-      spec = readJson(path);
+      spec = objectAt(readJson(path), `${relative}: chain spec`);
     } catch (error) {
       // A declared chain spec that is not present is a blocker, not a silent omission:
       // the bundle would ship with no relay bootnodes and fail to sync, which is a
@@ -202,7 +284,7 @@ export function collectAllowlist(repoRoot, declared) {
       void error;
       continue;
     }
-    for (const multiaddr of spec.bootNodes ?? []) {
+    for (const multiaddr of multiaddrsFrom(spec['bootNodes'], `${relative}:bootNodes`)) {
       const origin = originFromMultiaddr(multiaddr);
       if (origin) add(origin, 'bootnode', relative);
     }
@@ -230,7 +312,7 @@ export function collectAllowlist(repoRoot, declared) {
 }
 
 /** The directive value that goes into `index.html`'s meta-CSP. */
-export function renderConnectSrc(entries) {
+export function renderConnectSrc(entries: readonly OriginBearing[]): string {
   return [OWN_ORIGIN, ...entries.map((entry) => entry.origin)].join(' ');
 }
 
@@ -238,7 +320,10 @@ export function renderConnectSrc(entries) {
  * 15 §4.8's build-time diff. Returns additions and removals; the caller decides, so the
  * same function serves the gate and the "what changed" line in the readiness report.
  */
-export function diffAgainstIncumbent(emitted, incumbent) {
+export function diffAgainstIncumbent(
+  emitted: readonly OriginBearing[],
+  incumbent: readonly string[],
+): { additions: string[]; removals: string[] } {
   const before = new Set(incumbent);
   const after = new Set(emitted.map((entry) => entry.origin));
   return {
@@ -248,25 +333,20 @@ export function diffAgainstIncumbent(emitted, incumbent) {
 }
 
 /** Read the declared sources, refusing a shape that would silently contribute nothing. */
-export function readDeclaredSources(path) {
-  const document = readJson(path);
-  const raw = document.connectSrc;
-  if (typeof raw !== 'object' || raw === null) {
+export function readDeclaredSources(path: string): DeclaredSources {
+  const document = objectAt(readJson(path), 'release sources');
+  const raw = document['connectSrc'];
+  if (!isJsonObject(raw)) {
     throw new ConnectSrcError('release sources: connectSrc must be an object');
   }
-  for (const key of ['bootnodeManifests', 'chainSpecs', 'gateways', 'providers', 'rpcFallbacks']) {
-    if (!Array.isArray(raw[key])) {
-      // An absent key and an empty list mean different things — "the section was deleted"
-      // versus "nobody has added one" — so the absent case is refused rather than
-      // defaulted to empty, which would make a deletion look like the launch posture.
-      throw new ConnectSrcError(`release sources: ${key} must be an array`);
-    }
-  }
+  // An absent key and an empty list mean different things — "the section was deleted"
+  // versus "nobody has added one" — so `stringsFrom` refuses the absent case rather than
+  // defaulting it to empty, which would make a deletion look like the launch posture.
   return {
-    bootnodeManifests: raw.bootnodeManifests,
-    chainSpecs: raw.chainSpecs,
-    gateways: raw.gateways,
-    providers: raw.providers,
-    rpcFallbacks: raw.rpcFallbacks,
+    bootnodeManifests: stringsFrom(raw['bootnodeManifests'], 'bootnodeManifests'),
+    chainSpecs: stringsFrom(raw['chainSpecs'], 'chainSpecs'),
+    gateways: stringsFrom(raw['gateways'], 'gateways'),
+    providers: stringsFrom(raw['providers'], 'providers'),
+    rpcFallbacks: stringsFrom(raw['rpcFallbacks'], 'rpcFallbacks'),
   };
 }

@@ -37,9 +37,14 @@ function smoldotBytecodeDir() {
         'Two copies would make this measurement meaningless — 10 §10 rule 13 pins smoldot 3.x.',
     );
   }
+  const only = dirs[0];
+  // Unreachable given the length check above, and stated anyway: `dirs[0]` on an empty list
+  // is `undefined`, and `undefined.slice` would report as a crash in the measurement rather
+  // than as the pin problem the check above exists to name.
+  if (only === undefined) throw new Error('the pinned-smoldot check found a directory and then lost it');
   return {
-    version: dirs[0].slice('smoldot@'.length),
-    dir: join(store, dirs[0], 'node_modules', 'smoldot', 'dist', 'mjs', 'internals', 'bytecode'),
+    version: only.slice('smoldot@'.length),
+    dir: join(store, only, 'node_modules', 'smoldot', 'dist', 'mjs', 'internals', 'bytecode'),
   };
 }
 
@@ -57,7 +62,7 @@ if (files.length === 0) {
 
 const blob = Buffer.concat(files.map((n) => readFileSync(join(dir, n))));
 const gz = gzipSync(blob, { level: 9 }).length;
-const mib = (n) => `${(n / 1024 / 1024).toFixed(2)} MiB`;
+const mib = (n: number): string => `${(n / 1024 / 1024).toFixed(2)} MiB`;
 
 console.log(`smoldot ${version}: ${files.length} bytecode module(s), ${mib(blob.length)} raw -> ${mib(gz)} gz`);
 console.log(`10 §9.3 budget: ${mib(BUDGET_GZ_BYTES)} gz`);

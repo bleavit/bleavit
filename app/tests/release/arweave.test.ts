@@ -17,47 +17,70 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 
+import type {
+  AssetTree,
+  ManifestEntry,
+  ReleaseDocumentLike,
+  Uploader,
+} from '../../tools/release/arweave.ts';
 import {
   ArweaveDeployError,
   assertPublishable,
   releaseUndername,
   twoPassDeploy,
-} from '../../tools/release/arweave.mjs';
+} from '../../tools/release/arweave.ts';
 
-const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
+/** What an uploader must never return, expressed so the refusal can be exercised. */
+const notATxid = (value: string | undefined): string => value as string;
+
+const sha256 = (bytes: Uint8Array): string => createHash('sha256').update(bytes).digest('hex');
+
+/** One recorded call, so a test can assert what the driver did rather than only what it returned. */
+type UploaderCall =
+  | { readonly kind: 'tree'; readonly entries: Map<string, ManifestEntry> }
+  | { readonly kind: 'file'; readonly path: string; readonly tags: Readonly<Record<string, string>> };
+
+interface RecordingUploader extends Uploader {
+  readonly calls: UploaderCall[];
+}
 
 /** A deterministic stand-in: the "TXID" is a content address of what it was given, which is
  * exactly the property the real flow depends on — one different entry, one different
  * address. */
-function recordingUploader() {
-  const calls = [];
-  const address = (input) => createHash('sha256').update(input).digest('base64url').slice(0, 43);
+function recordingUploader(): RecordingUploader {
+  const calls: UploaderCall[] = [];
+  const address = (input: string): string =>
+    createHash('sha256').update(input).digest('base64url').slice(0, 43);
   return {
     calls,
-    async uploadTree(entries) {
+    async uploadTree(entries: ReadonlyMap<string, ManifestEntry>) {
       const manifest = [...entries.keys()]
         .sort()
         .map((path) => {
           const entry = entries.get(path);
-          return `${path}:${entry.txid ?? sha256(entry.bytes)}`;
+          assert.ok(entry, `the manifest lists ${path} with no entry`);
+          // `ManifestEntry` is a union — bytes to upload, or an already-uploaded sibling's
+          // address — and the stand-in must address both arms, which is exactly the
+          // property the real two-pass flow turns on.
+          return `${path}:${'txid' in entry ? entry.txid : sha256(entry.bytes)}`;
         })
         .join('|');
       calls.push({ kind: 'tree', entries: new Map(entries) });
       return address(manifest);
     },
-    async uploadFile(path, contents, tags) {
+    async uploadFile(path: string, contents: Uint8Array, tags: Readonly<Record<string, string>>) {
       calls.push({ kind: 'file', path, tags });
       return address(`${path}:${Buffer.from(contents).toString('base64')}`);
     },
   };
 }
 
-const treeOf = (entries) =>
+const treeOf = (entries: Readonly<Record<string, string>>): Map<string, Uint8Array> =>
   new Map(Object.entries(entries).map(([path, text]) => [path, new TextEncoder().encode(text)]));
 
 /** A document that genuinely describes its tree — the only thing the driver will publish. */
-function releaseFor(tree) {
-  const perFileHashes = {};
+function releaseFor(tree: AssetTree): ReleaseDocumentLike {
+  const perFileHashes: Record<string, string> = {};
   for (const [path, bytes] of tree) perFileHashes[path] = sha256(bytes);
   return {
     schema: 'bleavit.app-release.v1',
@@ -116,9 +139,15 @@ test('the final manifest references the sibling by TXID, not by a second copy of
     sha256,
   });
   const finalTree = uploader.calls.filter((call) => call.kind === 'tree').at(-1);
+  assert.ok(finalTree, 'the driver made no second tree upload');
   const entry = finalTree.entries.get('release.json');
+  assert.ok(entry, 'the final manifest does not list release.json');
+  // Checked as a discriminated union rather than as two field reads: `ManifestEntry` is
+  // *either* bytes to upload *or* an already-uploaded sibling's address, and `entry.bytes
+  // === undefined` would also be satisfied by an entry that has neither.
+  assert.ok('txid' in entry, 'release.json was re-sent as bytes instead of referenced by TXID');
   assert.equal(entry.txid, result.releaseJsonTxId);
-  assert.equal(entry.bytes, undefined, 'the bytes are not passed a second time');
+  assert.equal('bytes' in entry, false, 'the bytes are not passed a second time');
 });
 
 test('the sibling transaction carries the tags a verifier looks it up by', async () => {
@@ -131,6 +160,7 @@ test('the sibling transaction carries the tags a verifier looks it up by', async
     sha256,
   });
   const file = uploader.calls.find((call) => call.kind === 'file');
+  assert.ok(file, 'the driver uploaded no sibling transaction');
   assert.equal(file.path, 'release.json');
   assert.equal(file.tags['App-Release'], '1.2.3');
   assert.equal(file.tags['App-Manifest'], result.assetManifestTxId);
@@ -160,10 +190,9 @@ test('a hash map that disagrees with the tree is refused in both directions', ()
   const extra = new Map(TREE).set('assets/extra.js', new TextEncoder().encode('payload'));
   assert.throws(() => assertPublishable(good, extra, sha256), ArweaveDeployError);
   // A pinned file that is not in the tree.
-  assert.throws(
-    () => assertPublishable(good, new Map([['index.html', TREE.get('index.html')]]), sha256),
-    ArweaveDeployError,
-  );
+  const indexBytes = TREE.get('index.html');
+  assert.ok(indexBytes, 'the fixture tree carries index.html');
+  assert.throws(() => assertPublishable(good, new Map([['index.html', indexBytes]]), sha256), ArweaveDeployError);
   // Right paths, wrong digest.
   const tampered = new Map(TREE).set('assets/a.js', new TextEncoder().encode('y'));
   assert.throws(() => assertPublishable(good, tampered, sha256), ArweaveDeployError);
@@ -171,7 +200,13 @@ test('a hash map that disagrees with the tree is refused in both directions', ()
 });
 
 test('the hasher is required, because an optional one is a hash check that defaults off', () => {
-  assert.throws(() => assertPublishable(releaseFor(TREE), TREE, undefined), ArweaveDeployError);
+  // The type already forbids omitting it; the runtime refusal is what covers a caller that
+  // reached this function without one — through JSON, a spread, or a config object. Both
+  // halves are wanted, so the fixture names what it is doing rather than hiding it in a
+  // bare cast: `absent` produces the value an untyped caller would have passed.
+  const absent = (hasher: ((bytes: Uint8Array) => string) | undefined): ((bytes: Uint8Array) => string) =>
+    hasher as (bytes: Uint8Array) => string;
+  assert.throws(() => assertPublishable(releaseFor(TREE), TREE, absent(undefined)), ArweaveDeployError);
 });
 
 test('release.json in the pass-1 tree is refused', async () => {
@@ -232,7 +267,10 @@ test('a non-TXID from the uploader fails rather than being recorded as a content
     twoPassDeploy({
       tree: TREE,
       releaseJson: releaseFor(TREE),
-      uploader: { uploadTree: async () => undefined, uploadFile: async () => 'C'.repeat(43) },
+      // An uploader that answers with something that is not a TXID — the reason the driver
+      // checks its return rather than trusting it. Typed through `notATxid` so the fixture
+      // states that the wrong-shaped answer is the input under test.
+      uploader: { uploadTree: async () => notATxid(undefined), uploadFile: async () => 'C'.repeat(43) },
       version: '1.2.3',
       sha256,
     }),

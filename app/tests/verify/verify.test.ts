@@ -26,18 +26,30 @@ import {
   runSelfCheck,
   verifyChainIdentity,
 } from '@bleavit/verify';
-import type { Hash32, ReleaseIdentity } from '@bleavit/verify';
+import type { Hash32, ReleaseIdentity, Sha256Hex } from '@bleavit/verify';
 import * as verifyModule from '@bleavit/verify';
 
 /**
- * A 32-byte hash fixture.
+ * A 32-byte **chain** hash fixture — `0x`-prefixed, as a genesis or chain-spec hash is.
  *
  * The return type is `Hash32` (`` `0x${string}` ``), not `string`: an untyped template
- * expression infers as `string`, which then fails to satisfy every field in
+ * expression infers as `string`, which then fails to satisfy the chain-hash fields of
  * `ReleaseIdentity` — and widening those fields to `string` would delete the one thing the
- * brand buys, which is that a hash missing its `0x` prefix cannot be written at all.
+ * template type buys, which is that a hash missing its `0x` prefix cannot be written at all.
  */
 const h = (n: number): Hash32 => `0x${String(n).repeat(2).padEnd(64, '0')}`;
+
+/**
+ * A **content** hash fixture — 64 bare hex characters, no `0x`.
+ *
+ * A separate helper because the release record genuinely spells the two differently, and
+ * until F11/#31 put this package under the release suite's `tsc`, `ReleaseIdentity` claimed
+ * `0x`-prefixed for both while `parseReleaseDocument` validated `perFileHashes` and
+ * `descriptorMetadataHashes` as bare hex and then asserted them into the prefixed type. The
+ * fixture used the prefixed spelling throughout, so it described a document no producer
+ * emits — which is what let the mismatch sit unnoticed on both sides at once.
+ */
+const c = (n: number): Sha256Hex => String(n).repeat(2).padEnd(64, '0');
 
 /** A row the panel must contain, or a failure naming the label it lacks. */
 function panelRow<T extends { readonly label: string }>(rows: readonly T[], label: string): T {
@@ -61,8 +73,8 @@ const ASSET_MANIFEST = 'aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789-_abcde';
 const IDENTITY: ReleaseIdentity = {
   arweaveManifestTxId: ASSET_MANIFEST,
   sourceCommit: '3e0985e656549d987ff20a78d00de185f6f28381',
-  perFileHashes: { 'index.html': h(11), 'app.js': h(22), 'sw.js': h(33) },
-  descriptorMetadataHashes: { 2: h(44), 3: h(55) },
+  perFileHashes: { 'index.html': c(11), 'app.js': c(22), 'sw.js': c(33) },
+  descriptorMetadataHashes: { 2: c(44), 3: c(55) },
   specVersionRange: { primary: 2, recovery: 3 },
   chainSpecHashes: { relay: h(66), para: h(77) },
   genesisHashes: { relay: h(88), para: h(99) },
@@ -141,7 +153,7 @@ test('a changed file is reported as changed', () => {
 test('a missing file is reported, and is not silently a pass', () => {
   // Annotated so `delete` is legal: a spread of a known-keys object produces required
   // properties, and TypeScript refuses `delete` on one.
-  const served: Record<string, Hash32> = { ...IDENTITY.perFileHashes };
+  const served: Record<string, Sha256Hex> = { ...IDENTITY.perFileHashes };
   delete served['sw.js'];
   const result = runSelfCheck(IDENTITY, served);
   assert.equal(result.ok, false);
@@ -215,7 +227,7 @@ test('a prototype-carried entry cannot hide a tamper (own keys only)', () => {
   // `Object.entries` does not. `Object.create({'app.js': good})` therefore made
   // `served['app.js']` return the good hash at comparison time while the enumeration
   // never listed it — so a tampered `app.js` was neither compared nor reported.
-  const served: Record<string, Hash32> = Object.create({ 'app.js': h(22) });
+  const served: Record<string, Sha256Hex> = Object.create({ 'app.js': c(22) });
   served['index.html'] = h(11);
   served['sw.js'] = h(33);
   const result = runSelfCheck(IDENTITY, served);
@@ -224,7 +236,7 @@ test('a prototype-carried entry cannot hide a tamper (own keys only)', () => {
 
   // ...and the reverse: an inherited *manifest* entry must not suppress the
   // unexpected-file finding for a served file nobody signed.
-  const inheritedManifest: Record<string, Hash32> = Object.create({ 'payload.js': h(44) });
+  const inheritedManifest: Record<string, Sha256Hex> = Object.create({ 'payload.js': c(44) });
   inheritedManifest['index.html'] = h(11);
   const reverse = runSelfCheck(
     { ...IDENTITY, perFileHashes: inheritedManifest },

@@ -21,7 +21,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
 
-import { pipeline, readBakedAssetMap } from '../../tools/release/build.mjs';
+import { pipeline, readBakedAssetMap } from '../../tools/release/build.ts';
 
 const APP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const DIST = join(APP_ROOT, 'dist');
@@ -37,21 +37,91 @@ pipeline();
 const WORKER_SOURCE = readFileSync(join(DIST, 'sw.js'), 'utf8');
 const ASSETS = readBakedAssetMap(WORKER_SOURCE);
 
-const sha256 = (bytes) => createHash('sha256').update(Buffer.from(bytes)).digest('hex');
+const sha256 = (bytes: ArrayBuffer | Uint8Array): string =>
+  createHash('sha256')
+    .update(Buffer.from(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)))
+    .digest('hex');
+
+/** What the fabricated "gateway" answers for a URL. Every test supplies its own. */
+type Serve = (url: string) => Promise<Response>;
+
+/**
+ * The fabricated `ServiceWorkerGlobalScope`, declared rather than inferred.
+ *
+ * Written out because `self` is the seam the worker is driven through: the fields below are
+ * exactly what `sw.ts` touches, so a worker that grows a dependency on some other part of
+ * the real scope fails to run here instead of quietly reading `undefined` from a context
+ * object that happened not to have it.
+ */
+interface WorkerScope {
+  location: { href: string };
+  addEventListener: (type: string, handler: WorkerHandler) => unknown;
+  skipWaiting: () => Promise<void>;
+  clients: { claim: () => Promise<void> };
+}
+
+type WorkerHandler = (event: never) => void;
+
+interface FetchEvent {
+  readonly request: Request;
+  readonly respondWith: (value: Promise<Response>) => void;
+}
+
+interface MessageEvent {
+  readonly data: unknown;
+}
+
+interface WorkerContext {
+  self: WorkerScope;
+  caches: FakeCaches;
+  // `node:crypto`'s `webcrypto` and the DOM lib's `Crypto` are two declarations of the same
+  // runtime object, and they are not assignable to each other. The worker uses exactly one
+  // member of it, so that is what the seam declares — rather than an assertion papering over
+  // a mismatch that is real in the type system and absent at runtime.
+  crypto: { subtle: Pick<SubtleCrypto, 'digest'> };
+  fetch: (input: string | Request | URL) => Promise<Response>;
+  Request: typeof Request;
+  Response: typeof Response;
+  Headers: typeof Headers;
+  URL: typeof URL;
+  TextEncoder: typeof TextEncoder;
+  TextDecoder: typeof TextDecoder;
+  console: Console;
+  globalThis?: WorkerContext;
+}
+
+interface FakeCache {
+  readonly store: Map<string, Response>;
+  match(request: Request): Promise<Response | undefined>;
+  put(request: Request, response: Response): Promise<void>;
+  delete(request: Request): Promise<boolean>;
+}
+
+interface FakeCaches {
+  open: () => Promise<FakeCache>;
+  keys: () => Promise<string[]>;
+  delete: () => Promise<boolean>;
+}
+
+interface BootedWorker {
+  readonly handlers: Map<string, WorkerHandler>;
+  readonly cache: FakeCache;
+  readonly context: WorkerContext;
+}
 
 /** A `Cache` with just enough of the API for the worker, and an escape hatch for forging. */
-function fakeCache() {
-  const store = new Map();
+function fakeCache(): FakeCache {
+  const store = new Map<string, Response>();
   return {
     store,
-    async match(request) {
+    async match(request: Request) {
       const hit = store.get(new URL(request.url).pathname);
       return hit ? hit.clone() : undefined;
     },
-    async put(request, response) {
+    async put(request: Request, response: Response) {
       store.set(new URL(request.url).pathname, response.clone());
     },
-    async delete(request) {
+    async delete(request: Request) {
       return store.delete(new URL(request.url).pathname);
     },
   };
@@ -61,18 +131,18 @@ function fakeCache() {
  * Boot `dist/sw.js` with a controllable network. `serve(path)` decides what the "gateway"
  * answers, so a test can hand the worker exactly the response a hostile one would.
  */
-function bootWorker(serve) {
-  const handlers = new Map();
+function bootWorker(serve: Serve): BootedWorker {
+  const handlers = new Map<string, WorkerHandler>();
   const cache = fakeCache();
-  const caches = {
+  const caches: FakeCaches = {
     open: async () => cache,
     keys: async () => ['TXID'],
     delete: async () => true,
   };
-  const context = {
+  const context: WorkerContext = {
     self: {
       location: { href: `${BASE}sw.js` },
-      addEventListener: (type, handler) => handlers.set(type, handler),
+      addEventListener: (type: string, handler: WorkerHandler) => handlers.set(type, handler),
       skipWaiting: async () => {},
       clients: { claim: async () => {} },
     },
@@ -81,7 +151,8 @@ function bootWorker(serve) {
     // The worker fetches by `Request` *and* by `URL` (`release.json` at install), and a
     // `URL` carries `href` rather than `url` — reading the wrong one turned every call into
     // `new URL(undefined)`.
-    fetch: async (input) => serve(typeof input === 'string' ? input : (input.url ?? input.href)),
+    fetch: async (input: string | Request | URL) =>
+      serve(typeof input === 'string' ? input : input instanceof URL ? input.href : input.url),
     Request,
     Response,
     Headers,
@@ -96,21 +167,37 @@ function bootWorker(serve) {
   return { handlers, cache, context };
 }
 
-/** Drive the worker's `fetch` handler and return whatever it responded with. */
-async function requestThrough(worker, path) {
-  const handler = worker.handlers.get('fetch');
+/**
+ * Drive the worker's `fetch` handler and return whatever it responded with.
+ *
+ * A handler that never calls `respondWith` is asserted against rather than returned as
+ * `undefined`: in a browser that is the worker declining the request and letting the
+ * network answer it unverified, which for this worker is the failure, not the absence of
+ * one. Typing the suite is what made the difference visible — every assertion below reads
+ * `response.status`, and on a silent decline that would have been a `TypeError` blamed on
+ * the harness.
+ */
+async function requestThrough(worker: BootedWorker, path: string): Promise<Response> {
+  const responded = respondTo(worker, path);
+  assert.ok(responded, 'the worker did not respond to the request; it fell through to the network');
+  return responded;
+}
+
+/** The same drive, without the assertion — for the one test whose promise must reject. */
+function respondTo(worker: BootedWorker, path: string): Promise<Response> | undefined {
+  const handler = worker.handlers.get('fetch') as ((event: FetchEvent) => void) | undefined;
   assert.ok(handler, 'the built worker registers a fetch handler');
-  let responded;
+  let responded: Promise<Response> | undefined;
   handler({
     request: new worker.context.Request(new URL(path, BASE)),
-    respondWith: (value) => {
+    respondWith: (value: Promise<Response>) => {
       responded = value;
     },
   });
   return responded;
 }
 
-const honestGateway = async (url) => {
+const honestGateway: Serve = async (url) => {
   const path = new URL(url).pathname.slice('/TXID/'.length) || 'index.html';
   if (path === 'release.json') {
     return new Response(JSON.stringify({ arweaveManifestTxId: 'TXID' }), { status: 200 });
@@ -188,14 +275,8 @@ test('a release.json that names no manifest fails closed rather than defaulting 
   // A constant fallback name would be a cache two different releases share. The scope
   // promise rejects, so nothing is served — which is the direction that cannot leak.
   const worker = bootWorker(async () => new Response('{}', { status: 200 }));
-  const handler = worker.handlers.get('fetch');
-  let responded;
-  handler({
-    request: new worker.context.Request(new URL('index.html', BASE)),
-    respondWith: (value) => {
-      responded = value;
-    },
-  });
+  const responded = respondTo(worker, 'index.html');
+  assert.ok(responded, 'the worker did not respond at all');
   await assert.rejects(responded, /arweaveManifestTxId/);
 });
 
@@ -205,7 +286,8 @@ test('the message handler refuses activation unless `pinned` is an explicit bool
   worker.context.self.skipWaiting = async () => {
     skipped += 1;
   };
-  const message = worker.handlers.get('message');
+  const message = worker.handlers.get('message') as ((event: MessageEvent) => void) | undefined;
+  assert.ok(message, 'the built worker registers a message handler');
   // The shortest message anyone would try, and the one that used to activate a *pinned*
   // release because a missing field defaulted to "not pinned".
   message({ data: { type: 'bleavit:activate-waiting-release' } });

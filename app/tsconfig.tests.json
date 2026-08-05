@@ -48,7 +48,14 @@
     "tests/chain-client/**/*.ts",
     "tests/local-index/**/*.ts",
     "tests/transaction-builder/**/*.ts",
-    "tests/screens/**/*.ts"
+    "tests/screens/**/*.ts",
+    "tests/release/**/*.ts",
+    // The tools themselves, which are the thing the suites above exercise. `tools/release/`
+    // decides what a release contains; leaving it unchecked while checking the suite that
+    // reads it would put the type boundary on the wrong side of the artefact.
+    "tools/*.ts",
+    "tools/release/**/*.ts",
+    "tools/verify-release/**/*.ts"
   ],
   // `tests/descriptors/types/*-witness.ts` joins the same class as the firewall fixtures:
   // it is an anti-vacuity control that MUST fail `tsc`, and `compat.test.ts` compiles it

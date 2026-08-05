@@ -42,20 +42,21 @@
  *
  * Without (2) a typo'd path — or a new handoff package nobody added to the list — leaves
  * the scan green while covering less than it says. The directory list is shared with
- * dependency-cruiser (`tools/handoff-packages.cjs`) so the two gates cannot disagree
+ * dependency-cruiser (`tools/handoff-packages.ts`) so the two gates cannot disagree
  * about what a handoff path is.
  */
 
 import ts from 'typescript';
 
-import { createRequire } from 'node:module';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+// The same single list dependency-cruiser and the emitted-import scanner read, so three
+// gates cannot disagree about what counts as a handoff path.
+import { HANDOFF_SOURCE_DIRS } from './handoff-packages.ts';
+
 const APP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const require = createRequire(import.meta.url);
-const { HANDOFF_SOURCE_DIRS } = require('./handoff-packages.cjs');
 
 const WITNESS = 'tools/fixtures/handoff-network-witness.ts';
 
@@ -100,9 +101,9 @@ const PRIMITIVES = [
   { name: 'Function constructor', pattern: /\bnew\s+Function\s*\(/ },
 ];
 
-function walk(dir) {
-  const out = [];
-  let entries;
+function walk(dir: string): string[] {
+  const out: string[] = [];
+  let entries: string[];
   try {
     entries = readdirSync(dir);
   } catch {
@@ -137,7 +138,7 @@ function walk(dir) {
  * it. The narrowing is therefore exactly as wide as *cannot possibly execute*, which is the
  * only safe amount to narrow a control like this one.
  */
-function withoutComments(source) {
+function withoutComments(source: string): string {
   const scanner = ts.createScanner(ts.ScriptTarget.Latest, /* skipTrivia */ false, ts.LanguageVariant.Standard, source);
   const out = source.split('');
   let token = scanner.scan();
@@ -156,14 +157,22 @@ function withoutComments(source) {
 }
 
 /** Whole-file matching, with the line recovered from the match offset for the report. */
-function findings(files) {
-  const found = [];
+/** One network primitive found in a handoff package, with the line for the report. */
+interface NetworkFinding {
+  readonly file: string;
+  readonly line: number;
+  readonly name: string;
+  readonly text: string;
+}
+
+function findings(files: readonly string[]): NetworkFinding[] {
+  const found: NetworkFinding[] = [];
   for (const file of files) {
     const raw = readFileSync(file, 'utf8');
     const source = withoutComments(raw);
     for (const { name, pattern } of PRIMITIVES) {
       const global = new RegExp(pattern.source, pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`);
-      let match;
+      let match: RegExpExecArray | null;
       while ((match = global.exec(source)) !== null) {
         const line = source.slice(0, match.index).split('\n').length;
         const text = raw.split('\n')[line - 1] ?? '';
@@ -176,7 +185,7 @@ function findings(files) {
 }
 
 /** Per-directory file counts. A zero anywhere means the scan covers less than it claims. */
-function coverage() {
+function coverage(): { dir: string; files: string[] }[] {
   return HANDOFF_SOURCE_DIRS.map((dir) => ({ dir, files: walk(join(APP_ROOT, dir)) }));
 }
 
@@ -229,7 +238,7 @@ if (witnessMode) {
   for (const { dir, files } of coverage()) {
     if (files.length === 0) {
       console.error(`DECLARED HANDOFF PATH COVERS NOTHING: ${dir}`);
-      console.error('Either the directory moved, or the path in tools/handoff-packages.cjs');
+      console.error('Either the directory moved, or the path in tools/handoff-packages.ts');
       console.error('is wrong. Both leave the scan reporting success over less than it says.');
       failed = true;
     }

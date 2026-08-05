@@ -98,7 +98,37 @@ const EXCLUDED_PACKAGES = new Map([
 ]);
 const EXCLUDED_DIRS = new Set(['dist', 'node_modules']);
 
-export function extractFrozenConstants(specText) {
+/** One row of 02 §9's frozen-constant table. */
+export interface FrozenConstant {
+  readonly pallet: string;
+  readonly name: string;
+  /** Exactly one decimal string, or empty when the cell yields a tuple (see `scalarValues`). */
+  readonly values: readonly string[];
+}
+
+/** A classified exemption: a value or a constant name, in named files, for a stated reason. */
+export interface ClassificationGroup {
+  readonly name: string;
+  readonly reason: string;
+  readonly files: readonly string[];
+  readonly values?: readonly string[];
+  readonly constants?: readonly string[];
+}
+
+export interface Classification {
+  readonly groups: readonly ClassificationGroup[];
+}
+
+export type LiteralRule = 'A' | 'B';
+
+export interface Finding {
+  readonly rule: LiteralRule;
+  readonly file: string;
+  readonly line: number;
+  readonly detail: string;
+}
+
+export function extractFrozenConstants(specText: string): FrozenConstant[] {
   const start = specText.indexOf(FROZEN_TABLE_HEADING);
   if (start === -1) {
     throw new Error(`${SPEC} has no "${FROZEN_TABLE_HEADING}" section; the gate has nothing to read`);
@@ -108,13 +138,17 @@ export function extractFrozenConstants(specText) {
   const end = rest.search(/\n#{1,3} /);
   const section = end === -1 ? rest : rest.slice(0, end);
 
-  const constants = [];
-  const seen = new Set();
+  const constants: FrozenConstant[] = [];
+  const seen = new Set<string>();
   const row = /^\|\s*([^|]+?)\s*\|\s*`([A-Za-z0-9_]+)`\s*\|\s*([^|]+?)\s*\|\s*(.+?)\s*\|\s*$/;
   for (const line of section.split('\n')) {
     const match = row.exec(line);
     if (!match) continue;
     const [, pallet, name, , source] = match;
+    // The four capture groups are unconditional, so an absent one is a regex change rather
+    // than a table row this parser should tolerate — and tolerating it would silently drop
+    // a frozen constant from the set the gate compares against.
+    if (pallet === undefined || name === undefined || source === undefined) continue;
     if (pallet === 'Pallet' || /^-+$/.test(pallet)) continue;
     const key = `${pallet}::${name}`;
     if (seen.has(key)) continue;
@@ -141,21 +175,24 @@ export function extractFrozenConstants(specText) {
  * (`MaxTradeRatio (1, 4)`), and flattening them would ban their members everywhere on the
  * strength of a shape this parser guessed at.
  */
-function scalarValues(source) {
-  const values = [];
+function scalarValues(source: string): string[] {
+  const values: string[] = [];
   for (const match of source.matchAll(/=\s*(2\^(\d+)|[0-9][0-9,]*)/g)) {
-    values.push(match[2] ? (2n ** BigInt(match[2])).toString() : match[1].replaceAll(',', ''));
+    const exponent = match[2];
+    const literal = match[1];
+    if (exponent !== undefined) values.push((2n ** BigInt(exponent)).toString());
+    else if (literal !== undefined) values.push(literal.replaceAll(',', ''));
   }
   return values.length === 1 ? values : [];
 }
 
 /** `MaxPositionsPerAccount`, `MAX_POSITIONS_PER_ACCOUNT` and `maxPositionsPerAccount` all
  * normalise to the same token, so the rule cannot be sidestepped by a casing convention. */
-export function normaliseIdentifier(name) {
+export function normaliseIdentifier(name: string): string {
   return name.replace(/[^A-Za-z0-9]/g, '').toLowerCase();
 }
 
-function walk(dir, out) {
+function walk(dir: string, out: string[]): string[] {
   for (const entry of readdirSync(dir)) {
     if (EXCLUDED_DIRS.has(entry)) continue;
     const path = join(dir, entry);
@@ -168,8 +205,8 @@ function walk(dir, out) {
   return out;
 }
 
-export function sourceFiles(appRoot = APP_ROOT) {
-  const files = [];
+export function sourceFiles(appRoot: string = APP_ROOT): string[] {
+  const files: string[] = [];
   const packagesDir = resolve(appRoot, 'packages');
   for (const entry of readdirSync(packagesDir)) {
     if (EXCLUDED_PACKAGES.has(entry)) continue;
@@ -188,11 +225,11 @@ export function sourceFiles(appRoot = APP_ROOT) {
  * names the first of them explicitly. `BigInt` throughout, because `2 ** 63` is past the
  * safe-integer range and a `number` fold would silently produce a neighbouring value.
  */
-export function foldConstant(node) {
+export function foldConstant(node: ts.Node): string | undefined {
   switch (node.kind) {
     case ts.SyntaxKind.NumericLiteral:
     case ts.SyntaxKind.BigIntLiteral: {
-      const text = node.text.replace(/n$/, '').replaceAll('_', '');
+      const text = (node as ts.LiteralLikeNode).text.replace(/n$/, '').replaceAll('_', '');
       // A fractional or exponent-notation literal is not a chain constant; refusing to
       // fold it is safer than rounding it into one.
       if (/[.eE]/.test(text) && !/^0[xXbBoO]/.test(text)) return undefined;
@@ -203,18 +240,22 @@ export function foldConstant(node) {
       }
     }
     case ts.SyntaxKind.ParenthesizedExpression:
-      return foldConstant(node.expression);
+      return foldConstant((node as ts.ParenthesizedExpression).expression);
     case ts.SyntaxKind.PrefixUnaryExpression:
       // Only `+`; a negated chain constant is not one, and folding `-` would let `-43200`
       // report as the positive value.
-      return node.operator === ts.SyntaxKind.PlusToken ? foldConstant(node.operand) : undefined;
+    {
+      const unary = node as ts.PrefixUnaryExpression;
+      return unary.operator === ts.SyntaxKind.PlusToken ? foldConstant(unary.operand) : undefined;
+    }
     case ts.SyntaxKind.BinaryExpression: {
-      const left = foldConstant(node.left);
-      const right = foldConstant(node.right);
+      const binary = node as ts.BinaryExpression;
+      const left = foldConstant(binary.left);
+      const right = foldConstant(binary.right);
       if (left === undefined || right === undefined) return undefined;
       const a = BigInt(left);
       const b = BigInt(right);
-      switch (node.operatorToken.kind) {
+      switch (binary.operatorToken.kind) {
         case ts.SyntaxKind.LessThanLessThanToken:
           return b >= 0n && b < 1024n ? (a << b).toString() : undefined;
         case ts.SyntaxKind.AsteriskAsteriskToken:
@@ -234,7 +275,7 @@ export function foldConstant(node) {
 
 /** The four syntactic forms one binding wears. A gate that knew only `const x = 1` would be
  * dodged by a type annotation, which is the second thing the review found. */
-function boundName(node) {
+function boundName(node: ts.Node): string | undefined {
   if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) return node.name.text;
   if (ts.isPropertyDeclaration(node) && ts.isIdentifier(node.name)) return node.name.text;
   if (ts.isPropertyAssignment(node) && ts.isIdentifier(node.name)) return node.name.text;
@@ -242,7 +283,12 @@ function boundName(node) {
   return undefined;
 }
 
-function classificationFor(classification, appRoot, file, { value, constantName }) {
+function classificationFor(
+  classification: Classification,
+  appRoot: string,
+  file: string,
+  { value, constantName }: { readonly value?: string | undefined; readonly constantName?: string | undefined },
+): ClassificationGroup | undefined {
   const relativePath = relative(appRoot, file).replaceAll('\\', '/');
   for (const group of classification.groups) {
     // A prefix must end at a path boundary, or `admission.ts`'s exemption would cover
@@ -257,10 +303,17 @@ function classificationFor(classification, appRoot, file, { value, constantName 
   return undefined;
 }
 
-export function scan({ appRoot = APP_ROOT, constants, classification, files }) {
-  const findings = [];
-  const byNormalisedName = new Map();
-  const distinctive = new Map();
+export interface ScanInputs {
+  readonly appRoot?: string;
+  readonly constants: readonly FrozenConstant[];
+  readonly classification: Classification;
+  readonly files: readonly string[];
+}
+
+export function scan({ appRoot = APP_ROOT, constants, classification, files }: ScanInputs): Finding[] {
+  const findings: Finding[] = [];
+  const byNormalisedName = new Map<string, FrozenConstant>();
+  const distinctive = new Map<string, FrozenConstant>();
   for (const constant of constants) {
     byNormalisedName.set(normaliseIdentifier(constant.name), constant);
     for (const value of constant.values) {
@@ -273,17 +326,18 @@ export function scan({ appRoot = APP_ROOT, constants, classification, files }) {
   for (const file of files) {
     const text = readFileSync(file, 'utf8');
     const source = ts.createSourceFile(file, text, ts.ScriptTarget.ES2022, true, scriptKind(file));
-    const at = (node) => ({
+    const at = (node: ts.Node): { file: string; line: number } => ({
       file: relative(appRoot, file).replaceAll('\\', '/'),
       line: source.getLineAndCharacterOfPosition(node.getStart(source)).line + 1,
     });
 
-    const visit = (node) => {
+    const visit = (node: ts.Node): void => {
       // Rule A — a frozen constant's name bound to a constant-foldable number.
       const name = boundName(node);
-      if (name !== undefined && node.initializer) {
+      const initializer = initializerOf(node);
+      if (name !== undefined && initializer !== undefined) {
         const constant = byNormalisedName.get(normaliseIdentifier(name));
-        const folded = foldConstant(node.initializer);
+        const folded = foldConstant(initializer);
         if (constant && folded !== undefined) {
           if (!classificationFor(classification, appRoot, file, { constantName: constant.name })) {
             findings.push({
@@ -326,30 +380,48 @@ export function scan({ appRoot = APP_ROOT, constants, classification, files }) {
     ts.forEachChild(source, visit);
   }
   // Deduplicate: a folded binary expression and its enclosing declaration can both match.
-  const unique = new Map();
+  const unique = new Map<string, Finding>();
   for (const finding of findings) unique.set(`${finding.file}:${finding.line}:${finding.rule}`, finding);
   return [...unique.values()];
 }
 
-function scriptKind(file) {
+/** The initialiser of whichever of the four binding forms `boundName` accepted. */
+function initializerOf(node: ts.Node): ts.Expression | undefined {
+  if (ts.isVariableDeclaration(node) || ts.isPropertyDeclaration(node) || ts.isEnumMember(node)) {
+    return node.initializer;
+  }
+  if (ts.isPropertyAssignment(node)) return node.initializer;
+  return undefined;
+}
+
+function scriptKind(file: string): ts.ScriptKind {
   return file.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS;
 }
 
-export function loadClassification(path = CLASSIFICATION) {
-  const raw = JSON.parse(readFileSync(path, 'utf8'));
-  if (!Array.isArray(raw.groups)) throw new Error('classification: groups must be an array');
-  for (const group of raw.groups) {
-    if (!group.name || !group.reason || !Array.isArray(group.files)) {
-      throw new Error(`classification group ${group.name ?? '<unnamed>'} is missing a required field`);
+export function loadClassification(path: string = CLASSIFICATION): Classification {
+  const raw: unknown = JSON.parse(readFileSync(path, 'utf8'));
+  const groups = isRecord(raw) ? raw['groups'] : undefined;
+  if (!Array.isArray(groups)) throw new Error('classification: groups must be an array');
+  for (const candidate of groups) {
+    const group = isRecord(candidate) ? candidate : {};
+    if (!group['name'] || !group['reason'] || !Array.isArray(group['files'])) {
+      throw new Error(`classification group ${String(group['name'] ?? '<unnamed>')} is missing a required field`);
     }
-    const exempts = (group.values ?? []).length + (group.constants ?? []).length;
-    if (exempts === 0 || group.files.length === 0) {
+    const values = group['values'];
+    const constants = group['constants'];
+    const exempts = (Array.isArray(values) ? values.length : 0) + (Array.isArray(constants) ? constants.length : 0);
+    const files = group['files'];
+    if (exempts === 0 || files.length === 0) {
       // A group scoped to nothing exempts nothing and reads, in a diff, as deliberate
       // coverage of something. Refused so the file cannot accumulate reassuring no-ops.
-      throw new Error(`classification group ${group.name} exempts nothing; delete it instead`);
+      throw new Error(`classification group ${String(group['name'])} exempts nothing; delete it instead`);
     }
   }
-  return raw;
+  return { groups: groups as ClassificationGroup[] };
+}
+
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 /**
@@ -362,21 +434,21 @@ export function loadClassification(path = CLASSIFICATION) {
  * and a declared line that produces nothing fails. Same discipline as the negative-
  * compilation corpus's `expect-error` markers, adopted for the same reason (V-91).
  */
-function runWitness(constants, classification) {
+function runWitness(constants: readonly FrozenConstant[], classification: Classification): number {
   const fixture = resolve(HERE, 'fixtures/chain-literal-witness.ts');
   const lines = readFileSync(fixture, 'utf8').split('\n');
-  const markers = [];
+  const markers: { at: number; rules: LiteralRule[]; note: string }[] = [];
   lines.forEach((line, index) => {
     const match = /^\s*\/\/ expect: ([AB](?:\s*,\s*[AB])*)\s*(.*)$/.exec(line);
-    if (!match) return;
+    if (!match || match[1] === undefined) return;
     markers.push({
       at: index + 1,
       // A line can legitimately trip both rules — a *named* frozen constant bound to its
       // own distinctive value trips A for the name and B for the value — so the marker
       // takes a list. Declaring only one leaves the other reported as undeclared, which
       // fails; the witness is as strict about surprises as about omissions.
-      rules: match[1].split(',').map((token) => token.trim()),
-      note: match[2],
+      rules: match[1].split(',').map((token) => token.trim() as LiteralRule),
+      note: match[2] ?? '',
     });
   });
   // A marker claims the lines from just after it up to the next marker, because the thing
@@ -385,7 +457,7 @@ function runWitness(constants, classification) {
   // computed over marker *positions* before the rule lists are expanded, or a two-rule
   // marker would end its own range one line before it starts.
   const expectations = markers.flatMap((marker, index) => {
-    const to = index + 1 < markers.length ? markers[index + 1].at - 1 : lines.length;
+    const to = index + 1 < markers.length ? (markers[index + 1]?.at ?? lines.length) - 1 : lines.length;
     return marker.rules.map((rule) => ({ rule, note: marker.note, from: marker.at + 1, to }));
   });
   if (expectations.length === 0) {
@@ -412,7 +484,7 @@ function runWitness(constants, classification) {
   // Undeclared findings are reported too, without failing: the two negative-control lines
   // (a regex literal and a string containing a comment opener) must produce nothing, and
   // printing anything unexpected is how a reader notices they started to.
-  const claimed = (finding) =>
+  const claimed = (finding: Finding): boolean =>
     expectations.some(
       (expected) =>
         finding.rule === expected.rule && finding.line >= expected.from && finding.line <= expected.to,
@@ -428,7 +500,7 @@ function runWitness(constants, classification) {
   return undeclared.length > 0 ? 1 : 0;
 }
 
-function main(argv) {
+function main(argv: readonly string[]): number {
   const constants = extractFrozenConstants(readFileSync(SPEC, 'utf8'));
   const classification = loadClassification();
   if (argv.includes('--witness')) return runWitness(constants, classification);

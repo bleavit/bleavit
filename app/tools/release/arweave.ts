@@ -29,14 +29,57 @@
  */
 
 export class ArweaveDeployError extends Error {
-  constructor(message) {
+  constructor(message: string) {
     super(message);
     this.name = 'ArweaveDeployError';
   }
 }
 
+/** The built asset tree: release-relative path → emitted bytes. */
+export type AssetTree = ReadonlyMap<string, Uint8Array>;
+
+/** A path-manifest entry: bytes to upload, or the address of an already-uploaded sibling. */
+export type ManifestEntry = { bytes: Uint8Array } | { txid: string };
+
+/**
+ * The upload surface this driver needs.
+ *
+ * Injected rather than imported: `arweave.ts` is a pure driver over an uploader, and the
+ * Turbo-SDK adapter that satisfies it is prototype gate FE-P7, whose `[VERIFY]` R-2 forbids
+ * resolving by assumption. Keeping the port here is what lets the two-pass flow be tested
+ * with no network at all.
+ */
+export interface Uploader {
+  uploadTree(entries: ReadonlyMap<string, ManifestEntry>): Promise<string>;
+  uploadFile(path: string, bytes: Uint8Array, tags: Readonly<Record<string, string>>): Promise<string>;
+}
+
+/** As much of the release document as this driver reads. */
+export interface ReleaseDocumentLike {
+  readonly schema?: unknown;
+  readonly perFileHashes?: Record<string, string>;
+  readonly [field: string]: unknown;
+}
+
+export interface TwoPassDeployInputs {
+  readonly tree: AssetTree;
+  readonly releaseJson: ReleaseDocumentLike;
+  readonly uploader: Uploader;
+  readonly version: string;
+  readonly sha256: (bytes: Uint8Array) => string;
+}
+
+export interface TwoPassDeployResult {
+  readonly assetManifestTxId: string;
+  readonly releaseJsonTxId: string;
+  readonly manifestTxId: string;
+  readonly undername: string;
+  readonly releaseJson: ReleaseDocumentLike;
+  readonly releaseBytes: Uint8Array;
+}
+
 /** The immutable per-release undername of 12 §1.2: `v1-2-3_futarchy`. */
-export function releaseUndername(version) {
+export function releaseUndername(version: string): string {
   if (!/^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$/.test(version)) {
     throw new ArweaveDeployError(`version ${version} is not a semver this can undername`);
   }
@@ -52,7 +95,13 @@ export function releaseUndername(version) {
  * exist to break. Refused loudly, because the resulting release verifies against itself
  * and fails against everyone else.
  */
-export async function twoPassDeploy({ tree, releaseJson, uploader, version, sha256 }) {
+export async function twoPassDeploy({
+  tree,
+  releaseJson,
+  uploader,
+  version,
+  sha256,
+}: TwoPassDeployInputs): Promise<TwoPassDeployResult> {
   if (tree.has('release.json')) {
     throw new ArweaveDeployError(
       'the pass-1 tree must not contain release.json: its manifest TXID field would then ' +
@@ -129,7 +178,8 @@ export async function twoPassDeploy({ tree, releaseJson, uploader, version, sha2
   };
 }
 
-const entriesOf = (tree) => new Map([...tree].map(([path, bytes]) => [path, { bytes }]));
+const entriesOf = (tree: AssetTree): Map<string, ManifestEntry> =>
+  new Map([...tree].map(([path, bytes]) => [path, { bytes }]));
 
 /**
  * Refuse to publish a document that is not a release record for *this* tree.
@@ -141,7 +191,11 @@ const entriesOf = (tree) => new Map([...tree].map(([path, bytes]) => [path, { by
  * describe exactly this tree, digest for digest**. A release whose manifest and whose
  * hash map disagree is the failure every downstream verifier reports as tampering.
  */
-export function assertPublishable(releaseJson, tree, sha256) {
+export function assertPublishable(
+  releaseJson: ReleaseDocumentLike,
+  tree: AssetTree,
+  sha256: (bytes: Uint8Array) => string,
+): void {
   if (releaseJson?.schema !== 'bleavit.app-release.v1') {
     throw new ArweaveDeployError(`not a release document: schema is ${releaseJson?.schema}`);
   }
@@ -154,7 +208,11 @@ export function assertPublishable(releaseJson, tree, sha256) {
     // Required, not optional: an optional hasher is a hash check that defaults to off.
     throw new ArweaveDeployError('a sha256 function is required to bind the document to the tree');
   }
-  const pinned = Object.keys(releaseJson.perFileHashes).sort();
+  const { perFileHashes } = releaseJson;
+  if (perFileHashes === undefined) {
+    throw new ArweaveDeployError('release document is missing perFileHashes');
+  }
+  const pinned = Object.keys(perFileHashes).sort();
   const actual = [...tree.keys()].sort();
   if (pinned.join('\n') !== actual.join('\n')) {
     throw new ArweaveDeployError(
@@ -165,9 +223,9 @@ export function assertPublishable(releaseJson, tree, sha256) {
   }
   for (const [path, bytes] of tree) {
     const digest = sha256(bytes);
-    if (digest !== releaseJson.perFileHashes[path]) {
+    if (digest !== perFileHashes[path]) {
       throw new ArweaveDeployError(
-        `${path} hashes to ${digest} and release.json pins ${releaseJson.perFileHashes[path]}`,
+        `${path} hashes to ${digest} and release.json pins ${perFileHashes[path]}`,
       );
     }
   }
@@ -175,7 +233,7 @@ export function assertPublishable(releaseJson, tree, sha256) {
 
 /** Arweave TXIDs are 43 base64url characters. Checked because a stub or an error object
  * stringifies to something that would otherwise be recorded as a content address. */
-function assertTxid(value, what) {
+function assertTxid(value: unknown, what: string): asserts value is string {
   if (typeof value !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(value)) {
     throw new ArweaveDeployError(`${what} did not return a 43-character base64url TXID: ${value}`);
   }

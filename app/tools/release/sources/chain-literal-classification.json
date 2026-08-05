@@ -1,5 +1,5 @@
 {
-  "_doc": "Classification for the 10 \u00a75.4 no-hardcoded-chain-value gate (app/tools/check-chain-literals.mjs). Groups, not line exemptions: a number is permitted in a named set of files for a stated reason, so a new file cannot inherit an exemption by copying a literal. `constants` exempts rule A (a frozen constant's name bound to a literal); `values` exempts rule B (a distinctive frozen value appearing bare).",
+  "_doc": "Classification for the 10 \u00a75.4 no-hardcoded-chain-value gate (app/tools/check-chain-literals.ts). Groups, not line exemptions: a number is permitted in a named set of files for a stated reason, so a new file cannot inherit an exemption by copying a literal. `constants` exempts rule A (a frozen constant's name bound to a literal); `values` exempts rule B (a distinctive frozen value appearing bare).",
   "groups": [
     {
       "name": "lmsr-kernel",

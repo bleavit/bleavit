@@ -10,11 +10,21 @@
  * Redundancy is the point. The primary gate is a property of the install layout,
  * so a future `node-linker=hoisted` — or a `paths` alias added for convenience —
  * would silently demote it. These rules keep failing in that case.
+ *
+ * ## Why this file is JavaScript in an otherwise-TypeScript tree
+ *
+ * dependency-cruiser reads its config with `import()` for `.js`/`.cjs`/`.mjs` and
+ * JSON5-parses every other extension, so a `.ts` config is not a thing that can exist —
+ * it would be read as data and fail. What *can* be TypeScript is the logic, and that is
+ * where the defects have actually been: the matcher helpers below have shipped two rules
+ * that could never fire (V-86, V-92). They live in `tools/*.ts` and are reached through a
+ * dynamic `import()` Node 22.18 type-strips. What remains here is the rule list, which is
+ * data.
  */
-const { EXTERNAL, WORKSPACE_SUBPATH, POLKADOT_API_NON_SIGNER } = require('./tools/depcruise-external.cjs');
-const { HANDOFF_PATH, NON_LOCAL_DEPENDENCY_TYPES } = require('./tools/handoff-packages.cjs');
+const { EXTERNAL, WORKSPACE_SUBPATH, POLKADOT_API_NON_SIGNER } = await import('./tools/depcruise-external.ts');
+const { HANDOFF_PATH, NON_LOCAL_DEPENDENCY_TYPES } = await import('./tools/handoff-packages.ts');
 
-module.exports = {
+export default {
   forbidden: [
     {
       name: 'tx-unit-isolation',

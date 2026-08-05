@@ -63,11 +63,11 @@ const AWAITING_EMITTER = Object.freeze({
 });
 
 /** The declared facts, read from `MEANING_CHANGING_FACTS` rather than restated. */
-function declaredFacts() {
+function declaredFacts(): string[] {
   const source = readFileSync(FACTS_MODULE, 'utf8');
   const parsed = ts.createSourceFile(FACTS_MODULE, source, ts.ScriptTarget.ES2022, true);
-  const facts = [];
-  const visit = (node) => {
+  const facts: string[] = [];
+  const visit = (node: ts.Node): void => {
     if (
       ts.isVariableDeclaration(node) &&
       ts.isIdentifier(node.name) &&
@@ -90,9 +90,9 @@ function declaredFacts() {
   return facts;
 }
 
-function findObjectLiteral(node) {
-  let found;
-  const visit = (candidate) => {
+function findObjectLiteral(node: ts.Node): ts.ObjectLiteralExpression | undefined {
+  let found: ts.ObjectLiteralExpression | undefined;
+  const visit = (candidate: ts.Node): void => {
     if (found !== undefined) return;
     if (ts.isObjectLiteralExpression(candidate)) {
       found = candidate;
@@ -104,8 +104,8 @@ function findObjectLiteral(node) {
   return found;
 }
 
-function* sourceFiles(directory) {
-  let entries;
+function* sourceFiles(directory: string): Generator<string> {
+  let entries: string[];
   try {
     entries = readdirSync(directory);
   } catch {
@@ -129,13 +129,13 @@ function* sourceFiles(directory) {
  * line-oriented pattern misses exactly the multi-line ones — which is how a first pass at
  * this check reported three facts unemitted when only two were.
  */
-export function emittersByFact(roots = SOURCE_ROOTS) {
-  const emitters = new Map();
+export function emittersByFact(roots: readonly string[] = SOURCE_ROOTS): Map<string, string[]> {
+  const emitters = new Map<string, string[]>();
   for (const root of roots) {
     for (const file of sourceFiles(join(APP_ROOT, root))) {
       const text = readFileSync(file, 'utf8');
       const parsed = ts.createSourceFile(file, text, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TSX);
-      const visit = (node) => {
+      const visit = (node: ts.Node): void => {
         if (
           ts.isCallExpression(node) &&
           ts.isIdentifier(node.expression) &&
@@ -171,7 +171,7 @@ function main() {
 
   for (const fact of facts) {
     const sites = emitters.get(fact) ?? [];
-    const pending = AWAITING_EMITTER[fact];
+    const pending = AWAITING_EMITTER[fact as keyof typeof AWAITING_EMITTER];
     if (sites.length === 0 && pending === undefined) {
       errors.push(
         `"${fact}" is declared by 11 §11.2 constraint 3 and nothing emits it. A fact that ` +

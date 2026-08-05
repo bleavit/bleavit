@@ -29,10 +29,10 @@ import { fileURLToPath } from 'node:url';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SKILL_DIR = join(dirname(HERE), 'skills/bleavit-analysis');
 
-const read = (relative) => readFileSync(join(SKILL_DIR, relative), 'utf8');
+const read = (relative: string): string => readFileSync(join(SKILL_DIR, relative), 'utf8');
 
 /** Strip the YAML frontmatter — it is Agent Skill metadata, meaningless to a text box. */
-function body(markdown) {
+function body(markdown: string): string {
   const match = /^---\n[\s\S]*?\n---\n+/.exec(markdown);
   return match ? markdown.slice(match[0].length) : markdown;
 }
@@ -47,8 +47,8 @@ const safety = read('reference/safety.md');
  * Checked rather than assumed: a pointer that survives into an inlined document is an
  * instruction to open something that does not exist.
  */
-function inlinePointers(text) {
-  const rewrites = [
+function inlinePointers(text: string): string {
+  const rewrites: readonly (readonly [RegExp, string])[] = [
     [/Read `reference\/formats\.md` for the file formats and `reference\/safety\.md` for the rules\nyou must not break\. Both are short\. The rules are not stylistic\./,
      'Both reference sections are reproduced in full below. The rules are not stylistic.'],
     [/These are hard rules, and the reasons are in `reference\/safety\.md`:/,
@@ -95,7 +95,7 @@ requires tools, file access, or a network.
 `,
 };
 
-const assemble = (vendor) =>
+const assemble = (vendor: keyof typeof PREAMBLE): string =>
   PREAMBLE[vendor] +
   inlinePointers(skill).trimEnd() +
   '\n\n---\n\n' +
@@ -104,7 +104,7 @@ const assemble = (vendor) =>
   inlinePointers(safety).trimEnd() +
   '\n';
 
-const FILES = [
+const FILES: readonly (readonly [string, string])[] = [
   ['INSTRUCTIONS-chatgpt.md', assemble('chatgpt')],
   ['INSTRUCTIONS-generic.md', assemble('generic')],
 ];

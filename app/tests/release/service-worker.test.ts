@@ -10,6 +10,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
+import type { Handling, RequestVerdict } from '@bleavit/platform';
 import {
   ACTIVATE_MESSAGE,
   acceptsBytes,
@@ -27,7 +28,20 @@ const scope = releaseScope('TXID', assetHashesFrom({ 'index.html': HASH_A, 'asse
 ]);
 const SW_SCOPE = new URL('https://gw.example/TXID/');
 
-const at = (path) => classify(new URL(path, SW_SCOPE), SW_SCOPE, scope);
+const at = (path: string): Handling => classify(new URL(path, SW_SCOPE), SW_SCOPE, scope);
+
+/**
+ * The same classification, narrowed to a request this worker answers.
+ *
+ * `not-mine` is a separate arm for a reason — it is not the worker's to answer at all — so
+ * a test that reached `acceptsBytes` or `.path` through it would be exercising a call the
+ * worker never makes. Asserting the arm first is what keeps that distinction real here.
+ */
+const inRelease = (path: string): RequestVerdict => {
+  const verdict = at(path);
+  assert.notEqual(verdict.kind, 'not-mine', `${path} was classified as none of this worker's business`);
+  return verdict as RequestVerdict;
+};
 
 test('a request for a pinned asset carries the hash it must match', () => {
   assert.deepEqual(at('assets/x.js'), { kind: 'hash-pinned', path: 'assets/x.js', sha256: HASH_B });
@@ -36,8 +50,9 @@ test('a request for a pinned asset carries the hash it must match', () => {
 test('the release directory itself resolves to index.html', () => {
   // Every gateway serves the directory as the entry document; a worker that treated the
   // bare directory as an unknown path would refuse its own application's first request.
-  assert.equal(at('').kind, 'hash-pinned');
-  assert.equal(at('').path, 'index.html');
+  const entry = inRelease('');
+  assert.equal(entry.kind, 'hash-pinned');
+  assert.equal(entry.path, 'index.html');
 });
 
 test('a same-origin path this release does not contain is refused, not forwarded', () => {
@@ -66,8 +81,8 @@ test('another release directory on the same gateway is not this worker’s busin
 });
 
 test('bytes that do not match the pinned hash are refused', () => {
-  assert.equal(acceptsBytes(at('assets/x.js'), HASH_B), true);
-  assert.equal(acceptsBytes(at('assets/x.js'), HASH_A), false);
+  assert.equal(acceptsBytes(inRelease('assets/x.js'), HASH_B), true);
+  assert.equal(acceptsBytes(inRelease('assets/x.js'), HASH_A), false);
 });
 
 test('an empty asset map is refused rather than installed', () => {

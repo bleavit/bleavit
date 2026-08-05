@@ -41,7 +41,7 @@
  *    to be complete.
  */
 
-import type { Hash32, ReleaseIdentity, SpecVersionRange } from './identity.js';
+import type { Hash32, ReleaseIdentity, Sha256Hex, SpecVersionRange } from './identity.js';
 
 export const RELEASE_SCHEMA = 'bleavit.app-release.v1';
 
@@ -182,7 +182,7 @@ export function parseReleaseDocument(document: unknown): ReleaseDocumentVerdict 
     identity: {
       arweaveManifestTxId,
       sourceCommit,
-      perFileHashes: perFileHashes as Readonly<Record<string, Hash32>>,
+      perFileHashes,
       descriptorMetadataHashes,
       specVersionRange: { primary, recovery } as SpecVersionRange,
       chainSpecHashes,
@@ -191,14 +191,14 @@ export function parseReleaseDocument(document: unknown): ReleaseDocumentVerdict 
   };
 }
 
-function readDescriptorHashes(source: unknown): Record<number, Hash32> | undefined {
+function readDescriptorHashes(source: unknown): Record<number, Sha256Hex> | undefined {
   if (typeof source !== 'object' || source === null) return undefined;
-  const out: Record<number, Hash32> = {};
+  const out: Record<number, Sha256Hex> = {};
   for (const key of Object.getOwnPropertyNames(source)) {
     if (!/^[0-9]+$/.test(key)) return undefined;
     const value = own(source, key);
     if (typeof value !== 'string' || !SHA256_HEX.test(value)) return undefined;
-    out[Number(key)] = value as Hash32;
+    out[Number(key)] = value;
   }
   return out;
 }

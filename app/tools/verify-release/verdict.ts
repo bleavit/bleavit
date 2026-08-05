@@ -35,8 +35,10 @@
  * scope is exactly as much of an app-code delta as an edit.
  */
 
+import type { SelfCheckResult } from '@bleavit/verify';
+
 export class VerifyError extends Error {
-  constructor(message) {
+  constructor(message: string) {
     super(message);
     this.name = 'VerifyError';
   }
@@ -46,6 +48,51 @@ export class VerifyError extends Error {
 export const SIGNATURE_FLOOR = 2;
 export const ATTESTATION_FLOOR = 2;
 
+/** One detached release signature, as the CLI presents it after verifying the bytes. */
+export interface ReleaseSignature {
+  readonly keyId: string;
+  readonly generation: number;
+  readonly valid: boolean;
+}
+
+/**
+ * The `ReleaseChannel` keyring the signatures are counted against (12 §2.1, §2.3).
+ *
+ * `generation` is optional in the *type* because this function is the thing that checks it:
+ * §2.1 carries it as a `u32` and a keyring arriving without one is refused, so a required
+ * field here would make the refusal unreachable from a caller and untestable from a suite —
+ * a validator whose invalid input cannot be expressed validates nothing.
+ */
+export interface Keyring {
+  readonly generation?: number | undefined;
+  readonly revokedKeyIds?: readonly string[] | undefined;
+}
+
+/** An independent reproduction of the build, per §1.4 gate 2. */
+export interface Attestation {
+  readonly keyId: string;
+  readonly organization?: unknown;
+  readonly valid: boolean;
+}
+
+/** Why one signature or attestation did not count. Reported, never merely subtracted. */
+export interface RejectedCredential {
+  readonly keyId: string;
+  readonly why: string;
+}
+
+export interface SignatureCount {
+  readonly distinctKeys: number;
+  readonly accepted: readonly string[];
+  readonly rejected: readonly RejectedCredential[];
+}
+
+export interface AttestationCount {
+  readonly independentOrganizations: number;
+  readonly organizations: readonly string[];
+  readonly rejected: readonly RejectedCredential[];
+}
+
 /**
  * Count the signatures that actually satisfy §1.4.
  *
@@ -54,13 +101,16 @@ export const ATTESTATION_FLOOR = 2;
  * promise is that the verdict is reproducible with no project infrastructure — a function
  * that reached for a node would be a function that cannot run in the container §1.3 describes.
  */
-export function countReleaseSignatures(signatures, keyring) {
+export function countReleaseSignatures(
+  signatures: readonly ReleaseSignature[],
+  keyring: Keyring,
+): SignatureCount {
   if (!Number.isInteger(keyring?.generation)) {
     throw new VerifyError('the keyring declares no generation; §2.1 carries it as a u32');
   }
-  const revoked = new Set(keyring.revokedKeyIds ?? []);
-  const accepted = new Set();
-  const rejected = [];
+  const revoked = new Set<string>(keyring.revokedKeyIds ?? []);
+  const accepted = new Set<string>();
+  const rejected: RejectedCredential[] = [];
   for (const signature of signatures) {
     if (!signature.valid) {
       rejected.push({ keyId: signature.keyId, why: 'the signature does not verify' });
@@ -89,9 +139,9 @@ export function countReleaseSignatures(signatures, keyring) {
  * Count attestations by **organization**, per §1.4 gate 2's "different
  * organizations/infrastructure". Two attestations from one org is one reproduction.
  */
-export function countAttestations(attestations) {
-  const organizations = new Set();
-  const rejected = [];
+export function countAttestations(attestations: readonly Attestation[]): AttestationCount {
+  const organizations = new Set<string>();
+  const rejected: RejectedCredential[] = [];
   for (const attestation of attestations) {
     if (!attestation.valid) {
       rejected.push({ keyId: attestation.keyId, why: 'the attestation signature does not verify' });
@@ -112,7 +162,28 @@ export function countAttestations(attestations) {
  * The whole verdict. `selfCheck` is `packages/verify`'s `SelfCheckResult` — reused, so the
  * CLI and the in-app check cannot disagree about what "matches" means.
  */
-export function releaseVerdict({ selfCheck, signatures, keyring, attestations, minimumSignatures = SIGNATURE_FLOOR }) {
+export interface VerdictInputs {
+  readonly selfCheck: SelfCheckResult;
+  readonly signatures: readonly ReleaseSignature[];
+  readonly keyring: Keyring;
+  readonly attestations: readonly Attestation[];
+  readonly minimumSignatures?: number;
+}
+
+export interface Verdict {
+  readonly ok: boolean;
+  readonly failures: readonly string[];
+  readonly signatures: SignatureCount;
+  readonly attestations: AttestationCount;
+}
+
+export function releaseVerdict({
+  selfCheck,
+  signatures,
+  keyring,
+  attestations,
+  minimumSignatures = SIGNATURE_FLOOR,
+}: VerdictInputs): Verdict {
   if (minimumSignatures < SIGNATURE_FLOOR) {
     // §1.4: "A deployment MAY require more and MUST state its minimum explicitly rather than
     // inherit one silently; it MUST NOT configure fewer."
@@ -121,7 +192,7 @@ export function releaseVerdict({ selfCheck, signatures, keyring, attestations, m
         'may require more and must not configure fewer',
     );
   }
-  const failures = [];
+  const failures: string[] = [];
   const sigs = countReleaseSignatures(signatures, keyring);
   const atts = countAttestations(attestations);
 
@@ -147,14 +218,28 @@ export function releaseVerdict({ selfCheck, signatures, keyring, attestations, m
 }
 
 /** §1.5's admissible delta scope for the expedited lane. */
-export const EXPEDITED_SCOPE = Object.freeze([
+export const EXPEDITED_SCOPE: readonly string[] = Object.freeze([
   'assets/descriptors/',
   'release.json',
   'CHANGELOG.md',
   'release-history.json',
 ]);
 
-function inScope(path, scope) {
+/** Path → sha256 over a built tree, as `release.json`'s `perFileHashes` carries it. */
+export type FileHashes = Readonly<Record<string, string>>;
+
+export interface ScopeChange {
+  readonly path: string;
+  readonly change: 'added' | 'removed' | 'changed';
+}
+
+export interface ScopeVerdict {
+  readonly admissible: boolean;
+  readonly outOfScope: readonly ScopeChange[];
+  readonly detail: string;
+}
+
+function inScope(path: string, scope: readonly string[]): boolean {
   return scope.some((prefix) => path === prefix || path.startsWith(prefix));
 }
 
@@ -166,8 +251,12 @@ function inScope(path, scope) {
  * §1.5's requirement is that every other file be *byte-identical*, which a missing file is
  * not.
  */
-export function diffScope(incumbent, candidate, scope = EXPEDITED_SCOPE) {
-  const outOfScope = [];
+export function diffScope(
+  incumbent: FileHashes,
+  candidate: FileHashes,
+  scope: readonly string[] = EXPEDITED_SCOPE,
+): ScopeVerdict {
+  const outOfScope: ScopeChange[] = [];
   for (const [path, hash] of Object.entries(incumbent)) {
     const now = candidate[path];
     if (now === hash) continue;
