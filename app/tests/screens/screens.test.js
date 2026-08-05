@@ -57,7 +57,11 @@ import {
   UNRATIFIED_CONSEQUENCE,
   allowanceRemaining,
   approvalBlocks,
+  claimBlocks,
+  claimableNow,
   depositBlocks,
+  insuranceCopy,
+  insuranceStanding,
   destinationWarning,
   mayActivatePlaybook,
   proposalBlocks,
@@ -1883,4 +1887,84 @@ test('a proposal is blocked by allowance and by trigger independently', () => {
   );
   // A power with no trigger passes none, and is not blocked for lacking one.
   assert.deepEqual(proposalBlocks({ ...meter, power: 'pause_intake' }, undefined), []);
+});
+
+// ------------------------------------------------ S16 treasury streams (F17)
+
+const STREAM = (over = {}) => ({
+  id: finalized('s1'), recipient: finalized('5Grw'),
+  total: finalized(1_000_000n), claimed: finalized(0n),
+  startBlock: finalized(100), endBlock: finalized(1_100),
+  cancelled: finalized(false), ...over,
+});
+
+test('vesting floors against the claimant, and the last unit is not invented', () => {
+  // R-7's rounding rule. `total * elapsed / span` on bigint — a float would round a
+  // recipient's last unit into or out of existence.
+  assert.equal(claimableNow(STREAM(), finalized(600)).amount, 500_000n);
+  // 1 block into a 1000-block stream of 1,000,000 vests exactly 1,000.
+  assert.equal(claimableNow(STREAM(), finalized(101)).amount, 1_000n);
+  // A total that does not divide evenly floors rather than rounding up.
+  assert.equal(claimableNow(STREAM({ total: finalized(999n) }), finalized(101)).amount, 0n);
+});
+
+test('not-started and fully-claimed are different zeros', () => {
+  // A screen showing a bare zero for both tells a recipient the wrong thing to do.
+  assert.deepEqual(claimableNow(STREAM(), finalized(50)), { amount: 0n, reason: 'not-started' });
+  assert.deepEqual(
+    claimableNow(STREAM({ claimed: finalized(1_000_000n) }), finalized(2_000)),
+    { amount: 0n, reason: 'fully-claimed' },
+  );
+  assert.equal(claimableNow(STREAM({ cancelled: finalized(true) }), finalized(600)).reason, 'cancelled');
+});
+
+test('a stream whose end is not after its start is refused, not divided by', () => {
+  // Returning the whole total — the "treat it as instant" reading — would credit a
+  // recipient everything from malformed chain state.
+  const bad = claimableNow(STREAM({ startBlock: finalized(500), endBlock: finalized(500) }), finalized(900));
+  assert.deepEqual(bad, { amount: 0n, reason: 'malformed' });
+  const blocks = claimBlocks({
+    stream: STREAM({ startBlock: finalized(500), endBlock: finalized(500) }),
+    callerIsRecipient: true, now: finalized(900),
+  });
+  assert.match(blocks[0].detail, /no vesting schedule can be derived/);
+});
+
+test('vesting stops at the end block rather than continuing past it', () => {
+  assert.equal(claimableNow(STREAM(), finalized(1_100)).amount, 1_000_000n);
+  assert.equal(claimableNow(STREAM(), finalized(99_999)).amount, 1_000_000n);
+});
+
+test('INSURANCE is classified against its target, never shown as a bare trend', () => {
+  // E1: a rising INSURANCE balance is not protocol income. The screen gets a
+  // classification, not a number a component could plot as earnings.
+  assert.deepEqual(insuranceStanding(finalized(100n), finalized(100n)), { kind: 'at-target' });
+  assert.deepEqual(
+    insuranceStanding(finalized(60n), finalized(100n)),
+    { kind: 'below-target', shortfall: 40n },
+  );
+  assert.deepEqual(
+    insuranceStanding(finalized(140n), finalized(100n)),
+    { kind: 'awaiting-overflow', excess: 40n },
+  );
+});
+
+test('an above-target INSURANCE says it is not income and not a surplus', () => {
+  const copy = insuranceCopy({ kind: 'awaiting-overflow', excess: 40n });
+  assert.match(copy, /not protocol income/);
+  assert.match(copy, /not a surplus/);
+  assert.match(copy, /revenue routes entirely to MAIN/);
+  // And the below-target copy says where it refills from, which is not revenue either.
+  assert.match(insuranceCopy({ kind: 'below-target', shortfall: 1n }), /not funded from revenue/);
+});
+
+test('only the recipient may claim, and both blocks report together', () => {
+  const blocks = claimBlocks({
+    stream: STREAM({ cancelled: finalized(true) }), callerIsRecipient: false, now: finalized(600),
+  });
+  assert.deepEqual(blocks.map((b) => b.check), ['Recipient', 'Claimable amount']);
+  assert.deepEqual(
+    claimBlocks({ stream: STREAM(), callerIsRecipient: true, now: finalized(600) }),
+    [],
+  );
 });
