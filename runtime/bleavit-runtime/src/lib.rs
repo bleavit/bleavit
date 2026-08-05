@@ -147,6 +147,8 @@ mod tests_s5;
 #[cfg(all(test, feature = "bootstrap"))]
 mod tests_s5_behavior;
 #[cfg(test)]
+mod tests_storage_keys;
+#[cfg(test)]
 mod tests_telemetry;
 #[cfg(all(test, feature = "bootstrap"))]
 mod tests_treasury_health;

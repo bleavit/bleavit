@@ -1,46 +1,56 @@
 /**
- * Storage-key construction — the half that can be verified today.
+ * Storage-key construction — 02 §7.
  *
  * A chainHead storage key is `twox128(pallet) ++ twox128(item)` for a plain item or a map
- * *prefix*, and for a single map entry a further `hasher(arg)` per key argument. This module
- * implements the **prefix only**, and the absence of the rest is deliberate rather than
- * unfinished work.
+ * *prefix*, and for a single map entry a further `hasher_i(encoded_key_i)` per key
+ * argument, in key order.
  *
- * ## Why there is no function here that takes key arguments
+ * ## Why the args half arrived second
+ *
+ * This module shipped with {@link storagePrefix} alone (V-156), and the reason is worth
+ * keeping because it is what shaped {@link storageKey}'s signature.
  *
  * The prefix is checkable against ground truth: `app/fixtures/chainhead/` records 65 real
- * storage requests issued against the runtime, and every one of their keys is exactly 32
- * bytes — a prefix — because the recorder reads whole maps with `descendantsValues` and never
- * a single entry. So the corpus certifies this function completely and certifies **nothing
- * whatever** about hasher application (V-156).
+ * storage requests, and every one of their keys is exactly 32 bytes — a prefix — because
+ * the recorder reads whole maps with `descendantsValues` and never a single entry. So the
+ * corpus certifies the prefix completely and certifies **nothing whatever** about hasher
+ * application: it never issued a key that used one.
  *
- * That leaves two ways to add an args-taking function, and both are worse than not having one:
+ * That left two ways to build the args half, and both were worse than not having one.
+ * Test it against the same corpus, and the suite reports every surface covered while
+ * exercising no hasher at all. Test it against `@polkadot-api/substrate-bindings`, and it
+ * tests the library this module is built from against itself.
  *
- *  - Implement it and test it against the same corpus. The suite would report 65 surfaces and
- *    eight hasher combinations covered while exercising no hasher at all — the corpus declares
- *    hashers in its `metadata_presence` layout but never issues a key that uses one.
- *  - Implement it and test it against `@polkadot-api/substrate-bindings`' own hashers, which
- *    is what this module is built from. That tests the library against itself.
+ * This matters more than a normal gap because **a wrong storage key does not fail**. It
+ * returns no value, and an absent value is indistinguishable from an account that holds
+ * nothing. A mis-hashed `ForeignAssets.Account` key and a genuinely empty balance render
+ * the same screen: *0 USDC*.
  *
- * A wrong storage key does not fail loudly: it returns no value, and an absent value is
- * indistinguishable from an account that holds nothing. A balance of zero is exactly what a
- * mis-hashed key produces, and exactly what a real empty account produces. So the args half
- * needs known-answer vectors from outside TypeScript, and this repository already has that
- * pattern twice — `runtime/bleavit-runtime/fixtures/multisig-derivation.json` and
- * `crates/market-core/fixtures/chain-quote-agreement.json`, each written by the Rust side and
- * read in place.
+ * The oracle is now `runtime/bleavit-runtime/fixtures/storage-keys.json`, written by the
+ * runtime's own storage types (`hashed_key_for`) and read **in place** by
+ * `app/tests/chain-client/storage-keys.test.ts` — the same single-generator discipline
+ * `multisig-derivation.json` and `chain-quote-agreement.json` follow.
  *
- * Until those exist, a caller that needs a single map entry gets a **type error** rather than
- * a plausible key, which is the fail-closed shape: there is no function to call.
+ * ## Why keys arrive already encoded
+ *
+ * {@link storageKey} takes each key as bytes rather than as a value plus a codec, because
+ * every key is hashed **separately** and PAPI's `getTypedCodecs` cannot supply that: its
+ * `args` codec encodes the whole key tuple as one buffer, which is the right pre-image for
+ * a single map over a tuple key and the wrong one for a double map. Those two shapes are
+ * indistinguishable in doc 02's type column — `Welfare.Snapshots` and
+ * `ConditionalLedger.Positions` are both written `(A, B) → V` — and they produce different
+ * keys. Splitting encoding from hashing puts that choice at the call site, where the
+ * metadata that answers it lives, and the fixture carries both shapes so a caller that
+ * confused them fails.
  *
  * ## Why the names are separate arguments
  *
- * The same reason `decodeStorage` takes them separately: a dotted string invites a caller to
- * assemble a name by concatenation, and `"Epoch.Proposals"` hashed as one string is a
+ * The same reason `decodeStorage` takes them separately: a dotted string invites a caller
+ * to assemble a name by concatenation, and `"Epoch.Proposals"` hashed as one string is a
  * perfectly well-formed key for a storage item that does not exist.
  */
 
-import { Twox128 } from '@polkadot-api/substrate-bindings';
+import { Blake2128Concat, Twox64Concat, Twox128 } from '@polkadot-api/substrate-bindings';
 import type { HexString } from '@bleavit/shared-types';
 
 const encoder = new TextEncoder();
@@ -52,12 +62,74 @@ function hex(bytes: Uint8Array): string {
 }
 
 /**
+ * The hashers the 02 §7 read surface actually uses.
+ *
+ * Deliberately not every hasher FRAME defines. An unused name here would be untested
+ * surface — and the failure mode of a storage hasher is silence, so untested is not a
+ * risk this module can carry. A metadata-driven caller meeting anything else gets a
+ * refusal from {@link storageKey} rather than a guess.
+ */
+export type StorageHasher = 'Blake2_128Concat' | 'Twox64Concat';
+
+/** One key argument: the hasher metadata declares for it, and its SCALE encoding. */
+export interface StorageKeyArg {
+  readonly hasher: StorageHasher;
+  readonly encoded: Uint8Array;
+}
+
+/**
+ * Thrown when a caller names a hasher this module does not implement.
+ *
+ * A returned prefix would be far worse than a throw: `descendantsValues` answers a prefix
+ * by returning **every** entry in the map, so a silently-degraded key reads as one
+ * account's balance and is the whole book's.
+ */
+export class UnsupportedHasherError extends Error {
+  constructor(hasher: string) {
+    super(
+      `${hasher} is not a hasher this client builds keys for (02 §7 uses Blake2_128Concat ` +
+        'and Twox64Concat). Refusing rather than returning a shorter key, which the node ' +
+        'would answer as a map prefix.',
+    );
+    this.name = 'UnsupportedHasherError';
+  }
+}
+
+const HASHERS: Readonly<Record<StorageHasher, (encoded: Uint8Array) => Uint8Array>> =
+  Object.freeze({
+    Blake2_128Concat: Blake2128Concat,
+    Twox64Concat: Twox64Concat,
+  });
+
+/**
  * The 32-byte key of a plain storage item, or the prefix of a map.
  *
  * This is the key to pass to `transport.storage(…, 'value')` for a plain item and to
- * `transport.storage(…, 'descendantsValues')` for a whole map — which between them are every
- * read this client currently issues.
+ * `transport.storage(…, 'descendantsValues')` for a whole map.
  */
 export function storagePrefix(pallet: string, item: string): HexString {
   return `0x${hex(Twox128(encoder.encode(pallet)))}${hex(Twox128(encoder.encode(item)))}`;
+}
+
+/**
+ * The full key of one map entry: the prefix followed by each key's hash, in key order.
+ *
+ * Passing no keys returns exactly {@link storagePrefix}, which is correct — that *is* the
+ * key of a plain value — and is why the fixture carries `Constitution.PhaseFlags` as its
+ * zero-key control.
+ */
+export function storageKey(
+  pallet: string,
+  item: string,
+  keys: readonly StorageKeyArg[],
+): HexString {
+  let out: string = storagePrefix(pallet, item);
+  for (const key of keys) {
+    const hasher = HASHERS[key.hasher];
+    // Present-but-undefined is reachable from untyped metadata, which is the only way
+    // this function is called in production.
+    if (hasher === undefined) throw new UnsupportedHasherError(key.hasher);
+    out += hex(hasher(key.encoded));
+  }
+  return out as HexString;
 }
