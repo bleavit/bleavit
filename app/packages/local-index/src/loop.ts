@@ -1,0 +1,250 @@
+/**
+ * The ingestion loop — 10 §6.5's orchestration over F8's decision layer.
+ *
+ * Every *judgement* already lives in `ingest.ts` and `coverage.ts`: which extrinsics a block
+ * attributes, whether a body is worth fetching, what provenance a body inherits, how ranges
+ * merge. This module has no judgement of its own. What it owns is **order and continuity**,
+ * and both fail in ways no unit test of the pure functions can see.
+ *
+ * ## 1. Coverage advances only after the rows are durably written
+ *
+ * The tempting shape is to advance coverage as each block is scanned and write in the
+ * background. A crash then leaves coverage claiming blocks whose rows were never stored —
+ * and coverage is precisely the structure the client uses to decide it does **not** need to
+ * re-fetch. The gap becomes permanent and invisible: `isVerifiedAt` answers `true` for a
+ * block with no data behind it.
+ *
+ * So `ingestBlock` awaits the write and returns the new coverage only on success. There is no
+ * path that produces advanced coverage from a failed write, and a throw leaves the caller's
+ * coverage untouched rather than half-advanced.
+ *
+ * ## 2. A skipped block is a hole, never a span
+ *
+ * Subscriptions drop. When one resumes, the next finalized block it delivers may be far past
+ * the last one ingested, and the naive `addRange(coverage, selfRange(first, latest))` claims
+ * every block in between as self-ingested — the exact promotion 10 §6.3 forbids, arrived at
+ * by a reconnect instead of a merge.
+ *
+ * `ingestBlock` therefore adds a **single-block range per block** and lets `addRange` do the
+ * joining, which it only does for genuinely adjacent same-origin ranges. A gap survives as a
+ * hole because no range was ever created over it. This is the one place where doing the
+ * obvious cheap thing (one wide range) and the correct thing differ, and the correct thing
+ * is also simpler to state: *we claim what we ingested, one block at a time.*
+ *
+ * ## 3. A body fetch that fails does not silently drop the block's rows
+ *
+ * §6.5's cost claim means most blocks need no body. But when one *is* needed and the fetch
+ * fails, the block has attributed extrinsics whose rows cannot be built. Writing the events
+ * and advancing coverage would record the block as ingested while the user's own transactions
+ * from it are missing — and a filtered history is indistinguishable from an empty one.
+ *
+ * So a failed body fetch fails the block: nothing is written, coverage does not advance, and
+ * the block stays outside coverage where a later pass will find it as a hole.
+ */
+
+import {
+  addRange,
+  rangeForSource,
+  type Coverage,
+  type HeaderSource,
+} from './coverage.js';
+import {
+  attributedExtrinsics,
+  bodyProvenance,
+  needsBodyFetch,
+  txRowKey,
+  type BodyProvenance,
+  type FinalizedBlockScan,
+} from './ingest.js';
+
+export class IngestLoopError extends Error {
+  readonly blockNumber: number;
+
+  constructor(blockNumber: number, message: string) {
+    super(`block ${blockNumber}: ${message}`);
+    this.name = 'IngestLoopError';
+    this.blockNumber = blockNumber;
+  }
+}
+
+/** One attributed extrinsic, ready to be stored. */
+export interface AttributedRow {
+  readonly key: string;
+  readonly blockNumber: number;
+  readonly extrinsicIndex: number;
+  readonly provenance: BodyProvenance;
+  /** The decoded body bytes for this extrinsic, as the fetcher returned them. */
+  readonly body: Uint8Array;
+}
+
+export interface BlockWrite {
+  readonly blockNumber: number;
+  readonly scan: FinalizedBlockScan;
+  readonly rows: readonly AttributedRow[];
+  /**
+   * The coverage that becomes current **if and only if** this write succeeds.
+   *
+   * Passed in rather than persisted by a second call so an implementation can commit the
+   * rows and the coverage in **one transaction**. Rule 1 without this is only an in-memory
+   * property: rows written, then a crash before the coverage write, is the harmless
+   * direction — but rows written *after* coverage is not, and two separate calls leave that
+   * ordering to whoever writes the adapter. One transaction removes the choice.
+   */
+  readonly coverageAfter: Coverage;
+}
+
+export interface LoopPorts {
+  /**
+   * Fetch the block's extrinsic bodies. Called **only** when a watched account is
+   * attributed — §6.5's cost claim is a property of this call site, not of the fetcher.
+   */
+  readonly fetchBodies: (blockNumber: number) => Promise<readonly Uint8Array[]>;
+  /** Durably persist a block's events and attributed rows. Must resolve only on success. */
+  readonly write: (write: BlockWrite) => Promise<void>;
+  /** Wall-clock for the coverage range's `ingestedAt`. Injected so tests are deterministic. */
+  readonly now: () => number;
+}
+
+export interface IngestResult {
+  readonly coverage: Coverage;
+  readonly fetchedBody: boolean;
+  readonly rowCount: number;
+}
+
+/**
+ * Ingest one finalized block.
+ *
+ * Returns the **new** coverage rather than mutating: a caller that forgets to keep the result
+ * simply does not advance, which is the safe direction. The reverse — mutating in place and
+ * advancing before the write lands — is the failure this whole module is shaped around.
+ */
+export async function ingestBlock(
+  coverage: Coverage,
+  scan: FinalizedBlockScan,
+  watched: ReadonlySet<string>,
+  headerSource: HeaderSource,
+  ports: LoopPorts,
+): Promise<IngestResult> {
+  // Throws on a bad extrinsic index, which is correct here too: a block we cannot attribute
+  // safely must not be recorded as ingested.
+  const indices = attributedExtrinsics(scan, watched);
+  const wantsBody = needsBodyFetch(scan, watched);
+
+  let rows: readonly AttributedRow[] = [];
+  if (wantsBody) {
+    let bodies: readonly Uint8Array[];
+    try {
+      bodies = await ports.fetchBodies(scan.number);
+    } catch (cause) {
+      // Nothing written, coverage untouched: a block whose rows we cannot build must stay
+      // outside coverage, because a *filtered* history is indistinguishable from an empty one.
+      throw new IngestLoopError(
+        scan.number,
+        `the body fetch failed (${cause instanceof Error ? cause.message : String(cause)}), so ` +
+          'this block is not recorded as ingested — its attributed extrinsics would be missing ' +
+          'and a filtered history looks exactly like an empty one',
+      );
+    }
+    // The scan's count is optional (SQ-595) — §6.5 gives no source for one at scan time. Two
+    // distinct checks live here, and conflating them is how the optional count became a bug:
+    //
+    // 1. A *declared* count that disagrees with the body means the body we fetched is not the
+    //    block we scanned. Only checkable when one was declared.
+    // 2. An attributed index beyond the body's length is checkable **always**, because the
+    //    fetched body IS the authoritative count. This is where SQ-595 moved the guard
+    //    `attributedExtrinsics` can no longer make, and it is the check that matters: it is
+    //    the one covering the decode that would read a different extrinsic.
+    if (scan.extrinsicCount !== undefined && bodies.length !== scan.extrinsicCount) {
+      throw new IngestLoopError(
+        scan.number,
+        `the fetched body has ${bodies.length} extrinsic(s) but the scan declared ` +
+          `${scan.extrinsicCount}; indexing into it would read a different block`,
+      );
+    }
+    const beyond = indices.find((index) => index >= bodies.length);
+    if (beyond !== undefined) {
+      throw new IngestLoopError(
+        scan.number,
+        `an event attributed extrinsic ${beyond} but the fetched body has only ` +
+          `${bodies.length}; decoding at that index would read a different extrinsic`,
+      );
+    }
+    // Provenance follows the **header**, never the fetch — §6.5. Derived from the same
+    // argument that decides the coverage range's origin, so the two cannot disagree.
+    const provenance = bodyProvenance(headerSource.origin);
+    rows = indices.map((index) => ({
+      key: txRowKey(scan.number, index),
+      blockNumber: scan.number,
+      extrinsicIndex: index,
+      provenance,
+      body: bodies[index] as Uint8Array,
+    }));
+  }
+
+  // One block at a time. `addRange` joins genuinely adjacent same-origin ranges and nothing
+  // else, so a subscription that resumed past a gap leaves that gap as a hole rather than
+  // claiming it — the reconnect route to the promotion 10 §6.3 forbids.
+  //
+  // **From `headerSource`, not from `selfRange`.** This line read `selfRange(...)`
+  // unconditionally while the comment above the rows claimed both were derived from one
+  // argument. They were not: a block ingested behind an `operator` header stored rows
+  // labelled `provider` and a coverage range labelled `self`, so `isVerifiedAt` answered
+  // `true` for it. That is the promotion 10 §2.2 says has no path — reached through
+  // backfill rather than through a merge, and invisible to every test that only checked
+  // the rows.
+  const next = addRange(coverage, rangeForSource(headerSource, scan.number, scan.number, ports.now()));
+
+  // Computed before the write so the adapter can commit both atomically, **returned** only
+  // after it resolves. The distinction is the whole of rule 1: computing early is fine,
+  // handing back advanced coverage from a failed write is not — a throw here leaves the
+  // caller's coverage exactly as it was.
+  await ports.write({ blockNumber: scan.number, scan, rows, coverageAfter: next });
+
+  return { coverage: next, fetchedBody: wantsBody, rowCount: rows.length };
+}
+
+/**
+ * Drive the loop over a sequence of finalized blocks.
+ *
+ * Sequential on purpose. Ingesting concurrently would let block N+1's coverage land before
+ * N's write, which is rule 1 broken by parallelism rather than by ordering — and the symptom
+ * is identical.
+ *
+ * A block that throws **stops the run** and returns the coverage as of the last successful
+ * block, along with the failure. Continuing past it would leave a hole the caller never
+ * learns about, and this is the one place the loop can still report it.
+ */
+export interface RunResult {
+  readonly coverage: Coverage;
+  readonly ingested: number;
+  readonly bodiesFetched: number;
+  readonly stoppedAt: IngestLoopError | undefined;
+}
+
+export async function runIngest(
+  coverage: Coverage,
+  scans: AsyncIterable<FinalizedBlockScan> | Iterable<FinalizedBlockScan>,
+  watched: ReadonlySet<string>,
+  headerSource: HeaderSource,
+  ports: LoopPorts,
+): Promise<RunResult> {
+  let current = coverage;
+  let ingested = 0;
+  let bodiesFetched = 0;
+  for await (const scan of scans as AsyncIterable<FinalizedBlockScan>) {
+    let result: IngestResult;
+    try {
+      result = await ingestBlock(current, scan, watched, headerSource, ports);
+    } catch (error) {
+      const stoppedAt =
+        error instanceof IngestLoopError
+          ? error
+          : new IngestLoopError(scan.number, error instanceof Error ? error.message : String(error));
+      return { coverage: current, ingested, bodiesFetched, stoppedAt };
+    }
+    current = result.coverage;
+    ingested += 1;
+    if (result.fetchedBody) bodiesFetched += 1;
+  }
+  return { coverage: current, ingested, bodiesFetched, stoppedAt: undefined };
+}

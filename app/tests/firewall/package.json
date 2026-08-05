@@ -7,9 +7,11 @@
     "test": "node --test *.test.js"
   },
   "dependencies": {
-    "@bleavit/shared-types": "workspace:*",
     "@bleavit/chain-client": "workspace:*",
+    "@bleavit/features-tx": "workspace:*",
+    "@bleavit/shared-types": "workspace:*",
+    "@bleavit/signing": "workspace:*",
     "@bleavit/transaction-builder": "workspace:*",
-    "@bleavit/signing": "workspace:*"
+    "@bleavit/ui": "workspace:*"
   }
 }

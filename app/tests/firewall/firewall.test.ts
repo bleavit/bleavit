@@ -23,8 +23,13 @@ const here = dirname(fileURLToPath(import.meta.url));
 const fixtureDir = join(here, 'fixtures');
 const tsc = resolve(here, '../../node_modules/.bin/tsc');
 
-/** Compile one fixture in isolation. Returns { ok, output }. */
-function compile(fixture) {
+interface CompileResult {
+  readonly ok: boolean;
+  readonly output: string;
+}
+
+/** Compile one fixture in isolation. */
+function compile(fixture: string): CompileResult {
   try {
     execFileSync(
       tsc,
@@ -41,7 +46,12 @@ function compile(fixture) {
     );
     return { ok: true, output: '' };
   } catch (err) {
-    return { ok: false, output: `${err.stdout ?? ''}${err.stderr ?? ''}` };
+    // `execFileSync` rejects with an Error carrying `stdout`/`stderr`, which is not in the
+    // Error type. Narrowed rather than asserted: if a future Node stops decorating it, this
+    // yields an empty diagnostic and the per-fixture `expect-error` assertion fails loudly,
+    // instead of an `as any` quietly producing "undefinedundefined" that matches nothing.
+    const streams = err as { stdout?: string | Buffer; stderr?: string | Buffer };
+    return { ok: false, output: `${streams.stdout ?? ''}${streams.stderr ?? ''}` };
   }
 }
 
@@ -76,8 +86,8 @@ test('the corpus is not empty', () => {
  * unresolvable. That is exactly why the expectation is per fixture rather than a blanket
  * ban: the same diagnostic is the proof in one file and the vacuum in another.
  */
-function expectedError(fixture) {
-  const first = readFileSync(join(fixtureDir, fixture), 'utf8').split('\n', 1)[0];
+function expectedError(fixture: string): string | undefined {
+  const first = readFileSync(join(fixtureDir, fixture), 'utf8').split('\n', 1)[0] ?? '';
   const match = first.match(/^\/\/ expect-error:\s*(TS\d+)\b/);
   return match?.[1];
 }

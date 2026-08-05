@@ -9,12 +9,17 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./testing": {
+      "types": "./dist/testing.d.ts",
+      "default": "./dist/testing.js"
     }
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@bleavit/shared-types": "workspace:*"
+    "@bleavit/shared-types": "workspace:*",
+    "dexie": "4.4.4"
   }
 }

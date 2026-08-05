@@ -6,6 +6,7 @@
 // witnesses is decoration.
 const production = require('../../.dependency-cruiser.cjs');
 const { EXTERNAL, WORKSPACE_SUBPATH, POLKADOT_API_NON_SIGNER } = require('../../tools/depcruise-external.cjs');
+const { NON_LOCAL_DEPENDENCY_TYPES } = require('../../tools/handoff-packages.cjs');
 
 module.exports = {
   forbidden: [
@@ -35,11 +36,38 @@ module.exports = {
       to: { path: POLKADOT_API_NON_SIGNER },
     },
     {
+      // The two matchers that replaced the handoff denylist. `dependencyTypes` catches a
+      // resolvable package and `couldNotResolve` catches one that is not installed — and
+      // the second is the half a rule usually lacks, so both are witnessed rather than
+      // assumed to be equivalent.
+      name: 'witness-non-local-dependency-types',
+      severity: 'error',
+      from: { path: '^tests/depcruise-witness/' },
+      to: { dependencyTypes: NON_LOCAL_DEPENDENCY_TYPES },
+    },
+    {
+      name: 'witness-could-not-resolve',
+      severity: 'error',
+      from: { path: '^tests/depcruise-witness/' },
+      to: { couldNotResolve: true },
+    },
+    {
       // The workspace-subpath matcher, likewise imported rather than restated.
       name: 'witness-workspace-subpath-matcher',
       severity: 'error',
       from: { path: '^tests/depcruise-witness/' },
       to: { path: WORKSPACE_SUBPATH('@bleavit/signing/testing', 'packages/signing/dist/testing') },
+    },
+    {
+      // The range-minting subpath. Witnessed on its own because `WORKSPACE_SUBPATH` is
+      // parameterised by specifier *and* dist path: a typo in either would make
+      // `no-range-minting-outside-ingest` vacuous with the signing witness still green.
+      name: 'witness-local-index-testing-subpath',
+      severity: 'error',
+      from: { path: '^tests/depcruise-witness/' },
+      to: {
+        path: WORKSPACE_SUBPATH('@bleavit/local-index/testing', 'packages/local-index/dist/testing'),
+      },
     },
   ],
   // Verbatim, minus the exclude that would hide the witness from itself.

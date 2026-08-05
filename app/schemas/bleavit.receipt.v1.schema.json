@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bleavit.org/schemas/bleavit.receipt.v1.schema.json",
+  "title": "bleavit.receipt.v1",
+  "description": "What the chain recorded about one finalized extrinsic (10 §13.1).\n\nExport only, and deliberately NOT a copy of the transaction that produced it. There is no encoded call, no signature and no payload here — a receipt carrying call bytes teaches a tool to offer them back, and they would not have been rebuilt against current state (10 §13, third rule).\n\nWhat makes a receipt checkable is the anchor: re-read the chain at that block and that extrinsic index.",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "bleavit.receipt.v1"
+    },
+    "binding": {
+      "type": "object",
+      "description": "The chain binding (10 §13.1). Gated on the live chain by exact equality — a schema cannot check that, so a valid binding here is not an admitted one.",
+      "properties": {
+        "genesisHash": {
+          "type": "string",
+          "pattern": "^0x[0-9a-fA-F]{64}$",
+          "description": "Genesis hash of the chain this document was prepared against."
+        },
+        "specVersion": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295,
+          "description": "The runtime spec_version. A NEWER one than the client is refused; an older one is rebuilt."
+        },
+        "contractVersion": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295,
+          "description": "INTEGRATION_CONTRACT_VERSION, as the producing client reported it."
+        }
+      },
+      "required": [
+        "genesisHash",
+        "specVersion",
+        "contractVersion"
+      ],
+      "additionalProperties": false
+    },
+    "anchor": {
+      "type": "object",
+      "properties": {
+        "blockHash": {
+          "type": "string",
+          "pattern": "^0x[0-9a-fA-F]{64}$"
+        },
+        "blockNumber": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295,
+          "description": "The finalized block containing the extrinsic."
+        },
+        "extrinsicIndex": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295,
+          "description": "Its index within that block, so a reader can find the exact one."
+        }
+      },
+      "required": [
+        "blockHash",
+        "blockNumber",
+        "extrinsicIndex"
+      ],
+      "additionalProperties": false
+    },
+    "outcome": {
+      "type": "object",
+      "properties": {
+        "call": {
+          "type": "string",
+          "description": "Pallet.Call, as a NAME. Never an index and never bytes — a name cannot be resubmitted."
+        },
+        "success": {
+          "type": "boolean",
+          "description": "A failed dispatch is still a finalized fact."
+        },
+        "error": {
+          "type": "string",
+          "description": "Pallet.ErrorName from the frozen 02 §6 set, when it failed."
+        }
+      },
+      "required": [
+        "call",
+        "success"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "schema",
+    "binding",
+    "anchor",
+    "outcome"
+  ],
+  "additionalProperties": true
+}

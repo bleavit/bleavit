@@ -12,6 +12,7 @@
     "moduleResolution": "Bundler",
     "moduleDetection": "force",
     "jsx": "react-jsx",
+    "jsxImportSource": "@bleavit/ui",
     "composite": true,
     "declaration": true,
     "declarationMap": true,

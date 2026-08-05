@@ -372,6 +372,68 @@ jobs:
         working-directory: app
         run: pnpm run check:budget
 
+      - name: Foreign-chain feed vs the pinned Asset Hub runtime (02 §7.7, F4)
+        # `check-chain-feed.py` cannot do this job: it reads metadata v15 obtained by
+        # booting the runtime in `bleavit-node`, and a foreign runtime has neither the
+        # genesis config nor the pallets that node expects. This reads the wasm through
+        # PAPI's own decoder instead — which is also the better home, since what must be
+        # proven present is what the *client* can name, and the client names what that
+        # decoder produces. 10 §5.2's foreign verdict probes exactly `FOREIGN_SURFACE`,
+        # so a surface that quietly left the upstream runtime would make the verdict
+        # unable to fail on it: SQ-580's defect reached across a chain boundary.
+        working-directory: app
+        run: pnpm run foreign:check
+
+      - name: Optional-provider health, sampling and quotas (10 §8)
+        # INV-FE-3/15. Any mismatch auto-disables — §8.3 sets no threshold, and a
+        # threshold is what turns one caught lie into a tolerated error rate.
+        working-directory: app
+        run: pnpm run test:providers
+
+      - name: Release self-check and the verification panel (10 §5.4, 12 §1)
+        working-directory: app
+        run: pnpm run test:verify
+
+      - name: Local index — coverage, provenance and ingest (10 §6–§7)
+        # INV-FE-7. The load-bearing rule is 10 §6.3's "never silently spliced": a merged
+        # range must claim ONE origin, so joining ranges of different provenance either
+        # promotes provider blocks to verified or demotes verified ones. Neither is
+        # available, so the boundary has to survive to be rendered.
+        working-directory: app
+        run: pnpm run test:local-index
+
+      - name: Handoff formats — contexts, intents, receipts (10 §13, 11 §11.14)
+        # D-21's three serverless formats. Closed action vocabulary, no bytes-typed
+        # field, limits that only ever narrow.
+        working-directory: app
+        run: |
+          pnpm run test:contexts
+          pnpm run test:intents
+          pnpm run test:receipts
+          pnpm run test:llm-handoff
+
+      - name: Handoff carries no network primitive (D-21)
+        # The firewall proves `handoff` cannot IMPORT a network primitive; this proves
+        # the emitted JS contains none, which is the claim INV-FE-6 actually makes. The
+        # witness leg is not optional: V-86 found three CI-fatal firewall rules that
+        # could never fire, so a handoff gate that cannot fail is the established
+        # failure mode here rather than a hypothetical one.
+        working-directory: app
+        run: |
+          pnpm run check:handoff-network
+          pnpm run check:handoff-network:witness
+          pnpm run check:handoff-emitted
+          pnpm run check:handoff-emitted:witness
+
+      - name: Generated schemas and skills reproduce (10 §13, F20/F21)
+        # Both are generated artifacts committed to the tree, so the gate is that
+        # regeneration is a no-op. Never the `:generate` scripts — a `--write` step in
+        # CI would rewrite the artifact it is supposed to be comparing and pass always.
+        working-directory: app
+        run: |
+          pnpm run schemas:check
+          pnpm run skills:check
+
   environments:
     name: Environment definitions
     runs-on: ubuntu-latest

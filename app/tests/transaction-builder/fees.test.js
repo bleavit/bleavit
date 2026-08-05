@@ -27,6 +27,18 @@ const SCALE = 1_000_000n;
 const finalized = (value) => ({ value, status: { kind: 'verified-finalized', blockHash: `0x${'11'.repeat(32)}`, blockNumber: 1 } });
 const rate = (value, reference = 1_000_000n) => finalized({ value, reference, scale: SCALE });
 
+/**
+ * A stand-in for `GatePassed`, pinned to the same block `finalized()` reads at.
+ *
+ * The brand is a non-exported `unique symbol`, so a test cannot mint a real one — and that
+ * is the property being exercised rather than dodged: what these functions now require is
+ * *the gate's own pin*, and the suite proves they refuse a mismatched one.
+ */
+const gatePin = (blockHash = `0x${'11'.repeat(32)}`, blockNumber = 1) => ({
+  at: { blockHash, blockNumber },
+  results: [],
+});
+
 test('a rate inside [0.1x, 10x] of its reference is admitted', () => {
   assert.equal(admitRate(rate(1_000_000n)).value, 1_000_000n);
   assert.equal(admitRate(rate(100_000n)).value, 100_000n);      // exactly 0.1x
@@ -80,20 +92,42 @@ test('the estimate discloses the key and its bounds (11 §11.5, expert mode)', (
 });
 
 test('mortality is 64 blocks, and 256 only for a raw-external payload', () => {
-  assert.equal(mortalityFor(500).periodBlocks, MORTAL_ERA_BLOCKS);
-  assert.equal(mortalityFor(500, true).periodBlocks, MORTAL_ERA_BLOCKS_RAW_EXTERNAL);
-  assert.equal(mortalityFor(500).fromBlock, 500);
+  const pin = gatePin(`0x${'11'.repeat(32)}`, 500);
+  assert.equal(mortalityFor(pin).periodBlocks, MORTAL_ERA_BLOCKS);
+  assert.equal(mortalityFor(pin, true).periodBlocks, MORTAL_ERA_BLOCKS_RAW_EXTERNAL);
   // The longer era is a longer replay window, so it must be opt-in rather than default.
   assert.notEqual(MORTAL_ERA_BLOCKS, MORTAL_ERA_BLOCKS_RAW_EXTERNAL);
   assert.ok(MORTAL_ERA_BLOCKS < MORTAL_ERA_BLOCKS_RAW_EXTERNAL);
 });
 
+test('the era is anchored to the block the GATE pinned, not to a caller-chosen number', () => {
+  // 11 §11.3: "era 64 blocks from B′". This took a bare `number` until an adversarial
+  // review pointed out that the era IS the staleness bound — the user spends unbounded time
+  // at a wallet prompt and nothing re-checks afterwards; what stops a stale signature being
+  // included is that it expires. Anchored to the wrong block, the bound is simply not
+  // applied, and the transaction still looks valid.
+  assert.equal(mortalityFor(gatePin(`0x${'11'.repeat(32)}`, 900)).fromBlock, 900);
+  assert.equal(mortalityFor(gatePin(`0x${'22'.repeat(32)}`, 12)).fromBlock, 12);
+});
+
 test('the nonce adds in-flight increments to the finalized read', () => {
   // A broadcast transaction has consumed a nonce the finalized state has not observed;
   // signing the finalized nonce again produces a duplicate the chain drops.
-  assert.equal(nonceFor(finalized(7n), 0), 7n);
-  assert.equal(nonceFor(finalized(7n), 3), 10n);
-  assert.throws(() => nonceFor(finalized(7n), -1), RangeError);
+  assert.equal(nonceFor(gatePin(), finalized(7n), 0), 7n);
+  assert.equal(nonceFor(gatePin(), finalized(7n), 3), 10n);
+  assert.throws(() => nonceFor(gatePin(), finalized(7n), -1), RangeError);
+});
+
+test('a nonce read at a different block than the gate pinned is REFUSED', () => {
+  // 11 §11.3 says "at B′". A nonce one block earlier is a perfectly valid Finalized<bigint>
+  // describing a different state, and signing with it yields a duplicate or a gap — which
+  // the user experiences as "nothing happened".
+  assert.throws(() => nonceFor(gatePin(`0x${'99'.repeat(32)}`, 1), finalized(7n), 0), RangeError);
+});
+
+test('the block HASH decides, not the height — a reorg can reuse a height', () => {
+  // Same height, different block. Comparing heights would accept the sibling.
+  assert.throws(() => nonceFor(gatePin(`0x${'ab'.repeat(32)}`, 1), finalized(7n), 0), RangeError);
 });
 
 test('a phase boundary inside the window warns, outside it does not', () => {

@@ -2,40 +2,22 @@
   "files": [],
   "references": [
     {
-      "path": "packages/shared-types"
-    },
-    {
-      "path": "packages/descriptors"
+      "path": "packages/bleavit-client-ts"
     },
     {
       "path": "packages/chain-client"
     },
     {
-      "path": "packages/protocol"
-    },
-    {
-      "path": "packages/simulation"
-    },
-    {
-      "path": "packages/ui"
-    },
-    {
-      "path": "packages/verify"
-    },
-    {
-      "path": "packages/transaction-builder"
-    },
-    {
-      "path": "packages/signing"
-    },
-    {
-      "path": "packages/intents"
-    },
-    {
       "path": "packages/contexts"
     },
     {
-      "path": "packages/receipts"
+      "path": "packages/descriptors"
+    },
+    {
+      "path": "packages/handoff-envelope"
+    },
+    {
+      "path": "packages/intents"
     },
     {
       "path": "packages/llm-handoff"
@@ -44,16 +26,37 @@
       "path": "packages/local-index"
     },
     {
-      "path": "packages/providers"
+      "path": "packages/mock-runtime"
     },
     {
       "path": "packages/platform"
     },
     {
-      "path": "packages/mock-runtime"
+      "path": "packages/protocol"
     },
     {
-      "path": "src/features/tx"
+      "path": "packages/providers"
+    },
+    {
+      "path": "packages/receipts"
+    },
+    {
+      "path": "packages/shared-types"
+    },
+    {
+      "path": "packages/signing"
+    },
+    {
+      "path": "packages/simulation"
+    },
+    {
+      "path": "packages/transaction-builder"
+    },
+    {
+      "path": "packages/ui"
+    },
+    {
+      "path": "packages/verify"
     },
     {
       "path": "src/features/analysis"
@@ -62,7 +65,7 @@
       "path": "src/features/handoff"
     },
     {
-      "path": "packages/bleavit-client-ts"
+      "path": "src/features/tx"
     }
   ]
 }

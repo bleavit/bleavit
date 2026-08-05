@@ -20,12 +20,38 @@
  */
 
 import type { HexString } from '@bleavit/shared-types';
-import type { SignedPayload, SignerAdapter, SignerDescriptor, SigningRequest } from './adapters.js';
+import {
+  describeSigner,
+  grantsDecodedPayload,
+  grantsHashedPayload,
+  type SignedPayload,
+  type SignerAdapter,
+  type SignerDescriptor,
+  type SigningRequest,
+} from './adapters.js';
 
-export const MOCK_SIGNER_DESCRIPTOR: SignerDescriptor = Object.freeze({
+/**
+ * The mock's grants.
+ *
+ * It no longer claims `metadata-hash`, and that is not an oversight: there is no grant
+ * function for it anywhere, because FE-P6 has not established that any wallet honours
+ * `CheckMetadataHash` for a custom chain. A mock able to mint a capability no real adapter
+ * can hold would let a test assert behaviour that ships to nobody — which is worse than a
+ * missing test, because it reads as coverage.
+ */
+export const MOCK_SIGNER_DESCRIPTOR: SignerDescriptor = describeSigner({
   id: 'mock',
   label: 'Mock signer (tests only)',
-  capabilities: new Set(['decoded-payload', 'hashed-payload', 'metadata-hash'] as const),
+  grants: [
+    grantsDecodedPayload({
+      kind: 'attested-flow',
+      basis: 'the mock signs the exact payload bytes it is handed, so a test can assert them',
+    }),
+    grantsHashedPayload({
+      kind: 'attested-flow',
+      basis: 'the mock derives its signature deterministically from the full payload bytes',
+    }),
+  ],
   testOnly: true,
 });
 

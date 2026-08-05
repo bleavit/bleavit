@@ -9,6 +9,12 @@
   ],
   "references": [
     {
+      "path": "../chain-client"
+    },
+    {
+      "path": "../handoff-envelope"
+    },
+    {
       "path": "../shared-types"
     }
   ]

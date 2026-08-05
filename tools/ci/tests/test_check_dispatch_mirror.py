@@ -48,21 +48,21 @@ class DispatchMirror(unittest.TestCase):
         """The live defect: FE row 14 required a clock that `execute` itself starts."""
         self.assert_mutation_caught(
             FRONTEND,
-            "The FE renders each of the 13 checks",
-            "| 14. **Descriptor lead time** | `now ≥ authorized_at + DescriptorLeadTime` |\n\n"
-            "The FE renders each of the 13 checks",
-            "frontend row(s) [14]",
+            "The FE renders each of the 14 checks",
+            "| 15. **Descriptor lead time** | `now ≥ authorized_at + DescriptorLeadTime` |\n\n"
+            "The FE renders each of the 14 checks",
+            "frontend row(s) [15]",
         )
 
     def test_a_backend_check_the_frontend_stops_reading_is_caught(self) -> None:
         self.assert_mutation_caught(
-            FRONTEND, "BE 2–9, 11 ↔ FE 3–10, 13", "BE 2–8, 11 ↔ FE 3–9, 13", "backend check(s) [9]"
+            FRONTEND, "BE 2–9, 11 ↔ FE 3–10, 14", "BE 2–8, 11 ↔ FE 3–9, 14", "backend check(s) [9]"
         )
 
     def test_mapping_an_effect_item_is_caught(self) -> None:
         """Items 12–13 are dispatch and record; there is nothing to pre-check about them."""
         self.assert_mutation_caught(
-            FRONTEND, "**BE 10 ↔ FE 11–12**", "**BE 10, 12 ↔ FE 11–12**", "which are effects"
+            FRONTEND, "**BE 10 ↔ FE 11–13**", "**BE 10, 12 ↔ FE 11–13**", "which are effects"
         )
 
     def test_a_deleted_mapping_fails_with_an_explanation_not_a_traceback(self) -> None:
@@ -84,7 +84,7 @@ class DispatchMirror(unittest.TestCase):
     def test_a_reordered_frontend_table_is_caught(self) -> None:
         """Contiguity matters: the mapping addresses rows by number."""
         self.assert_mutation_caught(
-            FRONTEND, "| 13. Batch bounds |", "| 15. Batch bounds |", "not a contiguous"
+            FRONTEND, "| 14. Batch bounds |", "| 16. Batch bounds |", "not a contiguous"
         )
 
 
