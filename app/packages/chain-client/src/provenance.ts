@@ -23,18 +23,32 @@
  * Only a deliberate double assertion can — which is grep-able and lint-banned.
  */
 
-import type { HexString, Verified } from '@bleavit/shared-types';
+import type { ChainId, HexString, Verified } from '@bleavit/shared-types';
 
 declare const FINALIZED: unique symbol;
 
 /** The only type the transaction path accepts (10 §2.3). */
 export type Finalized<T> = Verified<T> & {
-  readonly status: { readonly kind: 'verified-finalized'; readonly blockHash: HexString; readonly blockNumber: number };
+  readonly status: {
+    readonly kind: 'verified-finalized';
+    readonly chain: ChainId;
+    readonly blockHash: HexString;
+    readonly blockNumber: number;
+  };
   readonly [FINALIZED]: true;
 };
 
-/** A finalized block the light client has verified, used to pin a read. */
+/**
+ * A finalized block the light client has verified, used to pin a read.
+ *
+ * `chain` is the genesis hash of the client that verified it. It is part of the *pin*
+ * rather than something a caller passes alongside, because every `finalize` call takes
+ * its status straight from a pin — so a read cannot acquire the wrong chain identity
+ * without the transport handing out the wrong pin, which is the one place it is checked
+ * (10 §3.1's genesis obligation).
+ */
 export interface FinalizedBlockRef {
+  readonly chain: ChainId;
   readonly blockHash: HexString;
   readonly blockNumber: number;
 }
@@ -53,21 +67,35 @@ export function finalize<T>(value: T, at: FinalizedBlockRef): Finalized<T> {
   // with a single file-scoped override for this module.
   return {
     value,
-    status: { kind: 'verified-finalized', blockHash: at.blockHash, blockNumber: at.blockNumber },
+    status: {
+      kind: 'verified-finalized',
+      chain: at.chain,
+      blockHash: at.blockHash,
+      blockNumber: at.blockNumber,
+    },
   } as Finalized<T>;
 }
 
 /**
- * Meet of two finalized reads: the result is finalized only if both were read at
- * the SAME block. Two values from different blocks are not a consistent view, and
- * INV-FE-2 requires every precondition to be evaluated at a single finalized
- * block — so this returns `undefined` rather than silently picking one.
+ * Meet of two finalized reads: the result is finalized only if both were read from
+ * the same chain at the SAME block. Two values from different blocks are not a
+ * consistent view, and INV-FE-2 requires every precondition to be evaluated at a
+ * single finalized block — so this returns `undefined` rather than silently picking
+ * one.
+ *
+ * The chain is checked **first and on its own** (F18). It is not redundant with the
+ * block check: two chains will not share a block hash, so a cross-chain meet would
+ * already return `undefined` — but only by a collision argument, and a safety
+ * property that holds because a hash function is good is a property nobody can read
+ * off this code. Once Asset Hub is a second light client, "these two reads are
+ * comparable" is a statement about the chain, so the chain is what is compared.
  */
 export function meet<A, B, C>(
   a: Finalized<A>,
   b: Finalized<B>,
   combine: (a: A, b: B) => C,
 ): Finalized<C> | undefined {
+  if (a.status.chain !== b.status.chain) return undefined;
   if (a.status.blockHash !== b.status.blockHash) return undefined;
   return finalize(combine(a.value, b.value), a.status);
 }
@@ -120,6 +148,13 @@ export function readmitFromLeader<T>(
   leaderPin: FinalizedBlockRef,
 ): Finalized<T> | undefined {
   if (!hasFinalizedStatus(v)) return undefined;
+  // Chain first, for the reason `meet` gives — and here it is load-bearing rather than
+  // merely clearer. A follower tab holds a pin per chain (F18 gives the leader two light
+  // clients), so re-admitting against *a* pin instead of the *right* pin is a mistake a
+  // caller can actually make: the payload would be an Asset Hub read and the pin the
+  // futarchy one. The block hashes differ, so this was already refused — but a future
+  // caller passing the payload's own block through would sail past a hash-only check.
+  if (v.status.chain !== leaderPin.chain) return undefined;
   if (v.status.blockHash !== leaderPin.blockHash) return undefined;
   if (v.status.blockNumber !== leaderPin.blockNumber) return undefined;
   return finalize(v.value, leaderPin);

@@ -30,11 +30,17 @@ import type { HexString } from '@bleavit/shared-types';
 
 import { argsFor, bundle, keyFor, recordedProvider } from './recorded-provider.ts';
 
+/** The chain identity every verified fixture in this file is read against (F18).
+ *  A named constant rather than a literal per site: the point of the field is that two
+ *  reads agree on it, and copies of a hex string agree until one is edited. */
+const TEST_CHAIN = `0x${'ce'.repeat(32)}` as HexString;
+
+
 const fixtures = bundle();
 
 async function reader() {
   const { provider } = recordedProvider(createMockRuntime(fixtures));
-  return FinalizedReader.open(await ChainHeadConnection.open(provider));
+  return FinalizedReader.open(await ChainHeadConnection.open(provider, { chain: TEST_CHAIN }));
 }
 
 test('a storage read yields Finalized<T> pinned to the reader block', async () => {
@@ -102,7 +108,7 @@ test('both legs of the cross-check are issued at the same block', async () => {
       return false;
     },
   });
-  const r = await FinalizedReader.open(await ChainHeadConnection.open(provider));
+  const r = await FinalizedReader.open(await ChainHeadConnection.open(provider, { chain: TEST_CHAIN }));
   const source = positionSourceFor('primary');
   await r.crossCheckedCall({
     api: source.api,
@@ -125,7 +131,7 @@ test('a malformed pin is refused when the reader is opened', async () => {
   // well-formed `0x…` string, and the malformation under test is its *length*, which
   // only the runtime check can see.
   const transport: ChainHeadTransport = {
-    pinnedBlock: async () => ({ blockHash: '0xdead', blockNumber: 1 }),
+    pinnedBlock: async () => ({ chain: TEST_CHAIN, blockHash: '0xdead', blockNumber: 1 }),
     storage: async () => [],
     call: async () => '0x',
   };

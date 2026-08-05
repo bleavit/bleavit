@@ -139,7 +139,12 @@ export async function readShellState(
   const undecodable: UndecodableRead[] = [];
   const finalized = <T,>(value: T): Verified<T> => ({
     value,
-    status: { kind: 'verified-finalized', blockHash: at.blockHash, blockNumber: at.blockNumber },
+    status: {
+      kind: 'verified-finalized',
+      chain: at.chain,
+      blockHash: at.blockHash,
+      blockNumber: at.blockNumber,
+    },
   });
 
   const epochRaw = firstValue((await reader.storage(SHELL_READS.epochOf)).value);

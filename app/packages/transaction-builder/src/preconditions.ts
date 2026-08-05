@@ -69,7 +69,11 @@ export function evaluate<T>(row: PreconditionRow<T>, read: Finalized<T>): Precon
     requirement: row.requirement,
     expected: row.expected(read.value),
     actual: describe(read.value),
-    at: { blockHash: read.status.blockHash, blockNumber: read.status.blockNumber },
+    at: {
+      chain: read.status.chain,
+      blockHash: read.status.blockHash,
+      blockNumber: read.status.blockNumber,
+    },
   };
 }
 

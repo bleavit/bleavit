@@ -177,7 +177,12 @@ export async function readProposals(
   const at = reader.at;
   const finalized = <T,>(value: T): Verified<T> => ({
     value,
-    status: { kind: 'verified-finalized', blockHash: at.blockHash, blockNumber: at.blockNumber },
+    status: {
+      kind: 'verified-finalized',
+      chain: at.chain,
+      blockHash: at.blockHash,
+      blockNumber: at.blockNumber,
+    },
   });
 
   const raw = await reader.crossCheckedCall({

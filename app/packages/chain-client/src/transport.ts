@@ -22,7 +22,7 @@
  * in it is a failure branch.
  */
 
-import type { HexString } from '@bleavit/shared-types';
+import type { ChainId, HexString } from '@bleavit/shared-types';
 import type { FinalizedBlockRef } from './provenance.js';
 import type { ChainHeadTransport, StorageItem } from './reads.js';
 
@@ -162,6 +162,17 @@ interface PendingOperation {
 }
 
 export interface ChainHeadConnectionOptions {
+  /**
+   * Which chain this connection follows — its genesis hash (F18).
+   *
+   * **Required, with no default.** Every pin this connection hands out carries it, and
+   * every `Finalized<T>` takes its chain identity from a pin, so this one field decides
+   * what a whole connection's reads *claim to be*. A default would have to be the
+   * futarchy chain, which is precisely the wrong answer for the Asset Hub connection and
+   * wrong in the dangerous direction: an AH balance would render as a futarchy read.
+   * There is no safe default for identity, so there is no default.
+   */
+  readonly chain: ChainId;
   /** `chainHead_v1_follow(withRuntime)`. Runtime updates are what make `_call` possible. */
   readonly withRuntime?: boolean;
   /** How many announced blocks to keep pinned. See `PIN_WINDOW`. */
@@ -205,6 +216,7 @@ export class ChainHeadConnection implements ChainHeadTransport {
   readonly #orphanEvents = new Map<string, Record<string, unknown>[]>();
   readonly #headerNumbers = new Map<string, number>();
   readonly #pinWindow: number;
+  readonly #chain: ChainId;
   #pinnedOrder: HexString[] = [];
   #nextId = 1;
   #subscription: string | undefined;
@@ -215,8 +227,9 @@ export class ChainHeadConnection implements ChainHeadTransport {
   #initializationFailed: ((error: Error) => void) | undefined;
   #stopped: string | undefined;
 
-  private constructor(provider: JsonRpcProviderLike, pinWindow: number) {
+  private constructor(provider: JsonRpcProviderLike, pinWindow: number, chain: ChainId) {
     this.#pinWindow = pinWindow;
+    this.#chain = chain;
     this.#connection = provider((message) => {
       this.#onMessage(message);
     });
@@ -235,9 +248,9 @@ export class ChainHeadConnection implements ChainHeadTransport {
    */
   static async open(
     provider: JsonRpcProviderLike,
-    options: ChainHeadConnectionOptions = {},
+    options: ChainHeadConnectionOptions,
   ): Promise<ChainHeadConnection> {
-    const connection = new ChainHeadConnection(provider, options.pinWindow ?? PIN_WINDOW);
+    const connection = new ChainHeadConnection(provider, options.pinWindow ?? PIN_WINDOW, options.chain);
     const firstFinalized = new Promise<HexString>((resolve, reject) => {
       connection.#initialized = resolve;
       connection.#initializationFailed = reject;
@@ -308,7 +321,7 @@ export class ChainHeadConnection implements ChainHeadTransport {
     this.#assertLive();
     const blockHash = this.#finalized;
     if (blockHash === undefined) throw new ChainHeadError('no finalized block has been reported yet');
-    return { blockHash, blockNumber: await this.#blockNumber(blockHash) };
+    return { chain: this.#chain, blockHash, blockNumber: await this.#blockNumber(blockHash) };
   }
 
   async storage(

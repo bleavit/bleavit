@@ -16,7 +16,7 @@ import { fileURLToPath } from 'node:url';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { createElement as h } from 'react';
 import type { ComponentType, ReactElement } from 'react';
-import type { Verified, VerificationStatus } from '@bleavit/shared-types';
+import type { HexString, Verified, VerificationStatus } from '@bleavit/shared-types';
 
 /**
  * `createElement`, widened to accept a child the `ReactNode` type refuses.
@@ -54,6 +54,12 @@ import {
 } from '@bleavit/ui';
 import { externalProposal } from '@bleavit/shared-types';
 
+/** The chain identity every verified fixture in this file is read against (F18).
+ *  A named constant rather than a literal per site: the point of the field is that two
+ *  reads agree on it, and copies of a hex string agree until one is edited. */
+const TEST_CHAIN = `0x${'ce'.repeat(32)}` as HexString;
+
+
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '../../..');
 
 // `Verified<T>`, not `Finalized<T>`: these render, and 10 §2.1 requires a *typed status* on
@@ -62,7 +68,7 @@ const REPO = join(dirname(fileURLToPath(import.meta.url)), '../../..');
 // widening it to `string`, which would silently make every badge assertion below vacuous.
 const finalized = <T,>(value: T, blockNumber = 1_000_000): Verified<T> => ({
   value,
-  status: { kind: 'verified-finalized', blockHash: '0xabc', blockNumber },
+  status: { kind: 'verified-finalized', chain: TEST_CHAIN, blockHash: '0xabc', blockNumber },
 });
 const provider = <T,>(value: T): Verified<T> => ({
   value,
@@ -120,8 +126,8 @@ test('an identifier is abbreviated at both ends, never as a bare prefix', () => 
 
 test('every status renders a badge, and the copy comes from the status', () => {
   const statuses: readonly VerificationStatus[] = [
-    { kind: 'verified-finalized', blockHash: '0x1', blockNumber: 7 },
-    { kind: 'verified-best', blockHash: '0x1', blockNumber: 7 },
+    { kind: 'verified-finalized', chain: TEST_CHAIN, blockHash: '0x1', blockNumber: 7 },
+    { kind: 'verified-best', chain: TEST_CHAIN, blockHash: '0x1', blockNumber: 7 },
     { kind: 'derived-local', coverage: { ranges: [], holes: [{ fromBlock: 1, toBlock: 2 }] } },
     { kind: 'provider', providerId: 'p', sampled: true },
     { kind: 'stale-cache', asOfBlock: 3, ageMs: 10 },

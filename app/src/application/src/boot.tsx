@@ -41,7 +41,11 @@ import { implementedScreens } from './composition.js';
  * what `verified-best` at height 0 says.
  */
 function initialChainState(): ShellChainState {
-  const unread = { kind: 'verified-best', blockHash: '0x', blockNumber: 0 } as const;
+  // A pre-read sentinel, not an observation: no chain, no block, nothing read yet. The
+  // empty chain id is deliberate and is why `combineStatus` refuses to derive anything
+  // from it — a placeholder that carried the real chain would combine happily with a real
+  // read and claim block 0 of it.
+  const unread = { kind: 'verified-best', chain: '0x', blockHash: '0x', blockNumber: 0 } as const;
   return {
     epoch: { value: 0, status: unread },
     phaseLabel: { value: 'connecting…', status: unread },

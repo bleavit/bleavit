@@ -35,6 +35,11 @@ import { digestPreimage, equalBinding } from '@bleavit/handoff-envelope';
 import type { FinalizedBlockRef } from '@bleavit/chain-client';
 import { finalize } from '@bleavit/chain-client/testing';
 
+/** The chain identity every pin in this file is read against (F18). Named, not inlined:
+ *  the field exists so two reads can agree on it, and copies agree until one is edited. */
+const TEST_CHAIN = `0x${'ce'.repeat(32)}` as `0x${string}`;
+
+
 const decode = (bytes: Uint8Array): string => new TextDecoder().decode(bytes);
 
 /**
@@ -52,7 +57,7 @@ const decode = (bytes: Uint8Array): string => new TextDecoder().decode(bytes);
  * forbids production code from importing — a suite may hold this capability, the transaction
  * path may not.
  */
-const AT: FinalizedBlockRef = { blockHash: `0x${'11'.repeat(32)}`, blockNumber: 7 };
+const AT: FinalizedBlockRef = { chain: TEST_CHAIN, blockHash: `0x${'11'.repeat(32)}`, blockNumber: 7 };
 const finalized = <T,>(value: T) => finalize(value, AT);
 
 const BINDING = {

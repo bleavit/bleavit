@@ -132,7 +132,14 @@ export async function startLightClient(options: LightClientOptions): Promise<Lig
 
   let transport: ChainHeadConnection;
   try {
-    transport = await ChainHeadConnection.open(asTransportProvider(provider));
+    // The pin, not the probe. `startTopology` has already asserted the *probed* genesis
+    // equals this pinned value (10 §3.1), so the two agree — and taking the release's
+    // pin makes the identity every read carries something the release chose, rather than
+    // something the chain reported. If they ever disagree the topology has already
+    // thrown, so this cannot be the quieter of two answers.
+    transport = await ChainHeadConnection.open(asTransportProvider(provider), {
+      chain: options.para.pinned.genesisHash,
+    });
   } catch (error) {
     for (const topology of topologies) topology.stop();
     await client.terminate();

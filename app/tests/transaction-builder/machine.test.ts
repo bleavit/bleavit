@@ -45,10 +45,15 @@ import { MOCK_SIGNER_DESCRIPTOR, MockSigner } from '@bleavit/signing/testing';
 // `finalize` is test-only on purpose — see packages/chain-client/src/testing.ts.
 import { finalize } from '@bleavit/chain-client/testing';
 
+/** The chain identity every pin in this file is read against (F18). Named, not inlined:
+ *  the field exists so two reads can agree on it, and copies agree until one is edited. */
+const TEST_CHAIN = `0x${'ce'.repeat(32)}` as `0x${string}`;
+
+
 const HERE = dirname(fileURLToPath(import.meta.url));
 const DOC = resolve(HERE, '..', '..', '..', 'docs', 'architecture', '11-frontend-workflows.md');
 
-const PIN: FinalizedBlockRef = { blockHash: `0x${'11'.repeat(32)}`, blockNumber: 100 };
+const PIN: FinalizedBlockRef = { chain: TEST_CHAIN, blockHash: `0x${'11'.repeat(32)}`, blockNumber: 100 };
 const BUILT_FOR: TxPreparation['builtFor'] = { specVersion: 2, metadataHash: `0x${'ab'.repeat(32)}` };
 // `requires` is the rows this call declares. It is required and non-empty: without it the
 // gate could not distinguish "every precondition holds" from "nobody read one", and those
@@ -57,7 +62,7 @@ const BUILT_FOR: TxPreparation['builtFor'] = { specVersion: 2, metadataHash: `0x
 const PREP: TxPreparation = {
   scaleHex: '0x0403aabbcc',
   builtFor: BUILT_FOR,
-  preparedAt: { blockHash: `0x${'22'.repeat(32)}`, blockNumber: 99 },
+  preparedAt: { chain: TEST_CHAIN, blockHash: `0x${'22'.repeat(32)}`, blockNumber: 99 },
   requires: ['P-1'],
 };
 
@@ -219,7 +224,7 @@ test('preconditions read at different blocks cannot authorise a signature (INV-F
   // certify a conjunction that was never simultaneously true.
   const elsewhere: PreconditionResult = {
     ...okRow('P-3'),
-    at: { blockHash: `0x${'99'.repeat(32)}`, blockNumber: 101 },
+    at: { chain: TEST_CHAIN, blockHash: `0x${'99'.repeat(32)}`, blockNumber: 101 },
   };
   const outcome = gate(PREP, PIN, BUILT_FOR, [okRow('P-1'), elsewhere]);
   assert.equal(outcome.kind, 'blocked');

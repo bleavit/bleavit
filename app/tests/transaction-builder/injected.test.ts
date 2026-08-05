@@ -33,6 +33,11 @@ import type {
 import { gate } from '@bleavit/transaction-builder';
 import type { GatePassed, TxPreparation } from '@bleavit/transaction-builder';
 
+/** The chain identity every pin in this file is read against (F18). Named, not inlined:
+ *  the field exists so two reads can agree on it, and copies agree until one is edited. */
+const TEST_CHAIN = `0x${'ce'.repeat(32)}` as `0x${string}`;
+
+
 const ALICE = '5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY';
 const BOB = '5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty';
 
@@ -87,13 +92,13 @@ function fakeApi(
 const PREP: TxPreparation = {
   scaleHex: '0x0102030405',
   builtFor: { specVersion: 2, metadataHash: `0x${'ab'.repeat(32)}` },
-  preparedAt: { blockHash: `0x${'22'.repeat(32)}`, blockNumber: 6 },
+  preparedAt: { chain: TEST_CHAIN, blockHash: `0x${'22'.repeat(32)}`, blockNumber: 6 },
   requires: ['P-1'],
 };
 
 /** A real gate proof — `GatePassed` is branded and only `gate()` mints one (10 §2.1). */
 const WINDOW: GatePassed = (() => {
-  const at = { blockHash: `0x${'11'.repeat(32)}` as const, blockNumber: 7 };
+  const at = { chain: TEST_CHAIN, blockHash: `0x${'11'.repeat(32)}` as const, blockNumber: 7 };
   const outcome = gate(PREP, at, PREP.builtFor, [
     { id: 'P-1', ok: true, requirement: 'r', expected: 'e', actual: 'a', at },
   ]);

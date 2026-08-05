@@ -17,13 +17,19 @@ import { combine, combine2, combineStatus } from '@bleavit/shared-types';
 import type { Combined, HexString, Verified, VerificationStatus } from '@bleavit/shared-types';
 import { Derived } from '@bleavit/ui';
 
+/** The chain identity every verified fixture in this file is read against (F18).
+ *  A named constant rather than a literal per site: the point of the field is that two
+ *  reads agree on it, and copies of a hex string agree until one is edited. */
+const TEST_CHAIN = `0x${'ce'.repeat(32)}` as HexString;
+
+
 // Annotated, not inferred. Without the annotation every `kind` widens to `string` and the
 // fixtures stop being `VerificationStatus` at all — the same widening that silently turned a
 // discriminant into a plain string in the handoff suites.
 const AT = (n: number, hash: HexString): VerificationStatus =>
-  ({ kind: 'verified-finalized', blockHash: hash, blockNumber: n });
+  ({ kind: 'verified-finalized', chain: TEST_CHAIN, blockHash: hash, blockNumber: n });
 const BEST = (n: number, hash: HexString): VerificationStatus =>
-  ({ kind: 'verified-best', blockHash: hash, blockNumber: n });
+  ({ kind: 'verified-best', chain: TEST_CHAIN, blockHash: hash, blockNumber: n });
 const PROVIDER: VerificationStatus = { kind: 'provider', providerId: 'p', sampled: false };
 const STALE: VerificationStatus = { kind: 'stale-cache', asOfBlock: 10, ageMs: 5_000 };
 const LOCAL: VerificationStatus = {
@@ -73,7 +79,7 @@ function statedDatum<T>(result: Combined<T>): Verified<T> {
 test('two finalized reads at the same block combine, keeping that block', () => {
   const status = stated(combineStatus([AT(100, '0xaa'), AT(100, '0xaa')]));
   assert.equal(status.kind, 'verified-finalized');
-  assert.deepEqual(status, { kind: 'verified-finalized', blockHash: '0xaa', blockNumber: 100 });
+  assert.deepEqual(status, { kind: 'verified-finalized', chain: TEST_CHAIN, blockHash: '0xaa', blockNumber: 100 });
 });
 
 test('a provider input makes the result provider — never the verified input’s badge', () => {
@@ -189,4 +195,56 @@ test('Derived never renders a badge on the incomparable arm', () => {
     h(Derived<number>, { combined, render: (v: number) => String(v) }),
   );
   assert.doesNotMatch(markup, /badge/);
+});
+
+/* ------------------------------------------------------- F18: two chains, two lineages */
+
+/** A second chain — Asset Hub's stand-in (02 §7.7). */
+const OTHER_CHAIN = `0x${'a5'.repeat(32)}` as HexString;
+const ON_OTHER = (n: number, hash: HexString): VerificationStatus =>
+  ({ kind: 'verified-finalized', chain: OTHER_CHAIN, blockHash: hash, blockNumber: n });
+
+test('two chains refuse — and at the SAME block hash, so it is the chain doing the work', () => {
+  // The construction is the point. A cross-chain pair with *different* blocks is already
+  // refused by the block check, so a test using one would pass with the chain check
+  // deleted — it would be witnessing nothing. Holding the hash equal removes the block
+  // check from the picture entirely, and the only thing left that can refuse is the chain.
+  const result = combineStatus([AT(100, '0xaa'), ON_OTHER(100, '0xaa')]);
+  assert.equal(result.kind, 'incomparable');
+  assert.ok(
+    result.kind === 'incomparable' && /different chains/.test(result.reason),
+    `expected the cross-chain reason, got: ${result.kind === 'incomparable' ? result.reason : 'stated'}`,
+  );
+});
+
+test('the cross-chain refusal does NOT tell the user to refresh', () => {
+  // The reason is the deliverable here, not the refusal. Two chains never share a block,
+  // so this pair was already being refused before F18 — with "Refresh to read them
+  // together", which is advice that cannot ever succeed. A user following it retries
+  // forever. Wrong advice on a real refusal is worse than a bare refusal.
+  const result = combineStatus([AT(100, '0xaa'), ON_OTHER(200, '0xbb')]);
+  assert.equal(result.kind, 'incomparable');
+  assert.ok(
+    result.kind === 'incomparable' && !/[Rr]efresh/.test(result.reason),
+    'the cross-chain refusal must not suggest refreshing',
+  );
+});
+
+test('same chain, different blocks still gets the refresh advice — which does work there', () => {
+  // The complement, so the previous test cannot pass by the reason simply never mentioning
+  // refreshing. Within one chain, reading together is exactly what fixes it.
+  const result = combineStatus([AT(100, '0xaa'), AT(200, '0xbb')]);
+  assert.ok(
+    result.kind === 'incomparable' && /[Rr]efresh/.test(result.reason),
+    'the same-chain block mismatch must still say how to fix it',
+  );
+});
+
+test('an unverified input still suppresses the chain check, as it does the block check', () => {
+  // A provider status carries no chain, so `chains` would be {chainA, undefined} — size 2.
+  // If the chain check ran on an already-unverified result it would report "different
+  // chains" for what is really just an unverified figure, replacing a correct weak badge
+  // with a refusal. The guard is the same `blockOf(weakest) !== undefined` gate.
+  assert.equal(stated(combineStatus([AT(100, '0xaa'), PROVIDER])).kind, 'provider');
+  assert.equal(stated(combineStatus([ON_OTHER(1, '0xff'), PROVIDER])).kind, 'provider');
 });

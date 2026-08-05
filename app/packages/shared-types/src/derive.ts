@@ -70,6 +70,13 @@ function blockOf(status: VerificationStatus): string | undefined {
     : undefined;
 }
 
+/** The chain a verified status was read against; `undefined` for the unverified kinds. */
+function chainOf(status: VerificationStatus): string | undefined {
+  return status.kind === 'verified-finalized' || status.kind === 'verified-best'
+    ? status.chain
+    : undefined;
+}
+
 export type Combined<T> =
   | { readonly kind: 'stated'; readonly datum: Verified<T> }
   /**
@@ -107,6 +114,21 @@ export function combineStatus(
   // Only meaningful when the *weakest* still names a block: if anything unverified is in
   // the mix the result is unverified already, and makes no block claim to falsify.
   if (blockOf(weakest) !== undefined) {
+    // Chain before block, and the order is the whole point (F18). Two chains never share a
+    // block, so a cross-chain pair would already fail the block check — but it would fail it
+    // saying "refresh to read them together", and no refresh can ever make an Asset Hub read
+    // and a futarchy read share a block. Wrong advice on a real refusal is worse than none:
+    // the user retries forever. These figures are not un-synchronised, they are
+    // un-combinable, and the two need different sentences.
+    const chains = new Set(statuses.map((status) => chainOf(status)));
+    if (chains.size > 1) {
+      return {
+        kind: 'incomparable',
+        reason:
+          'These values were read from different chains, so no single figure can be derived ' +
+          'from them. Each is shown against the chain it came from.',
+      };
+    }
     const blocks = new Set(statuses.map((status) => blockOf(status)));
     if (blocks.size > 1) {
       return {

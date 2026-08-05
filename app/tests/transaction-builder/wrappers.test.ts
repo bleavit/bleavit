@@ -50,6 +50,11 @@ import { finalize } from '@bleavit/chain-client/testing';
 import type { Finalized } from '@bleavit/chain-client';
 import { CRITICAL_SURFACE } from '@bleavit/descriptors';
 
+/** The chain identity every pin in this file is read against (F18). Named, not inlined:
+ *  the field exists so two reads can agree on it, and copies agree until one is edited. */
+const TEST_CHAIN = `0x${'ce'.repeat(32)}` as `0x${string}`;
+
+
 const blake2b256 = (bytes: Uint8Array): Uint8Array => blake2b(bytes, { dkLen: 32 });
 /** A 32-byte public key, which is what `deriveMultisigAccount` requires. */
 const key = (byte: string): PublicKeyHex => `0x${byte.repeat(32)}`;
@@ -82,7 +87,7 @@ const multisig = (threshold: number): CallWrapper => {
 const MULTI: AccountId = deriveMultisigAccount([SIGNER, OTHER], 2, blake2b256).account;
 
 const finalized = <T>(value: T): Finalized<T> =>
-  finalize(value, { blockHash: `0x${'22'.repeat(32)}`, blockNumber: 7 });
+  finalize(value, { chain: TEST_CHAIN, blockHash: `0x${'22'.repeat(32)}`, blockNumber: 7 });
 
 const proxy = (proxyType: string | undefined): CallWrapper => ({ kind: 'proxy', real: REAL, proxyType });
 /**
