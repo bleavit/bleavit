@@ -302,12 +302,15 @@ def decode_metadata(data: bytes) -> dict[str, Any]:
 
 
 def _render_fields(
-    fields: list[dict[str, Any]], types: dict[int, dict[str, Any]], stack: tuple[int, ...]
+    fields: list[dict[str, Any]],
+    types: dict[int, dict[str, Any]],
+    stack: tuple[int, ...],
+    elide: frozenset[str] = frozenset(),
 ) -> str:
     rendered = []
     named = any(field["name"] is not None for field in fields)
     for field in fields:
-        value = render_type(field["type_id"], types, stack)
+        value = render_type(field["type_id"], types, stack, elide)
         if named:
             rendered.append(f"{field['name'] or '_'}:{value}")
         else:
@@ -316,7 +319,10 @@ def _render_fields(
 
 
 def render_type(
-    type_id: int, types: dict[int, dict[str, Any]], stack: tuple[int, ...] = ()
+    type_id: int,
+    types: dict[int, dict[str, Any]],
+    stack: tuple[int, ...] = (),
+    elide: frozenset[str] = frozenset(),
 ) -> str:
     """Render a portable type recursively without unstable registry IDs.
 
@@ -325,6 +331,18 @@ def render_type(
     so two layouts differing only in a bound render the same. Bounds are
     covered separately by the paired metadata constants in the surface
     manifest, never by this rendering.
+
+    `elide` names type paths to render as the path alone instead of expanding
+    them. This is the *same* treatment the recursion guard below already gives a
+    cyclic type, applied deliberately rather than incidentally, and it exists for
+    runtime-wide aggregates: `System.Events` has value
+    `Vec<EventRecord<RuntimeEvent>>`, and expanding `RuntimeEvent` renders every
+    event of every pallet — 2.2 MB, and a drift signal that fires when any
+    unrelated pallet gains an event. Eliding it makes the signal *sharper*, not
+    weaker, but only because doc 02 §6 freezes those events one by one; an
+    elision whose subtree nothing else covers would be a hole. The manifest
+    therefore declares each elided path with the entries that cover it, and
+    `tools/ci/tests` asserts the declaration exists.
     """
     item = types.get(type_id)
     if item is None:
@@ -332,6 +350,8 @@ def render_type(
     path = "::".join(item["path"])
     if type_id in stack:
         return path or "<recursive>"
+    if path and path in elide:
+        return path
     nested = (*stack, type_id)
     definition = item["definition"]
     kind = definition["kind"]
@@ -342,9 +362,9 @@ def render_type(
         if not fields:
             body = "unit"
         elif any(field["name"] is not None for field in fields):
-            body = "{" + _render_fields(fields, types, nested) + "}"
+            body = "{" + _render_fields(fields, types, nested, elide) + "}"
         else:
-            body = "(" + _render_fields(fields, types, nested) + ")"
+            body = "(" + _render_fields(fields, types, nested, elide) + ")"
     elif kind == "variant":
         variants = []
         for variant in definition["variants"]:
@@ -352,23 +372,23 @@ def render_type(
             if not fields:
                 suffix = ""
             elif any(field["name"] is not None for field in fields):
-                suffix = "{" + _render_fields(fields, types, nested) + "}"
+                suffix = "{" + _render_fields(fields, types, nested, elide) + "}"
             else:
-                suffix = "(" + _render_fields(fields, types, nested) + ")"
+                suffix = "(" + _render_fields(fields, types, nested, elide) + ")"
             variants.append(f"{variant['name']}={variant['index']}{suffix}")
         body = "enum[" + "|".join(variants) + "]"
     elif kind == "sequence":
-        body = f"Vec<{render_type(definition['type_id'], types, nested)}>"
+        body = f"Vec<{render_type(definition['type_id'], types, nested, elide)}>"
     elif kind == "array":
-        body = f"[{render_type(definition['type_id'], types, nested)};{definition['length']}]"
+        body = f"[{render_type(definition['type_id'], types, nested, elide)};{definition['length']}]"
     elif kind == "tuple":
-        values = [render_type(value, types, nested) for value in definition["type_ids"]]
+        values = [render_type(value, types, nested, elide) for value in definition["type_ids"]]
         body = "(" + ",".join(values) + ("," if len(values) == 1 else "") + ")"
     elif kind == "compact":
-        body = f"Compact<{render_type(definition['type_id'], types, nested)}>"
+        body = f"Compact<{render_type(definition['type_id'], types, nested, elide)}>"
     elif kind == "bit_sequence":
-        store = render_type(definition["store_type_id"], types, nested)
-        order = render_type(definition["order_type_id"], types, nested)
+        store = render_type(definition["store_type_id"], types, nested, elide)
+        order = render_type(definition["order_type_id"], types, nested, elide)
         body = f"BitSequence<{store},{order}>"
     else:
         raise MetadataDecodeError(f"cannot render type definition {kind}")
@@ -378,9 +398,16 @@ def render_type(
 
 
 def surface_layout(metadata: dict[str, Any], entry: dict[str, Any]) -> dict[str, Any] | None:
-    """Return the resolved layout for a present manifest entry."""
+    """Return the resolved layout for a present manifest entry.
+
+    An entry's optional `elide` list names type paths to render as the path alone
+    (see `render_type`). Both sides of `compare_layout` are produced with the
+    *same* list — the committed layout was generated through here too — so the
+    comparison stays symmetric and an elision cannot make a mismatch look equal.
+    """
     kind = entry["kind"]
     types = metadata["types"]
+    elide = frozenset(entry.get("elide", ()))
     if kind == "storage":
         pallet = metadata["pallets"].get(entry["pallet"])
         storage = pallet.get("storage") if pallet else None
@@ -389,15 +416,22 @@ def surface_layout(metadata: dict[str, Any], entry: dict[str, Any]) -> dict[str,
             return None
         return {
             "hashers": item["hashers"],
-            "key": render_type(item["key_type"], types) if item["key_type"] is not None else None,
-            "value": render_type(item["value_type"], types),
+            "key": (
+                render_type(item["key_type"], types, (), elide)
+                if item["key_type"] is not None
+                else None
+            ),
+            "value": render_type(item["value_type"], types, (), elide),
         }
     if kind == "constant":
         pallet = metadata["pallets"].get(entry["pallet"])
         item = pallet.get("constants", {}).get(entry["constant"]) if pallet else None
         if item is None:
             return None
-        return {"type": render_type(item["type_id"], types), "value": "0x" + item["value"].hex()}
+        return {
+            "type": render_type(item["type_id"], types, (), elide),
+            "value": "0x" + item["value"].hex(),
+        }
     if kind == "event":
         pallet = metadata["pallets"].get(entry["pallet"])
         item = pallet.get("events", {}).get(entry["event"]) if pallet else None
@@ -405,7 +439,7 @@ def surface_layout(metadata: dict[str, Any], entry: dict[str, Any]) -> dict[str,
             return None
         return {
             "fields": [
-                {"name": field["name"], "type": render_type(field["type_id"], types)}
+                {"name": field["name"], "type": render_type(field["type_id"], types, (), elide)}
                 for field in item["fields"]
             ]
         }
@@ -416,10 +450,10 @@ def surface_layout(metadata: dict[str, Any], entry: dict[str, Any]) -> dict[str,
             return None
         return {
             "params": [
-                {"name": item["name"], "type": render_type(item["type_id"], types)}
+                {"name": item["name"], "type": render_type(item["type_id"], types, (), elide)}
                 for item in method["inputs"]
             ],
-            "return": render_type(method["output_type"], types),
+            "return": render_type(method["output_type"], types, (), elide),
         }
     return None
 

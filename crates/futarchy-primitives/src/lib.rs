@@ -9,7 +9,7 @@ use core::convert::TryFrom;
 use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 
-pub const INTEGRATION_CONTRACT_VERSION: u32 = 23;
+pub const INTEGRATION_CONTRACT_VERSION: u32 = 27;
 
 pub type Balance = u128;
 pub type ProposalId = u64;
@@ -1909,8 +1909,40 @@ mod tests {
         // the twelfth API method and the exact §4a types/events/storage/constants.
         // N9 is v22: ClientRecord gains trailing USDC delivery_float and the
         // fixed outbound receiver ABI becomes contract surface; FutarchyApi is
-        // unchanged.
-        assert_eq!(INTEGRATION_CONTRACT_VERSION, 23);
+        // unchanged. N13 is v23: the canonical client serves external books, so
+        // `service_positions` is appended as the thirteenth API method.
+        // v24 (SQ-580) freezes twelve storage items docs 10/11 already required
+        // the client to read — `Epoch::ResourceLocks` plus the eleven upstream
+        // Referenda/ConvictionVoting/Preimage/Scheduler/Multisig/System reads of
+        // 02 §7.6. Nothing in this crate's types moves: the bump records that the
+        // *contract* grew an obligation, which is why only this constant changes.
+        //
+        // v25 (SQ-588) appends a **fourteenth** `FutarchyApi` method,
+        // `is_reserved_protocol_destination(who) -> bool`. 11 §11.5's P-9 clause
+        // ("recipient is not a protocol account") had no chain surface at all: the
+        // runtime refuses on `ReservedProtocolDestinations::contains`, which is a
+        // `Contains` implementation and not storage, so there was nothing for a
+        // precondition row to read and the clause was simply absent from the client.
+        // A method rather than published constants because §11.4 rule 2 requires a
+        // precondition to be an *exact chain read* — a client recomputing the
+        // namespace would be evaluating a computation, and would also be maintaining
+        // a second copy of a predicate that can drift. Additive, so the `sp_api`
+        // version moves (3 -> 4) and no existing method, type, storage key, event or
+        // call index does; `transaction_version` is untouched (02 §13 rules 2 and 7).
+        //
+        // v26 (SQ-589) freezes the seven `pallet-execution-guard` surfaces
+        // `execute` reads at dispatch time — 02 §7.8 — so 11 §11.5's P-12 can cite
+        // all thirteen of its checks instead of the seven that had a home.
+        //
+        // v27 (SQ-590) freezes `Proxy.Proxies` in 02 §7.6. 11 §11.3 mandates
+        // proxies "as call wrappers under the same precondition system", and the
+        // only surface that answers *may this signer act for `real`* is that map;
+        // it was frozen nowhere, so 10 §5.2's classifier could not fail on it and
+        // every row of a proxied transaction evaluated correctly against an account
+        // the signer might have no delegation for at all. Like v24 and v26, the
+        // item already exists in the runtime — the bump records that the *contract*
+        // grew an obligation, so this constant is the only thing that moves.
+        assert_eq!(INTEGRATION_CONTRACT_VERSION, 27);
     }
 
     #[test]

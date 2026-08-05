@@ -2,7 +2,7 @@
   "authoring_version": 1,
   "impl_name": "bleavit-runtime",
   "impl_version": 0,
-  "integration_contract_version": 23,
+  "integration_contract_version": 27,
   "integration_contract_version_status": "decoded from Constitution metadata constant",
   "metadata_hash_kind": "sha256-of-raw-scale-metadata",
   "metadata_pallets": [
@@ -52,9 +52,9 @@
     "Welfare",
     "XcmpQueue"
   ],
-  "metadata_sha256": "837adf7f3e58d8f8015d2f8694b6e7dfdb9f106f15142a42a5bbe347043a1b35",
+  "metadata_sha256": "39201b6efecf23bbc5f21ca80534765c44174a1d14d4e3eaac4577bb8c079513",
   "metadata_version": 15,
-  "on_chain_wasm_sha256": "a2b0d7818f8a9eaf019bfd8778586dec31331460b00716ceabc97951d32a66b1",
+  "on_chain_wasm_sha256": "bbc8cac4563f3eec3d46ceb03856267aa21dbb917d4d7caa93c8bcad275a12d5",
   "rfc78_merkleized_metadata_hash": null,
   "rfc78_status": "not enabled by the runtime build recipe",
   "runtime_profile": "bootstrap",
@@ -68,6 +68,6 @@
     "tokenSymbol": "VIT"
   },
   "transaction_version": 1,
-  "wasm_file_sha256": "a2b0d7818f8a9eaf019bfd8778586dec31331460b00716ceabc97951d32a66b1",
-  "wasm_sha256": "a2b0d7818f8a9eaf019bfd8778586dec31331460b00716ceabc97951d32a66b1"
+  "wasm_file_sha256": "bbc8cac4563f3eec3d46ceb03856267aa21dbb917d4d7caa93c8bcad275a12d5",
+  "wasm_sha256": "bbc8cac4563f3eec3d46ceb03856267aa21dbb917d4d7caa93c8bcad275a12d5"
 }
