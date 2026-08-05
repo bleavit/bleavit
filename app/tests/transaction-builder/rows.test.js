@@ -22,16 +22,20 @@ import { fileURLToPath } from 'node:url';
 
 import {
   ALL_CLAUSES,
+  CONVICTIONS,
   CRANK_CALLS,
   GOVERNANCE_ROW_IDS,
   NO_WRAPPER,
   PRECONDITION_ROWS,
   aboveTheFoldClauses,
+  acceptsConviction,
   accountForClause,
   clauseGroupsFor,
   clausesNeedingOtherAccounts,
   crankStaleness,
+  discloseLock,
   governanceRowsFor,
+  lockPeriods,
   rowsFor,
 } from '@bleavit/transaction-builder';
 import { CRITICAL_SURFACE } from '@bleavit/descriptors';
@@ -573,4 +577,61 @@ test('every governance clause names a surface CRITICAL_SURFACE probes', () => {
       assert.ok(probed.has(c.surface), `${row} reads unprobed surface ${c.surface}`);
     }
   }
+});
+
+// -------------------------------------------------- conviction and its lock (F16)
+
+test('the lock multipliers match the pinned SDK exactly', () => {
+  // Verified 2026-08-05 against polkadot-sdk@polkadot-stable2606,
+  // substrate/frame/conviction-voting/src/conviction.rs — read rather than inferred from
+  // the doubling, because the pattern *looks* like it starts at 1 and these numbers are
+  // what a user's tokens are locked by.
+  assert.deepEqual(
+    CONVICTIONS.map((c) => [c, lockPeriods(c)]),
+    [['None', 0], ['Locked1x', 1], ['Locked2x', 2], ['Locked3x', 4],
+     ['Locked4x', 8], ['Locked5x', 16], ['Locked6x', 32]],
+  );
+});
+
+test('the lock is computed from the chain’s enactment period, never a default', () => {
+  const week = 100_800;
+  const six = discloseLock('Locked6x', week, 1_000);
+  assert.equal(six.lockBlocks, 32 * week);
+  assert.equal(six.unlocksAtEarliest, 1_000 + 32 * week);
+  // `None` locks nothing and still votes — at 10 %.
+  const none = discloseLock('None', week, 1_000);
+  assert.equal(none.lockBlocks, 0);
+  assert.equal(none.unlocksAtEarliest, 1_000);
+  assert.equal(none.weightTenths, 1);
+  assert.equal(six.weightTenths, 60);
+});
+
+test('a nonsense enactment period is refused rather than producing a wrong lock', () => {
+  assert.throws(() => discloseLock('Locked1x', -1, 0), RangeError);
+  assert.throws(() => discloseLock('Locked1x', 1.5, 0), RangeError);
+  assert.throws(() => discloseLock('Locked1x', 10, -5), RangeError);
+});
+
+test('a vote cannot reach signing without its lock having been disclosed', () => {
+  // The structural half of "displayed before signing". `LockDisclosed` is branded and
+  // `discloseLock` is its only producer, so a hand-built object does not typecheck —
+  // `tests/firewall` carries the fixture. Here we assert the produced value is usable and
+  // that the brand is a phantom with no runtime footprint to copy.
+  const lock = discloseLock('Locked3x', 100, 50);
+  const vote = { poll: 7n, intent: { kind: 'standard', aye: true, balance: 5n }, lock };
+  assert.equal(vote.lock.lockBlocks, 400);
+  assert.deepEqual(
+    Object.keys(lock).sort(),
+    ['conviction', 'lockBlocks', 'unlocksAtEarliest', 'weightTenths'],
+    'the brand materialised as a runtime property — it must stay phantom',
+  );
+});
+
+test('only a standard vote accepts a conviction', () => {
+  // pallet-conviction-voting's own shape: Split and SplitAbstain have no conviction field.
+  // A form that appeared to accept 6× on a split vote would tell the user both that their
+  // tokens are locked and that their vote weighs 6× — and neither is true.
+  assert.equal(acceptsConviction({ kind: 'standard', aye: true, balance: 1n }), true);
+  assert.equal(acceptsConviction({ kind: 'split', aye: 1n, nay: 1n }), false);
+  assert.equal(acceptsConviction({ kind: 'split-abstain', aye: 1n, nay: 1n, abstain: 1n }), false);
 });
