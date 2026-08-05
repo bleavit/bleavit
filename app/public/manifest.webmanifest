@@ -1,0 +1,12 @@
+{
+  "name": "Bleavit",
+  "short_name": "Bleavit",
+  "description": "Futarchy-governed conditional markets. Runs an in-browser light client; no application backend.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#101014",
+  "theme_color": "#101014",
+  "orientation": "any",
+  "icons": []
+}

@@ -1,0 +1,7 @@
+{
+  "_doc": "The incumbent production release's emitted connect-src allowlist — the baseline for 15 §4.8's build-time diff. `release:check` fails on any origin the build emits that is absent here.",
+  "_why_committed": "So that adding an entry is a reviewable diff to this file as well as to release-sources.json. It makes an addition visible, not impossible — nothing mechanical distinguishes an ar.io gateway from a vendor endpoint dressed as one, which is why D-21 states the rule in prose and this gate only forces someone to write the addition down.",
+  "_incumbent_release": null,
+  "_incumbent_note": "null while no release has shipped. The first production release sets this to its own version and its own emitted list; until then the baseline is the empty allowlist, which is also what the build emits.",
+  "allowlist": []
+}

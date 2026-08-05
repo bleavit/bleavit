@@ -442,6 +442,15 @@ importers:
         specifier: workspace:*
         version: link:../../packages/receipts
 
+  tests/release:
+    dependencies:
+      '@bleavit/platform':
+        specifier: workspace:*
+        version: link:../../packages/platform
+      '@bleavit/verify':
+        specifier: workspace:*
+        version: link:../../packages/verify
+
   tests/screens:
     dependencies:
       '@bleavit/application':

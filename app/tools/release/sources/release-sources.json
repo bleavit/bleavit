@@ -1,0 +1,33 @@
+{
+  "_doc": "Declared release sources — 12 §1.1, §5.1, F11. Every emitted connect-src entry is derived from this file plus the artifacts it names; nothing is added to the policy by hand. See app/tools/release/README.md.",
+  "_phase_gate": "Pre-genesis. The bootnode program has no seated operators, no production chain spec exists, and no ar.io gateway fallback set has been chosen — so the emitted connect-src is 'none' and `release:check --production` refuses this tree. Each empty section below is a named readiness blocker, not a default.",
+  "connectSrc": {
+    "bootnodeManifests": [
+      "deploy/chain-specs/bootnodes.paseo.json",
+      "deploy/chain-specs/bootnodes.polkadot.json"
+    ],
+    "chainSpecs": [],
+    "gateways": [],
+    "providers": [],
+    "rpcFallbacks": []
+  },
+  "chainIdentity": {
+    "_doc": "INV-FE-11's pin set (10 §5.4, 02 §8). These are the only chain-shaped values legitimately compiled into the bundle: they are used to *verify* the chain, not to parameterise it. A null is a readiness blocker, never a default — a bundle that shipped a null genesis pin would run `verifyChainIdentity` against nothing and report `verified`.",
+    "ss58Prefix": 7777,
+    "paraId": null,
+    "_paraId_gate": "02 §8: assigned at onboarding; test fixtures use 4242. A fixture value must never ship as a release pin.",
+    "decimals": { "VIT": 12, "USDC": 6 },
+    "chainSpecHashes": { "relay": null, "para": null },
+    "genesisHashes": { "relay": null, "para": null },
+    "_hash_gate": "Pre-genesis. No production chain exists, so no genesis hash and no production chain spec exist to hash. deploy/chain-specs/out/ currently holds dev/local specs only."
+  },
+  "signing": {
+    "_doc": "12 §1.4's release-signature floor: at least two valid signatures from distinct active keys of the current keyring generation. Declared here so a release cannot be assembled against a keyring that could never satisfy the floor.",
+    "keyringGeneration": null,
+    "keyIds": [],
+    "_gate": "No key ceremony has been held (12 §2.1). Key architecture, ceremony and the signer registry are F13."
+  },
+  "_providers_note": "10 §8.1 — strictly opt-in, empty by default. An entry here is a host the shipped bundle may reach; it is not a provider the app uses unless the vetted provider registry also lists it.",
+  "_rpc_note": "10 §4.5 — the optional WS-RPC fallback. Release-listed only: meta-CSP is fixed at build time, so a user-supplied endpoint outside this list cannot be reached (12 §5.1's accepted cost).",
+  "_vendor_rule": "D-21, 12 §5.1: an external-tool vendor host MUST NOT appear in any section of this file. The handoff transports are files, the clipboard and the share sheet — none of which is a fetch — and the vendor list ships inside the signed release rather than being fetched."
+}
