@@ -35,14 +35,66 @@ import {
   quoteSell,
   toRaw,
 } from '@bleavit/protocol';
+import type { BookState, QuoteView } from '@bleavit/protocol';
 
-import { catchThrown } from './corpus.js';
+import { catchThrown } from './corpus.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const FIXTURE_PATH = resolve(here, '../../../crates/market-core/fixtures/chain-quote-agreement.json');
 
-function loadFixture() {
-  let text;
+/**
+ * One column's outcome: the runtime either priced the trade or refused it.
+ *
+ * A union rather than one interface with everything optional, because the two
+ * arms share no field and the suite's control flow turns on exactly that. The
+ * priced arm carries `error?: undefined` as its discriminant — the fixture has
+ * no tag field, so the *absence* of `error` is the tag, and declaring it this
+ * way is what makes `expected.error !== undefined` narrow to the refused arm
+ * (and its `else` to the priced one) instead of leaving both fields to be read
+ * off a type that may not have them.
+ */
+interface PricedOutcome {
+  cost: string;
+  fee: string;
+  p_after_1e9: string;
+  max_trade: string;
+  within_domain: boolean;
+  error?: undefined;
+}
+
+interface RefusedOutcome {
+  error: string;
+}
+
+type ColumnOutcome = PricedOutcome | RefusedOutcome;
+
+/** The four `TradeSide` column keys, as the Rust writer names them. */
+type ColumnKey = 'buy_long' | 'buy_short' | 'sell_long' | 'sell_short';
+
+type FixtureCase = {
+  name: string;
+  q_long: string;
+  q_short: string;
+  b: string;
+  amount: string;
+  /** `null` where the case refuses before a raw kernel value exists. */
+  cost_raw_64x64: string | null;
+  price_long_raw_64x64: string | null;
+} & { [K in ColumnKey]: ColumnOutcome };
+
+interface QuoteFixture {
+  schema: string;
+  fee_bps: string;
+  trade_bounds: {
+    min_trade: string;
+    max_trade_numerator: string;
+    max_trade_denominator: string;
+  };
+  cases: FixtureCase[];
+}
+
+function loadFixture(): QuoteFixture {
+  let text: string;
   try {
     text = readFileSync(FIXTURE_PATH, 'utf8');
   } catch (cause) {
@@ -54,7 +106,7 @@ function loadFixture() {
   }
   // Every number in this file is a string by construction — see the Rust
   // module header — so a plain parse is exact and no reviver is needed.
-  const fixture = JSON.parse(text);
+  const fixture = JSON.parse(text) as QuoteFixture;
   if (fixture.schema !== 'bleavit.chain-quote-agreement.v1') {
     throw new Error(`unexpected fixture schema ${fixture.schema}`);
   }
@@ -69,8 +121,18 @@ const BOUNDS = {
   maxTradeDenominator: BigInt(fixture.trade_bounds.max_trade_denominator),
 };
 
-/** The four `TradeSide` columns, mapped onto this package's two entry points. */
-const COLUMNS = [
+/**
+ * The four `TradeSide` columns, mapped onto this package's two entry points.
+ *
+ * `run` is declared to return `QuoteView` — the five fields the fixture states —
+ * rather than the wider `BuyQuote`/`SellQuote`. The two differ in their last
+ * field (`total` on a buy, `net` on a sell), so a common type over both is what
+ * lets the loop below compare all four columns the same way.
+ */
+const COLUMNS: ReadonlyArray<{
+  key: ColumnKey;
+  run: (book: BookState, amount: bigint) => QuoteView;
+}> = [
   { key: 'buy_long', run: (book, amount) => quoteBuy(book, 'long', amount, FEE_BPS, BOUNDS) },
   { key: 'buy_short', run: (book, amount) => quoteBuy(book, 'short', amount, FEE_BPS, BOUNDS) },
   { key: 'sell_long', run: (book, amount) => quoteSell(book, 'long', amount, FEE_BPS, BOUNDS) },

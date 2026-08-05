@@ -35,7 +35,9 @@ import {
   windowStaleEvents,
 } from '@bleavit/protocol';
 
-import { decimalToRational, loadCorpus } from './corpus.js';
+import type { ObservationOutcome, ObservationState } from '@bleavit/protocol';
+
+import { decimalToRational, loadCorpus, twapScenario } from './corpus.ts';
 
 const corpus = loadCorpus();
 
@@ -46,8 +48,34 @@ const LAUNCH_PARAMS = {
   staleGapBlocks: 50n,
 };
 
+/**
+ * The observation an attempt recorded, or a failure naming where it did not.
+ *
+ * `observe` returns `recorded: undefined` for an attempt that arrived before the
+ * interval elapsed — the runtime's own no-op — so the field is legitimately
+ * optional and every read of it has to say what it expects.
+ *
+ * This replaced `assert.notEqual(outcome.recorded, undefined)` followed by a use
+ * of the field. That reads like a guard and is not one: `notEqual` carries no
+ * assertion signature, so nothing downstream was narrowed, and the comparison
+ * that followed would have run `undefined >= low` — which is `false` in
+ * JavaScript rather than an error, so the *next* assertion would have reported a
+ * band violation for an observation that was never recorded at all.
+ */
+function recordedAt(outcome: ObservationOutcome, where: string): bigint {
+  assert.ok(outcome.recorded !== undefined, `no observation recorded at ${where}`);
+  return outcome.recorded;
+}
+
+/** A checkpointed accumulator value, or a failure naming the block that has none. */
+function checkpoint(checkpoints: ReadonlyMap<bigint, bigint>, block: bigint): bigint {
+  const value = checkpoints.get(block);
+  assert.ok(value !== undefined, `no accumulator checkpoint at block ${block}`);
+  return value;
+}
+
 /** A decimal price string on the 1e9 grid, exactly. */
-function gridFromDecimal(text) {
+function gridFromDecimal(text: string): bigint {
   const { numerator, denominator } = decimalToRational(text);
   assert.equal(
     (numerator * PRICE_ONE_1E9) % denominator,
@@ -63,7 +91,12 @@ function gridFromDecimal(text) {
  * `side` is which way the inward rounding must go: `'below'` for an upper bound
  * (rounds down), `'above'` for a lower bound (rounds up).
  */
-function assertInsideExact(gridValue, exactText, side, what) {
+function assertInsideExact(
+  gridValue: bigint,
+  exactText: string,
+  side: 'below' | 'above',
+  what: string,
+): void {
   const { numerator, denominator } = decimalToRational(exactText);
   const scaledExact = numerator * PRICE_ONE_1E9; // exact × 1e9 × denominator
   const scaledGrid = gridValue * denominator;
@@ -82,7 +115,7 @@ function assertInsideExact(gridValue, exactText, side, what) {
   }
 }
 
-function initialState(initialPrice1e9, quote1e9) {
+function initialState(initialPrice1e9: bigint, quote1e9: bigint): ObservationState {
   return {
     lastQuote1e9: quote1e9,
     lastObservation1e9: initialPrice1e9,
@@ -98,19 +131,20 @@ test('the TWAP corpus rows are present', () => {
 });
 
 test('corpus `backward_weighted_mean` — two clamped observations and their window means', () => {
-  const scenario = corpus.twap_scenarios.find((row) => row.name === 'backward_weighted_mean');
-  assert.ok(scenario, 'the backward_weighted_mean scenario is missing');
+  const scenario = twapScenario(corpus, 'backward_weighted_mean');
+
+  const first = scenario.inputs.observations[0];
+  assert.ok(first, 'the backward_weighted_mean scenario records no observations');
 
   const initial = gridFromDecimal(scenario.inputs.initial);
-  const quote = gridFromDecimal(scenario.inputs.observations[0].previous_quote);
+  const quote = gridFromDecimal(first.previous_quote);
   let state = initialState(initial, quote);
 
-  const recorded = [];
-  const checkpoints = new Map([[0n, 0n]]);
+  const recorded: bigint[] = [];
+  const checkpoints = new Map<bigint, bigint>([[0n, 0n]]);
   for (const step of scenario.inputs.observations) {
     const outcome = observe(state, LAUNCH_PARAMS, BigInt(step.block));
-    assert.notEqual(outcome.recorded, undefined, `no observation recorded at block ${step.block}`);
-    recorded.push(outcome.recorded);
+    recorded.push(recordedAt(outcome, `block ${step.block}`));
     state = outcome.state;
     checkpoints.set(BigInt(step.block), state.cumulativePriceBlocks);
   }
@@ -122,31 +156,34 @@ test('corpus `backward_weighted_mean` — two clamped observations and their win
   assert.equal(state.staleEvents, scenario.stale_events);
 
   assert.equal(
-    twapBetween(checkpoints.get(0n), checkpoints.get(20n), 20n),
+    twapBetween(checkpoint(checkpoints, 0n), checkpoint(checkpoints, 20n), 20n),
     gridFromDecimal(scenario.mean_0_20),
   );
   assert.equal(
-    twapBetween(checkpoints.get(10n), checkpoints.get(20n), 10n),
+    twapBetween(checkpoint(checkpoints, 10n), checkpoint(checkpoints, 20n), 10n),
     gridFromDecimal(scenario.mean_10_20),
   );
 });
 
 test('corpus `stale_gap_accounting` — a 60-block gap widens the band by six intervals', () => {
-  const scenario = corpus.twap_scenarios.find((row) => row.name === 'stale_gap_accounting');
-  assert.ok(scenario, 'the stale_gap_accounting scenario is missing');
+  const scenario = twapScenario(corpus, 'stale_gap_accounting');
 
   const initial = gridFromDecimal('0.500'); // the generator's accumulator start
   const quote = gridFromDecimal(scenario.inputs.previous_quote);
   const outcome = observe(initialState(initial, quote), LAUNCH_PARAMS, BigInt(scenario.inputs.block));
 
-  assert.notEqual(outcome.recorded, undefined);
   assert.equal(outcome.state.staleEvents, scenario.stale_events);
 
   // The quote is above the band, so the recorded value IS the upper bound —
   // which rounds down. It must therefore sit just below the corpus's exact
   // value, and by less than one grid step. This is the I-13 direction, and it
   // is the assertion an equality-with-tolerance would have thrown away.
-  assertInsideExact(outcome.recorded, scenario.recorded, 'below', 'stale-gap upper clamp');
+  assertInsideExact(
+    recordedAt(outcome, `block ${scenario.inputs.block}`),
+    scenario.recorded,
+    'below',
+    'stale-gap upper clamp',
+  );
 
   // Six whole intervals, floored — 04 §7's `k = max(1, ⌊Δ/interval⌋)`.
   assert.equal(intervalsElapsed(60n, LAUNCH_PARAMS.obsIntervalBlocks), 6n);
@@ -210,10 +247,10 @@ test('a recorded observation never moves further than the band allows', () => {
       const previous = state.lastObservation1e9;
       const { low, high } = slewBounds(previous, LAUNCH_PARAMS.kappa1e9, 1n);
       const outcome = observe(state, LAUNCH_PARAMS, step * LAUNCH_PARAMS.obsIntervalBlocks);
-      assert.notEqual(outcome.recorded, undefined);
+      const observed = recordedAt(outcome, `step ${step}`);
       assert.ok(
-        outcome.recorded >= low && outcome.recorded <= high,
-        `observation ${outcome.recorded} escaped [${low}, ${high}]`,
+        observed >= low && observed <= high,
+        `observation ${observed} escaped [${low}, ${high}]`,
       );
       state = outcome.state;
     }
@@ -296,7 +333,7 @@ test('the accumulator weights each observation backward over the interval it end
   const second = observe(state, LAUNCH_PARAMS, 20n);
   assert.equal(
     second.state.cumulativePriceBlocks - first.state.cumulativePriceBlocks,
-    second.recorded * 10n,
+    recordedAt(second, 'block 20') * 10n,
   );
 
   // And the mean over a window of one constant value is that value.

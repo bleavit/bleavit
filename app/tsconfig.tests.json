@@ -17,6 +17,12 @@
   // `tests/firewall/fixtures/` is excluded and must stay excluded: those files are the
   // negative-compilation corpus and are *required* to fail `tsc`. They are compiled one at a
   // time by `firewall.test.ts`, each against its declared `// expect-error: TSxxxx`.
+  // `allowImportingTsExtensions` is required, not stylistic. Node 22.18 runs these files by
+  // stripping types and resolves the specifier **literally** — measured: importing
+  // `./corpus.js` from a `.ts` file is `ERR_MODULE_NOT_FOUND`, since nothing rewrites the
+  // extension. So a helper module must be imported as `./corpus.ts`, which TypeScript admits
+  // only under this flag (TS5097). It requires `noEmit`, which is set below and is what this
+  // project is for; the emitting build graph in `tsconfig.json` never compiles `tests/`.
   "extends": "./tsconfig.base.json",
   "compilerOptions": {
     "composite": false,
@@ -24,6 +30,7 @@
     "declarationMap": false,
     "sourceMap": false,
     "noEmit": true,
+    "allowImportingTsExtensions": true,
     "types": ["node"]
   },
   "include": [
@@ -33,7 +40,8 @@
     "tests/mock-runtime/**/*.ts",
     "tests/contexts/**/*.ts",
     "tests/receipts/**/*.ts",
-    "tests/ui/**/*.ts"
+    "tests/ui/**/*.ts",
+    "tests/protocol/**/*.ts"
   ],
   "exclude": ["**/node_modules/**", "**/dist/**", "tests/firewall/fixtures/**"]
 }
