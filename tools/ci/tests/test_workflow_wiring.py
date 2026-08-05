@@ -60,10 +60,16 @@ UNWIRED_BY_DESIGN = {
     "skills:generate": _REGENERATOR,
 }
 
-# `pnpm run <script>` anywhere in a step body, not just on its first line: a `run: |`
-# block invoking four suites is four gates, and reading only the first would exempt the
-# other three from both directions of this check.
-_PNPM_RUN = re.compile(r"^\s*pnpm run ([A-Za-z0-9:_-]+)", re.MULTILINE)
+# **Every** `pnpm run <script>` in a step body — not the first, and not one per line.
+#
+# Both narrower versions were written and both were wrong, in the same way the gate below
+# exists to catch. Matching only a step's opening command missed the other three suites in
+# a `run: |` block; anchoring per line then missed the second half of
+# `pnpm run check:chain-literals && pnpm run check:chain-literals:witness`, and reported
+# three *wired* witness legs as unwired. A parser that sees less than the shell does will
+# either miss a gate or invent one, and a checker that cries wolf gets switched off as
+# surely as one that never fires.
+_PNPM_RUN = re.compile(r"pnpm run ([A-Za-z0-9:_-]+)")
 
 
 def load(name: str) -> dict:

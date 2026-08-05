@@ -59,6 +59,9 @@
       "path": "packages/verify"
     },
     {
+      "path": "src/application"
+    },
+    {
       "path": "src/features/analysis"
     },
     {

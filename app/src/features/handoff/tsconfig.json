@@ -5,29 +5,33 @@
     "rootDir": "src"
   },
   "include": [
-    "src/**/*.ts"
+    "src/**/*.ts",
+    "src/**/*.tsx"
   ],
   "references": [
     {
-      "path": "../../../packages/shared-types"
-    },
-    {
       "path": "../../../packages/chain-client"
-    },
-    {
-      "path": "../../../packages/protocol"
     },
     {
       "path": "../../../packages/contexts"
     },
     {
+      "path": "../../../packages/handoff-envelope"
+    },
+    {
       "path": "../../../packages/intents"
+    },
+    {
+      "path": "../../../packages/llm-handoff"
+    },
+    {
+      "path": "../../../packages/protocol"
     },
     {
       "path": "../../../packages/receipts"
     },
     {
-      "path": "../../../packages/llm-handoff"
+      "path": "../../../packages/shared-types"
     },
     {
       "path": "../../../packages/ui"

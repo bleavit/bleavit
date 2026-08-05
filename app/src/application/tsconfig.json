@@ -1,0 +1,37 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src"
+  },
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.tsx"
+  ],
+  "references": [
+    {
+      "path": "../../packages/chain-client"
+    },
+    {
+      "path": "../../packages/platform"
+    },
+    {
+      "path": "../../packages/shared-types"
+    },
+    {
+      "path": "../../packages/ui"
+    },
+    {
+      "path": "../../packages/verify"
+    },
+    {
+      "path": "../features/analysis"
+    },
+    {
+      "path": "../features/handoff"
+    },
+    {
+      "path": "../features/tx"
+    }
+  ]
+}
