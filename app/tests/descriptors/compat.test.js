@@ -14,6 +14,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
@@ -43,6 +44,34 @@ const MANIFEST = JSON.parse(
 
 const allPass = (surface = CRITICAL_SURFACE) =>
   surface.map((e) => ({ id: e.id, compatible: true, level: 'identical' }));
+
+
+/**
+ * Compile a types-only module under this suite and report the outcome.
+ *
+ * Flags mirror `tsconfig.base.json`'s strictness for the properties that matter here.
+ * `skipLibCheck` is on, as it is everywhere in this workspace — it skips checking
+ * declaration files' *internals*, not the assignment being asserted, which is in our own
+ * source. The witness is what proves that distinction holds.
+ */
+function compileTypes(relative) {
+  const tsc = resolve(dirname(fileURLToPath(import.meta.url)), '../../node_modules/.bin/tsc');
+  try {
+    execFileSync(
+      tsc,
+      [
+        join(dirname(fileURLToPath(import.meta.url)), relative),
+        '--noEmit', '--strict',
+        '--target', 'ES2022', '--module', 'ESNext',
+        '--moduleResolution', 'Bundler', '--skipLibCheck',
+      ],
+      { cwd: dirname(fileURLToPath(import.meta.url)), stdio: 'pipe', encoding: 'utf8' },
+    );
+    return { ok: true, output: '' };
+  } catch (err) {
+    return { ok: false, output: `${err.stdout ?? ''}${err.stderr ?? ''}` };
+  }
+}
 
 test('CRITICAL_SURFACE covers the manifest exactly, minus what cannot be probed', () => {
   // A whitelist is not a surface check (F2, Decision-log D7): a generated list that
@@ -262,4 +291,25 @@ test('the probe asks PAPI with no threshold argument', () => {
   probeCriticalSurface(surface);
   assert.ok(seen.length > 0, 'no helper was consulted — this test would be vacuous');
   assert.deepEqual([...new Set(seen)], [0], 'the probe passed a threshold argument');
+});
+
+test('the probe’s structural shapes are assignable from PAPI’s real ones (F4)', () => {
+  // The last F4 item, and it sat open on a wrong premise: `probe.ts` said there was no
+  // equivalent of `light-client.ts`'s binding "because nothing constructs a `TypedApi`
+  // until F6 wires `createClient`". Assignability is a COMPILE-TIME relation — nothing has
+  // to be constructed and no client has to exist.
+  //
+  // `types/papi-shapes.ts` is types-only and emits nothing; compiling it IS the assertion.
+  // It must SUCCEED, which makes this a positive control: a toolchain that cannot compile
+  // anything fails here rather than agreeing silently.
+  const { ok, output } = compileTypes('types/papi-shapes.ts');
+  assert.equal(ok, true, `the probe's shapes no longer match PAPI 2.1.8's:\n${output}`);
+});
+
+test('the binding can fail — a divergent shape is rejected', () => {
+  // Anti-vacuity. Without this, "it compiled" is equally consistent with the file having
+  // been silently emptied, or with `skipLibCheck` swallowing the comparison.
+  const { ok, output } = compileTypes('types/papi-shapes-witness.ts');
+  assert.equal(ok, false, 'a deliberately wrong shape compiled — the binding proves nothing');
+  assert.match(output, /TS2(322|345|739|741)/, output);
 });

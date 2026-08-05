@@ -24,6 +24,7 @@
 import type { FinalizedBlockRef } from '@bleavit/chain-client';
 import type { HexString } from '@bleavit/shared-types';
 import type { PreconditionResult } from './preconditions.js';
+import type { PreconditionRowId } from './rows.js';
 
 /** 11 §11.3's lifecycle. `Finalized` is the only success state. */
 export type TxState =
@@ -53,6 +54,14 @@ export interface TxPreparation {
   readonly builtFor: BuiltFor;
   /** The block the preparation was assembled at (B). B′ is taken by the refresh. */
   readonly preparedAt: FinalizedBlockRef;
+  /**
+   * The `P-n` rows this call declares — 11 §11.5–§11.9.
+   *
+   * Required, and required to be **non-empty**. Without it the gate has no way to tell
+   * "every precondition holds" from "nobody read one", and those are the same value:
+   * `results.filter(r => !r.ok)` over an empty array is empty. See `gate`.
+   */
+  readonly requires: readonly PreconditionRowId[];
 }
 
 declare const GATE_PASSED: unique symbol;
@@ -154,6 +163,31 @@ export function gate(
       detail: `${failed.length} precondition(s) no longer hold at the finalized block just read.`,
     };
   }
+  // **A gate over zero reads certifies nothing, and certified `proceed` anyway.**
+  // Every check below is a filter over `results`, and every filter over an empty array is
+  // empty — so `gate(prep, at, live, [])` reached `AwaitingSignature` having read nothing.
+  // That is the same "passes by shrinking" defect the descriptor classifier refuses
+  // (`ProbeCoverageError`) and the one INV-FE-2 exists to prevent, in the one place it
+  // matters most: the only edge to a signer. The gate therefore compares what was read
+  // against what the preparation **declares** it must read, and a declared row with no
+  // result blocks — it is not evidence of anything, least of all of its own absence.
+  const covered = new Set(results.map((r) => r.id));
+  const uncovered = prep.requires.filter((row) => !covered.has(row));
+  if (prep.requires.length === 0 || uncovered.length > 0) {
+    return {
+      kind: 'blocked',
+      code: 'FE-TX-004',
+      at,
+      failed: [],
+      detail:
+        prep.requires.length === 0
+          ? 'this preparation declares no precondition rows, so the gate has nothing to verify ' +
+            'and cannot authorise a signature (11 §11.5 gives every call at least one row).'
+          : `${uncovered.length} declared precondition row(s) were never read at this block ` +
+            `(${uncovered.join(', ')}). An unread row is not a passing one.`,
+    };
+  }
+
   const mixed = results.filter((r) => r.at.blockHash !== at.blockHash);
   if (mixed.length > 0) {
     // Not a precondition failure — a defect in how the batch was read. Passing it would
@@ -242,10 +276,26 @@ export function txTransitionEdges(): readonly (readonly [TxState, TxState])[] {
     scaleHex: '0x00',
     builtFor: { specVersion: 1, metadataHash: '0x00' },
     preparedAt: { blockHash: `0x${'00'.repeat(32)}` as HexString, blockNumber: 0 },
+    requires: ['P-1'],
   };
   const pin: FinalizedBlockRef = { blockHash: `0x${'11'.repeat(32)}` as HexString, blockNumber: 1 };
-  const proceed = gate(prep, pin, prep.builtFor, []);
-  const blocked = gate(prep, pin, { specVersion: 2, metadataHash: '0x00' }, []);
+  // The passing gate has to be built from a **covered** row now, and that is the point of
+  // the change rather than a cost of it: this enumerator previously minted its `proceed`
+  // from `gate(prep, pin, prep.builtFor, [])` — an empty read set — which is exactly the
+  // bypass it exists to prove does not exist. An edge enumerator that reaches
+  // `AwaitingSignature` through a gate that read nothing enumerates a machine nobody ships.
+  const passing: readonly PreconditionResult[] = [
+    {
+      id: 'P-1',
+      ok: true,
+      requirement: 'the enumerator\'s stand-in row',
+      expected: 'ok',
+      actual: 'ok',
+      at: pin,
+    },
+  ];
+  const proceed = gate(prep, pin, prep.builtFor, passing);
+  const blocked = gate(prep, pin, { specVersion: 2, metadataHash: '0x00' }, passing);
 
   const states: TxState[] = [
     'Draft', 'Prepared', 'Refreshing', 'Blocked', 'AwaitingSignature',

@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bleavit.org/schemas/bleavit.context.v1.schema.json",
+  "title": "bleavit.context.v1",
+  "description": "A user's verified view of the chain at one finalized block, limited to what they agreed to share for this export (10 §13.1; 11 §11.14.4).\n\nExport only. Bleavit never reads one back in — the only inbound format is bleavit.intent.v1, and it carries no chain state at all.\n\nAbsence is meaningful: a field missing from `scope.included` was not shared, and a field named in `scope.included` is present even when empty. An empty array means \"none exist\"; an absent key means \"not shared\".",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "bleavit.context.v1"
+    },
+    "binding": {
+      "type": "object",
+      "description": "The chain binding (10 §13.1). Gated on the live chain by exact equality — a schema cannot check that, so a valid binding here is not an admitted one.",
+      "properties": {
+        "genesisHash": {
+          "type": "string",
+          "pattern": "^0x[0-9a-fA-F]{64}$",
+          "description": "Genesis hash of the chain this document was prepared against."
+        },
+        "specVersion": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295,
+          "description": "The runtime spec_version. A NEWER one than the client is refused; an older one is rebuilt."
+        },
+        "contractVersion": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295,
+          "description": "INTEGRATION_CONTRACT_VERSION, as the producing client reported it."
+        }
+      },
+      "required": [
+        "genesisHash",
+        "specVersion",
+        "contractVersion"
+      ],
+      "additionalProperties": false
+    },
+    "anchor": {
+      "type": "object",
+      "description": "The finalized block every value here was read at. Re-read it to check any of them.",
+      "properties": {
+        "blockHash": {
+          "type": "string",
+          "pattern": "^0x[0-9a-fA-F]{64}$"
+        },
+        "blockNumber": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295,
+          "description": "The finalized block this was read at."
+        }
+      },
+      "required": [
+        "blockHash",
+        "blockNumber"
+      ],
+      "additionalProperties": false
+    },
+    "scope": {
+      "type": "object",
+      "description": "What the user consented to share, this time. Consent is per export and never inherited (11 §11.14.4).",
+      "properties": {
+        "included": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "pseudonymized": {
+          "type": "boolean",
+          "description": "When true the address is withheld. It does NOT hide the holdings, which remain a fingerprint — what pseudonymization removes is linkage, not content."
+        }
+      },
+      "required": [
+        "included",
+        "pseudonymized"
+      ],
+      "additionalProperties": false
+    },
+    "positions": {
+      "type": "object",
+      "description": "Holdings, keyed by ledger domain. There is no combined field, deliberately: solvency holds per instance against its own sovereign account, so a merged total would assert one backing pool where there are two (11 §11.2a rule 2).",
+      "properties": {
+        "primary": {
+          "type": "array"
+        },
+        "service": {
+          "type": "array"
+        }
+      },
+      "required": [
+        "primary",
+        "service"
+      ],
+      "additionalProperties": false
+    }
+  },
+  "required": [
+    "schema",
+    "binding",
+    "anchor",
+    "scope"
+  ],
+  "additionalProperties": true
+}

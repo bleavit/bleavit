@@ -475,3 +475,64 @@ test('V-95: the block-number cache is evicted with the pin it belongs to', async
     `the header cache grew with the chain: ${connection.headerCacheCountForTest()} entries after 19 blocks`,
   );
 });
+
+test('onFinalized emits EVERY hash in a multi-block finalization, in order', async () => {
+  // `finalizedBlockHashes` is an array because several blocks can finalize at once, and the
+  // connection keeps only `.at(-1)` for its own head. That is right for "where is the chain
+  // now" and wrong for anything that has to see each block: an ingestion consumer built on
+  // the head alone skips every intermediate block, and the local index would then show
+  // coverage holes constantly under entirely normal operation — a gap indicator that is
+  // always on tells a user nothing.
+  const mock = runtime();
+  const { provider, state } = recordedProvider(mock);
+  const connection = await ChainHeadConnection.open(provider);
+
+  const seen = [];
+  const unsubscribe = connection.onFinalized((hash) => seen.push(hash));
+
+  const a = `0x${'a1'.repeat(32)}`;
+  const b = `0x${'b2'.repeat(32)}`;
+  const c = `0x${'c3'.repeat(32)}`;
+  state.followEvent({ event: 'finalized', finalizedBlockHashes: [a, b, c], prunedBlockHashes: [] });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.deepEqual(seen, [a, b, c], 'all three, in the order the node reported them');
+
+  // ...and the head is still the last one, so the two notions stay separate.
+  const head = await connection.pinnedBlock().catch(() => undefined);
+  assert.ok(head === undefined || head.blockHash === c);
+
+  // Unsubscribing really stops delivery — a listener that outlives its owner would keep a
+  // dead consumer's closure alive for the life of the connection.
+  unsubscribe();
+  state.followEvent({ event: 'finalized', finalizedBlockHashes: [`0x${'d4'.repeat(32)}`], prunedBlockHashes: [] });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(seen.length, 3, 'no delivery after unsubscribe');
+
+  connection.close();
+});
+
+test('a finalized hash is emitted while it is still pinned', async () => {
+  // The one ordering requirement that is real: emission after `#announcePinned`, so a
+  // listener that immediately reads at the hash it was handed finds it pinned.
+  //
+  // What this deliberately does NOT claim — an earlier draft of the comment beside the
+  // emission did — is that emission must precede the unpin. `#unpin` takes
+  // `prunedBlockHashes`, a set disjoint from the finalized ones, so no ordering between the
+  // two can hand a listener a released hash. Stating it would be a reassurance with nothing
+  // behind it.
+  const mock = runtime();
+  const { provider, state } = recordedProvider(mock);
+  const connection = await ChainHeadConnection.open(provider);
+
+  const pinnedWhenSeen = [];
+  connection.onFinalized(() => pinnedWhenSeen.push(connection.pinnedCountForTest()));
+
+  const a = `0x${'e5'.repeat(32)}`;
+  state.followEvent({ event: 'finalized', finalizedBlockHashes: [a], prunedBlockHashes: [] });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(pinnedWhenSeen.length, 1);
+  assert.ok(pinnedWhenSeen[0] > 0, 'the hash was announced-and-pinned before the listener ran');
+  connection.close();
+});

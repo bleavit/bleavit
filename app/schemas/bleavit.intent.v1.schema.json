@@ -1,0 +1,172 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bleavit.org/schemas/bleavit.intent.v1.schema.json",
+  "title": "bleavit.intent.v1",
+  "description": "A proposed action handed to Bleavit by an external tool (10 §13.2; D-21).\n\nValidating against this schema means the document is WELL FORMED. It does not mean it will be admitted: the digest must match the document, the binding must equal the live chain, the deadline is compared against the chain clock, and every limit is re-derived at a fresh block. Those are chain reads, and no schema performs one (11 §11.14.1).\n\nThe document carries no encoded call, no bytes-typed field, and no free text — by design, in both directions (10 §13).",
+  "type": "object",
+  "properties": {
+    "schema": {
+      "const": "bleavit.intent.v1",
+      "description": "Validated by exact equality."
+    },
+    "binding": {
+      "type": "object",
+      "description": "The chain binding (10 §13.1). Gated on the live chain by exact equality — a schema cannot check that, so a valid binding here is not an admitted one.",
+      "properties": {
+        "genesisHash": {
+          "type": "string",
+          "pattern": "^0x[0-9a-fA-F]{64}$",
+          "description": "Genesis hash of the chain this document was prepared against."
+        },
+        "specVersion": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295,
+          "description": "The runtime spec_version. A NEWER one than the client is refused; an older one is rebuilt."
+        },
+        "contractVersion": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295,
+          "description": "INTEGRATION_CONTRACT_VERSION, as the producing client reported it."
+        }
+      },
+      "required": [
+        "genesisHash",
+        "specVersion",
+        "contractVersion"
+      ],
+      "additionalProperties": false
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "SHA-256 over the document's core projection under a NUL-terminated domain tag, as 64 lowercase hex characters. An integrity check against truncation and transcription damage — it AUTHENTICATES NOTHING (10 §13.1)."
+    }
+  },
+  "required": [
+    "schema",
+    "binding",
+    "action",
+    "limits",
+    "digest"
+  ],
+  "additionalProperties": true,
+  "oneOf": [
+    {
+      "title": "prepare a position",
+      "properties": {
+        "action": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": [
+                "prepare_pass_position",
+                "prepare_fail_position"
+              ]
+            },
+            "id": {
+              "type": "string",
+              "pattern": "^(?:0|[1-9][0-9]*)$",
+              "description": "The target's u64 chain id, as a decimal string. The client re-reads what it resolves to and renders that beside it (11 §11.14.4) — id substitution is the sharpest attack this format admits."
+            },
+            "collateral": {
+              "type": "string",
+              "pattern": "^(?:0|[1-9][0-9]*)$",
+              "description": "How much collateral to spend, in base units. A canonical decimal string for a u128 — no sign, no leading zeros, no exponent. It is a string because base units run past 2^53 and JSON.parse corrupts a larger number silently."
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "collateral"
+          ],
+          "additionalProperties": false
+        },
+        "limits": {
+          "type": "object",
+          "description": "A prepare buys, so it states a cost ceiling and never a proceeds floor. The client narrows it against its own recomputed cost and never widens it (11 §11.14.3).",
+          "properties": {
+            "maxCost": {
+              "type": "string",
+              "pattern": "^(?:0|[1-9][0-9]*)$",
+              "description": "The most the producer wants spent, in collateral base units. A canonical decimal string for a u128 — no sign, no leading zeros, no exponent. It is a string because base units run past 2^53 and JSON.parse corrupts a larger number silently."
+            },
+            "deadlineBlock": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295,
+              "description": "A block height after which the request is stale. Compared against B′, the CHAIN clock, never a device clock — so a schema cannot tell you whether it has passed."
+            }
+          },
+          "required": [
+            "maxCost"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "action",
+        "limits"
+      ]
+    },
+    {
+      "title": "close a fraction of a position",
+      "properties": {
+        "action": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "enum": [
+                "close_position"
+              ]
+            },
+            "id": {
+              "type": "string",
+              "pattern": "^(?:0|[1-9][0-9]*)$",
+              "description": "The target's u64 chain id, as a decimal string. The client re-reads what it resolves to and renders that beside it (11 §11.14.4) — id substitution is the sharpest attack this format admits."
+            },
+            "fractionPpm": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1000000,
+              "description": "What fraction of the held position to close, in parts per million. A fraction rather than an amount because an absolute amount from a stale document can exceed the current holding or leave unredeemable dust (11 §11.14.2)."
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "fractionPpm"
+          ],
+          "additionalProperties": false
+        },
+        "limits": {
+          "type": "object",
+          "description": "A close sells, so it states a proceeds floor and never a cost ceiling. The client raises it and never lowers it (11 §11.14.3).",
+          "properties": {
+            "minProceeds": {
+              "type": "string",
+              "pattern": "^(?:0|[1-9][0-9]*)$",
+              "description": "The least the producer wants received, in base units. A canonical decimal string for a u128 — no sign, no leading zeros, no exponent. It is a string because base units run past 2^53 and JSON.parse corrupts a larger number silently."
+            },
+            "deadlineBlock": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 4294967295,
+              "description": "A block height after which the request is stale. Compared against B′, the CHAIN clock, never a device clock — so a schema cannot tell you whether it has passed."
+            }
+          },
+          "required": [
+            "minProceeds"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "action",
+        "limits"
+      ]
+    }
+  ],
+  "$comment": "Parser bounds, computed from 02-frozen type widths (10 §13.2): at most 3864 bytes of UTF-8, nesting at most 3 deep, and no object may repeat a key. Closed cores: binding, action, limits."
+}

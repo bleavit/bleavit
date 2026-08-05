@@ -12,6 +12,7 @@
  * would silently demote it. These rules keep failing in that case.
  */
 const { EXTERNAL, WORKSPACE_SUBPATH, POLKADOT_API_NON_SIGNER } = require('./tools/depcruise-external.cjs');
+const { HANDOFF_PATH, NON_LOCAL_DEPENDENCY_TYPES } = require('./tools/handoff-packages.cjs');
 
 module.exports = {
   forbidden: [
@@ -24,7 +25,7 @@ module.exports = {
         'transaction form state (INV-FE-3).',
       from: { path: '^src/features/tx/' },
       to: {
-        path: '^(src/features/(analysis|handoff)|packages/(providers|local-index|contexts|intents|receipts|llm-handoff))/',
+        path: '^(src/features/(analysis|handoff)|packages/(providers|local-index|contexts|handoff-envelope|intents|receipts|llm-handoff))/',
       },
     },
     {
@@ -34,7 +35,7 @@ module.exports = {
         '10 §10.1: `transaction-builder` and `signing` (the reviewed `wallet`) never ' +
         'import providers, the local index, or any handoff package.',
       from: { path: '^packages/(transaction-builder|signing)/' },
-      to: { path: '^packages/(providers|local-index|contexts|intents|receipts|llm-handoff)/' },
+      to: { path: '^packages/(providers|local-index|contexts|handoff-envelope|intents|receipts|llm-handoff)/' },
     },
     {
       name: 'handoff-never-reaches-a-signer',
@@ -43,7 +44,7 @@ module.exports = {
         '10 §10.1: the handoff packages may not reach `signing` or ' +
         '`transaction-builder`. The import path terminates in a TxPreparation ' +
         'entering Draft; it adds no edge to the tx machine (INV-FE-2).',
-      from: { path: '^packages/(contexts|intents|receipts|llm-handoff)/' },
+      from: { path: '^packages/(contexts|handoff-envelope|intents|receipts|llm-handoff)/' },
       to: { path: '^packages/(signing|transaction-builder|providers|local-index)/' },
     },
     {
@@ -117,6 +118,22 @@ module.exports = {
       to: { path: WORKSPACE_SUBPATH('@bleavit/signing/testing', 'packages/signing/dist/testing') },
     },
     {
+      name: 'no-range-minting-outside-ingest',
+      severity: 'error',
+      comment:
+        '10 §2.2/§6.3: an `origin ≠ self` range keeps its origin forever — there is no ' +
+        'promotion path. `selfRange` mints `origin: "self"` from three plain numbers, so any ' +
+        'package holding it can relabel provider data as light-client verified, which is that ' +
+        'promotion arriving through the front door. It is barred from the package barrel and ' +
+        'reachable only through `@bleavit/local-index/testing`; this makes that import fail in ' +
+        'production code. `providers` is the package that matters — it backfills from operator ' +
+        'endpoints, indexers and snapshots, and one call would launder any of it.',
+      from: { path: '^(src|packages)/', pathNot: '^tests/' },
+      to: {
+        path: WORKSPACE_SUBPATH('@bleavit/local-index/testing', 'packages/local-index/dist/testing'),
+      },
+    },
+    {
       name: 'no-mock-signer-in-the-bundle',
       severity: 'error',
       comment:
@@ -130,9 +147,33 @@ module.exports = {
       severity: 'error',
       comment:
         'D-21 / INV-FE-6: the handoff packages contain no network primitive at all. ' +
-        'The source gate in CI covers the global forms; this covers module imports.',
-      from: { path: '^packages/(contexts|intents|receipts|llm-handoff)/' },
+        'The source gate in CI covers the global forms; this covers module imports. ' +
+        'Strictly weaker than the two rules below and kept anyway, because it names the ' +
+        'libraries in its failure message and a named refusal is easier to act on.',
+      from: { path: HANDOFF_PATH },
       to: { path: EXTERNAL('axios|node-fetch|undici|ws|socket\\.io') },
+    },
+    {
+      name: 'handoff-imports-nothing-external',
+      severity: 'error',
+      comment:
+        'D-21: a named-library denylist only forbids the libraries somebody thought of — ' +
+        '`import ky` defeated the rule above while every gate stayed green. Nothing on a ' +
+        'handoff path imports any external package today, so the honest rule is that none ' +
+        'may. `core` is included: node:net and node:fs are as much a network and ' +
+        'filesystem surface as any package.',
+      from: { path: HANDOFF_PATH },
+      to: { dependencyTypes: NON_LOCAL_DEPENDENCY_TYPES },
+    },
+    {
+      name: 'handoff-imports-nothing-unresolvable',
+      severity: 'error',
+      comment:
+        'The other half, and the one a rule usually misses: dependency-cruiser records a ' +
+        'specifier it cannot resolve VERBATIM, with no dependency type at all (V-86). An ' +
+        'uninstalled package therefore slips past a dependencyTypes rule entirely.',
+      from: { path: HANDOFF_PATH },
+      to: { couldNotResolve: true },
     },
     { name: 'no-circular', severity: 'error', from: {}, to: { circular: true } },
     { name: 'no-orphans', severity: 'warn', from: { orphan: true, pathNot: '\\.d\\.ts$' }, to: {} },

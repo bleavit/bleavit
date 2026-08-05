@@ -21,11 +21,25 @@
  * to the transport, and the standard to verify is raised as SQ-579. The hex path needs no
  * framing and works today.
  *
- * **`metadata-hash` is refused, and that is the load-bearing part.** Whether a Ledger
- * Generic App honours `CheckMetadataHash` for a *custom* chain is FE-P6, unresolved. Until
- * it is, a surface that told the user their device had decoded and verified the call would
- * be claiming the one property that makes air-gapped signing better than blind signing.
- * Refusing the capability disables that surface with a named reason instead (INV-FE-12).
+ * **`metadata-hash` is refused, and the reason is now verified rather than pending.**
+ * This started as "FE-P6 is unresolved, so assume nothing". Reading the pinned
+ * `frame-metadata-hash-extension` settled the load-bearing half without a device (SQ-594,
+ * V-122): the digest comes from a **compile-time** `RUNTIME_METADATA_HASH` env var that
+ * `substrate-wasm-builder` sets only when metadata-hash generation is enabled, and the
+ * extension returns `Err(UnknownTransaction::CannotLookup)` for mode `Enabled` when it is
+ * absent. Bleavit's runtime declares `CheckMetadataHash` in its `TxExtension` stack but is
+ * built with `build_using_defaults()` and no `metadata-hash` feature — so **the chain
+ * rejects every transaction signed with mode 1**, today.
+ *
+ * That changes what this refusal means. It is not caution about an unknown device: granting
+ * the capability would build transactions this chain is guaranteed to refuse, and the user
+ * would meet the failure after signing on a hardware wallet. The runtime fix is milestone
+ * B21; until it lands and this comment is re-derived against the rebuilt runtime, the
+ * capability stays absent with a named reason (INV-FE-12).
+ *
+ * The narrower question that still needs hardware is whether a Ledger app falls back to
+ * blind signing when a chain offers no digest — which is exactly the outcome the mechanism
+ * exists to prevent, and so is not a fallback this client may rely on either way.
  */
 
 import {
