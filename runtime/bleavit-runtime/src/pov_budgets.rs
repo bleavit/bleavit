@@ -321,14 +321,14 @@ fn all_futarchy_call_weights() -> alloc::vec::Vec<(&'static str, Weight)> {
         }),
     );
     all.extend(
-        // `qualify_recovery_image` is deliberately absent: it is
-        // `DispatchClass::Operational`, and `recovery_qualifier_and_mandatory_hooks_
-        // fit_absolute_class_budgets` already checks it against the Operational
-        // budget. Adding it here would assert the wrong class.
+        // `qualify_recovery_image` and `apply_authorized_upgrade` are
+        // deliberately absent: both are `DispatchClass::Operational`, and
+        // `recovery_qualifier_and_mandatory_hooks_fit_absolute_class_budgets`
+        // checks them against the Operational budget. Adding either here would
+        // assert the wrong class.
         pallet_call_weights!(pallet_execution_guard as pallet_execution_guard::WeightInfo {
             ratify, reject_stale, expire_failed_execution,
             execute(MAX_CALLS_BOUND),
-            apply_authorized_upgrade(RUNTIME_CODE_BYTES_BOUND),
             commit_recovery_image, authorize_phase_four,
         }),
     );
@@ -442,7 +442,10 @@ const UPSTREAM_MODULES: &[&str] = &[
 /// are dispatched in another class. Every entry is class-verified by
 /// `non_normal_exclusions_are_really_non_normal`, so this list cannot be used to
 /// quietly drop a Normal call out of its budget.
-const NON_NORMAL_DISPATCHABLES: &[&str] = &["pallet_execution_guard::qualify_recovery_image"];
+const NON_NORMAL_DISPATCHABLES: &[&str] = &[
+    "pallet_execution_guard::qualify_recovery_image",
+    "pallet_execution_guard::apply_authorized_upgrade",
+];
 
 /// Sweep entries that are not dispatchables. Call metadata cannot enumerate
 /// these, so they are pinned as an exact set — an undeclared non-call entry
@@ -609,12 +612,22 @@ fn non_normal_exclusions_are_really_non_normal() {
     // Building the real `RuntimeCall` is the point: the class lives in the
     // `#[pallet::weight]` attribute, not in metadata, so the only honest check
     // is to ask the runtime what it would charge.
-    let verified: BTreeSet<String> = [(
-        "pallet_execution_guard::qualify_recovery_image",
-        crate::RuntimeCall::ExecutionGuard(pallet_execution_guard::Call::qualify_recovery_image {
-            pid: 1,
-        }),
-    )]
+    let verified: BTreeSet<String> = [
+        (
+            "pallet_execution_guard::qualify_recovery_image",
+            crate::RuntimeCall::ExecutionGuard(
+                pallet_execution_guard::Call::qualify_recovery_image { pid: 1 },
+            ),
+        ),
+        (
+            "pallet_execution_guard::apply_authorized_upgrade",
+            crate::RuntimeCall::ExecutionGuard(
+                pallet_execution_guard::Call::apply_authorized_upgrade {
+                    code: Default::default(),
+                },
+            ),
+        ),
+    ]
     .into_iter()
     .map(|(name, call)| {
         let class = call.get_dispatch_info().class;
@@ -692,6 +705,79 @@ fn xcm_claim_assets_fits_the_normal_class() {
     assert_fits("pallet_xcm::claim_assets", claim);
 }
 
+/// FE-P10 / 11 §11.8.4: the payload bound the upgrade crank publishes must be a
+/// payload the chain will actually accept.
+///
+/// `MaxRuntimeCodeBytes` is a **frozen 02 §9 constant the client reads**, and
+/// both permissionless apply paths carry a whole runtime image as a single call
+/// argument. `CheckWeight::check_block_length` measures the encoded extrinsic
+/// against the ceiling of the call's *`DispatchClass`*, and this runtime scales
+/// only the Normal class down by `NORMAL_DISPATCH_RATIO`. So a Normal-class
+/// apply call is capped *below* the bound the guard publishes, and an image in
+/// the gap is refused in the pool with `ExhaustsResources`: no dispatch, no
+/// error to decode, no event — on the one call whose entire purpose is
+/// liveness. That is how `pallet_execution_guard::apply_authorized_upgrade`
+/// shipped 256 KiB short of the constant its own pallet advertises, while
+/// `frame_system`'s equivalent (Operational, upstream's deliberate choice) was
+/// fine. Today's runtime image is well under either ceiling, so nothing was
+/// broken yet — which is exactly why no test found it.
+///
+/// Every number is derived from the side that owns it: the bound from the
+/// pallet `Config`, the ceiling from `BlockLength`, the class from a real
+/// `RuntimeCall`. Nothing is restated, so amending either side moves this test
+/// instead of letting it agree with a copy of itself.
+///
+/// It measures the encoded **call**, which is exact. The signed-extrinsic
+/// envelope (address, signature, extensions) adds order-100 bytes on top and is
+/// not modelled — said plainly rather than assumed away, because the margin
+/// this discriminates on is ~1 MiB, not ~100 B.
+#[test]
+fn upgrade_apply_paths_can_carry_max_runtime_code_bytes() {
+    use frame_support::dispatch::GetDispatchInfo;
+    use parity_scale_codec::Encode;
+
+    let bound: u32 = <Runtime as pallet_execution_guard::Config>::MaxRuntimeCodeBytes::get();
+
+    // The PoV sweep restates this bound as a literal because the benchmark
+    // fixture constant is `runtime-benchmarks`-gated. Pin the restatement here,
+    // where the real configured value is in scope.
+    assert_eq!(
+        RUNTIME_CODE_BYTES_BOUND, bound,
+        "the sweep's restated runtime-code bound drifted from Config::MaxRuntimeCodeBytes",
+    );
+
+    let code = alloc::vec![0u8; bound as usize];
+    let Ok(bounded) =
+        pallet_execution_guard::pallet::RuntimeCode::<Runtime>::try_from(code.clone())
+    else {
+        panic!("a blob of exactly MaxRuntimeCodeBytes must fit the bound it is taken from")
+    };
+
+    let lengths = <Runtime as frame_system::Config>::BlockLength::get();
+    for (name, call) in [
+        (
+            "frame_system::apply_authorized_upgrade",
+            crate::RuntimeCall::System(frame_system::Call::apply_authorized_upgrade { code }),
+        ),
+        (
+            "pallet_execution_guard::apply_authorized_upgrade",
+            crate::RuntimeCall::ExecutionGuard(
+                pallet_execution_guard::Call::apply_authorized_upgrade { code: bounded },
+            ),
+        ),
+    ] {
+        let class = call.get_dispatch_info().class;
+        let ceiling = *lengths.max.get(class);
+        let encoded = call.encoded_size() as u32;
+        assert!(
+            encoded <= ceiling,
+            "{name} dispatches as {class:?}, whose block-length ceiling is {ceiling} B, but a \
+             call carrying MaxRuntimeCodeBytes ({bound} B) encodes to {encoded} B. A runtime \
+             image this pallet accepts and authorizes would then be unsubmittable.",
+        );
+    }
+}
+
 #[test]
 fn recovery_qualifier_and_mandatory_hooks_fit_absolute_class_budgets() {
     let qualifier =
@@ -702,6 +788,18 @@ fn recovery_qualifier_and_mandatory_hooks_fit_absolute_class_budgets() {
     assert!(
         qualifier.all_lte(operational),
         "recovery qualifier {qualifier:?} exceeds Operational {operational:?}",
+    );
+
+    // The guard's own apply call moved to Operational with the length fix
+    // (`upgrade_apply_paths_can_carry_max_runtime_code_bytes`), so its weight
+    // leaves the Normal sweep and is checked here instead.
+    let apply =
+        <crate::weights::pallet_execution_guard::WeightInfo<Runtime> as pallet_execution_guard::WeightInfo>::apply_authorized_upgrade(
+            RUNTIME_CODE_BYTES_BOUND,
+        );
+    assert!(
+        apply.all_lte(operational),
+        "guard apply_authorized_upgrade {apply:?} exceeds Operational {operational:?}",
     );
 
     let generated_schedule_floor = qualifier
