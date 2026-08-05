@@ -4,4 +4,5 @@ export * from './ingest.js';
 export * from './backfill.js';
 export * from './candles.js';
 export * from './loop.js';
+export * from './loop-store.js';
 export * from './store.js';

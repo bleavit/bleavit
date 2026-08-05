@@ -81,6 +81,16 @@ export interface BlockWrite {
   readonly blockNumber: number;
   readonly scan: FinalizedBlockScan;
   readonly rows: readonly AttributedRow[];
+  /**
+   * The coverage that becomes current **if and only if** this write succeeds.
+   *
+   * Passed in rather than persisted by a second call so an implementation can commit the
+   * rows and the coverage in **one transaction**. Rule 1 without this is only an in-memory
+   * property: rows written, then a crash before the coverage write, is the harmless
+   * direction — but rows written *after* coverage is not, and two separate calls leave that
+   * ordering to whoever writes the adapter. One transaction removes the choice.
+   */
+  readonly coverageAfter: Coverage;
 }
 
 export interface LoopPorts {
@@ -156,14 +166,17 @@ export async function ingestBlock(
     }));
   }
 
-  // The write is awaited *before* coverage advances. A throw here leaves the caller's
-  // coverage exactly as it was.
-  await ports.write({ blockNumber: scan.number, scan, rows });
-
   // One block at a time. `addRange` joins genuinely adjacent same-origin ranges and nothing
   // else, so a subscription that resumed past a gap leaves that gap as a hole rather than
   // claiming it — the reconnect route to the promotion 10 §6.3 forbids.
   const next = addRange(coverage, selfRange(scan.number, scan.number, ports.now()));
+
+  // Computed before the write so the adapter can commit both atomically, **returned** only
+  // after it resolves. The distinction is the whole of rule 1: computing early is fine,
+  // handing back advanced coverage from a failed write is not — a throw here leaves the
+  // caller's coverage exactly as it was.
+  await ports.write({ blockNumber: scan.number, scan, rows, coverageAfter: next });
+
   return { coverage: next, fetchedBody: wantsBody, rowCount: rows.length };
 }
 
