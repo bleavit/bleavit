@@ -145,13 +145,28 @@ export async function ingestBlock(
           'and a filtered history looks exactly like an empty one',
       );
     }
-    if (bodies.length !== scan.extrinsicCount) {
-      // The count disagreeing means the body we fetched is not the block we scanned. Indexing
-      // into it would attribute somebody else's extrinsic to this user.
+    // The scan's count is optional (SQ-595) — §6.5 gives no source for one at scan time. Two
+    // distinct checks live here, and conflating them is how the optional count became a bug:
+    //
+    // 1. A *declared* count that disagrees with the body means the body we fetched is not the
+    //    block we scanned. Only checkable when one was declared.
+    // 2. An attributed index beyond the body's length is checkable **always**, because the
+    //    fetched body IS the authoritative count. This is where SQ-595 moved the guard
+    //    `attributedExtrinsics` can no longer make, and it is the check that matters: it is
+    //    the one covering the decode that would read a different extrinsic.
+    if (scan.extrinsicCount !== undefined && bodies.length !== scan.extrinsicCount) {
       throw new IngestLoopError(
         scan.number,
         `the fetched body has ${bodies.length} extrinsic(s) but the scan declared ` +
           `${scan.extrinsicCount}; indexing into it would read a different block`,
+      );
+    }
+    const beyond = indices.find((index) => index >= bodies.length);
+    if (beyond !== undefined) {
+      throw new IngestLoopError(
+        scan.number,
+        `an event attributed extrinsic ${beyond} but the fetched body has only ` +
+          `${bodies.length}; decoding at that index would read a different extrinsic`,
       );
     }
     // Provenance follows the **header**, never the fetch — §6.5. Derived here from the same

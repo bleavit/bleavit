@@ -63,8 +63,24 @@ export interface IndexedEvent {
 
 export interface FinalizedBlockScan {
   readonly number: number;
-  /** How many extrinsics the block contains, including the inherents. */
-  readonly extrinsicCount: number;
+  /**
+   * How many extrinsics the block contains, including the inherents — **when known**.
+   *
+   * `undefined` is the ordinary case, and SQ-595 is why (ruled 2026-08-05). §6.5 has the loop
+   * consume *headers + `System.Events`*, fetching a body **only** for blocks with a watched
+   * extrinsic — that is the entire cost claim. So at scan time there is usually no body and
+   * no count, and §6.5 names no other source for one.
+   *
+   * Three options were on the table and two are worse than they look. Deriving the count from
+   * the events (max index + 1) makes the index check below **vacuous by construction** — a
+   * check that cannot fail, which is the defect class this client keeps finding. Always
+   * fetching a body to learn the count breaks the cost claim outright. So the count is
+   * optional, the index check applies where it is known, and the **authoritative** check is
+   * the one in `loop.ts` comparing the fetched body's length against the scan — which is
+   * where the failure it describes ("decoding at that index reads a different extrinsic")
+   * can actually occur, because that is where decoding happens.
+   */
+  readonly extrinsicCount?: number | undefined;
   readonly events: readonly IndexedEvent[];
 }
 
@@ -106,20 +122,25 @@ export function attributedExtrinsics(
   scan: FinalizedBlockScan,
   watched: ReadonlySet<string>,
 ): readonly number[] {
-  if (!Number.isInteger(scan.extrinsicCount) || scan.extrinsicCount < 0) {
+  const count = scan.extrinsicCount;
+  if (count !== undefined && (!Number.isInteger(count) || count < 0)) {
     throw new IngestError(`block ${scan.number} declares a non-integer extrinsic count`);
   }
   const hits = new Set<number>();
   for (const event of scan.events) {
     if (event.phase.kind !== 'apply-extrinsic') continue;
     const index = event.phase.index;
-    if (!Number.isInteger(index) || index < 0 || index >= scan.extrinsicCount) {
+    // A negative or fractional index is always refused; the upper bound only where a count
+    // is known. An event index is still a *number the node reported*, so the shape check
+    // does not depend on knowing how many extrinsics there are.
+    if (!Number.isInteger(index) || index < 0 || (count !== undefined && index >= count)) {
       // Refused rather than clamped or skipped: a decode at a bad index does not throw, it
       // returns a *different* extrinsic, and the client would render someone else's
       // transaction as the user's.
       throw new IngestError(
         `block ${scan.number} has an event in ApplyExtrinsic(${index}) but declares ` +
-          `${scan.extrinsicCount} extrinsic(s); decoding at that index would read a different one`,
+          `${count ?? 'an unknown number of'} extrinsic(s); decoding at that index would read ` +
+          'a different one',
       );
     }
     if (!isAttributing(event)) continue;

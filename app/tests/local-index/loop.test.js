@@ -192,3 +192,69 @@ test('blocks are ingested sequentially — N+1 cannot land before N’s write', 
     'start-1', 'end-1', 'start-2', 'end-2', 'start-3', 'end-3',
   ]);
 });
+
+test('a scan with NO declared count still ingests — and the body becomes the authority', async () => {
+  // SQ-595: §6.5 gives no source for an extrinsic count at scan time, because a block with no
+  // watched extrinsic never has its body fetched. Making the count optional immediately
+  // introduced a latent bug the existing fixtures could not see — every one of them supplied
+  // a count, so `bodies.length !== undefined` (always true) was never evaluated.
+  const noCount = {
+    number: 200,
+    events: [
+      { phase: { kind: 'apply-extrinsic', index: 1 }, pallet: 'Balances', name: 'Transfer', accounts: ['alice'] },
+    ],
+  };
+  const result = await ingestBlock(EMPTY_COVERAGE, noCount, WATCHED, 'self', ports());
+  assert.equal(result.fetchedBody, true);
+  assert.equal(result.rowCount, 1);
+  assert.equal(isVerifiedAt(result.coverage, 200), true);
+});
+
+test('an index beyond the FETCHED body is refused even with no declared count', async () => {
+  // Where SQ-595 moved the guard. `attributedExtrinsics` can no longer bound the index at
+  // scan time, so the fetched body — the authoritative count — bounds it here. Without this,
+  // making the count optional would have deleted the control rather than relocated it.
+  const noCount = {
+    number: 201,
+    events: [
+      { phase: { kind: 'apply-extrinsic', index: 7 }, pallet: 'Balances', name: 'Transfer', accounts: ['alice'] },
+    ],
+  };
+  await assert.rejects(
+    ingestBlock(EMPTY_COVERAGE, noCount, WATCHED, 'self', ports()),
+    (error) => {
+      assert.ok(error instanceof IngestLoopError);
+      assert.match(error.message, /attributed extrinsic 7 but the fetched body has only 2/);
+      return true;
+    },
+  );
+});
+
+test('the index guard is >=, not > — index N against N extrinsics is out of range', async () => {
+  // The boundary a comfortably-out-of-range fixture cannot see: index 7 against a 2-length
+  // body is caught by either comparison, so a `>` mutation survived the first version of this
+  // test. Indices are zero-based, so index 2 in a 2-extrinsic block is exactly one past the
+  // end — the single most likely off-by-one, and the one that decodes garbage rather than
+  // throwing.
+  const atBoundary = {
+    number: 202,
+    events: [
+      { phase: { kind: 'apply-extrinsic', index: 2 }, pallet: 'Balances', name: 'Transfer', accounts: ['alice'] },
+    ],
+  };
+  await assert.rejects(
+    ingestBlock(EMPTY_COVERAGE, atBoundary, WATCHED, 'self', ports()),
+    /attributed extrinsic 2 but the fetched body has only 2/,
+  );
+
+  // ...and the last valid index is accepted, so the bound is not simply off by one the other
+  // way — which would silently drop the last extrinsic of every block.
+  const lastValid = {
+    number: 203,
+    events: [
+      { phase: { kind: 'apply-extrinsic', index: 1 }, pallet: 'Balances', name: 'Transfer', accounts: ['alice'] },
+    ],
+  };
+  const ok = await ingestBlock(EMPTY_COVERAGE, lastValid, WATCHED, 'self', ports());
+  assert.equal(ok.rowCount, 1);
+});
