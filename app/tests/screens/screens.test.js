@@ -54,8 +54,14 @@ import {
   OracleResolutionBallot,
   DelegationForm,
   RatificationPanel,
+  UNRATIFIED_CONSEQUENCE,
+  allowanceRemaining,
+  approvalBlocks,
   depositBlocks,
   destinationWarning,
+  mayActivatePlaybook,
+  proposalBlocks,
+  triggerRefusal,
   isApplicable,
   submissionOutlook,
   verifyArtifact,
@@ -1799,4 +1805,82 @@ test('an unregistered screen renders as pending rather than blank', () => {
   );
   assert.ok(/not in this build/.test(html), html);
   assert.ok(/F16/.test(html), 'the owning milestone is not named');
+});
+
+// --------------------------------------------------- S15 the guardian console (F17)
+
+const ACTION = (over = {}) => ({
+  actionId: finalized('a1'), power: finalized('activate_playbook'),
+  justificationHash: finalized('0xjh'), approvals: finalized(3),
+  threshold: finalized(5), expiresAt: finalized(9_000), ...over,
+});
+
+test('an unread trigger is treated exactly as an inactive one', () => {
+  // E20: playbooks are admissible only under VERIFIED triggers. Collapsing "could not
+  // check" into "checked and fine" is the fail-open reading, on the one power whose whole
+  // justification is that the condition holds right now.
+  assert.equal(mayActivatePlaybook({ kind: 'active', since: finalized(1) }), true);
+  assert.equal(mayActivatePlaybook({ kind: 'inactive' }), false);
+  assert.equal(mayActivatePlaybook({ kind: 'unread', reason: 'the storage read failed' }), false);
+  // And the two refusals say different things, because the guardian's next step differs.
+  assert.match(triggerRefusal({ kind: 'inactive' }), /the condition being absent/);
+  assert.match(
+    triggerRefusal({ kind: 'unread', reason: 'the storage read failed' }),
+    /could not establish/,
+  );
+  assert.equal(triggerRefusal({ kind: 'active', since: finalized(1) }), undefined);
+});
+
+test('approving twice is its own refusal, not "not eligible"', () => {
+  // A guardian who approves again believes they moved the count. Folding this into a
+  // generic refusal leaves them unable to tell whether the action is stuck or they are.
+  const blocks = approvalBlocks({
+    action: ACTION(), callerIsMember: true, callerHasApproved: true, now: finalized(100),
+  });
+  assert.equal(blocks.length, 1);
+  assert.equal(blocks[0].check, 'Already approved');
+  assert.match(blocks[0].detail, /does not add to the count/);
+});
+
+test('every approval blocker is reported together', () => {
+  const blocks = approvalBlocks({
+    action: ACTION({ expiresAt: finalized(10) }),
+    callerIsMember: false, callerHasApproved: true, now: finalized(100),
+  });
+  assert.deepEqual(blocks.map((b) => b.check).sort(), ['Already approved', 'Expiry', 'Membership']);
+  // And a clean context blocks nothing, so the checks are not vacuously firing.
+  assert.deepEqual(
+    approvalBlocks({ action: ACTION(), callerIsMember: true, callerHasApproved: false, now: finalized(100) }),
+    [],
+  );
+});
+
+test('an overrun allowance reads as zero remaining, never as negative headroom', () => {
+  // A negative would be treated as headroom by any arithmetic downstream.
+  assert.equal(allowanceRemaining({ power: 'delay_once', used: finalized(3), limit: finalized(5) }), 2);
+  assert.equal(allowanceRemaining({ power: 'delay_once', used: finalized(9), limit: finalized(5) }), 0);
+});
+
+test('the unratified-action consequence names the guardian own bond', () => {
+  // §11.8.2's ratification tracker. It is a fact about their money, not about protocol
+  // hygiene, and it applies whether or not the action turns out to have been correct.
+  assert.match(UNRATIFIED_CONSEQUENCE, /half your bond is slashed/);
+  assert.match(UNRATIFIED_CONSEQUENCE, /recalled/);
+  assert.match(UNRATIFIED_CONSEQUENCE, /whether or not the action turns out to have been correct/);
+});
+
+test('a proposal is blocked by allowance and by trigger independently', () => {
+  const meter = { power: 'activate_playbook', used: finalized(0), limit: finalized(2) };
+  assert.deepEqual(proposalBlocks(meter, { kind: 'active', since: finalized(1) }), []);
+  assert.deepEqual(
+    proposalBlocks({ ...meter, used: finalized(2) }, { kind: 'active', since: finalized(1) })
+      .map((b) => b.check),
+    ['Allowance'],
+  );
+  assert.deepEqual(
+    proposalBlocks(meter, { kind: 'unread', reason: 'x' }).map((b) => b.check),
+    ['Trigger condition'],
+  );
+  // A power with no trigger passes none, and is not blocked for lacking one.
+  assert.deepEqual(proposalBlocks({ ...meter, power: 'pause_intake' }, undefined), []);
 });

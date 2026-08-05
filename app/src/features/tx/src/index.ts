@@ -88,3 +88,17 @@ export {
   type UpgradeSubmission,
   type VerifiedArtifact,
 } from './upgrade-crank.js';
+export {
+  UNRATIFIED_CONSEQUENCE,
+  allowanceRemaining,
+  approvalBlocks,
+  mayActivatePlaybook,
+  proposalBlocks,
+  triggerRefusal,
+  type AllowanceMeter,
+  type ApprovalContext,
+  type GuardianBlock,
+  type GuardianPower,
+  type PendingAction,
+  type TriggerState,
+} from './guardian.js';
