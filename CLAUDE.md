@@ -127,6 +127,22 @@ AGENTS.md R-9 still governs the *judgement*: commit and push only when the user
 has asked or given standing instructions, and never publish or tag without an
 explicit ask. Removing the prompt removed the reminder, not the rule.
 
+**`Bash(git push*)` is on the `allow` list as of 2026-08-05, by explicit user
+instruction, and removing the prompt was not enough on its own.** The allow/ask
+lists are not the only gate: Claude Code's **auto-mode classifier** independently
+refuses actions it reads as destructive, and it blocked
+`git push --force-with-lease` three times in one session while `ask` was empty and
+nothing in this file denied it. An explicit `allow` entry is what overrides it.
+This matters more than it sounds, because **a force-push is routine here, not
+exceptional**: `main` takes squash merges, so every merge orphans whatever was
+stacked behind it — the same content under a new SHA — and each affected branch
+must be `git rebase --onto`'d and force-pushed. Without the rule, every merge in a
+stack strands the session. Prefer the pinned form
+`--force-with-lease=<branch>:<sha>` over bare `--force-with-lease`: the bare form
+takes its expected SHA from the remote-tracking ref, which **`git fetch` silently
+refreshes**, so a fetch you ran for an unrelated reason can renew the lease against
+commits you never looked at.
+
 ## Memory notes
 
 Auto-memory exists for this project. PLAN.md — not memory — is the canonical

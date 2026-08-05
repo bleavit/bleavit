@@ -15,6 +15,22 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { createElement as h } from 'react';
+import type { ComponentType, ReactElement } from 'react';
+import type { Verified, VerificationStatus } from '@bleavit/shared-types';
+
+/**
+ * `createElement`, widened to accept a child the `ReactNode` type refuses.
+ *
+ * `AboveTheFold` is a plain object and `ReactNode` does not accept one — that is the
+ * *compile* half of 11 §11.2 constraint 3, and it is proven by the negative-compilation
+ * corpus, not here. This file proves the **runtime** half: that React itself throws, which
+ * is what catches a fact handed down three components and rendered inside a collapsed region
+ * by a caller that never saw both ends. Proving that requires handing React the very value
+ * the type refuses, so the widening is declared once, named for what it is, and used only
+ * where a refusal is the assertion. Note it is a single assertion, never `as unknown as`,
+ * which app-code rule 2 bans outright.
+ */
+const hRejected = h as (type: unknown, props?: unknown, ...children: unknown[]) => ReactElement;
 import {
   AlwaysVisible,
   Amount,
@@ -40,11 +56,15 @@ import { externalProposal } from '@bleavit/shared-types';
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), '../../..');
 
-const finalized = (value, blockNumber = 1_000_000) => ({
+// `Verified<T>`, not `Finalized<T>`: these render, and 10 §2.1 requires a *typed status* on
+// anything displayed — the brand is the transaction path's requirement and is unavailable
+// here by design. Annotating the return is what keeps `kind` a discriminant rather than
+// widening it to `string`, which would silently make every badge assertion below vacuous.
+const finalized = <T,>(value: T, blockNumber = 1_000_000): Verified<T> => ({
   value,
   status: { kind: 'verified-finalized', blockHash: '0xabc', blockNumber },
 });
-const provider = (value) => ({
+const provider = <T,>(value: T): Verified<T> => ({
   value,
   status: { kind: 'provider', providerId: 'snapshots.example', sampled: false },
 });
@@ -99,7 +119,7 @@ test('an identifier is abbreviated at both ends, never as a bare prefix', () => 
 // ---------------------------------------------------------------- the badge
 
 test('every status renders a badge, and the copy comes from the status', () => {
-  const statuses = [
+  const statuses: readonly VerificationStatus[] = [
     { kind: 'verified-finalized', blockHash: '0x1', blockNumber: 7 },
     { kind: 'verified-best', blockHash: '0x1', blockNumber: 7 },
     { kind: 'derived-local', coverage: { ranges: [], holes: [{ fromBlock: 1, toBlock: 2 }] } },
@@ -143,11 +163,18 @@ test('the badge is not suppressible — no component takes a prop that hides it'
       component === Amount
         ? { datum: finalized(1n), decimals: 6, symbol: 'USDC' }
         : component === Datum
-          ? { datum: finalized('x'), render: (value) => String(value) }
+          ? { datum: finalized('x'), render: (value: string) => String(value) }
           : component === Identifier || component === Phrase
             ? { datum: finalized('abcdefghijklmnop') }
             : { datum: finalized(1) };
-    const html = renderToStaticMarkup(h(component, props));
+    // `h(component, props)` cannot be checked: the loop is deliberately heterogeneous —
+    // six components with six prop shapes — and that heterogeneity is the test. Typing the
+    // pair as a matched union would mean writing the mapping the loop exists to walk, so
+    // the call is widened here and nowhere else, with the props above still fully checked
+    // at each branch.
+    const html = renderToStaticMarkup(
+      h(component as ComponentType<Record<string, unknown>>, props as Record<string, unknown>),
+    );
     assert.ok(html.includes('class="badge'), `${component.name} rendered without a badge`);
   }
 });
@@ -174,7 +201,7 @@ test('an above-the-fold fact is not a ReactNode, so a Disclosure cannot take one
   // one as `children`. This asserts the runtime half — the compile half is the corpus.
   assert.equal(typeof fold, 'object');
   assert.equal(fold.fact, 'sudo-era-banner');
-  assert.throws(() => renderToStaticMarkup(h('div', null, fold)));
+  assert.throws(() => renderToStaticMarkup(hRejected('div', null, fold)));
 });
 
 test('AlwaysVisible throws when it renders inside a Disclosure', () => {
@@ -182,7 +209,7 @@ test('AlwaysVisible throws when it renders inside a Disclosure', () => {
   assert.throws(
     () =>
       renderToStaticMarkup(
-        h(Disclosure, { summary: 'details' }, h(AlwaysVisible, { fold })),
+        hRejected(Disclosure, { summary: 'details' }, h(AlwaysVisible, { fold })),
       ),
     (error) => {
       assert.ok(error instanceof DeferredMeaningChangingFactError, String(error));
@@ -198,7 +225,7 @@ test('the nesting check is on the region, not on whether it happens to be open',
   for (const open of [true, false]) {
     assert.throws(
       () =>
-        renderToStaticMarkup(h(Disclosure, { summary: 's', open }, h(AlwaysVisible, { fold }))),
+        renderToStaticMarkup(hRejected(Disclosure, { summary: 's', open }, h(AlwaysVisible, { fold }))),
       DeferredMeaningChangingFactError,
       `open=${open} should refuse just the same`,
     );
@@ -221,7 +248,7 @@ test('a fact nested two components deep inside a disclosure is still caught', ()
     h(AlwaysVisible, { fold: aboveTheFold('conviction-vote-lock', h('p', null, 'locked')) });
   const Outer = () => h('section', null, h(Wrapper));
   assert.throws(
-    () => renderToStaticMarkup(h(Disclosure, { summary: 's' }, h(Outer))),
+    () => renderToStaticMarkup(hRejected(Disclosure, { summary: 's' }, h(Outer))),
     DeferredMeaningChangingFactError,
   );
 });
