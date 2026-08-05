@@ -79,8 +79,12 @@ export const PENDING_SCREENS: Readonly<Record<string, PendingScreen>> = Object.f
   S9: { state: 'built-unwired', milestone: 'F16', component: `${TX}#ReferendaList`, waitingOn: 'a live transport for its reader' },
   S10: { state: 'built-unwired', milestone: 'F16', component: `${TX}#VoteForm`, waitingOn: 'a live transport and a signer session' },
   S11: { state: 'built-unwired', milestone: 'F16', component: `${TX}#OracleResolutionBallot`, waitingOn: 'a live transport and a signer session' },
-  S12: { state: 'built-unwired', milestone: 'F18', component: `${TX}#DepositForm`, waitingOn: 'a second Asset Hub light-client connection' },
-  S13: { state: 'built-unwired', milestone: 'F18', component: `${TX}#WithdrawForm`, waitingOn: 'a second Asset Hub light-client connection' },
+  // The Asset Hub connection they were waiting on exists (F18, `assetHubConnector`). What
+  // is left is the same thing S2 and S9–S11 wait on — a reader over a live transport — with
+  // the wrinkle that deposit needs **two**, one per chain, and withdraw needs only the local
+  // one. That asymmetry is 02 §7.7's and is why the two are listed apart rather than together.
+  S12: { state: 'built-unwired', milestone: 'F18', component: `${TX}#DepositForm`, waitingOn: 'readers over live transports on both this chain and Asset Hub' },
+  S13: { state: 'built-unwired', milestone: 'F18', component: `${TX}#WithdrawForm`, waitingOn: 'a live transport for its reader' },
   S14: { state: 'built-unwired', milestone: 'F17', component: `${TX}#RegisterReporter`, waitingOn: 'a live transport and a signer session' },
   S15: { state: 'built-unwired', milestone: 'F17', component: `${TX}#PendingActions`, waitingOn: 'a live transport and a signer session' },
   S16: { state: 'built-unwired', milestone: 'F17', component: `${TX}#TreasuryStreams`, waitingOn: 'a live transport and a signer session' },
