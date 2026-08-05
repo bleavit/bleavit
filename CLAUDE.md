@@ -141,7 +141,18 @@ stack strands the session. Prefer the pinned form
 `--force-with-lease=<branch>:<sha>` over bare `--force-with-lease`: the bare form
 takes its expected SHA from the remote-tracking ref, which **`git fetch` silently
 refreshes**, so a fetch you ran for an unrelated reason can renew the lease against
-commits you never looked at.
+commits you never looked at. **Derive that SHA with `git rev-parse`, never type
+it** — a hand-written one is rejected as `stale info`, which reads like a real
+lease failure and is not (2026-08-05).
+
+**Retarget a stacked PR before merging its base, not after** (learned 2026-08-05).
+`gh pr merge --delete-branch` removes the base branch, and GitHub **closes** every
+PR targeting it — then refuses `reopenPullRequest` even once the branch is
+recreated at its old tip, and a closed PR's base cannot be retargeted either. The
+work is not lost (the head branch is untouched) but the PR is, along with its
+review thread, so it must be re-proposed under a new number. Either
+`gh pr edit <stacked> --base main` first, or merge without `--delete-branch` and
+delete the branch once nothing points at it.
 
 ## Memory notes
 
