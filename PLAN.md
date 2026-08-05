@@ -20,35 +20,42 @@ Legend: ⬜ pending · 🔨 in progress · ✅ done · ⛔ blocked · 🅿 defer
 
 ## Current focus
 
-> ### ⇨ CURRENT (2026-08-04) — F20 ✅ · F21 ✅ · **F7 🔨**, and two firewall gates that could not fire
+> ### ⇨ CURRENT (2026-08-05) — Track F **12 ✅ · 6 🔨 · 5 ⬜**
 >
-> **Track F: 8 ✅ · 8 🔨 · 8 ⬜.** F7 is in progress and coherent: the surfaces, the render layer and
-> every control are built, mutation-proven and green; the read layer that feeds them is the named
-> remainder in its row.
+> **Closed this session: F4, F7, F10, F12.** F16 is 🔨 with only its form widgets left —
+> every safety property it carries is already in the model layer.
 >
-> **The finding of this session is a correction to my own note.** V-109 said the handoff screens
-> could not compile under the default `jsxImportSource`. Probing it rather than trusting it showed
-> the opposite and worse: `tsc` is satisfied by the root `@types/react` alone, and dependency-cruiser
-> cruises *source* so a compiler-injected import is not in its graph at all. **Both firewall gates
-> were blind to it**, and a handoff screen written the obvious way would have carried an external
-> import into the D-21 trust domain with every gate green — first failing at `vite build`, reading as
-> a packaging error. The `jsxImportSource: "@bleavit/ui"` repair is unchanged; what is new is
-> `check:handoff-emitted` (+ witness), which reads the **emitted** trees. Recorded as V-109
-> (corrected) and V-110 (the general form: any external package with hoisted `@types` is invisible to
-> the 10 §10.2 compile gate).
+> **The method that paid, stated so it survives this session.** Every time a claim was
+> checked against the *runtime, the SDK or the registry* instead of against my own
+> reasoning, it was wrong:
 >
-> **CI status, stated plainly: no run has yet verified F20 or F21.** Three heads in a row had their
-> CI job cancelled by the next push under the branch's `cancel-in-progress` group; the run on
-> `cfe9c462` is the first one left alone, and its `App (Track F)` job **passed** — only
-> `Model checking (TLC)` is still going, which is unrelated to Track F and slow rather than stuck.
+> - **V-109 corrected** — the JSX import is invisible to *both* firewall gates, not merely a
+>   compile error. `tsc` is satisfied by a hoisted `@types` package and dependency-cruiser
+>   cruises source, so a compiler-injected import is in neither. New gate:
+>   `check:handoff-emitted`.
+> - **The sudo banner was wrong.** `PhaseFlags` is a bitset with *bit 4* = sudo present; the
+>   shell tested `phase >= 4`. The recorded value `17` would have **hidden the banner on a
+>   chain running sudo**. Found by decoding the real fixture, not by re-reading the code.
+> - **SQ-593** — the degradation matrix was 25 rows by name and 12 by text. Ruled and
+>   executed; `check-degradation-matrix.py` now counts them.
+> - **FE-P8 resolved** from the relay's own constants (V-112), producing 10 §2.4.
 >
-> **The session-goal Stop hook is new and live** (`.claude/hooks/guard-track-goal.sh`, requested by
-> the user). With `.claude/session-goal` naming a track, ending a session while that track has open
-> milestones is blocked with the next milestone named. The escape is a `> **PARKED:**` line in this
-> block — auditable, and read by the next session. All eight branches were tested, including the two
-> directions where a guard *stops* firing.
+> **And twice a first grep was wrong in the *alarming* direction** (V-113, V-114): searching
+> 02 for a bare item name misses the qualified `` `Pallet.Item` `` form the document uses,
+> and both times the fix was to check `tools/release/surface-manifest.json` instead. Two
+> false spec questions were avoided that way. **Search 02 by the qualified name.**
 >
-> **Next:** F7's read layer, then the next Track F item.
+> **~110 mutations run, none surviving after repair.** Nine exposed defects in my own
+> *tests* rather than my code — the recurring shape being an assertion that passes for a
+> second reason (a phrase that also appears elsewhere on the page, a session missing the
+> stale field that made the mutation dangerous, a `never` type that is assignable to
+> anything).
+>
+> **Next:** F16's form widgets, then F17/F18 — both verified buildable (V-114), with F17's
+> read surface stated in prose rather than enumerated, which is **SQ-591**'s instance rather
+> than a new gap. The rest of Track F is gated on things only the user can supply: the F13
+> key ceremony, Arweave/ArNS credentials, a device lab (F1, F14), an independent second
+> build environment, and seated operator roles (F15).
 
 > ### ⇨ CURRENT (2026-08-04) — #232 merged, contract v25 reconciled, **PR #234 open (draft)**
 >
