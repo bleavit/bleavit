@@ -41,7 +41,19 @@
     "tests/contexts/**/*.ts",
     "tests/receipts/**/*.ts",
     "tests/ui/**/*.ts",
-    "tests/protocol/**/*.ts"
+    "tests/protocol/**/*.ts",
+    "tests/intents/**/*.ts",
+    "tests/verify/**/*.ts",
+    "tests/descriptors/**/*.ts"
   ],
-  "exclude": ["**/node_modules/**", "**/dist/**", "tests/firewall/fixtures/**"]
+  // `tests/descriptors/types/*-witness.ts` joins the same class as the firewall fixtures:
+  // it is an anti-vacuity control that MUST fail `tsc`, and `compat.test.ts` compiles it
+  // individually and asserts the failure. Type-checking it here would report the control
+  // working as a project error.
+  "exclude": [
+    "**/node_modules/**",
+    "**/dist/**",
+    "tests/firewall/fixtures/**",
+    "tests/descriptors/types/*-witness.ts"
+  ]
 }
