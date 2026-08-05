@@ -51,3 +51,4 @@ export {
   type DegradationResponse,
   type DegradationRow,
 } from './degradation.js';
+export { implementedScreens, unaccountedScreens } from './composition.js';

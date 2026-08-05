@@ -23,14 +23,24 @@ import { Notice, Panel, type ReactNode } from '@bleavit/ui';
 import { SCREENS, type Screen } from './screens.js';
 
 /**
- * Screens whose implementation is a later milestone, each with the milestone that owns it.
+ * Screens this build does not yet *reach*, each with the milestone that will change that.
  *
  * Read off PLAN.md's Track F rows. Kept here rather than in `screens.ts` because the
  * inventory is a statement about the *specification* and this is a statement about *this
  * build* — conflating them would make a screen's existence depend on whether it happened
  * to be implemented, which is the direction 11 §11.2 constraint 1 forbids.
+ *
+ * **Two different reasons live in this map, and the entries say which.** Most screens are
+ * simply not built. Three — S2, S21 and S22 — **are** built as components and are not yet
+ * *wired*: their read or transport layer is the remaining work. `unaccountedScreens()`
+ * found them sitting in neither map, which is precisely the state that renders as
+ * *"coming soon"* with no owner named and hides a screen indefinitely. Naming the reason
+ * is the point: *not built* and *built but unwired* need different work, and a reader who
+ * cannot tell them apart will do the wrong one.
  */
 export const PENDING_SCREENS: Readonly<Record<string, string>> = Object.freeze({
+  // Built as components; waiting on a data path, not on a design.
+  S2: 'F7 — the list and detail components exist; their reader needs a live transport',
   S3: 'F7b — market trading, once the decision dashboard lands',
   S4: 'F7b — positions and redemption, both ledger domains',
   S5: 'F7b — proposal submission',
@@ -49,6 +59,9 @@ export const PENDING_SCREENS: Readonly<Record<string, string>> = Object.freeze({
   S18: 'F17 — the welfare snapshot crank',
   S19: 'F17 — the incident and milestone registry',
   S20: 'F7b — balances and funding status',
+  // Built as components; waiting on the export and import flows to be wired to them.
+  S21: 'F7 — the share surface exists; the capsule export flow is not wired to it yet',
+  S22: 'F7 — the review surface exists; the import and clamp flow is not wired to it yet',
 });
 
 /** Resolve a hash to a screen, falling back to the front door rather than to nothing. */

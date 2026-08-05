@@ -24,10 +24,11 @@
  * longest and least attended part of a session.
  */
 
-import { mount as mountTree, type ReactNode } from '@bleavit/ui';
+import { mount as mountTree } from '@bleavit/ui';
 import { registerReleaseWorker, type WorkerStatus } from './release-worker.js';
 import { Shell, type ShellChainState } from './shell.js';
 import { Outlet, screenFor } from './routes.js';
+import { implementedScreens } from './composition.js';
 
 /**
  * What the shell shows before anything has been read.
@@ -66,12 +67,11 @@ export async function boot(container: Element): Promise<WorkerStatus> {
   const handoffEnabled = true;
   const hash = globalThis.location?.hash ?? '';
   const active = screenForHash(hash, handoffEnabled);
-  // The composition root, and the only place the three compilation units meet. It is a map
-  // rather than an import inside `routes.tsx` because `tx` and `handoff` may not see each
-  // other (10 §10.2) — assembling them here is what keeps that true while still letting one
-  // outlet render either. Empty for now: the screens take their models from the read layer,
-  // which is wired per screen as each lands.
-  const implemented: Readonly<Record<string, () => ReactNode>> = {};
+  // The composition root lives in `composition.tsx` — the only place the three compilation
+  // units meet. It is a map rather than an import inside `routes.tsx` because `tx` and
+  // `handoff` may not see each other (10 §10.2); assembling it at the top level is what
+  // keeps that true while still letting one outlet render either unit's screens.
+  const implemented = implementedScreens();
   mountTree(
     container,
     <Shell chain={initialChainState()} handoffEnabled={handoffEnabled} activeScreen={active}>

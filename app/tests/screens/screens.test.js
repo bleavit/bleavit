@@ -29,7 +29,9 @@ import {
   assertOnePin,
   reachableScreens,
   hasPhaseFlag,
+  implementedScreens,
   namedPhaseFlags,
+  unaccountedScreens,
   readShellState,
   respondTo,
   screenFor,
@@ -765,20 +767,32 @@ test('an unknown hash lands on the front door rather than on nothing', () => {
   assert.equal(screenFor('', true).id, 'S21');
 });
 
-test('the not-yet-built set is declared, and every member is a real screen', () => {
-  // The direction that matters: a screen *dropped* from the client must not be able to
-  // hide among the pending ones. Every pending id has to exist in the inventory, and no
-  // pending id may be one this build actually implements.
+test('the not-yet-reachable set is declared, and every member is a real screen', () => {
+  // A screen *dropped* from the client must not be able to hide among the pending ones, so
+  // every pending id has to exist in the inventory.
+  //
+  // The set's meaning was sharpened once `unaccountedScreens()` existed: it means "this
+  // build does not reach it", which covers both *not built* and *built but unwired*. S2,
+  // S21 and S22 are the second kind — components that exist with no data path yet — and
+  // this test previously asserted the opposite, that they were absent from the map. They
+  // were, and that is exactly what left them rendering as "coming soon" with no owner.
   const inventory = new Set(INVENTORY_IDS);
   for (const id of Object.keys(PENDING_SCREENS)) {
     assert.ok(inventory.has(id), `${id} is declared pending but is not in the inventory`);
   }
-  const built = ['S1', 'S2', 'S21', 'S22'];
-  for (const id of built) {
-    assert.ok(!(id in PENDING_SCREENS), `${id} is built but declared pending`);
+  // The built-but-unwired three say so in their own entries, rather than being indexed as
+  // unbuilt — a reader who cannot tell the two apart does the wrong work.
+  for (const id of ['S2', 'S21', 'S22']) {
+    assert.ok(
+      /\bexist(s)?\b/.test(PENDING_SCREENS[id]),
+      `${id} does not say it is already built: ${PENDING_SCREENS[id]}`,
+    );
   }
-  // And the two sets together cover the whole inventory — no screen is unaccounted for.
-  const accounted = new Set([...Object.keys(PENDING_SCREENS), ...built]);
+  // S1 is chrome — the shell's own header, never routed through the outlet — so it is in
+  // neither map, and `unaccountedScreens()` excludes it for that reason alone.
+  assert.ok(!(('S1') in PENDING_SCREENS), 'S1 is chrome and must not be listed as a route');
+  // Everything else is accounted for exactly once.
+  const accounted = new Set([...Object.keys(PENDING_SCREENS), ...Object.keys(implementedScreens()), 'S1']);
   assert.deepEqual([...inventory].filter((id) => !accounted.has(id)), []);
 });
 
@@ -1755,4 +1769,34 @@ test('the submission outlook states uncertainty rather than predicting success',
   assert.match(outlook, /4\.0 MiB/);
   // And it says the verification is not wasted if submission fails.
   assert.match(outlook, /already verified/);
+});
+
+// ------------------------------------------ the composition root (F7's outlet closed)
+
+test('every inventory screen is either implemented or declared pending, never neither', () => {
+  // The failure this prevents: a screen absent from both maps renders as pending with no
+  // owner named, which reads as "coming soon" forever and is exactly how a dropped screen
+  // hides. S1 is excluded because it renders as the shell's own header, not through the
+  // outlet.
+  assert.deepEqual(unaccountedScreens(), []);
+});
+
+test('nothing is registered that is also declared pending', () => {
+  // The other direction: a screen in both maps would render for real while the client still
+  // claims it is not built, and the PLAN row that owns it would never close.
+  const implemented = Object.keys(implementedScreens());
+  for (const id of implemented) {
+    assert.ok(!(id in PENDING_SCREENS), `${id} is both implemented and declared pending`);
+    assert.ok(INVENTORY_IDS.includes(id) || id === 'confirm', `${id} is not a real screen`);
+  }
+});
+
+test('an unregistered screen renders as pending rather than blank', () => {
+  // The composition root being empty must not produce a blank app — the outlet's placeholder
+  // is what makes an unbuilt screen say so.
+  const html = renderToStaticMarkup(
+    h(Outlet, { hash: '#/referenda', handoffEnabled: true, implemented: implementedScreens() }),
+  );
+  assert.ok(/not in this build/.test(html), html);
+  assert.ok(/F16/.test(html), 'the owning milestone is not named');
 });
