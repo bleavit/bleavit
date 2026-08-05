@@ -32,4 +32,5 @@ export * from './codecs.js';
 export * from './chain-spec.js';
 export * from './topology.js';
 export * from './asset-hub.js';
+export * from './storage-keys.js';
 export * from './transport.js';

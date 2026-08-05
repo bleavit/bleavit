@@ -50,6 +50,9 @@ importers:
       '@bleavit/shared-types':
         specifier: workspace:*
         version: link:../shared-types
+      '@polkadot-api/substrate-bindings':
+        specifier: 0.20.3
+        version: 0.20.3
       polkadot-api:
         specifier: 2.1.8
         version: 2.1.8(esbuild@0.28.1)(rxjs@7.8.2)
