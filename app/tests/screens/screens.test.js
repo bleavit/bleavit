@@ -52,6 +52,11 @@ import {
   OracleResolutionBallot,
   DelegationForm,
   RatificationPanel,
+  depositBlocks,
+  destinationWarning,
+  progressCopy,
+  withdrawBlocks,
+  xcmWarning,
   SPLIT_NO_CONVICTION,
   UnlockForm,
   VoteForm,
@@ -1603,4 +1608,88 @@ test('undelegate is disabled with a reason when not delegating', () => {
   );
   assert.ok(/not currently delegating/.test(html), html);
   assert.ok(html.includes('data-fact="conviction-vote-lock"'), 'the lock is not above the fold');
+});
+
+// ------------------------------------------------------ S12/S13 funding (F18)
+
+const DEPOSIT = (over = {}) => ({
+  assetHubBalance: finalized(100_000_000n),
+  amount: 10_000_000n,
+  assetHubFee: 100_000n,
+  minBalance: 10_000n,
+  bootstrapPhase: false,
+  assetHubReady: true,
+  xcmHealthy: true,
+  ...over,
+});
+
+test('Asset Hub finality is never rendered as arrival', () => {
+  // XCM delivery is asynchronous. A tracker showing "done" when the AH extrinsic finalized
+  // tells a user their money arrived when it has not — and the `credited` arm REQUIRES the
+  // futarchy-chain observation, so it cannot be reached from the AH leg alone.
+  const sent = { kind: 'sent-awaiting-arrival', assetHubBlock: finalized(500) };
+  assert.ok(!('creditedAtLocalBlock' in sent), 'the sent arm must carry no local credit');
+  assert.match(progressCopy(sent), /message was sent, not that the funds have arrived/);
+  assert.match(progressCopy(sent), /awaiting arrival/i);
+
+  const credited = {
+    kind: 'credited', assetHubBlock: finalized(500),
+    creditedAtLocalBlock: finalized(900), creditedAmount: finalized(10_000_000n),
+  };
+  assert.match(progressCopy(credited), /its own finalized state/);
+});
+
+test('the bootstrap caps read a bit, and an unreadable cap blocks (V-115, D-13)', () => {
+  // The spec said "while PhaseFlags < Phase 4", which is unperformable on a bitset and
+  // would have SKIPPED the caps entirely during bootstrap. Repaired; here the flag is a
+  // boolean the caller derives from bit 4.
+  const noCaps = depositBlocks(DEPOSIT({ bootstrapPhase: true }));
+  assert.ok(noCaps.some((b) => /exposure caps/i.test(b.check)), JSON.stringify(noCaps));
+  assert.match(noCaps[0].detail, /blocked rather than proceeding without the limit/);
+
+  const overGlobal = depositBlocks(DEPOSIT({
+    bootstrapPhase: true,
+    caps: { globalTvlHeadroom: finalized(1_000n), perAccountHeadroom: finalized(999_000_000n) },
+  }));
+  assert.ok(overGlobal.some((b) => b.check === 'Global TVL cap'));
+
+  // Outside bootstrap the caps do not apply at all — so the control is not vacuous.
+  assert.deepEqual(depositBlocks(DEPOSIT({ bootstrapPhase: false })), []);
+});
+
+test('every block is reported, not just the first', () => {
+  // A user told to fix one thing who then hits the next learns the screen is guessing.
+  const blocks = depositBlocks(DEPOSIT({
+    assetHubReady: false, amount: 1n, assetHubBalance: finalized(0n),
+  }));
+  assert.ok(blocks.length >= 3, JSON.stringify(blocks.map((b) => b.check)));
+});
+
+test('degraded XCM health warns and does not block', () => {
+  // I-24 is fail-static: the funds are held, not lost. Blocking would refuse what the chain
+  // accepts, which 15 §4.8's mirror rule forbids.
+  assert.deepEqual(depositBlocks(DEPOSIT({ xcmHealthy: false })), []);
+  assert.match(xcmWarning({ xcmHealthy: false }), /held, not lost/);
+  assert.equal(xcmWarning({ xcmHealthy: true }), undefined);
+});
+
+test('a withdrawal that would dust the remainder is blocked, but a full one is not', () => {
+  const base = {
+    freeBalance: finalized(1_000_000n), localFee: 1_000n, minBalance: 10_000n,
+    destinationViable: true, ledgerFrozen: false,
+  };
+  // Leaves 5,000 — below the 10,000 minimum.
+  assert.ok(withdrawBlocks({ ...base, amount: 994_000n }).some((b) => /dusted/.test(b.check)));
+  // Leaves exactly zero: a full withdrawal, which is fine. The check is a band, not a floor.
+  assert.deepEqual(withdrawBlocks({ ...base, amount: 999_000n }), []);
+  // Leaves 20,000 — comfortably above.
+  assert.deepEqual(withdrawBlocks({ ...base, amount: 979_000n }), []);
+});
+
+test('an unknown destination is distinct from a bad one and from a good one', () => {
+  // "Degrades to a warning, never silently skipped": collapsing unknown into either of the
+  // other two is exactly what silently skipped means.
+  assert.equal(destinationWarning(true), undefined);
+  assert.match(destinationWarning(false), /would not survive/);
+  assert.match(destinationWarning(undefined), /has not been established either way/);
 });
