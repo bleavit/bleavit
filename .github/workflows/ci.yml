@@ -433,6 +433,61 @@ jobs:
         run: |
           pnpm run schemas:check
           pnpm run skills:check
+      - name: Render provenance and the never-defer facts (INV-FE-9, 11 §11.2)
+        working-directory: app
+        # The `ui` layer. Rendered headlessly with `react-dom/server`, because every
+        # property here is about what the markup says. The two that fail silently: a
+        # badge that renders empty (which no happy-path test distinguishes from a
+        # badge that renders), and a meaning-changing fact wrapped in a `<details>`
+        # by a later layout change — 11 §11.2 constraint 3 names five of those and
+        # this suite binds the list to the section citations in doc 11 itself.
+        run: pnpm run test:ui
+      - name: The default surface — S1, S2, confirm, S21/S22 (11 §11.2–§11.5, §11.14)
+        working-directory: app
+        # Includes the 11 §11.2 constraint-1 check that matters most: with the
+        # handoff surfaces DISABLED (the 15 §4.8 no-infrastructure posture) every
+        # other screen is still reachable, and the client still has a front door.
+        # "Demoting a surface is permitted; removing one is not."
+        run: pnpm run test:screens
+      - name: Every meaning-changing fact has an emitter (11 §11.2 constraint 3)
+        working-directory: app
+        # The defect class this repository keeps rediscovering: a control defined and
+        # unreachable. FE-HANDOFF-012 shipped with zero emitting call sites, and no green
+        # run distinguishes that from a code that never fires. These five facts are the
+        # highest-consequence instance — each changes the meaning of a signature — and each
+        # has exactly one call site, so losing one would leave every existing test passing.
+        # Facts with no emitter yet are DECLARED with the milestone that will supply one,
+        # and a stale declaration fails, so the promise cannot become a permanent excuse.
+        run: pnpm run check:above-fold
+      - name: Chain values reach the screen with their badge (10 §2.1 / INV-FE-9)
+        # The other half of the provenance control, and the half `Verified<T>` cannot enforce:
+        # `<Panel title={`Referendum ${id.value}`}>` typechecks perfectly and puts a chain
+        # read on screen with no badge beside it. Rule A catches a `Verified<T>` payload
+        # reaching a display position; rule B catches a derived value wearing another read's
+        # status, which promotes provider data to verified by arithmetic. Type-aware on
+        # purpose — a syntactic version fires on `key={...}`, on `event.currentTarget.value`
+        # and on the release-constant rows of the verification panel, and a gate that fires
+        # on correct code gets switched off rather than fixed. The witness leg proves both
+        # rules can still fire, asserts the negative controls stay silent, and checks that
+        # the fixture's own imports resolve — an unresolved type reference still prints as
+        # `Verified<string>` while carrying no members, so the whole gate would inspect
+        # nothing and report only "did not fire".
+        working-directory: app
+        run: pnpm run check:render-provenance && pnpm run check:render-provenance:witness
+
+      - name: No markup or code sinks anywhere in app source (11 §11.8.1)
+        # Evidence is bytes an adversary chose, displayed inside the console operated by the
+        # system's most privileged actors; 10 §13.2's imported documents are the same shape
+        # from another direction. §11.8.1's "rendered as text/structured data only, never
+        # HTML" is not enforceable by a type — `evidence.text` is a `string` and
+        # `dangerouslySetInnerHTML={{ __html: text }}` typechecks perfectly. The sink list is
+        # closed rather than a pattern, because "anything ending in HTML" fires on
+        # `escapeHtml`/`parseHtml` and gets switched off. AST-based, so a sink named inside a
+        # comment or a string literal is simply not a property access. The witness proves each
+        # form is still detectable and that the near-miss controls stay silent.
+        working-directory: app
+        run: pnpm run check:no-html-sinks && pnpm run check:no-html-sinks:witness
+
 
   environments:
     name: Environment definitions

@@ -1,5 +1,5 @@
 {
-  "name": "@bleavit/features-handoff",
+  "name": "@bleavit/application",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -16,13 +16,12 @@
   },
   "dependencies": {
     "@bleavit/chain-client": "workspace:*",
-    "@bleavit/contexts": "workspace:*",
-    "@bleavit/handoff-envelope": "workspace:*",
-    "@bleavit/intents": "workspace:*",
-    "@bleavit/llm-handoff": "workspace:*",
-    "@bleavit/protocol": "workspace:*",
-    "@bleavit/receipts": "workspace:*",
+    "@bleavit/features-analysis": "workspace:*",
+    "@bleavit/features-handoff": "workspace:*",
+    "@bleavit/features-tx": "workspace:*",
+    "@bleavit/platform": "workspace:*",
     "@bleavit/shared-types": "workspace:*",
-    "@bleavit/ui": "workspace:*"
+    "@bleavit/ui": "workspace:*",
+    "@bleavit/verify": "workspace:*"
   }
 }
