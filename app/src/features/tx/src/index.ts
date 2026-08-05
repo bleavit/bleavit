@@ -28,6 +28,7 @@ export {
   type ProposalDecoders,
   type ProposalRecord,
   type ProposalsRead,
+  type ProposalsReader,
   type StatsRecord,
 } from './proposal-reads.js';
 export {
