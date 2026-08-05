@@ -38,12 +38,24 @@ import {
   Identifier,
   Notice,
   Panel,
+  Ratio,
   Refusal,
   formatBaseUnits,
   type ReactNode,
 } from '@bleavit/ui';
 import type { Combined, Verified } from '@bleavit/shared-types';
 import { evidenceCopy, type EvidenceState } from './evidence.js';
+import {
+  CONSERVATIVE_ZERO_HOLDINGS,
+  PARTIAL_CUSTODY_NOTE,
+  accountLines,
+  floorDistances,
+  incomeLabel,
+  navPresentation,
+  windowedTotal,
+  type NavView,
+  type WindowedIncome,
+} from './nav.js';
 import {
   checkRegistration,
   registrationCaveat,
@@ -491,5 +503,124 @@ export function EvidencePanel({
     <Notice severity="caution" heading={label}>
       {copy}
     </Notice>
+  );
+}
+
+// ------------------------------------------------- S16b the nav() view (§11.8.3)
+
+/**
+ * The treasury NAV screen.
+ *
+ * Everything load-bearing was decided in `nav.ts`; what this component owns is that the
+ * haircut arm's banner is **persistent** — rendered as part of the panel rather than as a
+ * dismissible notice — and that the account table carries its partial-view note where a
+ * reader meets the numbers, not in a footnote they scroll past.
+ */
+export function NavPanel({
+  nav,
+  income,
+  decimals,
+  symbol,
+}: {
+  readonly nav: NavView;
+  /** Optional: a client with no ingested history window has no income figure to show. */
+  readonly income?: WindowedIncome | undefined;
+  readonly decimals: number;
+  readonly symbol: string;
+}): ReactNode {
+  const presentation = navPresentation(nav);
+  return (
+    <Panel title="Treasury">
+      {presentation.kind === 'haircut' ? (
+        <>
+          {/* Persistent by construction — a `Notice` takes no dismiss handler. */}
+          <Notice severity="danger" heading="Reserve health degraded">
+            {presentation.banner}
+          </Notice>
+          <Field label="Spendable NAV">
+            <Amount datum={presentation.headlineSpendable} decimals={decimals} symbol={symbol} />
+          </Field>
+          <Field label="Gross total">
+            <Amount datum={presentation.unbackedTotal} decimals={decimals} symbol={symbol} />
+            <span className="nav__caveat">{presentation.unbackedTotalLabel}</span>
+          </Field>
+        </>
+      ) : (
+        <>
+          <Field label="NAV">
+            <Amount datum={presentation.headline} decimals={decimals} symbol={symbol} />
+          </Field>
+          <Field label="Spendable NAV">
+            <Amount datum={presentation.spendable} decimals={decimals} symbol={symbol} />
+          </Field>
+        </>
+      )}
+
+      {/* The note sits with the numbers, not in a footnote: it is what stops the table
+          reading as a decomposition, and a reader who misses it draws the wrong conclusion
+          from the very rows it qualifies. */}
+      <Notice severity="info" heading="These accounts do not sum to the total">
+        {PARTIAL_CUSTODY_NOTE}
+      </Notice>
+      <DataTable
+        caption="Treasury accounts published by the chain’s own view — a partial set"
+        headers={['Account', 'Balance']}
+        rows={accountLines(nav).map((line) => ({
+          key: line.account,
+          cells: [
+            line.account,
+            <Amount
+              datum={line.balance}
+              decimals={decimals}
+              symbol={symbol}
+              key={`b-${line.account}`}
+            />,
+          ],
+        }))}
+      />
+
+      <Field label="Stream remainders">
+        <Amount datum={nav.streamRemainders} decimals={decimals} symbol={symbol} />
+      </Field>
+      <Field label="Obligations">
+        <Amount datum={nav.obligations} decimals={decimals} symbol={symbol} />
+      </Field>
+      <Field label="Rolling-meter utilization">
+        <Ratio datum={nav.meterUtilizationBps} />
+      </Field>
+
+      {/* Continuous, never a pass/fail badge: one USDC above a floor and a million above
+          render identically under a binary indicator, and the first is about to stop being
+          able to fund its class. */}
+      <Field label="Class floors (distance from spendable NAV)">
+        <Derived
+          combined={floorDistances(nav)}
+          render={(rows) =>
+            rows
+              .map(
+                (row) =>
+                  `${row.klass}: ${row.meetsFloor ? '+' : ''}${formatBaseUnits(row.distance, decimals)} ${symbol}`,
+              )
+              .join(' · ')
+          }
+        />
+      </Field>
+
+      {CONSERVATIVE_ZERO_HOLDINGS.map((holding) => (
+        <Notice severity="info" heading={`${holding.holding}: 0`} key={holding.holding}>
+          {holding.why}
+        </Notice>
+      ))}
+
+      {income === undefined ? null : (
+        <Field label="Observed income">
+          <Derived
+            combined={windowedTotal(income)}
+            render={(total) => `${formatBaseUnits(total, decimals)} ${symbol}`}
+          />
+          <span className="nav__caveat">{incomeLabel(income)}</span>
+        </Field>
+      )}
+    </Panel>
   );
 }

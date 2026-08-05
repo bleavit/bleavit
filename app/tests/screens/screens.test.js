@@ -108,6 +108,14 @@ import {
   evidenceUnavailable,
   EvidencePanel,
   EVIDENCE_UNRETRIEVABLE,
+  NavPanel,
+  HAIRCUT_BANNER,
+  PARTIAL_CUSTODY_NOTE,
+  FLOOR_CLASSES,
+  accountLines,
+  floorDistances,
+  incomeLabel,
+  navPresentation,
 } from '@bleavit/features-tx';
 import { ImportRefused, ImportReview, UnlabellableClampError } from '@bleavit/features-handoff';
 import { ShareContext } from '@bleavit/features-handoff';
@@ -2697,4 +2705,126 @@ test('invalid UTF-8 shows replacement characters rather than blanking the docume
   assert.equal(state.kind, 'admitted');
   assert.match(state.text, /A$/);
   assert.ok(state.text.includes('\uFFFD'), JSON.stringify(state.text));
+});
+
+// ------------------------------------------------ §11.8.3 the nav() view (F17)
+
+const NAV = (over = {}) => ({
+  total: finalized(1_000_000_000n),
+  main: finalized(400_000_000n),
+  pol: finalized(300_000_000n),
+  insurance: finalized(50_000_000n),
+  keeper: finalized(10_000_000n),
+  oracle: finalized(5_000_000n),
+  rewards: finalized(5_000_000n),
+  streamRemainders: finalized(20_000_000n),
+  obligations: finalized(30_000_000n),
+  haircutFlag: finalized(false),
+  spendableNav: finalized(900_000_000n),
+  meterUtilizationBps: finalized(1_500),
+  classFloors: [finalized(100n), finalized(200n), finalized(300n), finalized(400n)],
+  ...over,
+});
+
+test('the account lines cannot be presented as a decomposition — no sum is exported', () => {
+  // §11.8.3: the account fields are a PARTIAL view; nine ops lines have no field, so the
+  // parts do not add to `total`. The obvious table with a sum at the bottom is wrong, and a
+  // reader who sees a decomposition assumes it decomposes.
+  const lines = accountLines(NAV());
+  assert.equal(lines.length, 6);
+  for (const line of lines) {
+    assert.equal(line.partialNote, PARTIAL_CUSTODY_NOTE, `${line.account} lost its note`);
+  }
+  // The parts genuinely do not add to the total, which is why no sum is offered.
+  const parts = lines.reduce((acc, line) => acc + line.balance.value, 0n);
+  assert.notEqual(parts, NAV().total.value);
+});
+
+test('under the haircut flag there is NO headline field to render full backing from', () => {
+  // "The FE never renders full backing while the flag is set" cannot be a discipline — it is
+  // one <Amount datum={nav.total}> away at all times. So the haircut arm has no `headline`
+  // property at all; `total` exists only as a subordinate, explicitly-labelled line.
+  const haircut = navPresentation(NAV({ haircutFlag: finalized(true), spendableNav: finalized(0n) }));
+  assert.equal(haircut.kind, 'haircut');
+  assert.equal(haircut.headline, undefined, 'the haircut arm must expose no headline');
+  assert.equal(haircut.headlineSpendable.value, 0n);
+  assert.equal(haircut.banner, HAIRCUT_BANNER);
+  assert.match(haircut.unbackedTotalLabel, /not backing available to spend/);
+
+  const full = navPresentation(NAV());
+  assert.equal(full.kind, 'full');
+  assert.equal(full.headline.value, 1_000_000_000n);
+});
+
+test('the haircut banner is persistent and states PB-RESERVE verbatim', () => {
+  const html = renderToStaticMarkup(
+    h(NavPanel, {
+      nav: NAV({ haircutFlag: finalized(true), spendableNav: finalized(0n) }),
+      decimals: 6,
+      symbol: 'USDC',
+    }),
+  );
+  assert.ok(html.includes(HAIRCUT_BANNER), html);
+  assert.match(html, /data-severity="danger"/);
+  assert.match(html, /PB-RESERVE/);
+  // A Notice takes no dismiss handler, so "persistent" is structural rather than styled.
+  assert.ok(!/dismiss|close/i.test(html), 'the banner must not be dismissible');
+
+  // The stated residual: the component also holds the raw NavView, so the type alone cannot
+  // stop `nav.total` being rendered in headline position by hand. This is the check for that
+  // deliberate bypass — under the flag there is no bare "NAV" field label, only
+  // "Spendable NAV" and a "Gross total" that carries its own not-backing caveat.
+  const labels = [...html.matchAll(/<span class="field__label">([^<]*)<\/span>/g)].map((m) => m[1]);
+  assert.ok(!labels.includes('NAV'), `full backing rendered as the headline: ${labels}`);
+  assert.ok(labels.includes('Spendable NAV'), labels);
+  assert.ok(labels.includes('Gross total'), labels);
+  // ...and the full-backing render DOES have it, so the assertion is not vacuous.
+  const clean = renderToStaticMarkup(h(NavPanel, { nav: NAV(), decimals: 6, symbol: 'USDC' }));
+  const cleanLabels = [...clean.matchAll(/<span class="field__label">([^<]*)<\/span>/g)].map((m) => m[1]);
+  assert.ok(cleanLabels.includes('NAV'), cleanLabels);
+});
+
+test('class-floor distance is continuous and measured against SPENDABLE nav', () => {
+  // A pass/fail badge hides the approach: one USDC above a floor and a million above look
+  // identical, and the first is about to stop being able to fund its class. Measured against
+  // spendable_nav because under a haircut that is 0 and every floor is genuinely unmet —
+  // measuring `total` would report floors met while the protocol refuses the spend.
+  const rows = stated(floorDistances(NAV({ spendableNav: finalized(250n) })));
+  assert.deepEqual(rows.map((r) => r.klass), [...FLOOR_CLASSES]);
+  assert.deepEqual(rows.map((r) => r.distance), [150n, 50n, -50n, -150n]);
+  assert.deepEqual(rows.map((r) => r.meetsFloor), [true, true, false, false]);
+
+  const underHaircut = stated(
+    floorDistances(NAV({ haircutFlag: finalized(true), spendableNav: finalized(0n) })),
+  );
+  assert.deepEqual(underHaircut.map((r) => r.meetsFloor), [false, false, false, false]);
+});
+
+test('an income figure cannot exist without its window, and says it is not lifetime', () => {
+  // §11.8.3: derived from the ingest-set events within the committed history window and
+  // "labelled as the partial, window-bounded total it is — never as lifetime protocol
+  // revenue". There is no constructor for an unbounded one.
+  const label = incomeLabel({
+    revenueSwept: finalized(5n),
+    redemptionFeesSwept: finalized(3n),
+    fromBlock: 100,
+    toBlock: 900,
+  });
+  assert.match(label, /between blocks 100 and 900/);
+  assert.match(label, /not lifetime protocol revenue/);
+  assert.match(label, /RevenueSwept and RedemptionFeesSwept/);
+  // InsuranceSwept is not in 02 §5's ingest set, so nothing here may depend on it.
+  assert.ok(!label.includes('InsuranceSwept'));
+});
+
+test('the conservative zeros are explained, not just shown as 0', () => {
+  const html = renderToStaticMarkup(h(NavPanel, { nav: NAV(), decimals: 6, symbol: 'USDC' }));
+  assert.match(html, /In-flight XCM: 0/);
+  assert.match(html, /VIT holdings: 0/);
+  assert.match(html, /not an asset the treasury can spend/);
+  // And every NavView field reaches the screen.
+  assert.match(html, /Stream remainders/);
+  assert.match(html, /Obligations/);
+  assert.match(html, /Rolling-meter utilization/);
+  assert.match(html, /Class floors/);
 });
