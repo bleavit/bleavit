@@ -30,7 +30,9 @@
     "tests/llm-handoff/**/*.ts",
     "tests/providers/**/*.ts",
     "tests/firewall/*.ts",
-    "tests/mock-runtime/**/*.ts"
+    "tests/mock-runtime/**/*.ts",
+    "tests/contexts/**/*.ts",
+    "tests/receipts/**/*.ts"
   ],
   "exclude": ["**/node_modules/**", "**/dist/**", "tests/firewall/fixtures/**"]
 }
