@@ -32,6 +32,8 @@ export {
 export {
   Outlet,
   PENDING_SCREENS,
+  pendingCopy,
+  type PendingScreen as PendingScreenEntry,
   PendingScreen,
   screenFor,
 } from './routes.js';

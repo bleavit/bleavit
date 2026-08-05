@@ -30,39 +30,74 @@ import { SCREENS, type Screen } from './screens.js';
  * build* — conflating them would make a screen's existence depend on whether it happened
  * to be implemented, which is the direction 11 §11.2 constraint 1 forbids.
  *
- * **Two different reasons live in this map, and the entries say which.** Most screens are
- * simply not built. Three — S2, S21 and S22 — **are** built as components and are not yet
- * *wired*: their read or transport layer is the remaining work. `unaccountedScreens()`
- * found them sitting in neither map, which is precisely the state that renders as
- * *"coming soon"* with no owner named and hides a screen indefinitely. Naming the reason
- * is the point: *not built* and *built but unwired* need different work, and a reader who
- * cannot tell them apart will do the wrong one.
+ * ## Two reasons, and they are a closed union rather than prose
+ *
+ * *Not built* and *built but unwired* need different work, and a reader who cannot tell
+ * them apart will do the wrong one. `unaccountedScreens()` found three screens in neither
+ * map — which renders as *"coming soon"* with no owner — and the fix was to name the reason.
+ *
+ * Prose could not hold it. Within a day of that fix, nine entries still read *"F16 — the
+ * governance surface"* and *"F17 — the reporter console"* for screens that had since been
+ * **built**, because nothing made the claim answerable. So each entry now carries the
+ * **component it is waiting on**, and the suite checks that name against the feature
+ * packages' real exports **in both directions**:
+ *
+ * - a `built-unwired` entry whose component does not exist is a false promise;
+ * - a `not-built` entry whose component *does* exist is this exact staleness, and it now
+ *   **fails the build the moment the component lands**.
+ *
+ * That second direction is the whole point. It is the same mechanical expiry the monitoring
+ * seams and the limit-coverage registry use: a declaration that cannot outlive the condition
+ * it describes.
  */
-export const PENDING_SCREENS: Readonly<Record<string, string>> = Object.freeze({
-  // Built as components; waiting on a data path, not on a design.
-  S2: 'F7 — the list and detail components exist; their reader needs a live transport',
-  S3: 'F7b — market trading, once the decision dashboard lands',
-  S4: 'F7b — positions and redemption, both ledger domains',
-  S5: 'F7b — proposal submission',
-  S6: 'F7b — the execution queue',
-  S7: 'F7b — the welfare and constitution dashboard',
-  S8: 'F7b — recent settlements',
-  S9: 'F16 — the governance surface',
-  S10: 'F16 — vote, delegate, unlock',
-  S11: 'F16 — the OracleResolution ballot',
-  S12: 'F18 — the Asset Hub deposit leg',
-  S13: 'F18 — the withdraw leg',
-  S14: 'F17 — the reporter console',
-  S15: 'F17 — the guardian console',
-  S16: 'F17 — treasury stream claims',
-  S17: 'F17 — the upgrade crank',
-  S18: 'F17 — the welfare snapshot crank',
-  S19: 'F17 — the incident and milestone registry',
-  S20: 'F7b — balances and funding status',
-  // Built as components; waiting on the export and import flows to be wired to them.
-  S21: 'F7 — the share surface exists; the capsule export flow is not wired to it yet',
-  S22: 'F7 — the review surface exists; the import and clamp flow is not wired to it yet',
+export type PendingScreen =
+  | {
+      readonly state: 'not-built';
+      readonly milestone: string;
+      /** The component this screen will export. Asserted **absent** until it is built. */
+      readonly component: string;
+    }
+  | {
+      readonly state: 'built-unwired';
+      readonly milestone: string;
+      /** An existing export. Asserted **present**, so the claim cannot be a false promise. */
+      readonly component: string;
+      readonly waitingOn: string;
+    };
+
+const TX = '@bleavit/features-tx';
+const HANDOFF = '@bleavit/features-handoff';
+
+export const PENDING_SCREENS: Readonly<Record<string, PendingScreen>> = Object.freeze({
+  S2: { state: 'built-unwired', milestone: 'F7', component: `${TX}#ProposalDetail`, waitingOn: 'a live transport for its reader' },
+  S3: { state: 'not-built', milestone: 'F7b', component: `${TX}#MarketTrade` },
+  S4: { state: 'not-built', milestone: 'F7b', component: `${TX}#Positions` },
+  S5: { state: 'not-built', milestone: 'F7b', component: `${TX}#SubmitProposal` },
+  S6: { state: 'not-built', milestone: 'F7b', component: `${TX}#ExecutionQueue` },
+  S7: { state: 'not-built', milestone: 'F7b', component: `${TX}#WelfareDashboard` },
+  S8: { state: 'not-built', milestone: 'F7b', component: `${TX}#RecentSettlements` },
+  S9: { state: 'built-unwired', milestone: 'F16', component: `${TX}#ReferendaList`, waitingOn: 'a live transport for its reader' },
+  S10: { state: 'built-unwired', milestone: 'F16', component: `${TX}#VoteForm`, waitingOn: 'a live transport and a signer session' },
+  S11: { state: 'built-unwired', milestone: 'F16', component: `${TX}#OracleResolutionBallot`, waitingOn: 'a live transport and a signer session' },
+  S12: { state: 'not-built', milestone: 'F18', component: `${TX}#DepositForm` },
+  S13: { state: 'not-built', milestone: 'F18', component: `${TX}#WithdrawForm` },
+  S14: { state: 'built-unwired', milestone: 'F17', component: `${TX}#RegisterReporter`, waitingOn: 'a live transport and a signer session' },
+  S15: { state: 'built-unwired', milestone: 'F17', component: `${TX}#PendingActions`, waitingOn: 'a live transport and a signer session' },
+  S16: { state: 'built-unwired', milestone: 'F17', component: `${TX}#TreasuryStreams`, waitingOn: 'a live transport and a signer session' },
+  S17: { state: 'built-unwired', milestone: 'F17', component: `${TX}#UpgradeCrank`, waitingOn: 'a live transport and the FE-P10 outcome' },
+  S18: { state: 'built-unwired', milestone: 'F17', component: `${TX}#SnapshotCrank`, waitingOn: 'a live transport and a signer session' },
+  S19: { state: 'built-unwired', milestone: 'F17', component: `${TX}#RegistryFiling`, waitingOn: 'a live transport and a signer session' },
+  S20: { state: 'not-built', milestone: 'F7b', component: `${TX}#Balances` },
+  S21: { state: 'built-unwired', milestone: 'F7', component: `${HANDOFF}#ShareContext`, waitingOn: 'the capsule export flow being wired to it' },
+  S22: { state: 'built-unwired', milestone: 'F7', component: `${HANDOFF}#ImportReview`, waitingOn: 'the import and clamp flow being wired to it' },
 });
+
+/** One line a user can read, assembled from the structured entry. */
+export function pendingCopy(pending: PendingScreen): string {
+  return pending.state === 'built-unwired'
+    ? `${pending.milestone} — this screen is built; it is waiting on ${pending.waitingOn}.`
+    : `${pending.milestone} — this screen has not been built yet.`;
+}
 
 /** Resolve a hash to a screen, falling back to the front door rather than to nothing. */
 export function screenFor(hash: string, handoffEnabled: boolean): Screen {
@@ -83,13 +118,13 @@ export function screenFor(hash: string, handoffEnabled: boolean): Screen {
  * nothing and tells a developer nothing either.
  */
 export function PendingScreen({ screen }: { readonly screen: Screen }) {
-  const owner = PENDING_SCREENS[screen.id];
+  const pending = PENDING_SCREENS[screen.id];
   return (
     <Panel title={screen.title}>
       <Notice severity="info" heading="This screen is not in this build">
-        {owner === undefined
+        {pending === undefined
           ? 'It is part of the canonical client and has not been built yet.'
-          : `It is part of the canonical client and lands with ${owner}.`}{' '}
+          : `It is part of the canonical client. ${pendingCopy(pending)}`}{' '}
         Nothing here is a chain reading, and no action on this screen is available.
       </Notice>
     </Panel>

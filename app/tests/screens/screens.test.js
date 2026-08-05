@@ -92,6 +92,16 @@ import {
   readProposals,
   summarise,
   viewFor,
+  ApproveAction,
+  ProposeAction,
+  PendingActions,
+  RegisterReporter,
+  SnapshotCrank,
+  RegistryFiling,
+  InsurancePanel,
+  TreasuryStreams,
+  UpgradeCrank,
+  UpgradeHashMismatch,
 } from '@bleavit/features-tx';
 import { ImportRefused, ImportReview, UnlabellableClampError } from '@bleavit/features-handoff';
 import { ShareContext } from '@bleavit/features-handoff';
@@ -115,6 +125,25 @@ const finalized = (value, blockNumber = 1_000_000) => ({
   status: { kind: 'verified-finalized', blockHash: '0xdead', blockNumber },
 });
 const AT = { blockHash: '0xdead', blockNumber: 1_000_000 };
+/**
+ * Whether a labelled button is really disabled.
+ *
+ * `/disabled/` is NOT the test: React renders the enabled case as `aria-disabled="false"`,
+ * which contains the substring, so a bare match passes on an enabled button and asserts
+ * nothing. The boolean attribute is `disabled=""`; that is what a browser honours and what
+ * this looks for.
+ */
+const buttonDisabled = (html, label) => {
+  const tag = new RegExp(`<button[^>]*>${label}</button>`).exec(html);
+  assert.ok(tag !== null, `no button labelled "${label}" in:\n${html}`);
+  return / disabled=""/.test(tag[0]);
+};
+
+/** Unwrap a `Combined<T>` that must be statable — asserting rather than optional-chaining. */
+const stated = (combined) => {
+  assert.equal(combined.kind, 'stated', combined.reason ?? '');
+  return combined.datum.value;
+};
 
 // ------------------------------------------------------- the screen inventory
 
@@ -798,13 +827,14 @@ test('the not-yet-reachable set is declared, and every member is a real screen',
   for (const id of Object.keys(PENDING_SCREENS)) {
     assert.ok(inventory.has(id), `${id} is declared pending but is not in the inventory`);
   }
-  // The built-but-unwired three say so in their own entries, rather than being indexed as
-  // unbuilt — a reader who cannot tell the two apart does the wrong work.
-  for (const id of ['S2', 'S21', 'S22']) {
+  // Each entry declares which of the two reasons applies, as a closed union rather than as
+  // prose — see the bidirectional check below, which is what stops it going stale.
+  for (const [id, pending] of Object.entries(PENDING_SCREENS)) {
     assert.ok(
-      /\bexist(s)?\b/.test(PENDING_SCREENS[id]),
-      `${id} does not say it is already built: ${PENDING_SCREENS[id]}`,
+      pending.state === 'not-built' || pending.state === 'built-unwired',
+      `${id} declares no reason`,
     );
+    assert.match(pending.component, /^@bleavit\/[a-z-]+#[A-Za-z]+$/, `${id}: ${pending.component}`);
   }
   // S1 is chrome — the shell's own header, never routed through the outlet — so it is in
   // neither map, and `unaccountedScreens()` excludes it for that reason alone.
@@ -1987,28 +2017,59 @@ const STREAM = (over = {}) => ({
 test('vesting floors against the claimant, and the last unit is not invented', () => {
   // R-7's rounding rule. `total * elapsed / span` on bigint — a float would round a
   // recipient's last unit into or out of existence.
-  assert.equal(claimableNow(STREAM(), finalized(600)).amount, 500_000n);
+  assert.equal(stated(claimableNow(STREAM(), finalized(600))).amount, 500_000n);
   // 1 block into a 1000-block stream of 1,000,000 vests exactly 1,000.
-  assert.equal(claimableNow(STREAM(), finalized(101)).amount, 1_000n);
+  assert.equal(stated(claimableNow(STREAM(), finalized(101))).amount, 1_000n);
   // A total that does not divide evenly floors rather than rounding up.
-  assert.equal(claimableNow(STREAM({ total: finalized(999n) }), finalized(101)).amount, 0n);
+  assert.equal(stated(claimableNow(STREAM({ total: finalized(999n) }), finalized(101))).amount, 0n);
+});
+
+test('the claimable figure carries the provenance of every read it came from', () => {
+  // Six reads: total, claimed, startBlock, endBlock, cancelled and now. Every call site had
+  // been picking `claimed`'s status for the result, which renders a figure derived partly
+  // from provider data with a verified badge — INV-FE-1 by arithmetic. `check-render-
+  // provenance`'s rule B caught it in this very file.
+  const mixed = claimableNow(
+    STREAM({ total: { value: 1_000_000n, status: { kind: 'provider', providerId: 'p', sampled: false } } }),
+    finalized(600),
+  );
+  assert.equal(mixed.kind, 'stated');
+  assert.equal(mixed.datum.status.kind, 'provider', 'must not inherit the verified badge');
+});
+
+test('a claim across two blocks is refused rather than shown — this is somebody’s money', () => {
+  const split = claimableNow(
+    STREAM({ claimed: { value: 0n, status: { kind: 'verified-finalized', blockHash: '0xbeef', blockNumber: 999_000 } } }),
+    finalized(600),
+  );
+  assert.equal(split.kind, 'incomparable');
+  const blocks = claimBlocks({
+    stream: STREAM({ claimed: { value: 0n, status: { kind: 'verified-finalized', blockHash: '0xbeef', blockNumber: 999_000 } } }),
+    callerIsRecipient: true,
+    now: finalized(600),
+  });
+  assert.deepEqual(blocks.map((b) => b.check), ['Claimable amount']);
+  assert.match(blocks[0].detail, /cannot establish what is claimable/);
 });
 
 test('not-started and fully-claimed are different zeros', () => {
   // A screen showing a bare zero for both tells a recipient the wrong thing to do.
-  assert.deepEqual(claimableNow(STREAM(), finalized(50)), { amount: 0n, reason: 'not-started' });
+  assert.deepEqual(stated(claimableNow(STREAM(), finalized(50))), { amount: 0n, reason: 'not-started' });
   assert.deepEqual(
-    claimableNow(STREAM({ claimed: finalized(1_000_000n) }), finalized(2_000)),
+    stated(claimableNow(STREAM({ claimed: finalized(1_000_000n) }), finalized(2_000))),
     { amount: 0n, reason: 'fully-claimed' },
   );
-  assert.equal(claimableNow(STREAM({ cancelled: finalized(true) }), finalized(600)).reason, 'cancelled');
+  assert.equal(
+    stated(claimableNow(STREAM({ cancelled: finalized(true) }), finalized(600))).reason,
+    'cancelled',
+  );
 });
 
 test('a stream whose end is not after its start is refused, not divided by', () => {
   // Returning the whole total — the "treat it as instant" reading — would credit a
   // recipient everything from malformed chain state.
   const bad = claimableNow(STREAM({ startBlock: finalized(500), endBlock: finalized(500) }), finalized(900));
-  assert.deepEqual(bad, { amount: 0n, reason: 'malformed' });
+  assert.deepEqual(stated(bad), { amount: 0n, reason: 'malformed' });
   const blocks = claimBlocks({
     stream: STREAM({ startBlock: finalized(500), endBlock: finalized(500) }),
     callerIsRecipient: true, now: finalized(900),
@@ -2017,8 +2078,8 @@ test('a stream whose end is not after its start is refused, not divided by', () 
 });
 
 test('vesting stops at the end block rather than continuing past it', () => {
-  assert.equal(claimableNow(STREAM(), finalized(1_100)).amount, 1_000_000n);
-  assert.equal(claimableNow(STREAM(), finalized(99_999)).amount, 1_000_000n);
+  assert.equal(stated(claimableNow(STREAM(), finalized(1_100))).amount, 1_000_000n);
+  assert.equal(stated(claimableNow(STREAM(), finalized(99_999))).amount, 1_000_000n);
 });
 
 test('INSURANCE is classified against its target, never shown as a bare trend', () => {
@@ -2149,4 +2210,298 @@ test('the checkable preconditions still work, so the gap is not an excuse', () =
     checkRegistration(REGISTRATION({ freeUsdc: finalized(1n) })).blocks.map((b) => b.check),
     ['Reporter stake'],
   );
+});
+
+// ------------------------------------------- the rendered operator consoles (F17)
+
+const ACTION_ROW = () => ({
+  actionId: finalized('0xacc'),
+  power: finalized('activate_playbook'),
+  justificationHash: finalized('0xjust'),
+  approvals: finalized(2),
+  threshold: finalized(5),
+  expiresAt: finalized(9_000),
+});
+
+test('m-of-n shows BOTH numbers — never a percentage and never a bar alone', () => {
+  // "3 of 5 required" tells a guardian whether their signature closes it. "60%" does not,
+  // and at 4-of-5 versus 5-of-7 a bar looks the same while the decisions differ entirely.
+  const html = renderToStaticMarkup(
+    h(PendingActions, { actions: [ACTION_ROW()], onOpen: () => {} }),
+  );
+  assert.match(html, />2</, 'the approvals so far must be on screen');
+  assert.match(html, />5</, 'the threshold must be on screen');
+  assert.ok(!html.includes('%'), 'a percentage replaces the two numbers that matter');
+});
+
+test('a blocked approval lists EVERY reason, not the first', () => {
+  // The model returns them all; a screen rendering only the first teaches a guardian who
+  // fixes one blocker and hits the next that the screen is guessing.
+  const html = renderToStaticMarkup(
+    h(ApproveAction, {
+      context: {
+        action: ACTION_ROW(),
+        callerIsMember: false,
+        callerHasApproved: true,
+        now: finalized(99_999),
+      },
+      onApprove: () => {},
+    }),
+  );
+  // Asserted on the notice HEADINGS, not on the raw string. The button's `title` joins every
+  // block check into one attribute, so `html.includes('Expiry')` passes even when a single
+  // notice rendered — a mutation dropping all but the first survived exactly that way.
+  const headings = [...html.matchAll(/<strong class="notice__heading">([^<]*)<\/strong>/g)].map(
+    (match) => match[1],
+  );
+  assert.deepEqual(headings.sort(), ['Already approved', 'Expiry', 'Membership']);
+});
+
+test('the unratified consequence renders BEFORE any propose action, unconditionally', () => {
+  // §11.8.2 requires it stated. The moment it matters is while the guardian is deciding, so
+  // it is not behind the button — and it renders on the clean path too, where a screen that
+  // showed it only alongside a refusal would omit it exactly when the action will happen.
+  const clean = renderToStaticMarkup(
+    h(ProposeAction, {
+      meter: { power: 'pause_intake', used: finalized(0), limit: finalized(3) },
+      onPropose: () => {},
+    }),
+  );
+  assert.ok(clean.includes(UNRATIFIED_CONSEQUENCE), 'must state the bond consequence');
+  assert.ok(
+    clean.indexOf(UNRATIFIED_CONSEQUENCE) < clean.indexOf('Propose</button>'),
+    'the consequence must precede the button, not follow it',
+  );
+});
+
+test('a propose panel offers nothing when the allowance cannot be established', () => {
+  const html = renderToStaticMarkup(
+    h(ProposeAction, {
+      meter: {
+        power: 'pause_intake',
+        used: finalized(0, 1_000_000),
+        limit: { value: 3, status: { kind: 'verified-finalized', blockHash: '0xbeef', blockNumber: 9 } },
+      },
+      onPropose: () => {},
+    }),
+  );
+  assert.ok(buttonDisabled(html, 'Propose'), html);
+  assert.match(html, /cannot establish/);
+  assert.match(html, /Not available/, 'the figure is withheld, not fabricated');
+});
+
+test('the reporter console shows its two unreadable conditions on the CLEAN path', () => {
+  // The dangerous rendering is a green "ready to sign" when nothing checkable blocks — that
+  // is exactly when the caveat carries information, and exactly when a screen is tempted to
+  // drop it.
+  const html = renderToStaticMarkup(
+    h(RegisterReporter, {
+      inputs: {
+        freeUsdc: finalized(10_000_000n),
+        reporterStake: finalized(1_000_000n),
+        alreadyRegistered: finalized(false),
+      },
+      decimals: 6,
+      symbol: 'USDC',
+      onRegister: () => {},
+    }),
+  );
+  for (const condition of UNCHECKABLE_REGISTRATION_CONDITIONS) {
+    assert.ok(html.includes(condition.dispatchError), `${condition.dispatchError} must appear`);
+  }
+  assert.ok(!html.includes('ready to sign'), 'must never claim a complete check');
+  assert.match(html, /the fee is spent/, 'the cost of the failure it cannot predict');
+});
+
+test('a no-op crank is disabled and says the fee would be spent for nothing', () => {
+  const html = renderToStaticMarkup(
+    h(SnapshotCrank, {
+      epoch: finalized(7),
+      boundaryPassed: false,
+      alreadyTaken: false,
+      onCrank: () => {},
+    }),
+  );
+  assert.ok(buttonDisabled(html, 'Take the snapshot'), html);
+  assert.match(html, /pay a fee and change nothing/);
+  // And the ready case is enabled, so the refusal is not vacuous.
+  const ready = renderToStaticMarkup(
+    h(SnapshotCrank, {
+      epoch: finalized(7),
+      boundaryPassed: true,
+      alreadyTaken: false,
+      onCrank: () => {},
+    }),
+  );
+  assert.ok(!buttonDisabled(ready, 'Take the snapshot'), ready);
+});
+
+test('a registry filing states what a challenge holds — on every arm of the window', () => {
+  // The natural reading of "a challenge is open" is that governance is paused. It is not,
+  // and the sentence must not be conditional on the window being open.
+  for (const window of [
+    { kind: 'open', closesAt: finalized(900), extended: false },
+    { kind: 'closed', closedAt: finalized(100) },
+    { kind: 'indeterminate', reason: 'the watchtower read failed' },
+  ]) {
+    const html = renderToStaticMarkup(
+      h(RegistryFiling, { filingId: finalized('0xfile'), window, onChallenge: () => {} }),
+    );
+    assert.ok(html.includes(REGISTRY_HOLDS_SETTLEMENT), `missing on ${window.kind}`);
+  }
+});
+
+test('an indeterminate challenge window disables the challenge rather than guessing', () => {
+  const html = renderToStaticMarkup(
+    h(RegistryFiling, {
+      filingId: finalized('0xfile'),
+      window: { kind: 'indeterminate', reason: 'the watchtower read failed' },
+      onChallenge: () => {},
+    }),
+  );
+  assert.ok(buttonDisabled(html, 'Challenge this filing'), html);
+  assert.match(html, /cannot establish when the window closes/);
+});
+
+test('INSURANCE renders its classification and never a bare balance beside it', () => {
+  // E1: a rising INSURANCE balance is not protocol income. A number a reader can watch move
+  // is an invitation to read it as one, so the panel shows the standing and the copy only.
+  const html = renderToStaticMarkup(
+    h(InsurancePanel, { balance: finalized(140n), target: finalized(100n) }),
+  );
+  assert.match(html, /awaiting-overflow/);
+  assert.match(html, /not protocol income/);
+  assert.ok(!html.includes('140'), 'the raw balance must not be rendered beside the copy');
+});
+
+test('a claimable amount derived across two blocks is withheld in the streams table', () => {
+  const stream = STREAM({
+    claimed: { value: 0n, status: { kind: 'verified-finalized', blockHash: '0xbeef', blockNumber: 9 } },
+  });
+  const html = renderToStaticMarkup(
+    h(TreasuryStreams, {
+      streams: [stream],
+      now: finalized(600),
+      decimals: 6,
+      symbol: 'USDC',
+      callerIsRecipient: () => true,
+      onClaim: () => {},
+    }),
+  );
+  assert.match(html, /Not available/);
+  assert.ok(!html.includes('Claim</button>'), 'no claim is offered against a figure it cannot state');
+});
+
+const AUTH_FOR_SCREEN = () => ({ codeHash: finalized('0xcode'), applicableAt: finalized(5_000) });
+
+test('the upgrade crank offers nothing until an artifact has been verified', () => {
+  // The structural half is in the model — `UpgradeSubmission` requires a `VerifiedArtifact`,
+  // whose only mint site is `verifyArtifact`. The screen's job is to not imply otherwise.
+  const html = renderToStaticMarkup(
+    h(UpgradeCrank, {
+      submission: undefined,
+      authorized: AUTH_FOR_SCREEN(),
+      now: finalized(9_000),
+      onSubmit: () => {},
+    }),
+  );
+  assert.ok(buttonDisabled(html, 'Submit the upgrade'), html);
+  assert.match(html, /hashed on this device/);
+});
+
+test('the FE-P10 outlook precedes the submit control, because it decides whether to start', () => {
+  const artifact = verifyArtifact(new Uint8Array(3 * 1024 * 1024), AUTH_FOR_SCREEN(), () => '0xcode');
+  const html = renderToStaticMarkup(
+    h(UpgradeCrank, {
+      submission: { artifact, authorized: AUTH_FOR_SCREEN() },
+      authorized: AUTH_FOR_SCREEN(),
+      now: finalized(9_000),
+      onSubmit: () => {},
+    }),
+  );
+  assert.match(html, /has not been established \(FE-P10\)/);
+  assert.ok(
+    html.indexOf('FE-P10') < html.indexOf('Submit the upgrade'),
+    'the outlook must come before the control it qualifies',
+  );
+  assert.ok(!buttonDisabled(html, 'Submit the upgrade'), 'a verified, applicable upgrade submits');
+});
+
+test('an upgrade before its stored applicable_at is refused with the chain’s own field', () => {
+  const artifact = verifyArtifact(new Uint8Array(16), AUTH_FOR_SCREEN(), () => '0xcode');
+  const html = renderToStaticMarkup(
+    h(UpgradeCrank, {
+      submission: { artifact, authorized: AUTH_FOR_SCREEN() },
+      authorized: AUTH_FOR_SCREEN(),
+      now: finalized(4_999),
+      onSubmit: () => {},
+    }),
+  );
+  assert.ok(buttonDisabled(html, 'Submit the upgrade'), html);
+  // SQ-552: the field is read, not recomputed, and the copy says so rather than presenting
+  // a countdown this client derived.
+  assert.match(html, /not a countdown this client computed/);
+});
+
+test('a hash mismatch is a refusal with both hashes — never a retry', () => {
+  // Re-downloading cannot make different bytes into the authorized ones. Offering "try
+  // again" would suggest the failure was transport rather than identity.
+  const html = renderToStaticMarkup(
+    h(UpgradeHashMismatch, { expected: '0xcode', computed: '0xother' }),
+  );
+  assert.match(html, /FE-UPG-001/);
+  assert.match(html, /0xcode/);
+  assert.match(html, /0xother/);
+  assert.match(html, /will not change this result/);
+  assert.ok(!/retry|Retry|try again</.test(html), `must not offer a retry: ${html}`);
+});
+
+test('a pending declaration expires the moment its component exists — in both directions', async () => {
+  // Prose could not hold this. Within a day of the "name the reason" fix, nine entries still
+  // read "F17 — the reporter console" for screens that had since been built, because nothing
+  // made the claim answerable. So each entry names the component it waits on, and both
+  // directions are checked:
+  //
+  //   built-unwired whose component is ABSENT  → a false promise;
+  //   not-built     whose component is PRESENT → exactly the staleness above, and this now
+  //                                              fails the build the moment it lands.
+  //
+  // The second direction is the point: a declaration that cannot outlive the condition it
+  // describes, the same mechanical expiry the monitoring seams and the limit-coverage
+  // registry use.
+  const modules = {
+    '@bleavit/features-tx': await import('@bleavit/features-tx'),
+    '@bleavit/features-handoff': await import('@bleavit/features-handoff'),
+  };
+  const wrong = [];
+  for (const [id, pending] of Object.entries(PENDING_SCREENS)) {
+    const [pkg, name] = pending.component.split('#');
+    const module = modules[pkg];
+    assert.ok(module !== undefined, `${id} names an unknown package ${pkg}`);
+    const exists = name in module;
+    if (pending.state === 'built-unwired' && !exists) {
+      wrong.push(`${id}: declared built-unwired, but ${pending.component} does not exist`);
+    }
+    if (pending.state === 'not-built' && exists) {
+      wrong.push(
+        `${id}: declared not-built, but ${pending.component} EXISTS — the entry is stale. ` +
+          "Change it to state: 'built-unwired' and say what it is waiting on.",
+      );
+    }
+  }
+  assert.deepEqual(wrong, []);
+});
+
+test('the pending copy distinguishes the two reasons in words a user reads', () => {
+  // The structured entry is for the checker; this is what reaches the screen. "Not built"
+  // and "built, waiting on a transport" are different promises and must read differently.
+  const unbuilt = renderToStaticMarkup(
+    h(Outlet, { hash: '#/positions', handoffEnabled: true, implemented: {} }),
+  );
+  assert.match(unbuilt, /has not been built yet/);
+  const unwired = renderToStaticMarkup(
+    h(Outlet, { hash: '#/guardian', handoffEnabled: true, implemented: {} }),
+  );
+  assert.match(unwired, /this screen is built; it is waiting on/);
+  assert.ok(!unwired.includes('has not been built yet'), unwired);
 });

@@ -132,3 +132,14 @@ export {
   type RegistrationInputs,
   type UncheckableCondition,
 } from './reporter.js';
+export { ApproveAction, PendingActions, ProposeAction } from './guardian-console.js';
+export {
+  ClaimStream,
+  UpgradeCrank,
+  UpgradeHashMismatch,
+  InsurancePanel,
+  RegisterReporter,
+  RegistryFiling,
+  SnapshotCrank,
+  TreasuryStreams,
+} from './operator-consoles.js';

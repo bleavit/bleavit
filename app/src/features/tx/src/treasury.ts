@@ -31,7 +31,7 @@
  * which is the enforceable form of that sentence.
  */
 
-import type { Verified } from '@bleavit/shared-types';
+import { combine, type Combined, type Verified } from '@bleavit/shared-types';
 
 export interface Stream {
   readonly id: Verified<string>;
@@ -61,26 +61,49 @@ export interface Claimable {
  *
  * `floor` throughout and against the claimant, per R-7's rounding rule: a recipient is
  * never credited a unit the schedule has not yet released.
+ *
+ * ## The figure is derived from six reads, so it carries their combined provenance
+ *
+ * `total`, `claimed`, `startBlock`, `endBlock`, `cancelled` and `now`. Returning a bare
+ * number left every call site to pick a status for it, and both call sites picked
+ * `claimed`'s — which renders the claimable amount with a **verified** badge even when one
+ * of the other five came from a provider, and asserts a figure true of no single block when
+ * they were read at different ones. That is INV-FE-1 reached by arithmetic, and it is the
+ * exact defect `check-render-provenance`'s rule B exists to catch (it caught this one).
+ *
+ * So the result is `Combined<Claimable>`: no stronger than its weakest input, and refused
+ * outright across blocks. This is somebody's money, and R-7 says the client states what the
+ * chain will do or states that it cannot.
  */
-export function claimableNow(stream: Stream, now: Verified<number>): Claimable {
-  if (stream.cancelled.value) return { amount: 0n, reason: 'cancelled' };
+export function claimableNow(stream: Stream, now: Verified<number>): Combined<Claimable> {
+  const provenance = [
+    stream.total.status,
+    stream.claimed.status,
+    stream.startBlock.status,
+    stream.endBlock.status,
+    stream.cancelled.status,
+    now.status,
+  ];
+  const claimable = (value: Claimable) => combine(value, provenance);
+
+  if (stream.cancelled.value) return claimable({ amount: 0n, reason: 'cancelled' });
   if (stream.endBlock.value <= stream.startBlock.value) {
     // Not a schedule. Returning zero with a *reason* beats dividing by zero, and beats
     // returning the whole total, which is what a "treat it as instant" reading would do.
-    return { amount: 0n, reason: 'malformed' };
+    return claimable({ amount: 0n, reason: 'malformed' });
   }
-  if (now.value <= stream.startBlock.value) return { amount: 0n, reason: 'not-started' };
+  if (now.value <= stream.startBlock.value) return claimable({ amount: 0n, reason: 'not-started' });
 
   const elapsed = BigInt(Math.min(now.value, stream.endBlock.value) - stream.startBlock.value);
   const span = BigInt(stream.endBlock.value - stream.startBlock.value);
   const vested = (stream.total.value * elapsed) / span; // floors — against the claimant
-  const claimable = vested - stream.claimed.value;
-  if (claimable <= 0n) {
+  const remaining = vested - stream.claimed.value;
+  if (remaining <= 0n) {
     // Distinguished from `not-started`: one is "not yet", the other is "nothing left", and
     // a screen showing a bare zero for both tells a recipient the wrong thing to do.
-    return { amount: 0n, reason: 'fully-claimed' };
+    return claimable({ amount: 0n, reason: 'fully-claimed' });
   }
-  return { amount: claimable, reason: 'claimable' };
+  return claimable({ amount: remaining, reason: 'claimable' });
 }
 
 export interface ClaimContext {
@@ -113,8 +136,20 @@ export function claimBlocks(context: ClaimContext): readonly TreasuryBlock[] {
     });
   }
   const claimable = claimableNow(context.stream, context.now);
-  if (claimable.reason !== 'claimable') {
-    blocks.push({ check: 'Claimable amount', detail: CLAIM_REASON_COPY[claimable.reason] });
+  if (claimable.kind === 'incomparable') {
+    // Fail-closed on money: a claim offered against a figure this client cannot establish
+    // would show the recipient a number true of no block, about their own funds.
+    blocks.push({
+      check: 'Claimable amount',
+      detail:
+        `This client cannot establish what is claimable. ${claimable.reason} Until it can, ` +
+        'the claim is not offered.',
+    });
+  } else if (claimable.datum.value.reason !== 'claimable') {
+    blocks.push({
+      check: 'Claimable amount',
+      detail: CLAIM_REASON_COPY[claimable.datum.value.reason],
+    });
   }
   return blocks;
 }
