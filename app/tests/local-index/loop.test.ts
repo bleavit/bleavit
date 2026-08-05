@@ -24,16 +24,26 @@ import {
   isVerifiedAt,
   runIngest,
 } from '@bleavit/local-index';
+import { nth } from './nth.ts';
+import type {
+  BlockWrite,
+  FinalizedBlockScan,
+  HeaderSource,
+  LoopPorts,
+} from '@bleavit/local-index';
 
 const WATCHED = new Set(['alice']);
 // 10 §6.5's header sources. `OPERATOR` names *which* operator because the type requires it:
 // two operators are two sources, and a range that cannot say which one it came from cannot
 // be invalidated without taking honest ranges with it.
-const SELF = { origin: 'self' };
-const OPERATOR = { origin: 'operator', providerId: 'op-1' };
+const SELF: HeaderSource = { origin: 'self' };
+const OPERATOR: HeaderSource = { origin: 'operator', providerId: 'op-1' };
 
 
-const scan = (number, { count = 2, watched = false } = {}) => ({
+const scan = (
+  number: number,
+  { count = 2, watched = false }: { count?: number | undefined; watched?: boolean } = {},
+): FinalizedBlockScan => ({
   number,
   extrinsicCount: count,
   events: watched
@@ -48,7 +58,7 @@ const scan = (number, { count = 2, watched = false } = {}) => ({
     : [{ phase: { kind: 'finalization' }, pallet: 'System', name: 'CodeUpdated', accounts: [] }],
 });
 
-const ports = (over = {}) => ({
+const ports = (over: Partial<LoopPorts> = {}): LoopPorts => ({
   fetchBodies: async () => [new Uint8Array([0]), new Uint8Array([1])],
   write: async () => {},
   now: () => 1_000,
@@ -81,15 +91,16 @@ test('an attributed block fetches once and rows carry the HEADER’s provenance'
 
   // The same block ingested behind a layer-2 header is `provider`, because the body's
   // extrinsics-root check is only as good as the header's provenance.
-  let captured;
+  let captured: BlockWrite | undefined;
   await ingestBlock(
     EMPTY_COVERAGE, scan(100, { watched: true }), WATCHED, OPERATOR,
-    ports({ write: async (w) => { captured = w; } }),
+    ports({ write: async (w: BlockWrite) => { captured = w; } }),
   );
-  assert.equal(captured.rows[0].provenance, 'provider');
+  assert.ok(captured, 'the loop never called write — nothing below is being asserted');
+  assert.equal(nth(captured.rows, 0, 'row').provenance, 'provider');
   // ...and so is the coverage the same call advanced. Asserting only the row is what let
   // the loop mint a `self` range here undetected.
-  assert.equal(captured.coverageAfter.ranges[0].origin, 'operator');
+  assert.equal(nth(captured.coverageAfter.ranges, 0, 'range').origin, 'operator');
 });
 
 test('coverage does NOT advance when the write fails', async () => {
@@ -189,9 +200,9 @@ test('the run stops at the first failure and reports the coverage it actually re
 
 test('blocks are ingested sequentially — N+1 cannot land before N’s write', async () => {
   // Rule 1 broken by parallelism rather than by ordering, with an identical symptom.
-  const order = [];
+  const order: string[] = [];
   await runIngest(EMPTY_COVERAGE, [scan(1), scan(2), scan(3)], WATCHED, SELF, ports({
-    write: async (w) => {
+    write: async (w: BlockWrite) => {
       order.push(`start-${w.blockNumber}`);
       await new Promise((resolve) => setTimeout(resolve, 5));
       order.push(`end-${w.blockNumber}`);
@@ -207,7 +218,7 @@ test('a scan with NO declared count still ingests — and the body becomes the a
   // watched extrinsic never has its body fetched. Making the count optional immediately
   // introduced a latent bug the existing fixtures could not see — every one of them supplied
   // a count, so `bodies.length !== undefined` (always true) was never evaluated.
-  const noCount = {
+  const noCount: FinalizedBlockScan = {
     number: 200,
     events: [
       { phase: { kind: 'apply-extrinsic', index: 1 }, pallet: 'Balances', name: 'Transfer', accounts: ['alice'] },
@@ -223,7 +234,7 @@ test('an index beyond the FETCHED body is refused even with no declared count', 
   // Where SQ-595 moved the guard. `attributedExtrinsics` can no longer bound the index at
   // scan time, so the fetched body — the authoritative count — bounds it here. Without this,
   // making the count optional would have deleted the control rather than relocated it.
-  const noCount = {
+  const noCount: FinalizedBlockScan = {
     number: 201,
     events: [
       { phase: { kind: 'apply-extrinsic', index: 7 }, pallet: 'Balances', name: 'Transfer', accounts: ['alice'] },
@@ -245,7 +256,7 @@ test('the index guard is >=, not > — index N against N extrinsics is out of ra
   // test. Indices are zero-based, so index 2 in a 2-extrinsic block is exactly one past the
   // end — the single most likely off-by-one, and the one that decodes garbage rather than
   // throwing.
-  const atBoundary = {
+  const atBoundary: FinalizedBlockScan = {
     number: 202,
     events: [
       { phase: { kind: 'apply-extrinsic', index: 2 }, pallet: 'Balances', name: 'Transfer', accounts: ['alice'] },
@@ -258,7 +269,7 @@ test('the index guard is >=, not > — index N against N extrinsics is out of ra
 
   // ...and the last valid index is accepted, so the bound is not simply off by one the other
   // way — which would silently drop the last extrinsic of every block.
-  const lastValid = {
+  const lastValid: FinalizedBlockScan = {
     number: 203,
     events: [
       { phase: { kind: 'apply-extrinsic', index: 1 }, pallet: 'Balances', name: 'Transfer', accounts: ['alice'] },

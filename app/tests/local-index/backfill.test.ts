@@ -24,6 +24,7 @@ import {
   planBackfill,
   tabHoursFor,
 } from '@bleavit/local-index';
+import { nth } from './nth.ts';
 
 const RATE = BUDGETED_INGEST_BLOCKS_PER_SECOND;
 /** 02 §8's 6-second blocks. The number lives in the suite rather than in the package: the
@@ -70,14 +71,14 @@ test('a plan runs newest to oldest in 1,000-block chunks', () => {
   assert.equal(plan.totalBlocks, 2_501);
   assert.equal(BACKFILL_CHUNK_BLOCKS, 1_000);
   // Newest first: an interrupted plan leaves the user with the part they were looking at.
-  assert.equal(plan.chunks[0].toBlock, head);
-  assert.ok(plan.chunks[0].fromBlock > plan.chunks[1].fromBlock);
-  assert.equal(plan.chunks.at(-1).fromBlock, head - 2_500);
+  assert.equal(nth(plan.chunks, 0, 'chunk').toBlock, head);
+  assert.ok(nth(plan.chunks, 0, 'chunk').fromBlock > nth(plan.chunks, 1, 'chunk').fromBlock);
+  assert.equal(nth(plan.chunks, -1, 'chunk').fromBlock, head - 2_500);
   // Contiguous and non-overlapping, so a block is neither missed nor ingested twice.
   const covered = plan.chunks.reduce((sum, chunk) => sum + (chunk.toBlock - chunk.fromBlock + 1), 0);
   assert.equal(covered, plan.totalBlocks);
   for (let i = 1; i < plan.chunks.length; i += 1) {
-    assert.equal(plan.chunks[i].toBlock + 1, plan.chunks[i - 1].fromBlock);
+    assert.equal(nth(plan.chunks, i, 'chunk').toBlock + 1, nth(plan.chunks, i - 1, 'chunk').fromBlock);
   }
 });
 

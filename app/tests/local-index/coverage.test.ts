@@ -23,24 +23,51 @@ import {
   holesIn,
   invalidateRange,
   isVerifiedAt,
+  providerRange,
 } from '@bleavit/local-index';
+import type { Coverage, CoverageRange } from '@bleavit/local-index';
+// `selfRange` is test-only on purpose — see packages/local-index/src/testing.ts. Going
+// through it rather than writing `{ origin: 'self' }` here is not ceremony: the `self`
+// brand has no runtime representation, so an object literal is the exact capability the
+// split exists to withhold, and a suite that minted one would be the first consumer to
+// demonstrate it can be done.
+import { selfRange } from '@bleavit/local-index/testing';
 
-const self = (fromBlock, toBlock, ingestedAt = 1) => ({ fromBlock, toBlock, origin: 'self', ingestedAt });
-const op = (fromBlock, toBlock, providerId = 'op-1', ingestedAt = 1) => ({
-  fromBlock, toBlock, origin: 'operator', providerId, ingestedAt,
-});
+/**
+ * A range as an *untyped* caller would supply it — a record rehydrated from IndexedDB, a
+ * provider payload, a hand-written fixture.
+ *
+ * Every use below is a refusal test: the value is inverted, unattributable, forged, or
+ * carries an origin `RangeOrigin` does not define. The types cannot express these values,
+ * which is the compile-time half of the control working; the cast is what lets the suite
+ * ask whether the *runtime* half is there too. Never use it for a well-formed range —
+ * `self`/`op` mint those, through the package's own constructors.
+ */
+const asRange = (record: Record<string, unknown>): CoverageRange => record as CoverageRange;
+
+/** The nth range, or a throw naming how many there were. */
+const rangeAt = (coverage: Coverage, n: number): CoverageRange => {
+  const range = coverage.ranges[n];
+  if (range === undefined) throw new Error(`coverage holds ${coverage.ranges.length} range(s), not ${n + 1}`);
+  return range;
+};
+
+const self = (fromBlock: number, toBlock: number, ingestedAt = 1): CoverageRange =>
+  selfRange(fromBlock, toBlock, ingestedAt);
+const op = (fromBlock: number, toBlock: number, providerId = 'op-1', ingestedAt = 1): CoverageRange =>
+  providerRange('operator', providerId, fromBlock, toBlock, ingestedAt);
 
 test('same-provenance adjacent ranges join', () => {
   const c = addRange(addRange(EMPTY_COVERAGE, self(1, 10)), self(11, 20));
   assert.equal(c.ranges.length, 1);
-  assert.deepEqual([c.ranges[0].fromBlock, c.ranges[0].toBlock], [1, 20]);
+  assert.deepEqual([rangeAt(c, 0).fromBlock, rangeAt(c, 0).toBlock], [1, 20]);
   assert.deepEqual(c.holes, []);
 });
 
 test('same-provenance overlapping ranges join', () => {
   const c = addRange(addRange(EMPTY_COVERAGE, self(1, 10)), self(5, 20));
   assert.equal(c.ranges.length, 1);
-  assert.deepEqual([c.ranges[0].fromBlock, c.ranges[0].toBlock], [1, 20]);
+  assert.deepEqual([rangeAt(c, 0).fromBlock, rangeAt(c, 0).toBlock], [1, 20]);
 });
 
 test('ADJACENT ranges of different origin are NOT merged (10 §6.3)', () => {
@@ -50,7 +77,7 @@ test('ADJACENT ranges of different origin are NOT merged (10 §6.3)', () => {
   assert.equal(c.ranges.length, 2, 'a provenance boundary was spliced away');
   assert.deepEqual(c.ranges.map((r) => r.origin), ['self', 'operator']);
   // ...and the boundary is exactly where it should be — a rendered fact, not an artefact.
-  assert.deepEqual([c.ranges[0].toBlock, c.ranges[1].fromBlock], [10, 11]);
+  assert.deepEqual([rangeAt(c, 0).toBlock, rangeAt(c, 1).fromBlock], [10, 11]);
 });
 
 test('ranges from different providers are not merged either', () => {
@@ -82,7 +109,9 @@ test('the 2-hour gap 10 §6.3 says cannot be closed stays open', () => {
   // that quietly closed it would be re-implementing a promise the spec withdrew.
   const c = addRange(addRange(EMPTY_COVERAGE, self(1, 1000)), self(2201, 3000));
   assert.deepEqual(c.holes, [{ fromBlock: 1001, toBlock: 2200 }]);
-  assert.equal(c.holes[0].toBlock - c.holes[0].fromBlock + 1, 1200);
+  const gap = c.holes[0];
+  assert.ok(gap, 'the gap was closed — 10 §6.3 says it cannot be');
+  assert.equal(gap.toBlock - gap.fromBlock + 1, 1200);
 });
 
 test('a hole is fillable by a provider without becoming verified', () => {
@@ -107,8 +136,8 @@ test('holesIn respects an explicit span wider than the ranges', () => {
 test('an unattributable range is refused', () => {
   // A non-`self` range with no provider is exactly the one a later reader would be
   // tempted to treat as verified.
-  assert.throws(() => addRange(EMPTY_COVERAGE, { fromBlock: 1, toBlock: 2, origin: 'operator', ingestedAt: 1 }), CoverageError);
-  assert.throws(() => addRange(EMPTY_COVERAGE, { ...self(1, 2), providerId: 'x' }), CoverageError);
+  assert.throws(() => addRange(EMPTY_COVERAGE, asRange({ fromBlock: 1, toBlock: 2, origin: 'operator', ingestedAt: 1 })), CoverageError);
+  assert.throws(() => addRange(EMPTY_COVERAGE, asRange({ ...self(1, 2), providerId: 'x' })), CoverageError);
 });
 
 test('a backwards or non-integer range is refused', () => {
@@ -123,7 +152,7 @@ test('invalidating one range leaves the rest of the index intact', () => {
   let c = addRange(addRange(EMPTY_COVERAGE, self(1, 10)), bad);
   c = invalidateRange(c, bad);
   assert.equal(c.ranges.length, 1);
-  assert.deepEqual([c.ranges[0].fromBlock, c.ranges[0].toBlock], [1, 10]);
+  assert.deepEqual([rangeAt(c, 0).fromBlock, rangeAt(c, 0).toBlock], [1, 10]);
   assert.equal(isVerifiedAt(c, 5), true, 'the surviving range was dropped too');
   assert.equal(isVerifiedAt(c, 25), false);
 });
@@ -156,7 +185,7 @@ test('merging same-provenance ranges makes invalidation coarser, and that is the
   assert.equal(untouched.ranges.length, 1, 'a stale sub-range reference removed something');
 
   // The stored range is the unit, and dropping it drops the whole span.
-  c = invalidateRange(c, c.ranges[0]);
+  c = invalidateRange(c, rangeAt(c, 0));
   assert.deepEqual(c.ranges, []);
   assert.equal(isVerifiedAt(c, 5), false);
 });
@@ -165,7 +194,7 @@ test('joining keeps the older ingest time', () => {
   // The joined range has been held since the earlier ingest; taking the newer time
   // would make a long-held range look freshly fetched to any staleness policy.
   const c = addRange(addRange(EMPTY_COVERAGE, self(1, 10, 100)), self(11, 20, 500));
-  assert.equal(c.ranges[0].ingestedAt, 100);
+  assert.equal(rangeAt(c, 0).ingestedAt, 100);
 });
 
 test('an inverted span is refused, not answered with "no holes"', () => {
@@ -200,7 +229,7 @@ test('non-canonical coverage is refused rather than silently carried forward', (
   const touching = { ranges: [self(1, 10), self(11, 20)], holes: [] };
   assert.throws(() => addRange(touching, self(100, 110)), CoverageError);
 
-  const malformed = { ranges: [{ fromBlock: 10, toBlock: 1, origin: 'self', ingestedAt: 1 }], holes: [] };
+  const malformed = { ranges: [asRange({ fromBlock: 10, toBlock: 1, origin: 'self', ingestedAt: 1 })], holes: [] };
   assert.throws(() => addRange(malformed, self(100, 110)), CoverageError);
 });
 
@@ -241,7 +270,7 @@ test('holesIn refuses a malformed RANGE, not only a malformed span', () => {
   // The same fail-open one argument over: an inverted range covers nothing, the cursor
   // arithmetic steps straight over it, and the answer is `[]` — which means complete
   // coverage. Guarding only the span left this reachable.
-  const inverted = { fromBlock: 100, toBlock: 50, origin: 'self', ingestedAt: 1 };
+  const inverted = asRange({ fromBlock: 100, toBlock: 50, origin: 'self', ingestedAt: 1 });
   assert.throws(() => holesIn([inverted]), CoverageError);
   assert.throws(() => holesIn([inverted], { fromBlock: 1, toBlock: 100 }), CoverageError);
 });
@@ -250,15 +279,15 @@ test('an unknown origin is refused rather than treated as provider data', () => 
   // `isVerifiedAt` asks whether the origin is `self`, so any other string reads as
   // "provider data" and is retained under a label 10 §6.2 does not define.
   assert.throws(
-    () => addRange(EMPTY_COVERAGE, { fromBlock: 1, toBlock: 5, origin: 'rpc', providerId: 'p', ingestedAt: 1 }),
+    () => addRange(EMPTY_COVERAGE, asRange({ fromBlock: 1, toBlock: 5, origin: 'rpc', providerId: 'p', ingestedAt: 1 })),
     CoverageError,
   );
   assert.throws(
-    () => addRange(EMPTY_COVERAGE, { fromBlock: 1, toBlock: 5, origin: 'operator', providerId: '', ingestedAt: 1 }),
+    () => addRange(EMPTY_COVERAGE, asRange({ fromBlock: 1, toBlock: 5, origin: 'operator', providerId: '', ingestedAt: 1 })),
     CoverageError,
   );
   assert.throws(
-    () => addRange(EMPTY_COVERAGE, { fromBlock: 1, toBlock: 5, origin: 'operator', providerId: 7, ingestedAt: 1 }),
+    () => addRange(EMPTY_COVERAGE, asRange({ fromBlock: 1, toBlock: 5, origin: 'operator', providerId: 7, ingestedAt: 1 })),
     CoverageError,
   );
 });
@@ -297,7 +326,7 @@ test('the self brand is a compile-time control, and the runtime control is elsew
   // IndexedDB, most obviously — can write `{ origin: 'self' }` and `isVerifiedAt` agrees.
   // That is not fixable inside this module: no local artifact can prove it came from a
   // light client.
-  const forged = addRange(EMPTY_COVERAGE, { fromBlock: 1, toBlock: 10, origin: 'self', ingestedAt: 1 });
+  const forged = addRange(EMPTY_COVERAGE, asRange({ fromBlock: 1, toBlock: 10, origin: 'self', ingestedAt: 1 }));
   assert.equal(isVerifiedAt(forged, 5), true, 'the brand is erased at runtime, as branded types are');
 
   // What makes that harmless is INV-FE-7 plus the firewall: local storage is disposable and

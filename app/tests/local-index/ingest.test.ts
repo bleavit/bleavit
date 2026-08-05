@@ -22,15 +22,25 @@ import {
   needsBodyFetch,
   txRowKey,
 } from '@bleavit/local-index';
+import type { EventPhase, FinalizedBlockScan, IndexedEvent } from '@bleavit/local-index';
 
 const ALICE = '0x' + '11'.repeat(32);
 const BOB = '0x' + '22'.repeat(32);
 const WATCHED = new Set([ALICE]);
 
-const apply = (index) => ({ kind: 'apply-extrinsic', index });
-const event = (phase, pallet, name, accounts = []) => ({ phase, pallet, name, accounts });
+const apply = (index: number): EventPhase => ({ kind: 'apply-extrinsic', index });
+const event = (
+  phase: EventPhase,
+  pallet: string,
+  name: string,
+  accounts: readonly string[] = [],
+): IndexedEvent => ({ phase, pallet, name, accounts });
 
-const block = (events, extrinsicCount = 4) => ({ number: 100, extrinsicCount, events });
+const block = (events: readonly IndexedEvent[], extrinsicCount = 4): FinalizedBlockScan => ({
+  number: 100,
+  extrinsicCount,
+  events,
+});
 
 test('an extrinsic that names a watched account is fetched', () => {
   const scan = block([event(apply(2), 'Market', 'Traded', [ALICE])]);

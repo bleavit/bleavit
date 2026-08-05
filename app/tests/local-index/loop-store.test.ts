@@ -26,17 +26,40 @@ import {
   runIngest,
   storeWriter,
 } from '@bleavit/local-index';
+import type {
+  AttributedRow,
+  EventEncoder,
+  FinalizedBlockScan,
+  HeaderSource,
+  LoopPorts,
+} from '@bleavit/local-index';
+import { selfRange } from '@bleavit/local-index/testing';
+import { nth } from './nth.ts';
+
+/**
+ * A row as a *malformed* producer would supply it.
+ *
+ * The one use below hands `txHistory` a row whose primary key is not a string, which is
+ * what makes the `bulkPut` fail **after** the coverage put was issued inside the same
+ * transaction. The type forbids it — correctly — so the cast is what lets the suite ask
+ * whether the rollback really covers both writes. Nothing else may use it.
+ */
+type MalformedRow = Omit<AttributedRow, 'key'> & { readonly key: unknown };
+const asRow = (record: MalformedRow): AttributedRow => record as AttributedRow;
 
 const GENESIS = `0x${'c3'.repeat(32)}`;
 const WATCHED = new Set(['alice']);
 // 10 §6.5's header sources. `OPERATOR` names *which* operator because the type requires it:
 // two operators are two sources, and a range that cannot say which one it came from cannot
 // be invalidated without taking honest ranges with it.
-const SELF = { origin: 'self' };
-const OPERATOR = { origin: 'operator', providerId: 'op-1' };
+const SELF: HeaderSource = { origin: 'self' };
+const OPERATOR: HeaderSource = { origin: 'operator', providerId: 'op-1' };
 
 
-const scan = (number, { count = 2, watched = false } = {}) => ({
+const scan = (
+  number: number,
+  { count = 2, watched = false }: { count?: number | undefined; watched?: boolean } = {},
+): FinalizedBlockScan => ({
   number,
   extrinsicCount: count,
   events: watched
@@ -45,7 +68,7 @@ const scan = (number, { count = 2, watched = false } = {}) => ({
 });
 
 const decodeRow = () => ({ account: 'alice', call: 'Balances.transfer_keep_alive' });
-const encodeEvent = (write, event, index) => ({
+const encodeEvent: EventEncoder = (write, event, index) => ({
   id: `${write.blockNumber}:${index}`,
   blockNumber: write.blockNumber,
   pallet: event.pallet,
@@ -54,7 +77,7 @@ const encodeEvent = (write, event, index) => ({
   decoded: true,
 });
 
-const ports = (db, over = {}) => ({
+const ports = (db: LocalIndex, over: Partial<LoopPorts> = {}): LoopPorts => ({
   fetchBodies: async () => [new Uint8Array([0]), new Uint8Array([1])],
   write: storeWriter(db, decodeRow, encodeEvent),
   now: () => 1_000,
@@ -104,8 +127,16 @@ test('a failed row write leaves NO coverage behind — the transaction rolls bot
     poison({
       blockNumber: 20,
       scan: scan(20, { watched: true }),
-      rows: [{ key: undefined, blockNumber: 20, extrinsicIndex: 1, provenance: 'verified-finalized', body: new Uint8Array() }],
-      coverageAfter: { ranges: [{ origin: 'self', fromBlock: 20, toBlock: 20, ingestedAt: 1 }], holes: [] },
+      rows: [
+        asRow({
+          key: undefined,
+          blockNumber: 20,
+          extrinsicIndex: 1,
+          provenance: 'verified-finalized',
+          body: new Uint8Array(),
+        }),
+      ],
+      coverageAfter: { ranges: [selfRange(20, 20, 1)], holes: [] },
     }),
   );
   const after = await readCoverage(db);
@@ -124,13 +155,13 @@ test('a row fetched behind a layer-2 header is stored as `operator`, never `self
   // light-client-verified one for every later reader.
   const db = await freshDb();
   await runIngest(EMPTY_COVERAGE, [scan(30, { watched: true })], WATCHED, OPERATOR, ports(db));
-  const [row] = await db.txHistory.toArray();
+  const row = nth(await db.txHistory.toArray(), 0, 'stored event');
   assert.equal(row.origin, 'operator');
 
   // ...and the same block behind a self header is `self`, so the mapping is not a constant.
   const db2 = await freshDb();
   await runIngest(EMPTY_COVERAGE, [scan(30, { watched: true })], WATCHED, SELF, ports(db2));
-  const [selfRow] = await db2.txHistory.toArray();
+  const selfRow = nth(await db2.txHistory.toArray(), 0, 'stored event');
   assert.equal(selfRow.origin, 'self');
   db.close();
   db2.close();
@@ -151,7 +182,7 @@ test('the COVERAGE a layer-2 header produces is `operator` too, not just its row
     false,
     'a block ingested behind an operator header must never read as light-client verified',
   );
-  const [range] = run.coverage.ranges;
+  const range = nth(run.coverage.ranges, 0, 'range');
   assert.equal(range.origin, 'operator');
   assert.equal(
     range.providerId,
