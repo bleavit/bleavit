@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!--
+      Content Security Policy — 12 §5.1. The final directive is an enumerated allowlist
+      substituted at build time from declared sources, never `*`; an unsubstituted tree
+      fails `release:check` rather than shipping a policy the parser would reject.
+      Every other directive is unchanged from FRONTEND_PLAN §9.8. `frame-ancestors` is
+      deliberately absent — meta-CSP cannot set it, and gateways own the real headers.
+      `worker-src` is `'self'` only: smoldot's worker is a bundled file, and `blob:` would
+      be a widening added on a guess about a dependency's packaging rather than on a
+      measurement of it. If it turns out to be needed, it breaks in development and is
+      widened deliberately — which is the direction that gets noticed.
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data:; font-src 'self'; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'; connect-src __CONNECT_SRC__"
+    />
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Bleavit</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <noscript>
+      Bleavit runs an in-browser light client; it needs JavaScript and WebAssembly. There
+      is no server-rendered fallback, because a server-rendered view would be an
+      unverified claim about chain state.
+    </noscript>
+    <script type="module" src="./src/application/src/main.ts"></script>
+  </body>
+</html>
