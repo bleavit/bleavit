@@ -335,6 +335,9 @@ importers:
 
   tests/contexts:
     dependencies:
+      '@bleavit/chain-client':
+        specifier: workspace:*
+        version: link:../../packages/chain-client
       '@bleavit/contexts':
         specifier: workspace:*
         version: link:../../packages/contexts
@@ -432,6 +435,9 @@ importers:
 
   tests/receipts:
     dependencies:
+      '@bleavit/chain-client':
+        specifier: workspace:*
+        version: link:../../packages/chain-client
       '@bleavit/contexts':
         specifier: workspace:*
         version: link:../../packages/contexts

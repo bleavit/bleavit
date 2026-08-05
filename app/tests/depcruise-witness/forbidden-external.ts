@@ -24,6 +24,12 @@ import '@bleavit/signing/testing';
 // minting `origin: 'self'` and laundering backfilled data into light-client-verified.
 import '@bleavit/local-index/testing';
 
+// And the third instance of the same matcher, for the subpath that matters most:
+// `@bleavit/chain-client/testing` is the `Finalized<T>` construction site, so a vacuous
+// `no-finalized-minting-outside-chain-client` would let `transaction-builder` mint the one
+// type the transaction path accepts. Witnessed on its own, not inferred from the two above.
+import '@bleavit/chain-client/testing';
+
 // The signing exemption's boundary, witnessed. `packages/signing` may reach
 // `polkadot-api/pjs-signer` because a signer factory cannot serve a read; everything else
 // under `polkadot-api` still constructs chains and providers, so it must still fail. A

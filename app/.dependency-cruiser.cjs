@@ -134,6 +134,26 @@ module.exports = {
       },
     },
     {
+      name: 'no-finalized-minting-outside-chain-client',
+      severity: 'error',
+      comment:
+        'INV-FE-1 / 10 §2.1: `Finalized<T>` is the one type the transaction path accepts, ' +
+        'and `finalize(value, pin)` mints it from two arguments the caller supplies. Held ' +
+        'by `transaction-builder` or `signing`, one call relabels a provider read — or a ' +
+        'literal invented on the spot — as light-client-verified state. Neither sibling ' +
+        'control can see that: `check:casts` looks for `as Finalized<T>` and there is no ' +
+        'assertion, and no import rule fires because reaching `@bleavit/chain-client` is ' +
+        'precisely what those packages are allowed to do. So the mint is barred from the ' +
+        'package barrel and reachable only through `@bleavit/chain-client/testing`; this ' +
+        'makes that import fail in production code. Same shape as ' +
+        '`no-range-minting-outside-ingest`, one layer down: that rule protects which ' +
+        'origin a range *renders* as, this one protects what may be *signed*.',
+      from: { path: '^(src|packages)/', pathNot: '^tests/' },
+      to: {
+        path: WORKSPACE_SUBPATH('@bleavit/chain-client/testing', 'packages/chain-client/dist/testing'),
+      },
+    },
+    {
       name: 'no-mock-signer-in-the-bundle',
       severity: 'error',
       comment:

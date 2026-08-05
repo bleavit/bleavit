@@ -3,6 +3,10 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "scripts": { "test": "node --test *.test.js" },
-  "dependencies": { "@bleavit/providers": "workspace:*" }
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@bleavit/providers": "workspace:*"
+  }
 }

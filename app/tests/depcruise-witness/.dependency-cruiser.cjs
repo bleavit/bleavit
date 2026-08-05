@@ -69,6 +69,18 @@ module.exports = {
         path: WORKSPACE_SUBPATH('@bleavit/local-index/testing', 'packages/local-index/dist/testing'),
       },
     },
+    {
+      // The `Finalized<T>` mint subpath, witnessed separately for the same parameterisation
+      // reason — and it is the one whose vacuity would cost most, since
+      // `no-finalized-minting-outside-chain-client` is what stops the transaction path
+      // labelling an arbitrary value as light-client-verified.
+      name: 'witness-chain-client-testing-subpath',
+      severity: 'error',
+      from: { path: '^tests/depcruise-witness/' },
+      to: {
+        path: WORKSPACE_SUBPATH('@bleavit/chain-client/testing', 'packages/chain-client/dist/testing'),
+      },
+    },
   ],
   // Verbatim, minus the exclude that would hide the witness from itself.
   options: { ...production.options, exclude: { path: '(^|/)tests/firewall/fixtures/' } },

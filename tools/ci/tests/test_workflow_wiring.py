@@ -162,6 +162,59 @@ class WorkflowWiring(unittest.TestCase):
             )
             self.assertTrue(reason.strip(), f"the exemption for `{name}` states no reason")
 
+    def test_no_suite_script_selects_tests_by_extension(self) -> None:
+        """A per-suite `test` script must not glob a file extension.
+
+        `node --test *.test.js` in a directory that has migrated to TypeScript matches
+        nothing, and Node reports `# tests 0` with **exit 0** — a green pass having executed
+        nothing. Six suites were already in that state when the migration was half done
+        (contexts, firewall, llm-handoff, mock-runtime, providers, receipts), and every
+        further slice would have joined them silently, one directory at a time.
+
+        Bare `node --test` discovers `.js` and `.ts` alike, so the selection cannot drift
+        from the files again. The root `pnpm run test:<suite>` scripts are unaffected — they
+        go through `tools/run-suite.ts`, which globs `{js,ts}` explicitly — which is exactly
+        why nothing went red: CI ran the suites, and only a developer running the package's
+        own script got the silent zero.
+        """
+        suites = sorted((ROOT / "app" / "tests").glob("*/package.json"))
+        self.assertGreater(len(suites), 10, "the suite glob found almost nothing; it is wrong")
+        for manifest in suites:
+            import json
+
+            script = ((json.loads(manifest.read_text(encoding="utf-8")).get("scripts")) or {}).get(
+                "test"
+            )
+            if script is None:
+                continue
+            self.assertNotIn(
+                "*.test.",
+                script,
+                f"app/tests/{manifest.parent.name} selects its tests by extension "
+                f"({script!r}). A directory that migrates to TypeScript then matches nothing "
+                "and exits 0. Use bare `node --test`, which discovers both",
+            )
+
+    def test_every_suite_directory_holds_a_discoverable_test(self) -> None:
+        """The other half: a script that can find files, in a directory that has none.
+
+        Asserted separately because the check above is satisfied by an empty directory —
+        `node --test` with nothing to discover is the same silent zero arrived at from the
+        other side.
+        """
+        for manifest in sorted((ROOT / "app" / "tests").glob("*/package.json")):
+            directory = manifest.parent
+            import json
+
+            if "test" not in ((json.loads(manifest.read_text(encoding="utf-8")).get("scripts")) or {}):
+                continue
+            found = list(directory.glob("*.test.js")) + list(directory.glob("*.test.ts"))
+            self.assertTrue(
+                found,
+                f"app/tests/{directory.name} declares a `test` script but holds no "
+                "`*.test.js` or `*.test.ts` file, so running it proves nothing",
+            )
+
     def test_concurrency_never_cancels_on_main(self) -> None:
         """R-12's rule: pushing to a branch supersedes its own run; `main` never does.
 
