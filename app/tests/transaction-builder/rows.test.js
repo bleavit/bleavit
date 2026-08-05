@@ -16,16 +16,22 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import {
   ALL_CLAUSES,
   CRANK_CALLS,
+  GOVERNANCE_ROW_IDS,
   NO_WRAPPER,
   PRECONDITION_ROWS,
+  aboveTheFoldClauses,
   accountForClause,
   clauseGroupsFor,
   clausesNeedingOtherAccounts,
   crankStaleness,
+  governanceRowsFor,
   rowsFor,
 } from '@bleavit/transaction-builder';
 import { CRITICAL_SURFACE } from '@bleavit/descriptors';
@@ -34,6 +40,8 @@ const ROW_IDS = [
   'P-1', 'P-2', 'P-3', 'P-4', 'P-5', 'P-6', 'P-7', 'P-8',
   'P-9', 'P-10', 'P-11', 'P-12', 'P-13', 'P-14', 'P-15',
 ];
+
+const REPO = join(dirname(fileURLToPath(import.meta.url)), '../../..');
 
 test('11 §11.5 publishes fifteen rows and every one carries clauses', () => {
   assert.deepEqual(Object.keys(PRECONDITION_ROWS).sort(), [...ROW_IDS].sort());
@@ -493,4 +501,76 @@ test('the two unreadable cranks are exactly the ones with no frozen surface', ()
   // the refusal gets replaced by a real read rather than surviving as permanent scaffolding.
   const unreadable = CRANK_CALLS.filter((c) => crankStaleness(c).kind === 'unreadable');
   assert.deepEqual(unreadable.sort(), ['ledger.sweep_redemption_fees', 'market.sweep_revenue']);
+});
+
+// ------------------------------------------- the 11 §11.7.3 governance rows (F16)
+
+test('every row 11 §11.7.3 defines has clauses', () => {
+  const doc = readFileSync(join(REPO, 'docs/architecture/11-frontend-workflows.md'), 'utf8');
+  const section = /^### 11\.7\.3 Extrinsics and precondition rows[\s\S]*?(?=^###)/m.exec(doc);
+  assert.ok(section, 'the §11.7.3 section moved — re-point this binding');
+  const declared = [...section[0].matchAll(/^\| (G-\d+) \|/gm)].map((m) => m[1]);
+  assert.ok(declared.length >= 8, `parsed only ${declared.length} rows: ${declared}`);
+  assert.deepEqual([...GOVERNANCE_ROW_IDS].sort(), [...declared].sort());
+  for (const row of GOVERNANCE_ROW_IDS) {
+    assert.ok(governanceRowsFor(row).length > 0, `${row} has no clauses`);
+  }
+});
+
+test('G-5 reads the unlock TARGET, not the caller', () => {
+  // `unlock(class, target)` unlocks for `target`, whom anyone may name. Reading the
+  // caller's locks passes green whenever the caller has none — the ordinary case when
+  // somebody unlocks for a friend — and the chain then refuses. P-9's lesson, new place.
+  const clauses = governanceRowsFor('G-5');
+  assert.equal(clauses.length, 1);
+  assert.equal(clauses[0].subject, 'recipient');
+  assert.equal(clauses[0].surface, 'storage.conviction_voting.class_locks_for');
+});
+
+test('a delegation target is a recipient read, not an echo of the form', () => {
+  // §11.3 anti-substitution applied to G-2: the address is a chain-read identity.
+  const target = governanceRowsFor('G-2').find((c) => c.subject === 'recipient');
+  assert.ok(target, 'G-2 has no clause about the delegation target');
+});
+
+test('conviction locks are marked above the fold on both rows that impose one', () => {
+  // 11 §11.7.6 and §11.2 constraint 3: the lock consequence is one of the five facts that
+  // may not be deferred. Marked in the row rather than left to a screen, because a screen
+  // is where it gets forgotten.
+  const folds = aboveTheFoldClauses();
+  assert.deepEqual(folds.map((c) => c.row).sort(), ['G-1', 'G-2']);
+  for (const fold of folds) assert.match(fold.requirement, /lock/i);
+});
+
+test('conviction-voting rows are subject `acting`, never `signer`', () => {
+  // Under a proxy, `conviction_voting` operates on the proxied account's votes and locks,
+  // while the fee and nonce stay with the signer. A row that resolved one account for both
+  // checks the wrong one and fails green — P-3's finding.
+  for (const row of ['G-1', 'G-3', 'G-4']) {
+    for (const c of governanceRowsFor(row)) {
+      assert.ok(
+        c.subject !== 'signer',
+        `${row} reads conviction-voting state against the signer: ${c.requirement}`,
+      );
+    }
+  }
+  // And the deposit rows genuinely are the signer's, so the distinction is not vacuous.
+  assert.ok(governanceRowsFor('G-6').some((c) => c.subject === 'signer'));
+  assert.ok(governanceRowsFor('G-7').some((c) => c.subject === 'signer'));
+});
+
+test('every governance clause names a surface CRITICAL_SURFACE probes', () => {
+  // An unprobed read is one the 10 §5.2 lattice cannot fail on — SQ-580's consequence.
+  //
+  // **The compiler is the real control here, not this test.** `SurfaceId` is a string-literal
+  // union generated from `CRITICAL_SURFACE`, so naming a surface that does not exist is a
+  // `TS2345` at the clause, proven by mutation. This assertion is kept as a second reading
+  // of the same fact — it would catch a future `SurfaceId` widened to `string` — but it
+  // should not be mistaken for what stops the defect today.
+  const probed = new Set(CRITICAL_SURFACE.map((entry) => entry.id));
+  for (const row of GOVERNANCE_ROW_IDS) {
+    for (const c of governanceRowsFor(row)) {
+      assert.ok(probed.has(c.surface), `${row} reads unprobed surface ${c.surface}`);
+    }
+  }
 });
