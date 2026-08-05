@@ -123,6 +123,9 @@ import {
   maySubmitRecompute,
   ProofMismatchError,
   NonDeterministicComponentError,
+  DepositForm,
+  DepositTracker,
+  WithdrawForm,
 } from '@bleavit/features-tx';
 import { ImportRefused, ImportReview, UnlabellableClampError } from '@bleavit/features-handoff';
 import { ShareContext } from '@bleavit/features-handoff';
@@ -3001,4 +3004,127 @@ test('a closed round blocks submission even with a reproduced proof', () => {
   const proof = recomputeProof(RECOMPUTE(), () => 1_234_000_000n);
   assert.equal(maySubmitRecompute({ proof, roundOpen: finalized(true) }), true);
   assert.equal(maySubmitRecompute({ proof, roundOpen: finalized(false) }), false);
+});
+
+// ------------------------------------------ S12/S13 the funding screens (F18)
+
+const DEPOSIT_SCREEN = (over = {}) => ({
+  assetHubBalance: finalized(1_000_000_000n),
+  amount: 10_000_000n,
+  assetHubFee: 100_000n,
+  minBalance: 1_000_000n,
+  assetHubReady: true,
+  bootstrapPhase: false,
+  ...over,
+});
+
+test('a WARNING does not disable the deposit — a client that refuses what the chain accepts', () => {
+  // §11.9.1/§11.9.2 and I-24: degraded XCM health means the funds are held, not lost. If the
+  // warning rendered in the same red box as a block, the user reads "there is a problem" and
+  // does not send — a lawful deposit stopped by presentation. This is the assertion a
+  // happy-path suite never makes and a cautious developer breaks first.
+  const html = renderToStaticMarkup(
+    h(DepositForm, {
+      inputs: DEPOSIT_SCREEN(),
+      xcmHealthy: false,
+      decimals: 6,
+      symbol: 'USDC',
+      onDeposit: () => {},
+    }),
+  );
+  assert.match(html, /XCM channel health is degraded/);
+  assert.match(html, /data-severity="caution"/);
+  assert.ok(!html.includes('data-severity="danger"'), 'a warning must not render as a block');
+  assert.ok(!buttonDisabled(html, 'Deposit'), 'the deposit stays available under a warning');
+});
+
+test('a real block DOES disable it, so the warning test is not vacuous', () => {
+  const html = renderToStaticMarkup(
+    h(DepositForm, {
+      inputs: DEPOSIT_SCREEN({ assetHubReady: false }),
+      xcmHealthy: true,
+      decimals: 6,
+      symbol: 'USDC',
+      onDeposit: () => {},
+    }),
+  );
+  assert.ok(buttonDisabled(html, 'Deposit'), html);
+  assert.match(html, /data-severity="danger"/);
+  assert.match(html, /blocked rather than offering to send anyway/);
+});
+
+test('"sent" is never rendered as "arrived", and the block says which chain it is', () => {
+  // The model makes `credited` unreachable from the Asset Hub leg. The screen's job is not to
+  // undo that in copy — a bare block number with no chain beside it is how a user concludes
+  // the transfer landed.
+  const sent = renderToStaticMarkup(
+    h(DepositTracker, {
+      progress: { kind: 'sent-awaiting-arrival', assetHubBlock: finalized(500) },
+      decimals: 6,
+      symbol: 'USDC',
+    }),
+  );
+  assert.match(sent, /awaiting arrival/);
+  assert.match(sent, /means the message was sent, not that the funds have arrived/);
+  assert.match(sent, /Asset Hub block \(sent\)/);
+  assert.ok(!sent.includes('Credited'), 'must not claim arrival');
+
+  const credited = renderToStaticMarkup(
+    h(DepositTracker, {
+      progress: {
+        kind: 'credited',
+        assetHubBlock: finalized(500),
+        creditedAtLocalBlock: finalized(900),
+        creditedAmount: finalized(10_000_000n),
+      },
+      decimals: 6,
+      symbol: 'USDC',
+    }),
+  );
+  assert.match(credited, /seen the balance in its own finalized state/);
+  // Both chains' blocks are shown and each is labelled, so neither can be read as the other.
+  assert.match(credited, /Asset Hub block \(sent\)/);
+  assert.match(credited, /This chain’s block \(credited\)/);
+});
+
+test('an unverifiable withdraw destination warns in its own words, and does not block', () => {
+  // `undefined` (connection down) and `false` (would be dusted) call for different actions,
+  // and collapsing either into the other is what "silently skipped" means.
+  const unknown = renderToStaticMarkup(
+    h(WithdrawForm, {
+      inputs: {
+        freeBalance: finalized(1_000_000_000n),
+        amount: 10_000_000n,
+        localFee: 100_000n,
+        minBalance: 1_000_000n,
+        destinationViable: undefined,
+        ledgerFrozen: false,
+      },
+      destination: finalized('5Gw...'),
+      decimals: 6,
+      symbol: 'USDC',
+      onWithdraw: () => {},
+    }),
+  );
+  assert.match(unknown, /has not been established either way/);
+  assert.ok(!buttonDisabled(unknown, 'Withdraw'), 'an unchecked destination is not a block');
+
+  const dusting = renderToStaticMarkup(
+    h(WithdrawForm, {
+      inputs: {
+        freeBalance: finalized(1_000_000_000n),
+        amount: 10_000_000n,
+        localFee: 100_000n,
+        minBalance: 1_000_000n,
+        destinationViable: false,
+        ledgerFrozen: false,
+      },
+      destination: finalized('5Gw...'),
+      decimals: 6,
+      symbol: 'USDC',
+      onWithdraw: () => {},
+    }),
+  );
+  assert.match(dusting, /risks the funds being dusted on arrival/);
+  assert.ok(!dusting.includes('has not been established'), 'the two states must read differently');
 });

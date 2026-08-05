@@ -192,3 +192,4 @@ export {
   type RegistryWindowEvent,
   type RegistryWindowVariant,
 } from './registry-filing.js';
+export { DepositForm, DepositTracker, WithdrawForm } from './funding-screens.js';
