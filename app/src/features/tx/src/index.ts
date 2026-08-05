@@ -45,3 +45,11 @@ export {
   type ReferendumStatus,
   type Tally,
 } from './referenda.js';
+export {
+  BALLOT_NOT_ROUTINE,
+  EffectivePowerNotice,
+  OracleResolutionBallot,
+  type DisputeRound,
+  type EffectivePower,
+  type OracleBallot,
+} from './oracle-ballot.js';

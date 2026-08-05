@@ -47,6 +47,8 @@ import {
   ConvictionLock,
   PROPOSAL_READS,
   ProposalDetail,
+  BALLOT_NOT_ROUTINE,
+  OracleResolutionBallot,
   ReferendaList,
   ReferendumDetail,
   decodeForConfirm,
@@ -1306,4 +1308,91 @@ test('the conviction lock refuses to sit behind a disclosure', () => {
     () => renderToStaticMarkup(h(Disclosure, { summary: 'details' }, h(AlwaysVisible, { fold }))),
     DeferredMeaningChangingFactError,
   );
+});
+
+// ------------------------------------------------- S11 the oracle ballot (F16)
+
+const BALLOT = (power) => ({
+  component: finalized('reserve_ratio'),
+  epoch: finalized(12),
+  rounds: [
+    { round: finalized(1), reporter: finalized('5Grw…utQY'), bond: finalized(1_000_000n), evidenceHash: finalized('0xab') },
+    { round: finalized(3), reporter: finalized('5Fhi…m3ZP'), bond: finalized(4_000_000n), evidenceHash: finalized('0xcd') },
+  ],
+  power,
+});
+
+test('a weightless vote is warned about before signing, with no number to misread', () => {
+  // The failure has no on-chain symptom: the extrinsic succeeds and the stake counts for
+  // nothing. Everything about this obligation is pre-sign.
+  const html = renderToStaticMarkup(
+    h(OracleResolutionBallot, {
+      ballot: BALLOT({ kind: 'weightless', lockedAt: finalized(900), snapshotAt: finalized(500) }),
+      decimals: 6,
+      symbol: 'VIT',
+    }),
+  );
+  assert.ok(/count for nothing/.test(html), html);
+  assert.ok(/succeed and change no outcome/.test(html), html);
+  assert.ok(html.includes('data-severity="danger"'), html);
+  // The arm carries no power field, so there is no zero to render and no figure to misread.
+  assert.ok(!/Your weight in this ballot<\/span>/.test(html), 'a weight figure rendered');
+});
+
+test('an unestablished snapshot shows no figure at all (R-2, the open [VERIFY])', () => {
+  const html = renderToStaticMarkup(
+    h(OracleResolutionBallot, {
+      ballot: BALLOT({ kind: 'unestablished', reason: 'The snapshot rule is not yet verified.' }),
+      decimals: 6,
+      symbol: 'VIT',
+    }),
+  );
+  assert.ok(/cannot be established/.test(html), html);
+  assert.ok(/would look exactly like one that was checked/.test(html), html);
+  assert.ok(html.includes('data-severity="danger"'), html);
+  // No amount is rendered anywhere in the power section — a computed figure resting on a
+  // guessed mechanism is the confident wrong answer the [VERIFY] tag exists to prevent.
+  assert.ok(!/VIT<\/span><span class="badge badge--verified-finalized"[^>]*>finalized #0</.test(html));
+});
+
+test('a counted power renders with its snapshot block beside it', () => {
+  // The anti-vacuity control: without this, every assertion above passes for the trivial
+  // reason that the screen never shows a power.
+  const html = renderToStaticMarkup(
+    h(OracleResolutionBallot, {
+      ballot: BALLOT({ kind: 'counted', power: finalized(2_500_000n), snapshotAt: finalized(500) }),
+      decimals: 6,
+      symbol: 'VIT',
+    }),
+  );
+  assert.ok(html.includes('2.500000 VIT'), html);
+  assert.ok(/snapshot block/.test(html), html);
+  assert.ok(!/count for nothing/.test(html), html);
+});
+
+test('the ballot always says it is not a routine vote', () => {
+  // Rule 4. Unconditional, and there is no prop that could replace it — asserted across
+  // every power state so it cannot be conditional on one.
+  for (const power of [
+    { kind: 'counted', power: finalized(1n), snapshotAt: finalized(1) },
+    { kind: 'weightless', lockedAt: finalized(2), snapshotAt: finalized(1) },
+    { kind: 'unestablished', reason: 'x' },
+  ]) {
+    const html = renderToStaticMarkup(
+      h(OracleResolutionBallot, { ballot: BALLOT(power), decimals: 6, symbol: 'VIT' }),
+    );
+    assert.ok(html.includes(BALLOT_NOT_ROUTINE.slice(0, 50)), `${power.kind}: copy missing`);
+    assert.ok(/unprofitable/.test(html), `${power.kind}: the reason is missing`);
+  }
+});
+
+test('the dispute lineage shows every round with its bond', () => {
+  const html = renderToStaticMarkup(
+    h(OracleResolutionBallot, {
+      ballot: BALLOT({ kind: 'counted', power: finalized(1n), snapshotAt: finalized(1) }),
+      decimals: 6, symbol: 'VIT',
+    }),
+  );
+  assert.ok(html.includes('1.000000 VIT') && html.includes('4.000000 VIT'), html);
+  assert.ok(html.includes('0xab') && html.includes('0xcd'), 'evidence hashes are missing');
 });
