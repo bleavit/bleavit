@@ -22,3 +22,4 @@ packages:
   - 'tests/release'
   - 'tests/ui'
   - 'tests/screens'
+  - 'tests/providers'

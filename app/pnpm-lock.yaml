@@ -418,6 +418,12 @@ importers:
         specifier: workspace:*
         version: link:../../packages/protocol
 
+  tests/providers:
+    dependencies:
+      '@bleavit/providers':
+        specifier: workspace:*
+        version: link:../../packages/providers
+
   tests/receipts:
     dependencies:
       '@bleavit/contexts':
