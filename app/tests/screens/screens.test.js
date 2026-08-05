@@ -102,6 +102,8 @@ import {
   TreasuryStreams,
   UpgradeCrank,
   UpgradeHashMismatch,
+  snapshotStaleness,
+  stalenessCopy,
 } from '@bleavit/features-tx';
 import { ImportRefused, ImportReview, UnlabellableClampError } from '@bleavit/features-handoff';
 import { ShareContext } from '@bleavit/features-handoff';
@@ -1888,10 +1890,15 @@ test('an unregistered screen renders as pending rather than blank', () => {
 
 // --------------------------------------------------- S15 the guardian console (F17)
 
+const CALL = (pallet = 'Constitution', call = 'set_param') => ({
+  kind: 'decoded', pallet: finalized(pallet), call: finalized(call), args: [finalized('42')],
+});
 const ACTION = (over = {}) => ({
   actionId: finalized('a1'), power: finalized('activate_playbook'),
   justificationHash: finalized('0xjh'), approvals: finalized(3),
-  threshold: finalized(5), expiresAt: finalized(9_000), ...over,
+  threshold: finalized(5), expiresAt: finalized(9_000),
+  // §11.8.2 requires the exact batch; an action without one cannot be built.
+  calls: [CALL()], ...over,
 });
 
 test('an unread trigger is treated exactly as an inactive one', () => {
@@ -2221,6 +2228,7 @@ const ACTION_ROW = () => ({
   approvals: finalized(2),
   threshold: finalized(5),
   expiresAt: finalized(9_000),
+  calls: [CALL('Epoch', 'force_rerun')],
 });
 
 test('m-of-n shows BOTH numbers — never a percentage and never a bar alone', () => {
@@ -2319,6 +2327,7 @@ test('a no-op crank is disabled and says the fee would be spent for nothing', ()
       epoch: finalized(7),
       boundaryPassed: false,
       alreadyTaken: false,
+      staleness: snapshotStaleness(finalized(100), finalized(200), 1_000, 5_000),
       onCrank: () => {},
     }),
   );
@@ -2330,6 +2339,7 @@ test('a no-op crank is disabled and says the fee would be spent for nothing', ()
       epoch: finalized(7),
       boundaryPassed: true,
       alreadyTaken: false,
+      staleness: snapshotStaleness(finalized(100), finalized(200), 1_000, 5_000),
       onCrank: () => {},
     }),
   );
@@ -2504,4 +2514,118 @@ test('the pending copy distinguishes the two reasons in words a user reads', () 
   );
   assert.match(unwired, /this screen is built; it is waiting on/);
   assert.ok(!unwired.includes('has not been built yet'), unwired);
+});
+
+// -------------------------------- §11.8.2's enumerated call batch (F17)
+
+test('the approve flow renders every call in the batch, decoded', () => {
+  // §11.8.2: "playbooks are preimage-committed enumerated batches — decoded and displayed,
+  // never summarized away". A count, a summary, or the justification hash alone would each
+  // let a guardian put the system's most privileged signature behind calls nobody read.
+  const html = renderToStaticMarkup(
+    h(ApproveAction, {
+      context: {
+        action: ACTION({ calls: [CALL('Constitution', 'set_param'), CALL('Epoch', 'force_rerun')] }),
+        callerIsMember: true,
+        callerHasApproved: false,
+        now: finalized(100),
+      },
+      onApprove: () => {},
+    }),
+  );
+  for (const name of ['Constitution', 'set_param', 'Epoch', 'force_rerun']) {
+    assert.ok(html.includes(name), `${name} must be displayed: ${html}`);
+  }
+  // Present in the markup is not the same as shown. A mutation adding `hidden` to the list
+  // left every assertion above passing while the batch was invisible, so the container is
+  // checked for the markup-level ways to conceal it.
+  //
+  // **The limit is stated rather than implied**: CSS can still hide this list and no string
+  // assertion over `renderToStaticMarkup` output can see that — the same boundary
+  // `tests/ui` already declares for badge legibility. What is covered is concealment that
+  // travels with the component; what is not is concealment that travels with the stylesheet.
+  const list = /<ol class="call-batch"([^>]*)>/.exec(html);
+  assert.ok(list !== null, `the batch list must render: ${html}`);
+  assert.ok(!/\bhidden\b/.test(list[1]), `the batch list is hidden: ${list[0]}`);
+  assert.ok(!/aria-hidden="true"/.test(list[1]), `the batch list is aria-hidden: ${list[0]}`);
+  assert.ok(!/display:\s*none/.test(list[1]), `the batch list is display:none: ${list[0]}`);
+  assert.ok(!buttonDisabled(html, 'Approve'), 'a fully decoded batch approves');
+});
+
+test('an undecodable call blocks the approval and renders as raw bytes, never a name', () => {
+  // R-7's reading: on the powers that cannot be undone, "we could not decode it" must not
+  // land on the same side as "we decoded it and it is fine". The undecodable arm carries no
+  // pallet or call field, so no screen can render a guessed name for it.
+  const html = renderToStaticMarkup(
+    h(ApproveAction, {
+      context: {
+        action: ACTION({
+          calls: [CALL(), { kind: 'undecodable', rawHex: '0xdeadbeef', reason: 'unknown call index' }],
+        }),
+        callerIsMember: true,
+        callerHasApproved: false,
+        now: finalized(100),
+      },
+      onApprove: () => {},
+    }),
+  );
+  assert.ok(buttonDisabled(html, 'Approve'), html);
+  assert.match(html, /0xdeadbeef/);
+  assert.match(html, /cannot be decoded/);
+});
+
+test('an empty batch is refused — it is not a harmless approval', () => {
+  // The dangerous reading: no calls looks like nothing to worry about. It means the batch
+  // could not be read at all, and approving it puts a signature behind something unseen.
+  const blocks = approvalBlocks({
+    action: ACTION({ calls: [] }),
+    callerIsMember: true,
+    callerHasApproved: false,
+    now: finalized(100),
+  });
+  assert.deepEqual(blocks.map((b) => b.check), ['Empty batch']);
+  assert.match(blocks[0].detail, /nobody has seen/);
+});
+
+test('snapshot staleness classifies against thresholds it is GIVEN, never ones it knows', () => {
+  // App-code rule 7: "> 4 days" is a chain tunable, so both thresholds are required
+  // arguments with no default. Baking them in would leave the client warning at the wrong
+  // point after a governance amendment — late, which is the unsafe direction.
+  assert.equal(stated(snapshotStaleness(finalized(0), finalized(500), 1_000, 5_000)).kind, 'current');
+  assert.equal(stated(snapshotStaleness(finalized(0), finalized(1_000), 1_000, 5_000)).kind, 'overdue');
+  assert.equal(
+    stated(snapshotStaleness(finalized(0), finalized(5_000), 1_000, 5_000)).kind,
+    'dead-man-engaged',
+  );
+  // Same age, different thresholds, different verdict — which is the point of passing them.
+  assert.equal(stated(snapshotStaleness(finalized(0), finalized(5_000), 9_000, 9_999)).kind, 'current');
+});
+
+test('an engaged dead-man rule is a danger notice, not a staleness count', () => {
+  // §11.8.5 + 05: past its threshold this is a system-wide state change, and a screen that
+  // showed only "5,000 blocks since" would present an incident as housekeeping.
+  const html = renderToStaticMarkup(
+    h(SnapshotCrank, {
+      epoch: finalized(7),
+      boundaryPassed: true,
+      alreadyTaken: false,
+      staleness: snapshotStaleness(finalized(0), finalized(6_000), 1_000, 5_000),
+      onCrank: () => {},
+    }),
+  );
+  assert.match(html, /data-severity="danger"/);
+  assert.match(html, /The dead-man rule is engaged/);
+  assert.match(html, /stopped treating its welfare readings as current/);
+  // And a current snapshot is not dressed as an incident, so the severity is not vacuous.
+  const fine = renderToStaticMarkup(
+    h(SnapshotCrank, {
+      epoch: finalized(7),
+      boundaryPassed: true,
+      alreadyTaken: false,
+      staleness: snapshotStaleness(finalized(0), finalized(10), 1_000, 5_000),
+      onCrank: () => {},
+    }),
+  );
+  assert.ok(!fine.includes('data-severity="danger"'), fine);
+  assert.match(fine, /The welfare snapshot is current/);
 });

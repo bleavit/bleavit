@@ -47,6 +47,24 @@ export type TriggerState =
   | { readonly kind: 'inactive' }
   | { readonly kind: 'unread'; readonly reason: string };
 
+/**
+ * One call inside a guardian action's enumerated batch.
+ *
+ * §11.8.2: *"playbooks are preimage-committed enumerated batches — decoded and displayed,
+ * never summarized away"*. The `undecodable` arm has **no pallet or call field**, so a screen
+ * holding one cannot render a name for it; that is 10 §5.4's "never guessed" made structural
+ * rather than promised, and it is the same shape `ReferendumCall` uses.
+ */
+export type ApprovedCall =
+  | {
+      readonly kind: 'decoded';
+      readonly pallet: Verified<string>;
+      readonly call: Verified<string>;
+      /** Rendered as text, never as markup — §11.8.1's evidence rule applies here too. */
+      readonly args: readonly Verified<string>[];
+    }
+  | { readonly kind: 'undecodable'; readonly rawHex: string; readonly reason: string };
+
 export interface PendingAction {
   readonly actionId: Verified<string>;
   readonly power: Verified<string>;
@@ -54,6 +72,12 @@ export interface PendingAction {
   readonly approvals: Verified<number>;
   readonly threshold: Verified<number>;
   readonly expiresAt: Verified<number>;
+  /**
+   * The exact batch this action would execute. Required — an action with no batch field
+   * could be approved without one ever being shown, which is the failure §11.8.2's
+   * "never summarized away" names.
+   */
+  readonly calls: readonly ApprovedCall[];
 }
 
 export interface ApprovalContext {
@@ -83,6 +107,28 @@ export function approvalBlocks(context: ApprovalContext): readonly GuardianBlock
       detail:
         'This action has expired. Approving it would not execute it — it would need ' +
         'proposing again.',
+    });
+  }
+  // §11.8.2 requires the exact batch decoded and displayed. Two states make that impossible,
+  // and both block rather than degrade — this is the system's most privileged signature, and
+  // R-7's rule is to take the reading that cannot execute a payload.
+  if (context.action.calls.length === 0) {
+    blocks.push({
+      check: 'Empty batch',
+      detail:
+        'This action carries no calls. An empty batch is not a harmless approval — it means ' +
+        'the batch could not be read, and approving it would put your signature behind ' +
+        'something nobody has seen.',
+    });
+  }
+  const undecodable = context.action.calls.filter((call) => call.kind === 'undecodable').length;
+  if (undecodable > 0) {
+    blocks.push({
+      check: 'Undecodable call',
+      detail:
+        `${undecodable} of the ${context.action.calls.length} calls in this batch cannot be ` +
+        'decoded, and are shown as raw bytes below. Approving a batch you cannot read is ' +
+        'refused here: the guardian powers are the ones that cannot be undone.',
     });
   }
   if (context.callerHasApproved) {

@@ -36,6 +36,8 @@ import {
   Identifier,
   Notice,
   Panel,
+  Phrase,
+  Undecodable,
   type ReactNode,
 } from '@bleavit/ui';
 import {
@@ -110,6 +112,34 @@ export function ApproveAction({
       </Field>
       <Field label="Justification">
         <Identifier datum={context.action.justificationHash} />
+      </Field>
+
+      {/* §11.8.2: the exact enumerated batch, "decoded and displayed, never summarized away".
+          A count, a summary, or the justification hash alone would all let a guardian approve
+          calls nobody read — and an undecodable one renders as raw SCALE rather than as a
+          guessed name, with the model refusing the approval outright. */}
+      <Field label={`What this action would execute (${context.action.calls.length})`}>
+        <ol className="call-batch">
+          {context.action.calls.map((call, index) =>
+            call.kind === 'decoded' ? (
+              <li key={`call-${index}`}>
+                <Phrase datum={call.pallet} />
+                <Phrase datum={call.call} />
+                {call.args.map((arg, argIndex) => (
+                  <Phrase datum={arg} key={`arg-${index}-${argIndex}`} />
+                ))}
+              </li>
+            ) : (
+              <li key={`call-${index}`}>
+                <Undecodable
+                  label={`Call ${index + 1}`}
+                  rawHex={call.rawHex}
+                  reason={call.reason}
+                />
+              </li>
+            ),
+          )}
+        </ol>
       </Field>
       <Field label="Approvals so far">
         <Count datum={context.action.approvals} />

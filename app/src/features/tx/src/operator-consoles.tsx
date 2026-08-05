@@ -42,7 +42,7 @@ import {
   formatBaseUnits,
   type ReactNode,
 } from '@bleavit/ui';
-import type { Verified } from '@bleavit/shared-types';
+import type { Combined, Verified } from '@bleavit/shared-types';
 import {
   checkRegistration,
   registrationCaveat,
@@ -68,7 +68,9 @@ import {
   mayChallenge,
   noOpWarning,
   snapshotCrankState,
+  stalenessCopy,
   type ChallengeWindow,
+  type SnapshotStaleness,
 } from './registry-crank.js';
 
 // --------------------------------------------------------------- S14 reporter
@@ -269,17 +271,34 @@ export function SnapshotCrank({
   epoch,
   boundaryPassed,
   alreadyTaken,
+  staleness,
   onCrank,
 }: {
   readonly epoch: Verified<number>;
   readonly boundaryPassed: boolean;
   readonly alreadyTaken: boolean;
+  /** From `snapshotStaleness`, with both thresholds read from chain params. */
+  readonly staleness: Combined<SnapshotStaleness>;
   readonly onCrank: () => void;
 }): ReactNode {
   const state = snapshotCrankState(epoch, boundaryPassed, alreadyTaken);
   const warning = noOpWarning(state);
+  const engaged = staleness.kind === 'stated' && staleness.datum.value.kind === 'dead-man-engaged';
   return (
     <Panel title="Welfare snapshot">
+      {/* §11.8.5: staleness "shown prominently", and above the crank rather than beside it —
+          past its threshold an overdue snapshot is not a housekeeping item, it engages the
+          dead-man rule, and the severity says which of the two a reader is looking at. */}
+      <Notice
+        severity={engaged ? 'danger' : 'info'}
+        heading={engaged ? 'The dead-man rule is engaged' : 'Snapshot staleness'}
+      >
+        <Derived
+          combined={staleness}
+          render={(value) => `${stalenessCopy(value)} (${value.blocksSince} blocks since)`}
+        />
+      </Notice>
+
       <Field label="Epoch">
         <Count datum={state.epoch} />
       </Field>

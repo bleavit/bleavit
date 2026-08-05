@@ -101,6 +101,7 @@ export {
   type GuardianPower,
   type PendingAction,
   type TriggerState,
+  type ApprovedCall,
 } from './guardian.js';
 export {
   claimBlocks,
@@ -120,8 +121,11 @@ export {
   mayChallenge,
   noOpWarning,
   snapshotCrankState,
+  snapshotStaleness,
+  stalenessCopy,
   type ChallengeWindow,
   type SnapshotCrankState,
+  type SnapshotStaleness,
 } from './registry-crank.js';
 export {
   UNCHECKABLE_REGISTRATION_CONDITIONS,

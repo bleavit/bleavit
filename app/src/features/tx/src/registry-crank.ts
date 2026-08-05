@@ -26,7 +26,7 @@
  * ignores an extension tells a challenger they are out of time when they are not.
  */
 
-import type { Verified } from '@bleavit/shared-types';
+import { combine, type Combined, type Verified } from '@bleavit/shared-types';
 
 /** Whether `welfare.snapshot(epoch)` would do anything. */
 export type SnapshotCrankState =
@@ -61,6 +61,66 @@ export function snapshotCrankState(
 /** What a user is told before signing a crank that would do nothing. */
 export function noOpWarning(state: SnapshotCrankState): string | undefined {
   return state.kind === 'no-op' ? NO_OP_COPY[state.reason] : undefined;
+}
+
+/**
+ * Snapshot staleness — §11.8.5's *"shown prominently"*.
+ *
+ * > an overdue snapshot > 4 days engages the dead-man rule ([05](05))
+ *
+ * The threshold is a **required argument with no default**, the same discipline
+ * `packages/protocol` follows for every tunable: baking `4 days` in would be a hardcoded
+ * chain constant (app-code rule 7), and a governance amendment would silently leave the
+ * client warning at the wrong point — late, in the direction that matters.
+ *
+ * Why this is not just a number on screen: an overdue snapshot is not a housekeeping item.
+ * Past the threshold it **engages the dead-man rule**, which is a system-wide state change,
+ * so the display carries the consequence rather than the count alone.
+ */
+export type SnapshotStaleness =
+  | { readonly kind: 'current'; readonly blocksSince: number }
+  | { readonly kind: 'overdue'; readonly blocksSince: number; readonly blocksOverBy: number }
+  /** The dead-man rule is engaged by this snapshot's age — no longer a crank, an incident. */
+  | { readonly kind: 'dead-man-engaged'; readonly blocksSince: number; readonly blocksOverBy: number };
+
+export function snapshotStaleness(
+  lastSnapshotAt: Verified<number>,
+  now: Verified<number>,
+  /** Blocks after which a snapshot is overdue. Read from chain params — never a literal. */
+  overdueAfterBlocks: number,
+  /** Blocks after which the dead-man rule engages (05). Read, never a literal. */
+  deadManAfterBlocks: number,
+): Combined<SnapshotStaleness> {
+  const provenance = [lastSnapshotAt.status, now.status];
+  const since = now.value - lastSnapshotAt.value;
+  if (since >= deadManAfterBlocks) {
+    return combine(
+      { kind: 'dead-man-engaged', blocksSince: since, blocksOverBy: since - deadManAfterBlocks },
+      provenance,
+    );
+  }
+  if (since >= overdueAfterBlocks) {
+    return combine(
+      { kind: 'overdue', blocksSince: since, blocksOverBy: since - overdueAfterBlocks },
+      provenance,
+    );
+  }
+  return combine({ kind: 'current', blocksSince: since }, provenance);
+}
+
+const STALENESS_COPY: Readonly<Record<SnapshotStaleness['kind'], string>> = Object.freeze({
+  current: 'The welfare snapshot is current.',
+  overdue:
+    'The welfare snapshot is overdue. Cranking it is permissionless — anyone may take it, ' +
+    'and nobody is assigned to.',
+  'dead-man-engaged':
+    'The welfare snapshot is overdue by enough to engage the dead-man rule. This is a ' +
+    'system-wide state, not a housekeeping item: the protocol has stopped treating its ' +
+    'welfare readings as current, and cranking the snapshot is what clears it.',
+});
+
+export function stalenessCopy(staleness: SnapshotStaleness): string {
+  return STALENESS_COPY[staleness.kind];
 }
 
 /**
