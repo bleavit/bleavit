@@ -100,7 +100,7 @@ test('decoded-payload is granted ONLY when the extension exposes signTx (#17)', 
 
   // Neither of the other two, under either construction.
   for (const d of [withoutDecode, withDecode]) {
-    assert.equal(d.capabilities.has('metadata-hash'), false, 'metadata-hash is FE-P6, unresolved');
+    assert.equal(d.capabilities.has('metadata-hash'), false, 'metadata-hash: the runtime emits no digest, so mode 1 is rejected on chain (SQ-594/B21)');
     assert.equal(d.capabilities.has('hashed-payload'), false);
   }
 });

@@ -106,7 +106,12 @@ test('a wrong length is refused, on both sides of the accepted band', async () =
   await assert.rejects(() => transport('0xabc').adapter.sign(request()), RawSignatureError);
 });
 
-test('metadata-hash stays refused — FE-P6 is unresolved', async () => {
+test('metadata-hash stays refused — and the reason is now verified, not pending', async () => {
+  // Was "FE-P6 is unresolved, assume nothing". SQ-594/V-122 settled the load-bearing half by
+  // reading the pinned `frame-metadata-hash-extension`: the digest comes from a compile-time
+  // env var this runtime's build never sets, so mode 1 is rejected `CannotLookup` ON CHAIN.
+  // Granting the capability would build transactions the chain is guaranteed to refuse, and
+  // the user would meet that failure after signing on a hardware wallet. Milestone B21.
   // The load-bearing refusal: the device's own decode is what makes air-gapped signing
   // better than blind signing, and whether a Ledger Generic App does it for a custom
   // chain is unverified. A surface that claimed it would claim exactly that property.
