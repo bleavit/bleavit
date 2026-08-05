@@ -30,6 +30,7 @@ import {
 } from '@bleavit/local-index';
 // `selfRange` is test-only on purpose — see packages/local-index/src/testing.ts.
 import { selfRange } from '@bleavit/local-index/testing';
+import { nth } from './nth.ts';
 
 const PASEO = `0x${'a1'.repeat(32)}`;
 const POLKADOT = `0x${'b2'.repeat(32)}`;
@@ -111,7 +112,7 @@ test('coverage round-trips, and a fresh database reads as empty rather than unde
   await writeCoverage(db, coverage);
   const read = await readCoverage(db);
   assert.equal(read.ranges.length, 1);
-  assert.equal(read.ranges[0].origin, 'self');
+  assert.equal(nth(read.ranges, 0, 'range').origin, 'self');
   await db.delete();
 });
 

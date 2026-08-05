@@ -15,6 +15,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import { IngestLockError, ingestLockName, withIngestLock } from '@bleavit/local-index';
+import type { LockManagerLike } from '@bleavit/local-index';
+
+type LockMode = 'exclusive' | 'shared';
 
 const GENESIS = `0x${'a1'.repeat(32)}`;
 const OTHER = `0x${'b2'.repeat(32)}`;
@@ -30,8 +33,8 @@ const OTHER = `0x${'b2'.repeat(32)}`;
  */
 function lockManager() {
   /** name -> array of modes currently held */
-  const holders = new Map();
-  const conflicts = (name, mode) => {
+  const holders = new Map<string, LockMode[]>();
+  const conflicts = (name: string, mode: LockMode): boolean => {
     const current = holders.get(name) ?? [];
     if (current.length === 0) return false;
     return mode === 'exclusive' || current.includes('exclusive');
@@ -40,7 +43,7 @@ function lockManager() {
     get held() {
       return new Set([...holders.entries()].filter(([, m]) => m.length > 0).map(([n]) => n));
     },
-    async request(name, options, callback) {
+    async request(name: string, options: { mode?: LockMode; ifAvailable?: boolean }, callback: (lock: unknown | null) => Promise<void>) {
       const mode = options.mode ?? 'exclusive';
       if (options.ifAvailable && conflicts(name, mode)) {
         await callback(null);
@@ -111,7 +114,7 @@ test('a different chain is NOT blocked while one is held, so the scoping is not 
 test('a null lock under ifAvailable is treated as NOT held', async () => {
   // Web Locks' documented "not available" signal. Treating it as held runs the body
   // unlocked — the exact failure, from the one branch a happy-path test never enters.
-  const nullGranting = {
+  const nullGranting: LockManagerLike = {
     async request(_name, _options, callback) {
       await callback(null);
     },

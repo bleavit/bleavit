@@ -25,10 +25,12 @@ import {
   rollUp,
 } from '@bleavit/local-index';
 // `selfRange` is test-only on purpose — see packages/local-index/src/testing.ts.
+import type { Candle, PriceSample, Resolution } from '@bleavit/local-index';
 import { selfRange } from '@bleavit/local-index/testing';
+import { nth } from './nth.ts';
 
 const HOUR = 3_600;
-const sample = (at, price, blockNumber, bookId = 'book-1') => ({
+const sample = (at: number, price: number, blockNumber: number, bookId = 'book-1'): PriceSample => ({
   bookId,
   at,
   price1e9: BigInt(price),
@@ -50,7 +52,9 @@ test('the floor returns undefined rather than throwing', () => {
   // justifies the floor arithmetically: a daily row costs books × 120 B/day even at max
   // load, so depth there is effectively unbounded.
   assert.equal(nextResolution('candles1d'), undefined);
-  assert.throws(() => nextResolution('candles5m'), CandleError);
+  // Deliberately outside `Resolution`: a stored row rehydrated from IndexedDB carries
+  // whatever string was written, and the refusal is what stops it being read as a rung.
+  assert.throws(() => nextResolution('candles5m' as Resolution), CandleError);
 });
 
 test('bucket widths are the ladder’s own', () => {
@@ -76,11 +80,11 @@ test('open and close are decided by time, never by array order', () => {
     'candles1h',
   );
   assert.deepEqual(forwards, backwards);
-  assert.equal(forwards[0].open1e9, 100n);
-  assert.equal(forwards[0].close1e9, 200n);
-  assert.equal(forwards[0].high1e9, 300n);
-  assert.equal(forwards[0].low1e9, 100n);
-  assert.equal(forwards[0].samples, 3);
+  assert.equal(nth(forwards, 0, 'candle').open1e9, 100n);
+  assert.equal(nth(forwards, 0, 'candle').close1e9, 200n);
+  assert.equal(nth(forwards, 0, 'candle').high1e9, 300n);
+  assert.equal(nth(forwards, 0, 'candle').low1e9, 100n);
+  assert.equal(nth(forwards, 0, 'candle').samples, 3);
 });
 
 test('two books never share a bucket', () => {
@@ -97,7 +101,7 @@ test('two books never share a bucket', () => {
 test('a candle records the block span it summarises', () => {
   // So coverage stays checkable after the raw samples are gone: without it, an evicted range
   // could only be described by time, and coverage is expressed in blocks.
-  const [candle] = foldCandles([sample(10, 100, 40), sample(20, 200, 12)], 'candles1h');
+  const candle = nth(foldCandles([sample(10, 100, 40), sample(20, 200, 12)], 'candles1h'), 0, 'candle');
   assert.equal(candle.fromBlock, 12);
   assert.equal(candle.toBlock, 40);
 });
@@ -120,7 +124,7 @@ test('rolling up composes exactly — the coarse candle is the one the samples w
 
 test('rolling a coarser candle into a finer bucket is refused', () => {
   // It would fabricate resolution the data never had.
-  const [daily] = rollUp(foldCandles([sample(10, 100, 1)], 'candles1h'), 'candles1d');
+  const daily: Candle = nth(rollUp(foldCandles([sample(10, 100, 1)], 'candles1h'), 'candles1d'), 0, 'candle');
   assert.throws(() => rollUp([daily], 'candles1h'), CandleError);
   assert.throws(() => rollUp([daily], 'candles1d'), CandleError);
 });
