@@ -114,3 +114,12 @@ export {
   type Stream,
   type TreasuryBlock,
 } from './treasury.js';
+export {
+  REGISTRY_HOLDS_SETTLEMENT,
+  challengeWindowCopy,
+  mayChallenge,
+  noOpWarning,
+  snapshotCrankState,
+  type ChallengeWindow,
+  type SnapshotCrankState,
+} from './registry-crank.js';

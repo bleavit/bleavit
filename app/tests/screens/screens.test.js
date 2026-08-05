@@ -56,8 +56,13 @@ import {
   RatificationPanel,
   UNRATIFIED_CONSEQUENCE,
   allowanceRemaining,
+  REGISTRY_HOLDS_SETTLEMENT,
   approvalBlocks,
+  challengeWindowCopy,
   claimBlocks,
+  mayChallenge,
+  noOpWarning,
+  snapshotCrankState,
   claimableNow,
   depositBlocks,
   insuranceCopy,
@@ -1967,4 +1972,47 @@ test('only the recipient may claim, and both blocks report together', () => {
     claimBlocks({ stream: STREAM(), callerIsRecipient: true, now: finalized(600) }),
     [],
   );
+});
+
+// ------------------------------- S18/S19 the snapshot crank and registry (F17)
+
+test('a crank that would do nothing says so before it costs a fee', () => {
+  // §11.5 row P-15: "never sign a guaranteed no-op without an explicit expert override".
+  // The part a user cannot see is that the button looks identical either way.
+  const notYet = snapshotCrankState(finalized(7), false, false);
+  assert.equal(notYet.kind, 'no-op');
+  assert.match(noOpWarning(notYet), /pay a fee and change nothing/);
+
+  const done = snapshotCrankState(finalized(7), true, true);
+  assert.equal(done.reason, 'already-taken');
+  assert.match(noOpWarning(done), /already been taken/);
+
+  // Ready is distinct, and carries no warning — so the control is not vacuously warning.
+  const ready = snapshotCrankState(finalized(7), true, false);
+  assert.equal(ready.kind, 'ready');
+  assert.equal(noOpWarning(ready), undefined);
+});
+
+test('the registry copy says a challenge cannot stall a decision', () => {
+  // The natural reading of "a challenge is open" is that governance is paused. It is not,
+  // and believing otherwise credits an incident filing with leverage the design withholds.
+  assert.match(REGISTRY_HOLDS_SETTLEMENT, /holds the settlement/);
+  assert.match(REGISTRY_HOLDS_SETTLEMENT, /does not pause a governance decision/);
+  assert.match(REGISTRY_HOLDS_SETTLEMENT, /cannot stall a decision/);
+});
+
+test('an unread watchtower extension makes the deadline indeterminate, not the base window', () => {
+  // A countdown that ignored an extension tells a challenger they are out of time when
+  // they are not — losing them exactly the window the extension exists to grant.
+  const unknown = { kind: 'indeterminate', reason: 'the storage read failed' };
+  assert.equal(mayChallenge(unknown), false);
+  assert.match(challengeWindowCopy(unknown), /not assuming the base window/);
+  assert.match(challengeWindowCopy(unknown), /out of time when you are not/);
+
+  assert.equal(mayChallenge({ kind: 'open', closesAt: finalized(9_000), extended: true }), true);
+  assert.match(
+    challengeWindowCopy({ kind: 'open', closesAt: finalized(9_000), extended: true }),
+    /extended by watchtower quorum/,
+  );
+  assert.equal(mayChallenge({ kind: 'closed', closedAt: finalized(100) }), false);
 });
