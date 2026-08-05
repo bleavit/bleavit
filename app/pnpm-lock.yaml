@@ -553,6 +553,12 @@ importers:
         specifier: workspace:*
         version: link:../../packages/verify
 
+  tools/verify-release:
+    dependencies:
+      '@bleavit/verify':
+        specifier: workspace:*
+        version: link:../../packages/verify
+
 packages:
 
   '@babel/code-frame@7.29.7':

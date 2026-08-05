@@ -14,10 +14,18 @@
  *
  * Lives in its own module because dependency-cruiser clones the config it is given: a
  * function hung off the config's own exports fails with "could not be cloned". The
- * witness requires this file directly, so it exercises the production matcher rather than
+ * witness imports this file directly, so it exercises the production matcher rather than
  * a restatement of it.
+ *
+ * TypeScript, imported from an `.mjs` dependency-cruiser config through a dynamic
+ * `import()` that Node 22.18 type-strips (measured, not assumed). The config files
+ * themselves stay JavaScript because dependency-cruiser reads them with `import()` only
+ * for `.js`/`.cjs`/`.mjs` and JSON5-parses every other extension — so a `.ts` config is
+ * not a thing that can exist. That is the honest boundary: the *logic* here, which has
+ * shipped two vacuous-matcher defects (V-86, V-92), is typed; the rule lists are data in
+ * the only format the tool accepts.
  */
-const EXTERNAL = (names) => `^(${names})(/|$)|/node_modules/(${names})/`;
+export const EXTERNAL = (names: string): string => `^(${names})(/|$)|/node_modules/(${names})/`;
 
 /**
  * The same trap, one layer in: a **workspace subpath export**.
@@ -33,7 +41,7 @@ const EXTERNAL = (names) => `^(${names})(/|$)|/node_modules/(${names})/`;
  * specifier it cannot resolve verbatim.** Always match both the specifier a source file
  * writes and the path it would resolve to.
  */
-const WORKSPACE_SUBPATH = (specifier, distPath) =>
+export const WORKSPACE_SUBPATH = (specifier: string, distPath: string): string =>
   `^${specifier.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}($|/)|^${distPath}`;
 
 /**
@@ -65,8 +73,6 @@ const WORKSPACE_SUBPATH = (specifier, distPath) =>
  * change which *does* resolve them cannot silently flip a permitted import into a
  * forbidden one.
  */
-const POLKADOT_API_NON_SIGNER =
+export const POLKADOT_API_NON_SIGNER: string =
   '^polkadot-api(?!/(pjs-signer|signer)($|/))(/|$)' +
   '|/node_modules/polkadot-api/(?!dist/reexports/(pjs-signer|signer)\\.)';
-
-module.exports = { EXTERNAL, WORKSPACE_SUBPATH, POLKADOT_API_NON_SIGNER };

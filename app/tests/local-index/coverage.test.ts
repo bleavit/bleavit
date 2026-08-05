@@ -333,7 +333,7 @@ test('the self brand is a compile-time control, and the runtime control is elsew
   // **the transaction path never reads this package**. So the control is the edge that does
   // not exist, and this asserts the rule that forbids it is actually written down — a rule
   // nobody checks for is how the last vacuous control shipped.
-  const config = readFileSync(new URL('../../.dependency-cruiser.cjs', import.meta.url), 'utf8');
+  const config = readFileSync(new URL('../../.dependency-cruiser.mjs', import.meta.url), 'utf8');
   const start = config.indexOf("name: 'wallet-never-imports-acceleration'");
   assert.notEqual(start, -1, 'the rule that keeps the tx path away from this package is gone');
   // To the start of the next rule, not to the first `},` — that one closes the `from`

@@ -53,11 +53,19 @@ const OUT_DIR = join(APP, 'schemas');
  * test chain. A missing `dist/` is reported as exactly that rather than as a mysterious
  * resolution failure.
  */
-async function loadPackage(name) {
+/**
+ * `any` because the shape is whatever the built package exports, and that is deliberate:
+ * this generator's whole claim is that the schema is derived from the **parser's own
+ * declarations**, so a hand-written interface here would reintroduce exactly the second
+ * copy the generator exists to remove. What checks the result is `assertCovers` below,
+ * bidirectionally, plus the `test:intents` differential.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function loadPackage(name: string): Promise<any> {
   try {
     return await import(`../packages/${name}/dist/index.js`);
   } catch (error) {
-    if (error?.code === 'ERR_MODULE_NOT_FOUND') {
+    if (isRecord(error) && error['code'] === 'ERR_MODULE_NOT_FOUND') {
       console.error(
         `cannot load @bleavit/${name} from packages/${name}/dist — run \`pnpm run build\` first.`,
       );
@@ -83,19 +91,31 @@ const {
 const { CONTEXT_SCHEMA } = await loadPackage('contexts');
 const { RECEIPT_SCHEMA } = await loadPackage('receipts');
 
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === 'object' && value !== null;
+}
+
 /** The `$id` a producer resolves. In-bundle and offline — nothing here is fetched. */
 const ID_BASE = 'https://bleavit.org/schemas';
 
 const DIALECT = 'https://json-schema.org/draft/2020-12/schema';
 
 /** A decimal-string amount. Bases past 2^53 never travel as JSON numbers (V-74). */
-const decimalString = (bits, description) => ({
+/** A JSON Schema fragment. Structural, because these are assembled and then serialised. */
+type SchemaFragment = Record<string, unknown>;
+
+const decimalString = (bits: number, description: string): SchemaFragment => ({
   type: 'string',
   pattern: INTENT_PATTERNS.canonicalDecimal,
   description: `${description} A canonical decimal string for a u${bits} — no sign, no leading zeros, no exponent. It is a string because base units run past 2^53 and JSON.parse corrupts a larger number silently.`,
 });
 
-const u32 = (description) => ({ type: 'integer', minimum: 0, maximum: 2 ** 32 - 1, description });
+const u32 = (description: string): SchemaFragment => ({
+  type: 'integer',
+  minimum: 0,
+  maximum: 2 ** 32 - 1,
+  description,
+});
 
 const binding = {
   type: 'object',
@@ -122,8 +142,8 @@ const binding = {
  * optional would validate a document carrying neither and one carrying both, so the shape
  * that permits it is the shape that publishes the wrong rule.
  */
-const prepareKinds = INTENT_ACTIONS.filter((kind) => kind.startsWith('prepare_'));
-const closeKinds = INTENT_ACTIONS.filter((kind) => !kind.startsWith('prepare_'));
+const prepareKinds = INTENT_ACTIONS.filter((kind: string) => kind.startsWith('prepare_'));
+const closeKinds = INTENT_ACTIONS.filter((kind: string) => !kind.startsWith('prepare_'));
 
 const actionId = {
   type: 'string',
@@ -256,7 +276,7 @@ const intentSchema = {
 
 /* ------------------------------------------------------------------ outbound formats */
 
-const anchor = (description) => ({
+const anchor = (description: string): SchemaFragment => ({
   type: 'object',
   description,
   properties: {
@@ -369,7 +389,7 @@ const receiptSchema = {
  * author the field is not allowed, and the client accepts it — so the format grows a member
  * nobody outside this repository can discover.
  */
-function assertCovers(label, declared, published) {
+function assertCovers(label: string, declared: readonly string[], published: readonly string[]): void {
   const missing = declared.filter((key) => !published.includes(key));
   const extra = published.filter((key) => !declared.includes(key));
   if (missing.length > 0 || extra.length > 0) {
@@ -382,21 +402,34 @@ function assertCovers(label, declared, published) {
   }
 }
 
-const publishedIn = (container) => [
-  ...new Set(variants.flatMap((variant) => Object.keys(variant.properties[container].properties))),
+/**
+ * Every field name the schema publishes inside `action` or `limits`, across all variants.
+ *
+ * Read through `properties` rather than off a declared type, because that is the artefact
+ * being checked: the assertion below is that the *published* set equals the parser's, and a
+ * type standing between the two would let them agree with each other and not with the file.
+ */
+const publishedIn = (container: 'action' | 'limits'): string[] => [
+  ...new Set(
+    variants.flatMap((variant: SchemaFragment) => {
+      const properties = variant['properties'] as Record<string, SchemaFragment>;
+      const section = properties[container];
+      return Object.keys((section?.['properties'] ?? {}) as SchemaFragment);
+    }),
+  ),
 ];
 assertCovers('action', [...ACTION_KEY_NAMES], publishedIn('action'));
 assertCovers('limits', [...LIMIT_KEY_NAMES], publishedIn('limits'));
 assertCovers('binding', [...BINDING_KEY_NAMES], Object.keys(binding.properties));
 
-const FILES = [
+const FILES: readonly (readonly [string, SchemaFragment])[] = [
   [`${INTENT_SCHEMA}.schema.json`, intentSchema],
   [`${CONTEXT_SCHEMA}.schema.json`, contextSchema],
   [`${RECEIPT_SCHEMA}.schema.json`, receiptSchema],
 ];
 
 /** Two-space JSON with a trailing newline — stable across runs and readable in a diff. */
-const render = (value) => `${JSON.stringify(value, null, 2)}\n`;
+const render = (value: unknown): string => `${JSON.stringify(value, null, 2)}\n`;
 
 const write = process.argv.includes('--write');
 mkdirSync(OUT_DIR, { recursive: true });
@@ -410,7 +443,7 @@ for (const [name, schema] of FILES) {
     console.log(`wrote ${name} (${createHash('sha256').update(expected).digest('hex').slice(0, 12)})`);
     continue;
   }
-  let actual;
+  let actual: string;
   try {
     actual = readFileSync(path, 'utf8');
   } catch {

@@ -18,7 +18,7 @@
  * regenerating into two unrelated directories and comparing every file hash. That is
  * what makes byte-comparison a legitimate gate rather than a flake.
  *
- * Usage: node tools/check-descriptor-drift.mjs [--update]
+ * Usage: node tools/check-descriptor-drift.ts [--update]
  */
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -65,9 +65,9 @@ const IGNORED = new Set([".gitignore"]);
  * recorder uses — own the serialization, apply it on both sides — and for the same reason:
  * two formatters that could disagree is a drift source rather than a fix for one.
  */
-function normalizeDeclarations(root) {
-  const files = [];
-  const walk = (dir) => {
+function normalizeDeclarations(root: string): number {
+  const files: string[] = [];
+  const walk = (dir: string): void => {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) walk(full);
@@ -100,15 +100,19 @@ function normalizeDeclarations(root) {
   return files.length;
 }
 
-function fail(message) {
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === "object" && value !== null;
+}
+
+function fail(message: string): void {
   console.error(`FAIL ${message}`);
   process.exitCode = 1;
 }
 
-function hashTree(root) {
-  const out = new Map();
+function hashTree(root: string): Map<string, string> {
+  const out = new Map<string, string>();
   if (!fs.existsSync(root)) return out;
-  const walk = (dir) => {
+  const walk = (dir: string): void => {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) {
@@ -124,9 +128,16 @@ function hashTree(root) {
   return out;
 }
 
-function main() {
+/** One `.papi/polkadot-api.json` entry, as much of it as this gate reads. */
+interface DescriptorEntry {
+  readonly metadata?: string;
+}
+
+function main(): void {
   const update = process.argv.includes("--update");
-  const config = JSON.parse(fs.readFileSync(CONFIG, "utf8"));
+  const config: { descriptorPath: string; entries?: Record<string, DescriptorEntry> } = JSON.parse(
+    fs.readFileSync(CONFIG, "utf8"),
+  );
   const committed = path.join(APP, config.descriptorPath);
 
   const entries = Object.entries(config.entries ?? {});
@@ -163,7 +174,11 @@ function main() {
       { cwd: APP, stdio: "pipe" },
     );
   } catch (error) {
-    fail(`papi generate failed:\n${error.stdout ?? ""}${error.stderr ?? ""}`);
+    // `execFileSync` throws an `Error` carrying the child's captured streams; typing the
+    // catch as `unknown` is what forces reading them off a checked shape rather than
+    // trusting a field that is only there for one class of failure.
+    const streams = isRecord(error) ? error : {};
+    fail(`papi generate failed:\n${String(streams["stdout"] ?? "")}${String(streams["stderr"] ?? "")}`);
     return;
   }
 

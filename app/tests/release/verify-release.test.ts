@@ -10,6 +10,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
+import type { ReleaseIdentity } from '@bleavit/verify';
 import { runSelfCheck } from '@bleavit/verify';
 
 import {
@@ -19,7 +20,8 @@ import {
   checkDisjointness,
   operatorsIn,
   parseRegistry,
-} from '../../tools/verify-release/registry.mjs';
+} from '../../tools/verify-release/registry.ts';
+import type { Attestation, Keyring, ReleaseSignature } from '../../tools/verify-release/verdict.ts';
 import {
   ATTESTATION_FLOOR,
   SIGNATURE_FLOOR,
@@ -28,14 +30,36 @@ import {
   countReleaseSignatures,
   diffScope,
   releaseVerdict,
-} from '../../tools/verify-release/verdict.mjs';
+} from '../../tools/verify-release/verdict.ts';
 
-const KEYRING = { generation: 3, revokedKeyIds: [] };
-const sig = (keyId, over = {}) => ({ keyId, generation: 3, valid: true, ...over });
-const att = (keyId, organization, over = {}) => ({ keyId, organization, valid: true, ...over });
+const KEYRING: Keyring = { generation: 3, revokedKeyIds: [] };
+const sig = (keyId: string, over: Partial<ReleaseSignature> = {}): ReleaseSignature => ({
+  keyId,
+  generation: 3,
+  valid: true,
+  ...over,
+});
+const att = (keyId: string, organization: unknown, over: Partial<Attestation> = {}): Attestation => ({
+  keyId,
+  organization,
+  valid: true,
+  ...over,
+});
 
-const identity = {
-  releaseTxid: 'R'.repeat(43),
+/** The first element, with the reason it had to be there — `[0]` on an empty list is not a
+ * failing assertion, it is a `TypeError` blamed on the harness. */
+const first = <T>(items: readonly T[], what: string): T => {
+  const item = items[0];
+  assert.ok(item !== undefined, `expected at least one ${what}, got none`);
+  return item;
+};
+
+// `arweaveManifestTxId`, not `releaseTxid`. Typing this suite caught the fixture still
+// naming the field the consumer stopped requiring: `ReleaseIdentity` demands the asset-tree
+// manifest address, and a fixture carrying the retired name described a document no producer
+// emits — the second half of the very defect that interface's own comment records.
+const identity: ReleaseIdentity = {
+  arweaveManifestTxId: 'R'.repeat(43),
   sourceCommit: 'a'.repeat(40),
   perFileHashes: { 'index.html': 'a'.repeat(64) },
   descriptorMetadataHashes: { 2: 'b'.repeat(64) },
@@ -59,20 +83,20 @@ test('a revoked key does not count, which is the case §2.3 exists for', () => {
   // failure the on-chain revocation set was added to prevent.
   const counted = countReleaseSignatures([sig('K1'), sig('K2')], { generation: 3, revokedKeyIds: ['K2'] });
   assert.equal(counted.distinctKeys, 1);
-  assert.match(counted.rejected[0].why, /revoked/);
+  assert.match(first(counted.rejected, 'rejection').why, /revoked/);
 });
 
 test('a signature from a previous keyring generation does not count', () => {
   // It verifies against a keyring this release did not publish.
   const counted = countReleaseSignatures([sig('K1'), sig('K2', { generation: 2 })], KEYRING);
   assert.equal(counted.distinctKeys, 1);
-  assert.match(counted.rejected[0].why, /generation/);
+  assert.match(first(counted.rejected, 'rejection').why, /generation/);
 });
 
 test('an invalid signature does not count and says so', () => {
   const counted = countReleaseSignatures([sig('K1'), sig('K2', { valid: false })], KEYRING);
   assert.equal(counted.distinctKeys, 1);
-  assert.match(counted.rejected[0].why, /does not verify/);
+  assert.match(first(counted.rejected, 'rejection').why, /does not verify/);
 });
 
 test('a keyring with no generation is refused rather than defaulted', () => {
@@ -90,7 +114,7 @@ test('an attestation with no declared organization is refused, not counted', () 
   // It cannot be shown independent of any other.
   const counted = countAttestations([att('A', 'acme'), att('B', '  ')]);
   assert.equal(counted.independentOrganizations, 1);
-  assert.match(counted.rejected[0].why, /independence is unshowable/);
+  assert.match(first(counted.rejected, 'rejection').why, /independence is unshowable/);
 });
 
 test('the verdict fails on any one floor, and names which', () => {
@@ -181,9 +205,9 @@ test('disjointness is evaluated over operators — the key-id reading would pass
   });
   const { violations } = checkDisjointness(entries);
   assert.equal(violations.length, 1);
-  assert.equal(violations[0].operator, 'Ada');
-  assert.deepEqual(violations[0].populations, ['release-signer', 'arns-controller']);
-  assert.match(violations[0].reason, /self-verifying malicious release/);
+  assert.equal(first(violations, 'violation').operator, 'Ada');
+  assert.deepEqual(first(violations, 'violation').populations, ['release-signer', 'arns-controller']);
+  assert.match(first(violations, 'violation').reason, /self-verifying malicious release/);
 });
 
 test('a monitor operator who is also an ArNS controller is a violation', () => {
@@ -198,7 +222,7 @@ test('a monitor operator who is also an ArNS controller is a violation', () => {
   });
   const { violations } = checkDisjointness(entries);
   assert.equal(violations.length, 1);
-  assert.deepEqual(violations[0].populations, ['monitor-operator', 'arns-controller']);
+  assert.deepEqual(first(violations, 'violation').populations, ['monitor-operator', 'arns-controller']);
 });
 
 test('attestors may overlap release signers — §2.2 separates two populations, not four', () => {
@@ -224,7 +248,7 @@ test('an empty population is reported separately from a clean separation', () =>
   const { violations, empty } = checkDisjointness(entries);
   assert.deepEqual(violations, []);
   assert.equal(empty.length, 2);
-  assert.match(empty[0].detail, /for want of members/);
+  assert.match(first(empty, 'unseated pair').detail, /for want of members/);
 });
 
 test('a key with no operator is refused, because it is invisible to the check', () => {
@@ -246,8 +270,8 @@ test('a key with no operator is refused, because it is invisible to the check', 
 test('single-key ANT custody is refused outright (12 §4.2)', () => {
   const one = parseRegistry({ entries: [{ id: 'ar://ANT-1', population: 'arns-controller', operator: 'Linus' }] });
   assert.equal(checkControllerQuorum(one).length, 1);
-  assert.match(checkControllerQuorum(one)[0], /3-of-5/);
+  assert.match(first(checkControllerQuorum(one), 'quorum finding'), /3-of-5/);
   assert.equal(operatorsIn(one, 'arns-controller').size, 1);
   const none = parseRegistry({ entries: [{ id: 'RWQ-1', population: 'release-signer', operator: 'Ada' }] });
-  assert.match(checkControllerQuorum(none)[0], /launch blocks/);
+  assert.match(first(checkControllerQuorum(none), 'quorum finding'), /launch blocks/);
 });

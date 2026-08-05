@@ -26,8 +26,8 @@ import {
   originFromMultiaddr,
   readDeclaredSources,
   renderConnectSrc,
-} from '../../tools/release/connect-src.mjs';
-import { assertNoAllowlistGrowth } from '../../tools/release/build.mjs';
+} from '../../tools/release/connect-src.ts';
+import { assertNoAllowlistGrowth } from '../../tools/release/build.ts';
 
 const HTTPS = ['https:'];
 
@@ -190,5 +190,5 @@ test('entries are sorted and deduplicated across sources', () => {
   );
   // Two operators reaching the same origin is one policy entry with two provenances — the
   // policy is about hosts, and the provenance is what a reviewer needs to judge an addition.
-  assert.equal(entries[0].provenance.length, 2);
+  assert.equal(entries[0]?.provenance.length, 2);
 });

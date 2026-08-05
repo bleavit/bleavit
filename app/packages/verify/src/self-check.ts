@@ -26,7 +26,7 @@
  * unexpected are therefore three separate findings rather than a boolean.
  */
 
-import type { Hash32, ReleaseIdentity } from './identity.js';
+import type { ReleaseIdentity, Sha256Hex } from './identity.js';
 
 export type SelfCheckFindingKind = 'changed' | 'missing' | 'unexpected';
 
@@ -34,9 +34,9 @@ export interface SelfCheckFinding {
   readonly kind: SelfCheckFindingKind;
   readonly path: string;
   /** The hash the signed manifest pins. Absent for an `unexpected` file. */
-  readonly pinned?: Hash32;
+  readonly pinned?: Sha256Hex;
   /** The hash of what was actually served. Absent for a `missing` file. */
-  readonly served?: Hash32;
+  readonly served?: Sha256Hex;
   /** What the user is told. Never phrased as a transient problem. */
   readonly detail: string;
 }
@@ -70,20 +70,20 @@ export interface SelfCheckResult {
  * compared nor reported as unexpected. Copying own keys into a null-prototype map makes
  * lookup and enumeration answer the same question.
  */
-function ownKeysOnly(source: Readonly<Record<string, Hash32>>): Map<string, Hash32> {
-  const out = new Map<string, Hash32>();
+function ownKeysOnly(source: Readonly<Record<string, Sha256Hex>>): Map<string, Sha256Hex> {
+  const out = new Map<string, Sha256Hex>();
   for (const key of Object.getOwnPropertyNames(source)) {
     const descriptor = Object.getOwnPropertyDescriptor(source, key);
     // A getter could return a different value on each read, so the pair that is compared
     // would not be the pair that was enumerated. Read once, here.
-    if (descriptor && 'value' in descriptor) out.set(key, descriptor.value as Hash32);
+    if (descriptor && 'value' in descriptor) out.set(key, String(descriptor.value));
   }
   return out;
 }
 
 export function runSelfCheck(
   identity: ReleaseIdentity,
-  servedInput: Readonly<Record<string, Hash32>>,
+  servedInput: Readonly<Record<string, Sha256Hex>>,
 ): SelfCheckResult {
   // Refuse an uncheckable release here rather than trusting every caller to remember:
   // a self-check over an empty manifest compares nothing and returns `ok`, which is the

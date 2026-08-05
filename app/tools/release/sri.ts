@@ -30,14 +30,41 @@ import { createHash } from 'node:crypto';
 const SRI_RELS = new Set(['stylesheet', 'modulepreload', 'preload']);
 
 export class SriError extends Error {
-  constructor(message) {
+  constructor(message: string) {
     super(message);
     this.name = 'SriError';
   }
 }
 
-export function sha384(bytes) {
+export function sha384(bytes: Uint8Array | string): string {
   return `sha384-${createHash('sha384').update(bytes).digest('base64')}`;
+}
+
+/** The emitted bytes for a same-tree reference, or `undefined` if it was never emitted. */
+export type ResolveBytes = (href: string) => Uint8Array | undefined;
+
+export interface ProtectedRef {
+  readonly href: string;
+  readonly integrity: string;
+}
+
+/** A `<link>` whose `rel` no browser enforces `integrity` for. Reported, never silent. */
+export interface SkippedRef {
+  readonly href: string;
+  readonly rel: string;
+}
+
+export interface SriInjection {
+  readonly html: string;
+  readonly protectedRefs: readonly ProtectedRef[];
+  readonly skipped: readonly SkippedRef[];
+}
+
+/** `actual` is `null` when the reference could not be resolved to any bytes at all. */
+export interface SriMismatch {
+  readonly href: string;
+  readonly declared: string;
+  readonly actual: string | null;
 }
 
 const TAG = /<(script|link)\b([^>]*)>/gi;
@@ -53,15 +80,17 @@ const TAG = /<(script|link)\b([^>]*)>/gi;
  */
 const ATTR = /([a-zA-Z][a-zA-Z0-9-]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/g;
 
-function attributes(raw) {
-  const out = new Map();
+type Attributes = ReadonlyMap<string, string>;
+
+function attributes(raw: string): Attributes {
+  const out = new Map<string, string>();
   for (const match of raw.matchAll(ATTR)) {
-    out.set(match[1].toLowerCase(), match[2] ?? match[3] ?? match[4] ?? '');
+    out.set((match[1] ?? '').toLowerCase(), match[2] ?? match[3] ?? match[4] ?? '');
   }
   return out;
 }
 
-function relTokens(attrs) {
+function relTokens(attrs: Attributes): string[] {
   return (attrs.get('rel') ?? '')
     .toLowerCase()
     .split(/\s+/)
@@ -77,10 +106,10 @@ function relTokens(attrs) {
  * would produce an `index.html` whose unprotected subresources are exactly the ones nobody
  * noticed were missing.
  */
-export function injectSri(html, resolveBytes) {
-  const protectedRefs = [];
-  const skipped = [];
-  const out = html.replace(TAG, (whole, tag, rawAttrs) => {
+export function injectSri(html: string, resolveBytes: ResolveBytes): SriInjection {
+  const protectedRefs: ProtectedRef[] = [];
+  const skipped: SkippedRef[] = [];
+  const out = html.replace(TAG, (whole: string, tag: string, rawAttrs: string) => {
     const attrs = attributes(rawAttrs);
     const isScript = tag.toLowerCase() === 'script';
     const href = isScript ? attrs.get('src') : attrs.get('href');
@@ -134,9 +163,12 @@ export function injectSri(html, resolveBytes) {
  * script and the app would be blank, which is fail-closed and completely opaque. So
  * `release:check` recomputes rather than counts.
  */
-export function verifySri(html, resolveBytes) {
-  const mismatches = [];
+export function verifySri(html: string, resolveBytes: ResolveBytes): SriMismatch[] {
+  const mismatches: SriMismatch[] = [];
   for (const [, tag, rawAttrs] of html.matchAll(TAG)) {
+    // `TAG` has two capture groups and both are unconditional, so a match without them is
+    // a regex change rather than an input the scan should tolerate.
+    if (tag === undefined || rawAttrs === undefined) continue;
     const attrs = attributes(rawAttrs);
     const declared = attrs.get('integrity');
     if (!declared) continue;
@@ -147,7 +179,7 @@ export function verifySri(html, resolveBytes) {
       continue;
     }
     const actual = sha384(bytes);
-    if (actual !== declared) mismatches.push({ href, declared, actual });
+    if (actual !== declared) mismatches.push({ href: href ?? '<no reference>', declared, actual });
   }
   return mismatches;
 }

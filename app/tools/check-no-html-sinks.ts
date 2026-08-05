@@ -23,11 +23,11 @@
  *
  * The list is closed rather than a pattern, because a pattern over "anything ending in HTML"
  * would fire on `parseHtml`, `escapeHtml`, `htmlLang` and be switched off within a week —
- * the same narrowing `check-chain-literals.mjs`'s rule B needed.
+ * the same narrowing `check-chain-literals.ts`'s rule B needed.
  *
  * ## AST, not text
  *
- * Every hole adversarial review found in `check-chain-literals.mjs` was a *tokenizer* hole:
+ * Every hole adversarial review found in `check-chain-literals.ts` was a *tokenizer* hole:
  * a string containing a comment opener swallowed the following lines, a regex character class
  * read as a comment. A property named in a comment or inside a string literal is not a
  * property access, and on the AST it simply is not one — so the discussion of these sinks in
@@ -53,9 +53,9 @@ export const SINKS = Object.freeze([
 const ROOTS = ['src', 'packages'];
 const SKIP = new Set(['node_modules', 'dist', 'papi-descriptors', '.papi']);
 
-function sourceFiles(root) {
-  const out = [];
-  const walk = (dir) => {
+function sourceFiles(root: string): string[] {
+  const out: string[] = [];
+  const walk = (dir: string): void => {
     for (const entry of readdirSync(dir)) {
       if (SKIP.has(entry)) continue;
       const full = join(dir, entry);
@@ -67,8 +67,15 @@ function sourceFiles(root) {
   return out;
 }
 
-export function scan({ files = ROOTS.flatMap(sourceFiles) } = {}) {
-  const findings = [];
+/** One markup or code sink, with the line for the report. */
+export interface SinkFinding {
+  readonly file: string;
+  readonly line: number;
+  readonly sink: string;
+}
+
+export function scan({ files = ROOTS.flatMap(sourceFiles) }: { files?: readonly string[] } = {}): SinkFinding[] {
+  const findings: SinkFinding[] = [];
   for (const file of files) {
     const source = ts.createSourceFile(
       file,
@@ -77,11 +84,11 @@ export function scan({ files = ROOTS.flatMap(sourceFiles) } = {}) {
       true,
       /\.tsx$/.test(file) ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
     );
-    const report = (node, sink) => {
+    const report = (node: ts.Node, sink: string): void => {
       const { line } = source.getLineAndCharacterOfPosition(node.getStart());
       findings.push({ file: relative(APP, file), line: line + 1, sink });
     };
-    const visit = (node) => {
+    const visit = (node: ts.Node): void => {
       // `x.innerHTML = …`, `el.insertAdjacentHTML(…)` — a property access, never a comment
       // or a string, because on the AST those are simply not this node kind.
       if (ts.isPropertyAccessExpression(node) && SINKS.includes(node.name.getText())) {
@@ -113,13 +120,15 @@ export function scan({ files = ROOTS.flatMap(sourceFiles) } = {}) {
 
 const WITNESS = join(APP, 'tools/fixtures/html-sink-witness.tsx');
 
-function runWitness() {
+function runWitness(): number {
   const findings = scan({ files: [WITNESS] });
   const lines = readFileSync(WITNESS, 'utf8').split('\n');
-  const expected = [];
+  const expected: { sink: string; from: number; to: number }[] = [];
   lines.forEach((line, index) => {
     const match = /^\s*\/\/ expect-sink: (.+)$/.exec(line);
-    if (match !== null) expected.push({ sink: match[1].trim(), from: index + 2, to: index + 4 });
+    if (match !== null && match[1] !== undefined) {
+      expected.push({ sink: match[1].trim(), from: index + 2, to: index + 4 });
+    }
   });
   if (expected.length === 0) {
     console.error('witness: no `// expect-sink:` lines — the fixture proves nothing.');
@@ -139,7 +148,7 @@ function runWitness() {
     }
   }
   // Negative controls: every finding must be one somebody declared.
-  const claimed = (f) => expected.some((w) => f.line >= w.from && f.line <= w.to);
+  const claimed = (f: SinkFinding): boolean => expected.some((w) => f.line >= w.from && f.line <= w.to);
   for (const f of findings.filter((x) => !claimed(x))) {
     console.error(`witness: FALSE POSITIVE at line ${f.line} (${f.sink}) — a control fired.`);
     failed += 1;
@@ -151,7 +160,7 @@ function runWitness() {
   return 0;
 }
 
-function main(argv) {
+function main(argv: readonly string[]): number {
   if (argv.includes('--witness')) return runWitness();
   const findings = scan();
   if (findings.length === 0) {

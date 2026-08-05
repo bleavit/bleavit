@@ -17,7 +17,7 @@
  */
 
 export class SbomError extends Error {
-  constructor(message) {
+  constructor(message: string) {
     super(message);
     this.name = 'SbomError';
   }
@@ -25,13 +25,27 @@ export class SbomError extends Error {
 
 const SUPPORTED_LOCKFILE_VERSIONS = new Set(['9.0']);
 
+/** One resolved dependency, as the lockfile records it. */
+export interface SbomComponent {
+  readonly name: string;
+  readonly version: string;
+  /** `sha512-<base64>`, or `null` when the lockfile entry carries no integrity line. */
+  integrity: string | null;
+}
+
+/** A CycloneDX hash entry. An empty list is how an unhashable component is represented. */
+interface CycloneDxHash {
+  readonly alg: string;
+  readonly content: string;
+}
+
 /**
  * `'@scope/name@1.2.3'` → `{ name: '@scope/name', version: '1.2.3' }`.
  *
  * Split on the **last** `@` so scoped names survive; refuse a key with no version, since a
  * component with no version pins nothing and would sit in the SBOM looking accounted for.
  */
-export function splitPackageKey(key) {
+export function splitPackageKey(key: string): { name: string; version: string } {
   // The peer suffix is stripped **first**, and that ordering is the whole subtlety: a
   // peer-resolution suffix contains scoped package names of its own, so
   // `vite@8.1.4(@types/node@20.0.0)` split on its last `@` yields the name
@@ -47,10 +61,10 @@ export function splitPackageKey(key) {
   return { name, version };
 }
 
-export function parseLockfile(text) {
+export function parseLockfile(text: string): SbomComponent[] {
   const versionMatch = /^lockfileVersion:\s*'?([0-9.]+)'?\s*$/m.exec(text);
   if (!versionMatch) throw new SbomError('lockfile declares no lockfileVersion');
-  if (!SUPPORTED_LOCKFILE_VERSIONS.has(versionMatch[1])) {
+  if (!SUPPORTED_LOCKFILE_VERSIONS.has(versionMatch[1] ?? '')) {
     throw new SbomError(
       `lockfileVersion ${versionMatch[1]} is not one this reader has been checked against ` +
         `(${[...SUPPORTED_LOCKFILE_VERSIONS].join(', ')}); refusing to emit an SBOM it may ` +
@@ -60,7 +74,7 @@ export function parseLockfile(text) {
   const packagesAt = text.indexOf('\npackages:\n');
   if (packagesAt === -1) throw new SbomError('lockfile has no packages: section');
   const section = text.slice(packagesAt);
-  const components = new Map();
+  const components = new Map<string, SbomComponent>();
   // The key charset must admit `:` — tarball and git-URL dependencies are recorded as
   // `pkg@https://…` and `pkg@github:owner/repo#sha`, and an earlier charset that excluded
   // the colon skipped exactly those. Skipping is the dangerous direction here: with other
@@ -68,12 +82,12 @@ export function parseLockfile(text) {
   // missing the least conventional and most audit-relevant dependencies in the tree. The
   // key is therefore taken up to the final `:` of the line.
   const entry = /^ {2}'?(\S.*?)'?:\s*$/gm;
-  let integrityFor = null;
+  let integrityFor: string | null = null;
   for (const line of section.split('\n')) {
     entry.lastIndex = 0;
     const match = entry.exec(line);
     if (match) {
-      const { name, version } = splitPackageKey(match[1]);
+      const { name, version } = splitPackageKey(match[1] ?? '');
       integrityFor = `${name}@${version}`;
       if (!components.has(integrityFor)) components.set(integrityFor, { name, version, integrity: null });
       continue;
@@ -81,7 +95,7 @@ export function parseLockfile(text) {
     const resolution = /^\s{4}resolution:\s*\{integrity:\s*([^,}]+)/.exec(line);
     if (resolution && integrityFor) {
       const component = components.get(integrityFor);
-      if (component && component.integrity === null) component.integrity = resolution[1].trim();
+      if (component && component.integrity === null) component.integrity = (resolution[1] ?? '').trim();
     }
   }
   if (components.size === 0) {
@@ -93,10 +107,12 @@ export function parseLockfile(text) {
 }
 
 /** `sha512-<base64>` → CycloneDX `{alg, content}` with hex content. */
-function cycloneHash(integrity) {
+function cycloneHash(integrity: string | null): CycloneDxHash[] {
   if (!integrity) return [];
   const [algorithm, encoded] = integrity.split('-');
-  const alg = { sha512: 'SHA-512', sha256: 'SHA-256', sha384: 'SHA-384', sha1: 'SHA-1' }[algorithm];
+  const alg = ({ sha512: 'SHA-512', sha256: 'SHA-256', sha384: 'SHA-384', sha1: 'SHA-1' } as Record<string, string>)[
+    algorithm ?? ''
+  ];
   if (!alg || !encoded) return [];
   return [{ alg, content: Buffer.from(encoded, 'base64').toString('hex') }];
 }
@@ -110,7 +126,42 @@ function cycloneHash(integrity) {
  * The build's identity is carried by `release.json`'s source commit and recipe digest,
  * which are facts about the build rather than about the clock.
  */
-export function buildSbom(components, { name, version }) {
+/**
+ * The emitted document.
+ *
+ * Note what is **absent** and stays absent: `timestamp` and `serialNumber`. The type is
+ * where that is enforceable at all — as `object` the two could have been added back without
+ * a single call site changing, and the suite's `!('timestamp' in sbom)` would then be the
+ * only thing standing between this file and the one artifact that differs between two
+ * environments building the same commit.
+ */
+export interface SbomDocument {
+  readonly bomFormat: 'CycloneDX';
+  readonly specVersion: string;
+  readonly version: number;
+  readonly metadata: {
+    readonly component: {
+      readonly type: string;
+      readonly 'bom-ref': string;
+      readonly name: string;
+      readonly version: string;
+    };
+    readonly properties: readonly { readonly name: string; readonly value: string }[];
+  };
+  readonly components: readonly {
+    readonly type: string;
+    readonly 'bom-ref': string;
+    readonly name: string;
+    readonly version: string;
+    readonly purl: string;
+    readonly hashes: readonly CycloneDxHash[];
+  }[];
+}
+
+export function buildSbom(
+  components: readonly SbomComponent[],
+  { name, version }: { readonly name: string; readonly version: string },
+): SbomDocument {
   return {
     bomFormat: 'CycloneDX',
     specVersion: '1.6',

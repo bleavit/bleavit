@@ -40,7 +40,7 @@
  *    requires descriptors per `spec_version`; a pin without them is a chain the client
  *    can identify and cannot read.
  *
- * Usage: node tools/check-foreign-feed.mjs
+ * Usage: node tools/check-foreign-feed.ts
  */
 import { createHash } from "node:crypto";
 import fs from "node:fs";
@@ -54,11 +54,38 @@ const FEED = path.join(APP, "fixtures", "foreign-chain-feed");
 const FOREIGN_TS = path.join(APP, "packages", "descriptors", "src", "foreign.ts");
 const PAPI_CONFIG = path.join(APP, ".papi", "polkadot-api.json");
 
-const problems = [];
-const warnings = [];
-const fail = (message) => problems.push(message);
+const problems: string[] = [];
+const warnings: string[] = [];
+const fail = (message: string): number => problems.push(message);
 
-const sha256 = (bytes) => "0x" + createHash("sha256").update(bytes).digest("hex");
+const sha256 = (bytes: Uint8Array): string => "0x" + createHash("sha256").update(bytes).digest("hex");
+
+/** One 02 §7.7 surface, as `foreign.ts` declares it. */
+interface ForeignSurface {
+  readonly id: string;
+  readonly kind: string;
+  readonly citation?: string;
+}
+
+/**
+ * PAPI's unified metadata, narrowed to what this gate reads.
+ *
+ * `unknown`-leaved on purpose: the parts below the pallet list differ between metadata
+ * versions, and every read of them here is already guarded — a shape asserted at the top
+ * would move those guards from runtime, where a foreign runtime's real metadata meets
+ * them, to compile time, where only this file's guess does.
+ */
+/**
+ * PAPI's own unified metadata, not a restatement of it.
+ *
+ * A hand-written interface here was the first attempt and it was wrong in the way that
+ * matters: it did not describe the SDK's type, so handing one to the other required an
+ * `as unknown as` — the double assertion this workspace bans outright, and the ban caught
+ * it. Taking the type off `unifyMetadata` instead means the version-straddling reads below
+ * (`calls` is a bare type id in v14/v15 and `{ type, deprecationInfo }` in v16) are checked
+ * against PAPI's declaration rather than against a guess at it.
+ */
+type UnifiedMetadata = ReturnType<typeof unifyMetadata>;
 
 /**
  * The §7.7 surfaces, parsed out of `foreign.ts`.
@@ -67,13 +94,13 @@ const sha256 = (bytes) => "0x" + createHash("sha256").update(bytes).digest("hex"
  * parsed rather than restated because a second copy of the list is a second thing to keep
  * true — and the copy that rots is always the one nothing reads back.
  */
-function foreignSurfaces() {
+function foreignSurfaces(): ForeignSurface[] {
   const source = fs.readFileSync(FOREIGN_TS, "utf8");
   const block = /export const FOREIGN_SURFACE = \[(.*?)\n\] as const/s.exec(source);
-  if (!block) throw new Error("could not find FOREIGN_SURFACE in foreign.ts");
-  const entries = [...block[1].matchAll(/id:\s*'([^']+)'[\s\S]*?kind:\s*'([^']+)'/g)].map(
-    ([, id, kind]) => ({ id, kind }),
-  );
+  if (!block || block[1] === undefined) throw new Error("could not find FOREIGN_SURFACE in foreign.ts");
+  const entries = [...block[1].matchAll(/id:\s*'([^']+)'[\s\S]*?kind:\s*'([^']+)'/g)]
+    .map(([, id, kind]) => ({ id: id ?? "", kind: kind ?? "" }))
+    .filter((entry) => entry.id !== "" && entry.kind !== "");
   if (entries.length === 0) {
     // The fail-closed half. A regex that matched nothing would otherwise report every
     // surface as present, which is precisely the shape this gate exists to refuse.
@@ -83,13 +110,20 @@ function foreignSurfaces() {
 }
 
 /** `assethub.Assets.Account` -> `{ chain: 'assethub', pallet: 'Assets', member: 'Account' }`. */
-function splitSurfaceId(id) {
+function splitSurfaceId(id: string): { chain: string; pallet: string; member: string } {
   const parts = id.split(".");
-  if (parts.length !== 3) throw new Error(`foreign surface id must be chain.Pallet.Member: ${id}`);
-  return { chain: parts[0], pallet: parts[1], member: parts[2] };
+  const [chain, pallet, member] = parts;
+  if (parts.length !== 3 || chain === undefined || pallet === undefined || member === undefined) {
+    throw new Error(`foreign surface id must be chain.Pallet.Member: ${id}`);
+  }
+  return { chain, pallet, member };
 }
 
-function checkSurfacePresence(unified, surfaces, label) {
+function checkSurfacePresence(
+  unified: UnifiedMetadata,
+  surfaces: readonly ForeignSurface[],
+  label: string,
+): void {
   for (const surface of surfaces) {
     const { pallet: palletName, member } = splitSurfaceId(surface.id);
     const pallet = unified.pallets.find((p) => p.name === palletName);
@@ -105,7 +139,7 @@ function checkSurfacePresence(unified, surfaces, label) {
       // both, because a shape assumption here fails as "the pallet declares no calls",
       // which reads like a missing surface and would have been "fixed" by removing the row.
       const callsRef = pallet.calls;
-      const callsType = typeof callsRef === "number" ? callsRef : callsRef?.type;
+      const callsType = typeof callsRef === "number" ? callsRef : (callsRef?.type ?? undefined);
       const lookup = callsType === undefined ? undefined : unified.lookup[callsType];
       const variants = lookup?.def?.tag === "variant" ? lookup.def.value : undefined;
       if (variants === undefined) {
@@ -125,12 +159,27 @@ function checkSurfacePresence(unified, surfaces, label) {
       // silent deprecation is exactly how the call vanishes one release later and the
       // §7.7 row becomes a citation of nothing, so it has to be visible now — this is the
       // only warning this gate emits, and it is deliberately not an error.
-      const deprecations = typeof callsRef === "object" ? (callsRef.deprecationInfo ?? []) : [];
+      // v16 adds `deprecationInfo` beside the type id; v14/v15 carry the bare id, and even
+      // in v16 the field is present only on the arm that has it — so it is read through the
+      // `in` guard rather than optional-chained off a union that does not declare it.
+      const deprecations =
+        callsRef !== null && typeof callsRef === "object" && "deprecationInfo" in callsRef
+          ? callsRef.deprecationInfo
+          : [];
+      //
+      // **Presence is the signal.** The previous version also required the tag not to be
+      // `"NotDeprecated"`, and typing this file against PAPI's own declaration showed that
+      // tag does not exist: `deprecationInfo` carries only `Deprecated` and
+      // `DeprecatedWithoutNote`, so an entry is *only* ever written for a deprecated call
+      // and the extra comparison was always true. It read like a filter and filtered
+      // nothing — which would have mattered the moment somebody trusted it.
       const note = deprecations.find((d) => d.index === variant.index);
-      if (note !== undefined && note.deprecation?.tag !== "NotDeprecated") {
+      if (note !== undefined) {
+        const detail =
+          note.deprecation.tag === "Deprecated" ? note.deprecation.value.note : "(no note)";
         warnings.push(
           `${label}: ${palletName}.${member} is DEPRECATED upstream — ` +
-            `${note.deprecation?.value?.note ?? "(no note)"} ` +
+            `${detail} ` +
             "It still dispatches, so this is not a failure; it is the notice that 02 §7.7's " +
             "row will need re-pinning before it becomes a citation of a call that is gone.",
         );
@@ -142,22 +191,28 @@ function checkSurfacePresence(unified, surfaces, label) {
 }
 
 /** `FOREIGN_CHAIN_PINS`, parsed out of `foreign.ts` for the same reason as above. */
-function declaredPins() {
+interface DeclaredPin {
+  readonly label: string | undefined;
+  readonly genesisHash: string | undefined;
+  readonly supportedSpecVersions: number[];
+}
+
+function declaredPins(): DeclaredPin[] {
   const source = fs.readFileSync(FOREIGN_TS, "utf8");
   const block = /export const FOREIGN_CHAIN_PINS: readonly ForeignChainPin\[\] = \[(.*?)\n\];/s.exec(
     source,
   );
-  if (!block) throw new Error("could not find FOREIGN_CHAIN_PINS in foreign.ts");
+  if (!block || block[1] === undefined) throw new Error("could not find FOREIGN_CHAIN_PINS in foreign.ts");
   return [...block[1].matchAll(/\{([\s\S]*?)\}/g)].map(([, body]) => ({
-    label: /label:\s*'([^']+)'/.exec(body)?.[1],
-    genesisHash: /genesisHash:\s*'([^']+)'/.exec(body)?.[1],
-    supportedSpecVersions: [...(/supportedSpecVersions:\s*\[([^\]]*)\]/.exec(body)?.[1] ?? "")
-      .toString()
-      .matchAll(/\d+/g)].map(([n]) => Number(n)),
+    label: /label:\s*'([^']+)'/.exec(body ?? "")?.[1],
+    genesisHash: /genesisHash:\s*'([^']+)'/.exec(body ?? "")?.[1],
+    supportedSpecVersions: [
+      ...(/supportedSpecVersions:\s*\[([^\]]*)\]/.exec(body ?? "")?.[1] ?? "").matchAll(/\d+/g),
+    ].map(([n]) => Number(n)),
   }));
 }
 
-function main() {
+function main(): number {
   const surfaces = foreignSurfaces();
   const chains = fs.existsSync(FEED)
     ? fs.readdirSync(FEED, { withFileTypes: true }).filter((e) => e.isDirectory())
@@ -203,15 +258,18 @@ function main() {
       if (measured !== info.metadata?.sha256) {
         fail(`${label}: metadata.scale is ${measured}, runtime-info says ${info.metadata?.sha256}`);
       }
-      let unified;
+      let unified: UnifiedMetadata;
       try {
-        const any = decAnyMetadata(raw);
+        // `decAnyMetadata` is typed for the SDK's own metadata union; a foreign runtime's
+        // bytes arrive here as `unknown` from the filesystem, so this is where they enter
+        // the typed world — guarded immediately below by the tag comparison.
+        const any = decAnyMetadata(raw as Parameters<typeof decAnyMetadata>[0]);
         if (any.metadata.tag !== `v${info.metadata?.version}`) {
           fail(`${label}: blob decodes as ${any.metadata.tag}, record says v${info.metadata?.version}`);
         }
-        unified = unifyMetadata(any.metadata.value);
+        unified = unifyMetadata(any.metadata.value as Parameters<typeof unifyMetadata>[0]);
       } catch (error) {
-        fail(`${label}: metadata does not decode — ${error.message}`);
+        fail(`${label}: metadata does not decode — ${error instanceof Error ? error.message : String(error)}`);
         continue;
       }
 

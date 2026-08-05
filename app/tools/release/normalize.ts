@@ -23,7 +23,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 export class DeterminismError extends Error {
-  constructor(message) {
+  constructor(message: string) {
     super(message);
     this.name = 'DeterminismError';
   }
@@ -44,13 +44,32 @@ export class DeterminismError extends Error {
  */
 const BINARY = /\.(png|jpg|jpeg|gif|webp|avif|ico|woff|woff2|ttf|otf|wasm|mp4|webm)$/i;
 
+/** One environment-specific string to look for, and the name it is reported under. */
+export interface EnvironmentProbe {
+  readonly name: string;
+  readonly pattern: string | undefined;
+}
+
+/** A string that leaked into a built file, named so it can be fixed. */
+export interface DeterminismFinding {
+  readonly path: string;
+  readonly probe: string;
+  readonly detail: string;
+}
+
 /**
  * `probes` is injected rather than derived from `process.env` inside the check, so a test
  * can assert the detector fires without having to arrange for a real home directory to
  * appear in a real bundle.
  */
-export function environmentProbes({ appRoot, home = process.env['HOME'] }) {
-  const probes = [
+export function environmentProbes({
+  appRoot,
+  home = process.env['HOME'],
+}: {
+  readonly appRoot: string;
+  readonly home?: string | undefined;
+}): EnvironmentProbe[] {
+  const probes: EnvironmentProbe[] = [
     { name: 'absolute build path', pattern: appRoot },
     { name: 'pnpm virtual store path', pattern: 'node_modules/.pnpm' },
   ];
@@ -58,8 +77,12 @@ export function environmentProbes({ appRoot, home = process.env['HOME'] }) {
   return probes;
 }
 
-export function checkDeterminism(distDir, files, probes) {
-  const findings = [];
+export function checkDeterminism(
+  distDir: string,
+  files: readonly string[],
+  probes: readonly EnvironmentProbe[],
+): DeterminismFinding[] {
+  const findings: DeterminismFinding[] = [];
   for (const path of files) {
     const text = readFileSync(join(distDir, path), BINARY.test(path) ? 'latin1' : 'utf8');
     for (const probe of probes) {

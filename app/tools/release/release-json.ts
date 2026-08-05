@@ -26,20 +26,34 @@ import { join, relative, resolve } from 'node:path';
 
 export const RELEASE_SCHEMA = 'bleavit.app-release.v1';
 
+/** The `runtime-info.json` fields this reader consumes. */
+interface RuntimeInfo {
+  readonly spec_version: number;
+  readonly metadata_sha256: string;
+  readonly integration_contract_version: number;
+}
+
+/** What the feed pins: the paired spec versions and each one's measured metadata hash. */
+export interface ChainFeedPins {
+  readonly specVersionRange: { readonly primary: number; readonly recovery: number };
+  readonly descriptorMetadataHashes: Record<number, string>;
+  readonly contractVersion: number;
+}
+
 export class ReleaseJsonError extends Error {
-  constructor(message) {
+  constructor(message: string) {
     super(message);
     this.name = 'ReleaseJsonError';
   }
 }
 
-export function sha256(bytes) {
+export function sha256(bytes: Uint8Array | string): string {
   return createHash('sha256').update(bytes).digest('hex');
 }
 
 /** Every file in the built tree, as release-relative POSIX paths. Sorted, so the map is a
  * function of the tree and not of directory-read order. */
-export function walkTree(root, base = root, out = []) {
+export function walkTree(root: string, base = root, out: string[] = []): string[] {
   for (const entry of readdirSync(root).sort()) {
     const path = join(root, entry);
     if (statSync(path).isDirectory()) walkTree(path, base, out);
@@ -48,8 +62,11 @@ export function walkTree(root, base = root, out = []) {
   return out;
 }
 
-export function perFileHashes(distDir, { exclude = [] } = {}) {
-  const hashes = {};
+export function perFileHashes(
+  distDir: string,
+  { exclude = [] }: { readonly exclude?: readonly string[] } = {},
+): Record<string, string> {
+  const hashes: Record<string, string> = {};
   for (const path of walkTree(distDir)) {
     if (exclude.includes(path)) continue;
     if (!/^[A-Za-z0-9._/-]+$/.test(path)) {
@@ -73,11 +90,11 @@ export function perFileHashes(distDir, { exclude = [] } = {}) {
  * recipe. A missing input is an error, not a skipped one — a recipe digest computed over
  * four of five files is a digest that agrees with a build it did not describe.
  */
-export function buildRecipeDigest(appRoot, inputs) {
+export function buildRecipeDigest(appRoot: string, inputs: readonly string[]): string {
   const hash = createHash('sha256');
   for (const relativePath of [...inputs].sort()) {
     const path = resolve(appRoot, relativePath);
-    let bytes;
+    let bytes: Buffer;
     try {
       bytes = readFileSync(path);
     } catch {
@@ -97,7 +114,7 @@ export function buildRecipeDigest(appRoot, inputs) {
  * window it cannot serve, and the recovery image is the one that becomes current during
  * exactly the incident it exists for.
  */
-export function readChainFeed(feedDir) {
+export function readChainFeed(feedDir: string): ChainFeedPins {
   const versions = readdirSync(feedDir)
     .filter((entry) => /^[0-9]+$/.test(entry) && statSync(join(feedDir, entry)).isDirectory())
     .map(Number)
@@ -109,14 +126,17 @@ export function readChainFeed(feedDir) {
     );
   }
   const [primary, recovery] = versions;
+  if (primary === undefined || recovery === undefined) {
+    throw new ReleaseJsonError('the chain feed yielded no spec versions');
+  }
   if (recovery !== primary + 1) {
     throw new ReleaseJsonError(`recovery spec_version must be primary + 1; got ${primary}, ${recovery}`);
   }
-  const descriptorMetadataHashes = {};
-  let contractVersion;
+  const descriptorMetadataHashes: Record<number, string> = {};
+  let contractVersion: number | undefined;
   for (const version of versions) {
     const dir = join(feedDir, String(version));
-    const info = JSON.parse(readFileSync(join(dir, 'runtime-info.json'), 'utf8'));
+    const info = JSON.parse(readFileSync(join(dir, 'runtime-info.json'), 'utf8')) as RuntimeInfo;
     if (info.spec_version !== version) {
       throw new ReleaseJsonError(`chain-feed/${version} declares spec_version ${info.spec_version}`);
     }
@@ -141,12 +161,90 @@ export function readChainFeed(feedDir) {
       );
     }
   }
+  if (contractVersion === undefined) {
+    throw new ReleaseJsonError('no runtime in the feed declares an integration contract version');
+  }
   return { specVersionRange: { primary, recovery }, descriptorMetadataHashes, contractVersion };
 }
 
 /** Assemble the document. `arweaveManifestTxId` is null here by construction — 12 §1.2's
  * pass 2 is the only thing that may fill it, and a builder that could pre-fill it would be
  * asserting a content address for bytes it has not uploaded. */
+export interface ReleaseJsonInputs {
+  readonly version: string;
+  readonly sourceCommit: string;
+  readonly buildRecipe: string;
+  /** Path → sha256, over the emitted tree. */
+  readonly files: Record<string, string>;
+  readonly chainFeed: ChainFeedPins;
+  readonly chainIdentity: {
+    // `null` per field, never an absent field and never a placeholder: an unmade pin has to
+    // survive into the document as one, because `readiness.blockers` naming it and the field
+    // itself carrying a plausible-looking value would state two different things about the
+    // same fact — and the one a consumer parses is the field.
+    readonly chainSpecHashes: Readonly<Record<string, string | null>>;
+    readonly genesisHashes: Readonly<Record<string, string | null>>;
+    readonly ss58Prefix: number | null;
+    readonly paraId: number | null;
+    /** Per token, e.g. `{ VIT: 12, USDC: 6 }` — D-17 pins USDC at 6. */
+    readonly decimals: Readonly<Record<string, number>> | null;
+  };
+  readonly assetHub?:
+    | {
+        readonly network: string | null;
+        readonly descriptorMetadataHashes: Readonly<Record<string, string>>;
+      }
+    | undefined;
+  readonly connectSrc: readonly string[];
+  readonly sbomSha256: string;
+  readonly signing: {
+    readonly keyringGeneration: number | null;
+    readonly keyIds: readonly string[];
+  };
+  /** Every pin this tree cannot yet make. `--production` refuses while any remain. */
+  readonly blockers: readonly string[];
+}
+
+/**
+ * `release.json` as it is written.
+ *
+ * Declared rather than left as `object`, because the suite that checks this document is the
+ * one place a field-name slip surfaces — and `object` made every field access an error and
+ * every `as` a temptation. It is **not** a second copy of `packages/verify`'s
+ * `ReleaseIdentity`: the required-field list is still parsed out of that interface at test
+ * time (a hand-written list beside the producer is exactly how `releaseTxid` came to be
+ * demanded by the consumer and never emitted here), and this type only says what the
+ * builder writes.
+ */
+export interface ReleaseDocument {
+  readonly schema: string;
+  readonly version: string;
+  readonly sourceCommit: string;
+  readonly buildRecipeDigest: string;
+  readonly arweaveManifestTxId: string | null;
+  readonly perFileHashes: Record<string, string>;
+  readonly specVersionRange: ChainFeedPins['specVersionRange'];
+  readonly descriptorMetadataHashes: Record<number, string>;
+  readonly assetHub: NonNullable<ReleaseJsonInputs['assetHub']>;
+  readonly integrationContractVersion: number;
+  readonly chainSpecHashes: ReleaseJsonInputs['chainIdentity']['chainSpecHashes'];
+  readonly genesisHashes: ReleaseJsonInputs['chainIdentity']['genesisHashes'];
+  readonly chainIdentity: {
+    readonly ss58Prefix: number | null;
+    readonly paraId: number | null;
+    readonly decimals: ReleaseJsonInputs['chainIdentity']['decimals'];
+  };
+  readonly connectSrc: readonly string[];
+  readonly sbomSha256: string;
+  readonly keyringGeneration: number | null;
+  readonly signingKeyIds: readonly string[];
+  readonly readiness: {
+    readonly productionReady: boolean;
+    readonly blockers: readonly string[];
+    readonly note: string;
+  };
+}
+
 export function buildReleaseJson({
   version,
   sourceCommit,
@@ -159,7 +257,7 @@ export function buildReleaseJson({
   sbomSha256,
   signing,
   blockers,
-}) {
+}: ReleaseJsonInputs): ReleaseDocument {
   return {
     schema: RELEASE_SCHEMA,
     version,
@@ -220,13 +318,13 @@ export function buildReleaseJson({
  * rather than with the interface. So the field names are parsed out of `identity.ts` — the
  * declaration INV-FE-11's list is transcribed into — and a shape change there fails here.
  */
-export function requiredIdentityFields(identitySource) {
+export function requiredIdentityFields(identitySource: string): string[] {
   const start = identitySource.indexOf('export interface ReleaseIdentity {');
   if (start === -1) throw new ReleaseJsonError('packages/verify no longer declares ReleaseIdentity');
   const body = identitySource.slice(start, identitySource.indexOf('\n}', start));
   const fields = [...body.matchAll(/^\s*readonly ([A-Za-z0-9_]+)(\?)?:/gm)]
     .filter((match) => match[2] === undefined)
-    .map((match) => match[1]);
+    .map((match) => match[1] ?? '');
   if (fields.length === 0) {
     throw new ReleaseJsonError('parsed no required fields out of ReleaseIdentity; the shape moved');
   }

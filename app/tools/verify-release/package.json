@@ -1,0 +1,10 @@
+{
+  "_doc": "The `verify-release` CLI (12 §1.3, F13) as its own workspace package, so its one dependency on @bleavit/verify is declared where it is used. The root package.json would have been simpler and wrong: pnpm's isolated node_modules is what makes an undeclared import unresolvable (see pnpm-workspace.yaml), and a root entry is reachable from every package by the parent-directory walk — which would quietly make @bleavit/verify importable from packages that never declared it.",
+  "name": "@bleavit/verify-release",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@bleavit/verify": "workspace:*"
+  }
+}

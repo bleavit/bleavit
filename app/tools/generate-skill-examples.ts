@@ -49,15 +49,29 @@ import { readFileSync, writeFileSync, mkdirSync, readdirSync, rmSync } from 'nod
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === 'object' && value !== null;
+}
+
 const HERE = dirname(fileURLToPath(import.meta.url));
 const APP = dirname(HERE);
 const OUT_DIR = join(APP, 'skills/bleavit-analysis/examples');
 
-async function loadPackage(name) {
+/**
+ * Load a built workspace package by path.
+ *
+ * Deliberately not a static `import`: this generator runs against `dist/`, and the useful
+ * failure when it has not been built is the sentence below rather than a module-resolution
+ * stack. The return is `any` because the shape is whatever that package exports — which is
+ * exactly what the corpus is for, since every example below is then executed against the
+ * real parser rather than against a description of it.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function loadPackage(name: string): Promise<any> {
   try {
     return await import(`../packages/${name}/dist/index.js`);
   } catch (error) {
-    if (error?.code === 'ERR_MODULE_NOT_FOUND') {
+    if (isRecord(error) && error['code'] === 'ERR_MODULE_NOT_FOUND') {
       console.error(`cannot load @bleavit/${name} from packages/${name}/dist — run \`pnpm run build\` first.`);
       process.exit(1);
     }
@@ -81,7 +95,7 @@ const LIVE = {
   contractVersion: 27,
 };
 const CURRENT_BLOCK = 1_000_000;
-const sha256 = (bytes) => createHash('sha256').update(bytes).digest('hex');
+const sha256 = (bytes: Uint8Array): string => createHash('sha256').update(bytes).digest('hex');
 const CONTEXT = { live: LIVE, currentBlock: CURRENT_BLOCK, digest: sha256 };
 
 /** The codes an inbound document can cause. The rest are covered where they live. */
@@ -97,8 +111,26 @@ const INBOUND_CODES = [
   'FE-HANDOFF-010',
 ];
 
-const core = (d) => ({ schema: d.schema, binding: d.binding, action: d.action, limits: d.limits });
-const sign = (d) => ({ ...d, digest: sha256(digestPreimage(INTENT_DOMAIN_TAG, core(d))) });
+/**
+ * An intent document as this corpus builds one.
+ *
+ * `unknown`-valued rather than typed against the parser's own interfaces, and that is the
+ * point: half these examples are documents the parser must **refuse**, so a type that only
+ * admitted valid ones would make the negative corpus unwritable — and a corpus that can
+ * only express what already passes proves nothing about the refusals.
+ */
+type ExampleDocument = Record<string, unknown>;
+
+const core = (d: ExampleDocument): ExampleDocument => ({
+  schema: d['schema'],
+  binding: d['binding'],
+  action: d['action'],
+  limits: d['limits'],
+});
+const sign = (d: ExampleDocument): ExampleDocument => ({
+  ...d,
+  digest: sha256(digestPreimage(INTENT_DOMAIN_TAG, core(d))),
+});
 
 const prepare = (over = {}) => ({
   schema: INTENT_SCHEMA,
@@ -224,17 +256,30 @@ const CORPUS = [
     note: 'The collateral was changed after the digest was computed. This is what a truncated or edited file looks like, and the digest is the only thing that sees it.',
     document: (() => {
       const signed = sign(prepare());
-      return { ...signed, action: { ...signed.action, collateral: '999000000' } };
+      // Narrowed before spreading: `action` is `unknown` in an `ExampleDocument`, and the
+      // whole point of this example is that the field is mutated *after* the digest was
+      // computed — so the mutation has to be over the real object rather than over a
+      // guess at it.
+      const action = signed['action'];
+      if (!isRecord(action)) throw new Error('the prepared example carries no action object');
+      return { ...signed, action: { ...action, collateral: '999000000' } };
     })(),
   },
 ];
 
 /* ------------------------------------------------------------------------ emit/check */
 
-const fileName = (entry) => `${entry.label}--${entry.slug}.json`;
-const render = (entry) => `${JSON.stringify(entry.document, null, 2)}\n`;
+/** One published example: the verdict it must produce, carried in its own filename. */
+interface Example {
+  readonly label: string;
+  readonly slug: string;
+  readonly document: ExampleDocument;
+}
 
-const expectedOutcome = (label) =>
+const fileName = (entry: Example): string => `${entry.label}--${entry.slug}.json`;
+const render = (entry: Example): string => `${JSON.stringify(entry.document, null, 2)}\n`;
+
+const expectedOutcome = (label: string): { ok: boolean; code?: string } =>
   label === 'admitted' ? { ok: true } : { ok: false, code: label.replace(/^refused-/, '') };
 
 const write = process.argv.includes('--write');

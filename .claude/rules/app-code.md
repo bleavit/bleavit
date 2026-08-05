@@ -24,14 +24,14 @@ Practical consequences:
    `chain-client/src/provenance.ts`, and `as unknown as` is banned across `app/`.
    **The brand does not stop assertions** — `x as Finalized<T>` is a narrowing
    assertion TypeScript permits, proven empirically by the corpus — so
-   `app/tools/check-finalized-casts.mjs` is the other half of the control, not a
+   `app/tools/check-finalized-casts.ts` is the other half of the control, not a
    belt-and-braces extra. Never put the brand in
    `shared-types`: if the universal sink package can construct it, 10 §2.1 is void
    silently, with green CI. UI components reject unlabeled values by type.
 
    **A third control covers the render edge**: `<Panel title={`Referendum ${id.value}`}>`
    typechecks perfectly and puts a chain read on screen with no badge, because the payload
-   of a `Verified<string>` is a `string`. `app/tools/check-render-provenance.mjs`
+   of a `Verified<string>` is a `string`. `app/tools/check-render-provenance.ts`
    (+ `:witness`) is type-aware for a reason — a syntactic version fires on `key={...}`,
    on `event.currentTarget.value` and on the verification panel's release-constant rows,
    and a gate that fires on correct code gets switched off. Its **rule B** is the one that
@@ -172,7 +172,7 @@ Practical consequences:
     uninstalled external package *and* a workspace subpath export like
     `@bleavit/signing/testing`, whose `exports` map enhanced-resolve does not follow. A rule
     written against only the resolved path can never fire. Use `EXTERNAL()` /
-    `WORKSPACE_SUBPATH()` from `app/tools/depcruise-external.cjs`, and add a witness module —
+    `WORKSPACE_SUBPATH()` from `app/tools/depcruise-external.ts`, and add a witness module —
     a rule proven only by a green run is not proven.
 
     **The same applies to the negative-compilation corpus** (V-91): a fixture must declare the

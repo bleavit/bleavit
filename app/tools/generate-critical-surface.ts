@@ -14,7 +14,7 @@
  * (ss58, decimals, symbol), verified by the genesis/spec pin at boot, not a runtime
  * surface a compat probe can ask about.
  *
- *   node tools/generate-critical-surface.mjs [--check]
+ *   node tools/generate-critical-surface.ts [--check]
  */
 
 import { readdirSync, readFileSync, writeFileSync } from 'node:fs';
@@ -39,7 +39,31 @@ const GROUP = {
   properties: null,
 };
 
-function memberOf(entry) {
+/**
+ * One `surface-manifest.json` row, in whichever of the four shapes its `kind` implies.
+ *
+ * A discriminated union rather than an optional bag: the manifest is the producer of
+ * `CRITICAL_SURFACE`, and a row whose kind and fields disagree would generate a probe
+ * against a member nobody declared.
+ */
+type ManifestEntry = { readonly id: string; readonly citation: string; readonly required?: boolean } & (
+  | { readonly kind: 'runtime_api'; readonly api: string; readonly method: string }
+  | { readonly kind: 'storage'; readonly pallet: string; readonly item: string }
+  | { readonly kind: 'constant'; readonly pallet: string; readonly constant: string }
+  | { readonly kind: 'event'; readonly pallet: string; readonly event: string }
+  | { readonly kind: 'raw_storage' | 'properties' }
+);
+
+interface SurfaceRow {
+  readonly id: string;
+  readonly compatGroup: string;
+  readonly pallet: string;
+  readonly member: string;
+  readonly required: boolean;
+  readonly citation: string;
+}
+
+function memberOf(entry: ManifestEntry): { group: string; name: string } | null {
   switch (entry.kind) {
     case 'runtime_api':
       return { group: entry.api, name: entry.method };
@@ -54,8 +78,10 @@ function memberOf(entry) {
   }
 }
 
-const manifest = JSON.parse(readFileSync(MANIFEST, 'utf8'));
-const rows = [];
+const manifest: { entries: ManifestEntry[]; integration_contract_version: number } = JSON.parse(
+  readFileSync(MANIFEST, 'utf8'),
+);
+const rows: SurfaceRow[] = [];
 let unprobed = 0;
 
 for (const entry of manifest.entries) {
@@ -68,6 +94,11 @@ for (const entry of manifest.entries) {
     continue;
   }
   const member = memberOf(entry);
+  if (member === null) {
+    // A kind that maps to a compatibility group must also name a member — otherwise the
+    // generated row would carry an empty pallet and probe nothing, which reads as `full`.
+    throw new Error(`surface-manifest.json entry ${entry.id} is probed but names no member`);
+  }
   rows.push({
     id: entry.id,
     compatGroup: group,

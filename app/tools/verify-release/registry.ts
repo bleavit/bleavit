@@ -35,21 +35,55 @@
  */
 
 export class RegistryError extends Error {
-  constructor(message) {
+  constructor(message: string) {
     super(message);
     this.name = 'RegistryError';
   }
 }
 
 /** The populations §2.2 keeps apart, and the one it does not. */
-export const POPULATIONS = Object.freeze(['release-signer', 'arns-controller', 'monitor-operator', 'attestor']);
+export const POPULATIONS = Object.freeze([
+  'release-signer',
+  'arns-controller',
+  'monitor-operator',
+  'attestor',
+] as const);
+
+export type Population = (typeof POPULATIONS)[number];
+
+/** One declared identity: a key id or ANT address, its population, and its operator. */
+export interface RegistryEntry {
+  readonly id: string;
+  readonly population: Population;
+  /** §2.2 point 1's stable operator identifier — a named person, or a role held by one. */
+  readonly operator: string;
+}
+
+export interface DisjointPair {
+  readonly a: Population;
+  readonly b: Population;
+  readonly reason: string;
+}
+
+export interface DisjointnessViolation {
+  readonly operator: string;
+  readonly populations: readonly [Population, Population];
+  readonly reason: string;
+  readonly detail: string;
+}
+
+/** A pair that passes for want of members. A different claim, and not one a release rests on. */
+export interface UnpopulatedPair {
+  readonly pair: DisjointPair;
+  readonly detail: string;
+}
 
 /**
  * Pairs that MUST be disjoint, with the reason each exists. Data rather than branches,
  * because the reason is what a reviewer needs when the check fires — "these two roles
  * overlap" is not actionable, "one quorum could then ship and self-verify" is.
  */
-export const DISJOINT_PAIRS = Object.freeze([
+export const DISJOINT_PAIRS: readonly DisjointPair[] = Object.freeze([
   Object.freeze({
     a: 'release-signer',
     b: 'arns-controller',
@@ -75,39 +109,51 @@ export const DISJOINT_PAIRS = Object.freeze([
  * belongs to, and the **stable operator identifier** §2.2 point 1 requires (a named person,
  * or a named organizational role held by a named person).
  */
-export function parseRegistry(document) {
-  const entries = document?.entries;
+export function parseRegistry(document: unknown): RegistryEntry[] {
+  const entries = isRecord(document) ? document['entries'] : undefined;
   if (!Array.isArray(entries) || entries.length === 0) {
     throw new RegistryError('the signer registry lists no entries; the disjointness check would compare nothing');
   }
-  const seen = new Set();
-  const parsed = [];
-  for (const [index, entry] of entries.entries()) {
+  const seen = new Set<string>();
+  const parsed: RegistryEntry[] = [];
+  for (const [index, raw] of entries.entries()) {
     const where = `entries[${index}]`;
-    if (typeof entry?.id !== 'string' || entry.id.length === 0) {
+    const entry = isRecord(raw) ? raw : {};
+    const id = entry['id'];
+    const population = entry['population'];
+    const operator = entry['operator'];
+    if (typeof id !== 'string' || id.length === 0) {
       throw new RegistryError(`${where} has no id`);
     }
-    if (!POPULATIONS.includes(entry.population)) {
-      throw new RegistryError(`${where} (${entry.id}) declares population ${entry.population}`);
+    if (!isPopulation(population)) {
+      throw new RegistryError(`${where} (${id}) declares population ${String(population)}`);
     }
-    if (typeof entry.operator !== 'string' || entry.operator.trim().length === 0) {
+    if (typeof operator !== 'string' || operator.trim().length === 0) {
       // Refused rather than skipped: an unmapped key is not a key outside the check, it is a
       // key the check cannot see — and §2.2's whole mechanism is the mapping.
       throw new RegistryError(
-        `${where} (${entry.id}) names no operator. 12 §2.2 evaluates disjointness over ` +
+        `${where} (${id}) names no operator. 12 §2.2 evaluates disjointness over ` +
           'natural persons; a key with no operator is invisible to the check rather than exempt from it.',
       );
     }
-    const key = `${entry.population}:${entry.id}`;
-    if (seen.has(key)) throw new RegistryError(`${entry.id} is listed twice in ${entry.population}`);
+    const key = `${population}:${id}`;
+    if (seen.has(key)) throw new RegistryError(`${id} is listed twice in ${population}`);
     seen.add(key);
-    parsed.push({ id: entry.id, population: entry.population, operator: entry.operator.trim() });
+    parsed.push({ id, population, operator: operator.trim() });
   }
   return parsed;
 }
 
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isPopulation(value: unknown): value is Population {
+  return typeof value === 'string' && (POPULATIONS as readonly string[]).includes(value);
+}
+
 /** Operators holding at least one identity in a population. */
-export function operatorsIn(entries, population) {
+export function operatorsIn(entries: readonly RegistryEntry[], population: Population): Set<string> {
   return new Set(entries.filter((entry) => entry.population === population).map((entry) => entry.operator));
 }
 
@@ -120,9 +166,12 @@ export function operatorsIn(entries, population) {
  * claim as passing because two populations do not overlap. The first is a launch blocker
  * (12 §4.2 prohibits single-key ANT custody outright), the second is the control working.
  */
-export function checkDisjointness(entries) {
-  const violations = [];
-  const empty = [];
+export function checkDisjointness(entries: readonly RegistryEntry[]): {
+  violations: DisjointnessViolation[];
+  empty: UnpopulatedPair[];
+} {
+  const violations: DisjointnessViolation[] = [];
+  const empty: UnpopulatedPair[] = [];
   for (const pair of DISJOINT_PAIRS) {
     const a = operatorsIn(entries, pair.a);
     const b = operatorsIn(entries, pair.b);
@@ -156,7 +205,11 @@ export function checkDisjointness(entries) {
  * bootstrap", and launch blocks if neither native n-of-m nor the FROST ceremony materialises.
  * Checked here because a registry is the only place it can be seen before a ceremony.
  */
-export function checkControllerQuorum(entries, threshold = 3, seats = 5) {
+export function checkControllerQuorum(
+  entries: readonly RegistryEntry[],
+  threshold = 3,
+  seats = 5,
+): string[] {
   const controllers = operatorsIn(entries, 'arns-controller');
   if (controllers.size === 0) return [`no ArNS controller is declared (12 §4.2 — launch blocks on this line)`];
   if (controllers.size < seats) {

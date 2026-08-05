@@ -1,5 +1,5 @@
 /**
- * The positive control for `tools/check-handoff-network.mjs`. NOT part of the build.
+ * The positive control for `tools/check-handoff-network.ts`. NOT part of the build.
  *
  * Every primitive D-21 forbids on a handoff path appears here at least once, in the form
  * the scanner is supposed to catch, including the *evasions* an earlier version missed:

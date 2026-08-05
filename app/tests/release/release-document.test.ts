@@ -20,13 +20,14 @@ import assert from 'node:assert/strict';
 
 import { mayOperate, parseReleaseDocument, runSelfCheck, verifyChainIdentity } from '@bleavit/verify';
 
-import { pipeline } from '../../tools/release/build.mjs';
+import type { ReleaseDocument } from '../../tools/release/release-json.ts';
+import { pipeline } from '../../tools/release/build.ts';
 
 const built = pipeline();
 
 /** The emitted document, promoted to what a published release would carry. Derived from the
  * real one rather than hand-written, so a field the producer renames breaks this too. */
-function asPublished(release) {
+function asPublished(release: ReleaseDocument): Record<string, unknown> {
   return {
     ...release,
     // Only the asset-tree manifest. There is deliberately no `releaseTxid`: a fixture
@@ -80,11 +81,12 @@ test('an unpublished document is refused — a build output is not a release', (
 });
 
 test('a present-but-malformed pin is refused exactly like an absent one', () => {
-  for (const [field, value] of [
+  const malformed: readonly (readonly [string, unknown])[] = [
     ['chainSpecHashes', { relay: '', para: `0x${'b'.repeat(64)}` }],
     ['genesisHashes', { relay: `0x${'c'.repeat(64)}`, para: '0xdeadbeef' }],
     ['sourceCommit', 'HEAD'],
-  ]) {
+  ];
+  for (const [field, value] of malformed) {
     const verdict = parseReleaseDocument({ ...asPublished(built.release), [field]: value });
     assert.equal(verdict.kind, 'refused', `${field} was accepted`);
   }
@@ -119,9 +121,14 @@ test('a supported runtime with no descriptor hash is refused', () => {
 test('a prototype-backed record is read by own keys only', () => {
   // The document arrives from a gateway. A plain lookup consults the prototype chain while
   // enumeration does not, so the pair that is validated would not be the pair that is used.
-  const hostile = Object.create({ schema: 'bleavit.app-release.v1' });
-  assert.equal(parseReleaseDocument(hostile).kind, 'refused');
-  assert.equal(parseReleaseDocument(hostile).reason, 'not-a-release-record');
+  const hostile: unknown = Object.create({ schema: 'bleavit.app-release.v1' });
+  const verdict = parseReleaseDocument(hostile);
+  assert.equal(verdict.kind, 'refused');
+  // Narrowed rather than read off the union: `reason` exists only on the refusal arm, so
+  // asserting it without the check above would be reading a field the accepting arm does
+  // not have — which is how a test can go on "passing" against `undefined`.
+  assert.ok(verdict.kind === 'refused');
+  assert.equal(verdict.reason, 'not-a-release-record');
 });
 
 test('a non-object, a string and null are all refused rather than throwing', () => {

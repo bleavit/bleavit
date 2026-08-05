@@ -29,9 +29,9 @@ import {
   assertNoTestOnlySigner,
   pipeline,
   readBakedAssetMap,
-} from '../../tools/release/build.mjs';
-import { requiredIdentityFields } from '../../tools/release/release-json.mjs';
-import { verifySri } from '../../tools/release/sri.mjs';
+} from '../../tools/release/build.ts';
+import { requiredIdentityFields } from '../../tools/release/release-json.ts';
+import { verifySri } from '../../tools/release/sri.ts';
 
 const APP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const DIST = join(APP_ROOT, 'dist');
@@ -99,6 +99,7 @@ test('the emitted policy has exactly one connect-src, and it is the derived allo
   const meta = /http-equiv="Content-Security-Policy"\s*\n?\s*content="([^"]*)"/.exec(indexHtml);
   assert.ok(meta, 'index.html carries a meta CSP');
   const policy = meta[1];
+  assert.ok(policy !== undefined, 'the meta CSP declares no content');
   assert.equal((policy.match(/connect-src/g) ?? []).length, 1);
   assert.ok(policy.includes(`connect-src ${built.connectSrc}`));
   assert.ok(policy.includes("script-src 'self' 'wasm-unsafe-eval'"), '12 §5.1 keeps this exact');
@@ -116,7 +117,7 @@ test('every script in the entry document carries an SRI digest of the file that 
   // Presence is the weaker half. A digest that is present and *wrong* makes the browser
   // refuse to execute and the page go blank — fail-closed and completely opaque — so every
   // declared digest is re-derived from the bytes actually emitted.
-  const resolve = (href) => readFileSync(join(DIST, href.replace(/^\.?\//, '')));
+  const resolve = (href: string): Uint8Array => readFileSync(join(DIST, href.replace(/^\.?\//, '')));
   assert.deepEqual(verifySri(indexHtml, resolve), []);
 });
 
@@ -172,7 +173,12 @@ test('the release document is the shape packages/verify consumes', () => {
   assert.equal(typeof built.release.specVersionRange.primary, 'number');
   assert.equal(built.release.specVersionRange.recovery, built.release.specVersionRange.primary + 1);
   for (const version of Object.values(built.release.specVersionRange)) {
-    assert.match(built.release.descriptorMetadataHashes[version], /^[0-9a-f]{64}$/);
+    const hash = built.release.descriptorMetadataHashes[version];
+    // Asserted present before it is matched: `assert.match(undefined, …)` throws a type
+    // error rather than the finding, and the finding here — a live-capable spec version
+    // with no pinned descriptor hash — is the whole point of the 10 §5.1 pair.
+    assert.ok(hash !== undefined, `spec_version ${version} has no pinned descriptor hash`);
+    assert.match(hash, /^[0-9a-f]{64}$/);
   }
 });
 
@@ -214,6 +220,6 @@ test('the test-only signer gate can fail — checked against a tree that contain
   assert.throws(() => assertNoTestOnlySigner(fixture, ['assets/leaked.js']), /test-only signer/);
 });
 
-function sha256Of(path) {
+function sha256Of(path: string): string {
   return createHash('sha256').update(readFileSync(path)).digest('hex');
 }

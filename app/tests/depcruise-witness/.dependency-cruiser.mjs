@@ -4,11 +4,11 @@
 // simplified copy, and that copy fired while the production config was silently
 // cruising a graph with no edges in it. A witness that does not share the thing it
 // witnesses is decoration.
-const production = require('../../.dependency-cruiser.cjs');
-const { EXTERNAL, WORKSPACE_SUBPATH, POLKADOT_API_NON_SIGNER } = require('../../tools/depcruise-external.cjs');
-const { NON_LOCAL_DEPENDENCY_TYPES } = require('../../tools/handoff-packages.cjs');
+const { default: production } = await import('../../.dependency-cruiser.mjs');
+const { EXTERNAL, WORKSPACE_SUBPATH, POLKADOT_API_NON_SIGNER } = await import('../../tools/depcruise-external.ts');
+const { NON_LOCAL_DEPENDENCY_TYPES } = await import('../../tools/handoff-packages.ts');
 
-module.exports = {
+export default {
   forbidden: [
     {
       name: 'witness-wallet-never-imports-acceleration',

@@ -27,13 +27,15 @@ import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import type { OriginBearing } from './connect-src.ts';
 import {
   collectAllowlist,
   diffAgainstIncumbent,
   readDeclaredSources,
   renderConnectSrc,
-} from './connect-src.mjs';
-import { checkDeterminism, environmentProbes } from './normalize.mjs';
+} from './connect-src.ts';
+import { checkDeterminism, environmentProbes } from './normalize.ts';
+import type { ReleaseJsonInputs } from './release-json.ts';
 import {
   buildRecipeDigest,
   buildReleaseJson,
@@ -41,9 +43,9 @@ import {
   readChainFeed,
   sha256,
   walkTree,
-} from './release-json.mjs';
-import { buildSbom, parseLockfile } from './sbom.mjs';
-import { injectSri, verifySri } from './sri.mjs';
+} from './release-json.ts';
+import { buildSbom, parseLockfile } from './sbom.ts';
+import { injectSri, verifySri } from './sri.ts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const APP_ROOT = resolve(HERE, '../..');
@@ -65,7 +67,7 @@ const RECIPE_INPUTS = [
   'pnpm-workspace.yaml',
   'tsconfig.base.json',
   'vite.config.ts',
-  'tools/release/build.mjs',
+  'tools/release/build.ts',
 ];
 
 /**
@@ -74,10 +76,26 @@ const RECIPE_INPUTS = [
  */
 const PRODUCER_ASSETS = ['schemas', 'skills'];
 
-/** The one file in the tree that is not hash-pinned by the worker (see `sw.ts`). */
-const SIGNED_METADATA = ['release.json'];
+/**
+ * A parsed JSON object. Every field is a claim until a reader below checks it.
+ *
+ * The readers here already treated the sources file as untrusted — `?? {}` and `?? null`
+ * everywhere — because it is a hand-maintained document whose fields become release pins.
+ * These two helpers are that same posture with a type on it: a non-object where an object
+ * was declared collapses to `{}`, so each field then reads `undefined` and lands in
+ * `blockers` rather than being handed to `JSON.stringify` as whatever it was.
+ */
+type JsonRecord = Readonly<Record<string, unknown>>;
 
-function run(command, args) {
+function isRecord(value: unknown): value is JsonRecord {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function record(value: unknown): JsonRecord {
+  return isRecord(value) ? value : {};
+}
+
+function run(command: string, args: readonly string[]): void {
   execFileSync(command, args, { cwd: APP_ROOT, stdio: 'inherit' });
 }
 
@@ -111,13 +129,13 @@ function buildTree() {
  * published. A static directory copied in after the map is written would be a same-origin
  * path the worker refuses — fail-closed, at the user, for no reason.
  */
-function copyProducerAssets() {
+function copyProducerAssets(): void {
   for (const name of PRODUCER_ASSETS) {
     cpSync(join(APP_ROOT, name), join(DIST, name), { recursive: true });
   }
 }
 
-function substitute(path, placeholder, replacement, what) {
+function substitute(path: string, placeholder: string, replacement: string, what: string): string {
   const before = readFileSync(path, 'utf8');
   if (!before.includes(placeholder)) {
     throw new Error(
@@ -136,43 +154,73 @@ function substitute(path, placeholder, replacement, what) {
 /** A 32-byte hash as every pinned identity field carries it. */
 const HASH32 = /^0x[0-9a-f]{64}$/;
 
-function readChainIdentity(sources) {
-  const declared = sources.chainIdentity ?? {};
-  const blockers = [];
-  const pin = (value, name, shape) => {
-    if (value === null || value === undefined) {
-      blockers.push(`chain identity: ${name} is unknown (INV-FE-11 requires the bundle to pin it)`);
-      return null;
-    }
-    // **Shape-checked, not merely present.** A pin is what `verifyChainIdentity` compares a
-    // live chain against, so an empty string or a truncated hash is not a partial pin — it
-    // is a comparison that can never match, shipped in a release the readiness block called
-    // ready. Rejecting it here keeps `productionReady` from meaning "somebody typed
-    // something".
-    if (shape && !shape.test(String(value))) {
-      blockers.push(`chain identity: ${name} is present but malformed (${JSON.stringify(value)})`);
-      return null;
-    }
+function readChainIdentity(sources: unknown): {
+  identity: ReleaseJsonInputs['chainIdentity'];
+  blockers: string[];
+} {
+  const declared = record(record(sources)['chainIdentity']);
+  const blockers: string[] = [];
+  // **Shape-checked, not merely present.** A pin is what `verifyChainIdentity` compares a
+  // live chain against, so an empty string or a truncated hash is not a partial pin — it is
+  // a comparison that can never match, shipped in a release the readiness block called
+  // ready. Rejecting it here keeps `productionReady` from meaning "somebody typed
+  // something".
+  //
+  // Split into a hash pin and an integer pin because the shape is the check, and typing it
+  // exposed a hole in the single untyped one: `paraId` was pinned with no shape argument
+  // and no later validation, so a string `"4242"` in the sources file would have shipped as
+  // the para-id pin. `ss58Prefix` escaped only because a `Number.isInteger` check sat
+  // further down; that check is now the pin itself, for both.
+  const missing = (name: string): null => {
+    blockers.push(`chain identity: ${name} is unknown (INV-FE-11 requires the bundle to pin it)`);
+    return null;
+  };
+  const malformed = (name: string, value: unknown): null => {
+    blockers.push(`chain identity: ${name} is present but malformed (${JSON.stringify(value)})`);
+    return null;
+  };
+  const pinHash = (value: unknown, name: string): string | null => {
+    if (value === null || value === undefined) return missing(name);
+    if (typeof value !== 'string' || !HASH32.test(value)) return malformed(name, value);
     return value;
   };
+  const pinInteger = (value: unknown, name: string): number | null => {
+    if (value === null || value === undefined) return missing(name);
+    if (typeof value !== 'number' || !Number.isInteger(value)) return malformed(name, value);
+    return value;
+  };
+
+  const specHashes = record(declared['chainSpecHashes']);
+  const genesisHashes = record(declared['genesisHashes']);
+  const decimals = declared['decimals'];
   const identity = {
     chainSpecHashes: {
-      relay: pin(declared.chainSpecHashes?.relay, 'relay chain-spec hash', HASH32),
-      para: pin(declared.chainSpecHashes?.para, 'parachain chain-spec hash', HASH32),
+      relay: pinHash(specHashes['relay'], 'relay chain-spec hash'),
+      para: pinHash(specHashes['para'], 'parachain chain-spec hash'),
     },
     genesisHashes: {
-      relay: pin(declared.genesisHashes?.relay, 'relay genesis hash', HASH32),
-      para: pin(declared.genesisHashes?.para, 'parachain genesis hash', HASH32),
+      relay: pinHash(genesisHashes['relay'], 'relay genesis hash'),
+      para: pinHash(genesisHashes['para'], 'parachain genesis hash'),
     },
-    ss58Prefix: pin(declared.ss58Prefix, 'ss58 prefix'),
-    paraId: pin(declared.paraId, 'para id'),
-    decimals: declared.decimals ?? null,
+    ss58Prefix: pinInteger(declared['ss58Prefix'], 'ss58 prefix'),
+    paraId: pinInteger(declared['paraId'], 'para id'),
+    decimals: isRecord(decimals) ? tokenDecimals(decimals, blockers) : null,
   };
-  if (!Number.isInteger(identity.ss58Prefix)) {
-    blockers.push('chain identity: ss58 prefix is not an integer');
-  }
   if (identity.decimals === null) blockers.push('chain identity: token decimals are undeclared');
   return { identity, blockers };
+}
+
+/** `{ VIT: 12, USDC: 6 }` — per-token, and a non-integer entry is a blocker, not a pin. */
+function tokenDecimals(declared: JsonRecord, blockers: string[]): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const [token, value] of Object.entries(declared)) {
+    if (typeof value === 'number' && Number.isInteger(value) && value >= 0) {
+      out[token] = value;
+      continue;
+    }
+    blockers.push(`chain identity: ${token} decimals are malformed (${JSON.stringify(value)})`);
+  }
+  return out;
 }
 
 /**
@@ -185,25 +233,50 @@ function readChainIdentity(sources) {
  * Polkadot), so it is a named readiness blocker rather than a silently absent field — the
  * shape a reader would otherwise mistake for "there is nothing to pin here".
  */
-function readAssetHub(sources) {
-  const declared = sources.assetHub ?? {};
-  const hashes = declared.descriptorMetadataHashes ?? null;
-  if (hashes === null || Object.keys(hashes).length === 0) {
+function readAssetHub(sources: unknown): {
+  assetHub: NonNullable<ReleaseJsonInputs['assetHub']>;
+  blockers: string[];
+} {
+  const declared = record(record(sources)['assetHub']);
+  const network = declared['network'];
+  const networkPin = typeof network === 'string' ? network : null;
+  const hashes = hexHashes(declared['descriptorMetadataHashes']);
+  if (Object.keys(hashes).length === 0) {
     return {
-      assetHub: { network: declared.network ?? null, descriptorMetadataHashes: {} },
+      assetHub: { network: networkPin, descriptorMetadataHashes: {} },
       blockers: [
         'Asset Hub descriptor set is unpinned (12 §1.1/§1.6, D-12) — F4, blocked on SQ-587 ' +
           '(which network a release targets)',
       ],
     };
   }
-  return { assetHub: { network: declared.network ?? null, descriptorMetadataHashes: hashes }, blockers: [] };
+  return { assetHub: { network: networkPin, descriptorMetadataHashes: hashes }, blockers: [] };
 }
 
-function readSigning(sources) {
-  const declared = sources.signing ?? {};
-  const keyIds = Array.isArray(declared.keyIds) ? declared.keyIds.map(String) : [];
-  const blockers = [];
+/**
+ * A declared `name → sha256` map, keeping only the entries that are one.
+ *
+ * Dropping a malformed entry rather than the whole map is deliberate here and is the
+ * opposite of the choice `connect-src.ts` makes for bootnodes: a descriptor hash that is
+ * not a hash pins nothing, and an emptied map is already a named readiness blocker, so the
+ * fail-closed outcome arrives either way.
+ */
+function hexHashes(value: unknown): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [name, hash] of Object.entries(record(value))) {
+    if (typeof hash === 'string' && /^[0-9a-f]{64}$/.test(hash)) out[name] = hash;
+  }
+  return out;
+}
+
+function readSigning(sources: unknown): {
+  signing: ReleaseJsonInputs['signing'];
+  blockers: string[];
+} {
+  const declared = record(record(sources)['signing']);
+  const rawKeyIds = declared['keyIds'];
+  const keyIds = Array.isArray(rawKeyIds) ? rawKeyIds.map((id: unknown) => String(id)) : [];
+  const blockers: string[] = [];
   // 12 §1.4's release-signature floor: ≥ 2 valid signatures from **distinct active keys**.
   // Counted on the *distinct* set, because the word doing the work in that clause is
   // "distinct": `["K", "K"]` is two entries and one key, and one key is exactly the
@@ -221,17 +294,48 @@ function readSigning(sources) {
   // §2.1 makes the generation a `u32` carried in both `release.json` and `ReleaseChannel`;
   // an absent one leaves an old bundle unable to say which keyring it verified against, and
   // §2.3's revocation bitmask is indexed within a generation.
-  const keyringGeneration = declared.keyringGeneration ?? null;
-  if (!Number.isInteger(keyringGeneration) || keyringGeneration < 0) {
+  //
+  // A generation that fails the check becomes `null` rather than being carried through: a
+  // document whose readiness block says "no keyring generation declared" while the field
+  // itself reads `-1` states two different things about the same fact, and the one a
+  // consumer parses is the field.
+  const rawGeneration = declared['keyringGeneration'];
+  const keyringGeneration =
+    typeof rawGeneration === 'number' && Number.isInteger(rawGeneration) && rawGeneration >= 0
+      ? rawGeneration
+      : null;
+  if (keyringGeneration === null) {
     blockers.push('release signing: no keyring generation declared (12 §2.1, §2.3)');
   }
   return { signing: { keyIds, keyringGeneration }, blockers };
 }
 
-export function pipeline({ check = false, production = false } = {}) {
-  const sources = JSON.parse(readFileSync(SOURCES, 'utf8'));
+/**
+ * The committed 15 §4.8 diff baseline.
+ *
+ * Refuses a document with no `allowlist` array rather than treating it as empty, because an
+ * empty incumbent makes *every* emitted entry an addition — which sounds fail-closed and is
+ * the opposite: the build then fails on a policy nobody changed, and the obvious way to get
+ * a green build again is to write the current allowlist into the baseline, which is exactly
+ * the review step the gate exists to force.
+ */
+function readIncumbentAllowlist(path: string): readonly string[] {
+  const document = record(JSON.parse(readFileSync(path, 'utf8')));
+  const allowlist = document['allowlist'];
+  if (!Array.isArray(allowlist) || allowlist.some((entry: unknown) => typeof entry !== 'string')) {
+    throw new Error(`${path}: the incumbent connect-src baseline must be an array of origins`);
+  }
+  return allowlist.filter((entry: unknown): entry is string => typeof entry === 'string');
+}
+
+export interface PipelineOptions {
+  readonly check?: boolean;
+}
+
+export function pipeline({ check = false }: PipelineOptions = {}) {
+  const sources: unknown = JSON.parse(readFileSync(SOURCES, 'utf8'));
   const declared = readDeclaredSources(SOURCES);
-  const blockers = [];
+  const blockers: string[] = [];
 
   if (!check) {
     buildTree();
@@ -249,14 +353,14 @@ export function pipeline({ check = false, production = false } = {}) {
   // 4 — the connect-src allowlist and 15 §4.8's no-growth diff.
   const allowlist = collectAllowlist(REPO_ROOT, declared);
   blockers.push(...allowlist.blockers);
-  const incumbent = JSON.parse(readFileSync(INCUMBENT, 'utf8')).allowlist;
+  const incumbent = readIncumbentAllowlist(INCUMBENT);
   const diff = assertNoAllowlistGrowth(allowlist.entries, incumbent);
   const connectSrc = renderConnectSrc(allowlist.entries);
   const indexPath = join(DIST, 'index.html');
   if (!check) substitute(indexPath, CONNECT_SRC_PLACEHOLDER, connectSrc, 'connect-src');
 
   // 5 — SRI over the final HTML.
-  const resolveBytes = (href) => {
+  const resolveBytes = (href: string): Uint8Array | undefined => {
     const relativePath = href.replace(/^\.?\//, '');
     try {
       return readFileSync(join(DIST, relativePath));
@@ -292,8 +396,10 @@ export function pipeline({ check = false, production = false } = {}) {
 
   // 7 — SBOM, then release.json over the complete tree.
   const components = parseLockfile(readFileSync(join(APP_ROOT, 'pnpm-lock.yaml'), 'utf8'));
-  const appPackage = JSON.parse(readFileSync(join(APP_ROOT, 'package.json'), 'utf8'));
-  const sbom = buildSbom(components, { name: appPackage.name, version: appPackage.version });
+  const appPackage = record(JSON.parse(readFileSync(join(APP_ROOT, 'package.json'), 'utf8')));
+  const packageName = String(appPackage['name'] ?? '');
+  const packageVersion = String(appPackage['version'] ?? '');
+  const sbom = buildSbom(components, { name: packageName, version: packageVersion });
   const sbomBytes = `${JSON.stringify(sbom, null, 2)}\n`;
 
   const chainFeed = readChainFeed(join(APP_ROOT, 'fixtures/chain-feed'));
@@ -301,7 +407,7 @@ export function pipeline({ check = false, production = false } = {}) {
   const { signing, blockers: signingBlockers } = readSigning(sources);
   const { assetHub, blockers: assetHubBlockers } = readAssetHub(sources);
   blockers.push(...identityBlockers, ...signingBlockers, ...assetHubBlockers);
-  if (appPackage.version === '0.0.0') {
+  if (packageVersion === '0.0.0') {
     blockers.push('app/package.json still carries version 0.0.0, which no release may publish');
   }
 
@@ -321,7 +427,7 @@ export function pipeline({ check = false, production = false } = {}) {
   }
 
   const release = buildReleaseJson({
-    version: appPackage.version,
+    version: packageVersion,
     assetHub,
     sourceCommit: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: REPO_ROOT, encoding: 'utf8' }).trim(),
     buildRecipe: buildRecipeDigest(APP_ROOT, RECIPE_INPUTS),
@@ -375,7 +481,10 @@ export function pipeline({ check = false, production = false } = {}) {
  * green with the `throw` deleted — which is the shape of vacuity this repository keeps
  * finding, and the reason the production path and the tested path are now the same call.
  */
-export function assertNoAllowlistGrowth(entries, incumbent) {
+export function assertNoAllowlistGrowth(
+  entries: readonly OriginBearing[],
+  incumbent: readonly string[],
+): ReturnType<typeof diffAgainstIncumbent> {
   const diff = diffAgainstIncumbent(entries, incumbent);
   if (diff.additions.length > 0) {
     throw new Error(
@@ -390,7 +499,7 @@ export function assertNoAllowlistGrowth(entries, incumbent) {
 
 /** Recover the substituted map from a built `sw.js`. Exported so the suite reads it the same
  * way `--check` does, rather than each having its own idea of the encoding. */
-export function readBakedAssetMap(workerSource) {
+export function readBakedAssetMap(workerSource: string): Record<string, string> {
   const encoded = /RELEASE_ASSETS_JSON\s*=\s*"((?:\\.|[^"\\])*)"/.exec(workerSource);
   if (!encoded) throw new Error('sw.js carries no substituted asset map');
   return JSON.parse(JSON.parse(`"${encoded[1]}"`));
@@ -405,9 +514,9 @@ export function readBakedAssetMap(workerSource) {
  * through a re-export all put the symbol in a chunk while every import in the source looked
  * fine. It is the one gate here that dependency-cruiser structurally cannot answer.
  */
-export function assertNoTestOnlySigner(distDir, files) {
+export function assertNoTestOnlySigner(distDir: string, files: readonly string[]): void {
   const markers = ['MockSigner', 'mock-signer', '@bleavit/signing/testing'];
-  const found = [];
+  const found: { path: string; marker: string }[] = [];
   for (const path of files) {
     if (!/\.(js|css|html)$/.test(path)) continue;
     const text = readFileSync(join(distDir, path), 'utf8');
@@ -421,10 +530,10 @@ export function assertNoTestOnlySigner(distDir, files) {
   }
 }
 
-function main(argv) {
+function main(argv: readonly string[]): number {
   const check = argv.includes('--check');
   const production = argv.includes('--production');
-  const result = pipeline({ check, production });
+  const result = pipeline({ check });
 
   console.log(`${result.files.length} files; connect-src ${result.connectSrc}`);
   if (result.diff.removals.length > 0) {

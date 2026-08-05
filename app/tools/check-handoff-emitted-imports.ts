@@ -38,17 +38,17 @@
  * can only ever cover what somebody wrote.
  */
 
-import { createRequire } from 'node:module';
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative } from 'node:path';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
 
-const APP_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
-const require = createRequire(import.meta.url);
 // The same single list dependency-cruiser and the network scanner read, so three gates
 // cannot disagree about what counts as a handoff path.
-const { HANDOFF_SOURCE_DIRS } = require('./handoff-packages.cjs');
+import { HANDOFF_SOURCE_DIRS } from './handoff-packages.ts';
+
+const APP_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 
 /**
  * A specifier that is local: relative, or a workspace package.
@@ -58,7 +58,8 @@ const { HANDOFF_SOURCE_DIRS } = require('./handoff-packages.cjs');
  * source graph. What this gate adds is the *non*-`@bleavit` case, which that graph cannot
  * see.
  */
-const isLocal = (specifier) => specifier.startsWith('.') || specifier.startsWith('@bleavit/');
+const isLocal = (specifier: string): boolean =>
+  specifier.startsWith('.') || specifier.startsWith('@bleavit/');
 
 /**
  * Every module specifier an emitted file actually imports — read off the AST.
@@ -74,10 +75,10 @@ const isLocal = (specifier) => specifier.startsWith('.') || specifier.startsWith
  * `require()` (which emitted ESM should never contain — and if it appears, that is precisely
  * what this gate should say out loud rather than skip).
  */
-function specifiersIn(file, source) {
+function specifiersIn(file: string, source: string): string[] {
   const parsed = ts.createSourceFile(file, source, ts.ScriptTarget.ES2022, true, ts.ScriptKind.JS);
-  const found = [];
-  const visit = (node) => {
+  const found: string[] = [];
+  const visit = (node: ts.Node): void => {
     if (
       (ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) &&
       node.moduleSpecifier !== undefined &&
@@ -98,8 +99,8 @@ function specifiersIn(file, source) {
   return found;
 }
 
-function* jsFilesUnder(directory) {
-  let entries;
+function* jsFilesUnder(directory: string): Generator<string> {
+  let entries: string[];
   try {
     entries = readdirSync(directory);
   } catch {
@@ -121,8 +122,18 @@ function* jsFilesUnder(directory) {
  * Exported so the witness drives the real function over a fixture rather than restating
  * its logic — a witness carrying its own copy proves the copy fires (V-86).
  */
-export function checkEmittedTree(distDir, { label = distDir } = {}) {
-  const findings = [];
+/** One external import that reached an emitted handoff module. */
+export interface EmittedImportFinding {
+  readonly file: string;
+  readonly specifier: string;
+  readonly label: string;
+}
+
+export function checkEmittedTree(
+  distDir: string,
+  { label = distDir }: { readonly label?: string } = {},
+): { scanned: number; findings: EmittedImportFinding[] } {
+  const findings: EmittedImportFinding[] = [];
   let scanned = 0;
   for (const file of jsFilesUnder(distDir)) {
     scanned += 1;
@@ -197,9 +208,7 @@ const WITNESS_FIXTURES = [
   },
 ];
 
-function witness() {
-  const { mkdtempSync, writeFileSync, rmSync } = require('node:fs');
-  const { tmpdir } = require('node:os');
+function witness(): void {
   const root = mkdtempSync(join(tmpdir(), 'bleavit-emitted-witness-'));
   let failed = 0;
   try {
@@ -234,14 +243,14 @@ function witness() {
   console.log(`\n${WITNESS_FIXTURES.length} witness cases behaved exactly as declared.`);
 }
 
-function main() {
+function main(): void {
   if (process.argv.includes('--witness')) {
     witness();
     return;
   }
   let scanned = 0;
-  const findings = [];
-  const empty = [];
+  const findings: EmittedImportFinding[] = [];
+  const empty: string[] = [];
 
   for (const sourceDir of HANDOFF_SOURCE_DIRS) {
     // `packages/intents/src` → `packages/intents/dist`.

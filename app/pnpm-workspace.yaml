@@ -6,6 +6,12 @@ packages:
   - 'packages/*'
   - 'src/application'
   - 'src/features/*'
+  # The `verify-release` CLI (12 §1.3) is the one tool that binds to a client package —
+  # it decides the release verdict over `packages/verify`'s own `SelfCheckResult`, so the
+  # CLI and the in-app self-check cannot disagree about what "matches" means. A member
+  # here rather than a root devDependency, for the reason stated above: the root is
+  # reachable from every package by the parent-directory walk.
+  - 'tools/verify-release'
   - 'tests/firewall'
   - 'tests/depcruise-witness'
   - 'tests/protocol'
