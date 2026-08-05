@@ -199,6 +199,8 @@ export class ChainHeadConnection implements ChainHeadTransport {
   #nextId = 1;
   #subscription: string | undefined;
   #finalized: HexString | undefined;
+
+  readonly #finalizedListeners = new Set<(hash: HexString) => void>();
   #initialized: ((hash: HexString) => void) | undefined;
   #initializationFailed: ((error: Error) => void) | undefined;
   #stopped: string | undefined;
@@ -245,6 +247,31 @@ export class ChainHeadConnection implements ChainHeadTransport {
       throw error;
     }
     return connection;
+  }
+
+  /**
+   * Subscribe to **every** finalized block hash, in order.
+   *
+   * Not the same thing as the finalized *head*, and the difference is a defect waiting to
+   * happen. `chainHead_v1_follow` reports finalization as `finalizedBlockHashes` — an
+   * **array**, because several blocks can finalize at once — and this class keeps only
+   * `.at(-1)` for its own purposes, which is right for "where is the chain now" and wrong
+   * for anything that has to *see* each block.
+   *
+   * An ingestion consumer built on the head alone would skip every intermediate block in a
+   * multi-block finalization. The local index would notice — its coverage would show holes —
+   * but it would show them constantly, under entirely normal operation, and a gap indicator
+   * that is always on tells a user nothing. So consumers get the whole array, in order.
+   *
+   * Listeners are called synchronously inside the follow-event handler and must not throw:
+   * a throw here would abort the handler mid-event, leaving pins un-trimmed and the
+   * subscription's own bookkeeping half-applied. Errors are the listener's to contain.
+   */
+  onFinalized(listener: (hash: HexString) => void): () => void {
+    this.#finalizedListeners.add(listener);
+    return () => {
+      this.#finalizedListeners.delete(listener);
+    };
   }
 
   close(): void {
@@ -515,6 +542,14 @@ export class ChainHeadConnection implements ChainHeadTransport {
         const hash = hashes?.at(-1) as HexString | undefined;
         if (hash !== undefined) this.#finalized = hash;
         this.#announcePinned(hashes ?? []);
+        // Every hash, in order — see `onFinalized`. Emitted **after** `#announcePinned` so a
+        // listener that immediately reads at one finds it pinned; that is the whole of the
+        // ordering requirement. It is deliberately not claimed that emission must precede
+        // `#unpin`: that call takes `prunedBlockHashes`, a set disjoint from the finalized
+        // ones, so no ordering between them can expose a released hash to a listener.
+        for (const finalizedHash of hashes ?? []) {
+          for (const listener of this.#finalizedListeners) listener(finalizedHash);
+        }
         // Pruned blocks are unreadable from this moment regardless, so releasing them is
         // free; keeping them was pure accumulation.
         this.#unpin((event['prunedBlockHashes'] as HexString[] | undefined) ?? []);
