@@ -1014,8 +1014,27 @@ pub mod pallet {
         }
 
         /// Permissionless second phase of the authorized-upgrade flow.
+        ///
+        /// `Operational`, matching the `frame_system::apply_authorized_upgrade`
+        /// this call forwards to. The class is not cosmetic here: it selects
+        /// which `BlockLength` ceiling `CheckWeight::check_block_length`
+        /// measures the encoded extrinsic against, and this is the one call
+        /// that carries a whole runtime image as a single argument. Under
+        /// `Normal` that ceiling is the runtime's normal-dispatch slice of the
+        /// block, which sits **below** `MaxRuntimeCodeBytes` — so the top of
+        /// the bound this same pallet publishes as a frozen constant (02 §9)
+        /// would be refused in the pool with `ExhaustsResources`: before any
+        /// dispatch, with no on-chain error and no event, on the one call whose
+        /// whole purpose is liveness. `frame_system` chose `Operational` for
+        /// exactly this reason; omitting it here silently narrowed the door.
+        /// `upgrade_apply_paths_can_carry_max_runtime_code_bytes` in
+        /// `runtime::pov_budgets` re-derives that relation from both sides
+        /// rather than restating either number.
         #[pallet::call_index(1)]
-        #[pallet::weight(T::WeightInfo::apply_authorized_upgrade(code.len() as u32))]
+        #[pallet::weight((
+            T::WeightInfo::apply_authorized_upgrade(code.len() as u32),
+            DispatchClass::Operational,
+        ))]
         pub fn apply_authorized_upgrade(
             origin: OriginFor<T>,
             code: RuntimeCode<T>,
