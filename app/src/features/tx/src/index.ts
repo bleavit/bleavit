@@ -79,3 +79,12 @@ export {
   type FundingBlock,
   type WithdrawInputs,
 } from './funding.js';
+export {
+  UpgradeHashMismatchError,
+  isApplicable,
+  submissionOutlook,
+  verifyArtifact,
+  type AuthorizedUpgrade,
+  type UpgradeSubmission,
+  type VerifiedArtifact,
+} from './upgrade-crank.js';

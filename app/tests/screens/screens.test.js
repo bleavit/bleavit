@@ -54,6 +54,9 @@ import {
   RatificationPanel,
   depositBlocks,
   destinationWarning,
+  isApplicable,
+  submissionOutlook,
+  verifyArtifact,
   progressCopy,
   withdrawBlocks,
   xcmWarning,
@@ -1692,4 +1695,64 @@ test('an unknown destination is distinct from a bad one and from a good one', ()
   assert.equal(destinationWarning(true), undefined);
   assert.match(destinationWarning(false), /would not survive/);
   assert.match(destinationWarning(undefined), /has not been established either way/);
+});
+
+// -------------------------------------------------- S17 the upgrade crank (F17)
+
+const AUTHORIZED = {
+  codeHash: finalized('0xaaaa'),
+  applicableAt: finalized(5_000),
+};
+
+test('a mismatched artifact hard-blocks and never becomes a submission', () => {
+  // §11.8.4 step 3: "a mismatch hard-blocks with FE-UPG-001 and never reaches the wallet."
+  // It throws rather than returning a result, because a refusal a caller can ignore is not
+  // a hard block — and this is the most consequential signature the client can produce.
+  assert.throws(
+    () => verifyArtifact(new Uint8Array([1, 2, 3]), AUTHORIZED, () => '0xbbbb'),
+    (error) => {
+      assert.equal(error.code, 'FE-UPG-001');
+      assert.match(error.message, /hard block/);
+      assert.match(error.message, /no gateway is retried into acceptance/);
+      return true;
+    },
+  );
+});
+
+test('a matching artifact verifies, and the brand stays phantom', () => {
+  const artifact = verifyArtifact(new Uint8Array(4_194_304), AUTHORIZED, () => '0xaaaa');
+  assert.equal(artifact.hash, '0xaaaa');
+  assert.equal(artifact.byteLength, 4_194_304);
+  assert.deepEqual(
+    Object.keys(artifact).sort(),
+    ['byteLength', 'hash'],
+    'the brand materialised at runtime — it must stay phantom and uncopyable',
+  );
+});
+
+test('applicable_at is read, and no lead-time arithmetic exists in the module', () => {
+  // SQ-552: `DescriptorLeadTime` was once recomputed client-side against a clock the call
+  // itself starts. §11.8.4 says read the stored field. A reader can confirm the absence.
+  assert.equal(isApplicable(AUTHORIZED, finalized(4_999)), false);
+  assert.equal(isApplicable(AUTHORIZED, finalized(5_000)), true);
+  const source = readFileSync(
+    join(REPO, 'app/src/features/tx/src/upgrade-crank.ts'),
+    'utf8',
+  );
+  assert.ok(
+    !/DescriptorLeadTime|authorized_at\s*\+|leadTime/i.test(source.replace(/\/\*[\s\S]*?\*\//g, '')),
+    'lead-time arithmetic reappeared in the upgrade crank',
+  );
+});
+
+test('the submission outlook states uncertainty rather than predicting success', () => {
+  // FE-P10 is unresolved. A screen that implied a 4 MiB extrinsic will go through would be
+  // asserting the very thing the prototype gate exists to find out.
+  const artifact = verifyArtifact(new Uint8Array(4_194_304), AUTHORIZED, () => '0xaaaa');
+  const outlook = submissionOutlook(artifact);
+  assert.match(outlook, /has not been established/);
+  assert.match(outlook, /FE-P10/);
+  assert.match(outlook, /4\.0 MiB/);
+  // And it says the verification is not wasted if submission fails.
+  assert.match(outlook, /already verified/);
 });
