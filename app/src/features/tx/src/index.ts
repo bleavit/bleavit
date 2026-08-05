@@ -35,3 +35,13 @@ export {
   mayOfferSigning,
   type ConfirmInputs,
 } from './confirm-controller.js';
+export {
+  CONFIRM_ABORT_COPY,
+  ConvictionLock,
+  ReferendaList,
+  ReferendumDetail,
+  type Referendum,
+  type ReferendumCall,
+  type ReferendumStatus,
+  type Tally,
+} from './referenda.js';

@@ -43,8 +43,12 @@ import {
   ConfirmSurface,
   EpochShrinkNotice,
   PayloadMismatchError,
+  CONFIRM_ABORT_COPY,
+  ConvictionLock,
   PROPOSAL_READS,
   ProposalDetail,
+  ReferendaList,
+  ReferendumDetail,
   decodeForConfirm,
   confirmProps,
   mayOfferSigning,
@@ -54,7 +58,13 @@ import {
 } from '@bleavit/features-tx';
 import { ImportRefused, ImportReview, UnlabellableClampError } from '@bleavit/features-handoff';
 import { ShareContext } from '@bleavit/features-handoff';
-import { DeferredMeaningChangingFactError, Disclosure, Undecodable } from '@bleavit/ui';
+import {
+  AlwaysVisible,
+  DeferredMeaningChangingFactError,
+  Disclosure,
+  Undecodable,
+  aboveTheFold,
+} from '@bleavit/ui';
 import { externalProposal } from '@bleavit/shared-types';
 import { defaultScope } from '@bleavit/contexts';
 import { refuse } from '@bleavit/handoff-envelope';
@@ -1200,4 +1210,100 @@ test('no response promises a repair the client cannot perform', () => {
       `${row} suggests a retry for a condition it classifies as unrecoverable`,
     );
   }
+});
+
+// ----------------------------------------------------- S9/S10 governance (F16)
+
+const REF = (over = {}) => ({
+  index: finalized('7'),
+  track: finalized('constitution'),
+  status: { kind: 'ongoing' },
+  tally: { ayes: finalized(100n), nays: finalized(20n), support: finalized(60n) },
+  call: { kind: 'decoded', pallet: finalized('Constitution'), call: finalized('set_param') },
+  ...over,
+});
+
+test('each side of a tally carries its own provenance badge', () => {
+  // §11.7.6: "a tally is never shown from provider data". Wrapping the pair in one
+  // `Verified` would let a single status stand for both and hide a mismatch between them.
+  const mixed = REF({
+    tally: {
+      ayes: finalized(100n),
+      nays: { value: 20n, status: { kind: 'provider', providerId: 'p', sampled: false } },
+      support: finalized(60n),
+    },
+  });
+  const html = renderToStaticMarkup(h(ReferendumDetail, { referendum: mixed }));
+  assert.ok(html.includes('data-status="verified-finalized"'), html);
+  assert.ok(html.includes('data-status="provider"'), 'the provider-served side is not badged');
+  assert.ok(/unverified/i.test(html), html);
+});
+
+test('the list renders ayes and nays as the different figures they are', () => {
+  // Mutation M75 survived without this: the provenance test above only drove
+  // `ReferendumDetail`, which renders each side in its own field, so a LIST that showed
+  // `ayes` twice passed. A tally where both columns show the same number is the one
+  // rendering error a reader cannot detect from the screen.
+  const html = renderToStaticMarkup(
+    h(ReferendaList, { referenda: [REF()], onOpen: () => {} }),
+  );
+  assert.ok(html.includes('>100<'), `the ayes are missing: ${html}`);
+  assert.ok(html.includes('>20<'), `the nays are missing: ${html}`);
+  // And each side is badged, so a provenance mismatch between them is visible here too.
+  const badges = html.match(/class="badge badge--/g) ?? [];
+  assert.ok(badges.length >= 4, `expected a badge per datum, got ${badges.length}`);
+});
+
+test('Confirming states the abort semantics wherever it renders', () => {
+  // The countdown is not a countdown, and nothing else on the screen would say so.
+  const confirming = REF({ status: { kind: 'confirming', confirmEndsAt: finalized(9_000) } });
+  const html = renderToStaticMarkup(h(ReferendumDetail, { referendum: confirming }));
+  assert.ok(html.includes(CONFIRM_ABORT_COPY.slice(0, 40)), html);
+  assert.ok(/restarts/.test(html), html);
+  assert.ok(/earliest/.test(html), 'the end date is presented as certain');
+  // And an ongoing referendum does not carry the copy — otherwise it says nothing.
+  const ongoing = renderToStaticMarkup(h(ReferendumDetail, { referendum: REF() }));
+  assert.ok(!/restarts/.test(ongoing), ongoing);
+});
+
+test('an undecodable call cannot be rendered as a call name', () => {
+  // The `undecodable` arm has no name field, so there is nothing for a screen to read.
+  const undecodable = REF({
+    call: { kind: 'undecodable', rawHex: '0xdeadbeef', reason: 'unknown call index 250' },
+  });
+  const html = renderToStaticMarkup(h(ReferendumDetail, { referendum: undecodable }));
+  assert.ok(html.includes('0xdeadbeef'), html);
+  assert.ok(/could not decode/.test(html), html);
+  assert.ok(!/What it would do/.test(html), 'a call description rendered for undecodable bytes');
+});
+
+test('the conviction lock states what a referendum ending does not release', () => {
+  const html = renderToStaticMarkup(
+    h(ConvictionLock, {
+      amount: finalized(5_000_000n),
+      decimals: 6,
+      symbol: 'VIT',
+      conviction: finalized(6),
+      unlockAt: finalized(1_500_000),
+    }),
+  );
+  assert.ok(/locked if you sign/.test(html), html);
+  assert.ok(/not released by the referendum ending/.test(html), html);
+  assert.ok(html.includes('5.000000 VIT'), html);
+});
+
+test('the conviction lock refuses to sit behind a disclosure', () => {
+  // §11.2 constraint 3 names `conviction-vote-lock`. The content lives in `features/tx`;
+  // the placement is enforced by `ui`, and this asserts the two compose as intended.
+  const fold = aboveTheFold(
+    'conviction-vote-lock',
+    h(ConvictionLock, {
+      amount: finalized(1n), decimals: 6, symbol: 'VIT',
+      conviction: finalized(1), unlockAt: finalized(2),
+    }),
+  );
+  assert.throws(
+    () => renderToStaticMarkup(h(Disclosure, { summary: 'details' }, h(AlwaysVisible, { fold }))),
+    DeferredMeaningChangingFactError,
+  );
 });
