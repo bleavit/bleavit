@@ -1090,7 +1090,21 @@ test('the confirm controller reaches no signer', async () => {
     'utf8',
   );
   assert.ok(!/@bleavit\/signing/.test(source), 'the confirm controller imports a signer');
-  assert.ok(!/\bsign\s*\(/.test(source.replace(/mayOfferSigning|onSign/g, '')), source);
+  // Every identifier this module *calls* whose name mentions signing, compared against the
+  // one that is allowed. The previous form stripped `mayOfferSigning|onSign` and then
+  // looked for `sign(`, which was dead code twice over: the capital S in both names means
+  // neither could ever have matched a lowercase `\bsign\s*\(`, and that narrow pattern
+  // missed `signPayload(` and `signRaw(` — the two names a signer is actually reached by —
+  // entirely. Naming the permitted callee is strictly stronger, and it is a match rather
+  // than a strip, so it does not read as sanitization.
+  const signCalls = [...source.matchAll(/\b([A-Za-z_$][\w$]*)\s*\(/g)]
+    .map((match) => match[1])
+    .filter((name) => /sign/i.test(name));
+  assert.deepEqual(
+    [...new Set(signCalls)].sort(),
+    ['mayOfferSigning'],
+    `the confirm controller calls a signer: ${JSON.stringify([...new Set(signCalls)])}`,
+  );
 });
 
 // ------------------------------------------------ the verification panel (F10)

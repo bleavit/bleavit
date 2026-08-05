@@ -146,9 +146,20 @@ test('release.json carries every field INV-FE-11 requires, read from the consume
   // list beside the producer. A hand-kept list made this test compare the producer with a
   // second copy of the producer, and it agreed with itself while the consumer required
   // `releaseTxid` and the document emitted only `arweaveManifestTxId`.
+  //
+  // That mismatch was then "fixed" from the wrong end, by adding `releaseTxid` to the
+  // producer — a field that can never hold a true value, since `M′` addresses a manifest
+  // containing this file. The consumer now declares `arweaveManifestTxId`, which the document
+  // really carries; the anchor below is what stops this test passing against a consumer
+  // that has drifted back to demanding the impossible one.
   const identity = readFileSync(join(APP_ROOT, 'packages/verify/src/identity.ts'), 'utf8');
   const required = requiredIdentityFields(identity);
-  assert.ok(required.includes('releaseTxid'), 'the consumer still declares releaseTxid');
+  assert.ok(required.includes('arweaveManifestTxId'), 'the consumer no longer declares arweaveManifestTxId');
+  assert.equal(
+    required.includes('releaseTxid'),
+    false,
+    'the consumer is demanding `releaseTxid` again — a field no served document can carry',
+  );
   for (const field of required) {
     assert.ok(field in built.release, `release.json is missing ${field}, which ReleaseIdentity requires`);
   }

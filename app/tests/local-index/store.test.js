@@ -26,9 +26,10 @@ import {
   evictMetadataToBudget,
   readCoverage,
   rebuild,
-  selfRange,
   writeCoverage,
 } from '@bleavit/local-index';
+// `selfRange` is test-only on purpose — see packages/local-index/src/testing.ts.
+import { selfRange } from '@bleavit/local-index/testing';
 
 const PASEO = `0x${'a1'.repeat(32)}`;
 const POLKADOT = `0x${'b2'.repeat(32)}`;

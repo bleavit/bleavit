@@ -118,6 +118,22 @@ module.exports = {
       to: { path: WORKSPACE_SUBPATH('@bleavit/signing/testing', 'packages/signing/dist/testing') },
     },
     {
+      name: 'no-range-minting-outside-ingest',
+      severity: 'error',
+      comment:
+        '10 §2.2/§6.3: an `origin ≠ self` range keeps its origin forever — there is no ' +
+        'promotion path. `selfRange` mints `origin: "self"` from three plain numbers, so any ' +
+        'package holding it can relabel provider data as light-client verified, which is that ' +
+        'promotion arriving through the front door. It is barred from the package barrel and ' +
+        'reachable only through `@bleavit/local-index/testing`; this makes that import fail in ' +
+        'production code. `providers` is the package that matters — it backfills from operator ' +
+        'endpoints, indexers and snapshots, and one call would launder any of it.',
+      from: { path: '^(src|packages)/', pathNot: '^tests/' },
+      to: {
+        path: WORKSPACE_SUBPATH('@bleavit/local-index/testing', 'packages/local-index/dist/testing'),
+      },
+    },
+    {
       name: 'no-mock-signer-in-the-bundle',
       severity: 'error',
       comment:

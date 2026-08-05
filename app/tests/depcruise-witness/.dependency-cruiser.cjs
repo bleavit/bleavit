@@ -58,6 +58,17 @@ module.exports = {
       from: { path: '^tests/depcruise-witness/' },
       to: { path: WORKSPACE_SUBPATH('@bleavit/signing/testing', 'packages/signing/dist/testing') },
     },
+    {
+      // The range-minting subpath. Witnessed on its own because `WORKSPACE_SUBPATH` is
+      // parameterised by specifier *and* dist path: a typo in either would make
+      // `no-range-minting-outside-ingest` vacuous with the signing witness still green.
+      name: 'witness-local-index-testing-subpath',
+      severity: 'error',
+      from: { path: '^tests/depcruise-witness/' },
+      to: {
+        path: WORKSPACE_SUBPATH('@bleavit/local-index/testing', 'packages/local-index/dist/testing'),
+      },
+    },
   ],
   // Verbatim, minus the exclude that would hide the witness from itself.
   options: { ...production.options, exclude: { path: '(^|/)tests/firewall/fixtures/' } },

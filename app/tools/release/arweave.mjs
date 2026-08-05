@@ -59,10 +59,22 @@ export async function twoPassDeploy({ tree, releaseJson, uploader, version, sha2
         'describe a tree that includes the field',
     );
   }
-  if (releaseJson.arweaveManifestTxId !== null || releaseJson.releaseTxid !== null) {
+  if (releaseJson.arweaveManifestTxId !== null) {
     throw new ArweaveDeployError(
       'release.json already names a content address; a rebuild must start from an unpatched ' +
         'document rather than overwrite a published one',
+    );
+  }
+  if ('releaseTxid' in releaseJson) {
+    // The field this driver used to fabricate. It cannot be filled — `M′` addresses a
+    // manifest containing this file — so a document carrying it was built by a producer
+    // still operating on the superseded format, and publishing it would serve a permanent
+    // `null` under a name a verifier reads as the release address.
+    throw new ArweaveDeployError(
+      'release.json carries a `releaseTxid` field, which 12 §1.2 does not define: the final ' +
+        'manifest TXID addresses a manifest containing this file and can never be written ' +
+        'into it. The pinned address is `arweaveManifestTxId`; `M′` is observed from ' +
+        '`location` at runtime',
     );
   }
   assertPublishable(releaseJson, tree, sha256);
@@ -103,10 +115,16 @@ export async function twoPassDeploy({ tree, releaseJson, uploader, version, sha2
     /** What `release.json` records: the asset-tree manifest (12 §1.2). */
     assetManifestTxId,
     releaseJsonTxId,
-    /** What the name is repointed to, and INV-FE-11's `releaseTxid`. */
+    /**
+     * What the ArNS name is repointed to — 12 §1.2's `M′`. Returned to the deployer, and
+     * deliberately **not** merged into `releaseJson`: it is not in the served bytes and
+     * cannot be, so a returned object carrying it described a document nobody receives.
+     * That is precisely how the unfillable `releaseTxid` field survived its own tests.
+     */
     manifestTxId,
     undername: releaseUndername(version),
-    releaseJson: { ...patched, releaseTxid: manifestTxId },
+    /** Exactly the object whose serialization is `releaseBytes`, so the two cannot diverge. */
+    releaseJson: patched,
     releaseBytes,
   };
 }

@@ -7,6 +7,16 @@
  * `arweaveManifestTxId` while the consumer required `releaseTxid`, and the test that should
  * have noticed compared the producer against a list kept beside the producer.
  *
+ * That disagreement was first "fixed" from the wrong side — by adding a `releaseTxid` field
+ * to the producer — and the second failure was worse than the first, because it looked
+ * fixed. `releaseTxid` names the *final* manifest, which contains this file, so the value
+ * can never be written into it; the field shipped `null` in every real deployment while the
+ * deploy driver's returned object carried the number, and the producer's tests asserted on
+ * that object. The parser therefore refused every genuine release as `unpublished` and no
+ * test could see it. What this module now reads is `arweaveManifestTxId` — 12 §1.2's
+ * asset-tree manifest, the address a document can hold — with the base TXID observed
+ * separately from `location`.
+ *
  * ## Refusal, not repair, and not a partial identity
  *
  * Every path here returns a verdict rather than throwing or filling a gap. A malformed
@@ -17,10 +27,10 @@
  * Three refusals are worth stating outright, because each is a place where being lenient
  * would produce a bundle that *looks* verified:
  *
- * 1. **An unpublished document is refused.** `releaseTxid: null` is what the builder emits
- *    before 12 §1.2's second pass fills it in. A bundle serving that record has no content
- *    address, so nothing a user could compare it against exists — and INV-FE-11's first pin
- *    is exactly that address.
+ * 1. **An unpublished document is refused.** `arweaveManifestTxId: null` is what the builder
+ *    emits before 12 §1.2's second pass patches it. A bundle serving that record has no
+ *    content address, so nothing a user could compare it against exists — and INV-FE-11's
+ *    first pin is exactly that address.
  * 2. **A record with unresolved readiness blockers is refused.** The blockers are the pins
  *    the build could not make. Accepting the document and rendering the fields that *are*
  *    present would show a verification panel full of green rows whose absent neighbours are
@@ -94,8 +104,12 @@ export function parseReleaseDocument(document: unknown): ReleaseDocumentVerdict 
     );
   }
 
-  const releaseTxid = own(document, 'releaseTxid');
-  if (typeof releaseTxid !== 'string' || !TXID.test(releaseTxid)) {
+  // 12 §1.2's `M`, the asset-tree manifest — the content address this document *can* hold.
+  // It is not the final manifest `M′`: that one addresses a manifest containing this file,
+  // so a document naming it would change its own address. `M′` is observed from `location`
+  // at runtime (`resolveBaseTxid`); requiring it here refused every real deployment.
+  const arweaveManifestTxId = own(document, 'arweaveManifestTxId');
+  if (typeof arweaveManifestTxId !== 'string' || !TXID.test(arweaveManifestTxId)) {
     return refuse(
       'unpublished',
       'this record carries no Arweave content address, so there is nothing a user could ' +
@@ -166,7 +180,7 @@ export function parseReleaseDocument(document: unknown): ReleaseDocumentVerdict 
   return {
     kind: 'identity',
     identity: {
-      releaseTxid,
+      arweaveManifestTxId,
       sourceCommit,
       perFileHashes: perFileHashes as Readonly<Record<string, Hash32>>,
       descriptorMetadataHashes,

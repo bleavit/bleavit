@@ -66,7 +66,9 @@ function releaseFor(tree) {
     perFileHashes,
     specVersionRange: { primary: 2, recovery: 3 },
     descriptorMetadataHashes: { 2: 'b'.repeat(64), 3: 'c'.repeat(64) },
-    releaseTxid: null,
+    // No `releaseTxid`. It is not a field 12 §1.2 defines, and it could never be filled:
+    // `M′` addresses a manifest containing this file. The driver now refuses a document
+    // carrying it, so a producer left on the superseded format fails loudly.
     arweaveManifestTxId: null,
   };
 }
@@ -83,13 +85,22 @@ test('release.json records the asset-tree manifest, and the final manifest diffe
     sha256,
   });
   assert.match(result.assetManifestTxId, /^[A-Za-z0-9_-]{43}$/);
-  assert.equal(result.releaseJson.arweaveManifestTxId, result.assetManifestTxId);
   // 12 §1.2 states the consequence explicitly: the second manifest references one more
   // transaction, so `M′ ≠ M`. What the name is repointed to is `M′`; what the release
-  // records is `M`; and INV-FE-11's `releaseTxid` is `M′`.
+  // records is `M`.
   assert.notEqual(result.manifestTxId, result.assetManifestTxId);
-  assert.equal(result.releaseJson.releaseTxid, result.manifestTxId);
   assert.deepEqual(uploader.calls.map((call) => call.kind), ['tree', 'file', 'tree']);
+
+  // **Asserted on the UPLOADED BYTES, not on the returned object.** This is the whole
+  // repair. The previous version checked `result.releaseJson`, which the driver was free
+  // to decorate with fields the served document does not contain — and it did exactly
+  // that, writing `releaseTxid: M′` into the returned object while uploading a document
+  // whose value was `null`. Every producer test passed and `parseReleaseDocument` refused
+  // every real deployment as `unpublished`. Only the bytes are the release.
+  const uploaded = JSON.parse(new TextDecoder().decode(result.releaseBytes));
+  assert.equal(uploaded.arweaveManifestTxId, result.assetManifestTxId);
+  assert.equal('releaseTxid' in uploaded, false, 'an unfillable field is back in the served document');
+  assert.deepEqual(uploaded, result.releaseJson, 'the returned object must BE the served document');
 });
 
 test('the final manifest references the sibling by TXID, not by a second copy of its bytes', async () => {
@@ -132,7 +143,7 @@ test('a document that does not describe this tree is refused before anything is 
   await assert.rejects(
     twoPassDeploy({
       tree: TREE,
-      releaseJson: { schema: 'bleavit.app-release.v1', version: '1.2.3', arweaveManifestTxId: null, releaseTxid: null },
+      releaseJson: { schema: 'bleavit.app-release.v1', version: '1.2.3', arweaveManifestTxId: null },
       uploader,
       version: '1.2.3',
       sha256,
@@ -184,6 +195,10 @@ test('a release document that already names a content address is refused', async
     }),
     ArweaveDeployError,
   );
+  // A document carrying `releaseTxid` at all is refused, filled in or not: the field is
+  // not one 12 §1.2 defines and can never hold a true value, so its presence means the
+  // producer is on the superseded format. Publishing it would serve a permanent `null`
+  // under a name a verifier reads as the release address.
   await assert.rejects(
     twoPassDeploy({
       tree: TREE,

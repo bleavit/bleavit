@@ -17,6 +17,13 @@ export const usesAnExternalChainSdk = true;
 // chunk" rule first shipped unable to fire for exactly that reason.
 import '@bleavit/signing/testing';
 
+// The SAME matcher with a different specifier, witnessed separately rather than assumed to
+// follow from the line above. `WORKSPACE_SUBPATH` takes both a specifier and a dist path, so
+// a typo in either leaves `no-range-minting-outside-ingest` structurally unable to fire while
+// the signing witness stays green — and that rule is the only thing stopping `providers` from
+// minting `origin: 'self'` and laundering backfilled data into light-client-verified.
+import '@bleavit/local-index/testing';
+
 // The signing exemption's boundary, witnessed. `packages/signing` may reach
 // `polkadot-api/pjs-signer` because a signer factory cannot serve a read; everything else
 // under `polkadot-api` still constructs chains and providers, so it must still fail. A

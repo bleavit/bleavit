@@ -23,8 +23,9 @@ import {
   holesIn,
   nextResolution,
   rollUp,
-  selfRange,
 } from '@bleavit/local-index';
+// `selfRange` is test-only on purpose — see packages/local-index/src/testing.ts.
+import { selfRange } from '@bleavit/local-index/testing';
 
 const HOUR = 3_600;
 const sample = (at, price, blockNumber, bookId = 'book-1') => ({

@@ -50,9 +50,30 @@ declare const SELF_INGESTED: unique symbol;
  * is the silent promotion this module's whole no-splice rule exists to prevent, arriving
  * through the front door instead.
  *
- * So `self` carries a brand only `selfRange()` can mint, exactly as `Finalized<T>` is
- * constructible only inside `chain-client` and for the same reason. A forged `self` range
- * is now a type error rather than a naming convention.
+ * So `self` carries a brand only `selfRange()` can mint. That stops the *object literal* —
+ * `{ origin: 'self', … }` no longer typechecks anywhere.
+ *
+ * ## What the brand does not do, stated precisely because an earlier note overclaimed
+ *
+ * The brand is not a capability. `selfRange` takes three plain numbers, so any caller who
+ * can *reach* it can mint a verified range out of provider-derived heights — the review
+ * finding this paragraph replaces. A private symbol is not a boundary when its minting
+ * function is public.
+ *
+ * Two things now carry the property instead, and neither is a comment:
+ *
+ * 1. **`selfRange` is not exported from the package barrel.** It is reachable only through
+ *    `@bleavit/local-index/testing`, which the `no-range-minting-outside-ingest`
+ *    dependency-cruiser rule forbids production code from importing — the same shape
+ *    `@bleavit/signing/testing` already uses for the test-only signer. So `providers`, the
+ *    package that actually does backfill, cannot construct a `self` range at all.
+ * 2. **The one production caller is the ingest loop**, which holds light-client output by
+ *    construction.
+ *
+ * And the residual is real: the brand is a **compile-time** control, so a record rehydrated
+ * from IndexedDB can still carry `origin: 'self'` and be believed. Nothing local can prove a
+ * range came from a light client. What makes that tolerable is INV-FE-7 plus the firewall —
+ * the transaction path never reads this package — not anything in this file.
  */
 export interface SelfIngested {
   readonly [SELF_INGESTED]: true;
@@ -71,10 +92,15 @@ export type CoverageRange = {
 /**
  * Mint a light-client-ingested range. The only way to obtain `origin: 'self'`.
  *
- * Callable only where the ingest loop actually holds light-client output; the brand it
- * attaches has no runtime representation, so this costs nothing and is checked entirely
- * by the compiler — like the `Finalized<T>` brand, whose companion cast gate exists
- * because a brand stops object literals and not assertions.
+ * **Deliberately absent from `index.ts`.** Its one production caller is the ingest loop in
+ * this package; everything else reaches it through `@bleavit/local-index/testing`, which
+ * production code is forbidden to import. Exporting it from the barrel let any consumer —
+ * `providers` above all, which is the package that backfills from unverified sources —
+ * turn three numbers into a range `isVerifiedAt` reports as light-client verified.
+ *
+ * The brand has no runtime representation, so this costs nothing and is checked entirely by
+ * the compiler — like the `Finalized<T>` brand, whose companion cast gate exists because a
+ * brand stops object literals and not assertions.
  */
 export function selfRange(fromBlock: number, toBlock: number, ingestedAt: number): CoverageRange {
   return { fromBlock, toBlock, ingestedAt, origin: 'self' } as CoverageRange;

@@ -51,8 +51,24 @@ export interface SpecVersionRange {
  * hashes can only express the first.
  */
 export interface ReleaseIdentity {
-  /** Arweave content address of the release (INV-FE-11's TXID). */
-  readonly releaseTxid: string;
+  /**
+   * The **asset-tree** manifest TXID — 12 §1.2's `M`, and the only content address this
+   * document can carry.
+   *
+   * It is deliberately not the final manifest `M′`. `M′` is the address of a manifest that
+   * *contains this file*, so writing `M′` into it changes the file, which changes `M′`: a
+   * fixed point in a hash, not an ordering problem a third pass would solve. An earlier
+   * round tried to satisfy INV-FE-11 by adding a `releaseTxid` field here, and the result
+   * was a field that shipped `null` in every real deployment while the in-memory object
+   * returned by the deploy driver carried the value — so the producer's own tests passed
+   * and `parseReleaseDocument` refused every genuine release as `unpublished`.
+   *
+   * 12 §1.2 already resolves this: *"`release.json` records the asset-tree manifest and the
+   * app resolves its own base TXID at runtime from `location`; the verification CLI checks
+   * both."* So `M` is **pinned** here and `M′` is **observed** — see `resolveBaseTxid`,
+   * and note the panel renders them under different `kind`s for exactly that reason.
+   */
+  readonly arweaveManifestTxId: string;
   /** The commit the bundle was built from. */
   readonly sourceCommit: string;
   /** Path → content hash, for every file in the distributed bundle. */

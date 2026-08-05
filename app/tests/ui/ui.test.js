@@ -111,9 +111,17 @@ test('every status renders a badge, and the copy comes from the status', () => {
     const html = renderToStaticMarkup(h(ProvenanceBadge, { status }));
     assert.ok(html.includes(`data-status="${status.kind}"`), `${status.kind}: ${html}`);
     assert.ok(html.includes('aria-label='), `${status.kind} has no accessible name`);
-    // Non-empty text: a badge that renders nothing is the suppression this forbids.
-    const text = html.replace(/<[^>]*>/g, '').trim();
-    assert.ok(text.length > 0, `${status.kind} rendered an empty badge`);
+    // Non-empty *text*, asserted by matching a text node rather than by stripping tags.
+    // Stripping is sanitization's shape, and one pass of `<[^>]*>` genuinely does leave
+    // `<script` behind in `<<script>script>` — nothing here is hostile, but a matching
+    // assertion states the intent more directly anyway: some text node holds a visible
+    // character. Excluding the brackets from the middle class is load-bearing, because
+    // `\S` matches `<` and would happily pass `<span aria-label="x"></span>` — a badge
+    // whose only words are in an attribute, which is exactly the suppression this forbids.
+    assert.ok(
+      />[^<>]*[^\s<>][^<>]*</.test(html),
+      `${status.kind} rendered an empty badge`,
+    );
   }
 });
 

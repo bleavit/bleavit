@@ -127,6 +127,56 @@ test('a signer who already approved is refused before paying for the rejection',
   assert.match(reason, /2 of 3/);
 });
 
+test('an already-approved signer COMPLETES a threshold-ready call', () => {
+  // The defect this replaced: `already-approved` was returned on membership alone, so a
+  // 2-of-2 whose members had both used `approve_as_multi` — which stores a hash-only
+  // approval and never carries a call — had *no* member able to complete it from the
+  // canonical client. That is a client refusing what the runtime accepts, the direction
+  // 15 §4.8's mirror rule forbids.
+  //
+  // The runtime is unambiguous (`operate`, pallet-multisig 49.0.0): the execution branch
+  // `maybe_call.filter(|_| approvals >= threshold)` is evaluated BEFORE the
+  // `AlreadyApproved` arm, so supplying the full call dispatches it.
+  const step = deriveApproval(entry([OTHER, SIGNER]), KEY, SIGNER, 2);
+  assert.equal(step.kind, 'completes');
+  assert.equal(step.executes, true);
+  assert.equal(step.dispatch, 'as_multi');
+  assert.equal(step.alreadyApproved, true);
+  assert.deepEqual(step.maybeTimepoint, { height: 100, index: 2 });
+  // And it is not refused, which is the whole user-visible consequence.
+  assert.equal(wrapperRefusalReason(step), undefined);
+});
+
+test('a signatory who never approved also completes an already-met threshold', () => {
+  // `maybe_pos` is filtered at `approvals < threshold`, so once the threshold is met the
+  // runtime records NO approval — it just dispatches. Reporting this as `subsequent` would
+  // tell the user their approval reaches the threshold when the threshold was already
+  // reached and their approval is never stored.
+  const step = deriveApproval(entry([OTHER, '5Third']), KEY, SIGNER, 2);
+  assert.equal(step.kind, 'completes');
+  assert.equal(step.alreadyApproved, false);
+  assert.equal(step.executes, true);
+});
+
+test('the already-approved refusal survives while the threshold is still short', () => {
+  // Anti-vacuity for the two above: a fix that returned `completes` unconditionally would
+  // delete the refusal, and this is the case the runtime really does reject —
+  // `approvals < threshold` with the signer on the list finds no insertion position and
+  // returns `AlreadyApproved`.
+  const step = deriveApproval(entry([OTHER, SIGNER]), KEY, SIGNER, 3);
+  assert.equal(step.kind, 'already-approved');
+  assert.match(wrapperRefusalReason(step), /already approved/);
+});
+
+test('the threshold-met boundary is exact, not approximate', () => {
+  // n === threshold is `completes`; n === threshold - 1 is still an approval to be made.
+  // An off-by-one here is invisible in the happy path and wrong in both directions: too
+  // eager offers an execution the runtime will not perform, too lazy refuses a lawful one.
+  assert.equal(deriveApproval(entry([OTHER, SIGNER]), KEY, SIGNER, 2).kind, 'completes');
+  assert.equal(deriveApproval(entry([OTHER]), KEY, SIGNER, 2).kind, 'subsequent');
+  assert.equal(deriveApproval(entry([OTHER]), KEY, SIGNER, 1).kind, 'first', 'threshold 1 short-circuits');
+});
+
 test('a refusal reason exists only for the refused step', () => {
   // Anti-vacuity for the assertion above: if `wrapperRefusalReason` returned a string
   // unconditionally, the previous test would pass on a function that refuses everything.

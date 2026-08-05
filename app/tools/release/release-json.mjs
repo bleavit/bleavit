@@ -166,15 +166,18 @@ export function buildReleaseJson({
     sourceCommit,
     buildRecipeDigest: buildRecipe,
     /**
-     * INV-FE-11's "release content address (TXID)" and `ReleaseIdentity.releaseTxid`'s
-     * consumer-side name. It is the **final** manifest — what the ArNS name is repointed to
-     * and what a user's URL bar shows — while `arweaveManifestTxId` below is 12 §1.2's
-     * *asset-tree* manifest, the one this document was still outside of when it was hashed.
-     * They are two different addresses and the review found the producer emitting only the
-     * second under a name the consumer does not read, which left the verification panel
-     * rendering an undefined release TXID.
+     * INV-FE-11's pinned "release content address" — 12 §1.2's asset-tree manifest `M`,
+     * patched in by the second pass. `null` here is the pre-publication state, and
+     * `parseReleaseDocument` refuses it as `unpublished`.
+     *
+     * There is deliberately **no `releaseTxid` field**. A previous round added one, meaning
+     * the *final* manifest `M′`, and it could never be filled: `M′` addresses a manifest
+     * that contains this file, so writing it in changes the file and therefore changes
+     * `M′`. It shipped `null` in every real deployment while the deploy driver's returned
+     * object carried the value — which is why the producer's tests passed and the consumer
+     * refused every genuine release. 12 §1.2 resolves it the only way it can: `M` is
+     * pinned here, `M′` is observed at runtime from `location`.
      */
-    releaseTxid: null,
     arweaveManifestTxId: null,
     perFileHashes: files,
     specVersionRange: chainFeed.specVersionRange,

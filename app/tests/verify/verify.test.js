@@ -22,6 +22,7 @@ import {
   classifyCheckpointAge,
   mayClaimVerified,
   mayOperate,
+  resolveBaseTxid,
   runSelfCheck,
   verifyChainIdentity,
 } from '@bleavit/verify';
@@ -29,8 +30,13 @@ import * as verifyModule from '@bleavit/verify';
 
 const h = (n) => `0x${String(n).repeat(2).padEnd(64, '0')}`;
 
+// A well-formed Arweave TXID: 43 base64url characters. Shaped correctly because
+// `parseReleaseDocument` enforces it, and a fixture that could not survive the parser is a
+// fixture describing a document that cannot exist.
+const ASSET_MANIFEST = 'aBcDeFgHiJkLmNoPqRsTuVwXyZ0123456789-_abcde';
+
 const IDENTITY = {
-  releaseTxid: 'tx-abcdefghijklmnopqrstuvwxyz0123456789',
+  arweaveManifestTxId: ASSET_MANIFEST,
   sourceCommit: '3e0985e656549d987ff20a78d00de185f6f28381',
   perFileHashes: { 'index.html': h(11), 'app.js': h(22), 'sw.js': h(33) },
   descriptorMetadataHashes: { 2: h(44), 3: h(55) },
@@ -227,13 +233,16 @@ test('buildPanel is synchronous and takes no chain handle', () => {
   // can be down — and it would be down in exactly the incident it exists for.
   const panel = buildPanel(IDENTITY);
   assert.equal(typeof panel.then, 'undefined');
-  assert.equal(buildPanel.length <= 3, true);
+  // The arity bound is a proxy for "no chain handle got added". It moved to 4 when the
+  // observed base TXID arrived — which is a `BaseTxidVerdict` the caller already resolved
+  // from `location`, not a connection, so the property this test guards is intact.
+  assert.equal(buildPanel.length <= 4, true);
 });
 
 test('every INV-FE-11 pin appears in the panel', () => {
   const labels = buildPanel(IDENTITY).rows.map((r) => r.label).join(' | ');
   for (const required of [
-    'Release (Arweave TXID)',
+    'Release assets (Arweave TXID)',
     'Source commit',
     'Files pinned',
     'Supported spec versions',
@@ -361,4 +370,82 @@ test('the messages say what lapsed and what to do about it', () => {
   assert.match(at(27).message, /newer release/);
   assert.match(at(28).message, /withdrawn their stake|bonding duration/);
   assert.match(at(28).message, /newer release/);
+});
+
+// --- the base TXID, observed from `location` (12 §1.2) ---------------------
+
+test('the base TXID is observed from the URL path', () => {
+  // 12 §1.2: "release.json records the asset-tree manifest and the app resolves its own
+  // base TXID at runtime from `location`". It CANNOT be pinned — `M′` addresses a manifest
+  // containing release.json, so writing it in changes the file and therefore changes `M′`.
+  const path = resolveBaseTxid(`https://arweave.net/${ASSET_MANIFEST}/index.html`);
+  assert.equal(path.kind, 'txid');
+  assert.equal(path.txid, ASSET_MANIFEST);
+  assert.equal(path.form, 'path');
+});
+
+test('a sandboxed subdomain is REFUSED, because a hostname cannot carry a TXID', () => {
+  // The first draft of `resolveBaseTxid` read the first hostname label, and this test is
+  // what caught it. DNS labels are case-insensitive and `new URL()` normalizes the host to
+  // lowercase, so a case-sensitive base64url TXID does not survive a hostname: the function
+  // returned a well-formed *wrong* address that fails every comparison it feeds — and would
+  // have appeared to work for a coincidentally all-lowercase TXID, making it intermittent.
+  //
+  // Arweave sandboxes to a base32 subdomain for exactly this reason. Decoding that has a
+  // verifiable answer and is real work; INV-FE-12 forbids guessing at an encoding, so this
+  // refuses instead of approximating.
+  const mixedCase = resolveBaseTxid(`https://${ASSET_MANIFEST}.arweave.net/index.html`);
+  assert.equal(mixedCase.kind, 'not-content-addressed');
+
+  // Proof the mechanism is case folding and not merely an unmatched pattern: the SAME
+  // string lowercased still matches /^[A-Za-z0-9_-]{43}$/, so a label-reading version would
+  // have accepted it here and returned an address that is not the release's.
+  const lowered = ASSET_MANIFEST.toLowerCase();
+  assert.equal(/^[A-Za-z0-9_-]{43}$/.test(lowered), true, 'the lowercased label is still TXID-shaped');
+  assert.notEqual(lowered, ASSET_MANIFEST, 'the fixture must be mixed-case for this to prove anything');
+  assert.equal(resolveBaseTxid(`https://${lowered}.arweave.net/`).kind, 'not-content-addressed');
+});
+
+test('a content-hashed asset filename is NOT read as the release address', () => {
+  // The dangerous near-miss: chunk filenames are also 43-ish base64url strings, so a scan
+  // for "a TXID anywhere in the path" would have the bundle report one of its own chunks
+  // as its release address — a wrong answer that looks exactly like a right one.
+  const verdict = resolveBaseTxid(`https://arweave.net/assets/${ASSET_MANIFEST}.js`);
+  assert.equal(verdict.kind, 'not-content-addressed');
+});
+
+test('an ArNS name and a dev server are `not-content-addressed`, with a reason', () => {
+  // An ArNS name DOES resolve to a transaction, but the page cannot see which one, and
+  // guessing would produce the confident wrong answer this comparison exists to catch.
+  // Typed absence rather than `undefined`, so the panel can say why rather than render a
+  // blank release row — which reads as "this release has no address".
+  for (const href of ['https://v1-2-3_futarchy.arweave.net/', 'http://localhost:5173/', 'not a url']) {
+    const verdict = resolveBaseTxid(href);
+    assert.equal(verdict.kind, 'not-content-addressed', href);
+    assert.ok(verdict.detail.length > 0, `${href} gave no reason`);
+  }
+  assert.match(resolveBaseTxid('https://v1-2-3_futarchy.arweave.net/').detail, /ArNS/);
+});
+
+test('the panel renders the observed address beside the pinned one, and never as a warning', () => {
+  // "the verification CLI checks both" — the pinned asset manifest and what was served.
+  const served = resolveBaseTxid(`https://arweave.net/${'Z'.repeat(43)}/`);
+  const panel = buildPanel(IDENTITY, undefined, undefined, served);
+  const row = panel.rows.find((r) => r.label === 'Served from (Arweave TXID)');
+  assert.ok(row, 'the observed address is missing from the panel');
+  assert.equal(row.kind, 'observed');
+  assert.equal(row.value, 'Z'.repeat(43));
+  // The pinned row is a DIFFERENT row with a different address: conflating them would hide
+  // exactly the substitution this pair exists to expose.
+  const pinned = panel.rows.find((r) => r.label === 'Release assets (Arweave TXID)');
+  assert.equal(pinned.kind, 'pinned');
+  assert.notEqual(pinned.value, row.value);
+
+  // Running off a dev server is not a divergence, so it must not become a warning.
+  const local = buildPanel(IDENTITY, undefined, undefined, resolveBaseTxid('http://localhost:5173/'));
+  assert.deepEqual(local.warnings, []);
+  assert.equal(local.rows.find((r) => r.label === 'Served from (Arweave TXID)').value, 'not a content address');
+
+  // And absent entirely when it was not resolved — no invented row.
+  assert.equal(buildPanel(IDENTITY).rows.some((r) => r.label === 'Served from (Arweave TXID)'), false);
 });

@@ -29,7 +29,9 @@ const built = pipeline();
 function asPublished(release) {
   return {
     ...release,
-    releaseTxid: 'R'.repeat(43),
+    // Only the asset-tree manifest. There is deliberately no `releaseTxid`: a fixture
+    // carrying one would describe a document the deploy driver refuses to publish, and
+    // this corpus would then be certifying a format that cannot exist.
     arweaveManifestTxId: 'M'.repeat(43),
     chainSpecHashes: { relay: `0x${'a'.repeat(64)}`, para: `0x${'b'.repeat(64)}` },
     genesisHashes: { relay: `0x${'c'.repeat(64)}`, para: `0x${'d'.repeat(64)}` },
@@ -64,10 +66,14 @@ test('a published document parses into the identity the panel and self-check con
 });
 
 test('an unpublished document is refused — a build output is not a release', () => {
-  // `releaseTxid: null` is exactly what the builder emits before 12 §1.2's second pass. A
-  // bundle serving that record has no content address, so there is nothing a user could
-  // compare the bytes they received against.
-  const document = { ...asPublished(built.release), releaseTxid: null };
+  // `arweaveManifestTxId: null` is exactly what the builder emits before 12 §1.2's second
+  // pass patches it. A bundle serving that record has no content address, so there is
+  // nothing a user could compare the bytes they received against.
+  //
+  // This test used to null `releaseTxid` instead — a field the served document never
+  // carried a value for, so it was asserting that the parser refuses a document that is
+  // *always* in that state. It passed for a reason that made every genuine release refuse.
+  const document = { ...asPublished(built.release), arweaveManifestTxId: null };
   const verdict = parseReleaseDocument(document);
   assert.equal(verdict.kind, 'refused');
   assert.equal(verdict.reason, 'unpublished');

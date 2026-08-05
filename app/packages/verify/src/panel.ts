@@ -28,6 +28,7 @@ import {
   type ReleaseIdentity,
 } from './identity.js';
 import type { SelfCheckResult } from './self-check.js';
+import type { BaseTxidVerdict } from './base-txid.js';
 
 /** One labelled fact in the panel. */
 export interface PanelRow {
@@ -86,9 +87,13 @@ export function buildPanel(
   identity: ReleaseIdentity,
   selfCheck?: SelfCheckResult,
   chain?: ChainIdentityVerdict,
+  baseTxid?: BaseTxidVerdict,
 ): VerificationPanel {
   const rows: PanelRow[] = [
-    { label: 'Release (Arweave TXID)', value: identity.releaseTxid, kind: 'pinned' },
+    // 12 §1.2's `M` — the asset-tree manifest, which is what a release document can pin.
+    // The address the browser is actually served from is `M′` and appears as an *observed*
+    // row below, because it cannot be inside the file that it addresses.
+    { label: 'Release assets (Arweave TXID)', value: identity.arweaveManifestTxId, kind: 'pinned' },
     { label: 'Source commit', value: identity.sourceCommit, kind: 'pinned' },
     {
       label: 'Files pinned',
@@ -115,6 +120,19 @@ export function buildPanel(
 
   const warnings: string[] = [];
   let status: PanelStatus = 'unverified';
+
+  // 12 §1.2's "the verification CLI checks both": the pinned asset manifest above, and the
+  // address this page was actually served from. Rendered even when it is *not* a content
+  // address, because a blank release row reads as "this release has no address" — which is
+  // a far stronger claim than "you are running a development build". Not a warning for the
+  // same reason: `localhost` is not a divergence.
+  if (baseTxid !== undefined) {
+    rows.push({
+      label: 'Served from (Arweave TXID)',
+      value: baseTxid.kind === 'txid' ? baseTxid.txid : 'not a content address',
+      kind: 'observed',
+    });
+  }
 
   if (selfCheck !== undefined) {
     rows.push({

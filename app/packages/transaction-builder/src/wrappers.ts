@@ -241,9 +241,45 @@ export type ApprovalStep =
     }
   | {
       /**
-       * This signer has already approved. Submitting again is refused by the runtime
-       * (`AlreadyApproved`), so the client refuses first with a reason rather than
-       * letting the user pay for a rejection.
+       * The recorded approvals **already** meet the threshold, so submitting `as_multi`
+       * with the full call dispatches it now — from any signatory, including one whose
+       * approval is already recorded.
+       *
+       * This is exactly the state `approve_as_multi` leaves behind: it stores a hash-only
+       * approval and never carries a call, so an N-of-N whose members all approved that
+       * way sits at `approvals.len() == threshold` with nothing dispatched. Somebody must
+       * then supply the call, and pallet-multisig lets them — in `operate` (49.0.0) the
+       * execution branch `maybe_call.filter(|_| approvals >= threshold)` is reached
+       * *before* the `AlreadyApproved` arm, so being on the list is not a bar to
+       * completing it.
+       *
+       * Classifying this as `already-approved` refused what the runtime accepts, which is
+       * the direction 15 §4.8's mirror rule forbids: it left a 2-of-2 whose members had
+       * both used `approve_as_multi` with no member able to complete their own multisig
+       * from the canonical client.
+       */
+      readonly kind: 'completes';
+      readonly maybeTimepoint: Timepoint;
+      readonly approvalsSoFar: number;
+      readonly approvalsNeeded: number;
+      /** Always true — this arm exists precisely because the inner call dispatches. */
+      readonly executes: true;
+      readonly dispatch: 'as_multi';
+      /**
+       * Whether this signer is among the recorded approvals. Either way the approval set
+       * does **not** grow: `maybe_pos` is filtered at `approvals < threshold`, so once the
+       * threshold is met the runtime records nothing. The confirm screen needs the
+       * distinction only for its wording — "your approval completes this" is false in
+       * both cases, because nobody's approval is being added.
+       */
+      readonly alreadyApproved: boolean;
+    }
+  | {
+      /**
+       * This signer has already approved and the threshold is **not** yet met, so a
+       * resubmission has nothing to do: `operate`'s `else` branch finds no insertion
+       * position and returns `AlreadyApproved`. Refused here with a reason rather than
+       * letting the user pay for the rejection.
        */
       readonly kind: 'already-approved';
       readonly maybeTimepoint: Timepoint;
@@ -285,7 +321,7 @@ export function deriveApproval(
     );
   }
   if (threshold === 1) {
-    // `as_multi` refuses threshold < 2 (`MinimumThreshold`; pallet-multisig 46.0.0 checks
+    // `as_multi` refuses threshold < 2 (`MinimumThreshold`; pallet-multisig 49.0.0 checks
     // it at three separate entry points). The 1-of-N path is `as_multi_threshold_1`, which
     // stores nothing and dispatches immediately — so there is no entry to consult even if
     // one were somehow present at this key, and reporting "approvals so far" for it would
@@ -310,6 +346,21 @@ export function deriveApproval(
     };
   }
   const approvalsSoFar = value.approvals.length;
+  // Threshold-met first, and the order is the whole fix. `operate` evaluates the execution
+  // branch before the `AlreadyApproved` arm, so "is this signer on the list" does not decide
+  // anything until the threshold is short — testing membership first inverted the runtime
+  // and refused a lawful completion.
+  if (approvalsSoFar >= threshold) {
+    return {
+      kind: 'completes',
+      maybeTimepoint: value.when,
+      approvalsSoFar,
+      approvalsNeeded: threshold,
+      executes: true,
+      dispatch: 'as_multi',
+      alreadyApproved: value.approvals.includes(signer),
+    };
+  }
   if (value.approvals.includes(signer)) {
     return {
       kind: 'already-approved',
