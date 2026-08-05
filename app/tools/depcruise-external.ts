@@ -28,6 +28,34 @@
 export const EXTERNAL = (names: string): string => `^(${names})(/|$)|/node_modules/(${names})/`;
 
 /**
+ * Every package that can open a chain connection, **in both the naming forms that reach it**.
+ *
+ * `polkadot-api` is an umbrella: its providers are separately published, separately
+ * installable **scoped** packages — `@polkadot-api/ws-provider`, `@polkadot-api/sm-provider`,
+ * `@polkadot-api/smoldot` — and they are already in this repo's store as transitive
+ * dependencies. The previous pattern was `EXTERNAL('polkadot-api|smoldot')`, whose bare arm
+ * is `^(polkadot-api|smoldot)(/|$)`: anchored at `^`, it **cannot match a specifier starting
+ * with `@`**. So a package that added `@polkadot-api/ws-provider` to its own `package.json`
+ * would get a working provider with the CI-fatal rule structurally unable to object.
+ *
+ * Measured rather than reasoned, by adding both scoped specifiers to the witness: they were
+ * reported by `witness-could-not-resolve` alone — which fires *because* they are not
+ * installed there — and by neither `witness-external-package-matcher` nor
+ * `witness-polkadot-api-non-signer-matcher`. Declaring the dependency is exactly what makes
+ * them resolvable, so that one rule stops firing at the same moment the import starts working.
+ *
+ * This is the third instance of V-86/V-92's class in these matchers, so it is written as a
+ * **wildcard with a named exception** rather than a list: an enumeration of provider packages
+ * goes stale the first time PAPI publishes another one, and goes stale silently.
+ *
+ * The exception is `@polkadot-api/descriptors`, which is not an external package at all —
+ * it is this workspace's own `packages/papi-descriptors` under its generated name. It carries
+ * generated type data and can construct nothing, so forbidding it would fail a future import
+ * that the danger this rule names does not cover.
+ */
+export const CHAIN_SDK_PACKAGES = 'polkadot-api|smoldot|@polkadot-api/(?!descriptors($|/))[^/]+';
+
+/**
  * The same trap, one layer in: a **workspace subpath export**.
  *
  * `@bleavit/signing/testing` resolves at build time through the package's `exports` map,
@@ -75,4 +103,13 @@ export const WORKSPACE_SUBPATH = (specifier: string, distPath: string): string =
  */
 export const POLKADOT_API_NON_SIGNER: string =
   '^polkadot-api(?!/(pjs-signer|signer)($|/))(/|$)' +
-  '|/node_modules/polkadot-api/(?!dist/reexports/(pjs-signer|signer)\\.)';
+  '|/node_modules/polkadot-api/(?!dist/reexports/(pjs-signer|signer)\\.)' +
+  // The scoped half, for `CHAIN_SDK_PACKAGES`' reason. `packages/signing` is exempted from
+  // `only-chain-client-opens-a-chain-connection` by path, so this pattern is the *whole* of
+  // what stops it reaching a provider — and without these two arms it stopped only the
+  // unscoped spelling. `@polkadot-api/pjs-signer` is the scoped form of the permitted
+  // subpath and is excluded here for the same reason `polkadot-api/pjs-signer` is above:
+  // it takes two callbacks and returns a signer, so it can construct nothing and read
+  // nothing. `descriptors` is excluded for `CHAIN_SDK_PACKAGES`' reason.
+  '|^@polkadot-api/(?!(pjs-signer|signer|descriptors)($|/))[^/]+' +
+  '|/node_modules/@polkadot-api/(?!(pjs-signer|signer|descriptors)/)';

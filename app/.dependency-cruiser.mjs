@@ -21,7 +21,7 @@
  * dynamic `import()` Node 22.18 type-strips. What remains here is the rule list, which is
  * data.
  */
-const { EXTERNAL, WORKSPACE_SUBPATH, POLKADOT_API_NON_SIGNER } = await import('./tools/depcruise-external.ts');
+const { CHAIN_SDK_PACKAGES, EXTERNAL, WORKSPACE_SUBPATH, POLKADOT_API_NON_SIGNER } = await import('./tools/depcruise-external.ts');
 const { HANDOFF_PATH, NON_LOCAL_DEPENDENCY_TYPES } = await import('./tools/handoff-packages.ts');
 
 export default {
@@ -96,7 +96,7 @@ export default {
         'the canonical client: it is N10\'s facade for third parties integrating the hosted ' +
         'question service, and nothing in `src/` may import it.',
       from: { pathNot: '^packages/(chain-client|bleavit-client-ts|papi-descriptors|signing)/' },
-      to: { path: EXTERNAL('polkadot-api|smoldot') },
+      to: { path: EXTERNAL(CHAIN_SDK_PACKAGES) },
     },
     {
       name: 'signing-may-only-reach-the-signer-surface',

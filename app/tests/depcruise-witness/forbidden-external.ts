@@ -44,3 +44,14 @@ import 'polkadot-api/ws-provider';
 // in `NON_LOCAL_DEPENDENCY_TYPES` precisely because `node:net` and `node:fs` are as much a
 // network and filesystem surface on a handoff path as any package.
 import 'node:http';
+
+// The SCOPED spelling of the same capability, and the third instance of V-86's class in
+// these matchers. `polkadot-api`'s providers are separately published, separately
+// installable packages — `@polkadot-api/ws-provider`, `@polkadot-api/sm-provider` — and the
+// bare arm of the old pattern (`^(polkadot-api|smoldot)(/|$)`) is anchored at `^`, so it
+// could never match a specifier starting with `@`. Measured before the repair: both lines
+// below were reported by `witness-could-not-resolve` alone, which fires *because* they are
+// not installed here — and declaring the dependency, which is what a package would do to
+// use one, is exactly what makes that rule stop firing. Both matchers must catch these.
+import '@polkadot-api/ws-provider';
+import '@polkadot-api/sm-provider';

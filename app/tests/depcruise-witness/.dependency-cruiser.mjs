@@ -5,7 +5,7 @@
 // cruising a graph with no edges in it. A witness that does not share the thing it
 // witnesses is decoration.
 const { default: production } = await import('../../.dependency-cruiser.mjs');
-const { EXTERNAL, WORKSPACE_SUBPATH, POLKADOT_API_NON_SIGNER } = await import('../../tools/depcruise-external.ts');
+const { CHAIN_SDK_PACKAGES, EXTERNAL, WORKSPACE_SUBPATH, POLKADOT_API_NON_SIGNER } = await import('../../tools/depcruise-external.ts');
 const { NON_LOCAL_DEPENDENCY_TYPES } = await import('../../tools/handoff-packages.ts');
 
 export default {
@@ -23,7 +23,7 @@ export default {
       name: 'witness-external-package-matcher',
       severity: 'error',
       from: { path: '^tests/depcruise-witness/' },
-      to: { path: EXTERNAL('polkadot-api|smoldot') },
+      to: { path: EXTERNAL(CHAIN_SDK_PACKAGES) },
     },
     {
       // The signing exemption's boundary. `packages/signing` may import
