@@ -10,6 +10,9 @@
     },
     "bleavit_recovery": {
       "metadata": "fixtures/chain-feed/3/metadata.scale"
+    },
+    "assethub_paseo": {
+      "metadata": "fixtures/foreign-chain-feed/asset-hub-paseo/2004002/metadata.scale"
     }
   }
 }

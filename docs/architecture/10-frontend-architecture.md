@@ -86,6 +86,29 @@ Values that shape a user's *discretionary judgment* — price charts, history ta
 
 Consistently with this honesty: the §8.4 sampling regime is stated for what it is — it detects sloppy and inconsistent forgeries and liveness failures; **it does not detect a self-consistent forgery of history at unreachable depth**. The only cross-check for deep history is comparing two independent snapshot producers, which the UI supports and discloses.
 
+### 2.4 Checkpoint age and the long-range bound (FE-P8 resolved, 2026-08-05)
+
+The relay light client warp-syncs from a **checkpoint compiled into the release** (§4.1). That checkpoint is the root of everything the client later calls `verified-finalized`, and its trustworthiness expires.
+
+**The threat.** A client warp-syncing from a checkpoint at era `E` trusts the GRANDPA authority set at `E`. Validators in that set who later unbond and withdraw their stake face no slashing, so once their stake is gone they can sign an alternative finalized chain forking from `E` at no cost. A client that begins from a stale checkpoint has no way to distinguish that chain from the real one — both carry valid signatures from the authority set it was told to trust. This is the standard weak-subjectivity bound, and it is not detectable after the fact: **everything the client learns through a compromised sync is compromised, including any figure it might use to check the sync.**
+
+**The bound, derived from the relay's own constants** (verified 2026-08-05 against the Fellowship-maintained Polkadot relay runtime and the Paseo relay runtime, which agree exactly — `SessionsPerEra = 6`, `EpochDuration = 4 h`, so an era is 24 h):
+
+| Constant | Value | What lapses |
+|---|---|---|
+| `SlashDeferDuration` | 27 eras = **27 days** | The deterrent. A slash for an offence at `E` is applied at `E + 27`; past that, an equivocation by the era-`E` set may no longer be punishable. |
+| `BondingDuration` | 28 eras = **28 days** | The stake. Bonded stake from era `E` may be withdrawn at `E + 28`, after which equivocating from that checkpoint is free. |
+
+Three normative rules follow:
+
+1. **A release whose checkpoint is 28 days or older MUST NOT present any value as `verified-finalized`.** The long-range guarantee has lapsed, so the claim is false — not weaker, false. The client enters a mode with the same surface as `WorkerFailed` (§3.2): the verification panel, docs and settings render, cached data renders with `stale-cache` badges, and signing is unavailable in normal mode. This is refusal, not degradation, and it is deliberately **not** `restricted` or `read-only-incompatible` — those describe a runtime whose *surface* is partly unknown, whereas this describes a client that cannot establish which chain it is on.
+2. **At 27 days the client warns prominently**, in the verification panel and above the fold. The deterrent has lapsed while the stake has not, which is exactly the window in which an attack becomes cheap before it becomes free.
+3. **The age is measured against the device clock, and that is deliberate.** The device clock is untrusted, but it is *independent of the attacker's chain*: an adversary who controls the network cannot move it. Deriving the age from chain state would ask the possibly-forged sync how old its own checkpoint is. The release therefore records the checkpoint's wall-clock timestamp in the signed release document, and the client compares that against the device clock. A device clock **behind** the checkpoint is itself a refusal (`FE-BOOT-005`) rather than an age of zero — a clock set to the past would silently disable this control entirely, which is the cheapest possible attack on it.
+
+**An earlier advisory is permitted and needs no derivation.** Warning sooner than 27 days is strictly conservative, so a release MAY set a lower advisory threshold; what may not move is the 28-day refusal, which is a chain constant and not a policy choice. If the relay's `BondingDuration` is ever amended, this bound moves with it — the client reads the two figures from the release document, which is produced from the verified relay constants rather than from a literal in frontend source (§5.4).
+
+---
+
 ---
 
 ## 3. Boot state machine
@@ -419,7 +442,7 @@ The client is rooted at **`app/`** in the chain repository — one workspace, on
 
 - **Shell** — `app/src/{application, components, routes, styles}`.
 - **Compilation units** — `app/src/features/{tx, analysis, handoff}` (§10.2).
-- **Packages** — `app/packages/{shared-types, chain-client, descriptors, protocol, simulation, transaction-builder, signing, contexts, intents, receipts, llm-handoff, ui, verify, local-index, providers, platform, mock-runtime}`.
+- **Packages** — `app/packages/{shared-types, chain-client, descriptors, protocol, simulation, transaction-builder, signing, handoff-envelope, contexts, intents, receipts, llm-handoff, ui, verify, local-index, providers, platform, mock-runtime}`.
 
 The names differ from the reviewed design; the **edges** are what carry the invariant, and they are preserved intact. `chain-client` is the reviewed `chain`; `transaction-builder` + `signing` together are the reviewed `wallet`; `protocol` keeps its name and its normative role, with `simulation` layered above it for what-if derivation only.
 
@@ -429,7 +452,8 @@ CI-fatal forbidden edges (dependency-cruiser, with the TypeScript project graph 
 - `chain-client` → anything above it
 - `providers` never imported by `transaction-builder` or `signing`
 - `shared-types` → **nothing** (it is the dependency-free root, and it MUST NOT contain `Finalized<T>`'s brand — §2.1)
-- `llm-handoff`, `contexts`, `intents`, `receipts` → `{transaction-builder, signing, providers, local-index}`; permitted: `→ {shared-types, chain-client, protocol}`
+- `llm-handoff`, `contexts`, `intents`, `receipts`, `handoff-envelope` → `{transaction-builder, signing, providers, local-index}`; permitted: `→ {shared-types, chain-client, protocol, handoff-envelope}` — **and `handoff-envelope` itself depends on nothing at all.** It carries the §13.1 envelope conventions (canonical JSON and the digest pre-image), which all three formats share and which must therefore have exactly one implementation; it is a separate package rather than a module inside `contexts` because `contexts` is the *outbound* half and depends on `chain-client` for `Finalized<T>`, while the **inbound** parser must not be able to reach a chain connection even transitively — §13's second load-bearing sentence is that the inbound format carries no chain state.
+- **No package on a handoff path imports anything external.** Not a network library, not a utility, not a node built-in: a denylist only forbids the libraries somebody thought of, and the transport here is files, the clipboard and the share sheet in every case. The client makes no network request on any handoff path (§13), and the rule that enforces it is the absence of a dependency rather than the absence of a name.
 - `platform` is the only package permitted to import a host or native SDK (`@tauri-apps/*`, `@parity/product-sdk`); `src/features/tx/**` may reference `platform` but never a concrete platform implementation
 - nothing outside test builds imports `mock-runtime` or `chain-client/testing`, and no signer adapter marked test-only may appear in a release chunk
 
@@ -489,7 +513,7 @@ The [VERIFY]/prototype epistemics of the reviewed design are retained deliberate
 | FE-P5 | Historical metadata retrievability via light client at depth | probe; else ship bounded metadata blobs per supported spec_version (§9.3) | affects backfill decode |
 | FE-P6 | Ledger Generic App + metadata-hash flow for a custom chain | hardware test | wallet support tier ([11](11-frontend-workflows.md)) |
 | FE-P7 | ANT n-of-m controller capability; two-pass manifest flow; undername immutability practice; resolver endpoints; manifest fallback behavior | ar.io testnet dry run of the full release pipeline | blocks distribution epic ([12](12-release-and-operations.md); D-16: single-key custody prohibited — launch blocks if neither n-of-m nor FROST materializes) |
-| FE-P8 | Long-range checkpoint policy: max safe release age before warning | analysis vs unbonding period | verification-panel copy |
+| FE-P8 | ~~Long-range checkpoint policy: max safe release age before warning~~ **RESOLVED 2026-08-05 — §2.4** | Derived from the relay's own constants rather than chosen: `BondingDuration` = 28 eras and `SlashDeferDuration` = 27 eras, at 6 sessions × 4 h = 24 h per era, verified against the Fellowship Polkadot relay runtime and the Paseo relay runtime (which agree exactly, so one bound covers both release targets — the risk this check retired was a client shipping Polkadot's number onto a testnet with a shorter one) | **Refuse** all `verified-finalized` claims at 28 days, **warn** at 27, measured against the *device* clock because the chain being checked is the one that may be forged |
 | FE-P9 | Bulletin mirror dry run (deferred D-Bulletin triggers T1–T4) | TestNet pipeline run | secondary mirror only; never canonical |
 | FE-P10 | Multi-MB Wasm extrinsic submission through smoldot/PAPI in-browser: transaction-pool/gossip size limits, peer banning on oversized transactions, mobile memory headroom ([11](11-frontend-workflows.md) §11.8.4) | instrumented testnet submission of a real runtime artifact (extends FE-P4) | gates the FE-15 upgrade-crank submission tier; the in-browser fetch + hash-verify path ships regardless, with the operator-CLI handoff as fallback |
 | FE-P11 | Handoff transports (§13.4): `navigator.share({ files })` availability across the browser/OS matrix, and confirmation that Web Share, the async Clipboard API and File System Access are **not** governed by CSP `connect-src`. The second half is load-bearing for §13's INV-FE-6 claim, so it is verified rather than assumed | read the Web Share security section, then a matrix test asserting a successful share and clipboard round-trip under `default-src 'none'` | decides whether Share ships as a primary or fallback transport. Conservative assumption in force until resolved: **clipboard and file are primary, Share is a fallback**; a negative result on the CSP half blocks §13 entirely and is the outcome to look for first |
@@ -532,7 +556,7 @@ The import path's only output is a `TxPreparation` entering **Draft**. It constr
 
 ### 13.3 Refusals
 
-`FE-HANDOFF-001..013`, joining the §9.4 taxonomy with the same discipline — fixed user copy, expert detail, and a documented recovery per code, no free text. The classes are: unknown schema, malformed document, unknown action, **foreign field inside `action`/`limits`**, wrong chain, newer-than-live runtime, limit missing/out-of-range/inconsistent, expired, digest mismatch, action infeasible at the refreshed block, scope refused, and export-from-unverified-state.
+`FE-HANDOFF-001..013`, joining the §9.4 taxonomy with the same discipline — fixed user copy, expert detail, and a documented recovery per code, no free text. The classes are: unknown schema, malformed document, unknown action, **foreign field inside a closed core object (`binding`, `action`, `limits`)**, wrong chain, newer-than-live runtime, limit missing/out-of-range/inconsistent, expired, digest mismatch, action infeasible at the refreshed block, scope refused, and export-from-unverified-state.
 
 **`FE-HANDOFF-009` is retired and MUST NOT be reassigned.** It was the replay refusal, deleted below. An error code is a user-facing identifier that appears in support threads, logs and documentation long after the release that emitted it, so the family carries a gap rather than renumbering the codes above it — a reused code is a worse defect than an absent one.
 

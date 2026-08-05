@@ -14,25 +14,37 @@ const toBinary = (base64) => {
   return bytes;
 };
 
-const descriptorValues$1 = import('./descriptors-Cl3foZIm.js').then((module) => module["Bleavit"]);
-const metadataTypes$1 = import('./metadataTypes-D5jJqTNo.js').then(
+const descriptorValues$2 = import('./descriptors-LM0qeaCh.js').then((module) => module["Bleavit"]);
+const metadataTypes$2 = import('./metadataTypes-BYQ0MV_D.js').then(
+  (module) => toBinary("default" in module ? module.default : module)
+);
+const asset$2 = {};
+const extensions$2 = {};
+const getMetadata$3 = () => import('./bleavit_metadata-DMzn9oLi.js').then(
+  (module) => toBinary("default" in module ? module.default : module)
+);
+const genesis$2 = void 0;
+const _allDescriptors$2 = { descriptors: descriptorValues$2, metadataTypes: metadataTypes$2, asset: asset$2, extensions: extensions$2, getMetadata: getMetadata$3, genesis: genesis$2 };
+
+const descriptorValues$1 = import('./descriptors-LM0qeaCh.js').then((module) => module["Bleavit_recovery"]);
+const metadataTypes$1 = import('./metadataTypes-BYQ0MV_D.js').then(
   (module) => toBinary("default" in module ? module.default : module)
 );
 const asset$1 = {};
 const extensions$1 = {};
-const getMetadata$2 = () => import('./bleavit_metadata-UBAOLIQX.js').then(
+const getMetadata$2 = () => import('./bleavit_recovery_metadata-PZuNElJ-.js').then(
   (module) => toBinary("default" in module ? module.default : module)
 );
 const genesis$1 = void 0;
 const _allDescriptors$1 = { descriptors: descriptorValues$1, metadataTypes: metadataTypes$1, asset: asset$1, extensions: extensions$1, getMetadata: getMetadata$2, genesis: genesis$1 };
 
-const descriptorValues = import('./descriptors-Cl3foZIm.js').then((module) => module["Bleavit_recovery"]);
-const metadataTypes = import('./metadataTypes-D5jJqTNo.js').then(
+const descriptorValues = import('./descriptors-LM0qeaCh.js').then((module) => module["Assethub_paseo"]);
+const metadataTypes = import('./metadataTypes-BYQ0MV_D.js').then(
   (module) => toBinary("default" in module ? module.default : module)
 );
 const asset = {};
 const extensions = {};
-const getMetadata$1 = () => import('./bleavit_recovery_metadata-B-QkPiqD.js').then(
+const getMetadata$1 = () => import('./assethub_paseo_metadata-DWquOdol.js').then(
   (module) => toBinary("default" in module ? module.default : module)
 );
 const genesis = void 0;
@@ -97,6 +109,24 @@ const XcmV4AssetAssetFilter = _Enum;
 const XcmV4AssetWildAsset = _Enum;
 const TransactionValidityUnknownTransaction = _Enum;
 const TransactionValidityTransactionSource = _Enum;
+const CommonClaimsEvent = _Enum;
+const ChildBountiesEvent = _Enum;
+const NominationPoolsPoolState = _Enum;
+const NominationPoolsCommissionClaimPermission = _Enum;
+const NominationPoolsClaimPermission = _Enum;
+const BagsListEvent = _Enum;
+const StakingRewardDestination = _Enum;
+const StakingForcing = _Enum;
+const GovernanceOrigin = _Enum;
+const NominationPoolsPalletFreezeReason = _Enum;
+const ClaimsStatementKind = _Enum;
+const TreasuryPaymentState = _Enum;
+const ChildBountyStatus = _Enum;
+const NominationPoolsBondExtra = _Enum;
+const StakingPalletConfigOpBig = _Enum;
+const StakingPalletConfigOp = _Enum;
+const NominationPoolsConfigOp = _Enum;
+const XcmVersionedAsset = _Enum;
 
 const metadatas = {};
 const getMetadata = async (codeHash) => {
@@ -107,4 +137,4 @@ const getMetadata = async (codeHash) => {
   return null;
 };
 
-export { ArithmeticError, BalanceStatus, BalancesAdjustmentDirection, BalancesTypesReasons, ConvictionVotingVoteAccountVote, ConvictionVotingVoteVoting, DigestItem, DispatchClass, MultiAddress, Phase, PreimageEvent, PreimageOldRequestStatus, PreimagePalletHoldReason, PreimageRequestStatus, PreimagesBounded, ReferendaTypesCurve, TokenError, TraitsScheduleDispatchTime, TransactionPaymentEvent, TransactionPaymentReleases, TransactionValidityTransactionSource, TransactionValidityUnknownTransaction, TransactionalError, UpgradeGoAhead, UpgradeRestriction, Version, VotingConviction, XcmPalletVersionMigrationStage, XcmV2JunctionBodyPart, XcmV2MultiassetWildFungibility, XcmV2OriginKind, XcmV3Instruction, XcmV3Junction, XcmV3JunctionBodyId, XcmV3JunctionNetworkId, XcmV3Junctions, XcmV3MaybeErrorCode, XcmV3MultiassetAssetId, XcmV3MultiassetAssetInstance, XcmV3MultiassetFungibility, XcmV3MultiassetMultiAssetFilter, XcmV3MultiassetWildMultiAsset, XcmV3Response, XcmV3TraitsError, XcmV3WeightLimit, XcmV4AssetAssetFilter, XcmV4AssetWildAsset, XcmV4Instruction, XcmV4Response, XcmV5AssetFilter, XcmV5Instruction, XcmV5Junction, XcmV5Junctions, XcmV5NetworkId, XcmV5WildAsset, XcmVersionedAssetId, XcmVersionedAssets, XcmVersionedLocation, XcmVersionedXcm, _allDescriptors$1 as bleavit, _allDescriptors as bleavit_recovery, getMetadata };
+export { ArithmeticError, BagsListEvent, BalanceStatus, BalancesAdjustmentDirection, BalancesTypesReasons, ChildBountiesEvent, ChildBountyStatus, ClaimsStatementKind, CommonClaimsEvent, ConvictionVotingVoteAccountVote, ConvictionVotingVoteVoting, DigestItem, DispatchClass, GovernanceOrigin, MultiAddress, NominationPoolsBondExtra, NominationPoolsClaimPermission, NominationPoolsCommissionClaimPermission, NominationPoolsConfigOp, NominationPoolsPalletFreezeReason, NominationPoolsPoolState, Phase, PreimageEvent, PreimageOldRequestStatus, PreimagePalletHoldReason, PreimageRequestStatus, PreimagesBounded, ReferendaTypesCurve, StakingForcing, StakingPalletConfigOp, StakingPalletConfigOpBig, StakingRewardDestination, TokenError, TraitsScheduleDispatchTime, TransactionPaymentEvent, TransactionPaymentReleases, TransactionValidityTransactionSource, TransactionValidityUnknownTransaction, TransactionalError, TreasuryPaymentState, UpgradeGoAhead, UpgradeRestriction, Version, VotingConviction, XcmPalletVersionMigrationStage, XcmV2JunctionBodyPart, XcmV2MultiassetWildFungibility, XcmV2OriginKind, XcmV3Instruction, XcmV3Junction, XcmV3JunctionBodyId, XcmV3JunctionNetworkId, XcmV3Junctions, XcmV3MaybeErrorCode, XcmV3MultiassetAssetId, XcmV3MultiassetAssetInstance, XcmV3MultiassetFungibility, XcmV3MultiassetMultiAssetFilter, XcmV3MultiassetWildMultiAsset, XcmV3Response, XcmV3TraitsError, XcmV3WeightLimit, XcmV4AssetAssetFilter, XcmV4AssetWildAsset, XcmV4Instruction, XcmV4Response, XcmV5AssetFilter, XcmV5Instruction, XcmV5Junction, XcmV5Junctions, XcmV5NetworkId, XcmV5WildAsset, XcmVersionedAsset, XcmVersionedAssetId, XcmVersionedAssets, XcmVersionedLocation, XcmVersionedXcm, _allDescriptors as assethub_paseo, _allDescriptors$2 as bleavit, _allDescriptors$1 as bleavit_recovery, getMetadata };

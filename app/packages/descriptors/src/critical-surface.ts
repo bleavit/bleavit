@@ -1,5 +1,5 @@
 /**
- * GENERATED — do not edit. Source: `tools/release/surface-manifest.json` (contract v23).
+ * GENERATED — do not edit. Source: `tools/release/surface-manifest.json` (contract v27).
  * Regenerate: `pnpm -C app run surface:generate`; verified by `pnpm -C app run surface:check`.
  *
  * 10 §5.2's `CRITICAL_SURFACE`: every runtime API, storage item, constant and event the
@@ -29,7 +29,7 @@ export interface CriticalSurfaceEntry {
   readonly citation: string;
 }
 
-export const INTEGRATION_CONTRACT_VERSION = 23;
+export const INTEGRATION_CONTRACT_VERSION = 27;
 
 /** Manifest entries with no metadata surface to probe (raw fixed-layout key, chain properties). */
 export const UNPROBED_MANIFEST_ENTRIES = 2;
@@ -50,6 +50,7 @@ export type SurfaceId =
   | "api.epoch_status"
   | "api.execution_queue"
   | "api.hosted_report"
+  | "api.is_reserved_protocol_destination"
   | "api.nav"
   | "api.open_oracle_rounds"
   | "api.params"
@@ -264,14 +265,25 @@ export type SurfaceId =
   | "storage.attestor.next_attestation_id"
   | "storage.attestor.revocations"
   | "storage.client_registry.clients"
+  | "storage.constitution.capabilities"
   | "storage.constitution.params"
   | "storage.constitution.phase_flags"
+  | "storage.conviction_voting.class_locks_for"
+  | "storage.conviction_voting.voting_for"
   | "storage.epoch.cohorts"
   | "storage.epoch.epoch_of"
   | "storage.epoch.intake_queue"
   | "storage.epoch.proposals"
   | "storage.epoch.recent_cohort_summaries"
+  | "storage.epoch.resource_locks"
+  | "storage.execution_guard.attestation_bindings"
+  | "storage.execution_guard.dead_man_freeze"
   | "storage.execution_guard.execution_records"
+  | "storage.execution_guard.expedited"
+  | "storage.execution_guard.gate_suspension"
+  | "storage.execution_guard.hard_gate_breach"
+  | "storage.execution_guard.held_resources"
+  | "storage.execution_guard.migration_halt"
   | "storage.execution_guard.queue"
   | "storage.execution_guard.ratifications"
   | "storage.foreign_assets.account"
@@ -286,18 +298,28 @@ export type SurfaceId =
   | "storage.ledger.vaults"
   | "storage.market.baseline_market_of"
   | "storage.market.markets"
+  | "storage.multisig.multisigs"
   | "storage.oracle.component_values"
   | "storage.oracle.reporters"
   | "storage.oracle.reserve_health"
   | "storage.oracle.rounds"
   | "storage.oracle.watchtowers"
+  | "storage.preimage.preimage_for"
+  | "storage.preimage.status_for"
+  | "storage.proxy.proxies"
   | "storage.question_service.questions"
   | "storage.question_service.reports"
+  | "storage.referenda.deciding_count"
+  | "storage.referenda.referendum_count"
+  | "storage.referenda.referendum_info_for"
+  | "storage.referenda.track_queue"
+  | "storage.scheduler.agenda"
   | "storage.service_ledger.baseline_vaults"
   | "storage.service_ledger.position_totals"
   | "storage.service_ledger.positions"
   | "storage.service_ledger.vaults"
   | "storage.system.account"
+  | "storage.system.events"
   | "storage.welfare.gate_breach_flags"
   | "storage.welfare.metric_specs"
   | "storage.welfare.snapshots";
@@ -308,6 +330,7 @@ export const CRITICAL_SURFACE: readonly CriticalSurfaceEntry[] = [
   { id: "api.epoch_status", compatGroup: "apis", pallet: "FutarchyApi", member: "epoch_status", required: true, citation: "02 §3" },
   { id: "api.execution_queue", compatGroup: "apis", pallet: "FutarchyApi", member: "execution_queue", required: true, citation: "02 §3" },
   { id: "api.hosted_report", compatGroup: "apis", pallet: "FutarchyApi", member: "hosted_report", required: true, citation: "02 §3; 02 §4a" },
+  { id: "api.is_reserved_protocol_destination", compatGroup: "apis", pallet: "FutarchyApi", member: "is_reserved_protocol_destination", required: true, citation: "02 §3; 11 §11.5 P-9" },
   { id: "api.nav", compatGroup: "apis", pallet: "FutarchyApi", member: "nav", required: true, citation: "02 §3" },
   { id: "api.open_oracle_rounds", compatGroup: "apis", pallet: "FutarchyApi", member: "open_oracle_rounds", required: true, citation: "02 §3" },
   { id: "api.params", compatGroup: "apis", pallet: "FutarchyApi", member: "params", required: true, citation: "02 §3" },
@@ -522,14 +545,25 @@ export const CRITICAL_SURFACE: readonly CriticalSurfaceEntry[] = [
   { id: "storage.attestor.next_attestation_id", compatGroup: "query", pallet: "Attestor", member: "NextAttestationId", required: true, citation: "02 §7.5" },
   { id: "storage.attestor.revocations", compatGroup: "query", pallet: "Attestor", member: "Revocations", required: true, citation: "02 §7.5" },
   { id: "storage.client_registry.clients", compatGroup: "query", pallet: "ClientRegistry", member: "Clients", required: true, citation: "02 §4a; 02 §7" },
+  { id: "storage.constitution.capabilities", compatGroup: "query", pallet: "Constitution", member: "Capabilities", required: true, citation: "02 §7.3" },
   { id: "storage.constitution.params", compatGroup: "query", pallet: "Constitution", member: "Params", required: true, citation: "02 §7.3" },
   { id: "storage.constitution.phase_flags", compatGroup: "query", pallet: "Constitution", member: "PhaseFlags", required: true, citation: "02 §7.3" },
+  { id: "storage.conviction_voting.class_locks_for", compatGroup: "query", pallet: "ConvictionVoting", member: "ClassLocksFor", required: true, citation: "02 §7.6" },
+  { id: "storage.conviction_voting.voting_for", compatGroup: "query", pallet: "ConvictionVoting", member: "VotingFor", required: true, citation: "02 §7.6" },
   { id: "storage.epoch.cohorts", compatGroup: "query", pallet: "Epoch", member: "Cohorts", required: true, citation: "02 §7.1" },
   { id: "storage.epoch.epoch_of", compatGroup: "query", pallet: "Epoch", member: "EpochOf", required: true, citation: "02 §7.1" },
   { id: "storage.epoch.intake_queue", compatGroup: "query", pallet: "Epoch", member: "IntakeQueue", required: true, citation: "02 §7.1" },
   { id: "storage.epoch.proposals", compatGroup: "query", pallet: "Epoch", member: "Proposals", required: true, citation: "02 §7.1" },
   { id: "storage.epoch.recent_cohort_summaries", compatGroup: "query", pallet: "Epoch", member: "RecentCohortSummaries", required: true, citation: "02 §7.1" },
+  { id: "storage.epoch.resource_locks", compatGroup: "query", pallet: "Epoch", member: "ResourceLocks", required: true, citation: "02 §7.1" },
+  { id: "storage.execution_guard.attestation_bindings", compatGroup: "query", pallet: "ExecutionGuard", member: "AttestationBindings", required: true, citation: "02 §7.8" },
+  { id: "storage.execution_guard.dead_man_freeze", compatGroup: "query", pallet: "ExecutionGuard", member: "DeadManFreeze", required: true, citation: "02 §7.8" },
   { id: "storage.execution_guard.execution_records", compatGroup: "query", pallet: "ExecutionGuard", member: "ExecutionRecords", required: true, citation: "02 §7.4" },
+  { id: "storage.execution_guard.expedited", compatGroup: "query", pallet: "ExecutionGuard", member: "Expedited", required: true, citation: "02 §7.8" },
+  { id: "storage.execution_guard.gate_suspension", compatGroup: "query", pallet: "ExecutionGuard", member: "GateSuspension", required: true, citation: "02 §7.8" },
+  { id: "storage.execution_guard.hard_gate_breach", compatGroup: "query", pallet: "ExecutionGuard", member: "HardGateBreach", required: true, citation: "02 §7.8" },
+  { id: "storage.execution_guard.held_resources", compatGroup: "query", pallet: "ExecutionGuard", member: "HeldResources", required: true, citation: "02 §7.8" },
+  { id: "storage.execution_guard.migration_halt", compatGroup: "query", pallet: "ExecutionGuard", member: "MigrationHalt", required: true, citation: "02 §7.8" },
   { id: "storage.execution_guard.queue", compatGroup: "query", pallet: "ExecutionGuard", member: "Queue", required: true, citation: "02 §7.4" },
   { id: "storage.execution_guard.ratifications", compatGroup: "query", pallet: "ExecutionGuard", member: "Ratifications", required: true, citation: "02 §7.4" },
   { id: "storage.foreign_assets.account", compatGroup: "query", pallet: "ForeignAssets", member: "Account", required: true, citation: "02 §7.4; 02 §8" },
@@ -544,18 +578,28 @@ export const CRITICAL_SURFACE: readonly CriticalSurfaceEntry[] = [
   { id: "storage.ledger.vaults", compatGroup: "query", pallet: "ConditionalLedger", member: "Vaults", required: true, citation: "02 §7.4" },
   { id: "storage.market.baseline_market_of", compatGroup: "query", pallet: "Market", member: "BaselineMarketOf", required: true, citation: "02 §7.4" },
   { id: "storage.market.markets", compatGroup: "query", pallet: "Market", member: "Markets", required: true, citation: "02 §7.4" },
+  { id: "storage.multisig.multisigs", compatGroup: "query", pallet: "Multisig", member: "Multisigs", required: true, citation: "02 §7.6" },
   { id: "storage.oracle.component_values", compatGroup: "query", pallet: "Oracle", member: "ComponentValues", required: true, citation: "02 §7.2" },
   { id: "storage.oracle.reporters", compatGroup: "query", pallet: "Oracle", member: "Reporters", required: true, citation: "02 §7.2" },
   { id: "storage.oracle.reserve_health", compatGroup: "query", pallet: "Oracle", member: "ReserveHealth", required: true, citation: "02 §7.2" },
   { id: "storage.oracle.rounds", compatGroup: "query", pallet: "Oracle", member: "Rounds", required: true, citation: "02 §7.2" },
   { id: "storage.oracle.watchtowers", compatGroup: "query", pallet: "Oracle", member: "Watchtowers", required: true, citation: "02 §7.2" },
+  { id: "storage.preimage.preimage_for", compatGroup: "query", pallet: "Preimage", member: "PreimageFor", required: true, citation: "02 §7.6" },
+  { id: "storage.preimage.status_for", compatGroup: "query", pallet: "Preimage", member: "StatusFor", required: true, citation: "02 §7.6" },
+  { id: "storage.proxy.proxies", compatGroup: "query", pallet: "Proxy", member: "Proxies", required: true, citation: "02 §7.6" },
   { id: "storage.question_service.questions", compatGroup: "query", pallet: "QuestionService", member: "Questions", required: true, citation: "02 §4a; 02 §7" },
   { id: "storage.question_service.reports", compatGroup: "query", pallet: "QuestionService", member: "Reports", required: true, citation: "02 §4a; 02 §7" },
+  { id: "storage.referenda.deciding_count", compatGroup: "query", pallet: "Referenda", member: "DecidingCount", required: true, citation: "02 §7.6" },
+  { id: "storage.referenda.referendum_count", compatGroup: "query", pallet: "Referenda", member: "ReferendumCount", required: true, citation: "02 §7.6" },
+  { id: "storage.referenda.referendum_info_for", compatGroup: "query", pallet: "Referenda", member: "ReferendumInfoFor", required: true, citation: "02 §7.6" },
+  { id: "storage.referenda.track_queue", compatGroup: "query", pallet: "Referenda", member: "TrackQueue", required: true, citation: "02 §7.6" },
+  { id: "storage.scheduler.agenda", compatGroup: "query", pallet: "Scheduler", member: "Agenda", required: true, citation: "02 §7.6" },
   { id: "storage.service_ledger.baseline_vaults", compatGroup: "query", pallet: "ServiceLedger", member: "BaselineVaults", required: true, citation: "02 §7.1; 02 §7.4" },
   { id: "storage.service_ledger.position_totals", compatGroup: "query", pallet: "ServiceLedger", member: "PositionTotals", required: true, citation: "02 §7.1; 02 §7.4" },
   { id: "storage.service_ledger.positions", compatGroup: "query", pallet: "ServiceLedger", member: "Positions", required: true, citation: "02 §7.1; 02 §7.4" },
   { id: "storage.service_ledger.vaults", compatGroup: "query", pallet: "ServiceLedger", member: "Vaults", required: true, citation: "02 §7.1; 02 §7.4" },
   { id: "storage.system.account", compatGroup: "query", pallet: "System", member: "Account", required: true, citation: "02 §7.4" },
+  { id: "storage.system.events", compatGroup: "query", pallet: "System", member: "Events", required: true, citation: "02 §7.6" },
   { id: "storage.welfare.gate_breach_flags", compatGroup: "query", pallet: "Welfare", member: "GateBreachFlags", required: true, citation: "02 §7.4" },
   { id: "storage.welfare.metric_specs", compatGroup: "query", pallet: "Welfare", member: "MetricSpecs", required: true, citation: "02 §7.4" },
   { id: "storage.welfare.snapshots", compatGroup: "query", pallet: "Welfare", member: "Snapshots", required: true, citation: "02 §7.4" },
