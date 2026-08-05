@@ -357,6 +357,16 @@ jobs:
         # obvious way would have carried an external import with every gate green.
         # This reads what was actually emitted, which reflects source AND compiler.
         run: pnpm run check:handoff-emitted
+      - name: Every meaning-changing fact has an emitter (11 §11.2 constraint 3)
+        working-directory: app
+        # The defect class this repository keeps rediscovering: a control defined and
+        # unreachable. FE-HANDOFF-012 shipped with zero emitting call sites, and no green
+        # run distinguishes that from a code that never fires. These five facts are the
+        # highest-consequence instance — each changes the meaning of a signature — and each
+        # has exactly one call site, so losing one would leave every existing test passing.
+        # Facts with no emitter yet are DECLARED with the milestone that will supply one,
+        # and a stale declaration fails, so the promise cannot become a permanent excuse.
+        run: pnpm run check:above-fold
       - name: Emitted-import gate witness
         working-directory: app
         run: pnpm run check:handoff-emitted:witness
