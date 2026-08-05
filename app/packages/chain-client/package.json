@@ -24,6 +24,7 @@
   },
   "dependencies": {
     "@bleavit/shared-types": "workspace:*",
+    "@polkadot-api/substrate-bindings": "0.20.3",
     "polkadot-api": "2.1.8"
   }
 }
