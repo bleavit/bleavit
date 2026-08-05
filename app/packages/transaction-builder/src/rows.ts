@@ -320,7 +320,7 @@ const P9: readonly PreconditionClause[] = [
   // domain-separated address namespace plus a set of PalletId-derived singletons, which
   // is not storage. There was therefore no `SurfaceId` to cite and the clause was simply
   // absent: a user could be walked through a green precondition table to a signature the
-  // runtime then refuses (SQ-586).
+  // runtime then refuses (SQ-588).
   //
   // It reads the chain rather than recomputing the namespace locally, and that is §11.4
   // rule 2 rather than taste: every row here must be *an exact chain read*, and a client

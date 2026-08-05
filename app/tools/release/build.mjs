@@ -181,7 +181,7 @@ function readChainIdentity(sources) {
  * `release.json` MUST record the Asset Hub descriptor metadata hashes as well as Bleavit's:
  * the funding flow's second light-client connection pins them, and Asset Hub upgrades ride
  * the Fellowship's schedule rather than this protocol's governance. The set is **F4's**
- * deliverable and is blocked on a network decision only the user can make (SQ-585: Paseo or
+ * deliverable and is blocked on a network decision only the user can make (SQ-587: Paseo or
  * Polkadot), so it is a named readiness blocker rather than a silently absent field — the
  * shape a reader would otherwise mistake for "there is nothing to pin here".
  */
@@ -192,7 +192,7 @@ function readAssetHub(sources) {
     return {
       assetHub: { network: declared.network ?? null, descriptorMetadataHashes: {} },
       blockers: [
-        'Asset Hub descriptor set is unpinned (12 §1.1/§1.6, D-12) — F4, blocked on SQ-585 ' +
+        'Asset Hub descriptor set is unpinned (12 §1.1/§1.6, D-12) — F4, blocked on SQ-587 ' +
           '(which network a release targets)',
       ],
     };

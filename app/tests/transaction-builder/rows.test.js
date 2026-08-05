@@ -268,7 +268,7 @@ test('P-9 checks the protocol-destination refusal, and does it as a CHAIN READ',
   // `ledger.transfer` refuses a protocol destination, and the runtime's test is a
   // `Contains` implementation — not storage — so there was no `SurfaceId` to cite and the
   // clause was simply absent. A user could be walked through a green precondition table
-  // to a signature the runtime then refuses (SQ-586).
+  // to a signature the runtime then refuses (SQ-588).
   const clause = rowsFor('P-9', 'USDC').find((c) => c.surface === 'api.is_reserved_protocol_destination');
   assert.ok(clause, 'P-9 lost the protocol-destination clause');
 

@@ -157,7 +157,7 @@ impl_runtime_apis! {
             // The exact predicate `ledger.transfer` refuses on, read through the same
             // `Contains` implementation the pallet is configured with rather than a
             // restatement of it — a second copy is a second answer, and the client
-            // would inherit whichever one drifted (SQ-586).
+            // would inherit whichever one drifted (SQ-588).
             // Fully qualified: `impl_runtime_apis!` expands into its own module, so a
             // `use` at the top of this file does not bring the trait into scope here.
             <<Runtime as pallet_conditional_ledger::Config<()>>::ReservedProtocolDestinations

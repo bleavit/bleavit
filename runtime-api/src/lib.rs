@@ -88,7 +88,7 @@ sp_api::decl_runtime_apis! {
         /// ownership/refcount state for deposit exemption and is strictly narrower:
         /// classification does not depend on it, because every canonical
         /// future/present/past book address is reserved by namespace whether or not a
-        /// book currently references it (SQ-586). A client bound to the narrower
+        /// book currently references it (SQ-588). A client bound to the narrower
         /// predicate would pass a row the runtime then refuses.
         fn is_reserved_protocol_destination(who: AccountId) -> bool;
     }
