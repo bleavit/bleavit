@@ -44,9 +44,9 @@
 
 import {
   addRange,
-  selfRange,
+  rangeForSource,
   type Coverage,
-  type RangeOrigin,
+  type HeaderSource,
 } from './coverage.js';
 import {
   attributedExtrinsics,
@@ -122,7 +122,7 @@ export async function ingestBlock(
   coverage: Coverage,
   scan: FinalizedBlockScan,
   watched: ReadonlySet<string>,
-  headerOrigin: RangeOrigin,
+  headerSource: HeaderSource,
   ports: LoopPorts,
 ): Promise<IngestResult> {
   // Throws on a bad extrinsic index, which is correct here too: a block we cannot attribute
@@ -169,9 +169,9 @@ export async function ingestBlock(
           `${bodies.length}; decoding at that index would read a different extrinsic`,
       );
     }
-    // Provenance follows the **header**, never the fetch — §6.5. Derived here from the same
+    // Provenance follows the **header**, never the fetch — §6.5. Derived from the same
     // argument that decides the coverage range's origin, so the two cannot disagree.
-    const provenance = bodyProvenance(headerOrigin);
+    const provenance = bodyProvenance(headerSource.origin);
     rows = indices.map((index) => ({
       key: txRowKey(scan.number, index),
       blockNumber: scan.number,
@@ -184,7 +184,15 @@ export async function ingestBlock(
   // One block at a time. `addRange` joins genuinely adjacent same-origin ranges and nothing
   // else, so a subscription that resumed past a gap leaves that gap as a hole rather than
   // claiming it — the reconnect route to the promotion 10 §6.3 forbids.
-  const next = addRange(coverage, selfRange(scan.number, scan.number, ports.now()));
+  //
+  // **From `headerSource`, not from `selfRange`.** This line read `selfRange(...)`
+  // unconditionally while the comment above the rows claimed both were derived from one
+  // argument. They were not: a block ingested behind an `operator` header stored rows
+  // labelled `provider` and a coverage range labelled `self`, so `isVerifiedAt` answered
+  // `true` for it. That is the promotion 10 §2.2 says has no path — reached through
+  // backfill rather than through a merge, and invisible to every test that only checked
+  // the rows.
+  const next = addRange(coverage, rangeForSource(headerSource, scan.number, scan.number, ports.now()));
 
   // Computed before the write so the adapter can commit both atomically, **returned** only
   // after it resolves. The distinction is the whole of rule 1: computing early is fine,
@@ -217,7 +225,7 @@ export async function runIngest(
   coverage: Coverage,
   scans: AsyncIterable<FinalizedBlockScan> | Iterable<FinalizedBlockScan>,
   watched: ReadonlySet<string>,
-  headerOrigin: RangeOrigin,
+  headerSource: HeaderSource,
   ports: LoopPorts,
 ): Promise<RunResult> {
   let current = coverage;
@@ -226,7 +234,7 @@ export async function runIngest(
   for await (const scan of scans as AsyncIterable<FinalizedBlockScan>) {
     let result: IngestResult;
     try {
-      result = await ingestBlock(current, scan, watched, headerOrigin, ports);
+      result = await ingestBlock(current, scan, watched, headerSource, ports);
     } catch (error) {
       const stoppedAt =
         error instanceof IngestLoopError

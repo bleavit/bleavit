@@ -449,11 +449,28 @@ const P12: readonly PreconditionClause[] = [
   // 11. `FreezeActive` (hard gate) — the guard latch and the welfare flags it mirrors.
   clause('P-12', 'no hard welfare-gate breach is latched', 'storage.execution_guard.hard_gate_breach', 'storage', 'chain'),
   clause('P-12', 'no hard-gate daily breach flag is set', 'storage.welfare.gate_breach_flags', 'storage', 'chain'),
-  // 12. `FreezeActive` (dead-man, ledger freeze, migration halt) and the expedited exemption.
+  // 12. `FreezeActive`, the never-waived half (11 §11.5 row 12). The guard's own latch and
+  //     the DEAD_MAN_ENGAGED phase-flag bit are two reads and two `ensure!` operands; the
+  //     D-9 exemption reaches neither.
   clause('P-12', 'the dead-man switch is not engaged', 'storage.execution_guard.dead_man_freeze', 'storage', 'chain'),
-  clause('P-12', 'PB-LEDGER-FREEZE and the dead-man flag are clear', 'storage.constitution.phase_flags', 'storage', 'chain'),
-  clause('P-12', 'no migration halt is in force', 'storage.execution_guard.migration_halt', 'storage', 'chain'),
-  clause('P-12', 'or this proposal holds the expedited exemption', 'storage.execution_guard.expedited', 'storage', 'chain'),
+  clause('P-12', 'the dead-man phase flag is clear', 'storage.constitution.phase_flags', 'storage', 'chain'),
+  // 13. `FreezeActive`, the half the expedited lane waives (11 §11.5 row 13; 09 §3.1).
+  //
+  //     The runtime is `ensure!(!(ledger_freeze || migration_halt) || expedited)` — a waiver
+  //     over the **conjunction**. That is written here as two `anyOf` groups sharing the
+  //     expedited clause, because `(¬L ∨ E) ∧ (¬M ∨ E)` ≡ `(¬L ∧ ¬M) ∨ E`. The distributed
+  //     form is why the flat group model needs no nesting to express this.
+  //
+  //     Both halves of getting this wrong are live. Leaving the exemption ungrouped — as
+  //     this list did — makes it a *requirement*, so the client refuses the emergency
+  //     upgrade during exactly the freeze the lane exists for. Putting all four freeze
+  //     clauses in one group instead would let any single one satisfy the whole obligation,
+  //     including waiving the dead-man latch. The first is fail-closed, the second
+  //     fail-open, and only the runtime's own grouping is neither.
+  clause('P-12', 'PB-LEDGER-FREEZE is clear', 'storage.constitution.phase_flags', 'storage', 'chain', { anyOf: 'P-12/ledger-freeze-or-expedited' }),
+  clause('P-12', 'or this proposal holds the expedited exemption', 'storage.execution_guard.expedited', 'storage', 'chain', { anyOf: 'P-12/ledger-freeze-or-expedited' }),
+  clause('P-12', 'no migration halt is in force', 'storage.execution_guard.migration_halt', 'storage', 'chain', { anyOf: 'P-12/migration-halt-or-expedited' }),
+  clause('P-12', 'or this proposal holds the expedited exemption', 'storage.execution_guard.expedited', 'storage', 'chain', { anyOf: 'P-12/migration-halt-or-expedited' }),
   // 13. Batch bounds and the SafetyFilter closure over the decoded preimage.
   clause('P-12', 'the decoded batch is within its call, size and weight bounds', 'api.execution_queue', 'runtime-api', 'chain'),
 ];

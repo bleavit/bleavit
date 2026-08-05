@@ -28,20 +28,38 @@ import * as signingExports from '@bleavit/signing';
 const ALICE = '5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY';
 const BOB = '5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty';
 
-const signerFor = (address) => ({
+/**
+ * @param address the account this signer holds
+ * @param opts `withSignTx` models a fully capable extension — the case that must STILL not
+ *   yield `decoded-payload`, because the capability also depends on this client being able
+ *   to call it. `record` captures which channel was used, so a test can assert the signing
+ *   path rather than only the descriptor.
+ */
+const signerFor = (address, opts = {}) => ({
   publicKey: new Uint8Array(32),
   // Deterministic and payload-derived, so a test cannot pass on a constant.
-  signBytes: async (data) => Uint8Array.from([data.length & 0xff, address.charCodeAt(1) & 0xff, 0xab]),
+  signBytes: async (data) => {
+    opts.record?.push('signBytes');
+    return Uint8Array.from([data.length & 0xff, address.charCodeAt(1) & 0xff, 0xab]);
+  },
+  ...(opts.withSignTx
+    ? {
+        signTx: async () => {
+          opts.record?.push('signTx');
+          return Uint8Array.from([0xff]);
+        },
+      }
+    : {}),
 });
 
-function fakeApi(extensions, accounts = [ALICE]) {
+function fakeApi(extensions, accounts = [ALICE], opts = {}) {
   let live = accounts;
   return {
     api: {
       getInjectedExtensions: () => extensions,
       connectInjectedExtension: async (name) => ({
         name,
-        getAccounts: () => live.map((address) => ({ address, polkadotSigner: signerFor(address) })),
+        getAccounts: () => live.map((address) => ({ address, polkadotSigner: signerFor(address, opts) })),
       }),
     },
     setAccounts: (next) => { live = next; },
@@ -78,31 +96,66 @@ test('the descriptor names the extension rather than "Browser extension"', async
   assert.notEqual(INJECTED_DESCRIPTOR('subwallet').id, descriptor.id);
 });
 
-test('decoded-payload is granted ONLY when the extension exposes signTx (#17)', () => {
-  // **This test previously asserted the defect.** It required `decoded-payload` on a
-  // descriptor built with no decode channel at all, while the adapter signed through
-  // `signBytes` — so the suite certified the false claim rather than catching it. PAPI's
-  // `signBytes` signs "an arbitrary payload" and may refuse extrinsic-shaped bytes; only
-  // `signTx` hands the extension the metadata it needs to render the call (11 §11.3).
-  const withoutDecode = INJECTED_DESCRIPTOR('talisman');
-  assert.ok(withoutDecode.capabilities.has('external-key-custody'));
+test('the injected signer cannot claim a decode it cannot perform', async () => {
+  // **This test has asserted the wrong thing twice.** First it required `decoded-payload`
+  // on a descriptor with no decode channel at all, certifying the false claim. Then it
+  // required the grant whenever the *extension* exposed `signTx` — which reads like the
+  // fix and is not one, because the grant followed the counterparty while `sign()` kept
+  // using `signBytes`. Both versions passed. Both told the user their wallet had rendered
+  // a call it never saw.
+  //
+  // The capability needs BOTH conditions, and the second is the one about us:
+  //
+  //   1. the extension exposes `signTx` (a fact about the counterparty), and
+  //   2. this adapter can *call* it — `SignTxFn` takes call data, signed extensions,
+  //      metadata and a block number as four arguments, and a `TxPreparation` carries one
+  //      opaque `scaleHex`. The app has no extrinsic encoder, so there is nothing to pass.
+  //
+  // (2) is false today, so the grant is absent however capable the extension is. When an
+  // encoder lands and (2) becomes true, this test fails and re-granting is a deliberate
+  // edit rather than a quiet one.
+  const descriptor = INJECTED_DESCRIPTOR('talisman');
+  assert.ok(descriptor.capabilities.has('external-key-custody'));
   assert.equal(
-    withoutDecode.capabilities.has('decoded-payload'),
+    descriptor.capabilities.has('decoded-payload'),
     false,
-    'an extension that only signs raw bytes shows the user an opaque blob',
+    'signBytes shows the user an opaque blob; the capability must not be claimed for it',
   );
 
-  const withDecode = INJECTED_DESCRIPTOR('talisman', async () => new Uint8Array([1]));
-  assert.ok(withDecode.capabilities.has('decoded-payload'));
-  // ...and the grant records that it was *proven* rather than attested.
-  const g = withDecode.grants.find((x) => x.capability === 'decoded-payload');
-  assert.match(g.basis, /^proven:/);
+  // ...and it stays absent when the extension is fully capable, which is the half the
+  // previous version got wrong. A descriptor built from a `signTx`-exposing extension is
+  // still built by an adapter that will call `signBytes`.
+  const { api } = fakeApi(['talisman'], [ALICE], { withSignTx: true });
+  const adapter = await connectInjected(api, 'talisman', 'Bleavit');
+  assert.equal(
+    adapter.descriptor.capabilities.has('decoded-payload'),
+    false,
+    'a capable extension does not make the CLIENT capable — condition (2) is still false',
+  );
 
-  // Neither of the other two, under either construction.
-  for (const d of [withoutDecode, withDecode]) {
+  for (const d of [descriptor, adapter.descriptor]) {
     assert.equal(d.capabilities.has('metadata-hash'), false, 'metadata-hash: the runtime emits no digest, so mode 1 is rejected on chain (SQ-594/B21)');
     assert.equal(d.capabilities.has('hashed-payload'), false);
   }
+});
+
+test('the signature really is produced by the channel the capabilities describe', async () => {
+  // The anti-drift assertion neither earlier version made: it reads which function the
+  // adapter *called*. Every previous test inspected the descriptor and none watched the
+  // signing path, which is exactly how a grant and a channel disagreed through two rounds
+  // of review. If `sign()` is ever routed through `signTx`, this fails and the capability
+  // has to be revisited in the same edit.
+  const called = [];
+  const { api } = fakeApi(['talisman'], [ALICE], { withSignTx: true, record: called });
+  const adapter = await connectInjected(api, 'talisman', 'Bleavit');
+  await adapter.sign(request(ALICE));
+
+  assert.deepEqual(called, ['signBytes']);
+  assert.equal(
+    adapter.descriptor.capabilities.has('decoded-payload'),
+    false,
+    'signBytes was used, so decoded-payload must be absent — the two are one fact',
+  );
 });
 
 test('signing an account the extension does not hold is refused before the prompt', async () => {

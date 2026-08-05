@@ -8,16 +8,24 @@
  * behind a manual step, and the logic here is where the safety properties live.
  *
  * **What this adapter declares, and what it refuses to.** An injected extension proves
- * `external-key-custody` — the key never enters this app. `decoded-payload` is granted
- * **only when the connected extension exposes `signTx`**, and that condition was added by
- * an adversarial review: the capability used to be declared unconditionally while this
- * adapter signed through `signBytes`. The two are different channels. PAPI's `signTx`
- * takes the call data, the signed extensions and the **metadata**, so the extension decodes
- * and renders the call on its own screen, which is the independent second channel 11 §11.3
- * requires against substitution; `signBytes` is documented as signing *"an arbitrary
- * payload"* and as possibly *refusing* bytes that constitute a valid extrinsic. An
- * extension asked that way shows the user an opaque blob, so declaring the capability told
- * them their wallet had verified a call it had never seen.
+ * `external-key-custody` — the key never enters this app. It declares nothing else, and
+ * `decoded-payload` in particular is **absent**.
+ *
+ * That capability has now been wrong twice, in the same direction. First it was declared
+ * unconditionally while this adapter signed through `signBytes`; a review made it
+ * conditional on the connected extension exposing `signTx`, which reads like the fix and
+ * is not one. `signTx` and `signBytes` are different channels — PAPI's `signTx` takes the
+ * call data, the signed extensions and the **metadata**, so the extension decodes and
+ * renders the call on its own screen, which is the independent second channel 11 §11.3
+ * requires against substitution, while `signBytes` is documented as signing *"an arbitrary
+ * payload"* and as possibly *refusing* bytes that constitute a valid extrinsic. Making the
+ * *grant* follow the extension changed nothing about which channel `sign()` used, so the
+ * user was still told their wallet had verified a call it never saw.
+ *
+ * The condition that was missing is that this adapter must be able to **call** `signTx`,
+ * and it cannot: a `TxPreparation` carries one opaque `scaleHex` and the app has no
+ * extrinsic encoder to decompose. Capability claims here are about what the signing path
+ * does, never about what the counterparty could do if asked differently.
  *
  * It does **not** declare `metadata-hash`, which is now unreachable rather than merely
  * undeclared — there is no grant function for it anywhere while FE-P6 is unresolved. It
@@ -34,7 +42,6 @@
 
 import {
   describeSigner,
-  grantsDecodedPayload,
   grantsExternalKeyCustody,
   type SignTxFn,
   type SignedPayload,
@@ -137,26 +144,30 @@ export function availableExtensions(api: PjsSignerApi): readonly string[] {
 }
 
 /**
- * The injected descriptor — a function of the extension name, and of what it exposes.
+ * The injected descriptor — a function of the extension name.
  *
- * **`decoded-payload` is granted only when the extension provides `signTx`.** It was
- * declared unconditionally while this adapter signed through `signBytes`, and the two are
- * different channels: PAPI's `signTx` takes the call data, the signed extensions and the
- * **metadata**, so the extension decodes and renders the call itself — the independent
- * second channel 11 §11.3 requires against substitution. `signBytes` signs *"an arbitrary
- * payload"* and is documented as possibly *refusing* bytes that look like a valid
- * extrinsic; an extension asked that way shows the user an opaque blob. Declaring the
- * capability anyway told the user their wallet had verified the call when nothing had.
+ * **`decoded-payload` is not granted, and the reason is a second condition that an earlier
+ * fix missed.** That fix made the grant conditional on the connected extension exposing
+ * `signTx`, which is necessary and *not sufficient*: this adapter must also be able to
+ * **call** it. `SignTxFn` takes the call data, the signed extensions, the metadata and a
+ * block number as four separate arguments — that decomposition **is** the decode channel,
+ * because it is what lets the wallet render a call instead of a blob. A `TxPreparation`
+ * carries one opaque `scaleHex`, and nothing in the app produces a real one yet: the only
+ * `scaleHex` literal in the tree is `'0x00'` inside the transition enumerator. So there is
+ * no argument to pass, `sign()` goes through `signBytes`, and the extension sees bytes it
+ * is documented as possibly *refusing* and certainly not decoding.
  *
- * So the grant is derived from the connected object rather than asserted about it, and an
- * extension exposing only `signBytes` yields an adapter whose `decoded-payload` is
- * **absent** — which INV-FE-12 then turns into a named refusal at the dependent surface
- * instead of a silent downgrade.
+ * Granting it anyway reproduced the original defect one layer up: the capability was
+ * derived from the extension while the signature went through the other channel, so a
+ * surface could require `decoded-payload`, be satisfied, and tell the user their wallet
+ * had verified a call it never saw. INV-FE-12's rule is that an unproven capability is
+ * **absent** — a named refusal at the dependent surface, never a silent downgrade — and
+ * "the wallet could decode if we could ask it to" is not proof.
+ *
+ * `injected_signer_cannot_claim_a_decode_it_cannot_perform` pins both conditions, so
+ * re-granting this once the encoder lands is a deliberate edit rather than a quiet one.
  */
-export const INJECTED_DESCRIPTOR = (
-  extensionName: string,
-  decodeChannel?: SignTxFn,
-): SignerDescriptor =>
+export const INJECTED_DESCRIPTOR = (extensionName: string): SignerDescriptor =>
   describeSigner({
     id: `injected:${extensionName}`,
     label: `${extensionName} (browser extension)`,
@@ -165,7 +176,6 @@ export const INJECTED_DESCRIPTOR = (
     // falls back to signing a hash of an oversized payload is signing something it did not
     // show anyone, which is the substitution this surface exists to prevent.
     grants: [
-      ...(decodeChannel === undefined ? [] : [grantsDecodedPayload({ kind: 'sign-tx', signTx: decodeChannel })]),
       grantsExternalKeyCustody(
         'the extension holds the key and returns only a signature; this adapter has no path ' +
           'that accepts key material',
@@ -195,17 +205,14 @@ export async function connectInjected(
     );
   }
   const extension = await api.connectInjectedExtension(extensionName, dappName);
-  // Derive the capability from what the connected extension actually exposes. Probed on
-  // the accounts it offers rather than assumed: an extension that exposes `signTx` on some
-  // accounts and not others cannot be described by one claim, so the capability is granted
-  // only when **every** account can serve it.
-  const connectedAccounts = extension.getAccounts();
-  const decodeChannel =
-    connectedAccounts.length > 0 &&
-    connectedAccounts.every((account) => typeof account.polkadotSigner.signTx === 'function')
-      ? connectedAccounts[0]!.polkadotSigner.signTx
-      : undefined;
-  const descriptor = INJECTED_DESCRIPTOR(extensionName, decodeChannel);
+  // No capability is derived from the connected accounts. The probe that used to live here
+  // read `signTx` off `getAccounts()[0]` and granted `decoded-payload` from it — wrong
+  // twice over. It described a channel `sign()` does not use (see `INJECTED_DESCRIPTOR`),
+  // and it took the function from the *first* account while `sign()` matches a different
+  // one by address, so even a working decode path would have been asked of the wrong
+  // signer. Capabilities here are a property of the adapter, not of whichever account
+  // happened to be listed first.
+  const descriptor = INJECTED_DESCRIPTOR(extensionName);
 
   return {
     descriptor,

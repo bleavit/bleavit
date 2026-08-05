@@ -29,6 +29,12 @@ import {
 
 const GENESIS = `0x${'c3'.repeat(32)}`;
 const WATCHED = new Set(['alice']);
+// 10 §6.5's header sources. `OPERATOR` names *which* operator because the type requires it:
+// two operators are two sources, and a range that cannot say which one it came from cannot
+// be invalidated without taking honest ranges with it.
+const SELF = { origin: 'self' };
+const OPERATOR = { origin: 'operator', providerId: 'op-1' };
+
 
 const scan = (number, { count = 2, watched = false } = {}) => ({
   number,
@@ -68,7 +74,7 @@ test('a run persists rows, events and coverage, and coverage survives a reopen',
     EMPTY_COVERAGE,
     [scan(10), scan(11, { watched: true }), scan(12)],
     WATCHED,
-    'self',
+    SELF,
     ports(db),
   );
   assert.equal(run.ingested, 3);
@@ -117,17 +123,63 @@ test('a row fetched behind a layer-2 header is stored as `operator`, never `self
   // upgrade it on the way in, which would make a depth-fetched body indistinguishable from a
   // light-client-verified one for every later reader.
   const db = await freshDb();
-  await runIngest(EMPTY_COVERAGE, [scan(30, { watched: true })], WATCHED, 'operator', ports(db));
+  await runIngest(EMPTY_COVERAGE, [scan(30, { watched: true })], WATCHED, OPERATOR, ports(db));
   const [row] = await db.txHistory.toArray();
   assert.equal(row.origin, 'operator');
 
   // ...and the same block behind a self header is `self`, so the mapping is not a constant.
   const db2 = await freshDb();
-  await runIngest(EMPTY_COVERAGE, [scan(30, { watched: true })], WATCHED, 'self', ports(db2));
+  await runIngest(EMPTY_COVERAGE, [scan(30, { watched: true })], WATCHED, SELF, ports(db2));
   const [selfRow] = await db2.txHistory.toArray();
   assert.equal(selfRow.origin, 'self');
   db.close();
   db2.close();
+});
+
+test('the COVERAGE a layer-2 header produces is `operator` too, not just its rows', async () => {
+  // The regression. The test above passed while the loop minted `selfRange` unconditionally:
+  // it read the *rows*, and the rows were always right. Coverage is the structure
+  // `isVerifiedAt` answers from and the one the client uses to decide it need not re-fetch,
+  // so labelling it `self` promoted provider backfill to light-client-verified — with the
+  // row beside it still honestly saying `provider`. Two records of the same block
+  // disagreeing, and the more authoritative one wrong.
+  const db = await freshDb();
+  const run = await runIngest(EMPTY_COVERAGE, [scan(30, { watched: true })], WATCHED, OPERATOR, ports(db));
+
+  assert.equal(
+    isVerifiedAt(run.coverage, 30),
+    false,
+    'a block ingested behind an operator header must never read as light-client verified',
+  );
+  const [range] = run.coverage.ranges;
+  assert.equal(range.origin, 'operator');
+  assert.equal(
+    range.providerId,
+    'op-1',
+    'the range must name WHICH provider: invalidating one operator must not drop another’s ranges',
+  );
+
+  // The positive control — the same block behind a self header still does read as verified,
+  // so this is not a test that passes because nothing is ever verified.
+  const db2 = await freshDb();
+  const verified = await runIngest(EMPTY_COVERAGE, [scan(30, { watched: true })], WATCHED, SELF, ports(db2));
+  assert.equal(isVerifiedAt(verified.coverage, 30), true);
+  db.close();
+  db2.close();
+});
+
+test('operator and self ranges never merge, so a backfilled span stays visible', async () => {
+  // `addRange` joins only same-origin, same-provider ranges. Adjacent blocks from different
+  // sources must therefore stay two ranges: a merged one would have to claim a single origin,
+  // and either choice is a lie 10 §6.3 forbids in a different direction.
+  const db = await freshDb();
+  let coverage = (await runIngest(EMPTY_COVERAGE, [scan(50)], WATCHED, SELF, ports(db))).coverage;
+  coverage = (await runIngest(coverage, [scan(51)], WATCHED, OPERATOR, ports(db))).coverage;
+
+  assert.equal(coverage.ranges.length, 2, 'adjacent blocks of different provenance must not splice');
+  assert.equal(isVerifiedAt(coverage, 50), true);
+  assert.equal(isVerifiedAt(coverage, 51), false);
+  db.close();
 });
 
 test('replaying the same blocks is idempotent, so a re-ingest after a crash is free', async () => {
@@ -135,8 +187,8 @@ test('replaying the same blocks is idempotent, so a re-ingest after a crash is f
   // duplicated rows, the safe ordering would not be safe.
   const db = await freshDb();
   const blocks = [scan(40), scan(41, { watched: true })];
-  const first = await runIngest(EMPTY_COVERAGE, blocks, WATCHED, 'self', ports(db));
-  const second = await runIngest(first.coverage, blocks, WATCHED, 'self', ports(db));
+  const first = await runIngest(EMPTY_COVERAGE, blocks, WATCHED, SELF, ports(db));
+  const second = await runIngest(first.coverage, blocks, WATCHED, SELF, ports(db));
   assert.equal(await db.txHistory.count(), 1);
   assert.equal(await db.events.count(), 2);
   assert.equal(isVerifiedAt(second.coverage, 41), true);

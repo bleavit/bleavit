@@ -12,11 +12,21 @@ the wrong directory silently loses the version pin the repository depends on.
 `tools/ci/check-ci-parity.py` cannot catch this. It runs each *gate* in a CI-shaped
 checkout and compares behaviour; it never reads the workflow, so a gate that is correct
 and invoked wrongly passes it. These tests read the workflow instead.
+
+**The binding is bidirectional, and the two directions fail differently.** A step naming
+a script that does not exist fails loudly the first time the job runs. A *script that no
+step names* never fails at all — it is a suite that exists, passes locally, is cited in
+PLAN.md as a gate, and has never executed in CI. That direction was missing until
+2026-08-05, and it was hiding fourteen gates and 296 assertions: every suite belonging to
+`local-index`, `providers`, `verify`, the three handoff formats and the generated
+schema/skill artifacts, plus the 02 §7.7 foreign-feed gate. So the inverse is asserted
+here, and an exemption costs an entry with a stated reason.
 """
 
 from __future__ import annotations
 
 import pathlib
+import re
 import unittest
 
 import yaml
@@ -27,9 +37,51 @@ WORKFLOWS = ROOT / ".github" / "workflows"
 # Jobs whose tooling lives in a subdirectory, and the directory it lives in.
 SUBDIRECTORY_JOBS = {"app": "app"}
 
+_REGENERATOR = (
+    "a `--write` regenerator; its `:check` counterpart is the gate. Running a "
+    "regenerator in CI would rewrite the artifact it is supposed to be comparing "
+    "against, so it would pass unconditionally"
+)
+
+# Scripts that deliberately have no CI step. Exact in **both** directions: an entry
+# naming a script that no longer exists is itself a failure, because a stale exemption
+# silently covers whatever later takes that name.
+UNWIRED_BY_DESIGN = {
+    "typecheck": "`build` already runs `tsc -b`; wiring both compiles the graph twice",
+    "clean": "a developer utility that deletes build output",
+    "test": (
+        "the local aggregate. CI enumerates the gates individually so a failure names "
+        "the gate that failed — and so that dropping a suite from the aggregate cannot "
+        "remove it from CI in the same edit, unnoticed"
+    ),
+    "descriptors:generate": _REGENERATOR,
+    "surface:generate": _REGENERATOR,
+    "schemas:generate": _REGENERATOR,
+    "skills:generate": _REGENERATOR,
+}
+
+# `pnpm run <script>` anywhere in a step body, not just on its first line: a `run: |`
+# block invoking four suites is four gates, and reading only the first would exempt the
+# other three from both directions of this check.
+_PNPM_RUN = re.compile(r"^\s*pnpm run ([A-Za-z0-9:_-]+)", re.MULTILINE)
+
 
 def load(name: str) -> dict:
     return yaml.safe_load((WORKFLOWS / name).read_text(encoding="utf-8"))
+
+
+def app_scripts() -> dict:
+    import json
+
+    return json.loads((ROOT / "app" / "package.json").read_text(encoding="utf-8"))["scripts"]
+
+
+def scripts_wired_in_ci() -> set:
+    spec = load("ci.yml")
+    wired = set()
+    for step in spec["jobs"]["app"]["steps"]:
+        wired.update(_PNPM_RUN.findall(step.get("run") or ""))
+    return wired
 
 
 class WorkflowWiring(unittest.TestCase):
@@ -59,22 +111,50 @@ class WorkflowWiring(unittest.TestCase):
 
     def test_app_job_gates_are_declared_as_package_scripts(self) -> None:
         """A step naming a script that does not exist fails only when the job runs."""
-        import json
-
-        scripts = set(
-            json.loads((ROOT / "app" / "package.json").read_text(encoding="utf-8"))["scripts"]
-        )
-        spec = load("ci.yml")
-        for step in spec["jobs"]["app"]["steps"]:
-            command = (step.get("run") or "").strip()
-            if not command.startswith("pnpm run "):
-                continue
-            script = command.split()[2]
+        scripts = set(app_scripts())
+        for script in sorted(scripts_wired_in_ci()):
             self.assertIn(
                 script,
                 scripts,
                 f"ci.yml runs `pnpm run {script}`, which app/package.json does not define",
             )
+
+    def test_every_app_script_is_wired_into_ci_or_exempt(self) -> None:
+        """The inverse, and the direction that fails silently.
+
+        A suite nobody invokes passes locally forever and never runs in CI. Nothing else
+        in this repository notices: `check-ci-parity.py` runs gates it is given, the
+        firewall checks imports, and PLAN.md cites the suite as a gate because it exists.
+        """
+        wired = scripts_wired_in_ci()
+        for name in sorted(app_scripts()):
+            if name in UNWIRED_BY_DESIGN:
+                self.assertNotIn(
+                    name,
+                    wired,
+                    f"`{name}` is listed in UNWIRED_BY_DESIGN and also wired into "
+                    "ci.yml; one of the two is wrong",
+                )
+                continue
+            self.assertIn(
+                name,
+                wired,
+                f"app/package.json defines `{name}` but no ci.yml step runs it, so it "
+                "never executes in CI. Add a step, or add it to UNWIRED_BY_DESIGN with "
+                "the reason it must not run there",
+            )
+
+    def test_exemptions_name_scripts_that_exist(self) -> None:
+        """A stale exemption is worse than none: it pre-approves whatever takes the name."""
+        scripts = set(app_scripts())
+        for name, reason in UNWIRED_BY_DESIGN.items():
+            self.assertIn(
+                name,
+                scripts,
+                f"UNWIRED_BY_DESIGN exempts `{name}`, which app/package.json no longer "
+                "defines; drop the entry rather than leaving it to cover a future script",
+            )
+            self.assertTrue(reason.strip(), f"the exemption for `{name}` states no reason")
 
     def test_concurrency_never_cancels_on_main(self) -> None:
         """R-12's rule: pushing to a branch supersedes its own run; `main` never does.

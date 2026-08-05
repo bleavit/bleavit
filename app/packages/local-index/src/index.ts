@@ -9,6 +9,11 @@
 //
 // An `export *` would silently re-admit it the moment anyone reformatted this file, which is
 // exactly why the list is explicit despite being longer.
+//
+// **`rangeForSource` is omitted for the same reason**, and it is the easier one to miss:
+// it takes a `HeaderSource`, so `rangeForSource({ origin: 'self' }, …)` reaches `selfRange`
+// through a wrapper. Only the ingest loop may name a `self` header. The *type* is exported
+// below because callers of `runIngest` have to name it — a type cannot mint anything.
 export {
   addRange,
   holesIn,
@@ -22,6 +27,7 @@ export type {
   Coverage,
   CoverageRange,
   CoveredResult,
+  HeaderSource,
   Hole,
   RangeOrigin,
   SelfIngested,

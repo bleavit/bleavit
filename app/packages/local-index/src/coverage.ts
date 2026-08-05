@@ -117,6 +117,45 @@ export function providerRange(
   return { fromBlock, toBlock, ingestedAt, origin, providerId };
 }
 
+/**
+ * Where a block's **header** came from — the ingest loop's argument, and the single fact
+ * that decides both a row's provenance and its coverage range's origin.
+ *
+ * A discriminated union rather than a bare `RangeOrigin`, because *"operator"* on its own
+ * is not a describable state: `sameProvenance` distinguishes two operators — one lying
+ * does not implicate the other — so a range that knows it came from *an* operator but not
+ * *which* cannot be merged correctly, and a provider that later proves dishonest cannot be
+ * invalidated without taking honest ranges with it.
+ *
+ * It was a bare `RangeOrigin`, and the loop minted a `selfRange` regardless of its value:
+ * layer-2 backfill was recorded as light-client-verified while the *rows* correctly said
+ * `provider`, so `isVerifiedAt` answered `true` for data 10 §2.2 says has no promotion
+ * path at all. Making the provider id part of the type is what stops a future caller
+ * re-creating that state — there is no longer an origin it can name without naming a
+ * source too.
+ */
+export type HeaderSource =
+  | { readonly origin: 'self' }
+  | { readonly origin: Exclude<RangeOrigin, 'self'>; readonly providerId: string };
+
+/**
+ * The coverage range a block ingested behind `source` is claimed by.
+ *
+ * The loop calls this rather than choosing between `selfRange` and `providerRange`, so
+ * "what origin does this range claim" has one answer derived from one argument. A caller
+ * cannot reach `selfRange` with an operator header because it never names a constructor.
+ */
+export function rangeForSource(
+  source: HeaderSource,
+  fromBlock: number,
+  toBlock: number,
+  ingestedAt: number,
+): CoverageRange {
+  return source.origin === 'self'
+    ? selfRange(fromBlock, toBlock, ingestedAt)
+    : providerRange(source.origin, source.providerId, fromBlock, toBlock, ingestedAt);
+}
+
 export interface Hole {
   readonly fromBlock: number;
   readonly toBlock: number;

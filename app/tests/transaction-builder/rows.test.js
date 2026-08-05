@@ -102,7 +102,7 @@ test('the constants-API clauses are the ones 11 §11.5 marks [C]', () => {
 });
 
 /**
- * P-12 carries all thirteen dispatch checks (contract v26; SQ-589).
+ * P-12 carries all fourteen dispatch checks (contract v26; SQ-589; row 12 split 2026-08-05).
  *
  * **This replaces a test that asserted `rowsFor('P-12').length < 13`** — deliberately, on
  * the theory that `check-dispatch-mirror.py` owned the diff. It does not: that gate parses
@@ -127,13 +127,13 @@ const P12_REQUIRED_SURFACES = [
   'storage.epoch.epoch_of',                        // 10 — the epoch it is keyed to
   'storage.execution_guard.hard_gate_breach',      // 11 — FreezeActive
   'storage.welfare.gate_breach_flags',             // 11 — the breach flags
-  'storage.execution_guard.dead_man_freeze',       // 12 — the guard's own latch
-  'storage.constitution.phase_flags',              // 12 — LEDGER_FROZEN / DEAD_MAN_ENGAGED
-  'storage.execution_guard.migration_halt',        // 12 — MigrationHalt
-  'storage.execution_guard.expedited',             // 12 — the exemption
+  'storage.execution_guard.dead_man_freeze',       // 12 — the guard's own latch (never waived)
+  'storage.constitution.phase_flags',              // 12 DEAD_MAN_ENGAGED / 13 LEDGER_FROZEN
+  'storage.execution_guard.migration_halt',        // 13 — MigrationHalt (waivable)
+  'storage.execution_guard.expedited',             // 13 — the D-9 exemption
 ];
 
-test('P-12 reads every surface its thirteen dispatch checks need', () => {
+test('P-12 reads every surface its fourteen dispatch checks need', () => {
   const cited = new Set(rowsFor('P-12', 'USDC').map((c) => c.surface));
   for (const surface of P12_REQUIRED_SURFACES) {
     assert.ok(cited.has(surface), `P-12 has no clause reading ${surface}; a dispatch check is unmirrored`);
@@ -155,6 +155,114 @@ test('P-12 carries the expedited exemption, not just the freeze flags', () => {
   const clauses = rowsFor('P-12', 'USDC');
   assert.ok(clauses.some((c) => c.surface === 'storage.execution_guard.expedited'));
   assert.ok(clauses.some((c) => c.surface === 'storage.execution_guard.migration_halt'));
+});
+
+/**
+ * The expedited exemption waives exactly the two freezes the runtime waives — and the
+ * test evaluates that rather than inspecting the shape.
+ *
+ * The test above asserts only that the clauses are *present*, and presence is what shipped:
+ * the exemption sat in the list with no `anyOf`, so `clauseGroupsFor` made it a mandatory
+ * requirement and the client refused the emergency upgrade during exactly the freeze the
+ * D-9 lane exists for. The obvious repair — one group holding all the freeze clauses and
+ * the exemption — is worse, because a flat any-of would let *no migration halt* alone
+ * satisfy the whole obligation, waiving the dead-man latch.
+ *
+ * The runtime (`pallets/execution-guard/src/lib.rs`, check §1.2(10)) is two `ensure!`s:
+ *
+ *     !HardGateBreach && !DeadManFreeze && !dead_man_freeze_active()        // never waived
+ *     !(ledger_freeze_active() || MigrationHalt) || Expedited(pid)          // waived
+ *
+ * so the client owes `(¬L ∨ E) ∧ (¬M ∨ E)`, which is `(¬L ∧ ¬M) ∨ E` distributed into two
+ * groups sharing the exemption clause.
+ */
+// Keyed on `requirement`, NOT on `surface` — and the difference is load-bearing rather
+// than stylistic. `Constitution.PhaseFlags` is one storage item carrying **both** the
+// DEAD_MAN_ENGAGED bit and the LEDGER_FROZEN bit, whose waivability is opposite: one is
+// never waived, the other is waived by the expedited lane. Anything keyed on the surface
+// conflates them and cannot express "ledger freeze clear, dead-man engaged" at all. A
+// clause's surface says what to read; its requirement says which check it is, and a
+// single read legitimately answers two.
+const DEAD_MAN = ['the dead-man switch is not engaged', 'the dead-man phase flag is clear'];
+const EXPEDITED = 'or this proposal holds the expedited exemption';
+
+/** Every P-12 group holds, given the checks currently reading clear. */
+function p12Satisfied(satisfied) {
+  return clauseGroupsFor('P-12', 'USDC').every((group) =>
+    group.some((clause) => satisfied.has(clause.requirement)),
+  );
+}
+
+test('the expedited exemption waives the triggering freeze — and nothing else', () => {
+  const groups = clauseGroupsFor('P-12', 'USDC');
+  const sharing = groups.filter((g) => g.some((c) => c.requirement === EXPEDITED));
+  assert.equal(
+    sharing.length,
+    2,
+    'the exemption must share a group with each waivable freeze — one group each, not one combined',
+  );
+  for (const group of sharing) {
+    assert.equal(group.length, 2, 'a waivable group is exactly {the freeze, the exemption}');
+  }
+  // The freezes it waives are the two the runtime waives, and no others.
+  assert.deepEqual(
+    sharing.map((g) => g.find((c) => c.requirement !== EXPEDITED).requirement).sort(),
+    ['PB-LEDGER-FREEZE is clear', 'no migration halt is in force'],
+  );
+
+  // ...and the dead-man latch is NOT among them. It is its own mandatory group, so no
+  // exemption can satisfy it. This is the fail-open direction, and it is the one that
+  // matters: D-9's whole point is a latch nothing clears.
+  for (const check of DEAD_MAN) {
+    const holding = groups.filter((g) => g.some((c) => c.requirement === check));
+    assert.ok(holding.length >= 1, `no group carries the check ${check}`);
+    for (const g of holding) {
+      assert.equal(
+        g.some((c) => c.requirement === EXPEDITED),
+        false,
+        `${check} shares a group with the exemption — expedited would waive the dead-man switch`,
+      );
+    }
+  }
+});
+
+test('the P-12 grouping evaluates the way the runtime does', () => {
+  // Shape assertions can agree with a wrong shape. These four evaluate it.
+  const everythingElse = new Set(
+    rowsFor('P-12', 'USDC')
+      .map((c) => c.requirement)
+      .filter((r) => r !== EXPEDITED && r !== 'no migration halt is in force'),
+  );
+
+  // 1. A frozen ledger with no exemption blocks — the ordinary case.
+  const frozen = new Set(everythingElse);
+  frozen.delete('PB-LEDGER-FREEZE is clear');
+  assert.equal(p12Satisfied(frozen), false, 'a live freeze with no exemption must block');
+
+  // 2. The same state WITH the exemption proceeds. This is the case the shipped list got
+  //    wrong: it refused the emergency upgrade during the freeze it repairs.
+  assert.equal(
+    p12Satisfied(new Set([...frozen, EXPEDITED])),
+    true,
+    'the expedited lane must proceed under the freeze it exists to repair',
+  );
+
+  // 3. A migration halt is waived the same way, and only together — the waiver is over the
+  //    conjunction, so an exemption clears both or the state was never blocking.
+  const halted = new Set(everythingElse);
+  assert.equal(p12Satisfied(halted), false, 'a migration halt with no exemption must block');
+  assert.equal(p12Satisfied(new Set([...halted, EXPEDITED])), true);
+
+  // 4. **The dead-man switch is not waivable.** Every surface satisfied, exemption held,
+  //    dead-man engaged — still blocked. If this ever passes, the client is offering a
+  //    signature the runtime refuses on the one latch that has no exemption.
+  const deadMan = new Set([...everythingElse, EXPEDITED]);
+  deadMan.delete('the dead-man switch is not engaged');
+  assert.equal(
+    p12Satisfied(deadMan),
+    false,
+    'the expedited exemption must never satisfy the dead-man latch',
+  );
 });
 
 test('rowsFor refuses an unknown row rather than returning an empty set', () => {

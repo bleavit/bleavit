@@ -26,6 +26,12 @@ import {
 } from '@bleavit/local-index';
 
 const WATCHED = new Set(['alice']);
+// 10 §6.5's header sources. `OPERATOR` names *which* operator because the type requires it:
+// two operators are two sources, and a range that cannot say which one it came from cannot
+// be invalidated without taking honest ranges with it.
+const SELF = { origin: 'self' };
+const OPERATOR = { origin: 'operator', providerId: 'op-1' };
+
 
 const scan = (number, { count = 2, watched = false } = {}) => ({
   number,
@@ -57,7 +63,7 @@ test('a block with no watched extrinsic never triggers a body fetch (§6.5 cost 
     EMPTY_COVERAGE,
     scan(100),
     WATCHED,
-    'self',
+    SELF,
     ports({ fetchBodies: async () => { fetches += 1; return []; } }),
   );
   assert.equal(fetches, 0);
@@ -68,7 +74,7 @@ test('a block with no watched extrinsic never triggers a body fetch (§6.5 cost 
 
 test('an attributed block fetches once and rows carry the HEADER’s provenance', async () => {
   const verified = await ingestBlock(
-    EMPTY_COVERAGE, scan(100, { watched: true }), WATCHED, 'self', ports(),
+    EMPTY_COVERAGE, scan(100, { watched: true }), WATCHED, SELF, ports(),
   );
   assert.equal(verified.fetchedBody, true);
   assert.equal(verified.rowCount, 1);
@@ -77,10 +83,13 @@ test('an attributed block fetches once and rows carry the HEADER’s provenance'
   // extrinsics-root check is only as good as the header's provenance.
   let captured;
   await ingestBlock(
-    EMPTY_COVERAGE, scan(100, { watched: true }), WATCHED, 'operator',
+    EMPTY_COVERAGE, scan(100, { watched: true }), WATCHED, OPERATOR,
     ports({ write: async (w) => { captured = w; } }),
   );
   assert.equal(captured.rows[0].provenance, 'provider');
+  // ...and so is the coverage the same call advanced. Asserting only the row is what let
+  // the loop mint a `self` range here undetected.
+  assert.equal(captured.coverageAfter.ranges[0].origin, 'operator');
 });
 
 test('coverage does NOT advance when the write fails', async () => {
@@ -88,7 +97,7 @@ test('coverage does NOT advance when the write fails', async () => {
   // stored. Coverage is what the client consults to decide it need not re-fetch, so the gap
   // becomes permanent and invisible.
   await assert.rejects(
-    ingestBlock(EMPTY_COVERAGE, scan(100), WATCHED, 'self', ports({
+    ingestBlock(EMPTY_COVERAGE, scan(100), WATCHED, SELF, ports({
       write: async () => { throw new Error('quota exceeded'); },
     })),
     /quota exceeded/,
@@ -102,7 +111,7 @@ test('a failed body fetch fails the block rather than recording it as ingested',
   // rows cannot be built must stay outside coverage where a later pass finds it as a hole.
   let wrote = false;
   await assert.rejects(
-    ingestBlock(EMPTY_COVERAGE, scan(100, { watched: true }), WATCHED, 'self', ports({
+    ingestBlock(EMPTY_COVERAGE, scan(100, { watched: true }), WATCHED, SELF, ports({
       fetchBodies: async () => { throw new Error('peer disconnected'); },
       write: async () => { wrote = true; },
     })),
@@ -120,7 +129,7 @@ test('a body whose extrinsic count disagrees with the scan is refused', async ()
   // Indexing into it would attribute a different block's extrinsic to this user — the same
   // failure `attributedExtrinsics` refuses a bad index for, arriving from the other side.
   await assert.rejects(
-    ingestBlock(EMPTY_COVERAGE, scan(100, { watched: true, count: 2 }), WATCHED, 'self', ports({
+    ingestBlock(EMPTY_COVERAGE, scan(100, { watched: true, count: 2 }), WATCHED, SELF, ports({
       fetchBodies: async () => [new Uint8Array([0])],
     })),
     /would read a different block/,
@@ -134,7 +143,7 @@ test('a subscription resuming past a gap leaves a HOLE, never a claimed span', a
     EMPTY_COVERAGE,
     [scan(100), scan(101), scan(500), scan(501)],
     WATCHED,
-    'self',
+    SELF,
     ports(),
   );
   assert.equal(run.ingested, 4);
@@ -153,7 +162,7 @@ test('a subscription resuming past a gap leaves a HOLE, never a claimed span', a
 });
 
 test('adjacent blocks DO join, so the hole test is not passing for the wrong reason', async () => {
-  const run = await runIngest(EMPTY_COVERAGE, [scan(10), scan(11), scan(12)], WATCHED, 'self', ports());
+  const run = await runIngest(EMPTY_COVERAGE, [scan(10), scan(11), scan(12)], WATCHED, SELF, ports());
   assert.equal(run.coverage.ranges.length, 1, JSON.stringify(run.coverage.ranges));
   assert.equal(run.coverage.holes.length, 0);
 });
@@ -165,7 +174,7 @@ test('the run stops at the first failure and reports the coverage it actually re
     EMPTY_COVERAGE,
     [scan(10), scan(11, { watched: true }), scan(12)],
     WATCHED,
-    'self',
+    SELF,
     ports({ fetchBodies: async () => { throw new Error('gone'); } }),
   );
   // Only block 10. Block 11 is the one with a watched extrinsic, so it is the one whose body
@@ -181,7 +190,7 @@ test('the run stops at the first failure and reports the coverage it actually re
 test('blocks are ingested sequentially — N+1 cannot land before N’s write', async () => {
   // Rule 1 broken by parallelism rather than by ordering, with an identical symptom.
   const order = [];
-  await runIngest(EMPTY_COVERAGE, [scan(1), scan(2), scan(3)], WATCHED, 'self', ports({
+  await runIngest(EMPTY_COVERAGE, [scan(1), scan(2), scan(3)], WATCHED, SELF, ports({
     write: async (w) => {
       order.push(`start-${w.blockNumber}`);
       await new Promise((resolve) => setTimeout(resolve, 5));
@@ -204,7 +213,7 @@ test('a scan with NO declared count still ingests — and the body becomes the a
       { phase: { kind: 'apply-extrinsic', index: 1 }, pallet: 'Balances', name: 'Transfer', accounts: ['alice'] },
     ],
   };
-  const result = await ingestBlock(EMPTY_COVERAGE, noCount, WATCHED, 'self', ports());
+  const result = await ingestBlock(EMPTY_COVERAGE, noCount, WATCHED, SELF, ports());
   assert.equal(result.fetchedBody, true);
   assert.equal(result.rowCount, 1);
   assert.equal(isVerifiedAt(result.coverage, 200), true);
@@ -221,7 +230,7 @@ test('an index beyond the FETCHED body is refused even with no declared count', 
     ],
   };
   await assert.rejects(
-    ingestBlock(EMPTY_COVERAGE, noCount, WATCHED, 'self', ports()),
+    ingestBlock(EMPTY_COVERAGE, noCount, WATCHED, SELF, ports()),
     (error) => {
       assert.ok(error instanceof IngestLoopError);
       assert.match(error.message, /attributed extrinsic 7 but the fetched body has only 2/);
@@ -243,7 +252,7 @@ test('the index guard is >=, not > — index N against N extrinsics is out of ra
     ],
   };
   await assert.rejects(
-    ingestBlock(EMPTY_COVERAGE, atBoundary, WATCHED, 'self', ports()),
+    ingestBlock(EMPTY_COVERAGE, atBoundary, WATCHED, SELF, ports()),
     /attributed extrinsic 2 but the fetched body has only 2/,
   );
 
@@ -255,6 +264,6 @@ test('the index guard is >=, not > — index N against N extrinsics is out of ra
       { phase: { kind: 'apply-extrinsic', index: 1 }, pallet: 'Balances', name: 'Transfer', accounts: ['alice'] },
     ],
   };
-  const ok = await ingestBlock(EMPTY_COVERAGE, lastValid, WATCHED, 'self', ports());
+  const ok = await ingestBlock(EMPTY_COVERAGE, lastValid, WATCHED, SELF, ports());
   assert.equal(ok.rowCount, 1);
 });
