@@ -18,7 +18,7 @@
     "test": "pnpm run test:firewall && pnpm run test:protocol && pnpm run test:mock-runtime && pnpm run test:chain-client && pnpm run test:descriptors && pnpm run test:tx && pnpm run check:casts && pnpm run surface:check && pnpm run check:budget && pnpm run depcruise:witness",
     "depcruise:witness": "depcruise tests/depcruise-witness --config tests/depcruise-witness/.dependency-cruiser.cjs --output-type err && (echo 'WITNESS DID NOT FIRE \u2014 the rule set is vacuous' && exit 1) || echo 'witness fired: rules are live'",
     "check:casts": "node tools/check-finalized-casts.mjs",
-    "descriptors:generate": "papi generate --config .papi/polkadot-api.json",
+    "descriptors:generate": "node tools/check-descriptor-drift.mjs --update",
     "test:mock-runtime": "node --test tests/mock-runtime/*.test.js",
     "descriptors:check": "node tools/check-descriptor-drift.mjs",
     "test:chain-client": "node --test tests/chain-client/*.test.js",
@@ -32,6 +32,7 @@
     "dependency-cruiser": "17.0.1",
     "esbuild": "0.28.1",
     "polkadot-api": "2.1.8",
+    "prettier": "3.6.2",
     "typescript": "5.9.3"
   }
 }

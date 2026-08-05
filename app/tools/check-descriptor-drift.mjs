@@ -32,6 +32,74 @@ const CONFIG = path.join(APP, ".papi", "polkadot-api.json");
 /** Files PAPI writes that are inputs to the next run, not outputs to compare. */
 const IGNORED = new Set([".gitignore"]);
 
+/**
+ * Collapse PAPI's generated `.d.ts` files onto one line per declaration.
+ *
+ * ## Why
+ *
+ * Four files — `common-types.d.ts` and one per chain — are **64,119 lines**, which was 88 %
+ * of PR #228 and ~40 % of PR #234. PAPI pretty-prints each type across ~7 lines; at one line
+ * per declaration the same content is ~1,720. Nobody reads these by hand (an editor shows
+ * types from the AST, not the file), and every consumer is `tsc`.
+ *
+ * ## Why it is safe, stated precisely
+ *
+ * **Only `.d.ts` is touched, never the emitted `.js`.** A declaration file has no runtime
+ * semantics at all, so a formatter cannot change behaviour — the worst case is a file `tsc`
+ * rejects, which is loud. The generated JavaScript *executes*, so it is left exactly as the
+ * generator wrote it. That line is the whole safety argument and is why the rule is
+ * "declarations only" rather than "everything big".
+ *
+ * And it is a **real formatter** — parse to AST, print from AST — not a regex line-joiner. A
+ * regex would have to understand template-literal types, nested generics and string members
+ * to avoid corrupting them, which is the same tokenizer trap `check-chain-literals` was
+ * rewritten onto an AST to escape.
+ *
+ * ## Why it does not weaken the drift gate
+ *
+ * The gate's claim becomes "committed == normalize(papi generate)" instead of
+ * "committed == papi generate". That is still a binding to the generator, and it holds
+ * because **this function is the only normalization site**: `descriptors:generate` now runs
+ * through `--update`, which writes the normalized scratch tree, and the check normalizes the
+ * fresh scratch before hashing. A hand-edit still fails. The same discipline the chainHead
+ * recorder uses — own the serialization, apply it on both sides — and for the same reason:
+ * two formatters that could disagree is a drift source rather than a fix for one.
+ */
+function normalizeDeclarations(root) {
+  const files = [];
+  const walk = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.name.endsWith(".d.ts")) files.push(full);
+    }
+  };
+  walk(root);
+  if (files.length === 0) return 0;
+  execFileSync(
+    process.execPath,
+    [
+      path.join(APP, "node_modules", "prettier", "bin", "prettier.cjs"),
+      "--write",
+      // Explicit flags rather than a config file: a repo-level `.prettierrc` appearing later
+      // would silently change this output and every committed descriptor would drift at once.
+      "--no-config",
+      "--parser",
+      "typescript",
+      "--print-width",
+      "100000",
+      // Prettier PRESERVES an object's original line breaks by default, so print-width alone
+      // changed nothing — measured, not assumed. `collapse` is what actually folds each
+      // generated type onto one line.
+      "--object-wrap",
+      "collapse",
+      ...files,
+    ],
+    { cwd: APP, stdio: "pipe" },
+  );
+  return files.length;
+}
+
 function fail(message) {
   console.error(`FAIL ${message}`);
   process.exitCode = 1;
@@ -99,9 +167,20 @@ function main() {
     return;
   }
 
+  // Normalize BEFORE hashing, and before `--update` copies. Both sides of the comparison
+  // therefore see the same transform, which is what keeps the byte-compare meaningful.
+  const normalized = normalizeDeclarations(scratchOut);
+
   const fresh = hashTree(scratchOut);
   if (fresh.size === 0) {
     fail("regeneration produced no files — the comparison below would be vacuous");
+    return;
+  }
+  if (normalized === 0) {
+    // The generator's output shape moved: a PAPI upgrade that stopped emitting `.d.ts`, or
+    // renamed them. Reported rather than shrugged at, because a normalization step that
+    // silently applies to nothing is the vacuity trap this repository keeps finding.
+    fail("no .d.ts files were normalized — the generator's output shape changed");
     return;
   }
 
