@@ -3,14 +3,19 @@
  *
  * ## The two corpora, and why neither alone is enough
  *
- * **`app/fixtures/chainhead/`** holds 65 storage requests *issued against the built runtime*
- * by the F2 recorder, so each recorded key is what that runtime actually answered to. It
- * certifies `storagePrefix` completely — and **nothing whatever** about hasher application,
- * because the recorder reads whole maps with `descendantsValues` and never a single entry.
- * Every recorded key is therefore exactly 32 bytes. That limitation is asserted below rather
- * than left in a comment, because the corpus otherwise *looks* like it covers the surface:
- * its `metadata_presence` layouts declare eight distinct hasher combinations up to three keys
- * deep, none of which any recorded request exercises.
+ * **`app/fixtures/chainhead/`** holds storage requests *issued against the built runtime* by the
+ * F2 recorder, so each recorded key is what that runtime actually answered to. Counted rather
+ * than assumed (V-159): **67 key items across 65 files — 65 map prefixes and 2 full keys.** The
+ * recorder reads whole maps with `descendantsValues`, so nearly everything here is a bare
+ * 32-byte prefix; the two exceptions are single-entry `value` reads of
+ * `ForeignAssets.{Asset,Metadata}(usdcLocation)`, and those *do* carry a real
+ * `Blake2_128Concat`.
+ *
+ * So the corpus certifies `storagePrefix` completely and certifies **one hasher, on one key
+ * type, in one pallet** — not zero, which an earlier version of this suite asserted while
+ * inspecting only the first request per file, and not the eight hasher combinations its
+ * `metadata_presence` layouts declare. Both counts are asserted below, because a corpus is
+ * easy to over-claim and just as easy to under-claim.
  *
  * **`runtime/bleavit-runtime/fixtures/storage-keys.json`** is the missing half (V-156). It is
  * written by the runtime's own storage types — `hashed_key_for`, not a re-implementation — so
@@ -34,11 +39,15 @@
  * right one, which `descendantsValues` answers by returning the whole map. That is not a
  * missing balance, it is everybody's.
  *
- * ## The one place the two corpora meet
+ * ## Where the producers meet
  *
- * The last test compares them: for every surface both describe, the prefix the recorder
- * captured and the prefix inside the runtime's own full key must agree. Two producers that
- * never saw each other, one live and one compiled.
+ * Three, not two, and they meet twice. On the **prefix**: for every surface both describe, the
+ * prefix the recorder captured and the prefix inside the runtime's own full key must agree. And
+ * on the **hasher**: the client rebuilds the two recorded full keys byte-for-byte, and the
+ * Location the live recorder hashed is the same pre-image the runtime publishes for
+ * `ForeignAssets.Account` — the 02 §8 pinned `USDC_LOCATION_ENCODED`.
+ *
+ * A live node, a compiled runtime and this client, none of which saw the others.
  */
 
 import { test } from 'node:test';
@@ -177,24 +186,37 @@ function bytes(hex: string): Uint8Array {
   return out;
 }
 
-/** The key the runtime was actually asked for, read out of the recording. */
-function recordedKey(file: string): string {
+/**
+ * EVERY key the runtime was asked for in one recording, not just the first.
+ *
+ * The earlier version took `requests.find(…)` and read item 0 of it, which is the shape
+ * V-159 is about: two of these files record a **second** request, a single-entry `value`
+ * read whose key carries a real hasher, and inspecting only the first request made the
+ * suite state — and assert — that the corpus contained no such key.
+ */
+function recordedKeys(file: string): readonly { key: string; type: string }[] {
   const doc = JSON.parse(readFileSync(join(FIXTURES, file), 'utf8')) as {
     requests: { method: string; params: unknown[] }[];
   };
-  const request = doc.requests.find((r) => r.method === 'chainHead_v1_storage');
-  assert.ok(request, `${file} records no chainHead_v1_storage request`);
-  const items = request.params[2] as { key: string }[];
-  const first = items[0];
-  assert.ok(first, `${file} records a storage request with no items`);
-  return first.key.toLowerCase();
+  const requests = doc.requests.filter((r) => r.method === 'chainHead_v1_storage');
+  assert.ok(requests.length > 0, `${file} records no chainHead_v1_storage request`);
+  const items = requests.flatMap((r) => r.params[2] as { key: string; type: string }[]);
+  assert.ok(items.length > 0, `${file} records a storage request with no items`);
+  return items.map((i) => ({ key: i.key.toLowerCase(), type: i.type }));
 }
 
-test('every recorded key is reproduced by twox128(pallet) ++ twox128(item)', () => {
+/** The map-prefix read every surface begins with. */
+function recordedPrefix(file: string): string {
+  const prefix = recordedKeys(file).find((i) => (i.key.length - 2) / 2 === 32);
+  assert.ok(prefix, `${file} records no 32-byte prefix read`);
+  return prefix.key;
+}
+
+test('every recorded prefix is reproduced by twox128(pallet) ++ twox128(item)', () => {
   for (const [file, pallet, item] of SURFACES) {
     assert.equal(
       storagePrefix(pallet, item).toLowerCase(),
-      recordedKey(file),
+      recordedPrefix(file),
       `${pallet}.${item} (${file})`,
     );
   }
@@ -212,14 +234,77 @@ test('the table covers EVERY recorded storage surface, not a chosen subset', () 
   assert.equal(named.size, SURFACES.length, 'the table names a fixture twice');
 });
 
-test('every recorded key is a 32-byte PREFIX — so the corpus exercises no hasher', () => {
-  // The load-bearing limitation of the chainhead corpus, asserted rather than described.
-  // It is the whole reason the runtime fixture exists; if the corpus ever gains a
-  // single-entry read, this fails and the header stops being true.
+test('the corpus is 65 prefixes and exactly 2 full keys — measured, not assumed (V-159)', () => {
+  // What the corpus actually contains, counted. An earlier version of this suite asserted
+  // that *every* recorded key was a 32-byte prefix; that was false, and it passed only
+  // because it inspected the first request per file. Two files record a second,
+  // single-entry read whose key carries a real Blake2_128Concat.
+  //
+  // Counting both classes is what keeps the claim honest in either direction: a corpus that
+  // gained single-entry reads would silently widen what this suite is entitled to say, and
+  // one that lost these two would silently narrow it.
+  const prefixes: string[] = [];
+  const full: { file: string; key: string }[] = [];
   for (const [file] of SURFACES) {
-    const key = recordedKey(file);
-    assert.equal((key.length - 2) / 2, 32, `${file} records a key that is not a bare prefix`);
+    for (const { key } of recordedKeys(file)) {
+      if ((key.length - 2) / 2 === 32) prefixes.push(key);
+      else full.push({ file, key });
+    }
   }
+  assert.equal(prefixes.length, 65, 'the number of recorded map-prefix reads changed');
+  assert.equal(full.length, 2, 'the number of recorded single-entry reads changed');
+  assert.deepEqual(
+    full.map((f) => f.file).sort(),
+    ['storage.identity.usdc_asset.json', 'storage.identity.usdc_metadata.json'],
+    'a different surface gained a single-entry read',
+  );
+});
+
+test('the client reproduces the two FULL keys a live node was actually asked for', () => {
+  // The third producer. These two are `ForeignAssets.{Asset,Metadata}(usdcLocation)` —
+  // 32-byte prefix + 16-byte blake2_128 + the 10-byte Location, concat'd — recorded by the
+  // F2 recorder against a running node, so they are known-answer hasher vectors that owe
+  // nothing to Rust or to `@polkadot-api/substrate-bindings`.
+  //
+  // They do NOT make the runtime fixture redundant: between them they exercise one hasher,
+  // one key type, one arity and one pallet. What they add is independence — a live node,
+  // a compiled runtime and this client all agreeing on the same bytes.
+  const USDC_LOCATION = '0x010300a10f043205e514';
+  for (const [file, pallet, item] of [
+    ['storage.identity.usdc_asset.json', 'ForeignAssets', 'Asset'],
+    ['storage.identity.usdc_metadata.json', 'ForeignAssets', 'Metadata'],
+  ] as const) {
+    const recorded = recordedKeys(file).filter(({ key }) => (key.length - 2) / 2 > 32);
+    assert.equal(recorded.length, 1, `${file} no longer records exactly one single-entry read`);
+    const built = storageKey(pallet, item, [
+      { hasher: 'Blake2_128Concat', encoded: bytes(USDC_LOCATION) },
+    ]);
+    // Non-null via the length assertion above.
+    assert.equal(built.toLowerCase(), (recorded[0] as { key: string }).key, `${pallet}.${item}`);
+  }
+});
+
+test('the recorded full keys agree with the runtime fixture on the same Location', () => {
+  // And the two producers meet on the hasher half as well as the prefix half: the Location
+  // the recorder hashed is byte-identical to the pre-image the runtime published for
+  // `ForeignAssets.Account`, which is the 02 §8 pinned `USDC_LOCATION_ENCODED`. If they
+  // ever diverge, the client is building keys for an asset one of them does not have.
+  const fixture = runtimeFixture();
+  const foreign = fixture.entries.find((e) => e.name === 'foreign_assets_account');
+  assert.ok(foreign, 'the ForeignAssets entry left the runtime fixture');
+  const recorded = recordedKeys('storage.identity.usdc_asset.json').find(
+    ({ key }) => (key.length - 2) / 2 > 32,
+  );
+  assert.ok(recorded, 'the single-entry usdc_asset read left the corpus');
+  // Asserted rather than defaulted. A `?? <sentinel>` fallback here would turn a missing
+  // pre-image into a failing `endsWith` - the right verdict for the wrong reason, reported
+  // as "the Location disagrees" when the truth is that the fixture stopped publishing one.
+  const location = foreign.preimages[0];
+  assert.ok(location, 'the ForeignAssets entry publishes no key-1 pre-image');
+  assert.ok(
+    recorded.key.endsWith(location.slice(2).toLowerCase()),
+    'the recorded key does not end with the Location the runtime fixture publishes',
+  );
 });
 
 test('the client rebuilds every key the runtime published', () => {
@@ -346,7 +431,7 @@ test('the two producers agree on every prefix they both describe', () => {
     if (file === undefined) continue;
     assert.equal(
       entry.key.slice(0, 66).toLowerCase(),
-      recordedKey(file),
+      recordedPrefix(file),
       `${entry.pallet}.${entry.item}: the runtime fixture and the chainhead recording disagree`,
     );
     compared += 1;
