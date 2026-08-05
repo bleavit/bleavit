@@ -123,3 +123,12 @@ export {
   type ChallengeWindow,
   type SnapshotCrankState,
 } from './registry-crank.js';
+export {
+  UNCHECKABLE_REGISTRATION_CONDITIONS,
+  checkRegistration,
+  registrationCaveat,
+  type RegistrationBlock,
+  type RegistrationCheck,
+  type RegistrationInputs,
+  type UncheckableCondition,
+} from './reporter.js';

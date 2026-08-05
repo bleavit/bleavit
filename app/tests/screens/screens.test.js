@@ -57,7 +57,10 @@ import {
   UNRATIFIED_CONSEQUENCE,
   allowanceRemaining,
   REGISTRY_HOLDS_SETTLEMENT,
+  UNCHECKABLE_REGISTRATION_CONDITIONS,
   approvalBlocks,
+  checkRegistration,
+  registrationCaveat,
   challengeWindowCopy,
   claimBlocks,
   mayChallenge,
@@ -2015,4 +2018,57 @@ test('an unread watchtower extension makes the deadline indeterminate, not the b
     /extended by watchtower quorum/,
   );
   assert.equal(mayChallenge({ kind: 'closed', closedAt: finalized(100) }), false);
+});
+
+// -------------------------- S14 the reporter console, and SQ-564's stated gap (F17)
+
+const REGISTRATION = (over = {}) => ({
+  freeUsdc: finalized(200_000_000_000n),
+  reporterStake: finalized(100_000_000_000n),
+  alreadyRegistered: finalized(false),
+  ...over,
+});
+
+test('the check can never present itself as complete', () => {
+  // SQ-564: two conditions are not client-readable because 02 §7 does not freeze the store
+  // they live in. `uncheckable` is a REQUIRED field, so there is no shape of the result in
+  // which they are absent — a screen cannot render a green "ready to sign".
+  const clean = checkRegistration(REGISTRATION());
+  assert.deepEqual(clean.blocks, []);
+  assert.equal(clean.uncheckable.length, 2);
+  // Even when everything checkable blocks, the uncheckable list is still there.
+  const blocked = checkRegistration(REGISTRATION({ alreadyRegistered: finalized(true) }));
+  assert.equal(blocked.uncheckable.length, 2);
+});
+
+test('each unreadable condition names its dispatch error and why it cannot be read', () => {
+  // "This might fail" teaches nothing. Named, a user recognises the outcome when it
+  // arrives and a support conversation starts in the right place.
+  const codes = UNCHECKABLE_REGISTRATION_CONDITIONS.map((c) => c.dispatchError).sort();
+  assert.deepEqual(codes, ['ReporterEjected', 'ReporterRecordsSaturated']);
+  for (const condition of UNCHECKABLE_REGISTRATION_CONDITIONS) {
+    assert.ok(condition.condition.length > 10, 'the condition is not stated in words');
+    assert.match(condition.why, /does not freeze|not readable through any frozen surface/);
+  }
+});
+
+test('the caveat does not say "ready to sign", and says what a failure costs', () => {
+  const caveat = registrationCaveat(checkRegistration(REGISTRATION()));
+  assert.ok(!/ready to sign/i.test(caveat), caveat);
+  assert.match(caveat, /Everything this client can check passes/);
+  assert.match(caveat, /ReporterEjected/);
+  assert.match(caveat, /ReporterRecordsSaturated/);
+  // And it is honest about the outcome: the stake is safe, the fee is not.
+  assert.match(caveat, /the stake is not taken — but the fee is spent/);
+});
+
+test('the checkable preconditions still work, so the gap is not an excuse', () => {
+  assert.deepEqual(
+    checkRegistration(REGISTRATION({ alreadyRegistered: finalized(true) })).blocks.map((b) => b.check),
+    ['Already registered'],
+  );
+  assert.deepEqual(
+    checkRegistration(REGISTRATION({ freeUsdc: finalized(1n) })).blocks.map((b) => b.check),
+    ['Reporter stake'],
+  );
 });
