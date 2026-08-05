@@ -1,0 +1,36 @@
+# Generated and recorded artifacts.
+#
+# Everything below is **produced**, not written: by PAPI, by the chainHead recorder, by the
+# FRAME benchmarking pipeline, or by a package manager. Marking them keeps two things honest.
+#
+#   `linguist-generated=true` — GitHub collapses them in pull requests and excludes them from
+#   the repository's language statistics. Without it a review of this repository opens on tens
+#   of thousands of lines nobody wrote, and the hand-written change is somewhere below.
+#
+#   `-diff` — git treats the file as binary for diff purposes and prints "Binary files differ"
+#   instead of the content. Applied only where a textual diff is genuinely worthless.
+#
+# These are presentation directives. They change no gate: every drift checker
+# (`descriptors:check`, `check-chain-feed.py`, `check-generated-weights.py`,
+# `regenerate-weights.py --check`, the supply-chain lockfile gate) reads file *content* and is
+# unaffected by how git chooses to display it.
+
+# PAPI descriptor output — regenerate with `pnpm -C app run descriptors:generate`, and
+# `descriptors:check` byte-compares all 16 files against a fresh generation.
+app/packages/papi-descriptors/dist/**   linguist-generated=true -diff
+
+# Recorded chainHead-v1 transcripts — one compact line each (see `tools/release/transcript.py`
+# `deterministic_json`). Reproducing them needs a built runtime and a booted node, which is why
+# they are committed rather than generated on demand; and a fixture regenerated on demand could
+# never fail a drift gate, because it would re-record whatever the current state is.
+app/fixtures/chainhead/*.json           linguist-generated=true -diff
+
+# Generated FRAME weights. NOT `-diff`: the weight-regression and per-function drift gates are
+# about exactly these numbers changing, and a human reading that diff is part of the control
+# (SQ-490 shipped a function declaring 8 reads while performing 261).
+runtime/bleavit-runtime/src/weights/*.rs   linguist-generated=true
+
+# Lockfiles. Also not `-diff` — a dependency-graph change is something a reviewer must be able
+# to read line by line, and `supply-chain-gates.sh` exists because those lines matter.
+app/pnpm-lock.yaml                      linguist-generated=true
+**/Cargo.lock                           linguist-generated=true

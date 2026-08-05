@@ -93,4 +93,21 @@ def normalized_transcript(
 
 
 def deterministic_json(value: Any) -> str:
-    return json.dumps(value, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+    """Serialize a chainHead transcript: deterministic, and **compact**.
+
+    `sort_keys` is what makes it deterministic and is the load-bearing half — two recordings
+    of the same block must produce byte-identical files or the fixtures become a source of
+    spurious diffs.
+
+    The compact separators are the other half, and they are about the repository rather than
+    the format. These 282 transcripts are *generated recordings*: nobody reads them by hand,
+    every consumer parses them, and pretty-printing cost ~31,000 lines of diff surface for
+    presentation nothing looks at. Compact serialization is lossless — the parsed value is
+    identical — and takes that to one line per file.
+
+    Changing this changes every committed fixture, so the two must move together: the tree
+    was re-serialized through *this function* when the separators changed, rather than by a
+    separate minifier that could disagree with it. `.gitattributes` marks the directory
+    `linguist-generated -diff` so the one-line files never render as a wall of diff.
+    """
+    return json.dumps(value, separators=(",", ":"), sort_keys=True, ensure_ascii=False) + "\n"
