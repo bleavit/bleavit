@@ -50,7 +50,11 @@ import {
   BALLOT_NOT_ROUTINE,
   CANNOT_COMPLETE,
   OracleResolutionBallot,
+  DelegationForm,
   RatificationPanel,
+  SPLIT_NO_CONVICTION,
+  UnlockForm,
+  VoteForm,
   canStillComplete,
   ReferendaList,
   ReferendumDetail,
@@ -1492,4 +1496,111 @@ test('approved-but-unrecorded is timing, not failure', () => {
   );
   assert.ok(/matter of timing rather than a failure/.test(html), html);
   assert.ok(!html.includes('data-severity="danger"'), html);
+});
+
+// ------------------------------------------------- S10's forms (F16, last piece)
+
+const LOCK_FOLD = () =>
+  aboveTheFold('conviction-vote-lock', h('p', null, 'locked for 32 enactment periods'));
+
+test('the vote form renders the lock above the fold, and cannot hide it', () => {
+  const html = renderToStaticMarkup(
+    h(VoteForm, {
+      intent: { kind: 'standard', aye: true, balance: 1n },
+      conviction: 'Locked6x',
+      lock: LOCK_FOLD(),
+      onIntentChange: () => {}, onConvictionChange: () => {}, onSubmit: () => {},
+    }),
+  );
+  assert.ok(html.includes('data-fact="conviction-vote-lock"'), html);
+  // The prop is `AboveTheFold`, not `ReactNode`, so a caller cannot substitute a plain
+  // node — and the whole form refuses to render inside a disclosure.
+  assert.throws(
+    () =>
+      renderToStaticMarkup(
+        h(Disclosure, { summary: 'vote' },
+          h(VoteForm, {
+            intent: { kind: 'standard', aye: true, balance: 1n },
+            conviction: 'Locked1x', lock: LOCK_FOLD(),
+            onIntentChange: () => {}, onConvictionChange: () => {}, onSubmit: () => {},
+          })),
+      ),
+    DeferredMeaningChangingFactError,
+  );
+});
+
+test('a split vote disables conviction and says why, in text not only a tooltip', () => {
+  // Silently ignoring the choice would tell the user two false things at once: that their
+  // tokens are locked, and that their vote weighs more than it does.
+  const html = renderToStaticMarkup(
+    h(VoteForm, {
+      intent: { kind: 'split', aye: 1n, nay: 1n },
+      conviction: 'Locked6x', lock: LOCK_FOLD(),
+      onIntentChange: () => {}, onConvictionChange: () => {}, onSubmit: () => {},
+    }),
+  );
+  // Asserted on the RENDERED ATTRIBUTE and on ELEMENT TEXT, and the first version of this
+  // test was wrong on both counts — mutations M94 and M95 survived it. `/<select[^>]*disabled/`
+  // matched `aria-describedby="conviction-disabled"` whether or not the control was
+  // disabled, and `html.includes(SPLIT_NO_CONVICTION)` matched the `title` attribute, so
+  // deleting the visible paragraph changed nothing. Both are the same shape: an assertion
+  // satisfied by a second occurrence elsewhere in the markup.
+  assert.ok(/<select[^>]*\sdisabled=""/.test(html), `the selector is enabled on a split vote: ${html}`);
+  assert.ok(html.includes(`>${SPLIT_NO_CONVICTION}</p>`), 'the reason is not rendered as text');
+  // And a standard vote leaves it enabled, so the control is not vacuously disabled.
+  const standard = renderToStaticMarkup(
+    h(VoteForm, {
+      intent: { kind: 'standard', aye: false, balance: 1n },
+      conviction: 'None', lock: LOCK_FOLD(),
+      onIntentChange: () => {}, onConvictionChange: () => {}, onSubmit: () => {},
+    }),
+  );
+  assert.ok(!/<select[^>]*\sdisabled=""/.test(standard), standard);
+  assert.ok(!standard.includes(SPLIT_NO_CONVICTION), standard);
+});
+
+test('the unlock form names the account it acts on', () => {
+  // G-5's subject is `recipient`. A form saying only "your tokens" while submitting for a
+  // target would describe a different transaction than the one being signed.
+  const html = renderToStaticMarkup(
+    h(UnlockForm, {
+      target: finalized('5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY'),
+      locks: [
+        { track: finalized('constitution'), amount: finalized(1n), unlocksAt: finalized(900), expired: false },
+        { track: finalized('metric'), amount: finalized(2n), unlocksAt: finalized(100), expired: true },
+      ],
+      onUnlock: () => {},
+    }),
+  );
+  assert.ok(/Unlocking for/.test(html), html);
+  assert.ok(html.includes('5Grwva'), 'the target account is not shown');
+  // The unexpired one is disabled with a reason; the expired one is not.
+  assert.ok(/has not expired yet/.test(html), html);
+  const disabled = html.match(/disabled=""/g) ?? [];
+  assert.equal(disabled.length, 1, `exactly one lock is unexpired: ${html}`);
+});
+
+test('an unlock screen with nothing unlockable says so rather than looking broken', () => {
+  const html = renderToStaticMarkup(
+    h(UnlockForm, {
+      target: finalized('5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY'),
+      locks: [{ track: finalized('metric'), amount: finalized(1n), unlocksAt: finalized(900), expired: false }],
+      onUnlock: () => {},
+    }),
+  );
+  assert.ok(/Nothing is unlockable yet/.test(html), html);
+  assert.ok(/refused by the chain, not by this screen/.test(html), html);
+});
+
+test('undelegate is disabled with a reason when not delegating', () => {
+  const html = renderToStaticMarkup(
+    h(DelegationForm, {
+      target: finalized('5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY'),
+      conviction: 'Locked2x', lock: LOCK_FOLD(),
+      onConvictionChange: () => {}, onSubmit: () => {}, onUndelegate: () => {},
+      currentlyDelegating: false,
+    }),
+  );
+  assert.ok(/not currently delegating/.test(html), html);
+  assert.ok(html.includes('data-fact="conviction-vote-lock"'), 'the lock is not above the fold');
 });
