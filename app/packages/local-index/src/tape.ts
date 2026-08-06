@@ -53,10 +53,29 @@ export class TradeTapeError extends Error {
  * and it is not a 02 §9 frozen constant, which is why §5.4's no-literal rule has nothing to read
  * from. It is the *maximum* a block can carry, which is what a bound needs: sizing a window on a
  * typical rate produces a bound that holds until the day it matters.
+ *
+ * **Neither this constant nor `BLOCK_SECONDS` below is reachable by `check:chain-literals`, and
+ * the reason is structural rather than an oversight to be fixed later.** That gate has exactly
+ * two rules: **A** binds a 02 §9 frozen constant's *name* to a numeric literal, and neither name
+ * appears in that table; **B** catches a distinctive frozen *value* appearing bare and is
+ * restricted to four decimal digits or more, because `32` and `64` are hash widths and array
+ * sizes on every other line — so `93` and `6` are below the threshold by design, and widening it
+ * is what makes a gate noisy enough to be switched off. There is also nothing for a metadata read
+ * to replace them with: the runtime pins the fill ceiling in a `pov_budgets` **test function**,
+ * not a `#[pallet::constant]`, so it reaches no metadata surface a client could read — which
+ * makes 10 §8.3's *release constant* classification the right precedent, the same one this
+ * repository already applies to the provider health thresholds and to §9.2's storage caps. The
+ * deferral is therefore a classification, not a gap, and it is covered by no gate: what binds it
+ * to the chain is this comment and the §9.1 quotation above it.
  */
 export const TRADED_FILLS_PER_BLOCK_CEILING = 93;
 
-/** 02 §9's block time, as §9.1's own arithmetic uses it (14,400 blocks/day at 6 s). */
+/**
+ * 02 §9's block time, as §9.1's own arithmetic uses it (14,400 blocks/day at 6 s).
+ *
+ * Classified with `TRADED_FILLS_PER_BLOCK_CEILING` above — see that note for why
+ * `check:chain-literals` cannot see either of them.
+ */
 const BLOCK_SECONDS = 6;
 
 /** One fill as the tape reports it — never stored, so it carries its block rather than a key. */

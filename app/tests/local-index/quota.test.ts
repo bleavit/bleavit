@@ -31,10 +31,12 @@ import {
   quotaSharesAgree,
   readCoverage,
   readDownsampled,
+  sourceKeyOf,
   writeCoverage,
   writeDownsampled,
 } from '@bleavit/local-index';
 import {
+  MAX_REPORTED_STEPS,
   TX_PATH_TABLES,
   evictMetadataToBudget,
   laddersAgree,
@@ -46,7 +48,7 @@ import {
   readMetadataBlob,
   readPendingRawEvicted,
 } from '@bleavit/local-index';
-import type { PriceSample, QuotaShares, RowSizes, SettledProposal } from '@bleavit/local-index';
+import type { Candle, PriceSample, QuotaShares, RowSizes, SettledProposal } from '@bleavit/local-index';
 import { selfRange } from '@bleavit/local-index/testing';
 import { nth } from './nth.ts';
 
@@ -84,6 +86,26 @@ async function freshDb(): Promise<LocalIndex> {
 
 const sample = (at: number, block: number, price: number, bookId = 'book-1'): PriceSample =>
   priceSample({ bookId, blockNumber: block, blockTimestampMs: at * 1000, price1e9: BigInt(price), origin: 'self' });
+
+/**
+ * One hourly bar, for fixtures that need the **candle** tier at a size no fold could build in a
+ * test. Written directly rather than through `foldCandles` because what is under test is the
+ * tier's size, and folding 130,000 bars would take longer than the property is worth.
+ */
+const hourly = (hour: number, bookId = 'book-1'): Candle => ({
+  bookId,
+  resolution: 'candles1h',
+  openAt: hour * HOUR,
+  open1e9: 100n,
+  high1e9: 100n,
+  low1e9: 100n,
+  close1e9: 100n,
+  samples: 1,
+  fromBlock: hour,
+  toBlock: hour,
+  sourceKey: sourceKeyOf({ origin: 'self' }),
+  origin: 'self',
+});
 
 const fromIndexer = (at: number, block: number, price: number, providerId = 'acme'): PriceSample =>
   priceSample({
@@ -875,18 +897,24 @@ test('§9.2’s measured-and-current depth is REPORTED, per tier, with the measu
   await db.delete();
 });
 
-test('§9.2’s depth is read from the INDEX, so a tier past V8’s spread limit still measures', async () => {
+test('§9.2’s depth is read from the INDEX, on BOTH tiers, so a tier past V8’s spread limit measures', async () => {
   // The retention pass crashed exactly when the database was largest. `measureDepth` computed each
   // tier's extremes with `Math.min(...instants)` / `Math.max(...instants)` over **every row of the
   // tier**, and V8 refuses a spread above roughly 125,390 arguments — measured here: 125,000 is
   // fine, 130,000 throws `RangeError: Maximum call stack size exceeded`. `applyQuota` calls
   // `measureDepth` on every pass, so the whole retention pass threw once any tier passed that
-  // size. `candles1h` grows 159 books × 24 h = 3,816 rows/day at the registry maximum, arriving in
-  // about 33 days — roughly a quarter of §9.2's own published 131-day desktop candle depth, and
-  // before the 500,000-row candle share triggers any relief. On mobile the 125,000-row share and
-  // the crash arrive together.
+  // size.
   //
-  // The suite was structurally blind to it in the same way it had been blind to the whole-table
+  // **`candles1h` is the tier the arithmetic was about, and it is a separate call site.** The
+  // first version of this fixture seeded 130,000 `priceSamples` — a tier with no producer at all
+  // in production (SQ-782), so the regression test for a production crash exercised a path
+  // production never reaches, while the candle loop went unexercised. `candles1h` grows
+  // 159 books × 24 h = 3,816 rows/day at the registry maximum, arriving in about 33 days — roughly
+  // a quarter of §9.2's own published 131-day desktop candle depth, and before the 500,000-row
+  // candle share triggers any relief. On mobile the 125,000-row share and the crash arrive
+  // together. Both tiers are seeded here, and the candle one is the load-bearing half.
+  //
+  // The suite was structurally blind to this in the same way it had been blind to the whole-table
   // read: the DBCore seam test resets its counter before `applyQuota`, and `measureDepth` runs
   // when the fixture table is nearly empty. So this fixture is a real tier past the limit.
   const db = await freshDb();
@@ -894,29 +922,95 @@ test('§9.2’s depth is read from the INDEX, so a tier past V8’s spread limit
   const CHUNK = 10_000;
   for (let base = 0; base < N; base += CHUNK) {
     const rows: PriceSample[] = [];
-    for (let i = 0; i < CHUNK; i += 1) rows.push(sample(base + i, base + i, 100));
+    const bars: Candle[] = [];
+    for (let i = 0; i < CHUNK; i += 1) {
+      rows.push(sample(base + i, base + i, 100));
+      bars.push(hourly(base + i));
+    }
     await db.priceSamples.bulkPut(rows);
+    await db.candles1h.bulkPut(bars);
   }
   assert.equal(await db.priceSamples.count(), N);
+  assert.equal(await db.candles1h.count(), N, 'the tier with a producer is not past the spread limit');
 
   const sizes: RowSizes = { priceSample: 120, candle: 120, event: 120, archiveRow: 120 };
-  const depth = await measureDepth(db, platformBudget('desktop'), sizes, 1_000 * HOUR);
+  const depth = await measureDepth(db, platformBudget('desktop'), sizes, 10_000_000 * HOUR);
   const raw = nth(depth.tiers, 0, 'tier');
   assert.equal(raw.rows, N);
   assert.equal(raw.oldest, 0, 'the oldest instant is not the first entry of the ordered index');
   assert.equal(raw.newest, N - 1, 'the newest instant is not the last entry of the ordered index');
   assert.ok(raw.rowsPerDay !== undefined && raw.rowsPerDay > 0);
 
-  // ...and the whole pass survives it, which is the property the crash actually took down. The
-  // budget here is over the raw share, so the ladder runs rather than short-circuiting.
-  const report = await applyQuota(db, {
+  // The candle arm, measured through its own call site — `table.orderBy('openAt')`, not the raw
+  // tier's `at`.
+  const hours = nth(depth.tiers, 1, 'tier');
+  assert.equal(hours.tier, 'candles1h');
+  assert.equal(hours.rows, N);
+  assert.equal(hours.oldest, 0, 'the candle tier’s extremes are not read from its ordered index');
+  assert.equal(hours.newest, (N - 1) * HOUR);
+  assert.ok(hours.rowsPerDay !== undefined && hours.rowsPerDay > 0);
+
+  // ...and the whole pass survives it, which is the property the crash actually took down.
+  //
+  // **The budget below leaves nothing over its share, and this comment says so rather than
+  // claiming coverage the assertions do not have** — an earlier version stated *"the budget here
+  // is over the raw share, so the ladder runs rather than short-circuiting"*, which was false:
+  // 130,000 × 120 B is 15.6 MB against the 180 MB desktop raw share and the 60 MB candle share,
+  // so the first `held <= budgetForShare` breaks and **no rung does any work**. `stepsPerformed`
+  // is asserted at zero so the claim and the fixture cannot drift apart again.
+  //
+  // That is still the case worth asserting, because `applyQuota` calls `measureDepth`
+  // unconditionally at the end of every pass: an index that is large and *inside* its budget is
+  // the common state, and it is the one that threw. What is deliberately **not** exercised here is
+  // the ladder folding a tier this size, and the reason is the harness rather than the code —
+  // measured on the pinned `fake-indexeddb`, one 3,600-key `bulkDelete` against a 130,000-row
+  // table had not returned after **nine minutes** (the same delete against this suite's ordinary
+  // fixtures is instant, and the inserts above take ~10 s and ~7 s). A fixture that cannot finish
+  // is not a stronger test; the ladder's own behaviour at scale is asserted where it can be —
+  // "the ladder reads ONE BUCKET per pass", through Dexie's DBCore seam, which counts the work per
+  // fold rather than performing it a hundred thousand times.
+  const idle = await applyQuota(db, {
     budget: platformBudget('desktop'),
     sizes,
-    now: 1_000 * HOUR,
+    now: 10_000_000 * HOUR,
     pinnedSpecVersions: [3],
   });
-  assert.equal(report.depth.tiers.length, 4);
-  assert.deepEqual([...report.refusals], []);
+  assert.equal(idle.depth.tiers.length, 4);
+  assert.deepEqual([...idle.refusals], []);
+  assert.equal(idle.stepsPerformed, 0, 'the fixture is now over its share — the comment above is wrong again');
+  assert.equal(nth(idle.depth.tiers, 1, 'tier').rows, N, 'the pass re-measured the candle tier as something else');
+  await db.delete();
+});
+
+test('a tier’s rate is measured over ONE population — the count comes off the index too', async () => {
+  // `Table.count()` counts rows; an index counts **entries**, and a row missing the indexed field
+  // is not an entry. The extremes come off `orderBy('at')`, so a count taken from the table would
+  // divide one population's rows by another population's span — measured on the pinned Dexie, a
+  // table holding one row with no `at` answers 3 to `count()` and 2 to `orderBy('at').count()`.
+  //
+  // Both directions of that error are conservative (an over-count shortens the budgeted depth,
+  // which understates rather than overstates), which is precisely why nothing would have caught
+  // it drifting. §9.2 makes measured depth a `MUST`, so the quantity is pinned rather than left
+  // to be conservative by luck.
+  const db = await freshDb();
+  await db.priceSamples.bulkPut([sample(0, 1, 100), sample(2 * 24 * HOUR, 2, 200)]);
+  // The shape a writer that omitted the block timestamp produces — well-formed enough to store,
+  // invisible to the `at` index.
+  await db.priceSamples.put({
+    bookId: 'book-1',
+    sourceKey: sourceKeyOf({ origin: 'self' }),
+    blockNumber: 3,
+    price1e9: 300n,
+    origin: 'self',
+  } as PriceSample);
+
+  const sizes: RowSizes = { priceSample: 120, candle: 120, event: 120, archiveRow: 120 };
+  const depth = await measureDepth(db, platformBudget('desktop'), sizes, 100 * HOUR);
+  const raw = nth(depth.tiers, 0, 'tier');
+  assert.equal(await db.priceSamples.count(), 3, 'the fixture no longer holds an unindexed row');
+  assert.equal(raw.rows, 2, 'the count and the extremes describe different populations');
+  assert.equal(raw.heldDays, 2);
+  assert.equal(raw.rowsPerDay, 1, 'the rate divided one population’s rows by another’s span');
   await db.delete();
 });
 
@@ -1032,11 +1126,214 @@ test('a rung that REFUSES does not abandon the rungs after it', async () => {
   // Step 4 ran despite step 3 refusing — the §9.1 bound on the tier that must never grow.
   const bound = report.steps.find((s) => s.kind === 'evict-pending-raw');
   assert.ok(bound, 'the compaction refusal skipped the §6.5 raw-blob bound entirely');
-  assert.deepEqual(bound.kind === 'evict-pending-raw' ? [...bound.blocks] : [], [10, 20]);
+  assert.deepEqual(
+    bound.kind === 'evict-pending-raw'
+      ? { blocks: bound.blocks, oldestBlock: bound.oldestBlock, newestBlock: bound.newestBlock }
+      : undefined,
+    { blocks: 2, oldestBlock: 10, newestBlock: 20 },
+  );
 
   // Nothing the refusals touched was destroyed: refusing costs depth, which §9.2 permits.
   assert.equal(await db.metadataCache.count(), 2, 'a pinned blob was evicted by the refused rung');
   assert.equal(await db.events.get('1:0') !== undefined, true, 'the refused compaction deleted its events anyway');
+  await db.delete();
+});
+
+test('the step list is BOUNDED, the count is not, and no refusal is ever elided', async () => {
+  // §9.2 calls the ladder "deterministic and user-visible", and `QuotaReport.steps` is what
+  // renders it — so the list is a rendering and had no bound at all. One `downsample` step is one
+  // folded bucket: a full pass at the desktop raw share (180 MB ÷ ~120 B ≈ 1.5 M rows) is
+  // thousands of them, and the §6.5 raw-blob step used to carry one entry per discarded block, up
+  // to ~225,000 at the desktop events share. Both are now envelope-and-count, the shape
+  // `PendingRawEvictionRecord` already used.
+  //
+  // The half that must NOT be bounded is the refusals: they are what the pass could not do, they
+  // are bounded by the rungs, and `refusals` is derived from `steps` precisely so one cannot go
+  // unreported. A cap that elided them would be a silent failure produced by a display decision.
+  const db = await freshDb();
+  const sizes: RowSizes = { priceSample: 120, candle: 120, event: 120, archiveRow: 120 };
+  // 120 closed hourly buckets, two samples apiece: each fold frees one row, so the ladder runs
+  // past the cap without any single transaction being large.
+  const samples: PriceSample[] = [];
+  for (let h = 0; h < 120; h += 1) {
+    samples.push(sample(h * HOUR + 10, 2 * h + 1, 100));
+    samples.push(sample(h * HOUR + 20, 2 * h + 2, 200));
+  }
+  await db.priceSamples.bulkPut(samples);
+  // ...and a raw row the sparse index cannot reach, so the LAST rung refuses — after the cap has
+  // already been reached by the chart ladder.
+  await db.events.put({
+    id: rawEventId(9_001),
+    blockNumber: 9_001,
+    pallet: '(pending decoder)',
+    name: '(era metadata unavailable)',
+    decoded: false,
+    raw: new Uint8Array(16),
+    origin: 'self',
+  } as Parameters<typeof db.events.put>[0]);
+
+  const report = await applyQuota(db, {
+    budget: { ...platformBudget('desktop'), rawSampleBytes: 120, candleBytes: 120 * 200 },
+    sizes,
+    now: 1_000 * HOUR,
+    pinnedSpecVersions: [3],
+  });
+
+  assert.ok(report.stepsPerformed > MAX_REPORTED_STEPS, 'the fixture no longer reaches the cap');
+  const listed = report.steps.filter((s) => s.kind !== 'refused');
+  assert.equal(listed.length, MAX_REPORTED_STEPS, 'the step list is unbounded again');
+  assert.ok(
+    report.stepsPerformed - listed.length > 0,
+    'nothing was elided, so `stepsPerformed` is not carrying the part the list dropped',
+  );
+  // The refusal is present despite arriving long after the cap was reached.
+  assert.deepEqual(report.refusals.map((r) => [r.rung, r.at]), [['evict-pending-raw', 'pending-raw']]);
+  assert.ok(
+    report.steps.some((s) => s.kind === 'refused'),
+    'the refusal is in `refusals` but not in `steps`, so the two lists disagree',
+  );
+  await db.delete();
+});
+
+test('a fold whose transaction ABORTS leaves no label — not in storage, not in the accumulator', async () => {
+  // §9.2 obligation 1: *"The 'downsampled' label is written in the same storage transaction that
+  // deletes the rows."* The transaction gave that for free until the per-rung `catch` was added:
+  // `degradeOldestBucket` merged the incoming range into the caller's accumulator **before**
+  // opening its transaction, and the throw used to end the pass, so the phantom label went nowhere.
+  // With the pass continuing, the next rung — which commits — persisted the whole accumulator,
+  // including a "downsampled" range whose rows had never been deleted. Measured before the repair:
+  // `priceSamples` still held its rows *and* `meta.downsampled` claimed they had been folded.
+  //
+  // The direction is safe (fidelity under-claimed, never over-claimed) and it is still a persisted
+  // claim about a deletion that did not happen — which is the whole reason the label is bound to
+  // the delete rather than written beside it.
+  const db = new LocalIndex(GENESIS);
+  let refusedWrites = 0;
+  // Armed after the fixture is written: the middleware has to be installed **before** `open()` to
+  // reach the built stack at all, and an unconditional one would refuse the seeding too.
+  let armed = false;
+  db.use({
+    stack: 'dbcore',
+    name: 'refuse-hourly-writes',
+    create: (down) => ({
+      ...down,
+      table: (name: string) => {
+        const table = down.table(name);
+        return {
+          ...table,
+          mutate: (req: { type: string }) => {
+            // Only the *write* into `candles1h`, so the raw rung's transaction aborts while the
+            // `candles1h` → `candles4h` rung — which deletes from this table and writes to
+            // another — still commits and persists whatever the accumulator holds.
+            if (armed && name === 'candles1h' && req.type !== 'delete' && req.type !== 'deleteRange') {
+              refusedWrites += 1;
+              return Promise.reject(new Error('the fold’s coarse write was refused'));
+            }
+            return table.mutate(req as Parameters<typeof table.mutate>[0]);
+          },
+        };
+      },
+    }),
+  });
+  await db.delete();
+  await db.open();
+
+  // Raw rung: one closed hour of samples over blocks 1..5, which is the fold that will abort.
+  await db.priceSamples.bulkPut([sample(10, 1, 100), sample(20, 5, 200)]);
+  // candles1h rung: four closed hourly bars over blocks 1000..1003, which roll up and commit.
+  await db.candles1h.bulkPut([0, 1, 2, 3].map((h) => ({ ...hourly(h), fromBlock: 1000 + h, toBlock: 1000 + h })));
+  armed = true;
+
+  const report = await applyQuota(db, {
+    budget: { ...platformBudget('desktop'), rawSampleBytes: 120, candleBytes: 120 },
+    sizes: { priceSample: 120, candle: 120, event: 120, archiveRow: 120 },
+    now: 100 * HOUR,
+    pinnedSpecVersions: [3],
+  });
+
+  assert.ok(refusedWrites > 0, 'the middleware never refused a write, so nothing was under test');
+  // The raw rung refused, in its place in the sequence — the behaviour the per-rung catch added.
+  assert.deepEqual(report.refusals.map((r) => [r.rung, r.at]), [['downsample', 'raw']]);
+  // Its rows are still there, which is what makes a label about them false.
+  assert.equal(await db.priceSamples.count(), 2, 'the aborted fold deleted its rows anyway');
+  // And no label claims otherwise — neither persisted nor reported. Blocks 1..5 are the raw fold's
+  // span; the committed `candles1h` → `candles4h` fold covers 1000..1003 and is expected.
+  const persisted = await readDownsampled(db);
+  assert.deepEqual(
+    persisted.filter((range) => range.fromBlock <= 5),
+    [],
+    'a label was persisted for a fold whose transaction rolled back',
+  );
+  assert.deepEqual(
+    report.downsampled.filter((range) => range.fromBlock <= 5),
+    [],
+    'the report carries a label for a fold that did not happen',
+  );
+  // The later rung really did run and really did persist its own label, or this test proves
+  // nothing about the accumulator being carried across rungs.
+  assert.deepEqual(
+    persisted.map((range) => [range.fromBlock, range.toBlock, range.resolution]),
+    [[1000, 1003, 'candles4h']],
+    'the committed fold’s own label is missing, so the accumulator was never persisted at all',
+  );
+  await db.delete();
+});
+
+test('a label that cannot be WRITTEN takes the delete with it (§9.2 obligation 1)', async () => {
+  // The obligation in the direction the existing transaction test cannot reach. That test proves
+  // `writeDownsampled` joins an ambient transaction — a property of the function. This one is
+  // about the **ladder**: that the fold's own label write is inside the fold's own transaction.
+  //
+  // The two are distinguished by exactly one failure, and it is the one §9.2 names: the label
+  // write fails after the delete has been issued. Inside the transaction, both roll back and the
+  // rows survive; written afterwards, the delete stands and the label is lost — rows gone with
+  // nothing saying so, which is the silent splice the sentence forbids, arriving from the code
+  // whose job is to prevent it. Found by mutation: moving `writeDownsampled` after the `rw` block
+  // survived the whole suite.
+  const db = new LocalIndex(GENESIS);
+  let refusedLabels = 0;
+  let armed = false;
+  db.use({
+    stack: 'dbcore',
+    name: 'refuse-meta-writes',
+    create: (down) => ({
+      ...down,
+      table: (name: string) => {
+        const table = down.table(name);
+        return {
+          ...table,
+          mutate: (req: { type: string }) => {
+            if (armed && name === 'meta' && req.type !== 'delete' && req.type !== 'deleteRange') {
+              refusedLabels += 1;
+              return Promise.reject(new Error('the downsampled label could not be written'));
+            }
+            return table.mutate(req as Parameters<typeof table.mutate>[0]);
+          },
+        };
+      },
+    }),
+  });
+  await db.delete();
+  await db.open();
+  await db.priceSamples.bulkPut([sample(10, 1, 100), sample(20, 5, 200)]);
+  armed = true;
+
+  const report = await applyQuota(db, {
+    budget: { ...platformBudget('desktop'), rawSampleBytes: 120 },
+    sizes: { priceSample: 120, candle: 120, event: 120, archiveRow: 120 },
+    now: 100 * HOUR,
+    pinnedSpecVersions: [3],
+  });
+
+  assert.ok(refusedLabels > 0, 'the middleware never refused a label write, so nothing was tested');
+  assert.deepEqual(report.refusals.map((r) => [r.rung, r.at]), [['downsample', 'raw']]);
+  const rows = await db.priceSamples.count();
+  const labels = await readDownsampled(db);
+  // The failing combination is `rows === 0 && labels === []`: the rows were freed and nothing
+  // records it. Asserted as the two facts rather than as their conjunction, so a run that fails
+  // says which half went wrong.
+  assert.equal(rows, 2, 'the delete committed while its label did not — the silent splice §9.2 forbids');
+  assert.deepEqual([...labels], [], 'a label was persisted although its write was refused');
   await db.delete();
 });
 
@@ -1202,7 +1499,14 @@ test('the pending-decode blobs are bounded by the EVENTS share, and the pass say
 
   const step = report.steps.find((s) => s.kind === 'evict-pending-raw');
   assert.ok(step, 'the raw blobs grew past their share with no rung able to reach them');
-  assert.deepEqual(step.kind === 'evict-pending-raw' ? [...step.blocks] : [], [10, 20]);
+  // An envelope and a count — §9.2 calls the ladder "user-visible", and the desktop events share
+  // admits on the order of 225,000 of these blobs, so the list is the thing being bounded.
+  assert.deepEqual(
+    step.kind === 'evict-pending-raw'
+      ? { blocks: step.blocks, oldestBlock: step.oldestBlock, newestBlock: step.newestBlock }
+      : undefined,
+    { blocks: 2, oldestBlock: 10, newestBlock: 20 },
+  );
   assert.equal(await pendingDecoderCount(db), 1);
   assert.ok(report.after.eventBytes <= budget.eventBytes);
 

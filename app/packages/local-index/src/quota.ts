@@ -72,6 +72,7 @@ import {
   writeDownsampled,
   type CandleKey,
   type LocalIndex,
+  type PendingRawEviction,
   type ProposalArchiveRow,
   type StoredEvent,
 } from './store.js';
@@ -327,8 +328,15 @@ export type QuotaStep =
       readonly eventsCompacted: number;
     }
   | { readonly kind: 'evict-metadata'; readonly specVersions: readonly number[] }
-  /** §9.1's bound on §6.5's raw blobs — see `evictPendingRawToBound`. */
-  | { readonly kind: 'evict-pending-raw'; readonly blocks: readonly number[] }
+  /**
+   * §9.1's bound on §6.5's raw blobs — see `evictPendingRawToBound`.
+   *
+   * An **envelope and a count**, never the block list. §9.2 calls the ladder *"user-visible"*, and
+   * the desktop events share admits on the order of 225,000 of these blobs — so a per-block list
+   * is not a rendering, it is the growth the eviction was run to stop reproduced in the report
+   * about stopping it. `PendingRawEvictionRecord` already made that choice for the stored label.
+   */
+  | ({ readonly kind: 'evict-pending-raw' } & PendingRawEviction)
   /**
    * A rung that refused, reported **in its place in the sequence** rather than thrown.
    *
@@ -351,13 +359,17 @@ export type QuotaStep =
       readonly reason: string;
     };
 
-/** The rungs of §9.2's pass, named so a refusal can say which one it belongs to. */
-export type QuotaRung =
-  | 'measure'
-  | 'evict-metadata'
-  | 'downsample'
-  | 'compact-events'
-  | 'evict-pending-raw';
+/**
+ * The rungs of §9.2's pass, named so a refusal can say which one it belongs to.
+ *
+ * **Every name here has an emitter.** A `'measure'` variant sat in this list with no producer
+ * anywhere: measurement runs before the first rung, outside every `try`, so the one step the enum
+ * advertised as refusable was the one that still took the whole pass down. A declared-and-never-
+ * emitted name is the same defect as a declared-and-never-emitted error code — it reads as
+ * coverage nobody has. What makes measurement safe instead is `pendingRawBytes`, the route with
+ * no index to disagree with, so it has no refusal to report.
+ */
+export type QuotaRung = 'evict-metadata' | 'downsample' | 'compact-events' | 'evict-pending-raw';
 
 /**
  * A proposal §9.2 permits compacting: *"`events` for settled+reaped proposals → compacted into
@@ -471,6 +483,14 @@ export interface DepthReport {
  * note says the surface calling it *"renders far more often than the quota manager runs"*.
  * `at` and `openAt` are both declared indexes, so the extremes are the first and last entries of
  * an ordered index: measured here, 1 ms against 4.25 s for the whole-table form at 130,000 rows.
+ *
+ * **The row count comes off the same index**, which the first version of the repair got wrong in a
+ * way nothing would have flagged: `Table.count()` counts rows and an index counts *entries*, and a
+ * row missing the indexed field is not an entry. Measured on the pinned Dexie, a table holding one
+ * row with no `at` answers 3 to `count()` and 2 to `orderBy('at').count()` — so the rate would
+ * have been three rows over the span of two, an over-count that is conservative but that nothing
+ * pinned. One population, one question: the rows the extremes were taken over are the rows
+ * divided by the span between them.
  */
 export async function measureDepth(
   db: LocalIndex,
@@ -485,7 +505,7 @@ export async function measureDepth(
       'raw',
       await tierExtent<PriceSample>(
         {
-          count: () => db.priceSamples.count(),
+          count: () => db.priceSamples.orderBy('at').count(),
           first: () => db.priceSamples.orderBy('at').first(),
           last: () => db.priceSamples.orderBy('at').last(),
         },
@@ -504,7 +524,7 @@ export async function measureDepth(
         resolution,
         await tierExtent<Candle>(
           {
-            count: () => table.count(),
+            count: () => table.orderBy('openAt').count(),
             first: () => table.orderBy('openAt').first(),
             last: () => table.orderBy('openAt').last(),
           },
@@ -518,7 +538,12 @@ export async function measureDepth(
   return { measuredAt: now, tiers };
 }
 
-/** A tier's size and its two extreme instants. Three index reads, whatever the tier holds. */
+/**
+ * A tier's size and its two extreme instants — all three read through **one** ordered index, so
+ * the count and the extremes describe the same population.
+ *
+ * Three index reads, whatever the tier holds.
+ */
 interface TierExtent {
   readonly rows: number;
   readonly oldest: number | undefined;
@@ -572,10 +597,32 @@ function tierDepth(
   };
 }
 
+/**
+ * How many non-refusal steps a report lists before it stops listing them.
+ *
+ * §9.2 calls the ladder *"deterministic and user-visible"*, and a `downsample` step is one folded
+ * bucket: a full pass at the desktop raw share (180 MB ÷ ~120 B ≈ 1.5 M rows) is thousands of
+ * them, which is a log rather than a rendering. The listed prefix plus `stepsPerformed` is the
+ * same envelope-and-count treatment `PendingRawEvictionRecord` already applies one layer down, and
+ * the aggregate outcome is fully described elsewhere in the report — `before`/`after` state what
+ * was freed, `downsampled` the labels the passes wrote, `depth` where the user ends up.
+ *
+ * **Refusals are never elided**, whatever the cap: they are what a pass could not do, they are
+ * bounded by the rungs (plus the caller's own settled list), and `refusals` is derived from
+ * `steps` precisely so a refusal cannot go unreported.
+ */
+export const MAX_REPORTED_STEPS = 100;
+
 export interface QuotaReport {
   readonly before: Usage;
   readonly after: Usage;
+  /**
+   * The pass's steps in order, **bounded** — at most `MAX_REPORTED_STEPS` of them plus every
+   * refusal. `stepsPerformed - steps.length` is what was elided.
+   */
   readonly steps: readonly QuotaStep[];
+  /** How many steps the pass actually performed, listed or not. */
+  readonly stepsPerformed: number;
   readonly downsampled: readonly DownsampledRange[];
   /**
    * §9.2's measured-and-current depth, taken **after** the pass — which is the state the user is
@@ -636,7 +683,15 @@ export async function applyQuota(db: LocalIndex, options: QuotaOptions): Promise
   assertSizes(sizes);
   if (!Number.isInteger(now) || now < 0) throw new QuotaError(`${now} is not a Unix second`);
   const steps: QuotaStep[] = [];
+  let stepsPerformed = 0;
+  // Every step is counted; the list keeps a bounded prefix — see `MAX_REPORTED_STEPS`.
+  const record = (step: QuotaStep): void => {
+    stepsPerformed += 1;
+    if (steps.length < MAX_REPORTED_STEPS) steps.push(step);
+  };
+  // A refusal is never elided, so it does not go through the cap.
   const refuse = (rung: QuotaRung, at: string, error: unknown): void => {
+    stepsPerformed += 1;
     steps.push({ kind: 'refused', rung, at, reason: reasonOf(error) });
   };
   const before = await measureUsage(db, sizes);
@@ -649,7 +704,7 @@ export async function applyQuota(db: LocalIndex, options: QuotaOptions): Promise
       maxBytes: Math.floor(budget.metadataBytes),
       pinned: pinnedSpecVersions,
     });
-    if (evicted.length > 0) steps.push({ kind: 'evict-metadata', specVersions: evicted });
+    if (evicted.length > 0) record({ kind: 'evict-metadata', specVersions: evicted });
   } catch (error) {
     // §9.3's pinned set does not fit its own platform budget — a release-configuration fault the
     // chart ladder can do nothing about and must not be stopped by.
@@ -658,6 +713,15 @@ export async function applyQuota(db: LocalIndex, options: QuotaOptions): Promise
 
   // 2. The chart ladder. `labels` accumulates across rungs so a range degraded twice keeps the
   // coarser label rather than two rows claiming two resolutions for one span.
+  //
+  // **It is only ever advanced by a fold whose transaction committed**, and that is not tidiness
+  // either. `degradeOldestBucket` used to merge the incoming range into this accumulator *before*
+  // opening its transaction, so a fold that aborted left the phantom label here — and the next
+  // rung, which does commit, persisted the whole accumulator including a "downsampled" range whose
+  // rows were never deleted. §9.2 obligation 1 binds the label to the delete (*"written in the
+  // same storage transaction that deletes the rows"*), and before the per-rung `catch` below the
+  // throw happened to prevent it. The error direction is safe — fidelity under-claimed, never
+  // over-claimed — but it is still a persisted claim about a deletion that did not happen.
   let labels = await readDownsampled(db);
   let rung: Resolution | undefined = 'raw';
   while (rung !== undefined) {
@@ -678,12 +742,12 @@ export async function applyQuota(db: LocalIndex, options: QuotaOptions): Promise
         // byte of the share that is full.
         const held = await shareBytes(db, share, sizes);
         if (held <= budgetForShare) break;
-        const step = await degradeOldestBucket(db, rung, target, now, after, (range) => {
-          labels = mergeDownsampled(labels, range);
-          return labels;
-        });
-        if (step === undefined) break;
-        steps.push(step);
+        const folded = await degradeOldestBucket(db, rung, target, now, after, labels);
+        if (folded === undefined) break;
+        // Assigned only here, after the transaction that wrote the same value resolved.
+        labels = folded.labels;
+        const step = folded.step;
+        record(step);
         // **The progress guard, and what it must not do is abandon the rung.** Every other
         // termination condition here is a property of *other* code — the delete really removing
         // rows, the measurement really shrinking — and when one of those is wrong the loop folds
@@ -712,7 +776,7 @@ export async function applyQuota(db: LocalIndex, options: QuotaOptions): Promise
     try {
       const compacted = await compactSettledEvents(db, proposal);
       if (compacted === 0) continue;
-      steps.push({ kind: 'compact-events', proposalId: proposal.proposalId, eventsCompacted: compacted });
+      record({ kind: 'compact-events', proposalId: proposal.proposalId, eventsCompacted: compacted });
     } catch (error) {
       // Per proposal, not per loop: a mixed-provenance proposal is refused and the next settled
       // proposal is still compacted. The refusal costs that proposal's depth, which §9.2 permits;
@@ -734,7 +798,7 @@ export async function applyQuota(db: LocalIndex, options: QuotaOptions): Promise
       Math.max(0, budget.eventBytes - eventOverhead),
       now,
     );
-    if (evictedRaw.length > 0) steps.push({ kind: 'evict-pending-raw', blocks: evictedRaw });
+    if (evictedRaw !== undefined) record({ kind: 'evict-pending-raw', ...evictedRaw });
   } catch (error) {
     // `pendingRawRows` refuses when the sparse index cannot reach the whole pending set. That
     // refusal is right — an under-covering bound is worse than none — and it is the last rung, so
@@ -746,6 +810,7 @@ export async function applyQuota(db: LocalIndex, options: QuotaOptions): Promise
     before,
     after: await measureUsage(db, sizes),
     steps,
+    stepsPerformed,
     downsampled: labels,
     depth: await measureDepth(db, budget, sizes, now),
     refusals: steps.filter((step): step is Extract<QuotaStep, { kind: 'refused' }> => step.kind === 'refused'),
@@ -860,6 +925,14 @@ function align(at: number, width: number): number {
  *   in the past.
  *
  * `after` skips buckets an earlier pass folded without freeing anything — see `applyQuota`.
+ *
+ * **The label is merged and written inside the transaction, and the merged set is a return
+ * value.** It used to be built by a callback that mutated the caller's accumulator before the
+ * transaction opened, which is §9.2 obligation 1 read backwards: the label is bound to the delete
+ * (*"written in the same storage transaction that deletes the rows"*), so a fold that aborts must
+ * leave no trace of it anywhere — not in storage, which the transaction already guaranteed, and
+ * not in the accumulator a later rung will persist. Returning it means the caller can only learn
+ * the new set from a transaction that resolved.
  */
 async function degradeOldestBucket(
   db: LocalIndex,
@@ -867,8 +940,14 @@ async function degradeOldestBucket(
   to: Exclude<Resolution, 'raw'>,
   now: number,
   after: number | undefined,
-  label: (range: DownsampledRange) => readonly DownsampledRange[],
-): Promise<Extract<QuotaStep, { kind: 'downsample' }> | undefined> {
+  labels: readonly DownsampledRange[],
+): Promise<
+  | {
+      readonly step: Extract<QuotaStep, { kind: 'downsample' }>;
+      readonly labels: readonly DownsampledRange[];
+    }
+  | undefined
+> {
   const width = bucketSeconds(to);
   const target = db.table<Candle, CandleKey>(candleTableFor(to));
 
@@ -896,21 +975,25 @@ async function degradeOldestBucket(
     const candles = foldCandles(group, to);
     const fromBlock = group.reduce((m, s) => Math.min(m, s.blockNumber), group[0]!.blockNumber);
     const toBlock = group.reduce((m, s) => Math.max(m, s.blockNumber), group[0]!.blockNumber);
-    const ranges = label(downsample(fromBlock, toBlock, to, now));
-    await db.transaction('rw', db.priceSamples, target, db.meta, async () => {
+    const written = await db.transaction('rw', db.priceSamples, target, db.meta, async () => {
       await rollIntoBuckets(target, candles);
       await db.priceSamples.bulkDelete(group.map((s) => [s.bookId, s.sourceKey, s.blockNumber] as [string, string, number]));
+      const ranges = mergeDownsampled(labels, downsample(fromBlock, toBlock, to, now));
       await writeDownsampled(db, ranges);
+      return ranges;
     });
     return {
-      kind: 'downsample',
-      from,
-      to,
-      rowsRemoved: group.length,
-      rowsWritten: candles.length,
-      fromBlock,
-      toBlock,
-      bucketOpenAt: bucket.openAt,
+      step: {
+        kind: 'downsample',
+        from,
+        to,
+        rowsRemoved: group.length,
+        rowsWritten: candles.length,
+        fromBlock,
+        toBlock,
+        bucketOpenAt: bucket.openAt,
+      },
+      labels: written,
     };
   }
 
@@ -938,21 +1021,25 @@ async function degradeOldestBucket(
   const rolled = rollUp(group, to);
   const fromBlock = group.reduce((m, c) => Math.min(m, c.fromBlock), group[0]!.fromBlock);
   const toBlock = group.reduce((m, c) => Math.max(m, c.toBlock), group[0]!.toBlock);
-  const ranges = label(downsample(fromBlock, toBlock, to, now));
-  await db.transaction('rw', sourceTable, target, db.meta, async () => {
+  const written = await db.transaction('rw', sourceTable, target, db.meta, async () => {
     await rollIntoBuckets(target, rolled);
     await sourceTable.bulkDelete(group.map((c) => [c.bookId, c.sourceKey, c.openAt] as [string, string, number]));
+    const ranges = mergeDownsampled(labels, downsample(fromBlock, toBlock, to, now));
     await writeDownsampled(db, ranges);
+    return ranges;
   });
   return {
-    kind: 'downsample',
-    from,
-    to,
-    rowsRemoved: group.length,
-    rowsWritten: rolled.length,
-    fromBlock,
-    toBlock,
-    bucketOpenAt: bucket.openAt,
+    step: {
+      kind: 'downsample',
+      from,
+      to,
+      rowsRemoved: group.length,
+      rowsWritten: rolled.length,
+      fromBlock,
+      toBlock,
+      bucketOpenAt: bucket.openAt,
+    },
+    labels: written,
   };
 }
 
@@ -1018,24 +1105,29 @@ export async function compactSettledEvents(
     );
   }
   // **Provenance is never degraded on the way** — §9.2 obligation 3, which the archive row was
-  // outside. `proposalsArchive` is keyed on the proposal id alone (§7), so one settled proposal
-  // gets one summary; the summary's origin was whatever the caller put in `provenance`, and
-  // nothing compared it with the rows being deleted. A proposal whose blocks span a
-  // self-ingested range and an operator-backfilled one therefore collapsed into a single row
-  // that would render under one badge — the merge §6.3 refuses for ranges and `foldCandles`
-  // refuses for bars, arriving where there is no second row to keep the boundary in.
+  // outside. `proposalsArchive` is keyed on the proposal id alone by **`SCHEMA_V1`/`SCHEMA_V3`**,
+  // this package's own declaration — 10 §7 publishes a table name list and three named key
+  // changes and no column list at all (SQ-607), so it cannot be cited for this key and an earlier
+  // draft of this comment did exactly that. One settled proposal therefore gets one summary; the
+  // summary's origin was whatever the caller put in `provenance`, and nothing compared it with
+  // the rows being deleted. A proposal whose blocks span a self-ingested range and an
+  // operator-backfilled one collapsed into a single row that would render under one badge — the
+  // merge §6.3 refuses for ranges and `foldCandles` refuses for bars, arriving where there is no
+  // second row to keep the boundary in.
   //
-  // Refused rather than split, because splitting needs a second summary and `proposalsArchive`
-  // has nowhere to put it: its primary key admits exactly one row per proposal. Refusing leaves
+  // Refused rather than split, because splitting needs a second summary and the declared key
+  // admits exactly one row per proposal. Re-keying on `[proposalId+sourceKey]` would change the
+  // archive's identity, which is a schema decision this refusal does not force; refusing leaves
   // the events in place, costing depth, which §9.2 permits and mislabelling does not.
   const foreign = doomed.find((event) => !sameSampleProvenance(event, proposal.provenance));
   if (foreign !== undefined) {
     throw new QuotaError(
       `proposal ${proposal.proposalId} declares its summary as ${describe(proposal.provenance)} ` +
         `and names event ${foreign.id}, which is ${describe(foreign)}. 10 §9.2 lets the ladder ` +
-        'degrade resolution and forbids it relabelling a source on the way; proposalsArchive is ' +
-        'keyed by proposal, so one summary cannot carry two origins and there is no second row ' +
-        'to keep the boundary in. The events stay, which costs depth rather than truth.',
+        'degrade resolution and forbids it relabelling a source on the way; SCHEMA_V3 keys ' +
+        'proposalsArchive by proposal alone, so one summary cannot carry two origins and there ' +
+        'is no second row to keep the boundary in. The events stay, which costs depth rather ' +
+        'than truth.',
     );
   }
   const row: ProposalArchiveRow = {

@@ -20,7 +20,12 @@ import 'fake-indexeddb/auto';
 
 import {
   ChainTagError,
+  EMPTY_COVERAGE,
   LocalIndex,
+  REKEY_VERSION,
+  SCHEMA_V1_VERSION,
+  SCHEMA_V3_VERSION,
+  addRange,
   priceSample,
   REKEYED_TABLES,
   SCHEMA_V1,
@@ -28,7 +33,9 @@ import {
   StoreError,
   applyQuota,
   checkIndexAtBoot,
+  coveredSamples,
   databaseName,
+  downsample,
   evictMetadataToBudget,
   evictPendingRawToBound,
   evictionEnvelope,
@@ -44,6 +51,7 @@ import {
   rebuild,
   sanitizeCoverage,
   writeCoverage,
+  writeDownsampled,
 } from '@bleavit/local-index';
 import { isVerifiedAt } from '@bleavit/local-index';
 import type { CoverageRange } from '@bleavit/local-index';
@@ -394,8 +402,17 @@ test('a database created under SCHEMA_V1 UPGRADES rather than failing to open', 
   assert.ok(discard, 'the migration emptied the chart tables and left nothing saying so');
   assert.equal(discard.rows, 2, 'the record does not count the rows that were actually dropped');
   assert.deepEqual([...discard.tables], [...REKEYED_TABLES]);
-  assert.equal(discard.fromSchema, 1);
-  assert.equal(discard.toSchema, 3);
+  // Neither schema number is copied into the record: `toSchema` is read off the database being
+  // upgraded, so a future `version(4)` cannot leave it claiming the schema stopped at 3, and
+  // `fromSchema` is the only released schema an upgrader at `REKEY_VERSION` can run for.
+  assert.equal(discard.fromSchema, SCHEMA_V1_VERSION);
+  assert.equal(discard.toSchema, SCHEMA_V3_VERSION);
+  assert.equal(discard.toSchema, db.verno, 'the record names a schema the database did not reach');
+  assert.deepEqual(
+    [SCHEMA_V1_VERSION, REKEY_VERSION, SCHEMA_V3_VERSION],
+    [1, 2, 3],
+    'the declared version ladder moved without the record following it',
+  );
   // The span named is the one `meta.coverage` still claims — exactly where the surviving coverage
   // and the surviving rows now disagree.
   assert.equal(discard.fromBlock, 1);
@@ -407,6 +424,24 @@ test('a database created under SCHEMA_V1 UPGRADES rather than failing to open', 
   // shape as a checker with no call site — which is the defect this whole repair round began on.
   const report = await checkIndexAtBoot(db, () => undefined);
   assert.deepEqual(report.chartDiscard, discard);
+
+  // **And so does the QUERY path, which is the surface §6.3 exists to protect.** A record on a
+  // channel the history read never consults explains nothing: measured before this, the exact
+  // call below answered `{ data: [], ranges: [1..9 self], holes: [] }` — a complete series over an
+  // emptied tier, which is the reading §6.3's opening rule forbids and INV-FE-15 calls a silent
+  // splice. The boot report is a different surface with a different lifetime; a chart drawn an
+  // hour later reads this one.
+  const answer = await coveredSamples(db, 'book-1', { fromBlock: 1, toBlock: 9 });
+  assert.deepEqual([...answer.covered.data], [], 'the fixture no longer exercises an emptied tier');
+  assert.deepEqual([...answer.covered.holes], [], 'the span is no longer fully covered');
+  assert.equal(nth(answer.covered.ranges, 0, 'range').origin, 'self');
+  assert.deepEqual(answer.chartDiscard, discard, 'the emptiness arrived with no explanation');
+
+  // Bounded by the question, exactly as `ranges` and `holes` are: a span the discard's envelope
+  // cannot reach is not explained by it, and saying otherwise would attach the loss to blocks
+  // ingested after the migration.
+  const later = await coveredSamples(db, 'book-1', { fromBlock: 100, toBlock: 200 });
+  assert.equal(later.chartDiscard, undefined, 'the discard was reported over blocks it never covered');
 
   // The corrected key really is in force afterwards — the property the migration exists for.
   const common = { bookId: 'book-1', blockNumber: 7, blockTimestampMs: 7_000 };
@@ -462,6 +497,42 @@ test('an upgrade that dropped NOTHING records nothing — the zero case, not jus
     'the upgrade announced a chart loss over four tables that held nothing',
   );
   await upgraded.delete();
+});
+
+test('§9.2’s “downsampled” label reaches the query path too, bounded by the question', async () => {
+  // The other channel that records rows removed from a span that is still covered, and the
+  // general case the migration discard is one instance of. §9.2's ladder writes the label so that
+  // *"an evicted range becomes a labelled 'downsampled' range, not a hole, and never a silent
+  // splice"* — but a label stored where the read path does not look leaves the read path answering
+  // a covered span with fewer rows than it holds and nothing saying why, which is the same false
+  // "complete" the discard produced. Coverage cannot carry it: those blocks were ingested, so
+  // turning them into a hole is the other false answer.
+  const genesis = `0x${'d8'.repeat(32)}`;
+  const db = new LocalIndex(genesis);
+  await db.delete();
+  await db.open();
+  await writeCoverage(db, addRange(EMPTY_COVERAGE, selfRange(1, 500, 1, edgeAt(500, genesis))));
+  await writeDownsampled(db, [
+    downsample(1, 100, 'candles1h', 10),
+    downsample(300, 400, 'candles1d', 20),
+  ]);
+
+  const inside = await coveredSamples(db, 'book-1', { fromBlock: 50, toBlock: 120 });
+  assert.deepEqual([...inside.covered.data], []);
+  assert.deepEqual([...inside.covered.holes], [], 'the span is covered — the rows were folded, not un-ingested');
+  assert.equal(inside.downsampled.length, 1, 'the label over these blocks did not reach the answer');
+  // Unclipped, exactly as `CoveredResult.ranges` are: the renderer intersects for display, and a
+  // clipped label would publish a range nothing recorded.
+  assert.deepEqual(nth(inside.downsampled, 0, 'label').toBlock, 100);
+  assert.equal(nth(inside.downsampled, 0, 'label').resolution, 'candles1h');
+
+  // Both labels when both are asked about, and neither when neither is.
+  const wide = await coveredSamples(db, 'book-1', { fromBlock: 1, toBlock: 500 });
+  assert.deepEqual(wide.downsampled.map((r) => r.resolution), ['candles1h', 'candles1d']);
+  const between = await coveredSamples(db, 'book-1', { fromBlock: 150, toBlock: 250 });
+  assert.deepEqual([...between.downsampled], [], 'a label was reported over blocks it never covered');
+  assert.equal(between.chartDiscard, undefined);
+  await db.delete();
 });
 
 test('the upgrade BACKFILLS pendingBlock, or the sparse index refuses every pass forever', async () => {
@@ -583,10 +654,20 @@ test('§6.5’s raw blobs are BOUNDED, oldest first, and the eviction is labelle
   assert.deepEqual(measured.rows.map((r) => r.blockNumber), [10, 20, 30], 'the index is not oldest-first');
 
   // A budget that fits everything frees nothing.
-  assert.deepEqual(await evictPendingRawToBound(db, 300, 5), []);
+  assert.equal(await evictPendingRawToBound(db, 300, 5), undefined);
   // 150 bytes admits one blob, so the two oldest go — oldest first, because the oldest era is
   // the one whose metadata is least likely ever to arrive (FE-P5).
-  assert.deepEqual(await evictPendingRawToBound(db, 150, 5), [10, 20]);
+  //
+  // **An envelope and a count, never the block list.** The desktop events share admits on the
+  // order of 225,000 of these blobs, so a per-block return is the growth the eviction exists to
+  // stop, handed back to the caller that asked for it to be stopped — and §9.2 calls the ladder
+  // "user-visible", which a 225,000-entry array is not. `PendingRawEvictionRecord` already made
+  // that choice for the stored label; this is the same choice one layer up.
+  assert.deepEqual(await evictPendingRawToBound(db, 150, 5), {
+    blocks: 2,
+    oldestBlock: 10,
+    newestBlock: 20,
+  });
   assert.equal(await pendingDecoderCount(db), 1, 'the pending count did not fall with the blobs');
 
   // Labelled, in the same transaction as the delete. An unlabelled drop is the silent splice

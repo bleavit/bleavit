@@ -272,6 +272,21 @@ export interface ChartDiscardRecord {
 }
 
 /**
+ * The three Dexie versions this schema has had.
+ *
+ * Named because three places have to agree on them and only one of them is the constructor: the
+ * declaration below, the migration record that states which schema a database left and which it
+ * reached, and the suite that checks the pair. `ChartDiscardRecord` exists to be accurate about
+ * what happened, so the one field it could get wrong by copying is the one that may not be a
+ * literal.
+ */
+export const SCHEMA_V1_VERSION = 1;
+/** The version that **drops** the re-keyed tables — see `LocalIndex`'s three-version recipe. */
+export const REKEY_VERSION = 2;
+/** The version that re-declares them under `SCHEMA_V3`, and the schema an upgrade reaches. */
+export const SCHEMA_V3_VERSION = 3;
+
+/**
  * §7's schema **as first shipped**, kept because a browser that opened it is what a migration
  * has to upgrade from.
  *
@@ -385,11 +400,11 @@ export class LocalIndex extends Dexie {
     // field, is invisible to the index, and makes `pendingRawRows` refuse **permanently**. The
     // upgraders are where both are repaired, because both are properties of the data that
     // crossed the boundary rather than of anything a later caller can supply.
-    this.version(1).stores({ ...SCHEMA_V1 });
-    this.version(2)
+    this.version(SCHEMA_V1_VERSION).stores({ ...SCHEMA_V1 });
+    this.version(REKEY_VERSION)
       .stores(Object.fromEntries(REKEYED_TABLES.map((table) => [table, null])))
       .upgrade(recordChartDiscard);
-    this.version(3).stores({ ...SCHEMA_V3 }).upgrade(backfillPendingBlock);
+    this.version(SCHEMA_V3_VERSION).stores({ ...SCHEMA_V3 }).upgrade(backfillPendingBlock);
   }
 }
 
@@ -413,8 +428,15 @@ async function recordChartDiscard(tx: Transaction): Promise<void> {
   if (rows === 0) return;
   const span = coverageEnvelope(await tx.table('meta').get('coverage'));
   const record: ChartDiscardRecord = {
-    fromSchema: 1,
-    toSchema: 3,
+    // **Neither number is copied.** `toSchema` is the version this open is upgrading to, read off
+    // the database itself, so adding a `version(4)` cannot leave the record claiming the schema
+    // stopped at 3. `fromSchema` is `SCHEMA_V1_VERSION` by construction rather than by assumption:
+    // this upgrader belongs to `REKEY_VERSION`, so it runs only for a database below that version,
+    // the sole released schema below it is version 1, and a database created from nothing never
+    // runs a version's upgrader at all (measured — which is also why the zero-row guard above
+    // needs a real version-1 fixture to be exercised).
+    fromSchema: SCHEMA_V1_VERSION,
+    toSchema: tx.db.verno,
     tables: [...REKEYED_TABLES],
     rows,
     fromBlock: span?.fromBlock,
@@ -551,6 +573,54 @@ export async function readDownsampled(db: LocalIndex): Promise<readonly Downsamp
 }
 
 /**
+ * A history answer **and every reason its rows can be absent over blocks that are still covered**.
+ *
+ * §6.3's `CoveredResult<T>` has three fields — `ranges`, `holes` and `span` — and each is about
+ * *coverage*: what was ingested. Nothing in it can say that a block was ingested, is still
+ * covered, and is **no longer held at any resolution**. That third state is produced by §9.2's
+ * ladder (where a coarser rung survives, `downsampled`) and by a schema migration or repair
+ * (where nothing survives, `chartDiscard`), and until this type existed both were written to
+ * `meta` rows the query path never read — so `coveredSamples` answered a covered span with an
+ * empty array, no hole and no explanation, which is exactly the reading §6.3's opening rule
+ * forbids: *"bare rows render as a complete series and 'there were no observations in this
+ * window' and 'we never ingested this window' then arrive as the same empty answer"*.
+ *
+ * **The explanation is attached to the absence, on the path that renders it.** A record written
+ * to a channel no consumer consults explains nothing; INV-FE-15 requires everything unverified to
+ * be *"either absent **with an explanation** or present and labeled"*, and an explanation the
+ * caller has to know to go and fetch is one that will be missing wherever it matters most.
+ *
+ * The shape is a **container** rather than three more fields on `CoveredResult`, and that is
+ * deliberate on two counts. It leaves §6.3's published interface exactly as the section declares
+ * it, because *which* of these three repairs is right — a field on `CoveredResult`, trimming
+ * `CoverageRange` on discard, or an obligation on every consumer to consult `meta` — is a spec
+ * question (SQ-821) and answering it here would be inventing the vocabulary §6.3 does not have
+ * (SQ-820). And it makes the sibling fields unavoidable at the point a caller reaches the rows:
+ * `answer.data` no longer typechecks, so nobody can carry the old bare-rows reading forward
+ * without seeing what else the answer carries.
+ */
+export interface CoveredHistory<T> {
+  /** §6.3's own answer, unchanged. */
+  readonly covered: CoveredResult<T>;
+  /**
+   * §9.2's labels overlapping the span — blocks whose finer rows were folded away and which are
+   * still held, one rung coarser. Unclipped, for the same reason `CoveredResult.ranges` are: the
+   * renderer intersects for display, and clipping would publish a range nothing recorded.
+   */
+  readonly downsampled: readonly DownsampledRange[];
+  /**
+   * A migration discard whose block envelope overlaps the span, and therefore explains rows that
+   * are missing here. `undefined` when none does.
+   *
+   * A record whose envelope could not be named (`fromBlock`/`toBlock` absent — the coverage row
+   * was unreadable when the migration ran) is reported for **every** span: overlap cannot be
+   * ruled out, and dropping the explanation on *cannot say* is the one disposal that turns an
+   * announced loss back into a silent one.
+   */
+  readonly chartDiscard: ChartDiscardRecord | undefined;
+}
+
+/**
  * §6.3's *"data **plus** the coverage it came from"* on the read path.
  *
  * Every history read goes through this rather than returning bare rows, because bare rows
@@ -558,6 +628,10 @@ export async function readDownsampled(db: LocalIndex): Promise<readonly Downsamp
  * ingested this window"* arrive as the same empty array, and the second is the silent splice
  * §6.3 forbids. The coverage is read through `readCoverage`, so it is sanitized on the way out
  * of storage exactly as it is on the way in.
+ *
+ * It also reads the two channels that record rows *removed* from a covered span — see
+ * `CoveredHistory`. Three `meta` gets rather than one is the whole cost, on a table that holds
+ * one row per key.
  *
  * `read` is a callback rather than a table argument so this cannot become "the covered query
  * for price samples" and then a second, uncovered one for everything else — the wrapping is
@@ -567,9 +641,32 @@ export async function coveredQuery<T>(
   db: LocalIndex,
   span: Hole,
   read: (db: LocalIndex) => Promise<T>,
-): Promise<CoveredResult<T>> {
-  const coverage = await readCoverage(db);
-  return covered(coverage, span, await read(db));
+): Promise<CoveredHistory<T>> {
+  const [coverage, labels, discard] = await Promise.all([
+    readCoverage(db),
+    readDownsampled(db),
+    readChartDiscard(db),
+  ]);
+  const result = covered(coverage, span, await read(db));
+  return {
+    covered: result,
+    downsampled: labels.filter(
+      (range) => range.toBlock >= result.span.fromBlock && range.fromBlock <= result.span.toBlock,
+    ),
+    chartDiscard: discardOver(discard, result.span),
+  };
+}
+
+/** A discard record is reported when it can overlap the span — and when it cannot say. */
+function discardOver(
+  discard: ChartDiscardRecord | undefined,
+  span: Hole,
+): ChartDiscardRecord | undefined {
+  if (discard === undefined) return undefined;
+  if (discard.fromBlock === undefined || discard.toBlock === undefined) return discard;
+  return discard.toBlock >= span.fromBlock && discard.fromBlock <= span.toBlock
+    ? discard
+    : undefined;
 }
 
 /**
@@ -584,7 +681,7 @@ export async function coveredSamples(
   db: LocalIndex,
   bookId: string,
   span: Hole,
-): Promise<CoveredResult<readonly PriceSample[]>> {
+): Promise<CoveredHistory<readonly PriceSample[]>> {
   return coveredQuery(db, span, async () =>
     db.priceSamples
       .where('bookId')
@@ -808,9 +905,10 @@ export async function pendingRawBytes(db: LocalIndex): Promise<number> {
  * Oldest first, because the oldest era is the one whose metadata is least likely ever to arrive
  * (FE-P5), and because it is the only order under which the disposal is deterministic.
  *
- * Returns the blocks discarded. The label is written in the same transaction as the deletes:
- * written afterwards it is absent for as long as it takes a tab to close mid-eviction, which is
- * the silent splice §9.2 forbids in the chart tier for exactly the same reason.
+ * Returns what it discarded as an envelope and a count (`PendingRawEviction`), never a block
+ * list. The label is written in the same transaction as the deletes: written afterwards it is
+ * absent for as long as it takes a tab to close mid-eviction, which is the silent splice §9.2
+ * forbids in the chart tier for exactly the same reason.
  */
 /**
  * The block envelope an eviction record carries, **folded rather than spread**.
@@ -849,16 +947,35 @@ export function evictionEnvelope(
   return { oldestBlock, newestBlock };
 }
 
+/**
+ * What one pass of the bound discarded — an envelope and a count, never the list.
+ *
+ * The same summary shape as `PendingRawEvictionRecord`, and for the same reason one rung up:
+ * §9.2 calls the ladder *"deterministic and user-visible"*, and the quantity being reported is
+ * the number of blocks the pass dropped. The desktop events share admits on the order of 225,000
+ * of §6.5's small raw blobs, so a per-block list is not a rendering — it is the growth the
+ * eviction was run to stop, reproduced in the report that describes stopping it.
+ *
+ * Unlike the stored record, this describes **this pass alone**: the record accumulates across
+ * passes so a surface can say what the client has lost in total, while a step says what this run
+ * did.
+ */
+export interface PendingRawEviction {
+  readonly blocks: number;
+  readonly oldestBlock: number;
+  readonly newestBlock: number;
+}
+
 export async function evictPendingRawToBound(
   db: LocalIndex,
   maxBytes: number,
   at: number,
-): Promise<readonly number[]> {
+): Promise<PendingRawEviction | undefined> {
   if (!Number.isFinite(maxBytes) || maxBytes < 0) {
     throw new StoreError(`${maxBytes} is not a byte budget for the pending-decode set`);
   }
   const { rows, bytes } = await pendingRawRows(db);
-  if (bytes <= maxBytes) return [];
+  if (bytes <= maxBytes) return undefined;
   let remaining = bytes;
   const doomed: StoredEvent[] = [];
   for (const row of rows) {
@@ -866,7 +983,7 @@ export async function evictPendingRawToBound(
     doomed.push(row);
     remaining -= row.raw?.byteLength ?? 0;
   }
-  if (doomed.length === 0) return [];
+  if (doomed.length === 0) return undefined;
   const freed = doomed.reduce((sum, row) => sum + (row.raw?.byteLength ?? 0), 0);
   const previous = await readPendingRawEvicted(db);
   const blocks = doomed.map((row) => row.blockNumber);
@@ -886,7 +1003,9 @@ export async function evictPendingRawToBound(
     await db.events.bulkDelete(doomed.map((row) => row.id));
     await db.meta.put({ key: 'pendingRawEvicted', record });
   });
-  return blocks;
+  // This pass's own envelope, folded from the same list without the previous record's span —
+  // `record` is cumulative and a step is not.
+  return { blocks: doomed.length, ...evictionEnvelope(undefined, blocks) };
 }
 
 /**

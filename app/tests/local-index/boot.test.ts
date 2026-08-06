@@ -251,9 +251,14 @@ test('a store-backed query wraps its rows in the coverage read back from storage
     priceSample({ bookId: 'book-2', blockNumber: 5, blockTimestampMs: 5_000, price1e9: 300n, origin: 'self' }),
   ]);
   const answer = await coveredSamples(db, 'book-1', { fromBlock: 1, toBlock: 20 });
-  assert.equal(answer.data.length, 1, 'the query returned rows from outside the span or the wrong book');
-  assert.equal(nth(answer.data, 0, 'sample').price1e9, 100n);
-  assert.deepEqual(answer.holes, [{ fromBlock: 11, toBlock: 20 }]);
-  assert.equal(nth(answer.ranges, 0, 'range').origin, 'self');
+  assert.equal(answer.covered.data.length, 1, 'the query returned rows from outside the span or the wrong book');
+  assert.equal(nth(answer.covered.data, 0, 'sample').price1e9, 100n);
+  assert.deepEqual(answer.covered.holes, [{ fromBlock: 11, toBlock: 20 }]);
+  assert.equal(nth(answer.covered.ranges, 0, 'range').origin, 'self');
+  // A store-backed answer carries the two channels §6.3's own shape has no field for — the
+  // reasons a row can be missing from a span that is still covered. Both are empty here, and
+  // that is the assertion: on a database nothing has degraded, nothing is claimed to have been.
+  assert.deepEqual([...answer.downsampled], []);
+  assert.equal(answer.chartDiscard, undefined);
   await db.delete();
 });
