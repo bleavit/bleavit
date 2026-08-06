@@ -60,7 +60,8 @@
  * cannot name (`no-range-minting-outside-ingest` guards the other half).
  */
 
-import type { CoverageRange } from '@bleavit/local-index';
+import type { CoverageRange, RangeEdge } from '@bleavit/local-index';
+import { provider } from '@bleavit/shared-types';
 import type { Verified, VerificationStatus } from '@bleavit/shared-types';
 
 import type { SampledRound } from './sampling.js';
@@ -74,6 +75,17 @@ import type { AdmittedSnapshot, SnapshotBalance, SnapshotRange, SpotCheckReport 
  * the restriction, expressed where a call site cannot widen it.
  */
 export type ProviderOrigin = 'snapshot' | 'indexer';
+
+/**
+ * `0x` + 32 bytes — the rendering every hash in this repository is carried in.
+ *
+ * Restated here rather than imported, because `@bleavit/local-index`'s copy is module-private
+ * and importing its barrel for a regex would pull Dexie into this package's graph — the exact
+ * edge the type-only `CoverageRange` import above exists to avoid. The two are checked against
+ * each other by the mint suite, which asserts a range this module produces is accepted by that
+ * package's own `assertCanonical`.
+ */
+const HASH_32 = /^0x[0-9a-f]{64}$/;
 
 /** 10 §7's `snapshotsImported` row. Column names are that table's, not this module's. */
 export interface SnapshotImportRow {
@@ -138,6 +150,17 @@ export interface SnapshotMintRequest {
 export interface IndexerMintRequest {
   readonly providerId: string;
   readonly importedAt: number;
+  /**
+   * This client's own genesis hash — 10 §6.3's genesis binding, stamped onto every minted range.
+   *
+   * On the request because there is nowhere else it could come from: an indexer serves pages
+   * with no chain binding in them (§8.2), and this package may not open a chain connection
+   * (§10.1) to ask. It is deliberately **this client's** identity rather than anything the
+   * provider stated — a genesis a provider supplied would make the one surviving §6.3 check a
+   * comparison of the provider against itself. The snapshot arm needs no such field: its
+   * document's binding was already compared against this client's at admission.
+   */
+  readonly genesisHash: string;
 }
 
 /**
@@ -186,6 +209,26 @@ export function mintSnapshotRows(
     // — a row that says it was not compared costs a badge, and one that says it was buys a claim
     // nothing backs. This is what keeps the ceiling's new *admission* honest (SQ-811).
     sampled: spotCheck.reach !== 'ceiling' && spotCheck.compared > 0,
+    // §6.3's edge, on its `unverifiable` arm, with the genesis this document was admitted
+    // against. The genesis is taken from the admitted document rather than from the request
+    // because the brand already proves it: `admitSnapshot` refuses on a binding mismatch, so an
+    // `AdmittedSnapshot` names **this client's** chain by construction — a request field would
+    // be one a caller fills in, which is the shape this module exists to remove.
+    //
+    // The other two facts are absent because the format does not carry them. `bleavit.snapshot.v1`
+    // has no block hash anywhere, and `binding.specVersion` is a producer claim `admitSnapshot`
+    // deliberately declines to compare (§6.4 gives snapshots history predating the runtime, so
+    // exact equality refuses every deep snapshot after the first upgrade). Writing either into
+    // the edge would hand `verifyRange` a number to invalidate honest ranges on.
+    edge: {
+      kind: 'unverifiable',
+      genesisHash: admitted.document.binding.genesisHash,
+      why:
+        'imported from a snapshot file. The bleavit.snapshot.v1 format carries no block hash at ' +
+        'any block, and its declared spec_version is the producer’s claim rather than an ' +
+        'observation, so 10 §6.3’s hash-at-edge and spec-version-at-edge checks have nothing to ' +
+        'read for this range. Its genesis binding was checked at import.',
+    },
   });
   const fromBlock = admitted.document.coverage.reduce(
     (lowest, range) => Math.min(lowest, range.fromBlock),
@@ -237,7 +280,32 @@ export function mintIndexerRows(
     );
   }
   const compared = round.result.rowsChecked - round.result.unverifiable;
-  return mint('indexer', balances, coverage, request, { sampled: compared > 0 });
+  if (!HASH_32.test(request.genesisHash)) {
+    // Refused rather than defaulted, for the reason the empty `providerId` below is: the
+    // genesis binding is the one §6.3 check a provider range can still fail, and a range
+    // carrying a placeholder genesis is one that either fails it always or passes it always.
+    // Neither is a check. There is no honest placeholder for a chain identity.
+    throw new RangeError(
+      `an indexer mint must name this client's genesis hash; got "${request.genesisHash}". It ` +
+        'is the one fact of 10 §6.3’s edge a provider range still carries, and the only check ' +
+        'that can catch another chain’s history filed under this one’s ids',
+    );
+  }
+  return mint('indexer', balances, coverage, request, {
+    sampled: compared > 0,
+    // The `unverifiable` arm again, and for a stronger reason than the snapshot arm's: an
+    // indexer serves pages and pins nothing, so there is no binding to read at all — §8.4 gives
+    // indexers *sampling* precisely because there is no document to screen.
+    edge: {
+      kind: 'unverifiable',
+      genesisHash: request.genesisHash,
+      why:
+        'served by a live indexer. An indexer serves pages rather than a pinned document, so ' +
+        'nothing it returned states a block hash or a spec_version at this range’s edge, and ' +
+        '10 §6.3’s hash-at-edge and spec-version-at-edge checks have nothing to read for it. ' +
+        'What covers these rows instead is §8.4 sampling against the chain.',
+    },
+  });
 }
 
 function mint(
@@ -245,7 +313,7 @@ function mint(
   balances: readonly SnapshotBalance[],
   coverage: readonly SnapshotRange[],
   request: SnapshotMintRequest | IndexerMintRequest,
-  evidence: { readonly sampled: boolean },
+  evidence: { readonly sampled: boolean; readonly edge: RangeEdge },
 ): MintedRows {
   if (request.providerId.length === 0) {
     // A row whose `providerId` is empty is a row that renders as *from a provider* and cannot
@@ -262,11 +330,12 @@ function mint(
         '"some provider" is not an origin a user can act on',
     );
   }
-  const status: VerificationStatus = {
-    kind: 'provider',
-    providerId: request.providerId,
-    sampled: evidence.sampled,
-  };
+  // Through the sanctioned constructor, never written out here. `check:provenance-mints` makes
+  // that structural: a `VerificationStatus` longhand is a complete provenance claim with
+  // nothing behind it, and this module is the client's one INV-FE-15 badge site. The
+  // constructor lives in `shared-types` rather than beside `providerRead` because 10 §10.1
+  // forbids this package importing `chain-client` — see its doc comment.
+  const status: VerificationStatus = provider(request.providerId, evidence.sampled);
   return {
     coverage: coverage.map((range) => ({
       origin,
@@ -276,6 +345,9 @@ function mint(
       // §6.3 requires it, and it is the device clock for the same reason `importedAt` is: the
       // one honest thing this client knows about when a row arrived locally.
       ingestedAt: request.importedAt,
+      // The same edge on every range this mint produces: the reason the hash and the spec
+      // version are absent is a property of the *source*, not of one span within it.
+      edge: evidence.edge,
     })),
     balances: balances.map((row) => ({
       value: {

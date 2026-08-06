@@ -47,6 +47,7 @@ const GENESIS = `0x${'11'.repeat(32)}`;
 const OTHER_CHAIN = `0x${'22'.repeat(32)}`;
 const hashAt = (block: number): string => `0x${block.toString(16).padStart(64, '0')}`;
 const edgeAt = (block: number, specVersion = 3, genesisHash = GENESIS) => ({
+  kind: 'checked' as const,
   genesisHash,
   hash: hashAt(block),
   specVersion,
@@ -67,6 +68,27 @@ const asRange = (record: Record<string, unknown>): CoverageRange => record as Co
 const self = (from: number, to: number): CoverageRange => selfRange(from, to, 1, edgeAt(to));
 const op = (from: number, to: number, providerId = 'op-1'): CoverageRange =>
   providerRange('operator', providerId, from, to, 1, edgeAt(to));
+
+/**
+ * The `unverifiable` arm — what `packages/providers` mints for a snapshot or an indexer.
+ *
+ * Built here rather than imported so this suite states the shape it is asserting over; the
+ * binding to the real producer is `tests/providers/import.test.ts`, which runs a minted range
+ * through this package's own `addRange` and `verifyRanges`.
+ */
+const unverifiableEdge = (why = 'imported from a snapshot file, which carries no block hash') => ({
+  kind: 'unverifiable' as const,
+  genesisHash: GENESIS,
+  why,
+});
+const imported = (from: number, to: number, providerId = 'pub-1'): CoverageRange =>
+  providerRange('snapshot', providerId, from, to, 1, unverifiableEdge());
+
+/** The hash of a `checked` edge, refusing rather than narrowing silently. */
+const checkedHash = (range: CoverageRange): string => {
+  assert.equal(range.edge.kind, 'checked', 'this range’s edge carries no hash to compare');
+  return range.edge.kind === 'checked' ? range.edge.hash : '';
+};
 
 test('a range with no edge is refused — the three checks would have nothing to read', () => {
   // The fields are what makes §6.3's sentence executable. Without them `verifyRange` compares
@@ -107,13 +129,80 @@ test('the edge is the range’s toBlock, and a join carries the HIGHER edge forw
   // every joined range as corrupt.
   const joined = addRange(addRange(EMPTY_COVERAGE, self(1, 10)), self(11, 20));
   assert.equal(joined.ranges.length, 1);
-  assert.equal(nth(joined.ranges, 0, 'range').edge.hash, hashAt(20));
+  assert.equal(checkedHash(nth(joined.ranges, 0, 'range')), hashAt(20));
   assert.deepEqual(verifyRange(nth(joined.ranges, 0, 'range'), factsAt(20)), { kind: 'ok' });
 
   // ...and the same when the ranges arrive newest-first, which §6.4's backfill order makes the
   // ordinary case rather than an exotic one.
   const reversed = addRange(addRange(EMPTY_COVERAGE, self(11, 20)), self(1, 10));
-  assert.equal(nth(reversed.ranges, 0, 'range').edge.hash, hashAt(20));
+  assert.equal(checkedHash(nth(reversed.ranges, 0, 'range')), hashAt(20));
+});
+
+test('a provider range is neither invalidated nor silently treated as checked', () => {
+  // §6.3's edge is a discriminated union because `packages/providers` cannot honestly fill two
+  // of its three fields: `bleavit.snapshot.v1` states no block hash anywhere, and its declared
+  // spec_version is a producer claim `admitSnapshot` deliberately declines to compare (§6.4
+  // gives snapshots history predating the runtime). The two wrong answers are equally available
+  // and this asserts against both.
+  const range = imported(21, 30);
+
+  // NOT `invalid`. Nothing disagreed — the client simply has nothing of this range's to compare,
+  // and dropping on that empties the index of every imported snapshot at the first boot.
+  // NOT `ok` either: `ok` says this range was compared against the chain and agreed, which is
+  // the promotion §2.2 gives provider data no path to.
+  assert.deepEqual(verifyRange(range, factsAt(30)), { kind: 'unchecked' });
+
+  // The genesis binding still runs, and it is the reason the arm keeps that one field: it is
+  // what catches another network's history filed under this chain's ids.
+  const foreign = verifyRange(range, factsAt(30, 3, OTHER_CHAIN));
+  assert.equal(foreign.kind, 'invalid');
+  assert.match(foreign.kind === 'invalid' ? foreign.reason : '', /genesis/);
+
+  // And across a set: the range survives, it is reported as unchecked, and the self range beside
+  // it is not — a range appearing in neither list reads to a caller as one that passed.
+  const coverage = addRange(addRange(EMPTY_COVERAGE, self(1, 10)), range);
+  const checked = verifyRanges(coverage, (r) => factsAt(r.toBlock));
+  assert.deepEqual(checked.invalidated, []);
+  assert.equal(checked.coverage.ranges.length, 2, 'an unverifiable edge dropped the range');
+  assert.equal(checked.unchecked.length, 1);
+  assert.equal(nth(checked.unchecked, 0, 'range').origin, 'snapshot');
+});
+
+test('the unverifiable arm must say why, and may not carry the facts it declares absent', () => {
+  // INV-FE-15's rule is *absent with an explanation, never silently spliced*, so both halves are
+  // refused at the same boundary every other malformed range is.
+  const noReason = asRange({
+    fromBlock: 1,
+    toBlock: 10,
+    ingestedAt: 1,
+    origin: 'snapshot',
+    providerId: 'pub-1',
+    edge: { kind: 'unverifiable', genesisHash: GENESIS, why: '   ' },
+  });
+  assert.throws(() => addRange(EMPTY_COVERAGE, noReason), /gives no reason/);
+
+  // A hash on the unverifiable arm is refused rather than ignored: a later reader looking at the
+  // fields rather than at `kind` would run §6.3's checks against a number no ingest observed.
+  const spliced = asRange({
+    fromBlock: 1,
+    toBlock: 10,
+    ingestedAt: 1,
+    origin: 'snapshot',
+    providerId: 'pub-1',
+    edge: { kind: 'unverifiable', genesisHash: GENESIS, why: 'no hash in the format', hash: hashAt(10) },
+  });
+  assert.throws(() => addRange(EMPTY_COVERAGE, spliced), /still carries a hash/);
+
+  // An edge with no arm at all is refused rather than read as the old three-field shape. Guessing
+  // `checked` for it is exactly how a provider range acquires the arm the checks may run over.
+  const preUnion = asRange({
+    fromBlock: 1,
+    toBlock: 10,
+    ingestedAt: 1,
+    origin: 'self',
+    edge: { genesisHash: GENESIS, hash: hashAt(10), specVersion: 3 },
+  });
+  assert.throws(() => addRange(EMPTY_COVERAGE, preUnion), /edge of unknown kind/);
 });
 
 test('“cannot say” KEEPS a range; only a disagreement invalidates it', () => {

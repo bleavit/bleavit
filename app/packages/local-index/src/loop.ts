@@ -302,7 +302,12 @@ export async function ingestBlock(
   // `true` for it. That is the promotion 10 §2.2 says has no path — reached through
   // backfill rather than through a merge, and invisible to every test that only checked
   // the rows.
+  // The `checked` arm, because this range was produced by an ingest that recorded the header it
+  // followed to. That is what §6.3's other two checks read, and it is what makes them able to
+  // fail — the `unverifiable` arm exists for ranges minted from a document that carries neither
+  // fact (10 §6.3, `UnverifiableEdge`).
   const edge: RangeEdge = {
+    kind: 'checked',
     genesisHash: ports.genesisHash,
     hash: scan.hash,
     specVersion: scan.specVersion,

@@ -37,6 +37,7 @@ import { nth } from './nth.ts';
 
 const HOUR = 3_600;
 const EDGE = {
+  kind: 'checked' as const,
   genesisHash: `0x${'a1'.repeat(32)}`,
   hash: `0x${'b2'.repeat(32)}`,
   specVersion: 3,

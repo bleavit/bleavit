@@ -56,6 +56,7 @@ const GENESIS = `0x${'e5'.repeat(32)}`;
 const HOUR = 3_600;
 
 const edgeAt = (toBlock: number) => ({
+  kind: 'checked' as const,
   genesisHash: GENESIS,
   hash: `0x${toBlock.toString(16).padStart(64, '0')}`,
   specVersion: 3,

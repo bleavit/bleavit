@@ -157,7 +157,7 @@ test('a failed row write leaves NO coverage behind — the transaction rolls bot
       headerSource: SELF,
       coverageAfter: {
         ranges: [
-          selfRange(20, 20, 1, { genesisHash: GENESIS, hash: blockHash(20), specVersion: 3 }),
+          selfRange(20, 20, 1, { kind: 'checked', genesisHash: GENESIS, hash: blockHash(20), specVersion: 3 }),
         ],
         holes: [],
       },

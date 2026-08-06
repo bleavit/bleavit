@@ -105,7 +105,20 @@ export interface SelfIngested {
  * high end is the one a resumed ingest continues from and the one a reorg or a runtime
  * upgrade invalidates first.
  */
-export interface RangeEdge {
+export type RangeEdge = CheckedEdge | UnverifiableEdge;
+
+/**
+ * A range this client's own ingest produced: all three facts, and all three checks can run.
+ *
+ * `hash` and `specVersion` are what the ingest recorded at the edge block — the header it
+ * followed to, and the runtime version whose metadata decoded the rows. What makes the arm
+ * *checked* is not who supplied that header but that both facts are **falsifiable**:
+ * `verifyRange` compares them against what the chain answers at `toBlock`, so an operator that
+ * served a header for a fork is caught by the same comparison that catches a reorg. A range
+ * that was not ingested here has neither fact, and cannot honestly invent them.
+ */
+export interface CheckedEdge {
+  readonly kind: 'checked';
   /**
    * §6.3's genesis binding. Redundant with the database name (§7) exactly until it is not:
    * a range that arrives by import, by structured clone from another tab, or by a migration
@@ -117,6 +130,46 @@ export interface RangeEdge {
   readonly hash: string;
   /** §6.3's spec-version-at-edge: the runtime `spec_version` at `toBlock`. */
   readonly specVersion: number;
+}
+
+/**
+ * A range minted from a provider: the edge is **not checkable here, and this says why**.
+ *
+ * The alternative shapes were both worse, and both were tried on paper first:
+ *
+ * - **Optional fields.** `edge?: RangeEdge` puts a range with no edge back into the state
+ *   §6.3 refuses — every comparison against an absent field is false, so `verifyRange` would
+ *   report an honest provider range as *corrupt* rather than as *unverifiable*.
+ * - **Filled with something.** `bleavit.snapshot.v1` carries no block hash anywhere, and its
+ *   `binding.specVersion` is a producer *claim* that `admitSnapshot` deliberately declines to
+ *   compare, because §6.4 gives snapshots deep history that necessarily predates the current
+ *   runtime — writing that claim into the edge would make `verifyRange` invalidate every deep
+ *   snapshot at the first boot after a runtime upgrade. Filling the two fields from the
+ *   client's own reads is worse still: `verifyRange` would then compare the chain against
+ *   itself, which is a check that cannot fail. INV-FE-15's rule is the general form —
+ *   **absent with an explanation, never silently spliced.**
+ *
+ * `genesisHash` stays, and it is not a courtesy field: it is the one fact of the three the
+ * client genuinely knows about a provider range. A snapshot's genesis was compared against
+ * this client's own at admission (10 §8.2's binding screen), and an indexer's rows are served
+ * for the chain this client is on. It is also the field §6.3's *genesis binding* check reads,
+ * so that check keeps working on provider ranges — which matters, because it is the one that
+ * catches another network's history being filed under this chain's ids.
+ *
+ * This is the shape §8.4 already uses for the depth blind spot: the limit is **disclosed**
+ * rather than refused, so a surface can say what was not checked and why.
+ */
+export interface UnverifiableEdge {
+  readonly kind: 'unverifiable';
+  /** As above. The genesis binding is the check that still runs. */
+  readonly genesisHash: string;
+  /**
+   * Why the hash and the spec version are absent — a sentence a surface can render.
+   *
+   * Non-empty by validation, for the reason `packages/platform`'s `absent` carries one: a
+   * reason nobody can read turns a disclosed limit back into a silent one.
+   */
+  readonly why: string;
 }
 
 export type CoverageRange = {
@@ -320,13 +373,44 @@ function assertEdge(range: CoverageRange): void {
         'genesis-binding and spec-version-at-edge checks would have nothing to read',
     );
   }
-  const { genesisHash, hash, specVersion } = edge as {
+  const { kind, genesisHash, hash, specVersion, why } = edge as {
+    kind?: unknown;
     genesisHash?: unknown;
     hash?: unknown;
     specVersion?: unknown;
+    why?: unknown;
   };
+  // The arm is checked first and on its own. An edge with no `kind` is not an old-shaped
+  // checked edge to be inferred from its fields — it is a record from before the union whose
+  // provenance nobody stated, and guessing `checked` for it is how a provider range acquires
+  // the one arm §6.3's three checks are allowed to run over.
+  if (kind !== 'checked' && kind !== 'unverifiable') {
+    throw new CoverageError(
+      `range ${range.fromBlock}..${range.toBlock} has an edge of unknown kind ` +
+        `${String(kind)}; 10 §6.3's edge is either checked or explicitly unverifiable`,
+    );
+  }
   if (typeof genesisHash !== 'string' || !HASH_32.test(genesisHash)) {
     throw new CoverageError(`range ${range.fromBlock}..${range.toBlock} names no genesis hash`);
+  }
+  if (kind === 'unverifiable') {
+    if (typeof why !== 'string' || why.trim() === '') {
+      throw new CoverageError(
+        `range ${range.fromBlock}..${range.toBlock} declares an unverifiable edge and gives no ` +
+          'reason; a limit nobody can read is not a disclosed limit (INV-FE-15)',
+      );
+    }
+    // A hash or a spec version on the unverifiable arm is refused rather than ignored. It is
+    // exactly the silent splice the arm exists to prevent: a later reader looking at the fields
+    // rather than at `kind` would run §6.3's checks against a number no ingest observed.
+    if (hash !== undefined || specVersion !== undefined) {
+      throw new CoverageError(
+        `range ${range.fromBlock}..${range.toBlock} declares an unverifiable edge and still ` +
+          'carries a hash or a spec version; those facts come from an ingest, and this range ' +
+          'had none',
+      );
+    }
+    return;
   }
   if (typeof hash !== 'string' || !HASH_32.test(hash)) {
     throw new CoverageError(
@@ -688,6 +772,20 @@ export type RangeVerdict =
  * edge names a block this chain does not have at that height. **Spec version at edge** catches
  * rows decoded with metadata the runtime has since replaced, which decode to plausible values
  * of the wrong shape rather than failing.
+ *
+ * ## An `unverifiable` edge is `unchecked`, and that is neither of the two easy answers
+ *
+ * A provider range carries the genesis binding and neither of the other two facts (see
+ * {@link UnverifiableEdge}). The genesis check therefore still runs on it — it is the check
+ * that catches another chain's history filed under this one's ids, and declining to run it
+ * because the *other* two cannot run would make the arm a hole rather than a disclosure.
+ *
+ * Past that, the verdict is `unchecked` and **not** `ok`. `ok` is a statement that this range
+ * was compared against the chain and agreed, and `verifyRanges` hands `unchecked` ranges to a
+ * caller as the set it could not check — so returning `ok` here would launder *"nobody looked"*
+ * into *"it was looked at"* on exactly the ranges §2.2 gives no promotion path. Nor is it
+ * `invalid`: nothing disagreed. Only a disagreement invalidates, which is the same asymmetry
+ * `verifyRanges` applies to a chain it cannot reach.
  */
 export function verifyRange(range: CoverageRange, observed: RangeEdgeFacts): RangeVerdict {
   assertWellFormed(range);
@@ -699,6 +797,7 @@ export function verifyRange(range: CoverageRange, observed: RangeEdgeFacts): Ran
         `but this client is on ${observed.genesisHash}`,
     };
   }
+  if (range.edge.kind === 'unverifiable') return { kind: 'unchecked' };
   if (range.edge.hash !== observed.hash) {
     return {
       kind: 'invalid',
@@ -765,7 +864,13 @@ export function verifyRanges(
     if (verdict.kind === 'invalid') {
       invalidated.push({ range, verdict });
       kept = invalidateRange(kept, range);
+      continue;
     }
+    // A verdict of `unchecked` reaches this list too, and not only the `observe`-said-nothing
+    // case above. A provider range whose edge is `unverifiable` is checkable in exactly one
+    // respect (genesis) and unverifiable in the other two, so it must appear as *not checked*
+    // — a range that is in neither list reads to a caller as one that passed.
+    if (verdict.kind === 'unchecked') unchecked.push(range);
   }
   return { coverage: kept, invalidated, unchecked };
 }

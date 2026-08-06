@@ -43,11 +43,26 @@ import type {
   SpotClaim,
   SpotVerdict,
 } from '@bleavit/providers';
+// A **test** dependency, and the reason it is one is 10 §10.1: `packages/providers` may import
+// `local-index`'s types and not its values, since the values bring Dexie with them. The two
+// halves of §6.3's edge therefore have to be bound somewhere, and a suite is where that costs
+// no production edge — the same argument `tests/platform` makes for its two restatements.
+import { EMPTY_COVERAGE, addRange, verifyRanges } from '@bleavit/local-index';
 
 const sha256 = (preimage: Uint8Array): string =>
   createHash('sha256').update(preimage).digest('hex');
 
 const BINDING = { genesisHash: '0xfeed', specVersion: 2, contractVersion: 23 } as const;
+
+/**
+ * A real 32-byte genesis, because the indexer mint refuses anything else (10 §6.3).
+ *
+ * The `0xfeed` stand-in above is fine for the *document* binding, which `admitSnapshot`
+ * compares only against the caller's own binding. It is not fine for a minted range's edge:
+ * that value goes into a coverage set, where `assertCanonical` enforces the hash form, so a
+ * stand-in here would be a fixture that this client's own index would refuse.
+ */
+const CLIENT_GENESIS = `0x${'c1'.repeat(32)}`;
 
 function validDocument(): SnapshotDocument {
   return {
@@ -119,6 +134,21 @@ function admit(document: SnapshotDocument) {
   return verdict;
 }
 
+
+/** The same, for a document bound to a real 32-byte genesis — see {@link CLIENT_GENESIS}. */
+function admitOnThisChain(document: SnapshotDocument) {
+  const verdict = admitSnapshot(
+    serializeSnapshot(document),
+    {
+      expectedPin: sha256(snapshotPreimage(document)),
+      binding: { ...BINDING, genesisHash: CLIENT_GENESIS },
+    },
+    sha256,
+  );
+  assert.equal(verdict.kind, 'admitted');
+  if (verdict.kind !== 'admitted') throw new Error('unreachable');
+  return verdict;
+}
 
 function deps(overrides: Partial<ImportDependencies> = {}): ImportDependencies {
   return {
@@ -607,6 +637,103 @@ test('a report that CAUGHT a disagreement mints nothing', async () => {
   );
 });
 
+test('every minted range carries §6.3’s edge on its UNVERIFIABLE arm, and says why', async () => {
+  // 10 §6.3's edge is a discriminated union because this module is the reason it had to be: it
+  // is the only production producer of `snapshot` and `indexer` ranges, and it cannot honestly
+  // fill two of the three facts. Asserted here on the producer, and asserted against the real
+  // consumer below, because a shape agreed on by one side is a shape that can drift.
+  const document = { ...validDocument(), binding: { ...BINDING, genesisHash: CLIENT_GENESIS } };
+  const admitted = admitOnThisChain(document);
+  const report = await spotCheckSnapshot(admitted.document, REACHES_NOTHING);
+  const minted = mintSnapshotRows(admitted, report, {
+    providerId: 'archive-one',
+    pin: sha256(snapshotPreimage(document)),
+    importedAt: 5,
+  });
+  assert.ok(minted.coverage.length > 0);
+  for (const range of minted.coverage) {
+    assert.equal(range.edge.kind, 'unverifiable');
+    if (range.edge.kind !== 'unverifiable') continue;
+    // The genesis comes from the admitted document, and the brand is what makes that honest:
+    // `admitSnapshot` refuses on a binding mismatch, so this is **this client's** chain.
+    assert.equal(range.edge.genesisHash, CLIENT_GENESIS);
+    assert.match(range.edge.why, /no block hash/);
+    assert.match(range.edge.why, /spec_version/);
+  }
+
+  // The indexer arm says something different, because its reason is a different one: an indexer
+  // pins no document at all, so there is not even a claimed spec_version to decline.
+  const round = await runSamplingRound(
+    { id: 'live-one', kind: 'indexer', health: { kind: 'healthy' } },
+    [{ rows: [{ reference: 'k', claimed: 'v' }] }],
+    async () => ({ kind: 'match' }),
+    () => 0,
+  );
+  const live = mintIndexerRows(document.balances, document.coverage, round, {
+    providerId: 'live-one',
+    importedAt: 7,
+    genesisHash: CLIENT_GENESIS,
+  });
+  const liveEdge = live.coverage[0]?.edge;
+  assert.equal(liveEdge?.kind, 'unverifiable');
+  assert.match(liveEdge?.kind === 'unverifiable' ? liveEdge.why : '', /live indexer/);
+
+  // A genesis this client cannot have is refused rather than stamped. It is the one §6.3 check a
+  // provider range still carries, and a placeholder makes it a check that always passes or
+  // always fails.
+  assert.throws(
+    () =>
+      mintIndexerRows(document.balances, document.coverage, round, {
+        providerId: 'live-one',
+        importedAt: 7,
+        genesisHash: '0xfeed',
+      }),
+    /must name this client's genesis hash/,
+  );
+});
+
+test('a minted provider range is neither invalidated nor treated as checked by the real index', async () => {
+  // The binding that makes the two halves one design: the range this module produced goes
+  // through `@bleavit/local-index`'s own `addRange` and `verifyRanges`, not through a restatement
+  // of what they were believed to do. `packages/providers` may not import that package's values
+  // in production (Dexie would come with it), so the check belongs in a suite, where the
+  // dependency carries no production edge.
+  const document = { ...validDocument(), binding: { ...BINDING, genesisHash: CLIENT_GENESIS } };
+  const admitted = admitOnThisChain(document);
+  const report = await spotCheckSnapshot(admitted.document, REACHES_NOTHING);
+  const minted = mintSnapshotRows(admitted, report, {
+    providerId: 'archive-one',
+    pin: sha256(snapshotPreimage(document)),
+    importedAt: 5,
+  });
+
+  // Accepted: `assertCanonical` validates every edge, so a mint emitting a malformed one would
+  // make the whole index unusable at the next mutation rather than here.
+  const coverage = minted.coverage.reduce(addRange, EMPTY_COVERAGE);
+  assert.equal(coverage.ranges.length, minted.coverage.length);
+
+  // The chain answers, and it answers with a spec version and a hash that have nothing to do
+  // with this document — which is the ordinary case for deep history (§6.4). Neither invalidates
+  // it, and it is still reported as unchecked rather than passing quietly.
+  const checked = verifyRanges(coverage, () => ({
+    genesisHash: CLIENT_GENESIS,
+    hash: `0x${'9'.repeat(64)}`,
+    specVersion: 99,
+  }));
+  assert.deepEqual(checked.invalidated, []);
+  assert.equal(checked.coverage.ranges.length, coverage.ranges.length);
+  assert.equal(checked.unchecked.length, coverage.ranges.length);
+
+  // And the genesis binding still bites, on the same range: the arm is a disclosure, not a hole.
+  const foreign = verifyRanges(coverage, () => ({
+    genesisHash: `0x${'ab'.repeat(32)}`,
+    hash: `0x${'9'.repeat(64)}`,
+    specVersion: 99,
+  }));
+  assert.equal(foreign.invalidated.length, coverage.ranges.length);
+  assert.equal(foreign.coverage.ranges.length, 0);
+});
+
 test('an indexer mint labels `indexer`, and shares the labelling code with the snapshot one', async () => {
   // Two origins, one labelling discipline. A second mint would drift, and the drift is
   // invisible: both produce rows that render, and only one of them is honest about where they
@@ -621,6 +748,7 @@ test('an indexer mint labels `indexer`, and shares the labelling code with the s
   const minted = mintIndexerRows(validDocument().balances, validDocument().coverage, round, {
     providerId: 'live-one',
     importedAt: 7,
+    genesisHash: CLIENT_GENESIS,
   });
   for (const row of minted.balances) {
     assert.equal(row.value.origin, 'indexer');
@@ -653,7 +781,7 @@ test('an indexer mint cannot be reached with a round nobody ran', () => {
         mismatches: [],
         refusal: undefined,
       },
-      { providerId: 'live-one', importedAt: 7 },
+      { providerId: 'live-one', importedAt: 7, genesisHash: CLIENT_GENESIS },
     );
   assert.equal(typeof uncallable, 'function');
 });
@@ -671,6 +799,7 @@ test('a round that caught the indexer lying mints none of its rows', async () =>
       mintIndexerRows(validDocument().balances, validDocument().coverage, round, {
         providerId: 'live-one',
         importedAt: 7,
+        genesisHash: CLIENT_GENESIS,
       }),
     /was disabled by this sampling round/,
   );
@@ -686,6 +815,7 @@ test('an inconclusive round mints rows that say `sampled: false`', async () => {
   const minted = mintIndexerRows(validDocument().balances, validDocument().coverage, round, {
     providerId: 'live-one',
     importedAt: 7,
+    genesisHash: CLIENT_GENESIS,
   });
   assert.equal(minted.status.kind, 'provider');
   if (minted.status.kind !== 'provider') return;

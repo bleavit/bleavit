@@ -64,6 +64,7 @@ const POLKADOT = `0x${'b2'.repeat(32)}`;
 
 /** §6.3's per-range edge facts, on this database's chain. */
 const edgeAt = (toBlock: number, genesisHash = PASEO) => ({
+  kind: 'checked' as const,
   genesisHash,
   hash: `0x${toBlock.toString(16).padStart(64, '0')}`,
   specVersion: 3,

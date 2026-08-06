@@ -66,6 +66,7 @@ const rangeAt = (coverage: CoverageRef, n: number): CoverageRange => {
  */
 export const GENESIS = `0x${'a1'.repeat(32)}`;
 export const edgeAt = (toBlock: number, specVersion = 3): RangeEdge => ({
+  kind: 'checked',
   genesisHash: GENESIS,
   hash: `0x${toBlock.toString(16).padStart(64, '0')}`,
   specVersion,
@@ -369,6 +370,7 @@ test('a range from another chain is refused where the caller can still act', () 
   // a call site that had done nothing wrong, and the caller that could still have acted was gone.
   const OTHER = `0x${'ff'.repeat(32)}`;
   const foreign = providerRange('operator', 'op-1', 21, 30, 1, {
+    kind: 'checked',
     genesisHash: OTHER,
     hash: `0x${'ee'.repeat(32)}`,
     specVersion: 3,

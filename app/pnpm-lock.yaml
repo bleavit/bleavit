@@ -471,6 +471,9 @@ importers:
 
   tests/providers:
     dependencies:
+      '@bleavit/local-index':
+        specifier: workspace:*
+        version: link:../../packages/local-index
       '@bleavit/mock-runtime':
         specifier: workspace:*
         version: link:../../packages/mock-runtime
