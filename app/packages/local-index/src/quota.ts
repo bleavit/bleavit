@@ -46,13 +46,17 @@
  * size (0.14 MB gz) the **count** limit is what actually binds and the byte limit is headroom.
  */
 
+import type { Table } from 'dexie';
+
 import {
   bucketSeconds,
   downsample,
   foldCandles,
+  mergeCandle,
   mergeDownsampled,
   nextResolution,
   rollUp,
+  sameSampleProvenance,
   type Candle,
   type DownsampledRange,
   type PriceSample,
@@ -60,9 +64,13 @@ import {
   type SampleProvenance,
 } from './candles.js';
 import {
+  candleTableFor,
   evictMetadataToBudget,
+  evictPendingRawToBound,
+  pendingRawRows,
   readDownsampled,
   writeDownsampled,
+  type CandleKey,
   type LocalIndex,
   type ProposalArchiveRow,
   type StoredEvent,
@@ -101,16 +109,25 @@ export const METADATA_BOUND: Readonly<Record<Platform, { blobs: number; bytes: n
  * single number that moves, and so the sum can be asserted: a share table that does not add to
  * one either wastes budget or over-commits it, and neither is visible from any one row.
  */
-export const QUOTA_SHARES = Object.freeze({
+export const QUOTA_SHARES: QuotaShares = Object.freeze({
   rawSamples: 0.6,
   candles: 0.2,
   eventsAndArchive: 0.15,
   metadata: 0.05,
 });
 
+/** The four fractions §9.2 publishes, as a value a caller can supply a different one of. */
+export interface QuotaShares {
+  readonly rawSamples: number;
+  readonly candles: number;
+  readonly eventsAndArchive: number;
+  readonly metadata: number;
+}
+
 export interface StorageBudget {
   readonly platform: Platform;
   readonly capBytes: number;
+  readonly shares: QuotaShares;
   readonly rawSampleBytes: number;
   readonly candleBytes: number;
   readonly eventBytes: number;
@@ -122,27 +139,49 @@ export interface StorageBudget {
  * The budget for a platform. **Required argument, no default** — a client that does not know
  * whether it is on a phone would otherwise silently take the desktop cap, which is the unsafe
  * direction (four times the storage on the device most likely to have none).
+ *
+ * §9.2's shares are *"fixed internal shares (**user-adjustable locally**)"*, so a second,
+ * optional argument exists to adjust them — the parenthesis is the whole reason, and a frozen
+ * table with no path to it published half the sentence. Adjusted shares are **validated, not
+ * trusted**: each must be a fraction and the four must sum to the cap, because a table that does
+ * not either wastes budget or over-commits it and neither is visible from any one row.
+ *
+ * What the adjustment cannot do is raise the metadata share past §9.3's own bound — the `min`
+ * below still applies, so a local preference cannot grant a cache §9.3 forbids. It *can* lower
+ * it below what the pinned runtimes need, at which point `evictMetadataToBudget` refuses rather
+ * than dropping a pin; whether §9.2's adjustability was meant to reach a bound §9.3 states
+ * absolutely is SQ-763.
  */
-export function platformBudget(platform: Platform): StorageBudget {
+export function platformBudget(platform: Platform, shares: QuotaShares = QUOTA_SHARES): StorageBudget {
   const capBytes = STORAGE_CAP_BYTES[platform];
   if (capBytes === undefined) throw new QuotaError(`${String(platform)} is not a platform 10 §9.2 sizes`);
+  if (!quotaSharesAgree(shares)) {
+    throw new QuotaError(
+      `the shares ${JSON.stringify(shares)} do not describe 10 §9.2's cap. Each must be a ` +
+        'fraction above zero and the four must sum to one: a table that sums to less silently ' +
+        'strands budget, and one that sums to more over-commits the hard cap — neither is ' +
+        'visible from any single row.',
+    );
+  }
   const bound = METADATA_BOUND[platform];
   return {
     platform,
     capBytes,
-    rawSampleBytes: capBytes * QUOTA_SHARES.rawSamples,
-    candleBytes: capBytes * QUOTA_SHARES.candles,
-    eventBytes: capBytes * QUOTA_SHARES.eventsAndArchive,
+    shares,
+    rawSampleBytes: capBytes * shares.rawSamples,
+    candleBytes: capBytes * shares.candles,
+    eventBytes: capBytes * shares.eventsAndArchive,
     // The tighter of §9.2's share and §9.3's own bound — see the module note.
-    metadataBytes: Math.min(capBytes * QUOTA_SHARES.metadata, bound.bytes),
+    metadataBytes: Math.min(capBytes * shares.metadata, bound.bytes),
     metadataBlobs: bound.blobs,
   };
 }
 
-/** Whether the share table sums to the whole cap. Exported so a suite can assert it. */
-export function quotaSharesAgree(): boolean {
-  const sum = Object.values(QUOTA_SHARES).reduce((a, b) => a + b, 0);
-  return Math.abs(sum - 1) < 1e-9;
+/** Whether a share table sums to the whole cap. Exported so a suite can assert it. */
+export function quotaSharesAgree(shares: QuotaShares = QUOTA_SHARES): boolean {
+  const values = [shares.rawSamples, shares.candles, shares.eventsAndArchive, shares.metadata];
+  if (values.some((value) => !Number.isFinite(value) || value <= 0 || value >= 1)) return false;
+  return Math.abs(values.reduce((a, b) => a + b, 0) - 1) < 1e-9;
 }
 
 /**
@@ -187,18 +226,20 @@ function assertSizes(sizes: RowSizes): void {
 /** Measure what is stored, per §9.2 share. */
 export async function measureUsage(db: LocalIndex, sizes: RowSizes): Promise<Usage> {
   assertSizes(sizes);
-  const [samples, c1h, c4h, c1d, events, archive, blobs] = await Promise.all([
-    db.priceSamples.count(),
-    db.candles1h.count(),
-    db.candles4h.count(),
-    db.candles1d.count(),
+  const [rawSampleBytes, candleBytes, events, archive, pending, blobs] = await Promise.all([
+    shareBytes(db, 'rawSamples', sizes),
+    shareBytes(db, 'candles', sizes),
     db.events.count(),
     db.proposalsArchive.count(),
+    pendingRawRows(db),
     db.metadataCache.toArray(),
   ]);
-  const rawSampleBytes = samples * sizes.priceSample;
-  const candleBytes = (c1h + c4h + c1d) * sizes.candle;
-  const eventBytes = events * sizes.event + archive * sizes.archiveRow;
+  // §6.5's raw blobs are **measured**, like `metadataCache` and unlike everything else here.
+  // Modelling them at `sizes.event` charges a whole block's `System.Events` value — the largest
+  // single row this schema can hold — as though it were one decoded event, so the share that is
+  // supposed to bound them cannot see them growing. The row overhead is still modelled; only
+  // the blob is weighed.
+  const eventBytes = events * sizes.event + pending.bytes + archive * sizes.archiveRow;
   const metadataBytes = blobs.reduce((sum, blob) => sum + blob.bytes, 0);
   return {
     rawSampleBytes,
@@ -207,6 +248,35 @@ export async function measureUsage(db: LocalIndex, sizes: RowSizes): Promise<Usa
     metadataBytes,
     totalBytes: rawSampleBytes + candleBytes + eventBytes + metadataBytes,
   };
+}
+
+/**
+ * The bytes of **one** share, and the reason it is separate from `measureUsage`.
+ *
+ * The ladder's inner loop asks one question per pass — *is the share this rung relieves still
+ * over budget?* — and answering it through `measureUsage` costs six queries and a full read of
+ * `metadataCache` for a number that cannot have changed. At the desktop raw share that loop runs
+ * thousands of times, so the wasted work is not a constant factor: the pass that folds a full
+ * index would re-measure tables it is not touching once per bucket.
+ *
+ * It stays a **database read** rather than an arithmetic carry-forward, and that is deliberate.
+ * The progress guard is the one termination condition in that loop which is a property of the
+ * loop itself rather than of other code, and a share derived from the step's own row counts
+ * would agree with the step by construction — it could not see a delete that silently matched
+ * nothing, which is precisely the failure it exists to catch.
+ */
+async function shareBytes(
+  db: LocalIndex,
+  share: 'rawSamples' | 'candles',
+  sizes: RowSizes,
+): Promise<number> {
+  if (share === 'rawSamples') return (await db.priceSamples.count()) * sizes.priceSample;
+  const [c1h, c4h, c1d] = await Promise.all([
+    db.candles1h.count(),
+    db.candles4h.count(),
+    db.candles1d.count(),
+  ]);
+  return (c1h + c4h + c1d) * sizes.candle;
 }
 
 /**
@@ -238,13 +308,23 @@ export type QuotaStep =
       readonly rowsWritten: number;
       readonly fromBlock: number;
       readonly toBlock: number;
+      /**
+       * The **source** bucket that was folded, as a Unix second.
+       *
+       * Reported because it identifies the unit of work, which the block span does not: the
+       * ladder's cursor advances past a bucket that freed nothing, and *"which bucket"* is the
+       * question that has to have an answer for that to be possible.
+       */
+      readonly bucketOpenAt: number;
     }
   | {
       readonly kind: 'compact-events';
       readonly proposalId: string;
       readonly eventsCompacted: number;
     }
-  | { readonly kind: 'evict-metadata'; readonly specVersions: readonly number[] };
+  | { readonly kind: 'evict-metadata'; readonly specVersions: readonly number[] }
+  /** §9.1's bound on §6.5's raw blobs — see `evictPendingRawToBound`. */
+  | { readonly kind: 'evict-pending-raw'; readonly blocks: readonly number[] };
 
 /**
  * A proposal §9.2 permits compacting: *"`events` for settled+reaped proposals → compacted into
@@ -292,11 +372,126 @@ export interface QuotaOptions {
   readonly settled?: readonly SettledProposal[];
 }
 
+/** Seconds in a day, so a measured span can be stated in the unit §9.2 publishes depth in. */
+const DAY_SECONDS = 86_400;
+
+/**
+ * What one tier currently holds — 10 §9.2's measured-and-current obligation.
+ *
+ * > Raw depth is the tier that moves with hosted occupancy, so a client **MUST** present it as
+ * > measured-and-current rather than as a promise — §9.2's opening sentence, that retention is
+ * > computed from the *measured* ingest rate, is what makes that honest rather than merely
+ * > cautious.
+ *
+ * §9.2's depth tables are a planning model at four book counts; this is the same quantity read
+ * off the database in front of the user. The distinction is the whole `MUST`: hosted occupancy
+ * is a governance row (`svc.max_live`, provisional 16 against a registry maximum of 64), so the
+ * published figure moves under the client without anything local changing, and a surface quoting
+ * a table cell would be quoting a promise nobody made.
+ *
+ * **An unmeasurable rate is `undefined`, never zero and never a default.** A tier holding one
+ * row, or many rows all at one instant, has no span to divide by — and a rate invented there
+ * would produce a budgeted depth of infinity, which is the one number this field must never
+ * report. Absent is the honest value, and it is the fail-closed lattice this client applies to
+ * every unproven capability.
+ */
+export interface TierDepth {
+  readonly tier: Resolution;
+  readonly rows: number;
+  readonly bytes: number;
+  /** The share §9.2 gives this tier, in bytes. Raw and the three candle tables share theirs. */
+  readonly shareBytes: number;
+  /** Oldest and newest instant held, Unix seconds — `undefined` for an empty tier. */
+  readonly oldest: number | undefined;
+  readonly newest: number | undefined;
+  /** Days of history the tier holds **right now**, measured from its own rows. */
+  readonly heldDays: number;
+  /** Rows per day, measured over `heldDays`. `undefined` when the span is too short to divide. */
+  readonly rowsPerDay: number | undefined;
+  /**
+   * Days the tier's share admits **at the measured rate** — §9.2's *"computed from the measured
+   * ingest rate; there is no fixed '90 days' promise"*, as a number rather than as a sentence.
+   */
+  readonly budgetedDays: number | undefined;
+}
+
+export interface DepthReport {
+  readonly measuredAt: number;
+  readonly tiers: readonly TierDepth[];
+}
+
+/**
+ * Measure current depth per tier — callable without running a retention pass, because the
+ * surface that has to present it renders far more often than the quota manager runs.
+ */
+export async function measureDepth(
+  db: LocalIndex,
+  budget: StorageBudget,
+  sizes: RowSizes,
+  now: number,
+): Promise<DepthReport> {
+  assertSizes(sizes);
+  if (!Number.isInteger(now) || now < 0) throw new QuotaError(`${now} is not a Unix second`);
+  const samples = await db.priceSamples.orderBy('at').toArray();
+  const tiers: TierDepth[] = [
+    tierDepth(
+      'raw',
+      samples.map((row) => row.at),
+      sizes.priceSample,
+      budget.rawSampleBytes,
+    ),
+  ];
+  // The three candle tables share one §9.2 budget line, so each is reported against the share it
+  // actually competes for rather than against a quarter of it invented here.
+  for (const resolution of ['candles1h', 'candles4h', 'candles1d'] as const) {
+    const rows = await db.table<Candle>(candleTableFor(resolution)).orderBy('openAt').toArray();
+    tiers.push(
+      tierDepth(
+        resolution,
+        rows.map((row) => row.openAt),
+        sizes.candle,
+        budget.candleBytes,
+      ),
+    );
+  }
+  return { measuredAt: now, tiers };
+}
+
+function tierDepth(
+  tier: Resolution,
+  instants: readonly number[],
+  rowBytes: number,
+  share: number,
+): TierDepth {
+  const rows = instants.length;
+  const oldest = rows === 0 ? undefined : Math.min(...instants);
+  const newest = rows === 0 ? undefined : Math.max(...instants);
+  const spanSeconds = oldest === undefined || newest === undefined ? 0 : newest - oldest;
+  const heldDays = spanSeconds / DAY_SECONDS;
+  const rowsPerDay = heldDays > 0 ? rows / heldDays : undefined;
+  return {
+    tier,
+    rows,
+    bytes: rows * rowBytes,
+    shareBytes: share,
+    oldest,
+    newest,
+    heldDays,
+    rowsPerDay,
+    budgetedDays: rowsPerDay === undefined ? undefined : share / rowBytes / rowsPerDay,
+  };
+}
+
 export interface QuotaReport {
   readonly before: Usage;
   readonly after: Usage;
   readonly steps: readonly QuotaStep[];
   readonly downsampled: readonly DownsampledRange[];
+  /**
+   * §9.2's measured-and-current depth, taken **after** the pass — which is the state the user is
+   * in, not the one they were in before it ran.
+   */
+  readonly depth: DepthReport;
   /**
    * True when every rung has been applied and the budget is still exceeded.
    *
@@ -353,34 +548,36 @@ export async function applyQuota(db: LocalIndex, options: QuotaOptions): Promise
   while (rung !== undefined) {
     const target = nextResolution(rung);
     // `candles1d` is the floor: §9.2 justifies it arithmetically (a daily row costs
-    // `books × 120 B/day` even at max load), so there is nothing to degrade *to*.
+    // `books × 120 B/day` even at the 159-book maximum), so there is nothing to degrade *to*.
     if (target === undefined) break;
+    const share = shareOf(rung);
+    const budgetForShare = share === 'rawSamples' ? budget.rawSampleBytes : budget.candleBytes;
+    // The cursor. `after` is the last bucket this rung folded **without freeing anything**;
+    // every pass starts strictly after it, so the loop cannot retry a bucket it has already
+    // failed on and cannot skip one it has not tried.
+    let after: number | undefined;
     for (;;) {
-      const over = await overShare(db, budget, sizes);
-      // Only the share this rung can relieve. Degrading candles because the *sample* share is
-      // over would destroy resolution without freeing a byte of the share that is full.
-      if (over !== shareOf(rung)) break;
-      const usageBefore = await measureUsage(db, sizes);
-      const step = await degradeOldestBucket(db, rung, target, now, (range) => {
+      // Only the share this rung can relieve, read from the database each pass. Degrading
+      // candles because the *sample* share is over would destroy resolution without freeing a
+      // byte of the share that is full.
+      const held = await shareBytes(db, share, sizes);
+      if (held <= budgetForShare) break;
+      const step = await degradeOldestBucket(db, rung, target, now, after, (range) => {
         labels = mergeDownsampled(labels, range);
         return labels;
       });
       if (step === undefined) break;
       steps.push(step);
-      // **A progress guard, and it is not defensive padding.** Every other termination
-      // condition here is "the share fell" or "nothing is eligible", and both are properties of
-      // *other* code — the delete really removing rows, the measurement really shrinking. When
-      // one of those is wrong the loop above folds the same bucket forever: the coarse row is
-      // rewritten, the delete removes nothing, the share is unchanged, and the rung is retried.
-      // Running out of room is a budgeted, expected state under §9.2 (thin against a
-      // fully-subscribed hosted partition), so it is reported — and an unbounded loop is not an
-      // admissible failure mode for a reported state. A retention pass that never returns takes
-      // the tab with it.
-      const usageAfter = await measureUsage(db, sizes);
-      const removed = step.kind === 'downsample' ? step.rowsRemoved : 0;
-      if (removed === 0 || usageAfter[USAGE_FIELD[over]] >= usageBefore[USAGE_FIELD[over]]) {
-        break;
-      }
+      // **The progress guard, and what it must not do is abandon the rung.** Every other
+      // termination condition here is a property of *other* code — the delete really removing
+      // rows, the measurement really shrinking — and when one of those is wrong the loop folds
+      // one bucket forever, which takes the tab with it. But a bucket can also legitimately free
+      // nothing: rolling up a bucket holding a single candle writes one row for one row, and a
+      // guard that stopped there would report `exhausted` while later buckets holding four
+      // rows apiece were still foldable and still over budget. So a bucket that freed nothing
+      // advances the cursor past **itself** rather than ending the rung, and the rung ends only
+      // when nothing is eligible or the share is under budget.
+      if ((await shareBytes(db, share, sizes)) >= held) after = step.bucketOpenAt;
     }
     rung = target;
   }
@@ -389,23 +586,40 @@ export async function applyQuota(db: LocalIndex, options: QuotaOptions): Promise
   // §9.2 publishes the order and calls it "deterministic and user-visible" — `QuotaReport.steps`
   // is what renders it. The two consume separate shares, so nothing extra is destroyed either
   // way; what changes is whether the reported sequence is the section's.
-  let eventBytes = (await db.events.count()) * sizes.event + (await db.proposalsArchive.count()) * sizes.archiveRow;
   for (const proposal of options.settled ?? []) {
-    if (eventBytes <= budget.eventBytes) break;
+    if ((await eventShareBytes(db, sizes)) <= budget.eventBytes) break;
     const compacted = await compactSettledEvents(db, proposal);
     if (compacted === 0) continue;
     steps.push({ kind: 'compact-events', proposalId: proposal.proposalId, eventsCompacted: compacted });
-    eventBytes -= compacted * sizes.event;
-    eventBytes += sizes.archiveRow;
   }
+
+  // 4. §6.5's raw blobs, bounded last because they are the only event rows the ladder can free
+  // that a user might still want — an era's metadata can arrive (FE-P5) and make them readable.
+  // Compaction goes first for that reason: a settled proposal's decoded events are replaced by a
+  // summary that says what they were, while a discarded blob is gone. The budget is what the
+  // events share has **left** after everything else in it, so the bound is §9.2's own 15 % and
+  // not a number invented here.
+  const eventOverhead = (await eventShareBytes(db, sizes)) - (await pendingRawRows(db)).bytes;
+  const evictedRaw = await evictPendingRawToBound(
+    db,
+    Math.max(0, budget.eventBytes - eventOverhead),
+    now,
+  );
+  if (evictedRaw.length > 0) steps.push({ kind: 'evict-pending-raw', blocks: evictedRaw });
 
   return {
     before,
     after: await measureUsage(db, sizes),
     steps,
     downsampled: labels,
+    depth: await measureDepth(db, budget, sizes, now),
     exhausted: !(await budgetHolds(db, budget, sizes)),
   };
+}
+
+/** A provenance as an error message names it — one spelling, so two messages cannot disagree. */
+function describe(provenance: SampleProvenance): string {
+  return provenance.origin === 'self' ? 'self' : `${provenance.origin}:${provenance.providerId}`;
 }
 
 /** Which §9.2 share a rung's rows are charged to. */
@@ -413,29 +627,14 @@ function shareOf(rung: Resolution): 'rawSamples' | 'candles' {
   return rung === 'raw' ? 'rawSamples' : 'candles';
 }
 
-/** Which `Usage` field carries a share's bytes, so progress can be measured on the right one. */
-const USAGE_FIELD = Object.freeze({
-  rawSamples: 'rawSampleBytes',
-  candles: 'candleBytes',
-} as const);
-
-/**
- * The first **ladder-relievable** share over its budget, in ladder order.
- *
- * Deliberately narrower than "is the budget exceeded": these are the two shares a rung can act
- * on. The events share has no rung once the settled list is empty, and the metadata share is
- * handled by its own bounded eviction, so reporting either here would spin the chart ladder
- * against a share it cannot touch. `budgetHolds` is the wider question.
- */
-async function overShare(
-  db: LocalIndex,
-  budget: StorageBudget,
-  sizes: RowSizes,
-): Promise<'rawSamples' | 'candles' | undefined> {
-  const usage = await measureUsage(db, sizes);
-  if (usage.rawSampleBytes > budget.rawSampleBytes) return 'rawSamples';
-  if (usage.candleBytes > budget.candleBytes) return 'candles';
-  return undefined;
+/** The events share as `measureUsage` computes it — decoded rows, raw blobs and the archive. */
+async function eventShareBytes(db: LocalIndex, sizes: RowSizes): Promise<number> {
+  const [events, archive, pending] = await Promise.all([
+    db.events.count(),
+    db.proposalsArchive.count(),
+    pendingRawRows(db),
+  ]);
+  return events * sizes.event + pending.bytes + archive * sizes.archiveRow;
 }
 
 /**
@@ -462,8 +661,49 @@ async function budgetHolds(
   );
 }
 
-const CANDLE_TABLE: Readonly<Record<Exclude<Resolution, 'raw'>, 'candles1h' | 'candles4h' | 'candles1d'>> =
-  Object.freeze({ candles1h: 'candles1h', candles4h: 'candles4h', candles1d: 'candles1d' });
+/**
+ * The oldest closed target bucket's rows, and **only** that bucket's.
+ *
+ * The whole-table read this replaces was the reason the quota manager could not run at the scale
+ * it enforces: `degradeOldestBucket` re-materialised `priceSamples` once per bucket folded, and
+ * at the desktop raw share (180 MB ÷ ~120 B ≈ 1.5 M rows) a full pass is thousands of buckets —
+ * so the pass costs rows × buckets. The suite could not see it, because the row sizes it uses are
+ * set so that a handful of rows exceeds a 300 MB share.
+ *
+ * Two facts make one indexed read sufficient. **The index is ordered by the instant**, so the
+ * first row past the cursor is the oldest one there is; and **bucket closure is monotone in that
+ * instant**, so if the oldest row's bucket has not closed then no bucket has and there is nothing
+ * to do. The bucket is then read by key range over the same index — bounded by one bucket's rows
+ * rather than by the table.
+ */
+async function oldestClosedBucket<T>(
+  read: {
+    readonly first: (after: number | undefined) => Promise<T | undefined>;
+    readonly between: (from: number, to: number) => Promise<readonly T[]>;
+    readonly instant: (row: T) => number;
+  },
+  width: number,
+  now: number,
+  after: number | undefined,
+): Promise<{ readonly openAt: number; readonly rows: readonly T[] } | undefined> {
+  // A row is eligible when **its target bucket** has closed, which is not the same as the row
+  // itself lying in the past. The candle arm once read `c.openAt + width <= lastClosedEnd` — the
+  // *target* width added to a *source* row — so of the four hours belonging to one 4 h bucket
+  // only the first qualified. The bucket was written from that hour alone, and the next pass
+  // wrote it again from the remaining three under the same key, replacing the first: an hour of
+  // history gone, with coverage still claiming those blocks and the "downsampled" label still
+  // saying nothing is missing.
+  const lastClosedEnd = now - (now % width);
+  const first = await read.first(after);
+  if (first === undefined) return undefined;
+  const openAt = align(read.instant(first), width);
+  if (openAt >= lastClosedEnd) return undefined;
+  return { openAt, rows: await read.between(openAt, openAt + width - 1) };
+}
+
+function align(at: number, width: number): number {
+  return at - (at % width);
+}
 
 /**
  * Degrade the oldest **closed** bucket one rung, in a single transaction.
@@ -471,46 +711,53 @@ const CANDLE_TABLE: Readonly<Record<Exclude<Resolution, 'raw'>, 'candles1h' | 'c
  * Whole buckets, and closed ones only. Both restrictions are load-bearing:
  *
  * - **Whole buckets**, because the coarser row is keyed on its bucket. Folding half a bucket
- *   now and the other half later writes two candles under one key, and the second silently
- *   replaces the first — a bar describing part of an hour, rendered as the hour.
+ *   now and the other half later writes two candles under one key, and — before `mergeCandle` —
+ *   the second silently replaced the first: a bar describing part of an hour, rendered as the
+ *   hour.
  * - **Closed buckets**, because samples still arriving in the current bucket would produce
  *   exactly that second write. `now` decides, and a bucket is closed when its end is strictly
  *   in the past.
+ *
+ * `after` skips buckets an earlier pass folded without freeing anything — see `applyQuota`.
  */
 async function degradeOldestBucket(
   db: LocalIndex,
   from: Resolution,
   to: Exclude<Resolution, 'raw'>,
   now: number,
+  after: number | undefined,
   label: (range: DownsampledRange) => readonly DownsampledRange[],
 ): Promise<Extract<QuotaStep, { kind: 'downsample' }> | undefined> {
   const width = bucketSeconds(to);
-  const lastClosedEnd = now - (now % width);
-  // A row is eligible when **its target bucket** has closed, which is not the same as the row
-  // itself lying in the past. The candle arm first read `c.openAt + width <= lastClosedEnd` —
-  // the *target* width added to a *source* row — so of the four hours belonging to one 4 h
-  // bucket only the first qualified. The bucket was written from that hour alone, and the next
-  // pass wrote it again from the remaining three **under the same key**, replacing the first:
-  // an hour of history gone, with coverage still claiming those blocks and the "downsampled"
-  // label still saying nothing is missing. Both arms now ask the one question that is correct
-  // for both.
-  const bucketClosed = (at: number): boolean => at - (at % width) < lastClosedEnd;
+  const target = db.table<Candle, CandleKey>(candleTableFor(to));
 
   if (from === 'raw') {
-    const samples = await db.priceSamples.orderBy('at').toArray();
-    const eligible = samples.filter((s) => bucketClosed(s.at));
-    if (eligible.length === 0) return undefined;
-    const oldest = [...eligible].sort(evictionOrder)[0] as PriceSample;
-    const bucketOpen = oldest.at - (oldest.at % width);
-    const group = eligible.filter(
-      (s) => s.sourceKey === oldest.sourceKey && s.bookId === oldest.bookId && s.at - (s.at % width) === bucketOpen,
+    const bucket = await oldestClosedBucket<PriceSample>(
+      {
+        first: async (cursor) =>
+          cursor === undefined
+            ? db.priceSamples.orderBy('at').first()
+            : db.priceSamples.where('at').aboveOrEqual(cursor + width).first(),
+        between: (low, high) => db.priceSamples.where('at').between(low, high, true, true).toArray(),
+        instant: (row) => row.at,
+      },
+      width,
+      now,
+      after,
+    );
+    if (bucket === undefined || bucket.rows.length === 0) return undefined;
+    // §9.2's eviction order decides which (book, source) group inside the bucket goes first:
+    // oldest, then imported before self-ingested at equal age.
+    const oldest = [...bucket.rows].sort(evictionOrder)[0] as PriceSample;
+    const group = bucket.rows.filter(
+      (s) => s.sourceKey === oldest.sourceKey && s.bookId === oldest.bookId,
     );
     const candles = foldCandles(group, to);
     const fromBlock = group.reduce((m, s) => Math.min(m, s.blockNumber), group[0]!.blockNumber);
     const toBlock = group.reduce((m, s) => Math.max(m, s.blockNumber), group[0]!.blockNumber);
     const ranges = label(downsample(fromBlock, toBlock, to, now));
-    await db.transaction('rw', db.priceSamples, db[CANDLE_TABLE[to]], db.meta, async () => {
-      await db[CANDLE_TABLE[to]].bulkPut(candles as Candle[]);
+    await db.transaction('rw', db.priceSamples, target, db.meta, async () => {
+      await rollIntoBuckets(target, candles);
       await db.priceSamples.bulkDelete(group.map((s) => [s.bookId, s.sourceKey, s.blockNumber] as [string, string, number]));
       await writeDownsampled(db, ranges);
     });
@@ -522,24 +769,37 @@ async function degradeOldestBucket(
       rowsWritten: candles.length,
       fromBlock,
       toBlock,
+      bucketOpenAt: bucket.openAt,
     };
   }
 
-  const sourceTable = db[CANDLE_TABLE[from]];
-  const rows = await sourceTable.orderBy('openAt').toArray();
-  const eligible = rows.filter((c) => bucketClosed(c.openAt));
-  if (eligible.length === 0) return undefined;
-  const oldest = [...eligible].sort((a, b) => evictionOrder({ ...a, at: a.openAt }, { ...b, at: b.openAt }))[0] as Candle;
-  const bucketOpen = oldest.openAt - (oldest.openAt % width);
-  const group = eligible.filter(
-    (c) => c.sourceKey === oldest.sourceKey && c.bookId === oldest.bookId && c.openAt - (c.openAt % width) === bucketOpen,
+  const sourceTable = db.table<Candle, CandleKey>(candleTableFor(from));
+  const bucket = await oldestClosedBucket<Candle>(
+    {
+      first: async (cursor) =>
+        cursor === undefined
+          ? sourceTable.orderBy('openAt').first()
+          : sourceTable.where('openAt').aboveOrEqual(cursor + width).first(),
+      between: (low, high) => sourceTable.where('openAt').between(low, high, true, true).toArray(),
+      instant: (row) => row.openAt,
+    },
+    width,
+    now,
+    after,
+  );
+  if (bucket === undefined || bucket.rows.length === 0) return undefined;
+  const oldest = [...bucket.rows].sort((a, b) =>
+    evictionOrder({ ...a, at: a.openAt }, { ...b, at: b.openAt }),
+  )[0] as Candle;
+  const group = bucket.rows.filter(
+    (c) => c.sourceKey === oldest.sourceKey && c.bookId === oldest.bookId,
   );
   const rolled = rollUp(group, to);
   const fromBlock = group.reduce((m, c) => Math.min(m, c.fromBlock), group[0]!.fromBlock);
   const toBlock = group.reduce((m, c) => Math.max(m, c.toBlock), group[0]!.toBlock);
   const ranges = label(downsample(fromBlock, toBlock, to, now));
-  await db.transaction('rw', sourceTable, db[CANDLE_TABLE[to]], db.meta, async () => {
-    await db[CANDLE_TABLE[to]].bulkPut(rolled as Candle[]);
+  await db.transaction('rw', sourceTable, target, db.meta, async () => {
+    await rollIntoBuckets(target, rolled);
     await sourceTable.bulkDelete(group.map((c) => [c.bookId, c.sourceKey, c.openAt] as [string, string, number]));
     await writeDownsampled(db, ranges);
   });
@@ -551,7 +811,31 @@ async function degradeOldestBucket(
     rowsWritten: rolled.length,
     fromBlock,
     toBlock,
+    bucketOpenAt: bucket.openAt,
   };
+}
+
+/**
+ * Write coarse rows into the target table by **reading what is already there** — §9.2's second
+ * obligation, which a `bulkPut` cannot satisfy.
+ *
+ * > Degradation is applied in whole, closed buckets. Folding part of a bucket now and the rest
+ * > later writes two coarse rows under one bucket key, the second replacing the first, so the
+ * > chart shows a bar describing part of an hour labelled as the hour.
+ *
+ * Folding whole buckets makes that true *within* a pass and not *across* passes: a backfill
+ * chunk landing older samples for an already-folded hour arrives later and writes over the
+ * earlier bar. Reading first and rolling in is the difference between "the ladder is
+ * whole-bucket" as a property of one call and as a property of the stored row.
+ */
+async function rollIntoBuckets(
+  table: Table<Candle, CandleKey>,
+  candles: readonly Candle[],
+): Promise<void> {
+  for (const candle of candles) {
+    const existing = await table.get([candle.bookId, candle.sourceKey, candle.openAt]);
+    await table.put(existing === undefined ? candle : mergeCandle(existing, candle));
+  }
 }
 
 /**
@@ -590,6 +874,27 @@ export async function compactSettledEvents(
         `outside the span ${proposal.fromBlock}..${proposal.toBlock} its summary declares. The ` +
         'summary is what the user is shown in place of the rows, so it cannot describe a ' +
         'narrower range than it replaces.',
+    );
+  }
+  // **Provenance is never degraded on the way** — §9.2 obligation 3, which the archive row was
+  // outside. `proposalsArchive` is keyed on the proposal id alone (§7), so one settled proposal
+  // gets one summary; the summary's origin was whatever the caller put in `provenance`, and
+  // nothing compared it with the rows being deleted. A proposal whose blocks span a
+  // self-ingested range and an operator-backfilled one therefore collapsed into a single row
+  // that would render under one badge — the merge §6.3 refuses for ranges and `foldCandles`
+  // refuses for bars, arriving where there is no second row to keep the boundary in.
+  //
+  // Refused rather than split, because splitting needs a second summary and `proposalsArchive`
+  // has nowhere to put it: its primary key admits exactly one row per proposal. Refusing leaves
+  // the events in place, costing depth, which §9.2 permits and mislabelling does not.
+  const foreign = doomed.find((event) => !sameSampleProvenance(event, proposal.provenance));
+  if (foreign !== undefined) {
+    throw new QuotaError(
+      `proposal ${proposal.proposalId} declares its summary as ${describe(proposal.provenance)} ` +
+        `and names event ${foreign.id}, which is ${describe(foreign)}. 10 §9.2 lets the ladder ` +
+        'degrade resolution and forbids it relabelling a source on the way; proposalsArchive is ' +
+        'keyed by proposal, so one summary cannot carry two origins and there is no second row ' +
+        'to keep the boundary in. The events stay, which costs depth rather than truth.',
     );
   }
   const row: ProposalArchiveRow = {

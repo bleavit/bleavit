@@ -17,4 +17,23 @@
  * the loop's correctness — so a bug there would make those suites agree with it.
  */
 
+import Dexie from 'dexie';
+
+import { SCHEMA_V1, databaseName } from './store.js';
+
 export { selfRange } from './coverage.js';
+
+/**
+ * A database at the **schema this package first shipped** — the thing a migration upgrades from.
+ *
+ * It lives here rather than in the suite because `dexie` is `local-index`'s dependency and not
+ * the test root's, and it is test-only for the same reason `selfRange` is: production code has
+ * no business opening this database at an old version. A suite that hand-rolled the old object
+ * stores through raw IndexedDB would be asserting against its own idea of what Dexie writes,
+ * which is the shape of a migration test that passes while the migration does not.
+ */
+export function legacyIndexV1(paraGenesisHash: string): Dexie {
+  const db = new Dexie(databaseName(paraGenesisHash));
+  db.version(1).stores({ ...SCHEMA_V1 });
+  return db;
+}

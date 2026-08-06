@@ -48,7 +48,7 @@ import {
   type Hole,
 } from './coverage.js';
 import type { SampleProvenance } from './candles.js';
-import type { Candle, DownsampledRange, PriceSample } from './candles.js';
+import type { Candle, DownsampledRange, PriceSample, Resolution } from './candles.js';
 
 export class StoreError extends Error {
   constructor(message: string) {
@@ -85,14 +85,50 @@ export type StoredEvent = {
   readonly name: string;
 } & SampleProvenance &
   (
-    | { readonly decoded: true; readonly raw?: undefined }
+    | { readonly decoded: true; readonly raw?: undefined; readonly pendingBlock?: undefined }
     /**
      * §6.5's raw row: kept for the era whose metadata was unavailable, surfaced as
      * "N events pending decoder", never guessed at. `raw` is required here — a raw row
      * without its bytes is a row that can never stop being pending.
+     *
+     * `pendingBlock` repeats the block number and is present on **this arm only**, which is
+     * what makes it a sparse index. It exists because the pending set has to be *enumerable
+     * and orderable* — 10 §9.1 forbids retaining chain-wide event data and this blob holds a
+     * whole block's `System.Events` regardless of the watched set, so the set needs a bound
+     * and the bound needs oldest-first order. A boolean cannot serve: it is not a valid
+     * IndexedDB key, so an index on `decoded` holds nothing and answers zero.
      */
-    | { readonly decoded: false; readonly raw: Uint8Array }
+    | { readonly decoded: false; readonly raw: Uint8Array; readonly pendingBlock: number }
   );
+
+/**
+ * The id §6.5's raw row is stored under.
+ *
+ * One function, because the writer that creates it and the writer that **retires** it must
+ * agree byte for byte: a re-ingest with the era's metadata deletes this id in the same
+ * transaction that writes the decoded rows, and a second spelling would leave the block stored
+ * twice with "N events pending decoder" permanently one too high.
+ */
+export function rawEventId(blockNumber: number): string {
+  return `${blockNumber}:raw`;
+}
+
+/** The table a candle of a given resolution lives in. */
+export function candleTableFor(
+  resolution: Exclude<Resolution, 'raw'>,
+): 'candles1h' | 'candles4h' | 'candles1d' {
+  const table = CANDLE_TABLE[resolution];
+  if (table === undefined) throw new StoreError(`${resolution} has no candle table`);
+  return table;
+}
+
+const CANDLE_TABLE: Readonly<
+  Record<Exclude<Resolution, 'raw'>, 'candles1h' | 'candles4h' | 'candles1d'>
+> = Object.freeze({
+  candles1h: 'candles1h',
+  candles4h: 'candles4h',
+  candles1d: 'candles1d',
+});
 
 export type StoredTxRow = {
   /** `txRowKey(block, index)` — block-ordered and replay-stable. */
@@ -111,25 +147,33 @@ export type ProposalArchiveRow = {
   readonly compactedEvents: number;
 } & SampleProvenance;
 
-export interface SnapshotImport {
+/**
+ * §7's `snapshotsImported` row.
+ *
+ * `providerId` is **not** declared here: it arrives with `SampleProvenance`, which §7 requires
+ * of *"every row"*. Declaring it twice would be two spellings of one fact, and the shape that
+ * lets one of them be dropped in transit is exactly the one INV-FE-15 forbids. Its `self` arm
+ * is uninhabitable by construction, which is correct — a snapshot the client produced itself is
+ * not a snapshot import.
+ */
+export type SnapshotImport = {
   readonly id: string;
-  readonly providerId: string;
   readonly importedAt: number;
   readonly fromBlock: number;
   readonly toBlock: number;
-}
+} & SampleProvenance;
 
 /**
  * §9.3's bounded metadata cache. `lastUsedAt` and `bytes` are required rather than optional:
  * the bound is enforced by evicting least-recently-used blobs, and a row that carried neither
  * would be permanently un-evictable — which is how the cache was unbounded in the first place.
  */
-export interface MetadataBlob {
+export type MetadataBlob = {
   readonly specVersion: number;
   readonly bytes: number;
   readonly lastUsedAt: number;
   readonly blob: Uint8Array;
-}
+} & SampleProvenance;
 
 /**
  * The `meta` table's rows. §7 replaced `cursor` with `coverage` for §6.3's holes.
@@ -146,10 +190,45 @@ export interface MetadataBlob {
  */
 export type MetaRow =
   | { readonly key: 'coverage'; readonly coverage: CoverageRef }
-  | { readonly key: 'downsampled'; readonly ranges: readonly DownsampledRange[] };
+  | { readonly key: 'downsampled'; readonly ranges: readonly DownsampledRange[] }
+  | { readonly key: 'pendingRawEvicted'; readonly record: PendingRawEvictionRecord };
 
 /**
- * §7's schema, as data.
+ * What the client discarded when §6.5's raw blobs were bounded — the label without which the
+ * bound is a silent splice.
+ *
+ * §6.5 requires an undecodable block's `System.Events` value to be kept raw and counted; §9.1
+ * forbids retaining chain-wide event data, and one raw blob is exactly that — a whole block's
+ * events regardless of the watched set. The two cannot both hold without a bound, and a bound
+ * that drops bytes without saying so leaves the block covered, decoded-looking and empty. The
+ * tension itself is a spec question (SQ-760); what this row does is make the disposal visible.
+ *
+ * A **summary**, not a list, because the list is the thing being bounded: an append-only record
+ * of every discarded block reproduces the growth the eviction was run to stop. The envelope
+ * (`oldestBlock`..`newestBlock`) plus the count is what a surface needs to say *"the events of N
+ * blocks in this span can no longer be decoded"*, which is the true sentence.
+ */
+export interface PendingRawEvictionRecord {
+  readonly blocks: number;
+  readonly bytes: number;
+  readonly oldestBlock: number;
+  readonly newestBlock: number;
+  /** When the most recent eviction ran. */
+  readonly at: number;
+  /** Rendered, not logged. */
+  readonly reason: string;
+}
+
+/**
+ * §7's schema **as first shipped**, kept because a browser that opened it is what a migration
+ * has to upgrade from.
+ *
+ * Two of its declarations were wrong and both were primary keys, which is the one thing a
+ * Dexie version cannot quietly change: `priceSamples` was keyed on the *device clock*
+ * (`[bookId+at]`), so two observations of one book inside the same second overwrote each other,
+ * and the chart tables were keyed without the row's source, so two sources' bars for one bucket
+ * collapsed into one row whose number is whichever wrote last. `SCHEMA_V3` fixes both — see
+ * `LocalIndex`, where the upgrade has to drop the tables before it can re-declare them.
  *
  * `candles4h` and `candles1d` are present from version 1 rather than added later: §9.2's
  * ladder degrades *into* them, so a database that lacked them would have nowhere to put a
@@ -158,22 +237,53 @@ export type MetaRow =
  */
 export const SCHEMA_V1: Readonly<Record<string, string>> = Object.freeze({
   meta: 'key',
-  // `decoded` is deliberately **not** indexed: a boolean is not a valid IndexedDB key, so the
-  // index would hold nothing and every query against it would answer zero. See
-  // `pendingDecoderCount`.
   events: 'id, blockNumber, [pallet+name], origin',
-  // **Block-keyed, not wall-clock-keyed.** `[bookId+at]` made the primary key a function of
-  // the device clock, so two observations of one book inside the same second overwrote each
-  // other silently — and every other ingest key in this schema is deterministic and
-  // block-derived precisely so a replay is idempotent. `at` remains a column (it is the
-  // block's timestamp, and `bucketStart` needs it) but it does not identify the row.
-  //
-  // **`sourceKey` is in the key for a second, independent reason.** Once a chart row carries a
-  // provenance (10 §2.3's mandatory labelling), two sources observing one book at one block are
-  // two rows. Keyed without it they are one row, and which datum survives is decided by write
-  // order — the label stays correct while the number under it becomes whichever source wrote
-  // last. `foldCandles` refuses to merge across provenance in memory; this is the same refusal
-  // at the storage layer, without which the in-memory rule is undone on the way to disk.
+  priceSamples: '[bookId+at], bookId, blockNumber, at, origin',
+  candles1h: '[bookId+openAt], bookId, openAt, toBlock',
+  candles4h: '[bookId+openAt], bookId, openAt, toBlock',
+  candles1d: '[bookId+openAt], bookId, openAt, toBlock',
+  proposalsArchive: 'proposalId, settledAt',
+  txHistory: 'id, blockNumber, account',
+  metadataCache: 'specVersion, lastUsedAt',
+  snapshotsImported: 'id, providerId',
+});
+
+/**
+ * The chart tables `SCHEMA_V3` re-keys. Named as data because the upgrade has to mention them
+ * **twice** — once to drop, once to re-declare — and two hand-written lists is how one of them
+ * ends up short by a table nobody notices until a query returns the wrong row.
+ */
+export const REKEYED_TABLES: readonly string[] = Object.freeze([
+  'priceSamples',
+  'candles1h',
+  'candles4h',
+  'candles1d',
+]);
+
+/**
+ * §7's schema as it now stands.
+ *
+ * Three declarations differ from `SCHEMA_V1` and each is load-bearing:
+ *
+ * - **`priceSamples` is block-keyed, not wall-clock-keyed.** `[bookId+at]` made the primary key
+ *   a function of the device clock; every other ingest key here is deterministic and
+ *   block-derived precisely so a replay is idempotent. `at` remains a column (it is the block's
+ *   timestamp, and `bucketStart` needs it) but it does not identify the row.
+ * - **`sourceKey` is in every chart row's key.** Once a chart row carries a provenance (10 §2.3's
+ *   mandatory labelling), two sources observing one book at one block are two rows. Keyed
+ *   without it they are one row, and which datum survives is decided by write order — the label
+ *   stays correct while the number under it becomes whichever source wrote last. `foldCandles`
+ *   refuses to merge across provenance in memory; this is the same refusal at the storage layer,
+ *   without which the in-memory rule is undone on the way to disk.
+ * - **`events` indexes `pendingBlock`.** `decoded` is deliberately *not* indexed: a boolean is
+ *   not a valid IndexedDB key, so the index would hold nothing and every query against it would
+ *   answer zero (see `pendingDecoderCount`). `pendingBlock` is present only on a raw row, so the
+ *   index is sparse and enumerates exactly the pending set, oldest first — which is what bounds
+ *   it (`evictPendingRawToBound`).
+ */
+export const SCHEMA_V3: Readonly<Record<string, string>> = Object.freeze({
+  meta: 'key',
+  events: 'id, blockNumber, [pallet+name], origin, pendingBlock',
   priceSamples: '[bookId+sourceKey+blockNumber], bookId, blockNumber, at, origin',
   candles1h: '[bookId+sourceKey+openAt], bookId, openAt, toBlock',
   candles4h: '[bookId+sourceKey+openAt], bookId, openAt, toBlock',
@@ -184,7 +294,7 @@ export const SCHEMA_V1: Readonly<Record<string, string>> = Object.freeze({
   snapshotsImported: 'id, providerId',
 });
 
-/** The compound primary keys `SCHEMA_V1` declares, as the table types name them. */
+/** The compound primary keys `SCHEMA_V3` declares, as the table types name them. */
 export type SampleKey = [string, string, number];
 export type CandleKey = [string, string, number];
 
@@ -205,7 +315,20 @@ export class LocalIndex extends Dexie {
   constructor(paraGenesisHash: string) {
     super(databaseName(paraGenesisHash));
     this.paraGenesisHash = paraGenesisHash;
+    // **The migration is three versions and it has to be**, which is the part a single
+    // `version(1)` declaring the new keys hid. IndexedDB fixes a store's key path at creation
+    // and Dexie refuses to change one in place (*"Not yet support for changing primary key"*),
+    // so a browser holding version 1 would not silently keep the old key path — it would fail
+    // to open at all, on the one structure INV-FE-7 says the client must survive losing. The
+    // published recipe is to drop the table in one version and re-declare it in the next.
+    //
+    // Dropping chart rows on upgrade is the honest cost and it is bounded: local storage is
+    // disposable (INV-FE-7), the ladder's own tables are the ones re-keyed, and coverage,
+    // `txHistory`, `events` and the metadata cache all carry through untouched — so what a user
+    // loses is chart depth that re-accumulates, not history that cannot be recovered.
     this.version(1).stores({ ...SCHEMA_V1 });
+    this.version(2).stores(Object.fromEntries(REKEYED_TABLES.map((table) => [table, null])));
+    this.version(3).stores({ ...SCHEMA_V3 });
   }
 }
 
@@ -241,7 +364,12 @@ export async function readCoverageRepair(
   db: LocalIndex,
 ): Promise<{ readonly coverage: CoverageRef; readonly dropped: readonly DroppedRange[] }> {
   const row = await db.meta.get('coverage');
-  return sanitizeCoverage(row === undefined ? undefined : (row as { coverage?: unknown }).coverage);
+  // Against **this database's own chain**, never a majority of what was stored: the store knows
+  // its genesis (it is in the database name), so there is nothing to infer from untrusted rows.
+  return sanitizeCoverage(
+    row === undefined ? undefined : (row as { coverage?: unknown }).coverage,
+    db.paraGenesisHash,
+  );
 }
 
 /**
@@ -257,7 +385,7 @@ export async function writeCoverage(
   db: LocalIndex,
   coverage: CoverageRef,
 ): Promise<readonly DroppedRange[]> {
-  const repaired = sanitizeCoverage(coverage);
+  const repaired = sanitizeCoverage(coverage, db.paraGenesisHash);
   await db.meta.put({ key: 'coverage', coverage: repaired.coverage });
   return repaired.dropped;
 }
@@ -439,6 +567,100 @@ export async function readMetadataBlob(
  */
 export async function pendingDecoderCount(db: LocalIndex): Promise<number> {
   return db.events.filter((event) => event.decoded === false).count();
+}
+
+/** §9.2's downsampled-label sibling: what the pending-raw bound has discarded, or `undefined`. */
+export async function readPendingRawEvicted(
+  db: LocalIndex,
+): Promise<PendingRawEvictionRecord | undefined> {
+  const row = await db.meta.get('pendingRawEvicted');
+  if (row === undefined || row.key !== 'pendingRawEvicted') return undefined;
+  return row.record;
+}
+
+/**
+ * The raw pending-decode blobs, oldest first, and their measured bytes.
+ *
+ * Read through the sparse `pendingBlock` index rather than by scanning `events`, because this
+ * runs inside the quota pass and the whole point of the bound is that the set can be large.
+ *
+ * **Cross-checked against `pendingDecoderCount`, which is a full scan and therefore cannot
+ * miss.** A raw row written without `pendingBlock` is invisible to the index — so the bound
+ * would report a set it cannot reach and the growth §9.1 forbids would continue under a green
+ * eviction. Refusing is the fail-closed disposal: a bound that silently does not cover
+ * everything is worse than no bound, because it is believed.
+ */
+export async function pendingRawRows(
+  db: LocalIndex,
+): Promise<{ readonly rows: readonly StoredEvent[]; readonly bytes: number }> {
+  const rows = await db.events.orderBy('pendingBlock').toArray();
+  const counted = await pendingDecoderCount(db);
+  if (rows.length !== counted) {
+    throw new StoreError(
+      `the sparse pendingBlock index enumerates ${rows.length} raw row(s) while a full scan ` +
+        `finds ${counted}. A raw row without pendingBlock cannot be reached by the 10 §9.1 ` +
+        'bound, so the set would grow unbounded under an eviction reporting success.',
+    );
+  }
+  return { rows, bytes: rows.reduce((sum, row) => sum + (row.raw?.byteLength ?? 0), 0) };
+}
+
+/**
+ * Bound §6.5's raw blob set — oldest first, labelled, in one transaction.
+ *
+ * §9.1 rules that the index retains only events attributing to watched accounts, and *"a
+ * chain-wide trade tape is a bounded windowed read, never a retained table"*. One `${block}:raw`
+ * row is a whole block's `System.Events` value regardless of the watched set, and it is the
+ * **expected** state of any backfill across a runtime upgrade — so without a bound the one path
+ * §6.5 mandates is the one path §9.1 forbids, at whatever rate the upgrade history dictates.
+ * `compactSettledEvents` cannot reach these rows (they belong to no settled proposal) and
+ * §9.2's ladder has no rung for them, so the bound is here.
+ *
+ * The budget is the caller's remaining **events share** — §9.2's own 15 %, not a new number.
+ * Oldest first, because the oldest era is the one whose metadata is least likely ever to arrive
+ * (FE-P5), and because it is the only order under which the disposal is deterministic.
+ *
+ * Returns the blocks discarded. The label is written in the same transaction as the deletes:
+ * written afterwards it is absent for as long as it takes a tab to close mid-eviction, which is
+ * the silent splice §9.2 forbids in the chart tier for exactly the same reason.
+ */
+export async function evictPendingRawToBound(
+  db: LocalIndex,
+  maxBytes: number,
+  at: number,
+): Promise<readonly number[]> {
+  if (!Number.isFinite(maxBytes) || maxBytes < 0) {
+    throw new StoreError(`${maxBytes} is not a byte budget for the pending-decode set`);
+  }
+  const { rows, bytes } = await pendingRawRows(db);
+  if (bytes <= maxBytes) return [];
+  let remaining = bytes;
+  const doomed: StoredEvent[] = [];
+  for (const row of rows) {
+    if (remaining <= maxBytes) break;
+    doomed.push(row);
+    remaining -= row.raw?.byteLength ?? 0;
+  }
+  if (doomed.length === 0) return [];
+  const freed = doomed.reduce((sum, row) => sum + (row.raw?.byteLength ?? 0), 0);
+  const previous = await readPendingRawEvicted(db);
+  const blocks = doomed.map((row) => row.blockNumber);
+  const record: PendingRawEvictionRecord = {
+    blocks: (previous?.blocks ?? 0) + doomed.length,
+    bytes: (previous?.bytes ?? 0) + freed,
+    oldestBlock: Math.min(previous?.oldestBlock ?? blocks[0]!, ...blocks),
+    newestBlock: Math.max(previous?.newestBlock ?? blocks[0]!, ...blocks),
+    at,
+    reason:
+      'the raw events of these blocks could not be decoded (their era metadata was unavailable) ' +
+      'and were discarded to stay inside the storage budget. This is not a gap in coverage — the ' +
+      'blocks were seen — but their events can no longer be recovered locally.',
+  };
+  await db.transaction('rw', db.events, db.meta, async () => {
+    await db.events.bulkDelete(doomed.map((row) => row.id));
+    await db.meta.put({ key: 'pendingRawEvicted', record });
+  });
+  return blocks;
 }
 
 /**

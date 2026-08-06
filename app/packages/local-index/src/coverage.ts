@@ -600,8 +600,24 @@ export interface CoverageRepair {
  * 3. **Anything that is not a coverage value at all yields empty coverage**, never
  *    `undefined`. A renderer that receives `undefined` treats it as full coverage, which is
  *    the one reading this module exists to make impossible.
+ *
+ * `expectedGenesis` is **required and is an identity, not a vote.** An earlier version kept
+ * whichever genesis had the most ranges, which is a majority rule over untrusted input: a
+ * corrupted or imported record carrying more foreign ranges than honest ones wins, and
+ * `readCoverage` then returns another chain's ranges — `origin: 'self'` among them, since the
+ * brand is compile-time only and a rehydrated record carries whatever it was written with. That
+ * is the cross-chain contamination §7's per-chain database name exists to prevent, arriving
+ * through the door §6.3 opens for imports and structured clones. The database being read knows
+ * its own chain (`LocalIndex.paraGenesisHash`), so there is nothing to infer.
  */
-export function sanitizeCoverage(value: unknown): CoverageRepair {
+export function sanitizeCoverage(value: unknown, expectedGenesis: string): CoverageRepair {
+  if (typeof expectedGenesis !== 'string' || !HASH_32.test(expectedGenesis)) {
+    throw new CoverageError(
+      `${String(expectedGenesis)} is not a genesis hash. Repair compares every range against the ` +
+        'chain this index describes, and a repair with no chain to compare against would have to ' +
+        'guess one from the data it is repairing.',
+    );
+  }
   const dropped: DroppedRange[] = [];
   if (value === null || typeof value !== 'object' || !Array.isArray((value as CoverageRef).ranges)) {
     if (value !== undefined) {
@@ -623,26 +639,22 @@ export function sanitizeCoverage(value: unknown): CoverageRepair {
     }
   }
 
-  // A set spanning two chains is not repairable by merging: neither chain's ranges are the
-  // corrupt ones, and picking a winner would keep rows from a chain the user is not on. The
-  // majority genesis is kept and the rest dropped, which is the same per-range disposal the
-  // section mandates rather than a whole-index rebuild.
-  const byGenesis = new Map<string, CoverageRange[]>();
+  // A set spanning two chains is not repairable by merging: neither chain's ranges are corrupt
+  // in themselves, and keeping the wrong chain's would put another network's blocks behind this
+  // one's ids. Every range is checked against the opened database's own genesis — per range, so
+  // the disposal is §6.3's rather than a whole-index rebuild.
+  const kept: CoverageRange[] = [];
   for (const range of wellFormed) {
-    const bucket = byGenesis.get(range.edge.genesisHash) ?? [];
-    byGenesis.set(range.edge.genesisHash, bucket);
-    bucket.push(range);
-  }
-  let kept: readonly CoverageRange[] = [];
-  for (const [, bucket] of byGenesis) if (bucket.length > kept.length) kept = bucket;
-  for (const range of wellFormed) {
-    if (!kept.includes(range)) {
-      dropped.push({
-        value: range,
-        reason: `range ${range.fromBlock}..${range.toBlock} names genesis ${range.edge.genesisHash}, ` +
-          'which is not this index’s chain',
-      });
+    if (range.edge.genesisHash === expectedGenesis) {
+      kept.push(range);
+      continue;
     }
+    dropped.push({
+      value: range,
+      reason:
+        `range ${range.fromBlock}..${range.toBlock} names genesis ${range.edge.genesisHash}, ` +
+        `which is not this index’s chain (${expectedGenesis})`,
+    });
   }
 
   let coverage = EMPTY_COVERAGE;
@@ -808,6 +820,22 @@ export function covered<T>(coverage: CoverageRef, span: Hole, data: T): CoveredR
  * cannot carry the fact. *"3 sources"* reads as an abundance; `self + indexer` reads as *part
  * of this line is third-party data*, which is what 10 §2.3's mandatory labelling is for.
  */
+/**
+ * This module's `CoverageRange` seen as the shape `@bleavit/shared-types` publishes.
+ *
+ * The two are **not** the same type and that is a real seam: 10 §6.3 declares a range with
+ * `ingestedAt` and a `RangeEdge`, and `shared-types` carries only the span and the provenance,
+ * because the render layer may not import this package (10 §10.1) and a badge needs nothing
+ * else. Nothing checked that the narrower shape stays a *narrowing* of the wider one, so a
+ * field renamed on one side would be found by whichever consumer read it next — which for
+ * `origin` means a badge silently unable to say who supplied a line. Whether §6.3 should
+ * publish one shape is SQ-765; this function is the compile-time half in the meantime, and it
+ * is an ordinary assignment rather than a cast, so it fails the build rather than a test.
+ */
+export function asSharedCoverageRange(range: CoverageRange): CoverageShape {
+  return range;
+}
+
 export function boundarySet(ranges: readonly CoverageRange[]): readonly string[] {
   // Delegated to `shared-types` rather than reimplemented. `packages/ui` cannot import this
   // package (10 §10.1), so the badge must be able to compute the set from a `VerificationStatus`
