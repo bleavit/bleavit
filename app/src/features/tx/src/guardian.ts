@@ -231,6 +231,259 @@ export function allowanceRemaining(meter: AllowanceMeter): Combined<number> {
   return combine2(meter.limit, meter.used, (limit, used) => Math.max(0, limit - used));
 }
 
+/* ------------------------------------------------ §11.8.2's ratification tracker */
+
+/**
+ * The four frozen guardian events that move an executed action through its review.
+ *
+ * §11.8.2's fourth element — *"every executed action's auto-scheduled `ratify`-track
+ * retrospective review, with the 50%-bond-slash + recall consequence of an unratified
+ * action stated"* — was the one element of the console with no model at all. The
+ * consequence copy existed (`UNRATIFIED_CONSEQUENCE`); nothing tracked whether a given
+ * action's review had been scheduled, had passed, or had failed.
+ *
+ * These are 02 §6's names and shapes, verified against the pallet's own declarations:
+ * `ReviewScheduled { action, referendum }`, `ActionRatified { action }`,
+ * `ReviewFailed { action, slashed_each }`, `RecallScheduled { action, referendum }`.
+ *
+ * **`RecallEnacted` is deliberately not one of them.** It carries the removed seats and is
+ * a fact about *membership*, not about this action's ratification state — an action whose
+ * recall has enacted is still, and permanently, an action whose review failed. Folding it
+ * in would make the tracker say something different about the same review depending on
+ * whether an unrelated referendum had concluded.
+ */
+export type RatificationEventVariant =
+  | 'ReviewScheduled'
+  | 'ActionRatified'
+  | 'ReviewFailed'
+  | 'RecallScheduled';
+
+export interface RatificationEvent {
+  readonly variant: RatificationEventVariant;
+  readonly actionId: string;
+  /** Present on `ReviewScheduled` and `RecallScheduled`; absent on the terminal two. */
+  readonly referendum?: number | undefined;
+  /** Present on `ReviewFailed` — what each approver lost. */
+  readonly slashedEach?: bigint | undefined;
+}
+
+/**
+ * What `Referenda.ReferendumInfoFor` says about the review referendum.
+ *
+ * The events cannot answer this: between `ReviewScheduled` and whichever terminal event
+ * follows, the only source for *where the review has got to* is the referendum itself. The
+ * `unread` arm is the same fail-closed device `TriggerState` uses — a review this client
+ * could not read is not one it will describe as going well.
+ */
+export type ReviewReferendum =
+  | { readonly kind: 'ongoing'; readonly ayes: Verified<bigint>; readonly nays: Verified<bigint> }
+  | { readonly kind: 'concluded' }
+  | { readonly kind: 'unread'; readonly reason: string };
+
+/**
+ * Where an executed action stands in its retrospective review.
+ *
+ * The arm that matters is **`unobserved`**, and getting it wrong is the defect a naive
+ * implementation ships. §11.8.2 says the review is *auto-scheduled* — every executed action
+ * has one — so an action with no `ReviewScheduled` in the ingested window does **not** mean
+ * "no review is required". It means this client has not seen it. Rendering that as *"not
+ * subject to ratification"* would tell a guardian their exposure has ended when it has not,
+ * about their own bond, which is precisely the direction §11.8.2 requires stated.
+ */
+export type ActionRatification =
+  | {
+      /** No `ReviewScheduled` in the ingested history. A coverage gap, never a verdict. */
+      readonly kind: 'unobserved';
+    }
+  | {
+      readonly kind: 'pending';
+      readonly referendum: number;
+      readonly review: ReviewReferendum;
+    }
+  | { readonly kind: 'ratified' }
+  | {
+      readonly kind: 'failed';
+      readonly slashedEach: bigint | undefined;
+      /** The recall referendum, once one has been scheduled. */
+      readonly recall: number | undefined;
+    }
+  | {
+      /**
+       * Two terminal events for one action — chain-impossible, so the stream is mis-keyed.
+       *
+       * Refused rather than resolved by precedence. Picking one would report a definite
+       * outcome derived from an ingest this client has just shown itself unable to trust,
+       * and the wrong half of that coin tells a guardian their bond is safe.
+       */
+      readonly kind: 'contradictory';
+      readonly reason: string;
+    };
+
+/**
+ * Fold the four events for one action, with the referendum read filling the interim.
+ *
+ * Events are filtered by `actionId` here rather than by the caller, because an action id is
+ * the only thing that binds these events together and a caller that filtered loosely would
+ * fold another action's `ReviewFailed` into this one's verdict.
+ */
+export function ratificationFor(
+  actionId: string,
+  events: readonly RatificationEvent[],
+  review: ReviewReferendum,
+): ActionRatification {
+  const mine = events.filter((event) => event.actionId === actionId);
+  const ratified = mine.some((event) => event.variant === 'ActionRatified');
+  const failed = mine.find((event) => event.variant === 'ReviewFailed');
+  if (ratified && failed !== undefined) {
+    return {
+      kind: 'contradictory',
+      reason:
+        `Action ${actionId} carries both ActionRatified and ReviewFailed. A review has one ` +
+        'outcome, so these cannot both be about this action — the event stream is keyed ' +
+        'wrongly, and no verdict is reported from it.',
+    };
+  }
+  if (ratified) return { kind: 'ratified' };
+  if (failed !== undefined) {
+    const recall = mine.find((event) => event.variant === 'RecallScheduled');
+    return {
+      kind: 'failed',
+      slashedEach: failed.slashedEach,
+      recall: recall?.referendum,
+    };
+  }
+  const scheduled = mine.find((event) => event.variant === 'ReviewScheduled');
+  if (scheduled === undefined || scheduled.referendum === undefined) {
+    return { kind: 'unobserved' };
+  }
+  return { kind: 'pending', referendum: scheduled.referendum, review };
+}
+
+/** What a guardian is told about this action's review. Fixed copy, one sentence per arm. */
+export function ratificationCopy(state: ActionRatification): string {
+  switch (state.kind) {
+    case 'unobserved':
+      return (
+        'No ratification referendum for this action appears in the history this client has ' +
+        'ingested. Every executed guardian action has one scheduled automatically, so this ' +
+        'is a gap in what this device has seen — not a statement that none exists, and not ' +
+        'an indication that your exposure has ended.'
+      );
+    case 'pending':
+      return (
+        'The retrospective review is live. Until it passes, the consequence of it failing ' +
+        'stands: half your bond and your seat.'
+      );
+    case 'ratified':
+      return 'The retrospective review passed. This action is ratified and no recall follows.';
+    case 'failed':
+      return (
+        'The retrospective review did not pass. Half the bond of every approver has been ' +
+        'slashed, and a recall referendum follows on the guardian track.'
+      );
+    case 'contradictory':
+      return state.reason;
+  }
+}
+
+/* -------------------------------------------- §11.8.2's power-specific argument forms */
+
+/**
+ * The arguments each power carries — one call, five argument sets.
+ *
+ * §11.8.2 asks for *"power-specific forms for `pause_intake`, `delay_once`, `force_rerun`,
+ * `activate_playbook`, `suspend_on_gate`"*, and the console rendered one generic form for
+ * all five. That reads as five equivalent buttons when the powers take entirely different
+ * arguments — `suspend_on_gate` takes none at all, while `activate_playbook` takes four.
+ *
+ * **This is one dispatchable, not five** (SQ-609, resolved by reading the runtime rather
+ * than the sentence): `guardian.propose_action(power, justification_hash)` takes a
+ * `GuardianPower` **enum** whose variants carry the fields below. Five call shapes would be
+ * five extrinsics with five indices; the pallet has one. So a "form" here selects a variant
+ * and fills that variant's fields, which is what this union makes structural — a caller
+ * cannot supply `pid` for `pause_intake`, because that arm has no such field.
+ *
+ * Field names and types are the runtime's own (`guardian_core::GuardianPower`), not names
+ * chosen here: `PauseIntake { until }`, `DelayOnce { pid }`, `ForceRerun { pid }`,
+ * `ActivatePlaybook { id, trigger, expiry, target }`, `SuspendOnGate`.
+ */
+export type PlaybookTrigger =
+  | 'DepegMedian'
+  | 'MigrationHalt'
+  | 'OracleDeadlock'
+  | 'GateBreach'
+  | 'DeadMan'
+  | 'VoidInFlight'
+  | 'ReserveHealth'
+  | 'LedgerDrift';
+
+export type PowerArguments =
+  | { readonly power: 'pause_intake'; readonly until: number }
+  | { readonly power: 'delay_once'; readonly pid: string }
+  | { readonly power: 'force_rerun'; readonly pid: string }
+  | {
+      readonly power: 'activate_playbook';
+      readonly id: string;
+      readonly trigger: PlaybookTrigger;
+      readonly expiry: number;
+      /**
+       * PB-ORACLE-VOID's cohort target. **Every other playbook rejects `Some`**, which is
+       * the runtime's rule and not a convention — so it is optional here and a form that
+       * offers it for another playbook builds a call the chain refuses.
+       */
+      readonly target?: number | undefined;
+    }
+  | { readonly power: 'suspend_on_gate' };
+
+/** The field labels a form renders per power. Closed, so a sixth power cannot be invented. */
+export const POWER_FIELDS: Readonly<Record<GuardianPower, readonly string[]>> = Object.freeze({
+  pause_intake: Object.freeze(['until (block)']),
+  delay_once: Object.freeze(['proposal id']),
+  force_rerun: Object.freeze(['proposal id']),
+  activate_playbook: Object.freeze(['playbook id', 'trigger', 'expiry (block)', 'cohort target (PB-ORACLE-VOID only)']),
+  // Deliberately empty, and rendered as "this power takes no arguments" rather than as an
+  // empty form: a form with no fields looks like one that failed to load.
+  suspend_on_gate: Object.freeze([]),
+});
+
+/** A proposal is `propose_action(power, justification_hash)` — the hash is never optional. */
+export interface ProposeInputs {
+  readonly args: PowerArguments;
+  /**
+   * `propose_action`'s second argument. Absent is a refusal, not a default: §11.8.2's
+   * pending list renders this hash and resolves the document behind it, so an action
+   * proposed without one is one no guardian can review the justification of.
+   */
+  readonly justificationHash: string | undefined;
+}
+
+/** Blocks that come from the form itself rather than from chain state. */
+export function proposeFormBlocks(inputs: ProposeInputs): readonly GuardianBlock[] {
+  const blocks: GuardianBlock[] = [];
+  if (inputs.justificationHash === undefined || inputs.justificationHash.length === 0) {
+    blocks.push({
+      check: 'Justification',
+      detail:
+        'A guardian action needs a justification hash. The pending-actions list resolves the ' +
+        'document behind it, so proposing without one asks six other guardians to approve ' +
+        'something with no stated reason.',
+    });
+  }
+  if (
+    inputs.args.power === 'activate_playbook' &&
+    inputs.args.target !== undefined &&
+    inputs.args.trigger !== 'VoidInFlight'
+  ) {
+    blocks.push({
+      check: 'Cohort target',
+      detail:
+        'Only the VOID playbook takes a cohort target. Every other playbook rejects one on ' +
+        'chain, so this call would be refused after signing.',
+    });
+  }
+  return blocks;
+}
+
 export function proposalBlocks(
   meter: AllowanceMeter,
   trigger: TriggerState | undefined,

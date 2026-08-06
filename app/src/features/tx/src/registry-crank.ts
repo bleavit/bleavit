@@ -28,13 +28,36 @@
 
 import { combine, type Combined, type Verified } from '@bleavit/shared-types';
 
-/** Whether `welfare.snapshot(epoch)` would do anything. */
+/**
+ * Whether `welfare.record_snapshot(epoch, spec_version)` would do anything.
+ *
+ * ## The record is keyed by **two** things, and the model carried one
+ *
+ * `Welfare.Snapshots` is keyed `(epoch, spec_version)` — 02 §13 froze it that way at v16 —
+ * and the runtime's call is `record_snapshot(epoch, spec_version)`, which is also 05 §4.6's
+ * name. This model took a bare `alreadyTaken: boolean`, so *"a snapshot exists for this
+ * epoch"* stood in for *"a snapshot exists for this epoch at this MetricSpec version"*.
+ *
+ * Those differ whenever a second version is admissible, which is not an edge case: it is
+ * exactly what happens across a MetricSpec amendment. A lawful record at the **active**
+ * version — the one that advances `SnapshotDeadline` — was refused by this client because
+ * some *other* version already had one for the epoch. A client refusing what the chain
+ * accepts, on the crank whose overdue state engages the dead-man rule.
+ *
+ * So the version is carried, both in the state and in the copy: *already taken* has to say
+ * *at which version*, or the operator cannot tell a genuine no-op from this defect.
+ */
 export type SnapshotCrankState =
-  | { readonly kind: 'ready'; readonly epoch: Verified<number> }
+  | {
+      readonly kind: 'ready';
+      readonly epoch: Verified<number>;
+      readonly specVersion: Verified<number>;
+    }
   | {
       /** The staleness precondition does not hold: signing would cost a fee and do nothing. */
       readonly kind: 'no-op';
       readonly epoch: Verified<number>;
+      readonly specVersion: Verified<number>;
       readonly reason: 'boundary-not-passed' | 'already-taken';
     };
 
@@ -44,18 +67,27 @@ const NO_OP_COPY: Readonly<Record<'boundary-not-passed' | 'already-taken', strin
       'The epoch boundary has not passed yet, so this snapshot cannot be taken. Signing now ' +
       'would pay a fee and change nothing.',
     'already-taken':
-      'This epoch’s snapshot has already been taken. Signing again would pay a fee and ' +
-      'change nothing.',
+      'A snapshot already exists for this epoch at this MetricSpec version. Signing again ' +
+      'would pay a fee and change nothing. A different admissible version would still need ' +
+      'its own record — this refusal is about the pair, not about the epoch.',
   });
 
+/**
+ * Whether a record exists for **this** `(epoch, spec_version)` pair.
+ *
+ * A required argument rather than a lookup, because the map read belongs to the reader
+ * layer. What matters here is that the caller cannot pass an epoch-only answer: the
+ * signature demands the version, so the narrower question has nowhere to hide.
+ */
 export function snapshotCrankState(
   epoch: Verified<number>,
+  specVersion: Verified<number>,
   boundaryPassed: boolean,
-  alreadyTaken: boolean,
+  takenAtThisVersion: boolean,
 ): SnapshotCrankState {
-  if (!boundaryPassed) return { kind: 'no-op', epoch, reason: 'boundary-not-passed' };
-  if (alreadyTaken) return { kind: 'no-op', epoch, reason: 'already-taken' };
-  return { kind: 'ready', epoch };
+  if (!boundaryPassed) return { kind: 'no-op', epoch, specVersion, reason: 'boundary-not-passed' };
+  if (takenAtThisVersion) return { kind: 'no-op', epoch, specVersion, reason: 'already-taken' };
+  return { kind: 'ready', epoch, specVersion };
 }
 
 /** What a user is told before signing a crank that would do nothing. */

@@ -106,30 +106,52 @@ export {
   type FundingKeyInputs,
 } from './funding-composition.js';
 export {
+  EmptyArtifactError,
   UpgradeHashMismatchError,
+  feeHeadroomBlock,
   isApplicable,
+  leadTimeCountdown,
+  progressLine,
   submissionOutlook,
+  upgradeFeeHeadroom,
   verifyArtifact,
+  type ArtifactSource,
   type AuthorizedUpgrade,
+  type FeeHeadroom,
+  type FetchProgress,
+  type StreamingHasher,
+  type UpgradeFeeInputs,
   type UpgradeSubmission,
   type VerifiedArtifact,
 } from './upgrade-crank.js';
 export {
+  POWER_FIELDS,
   UNRATIFIED_CONSEQUENCE,
   allowanceRemaining,
   approvalBlocks,
   mayActivatePlaybook,
   proposalBlocks,
+  proposeFormBlocks,
+  ratificationCopy,
+  ratificationFor,
   triggerRefusal,
+  type ActionRatification,
   type AllowanceMeter,
   type ApprovalContext,
   type GuardianBlock,
   type GuardianPower,
   type PendingAction,
+  type PlaybookTrigger,
+  type PowerArguments,
+  type ProposeInputs,
+  type RatificationEvent,
+  type RatificationEventVariant,
+  type ReviewReferendum,
   type TriggerState,
   type ApprovedCall,
 } from './guardian.js';
 export {
+  INSURANCE_TARGET_UNREADABLE,
   claimBlocks,
   claimableNow,
   insuranceCopy,
@@ -138,6 +160,7 @@ export {
   type ClaimableReason,
   type ClaimContext,
   type InsuranceStanding,
+  type InsuranceTarget,
   type Stream,
   type TreasuryBlock,
 } from './treasury.js';
@@ -154,6 +177,7 @@ export {
   type SnapshotStaleness,
 } from './registry-crank.js';
 export {
+  STAKE_HOLD_CONSEQUENCE,
   UNCHECKABLE_REGISTRATION_CONDITIONS,
   checkRegistration,
   registrationCaveat,
@@ -169,7 +193,21 @@ export {
   type RecomputeSubmission,
   type RecomputedProof,
 } from './reporter.js';
-export { ApproveAction, PendingActions, ProposeAction } from './guardian-console.js';
+export {
+  ApproveAction,
+  PendingActions,
+  ProposeAction,
+  RatificationTracker,
+} from './guardian-console.js';
+export {
+  operatorDisabledReason,
+  operatorGate,
+  operatorSubmit,
+  type OperatorBlock,
+  type OperatorGate,
+  type OperatorGateState,
+} from './operator-gate.js';
+export { GateControl } from './gate-control.js';
 export {
   ChallengeRound,
   ClaimStream,
@@ -180,6 +218,7 @@ export {
   RecomputeProof,
   RegisterReporter,
   RegistryFiling,
+  RegistryFilingForm,
   SnapshotCrank,
   SubmitReport,
   TreasuryStreams,
@@ -213,8 +252,10 @@ export { NavPanel } from './operator-consoles.js';
 export {
   RegistryInstanceCollisionError,
   admitRegistryWindowEvent,
+  challengeFilingBlocks,
   filingBlocks,
   type Admission,
+  type ChallengeFilingInputs,
   type FilingBlock,
   type FilingInputs,
   type FilingKind,
@@ -224,8 +265,11 @@ export {
   type RegistryWindowVariant,
 } from './registry-filing.js';
 export {
+  P13_CHECK_KEYS,
   REPORT_BOND_NOT_ESTABLISHED,
+  UnimplementedClauseError,
   challengeBlocks,
+  p13Predicate,
   escalationConsequence,
   reportBlocks,
   reportBondFloor,

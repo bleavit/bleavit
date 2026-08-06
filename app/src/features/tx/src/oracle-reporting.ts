@@ -44,6 +44,21 @@
  * escrow. There is deliberately no `exact` arm: an arm no code path can construct is
  * `FE-HANDOFF-010`'s shape, and its presence would suggest a capability that does not exist.
  *
+ * ## That conclusion is now the table's, not this module's
+ *
+ * Until this review the two disagreed **in one shipped client**. `rows.ts`'s P-13 declared
+ * the bond recomputed from a cohort escrow and a headroom clause against the recomputed
+ * amount; this module declared the same bond structurally uncomputable and blocked only on
+ * `orc.bond_floor`. Nothing bound them, so a bonded and slashable action carried two
+ * different answers to *"what will this hold?"*. Worse, the table's escrow clause cited
+ * `storage.epoch.cohorts` — `CohortInfo { epoch, proposals, status }` holds no escrow, so
+ * the clause read a map that cannot answer it.
+ *
+ * The repair is one direction of dependency rather than a corrected copy: P-13's clause list
+ * is `reportBlocks`' **work list**. Every clause must have a predicate here and a clause with
+ * none throws, so a clause added to the table cannot be silently unimplemented — the failure
+ * mode where a check is absent and the screen still reports that everything passes.
+ *
  * ## A reporter may not challenge their own round
  *
  * 07 §5.2 grants `challenge` to *"anyone **other than the round's own reporter**"* — §5.5
@@ -55,6 +70,12 @@
 
 import type { Verified } from '@bleavit/shared-types';
 import { accountKey } from '@bleavit/chain-client';
+import {
+  clauseGroupsFor,
+  unreadableObligationsFor,
+  type FeeAsset,
+  type PreconditionClause,
+} from '@bleavit/transaction-builder';
 
 /**
  * 02 §4's `OracleRoundView`, as the client holds it.
@@ -104,6 +125,14 @@ export function reportBondFloor(floor: Verified<bigint>): ReportBondFloor {
 
 export interface ReportInputs {
   /**
+   * Whether the round itself is still open — **read**, never derived from the epoch clock.
+   *
+   * Distinct from `reportWindowOpen` because the two come apart on a live round: a round
+   * can be open with its report window elapsed, which refuses the report, and a single
+   * collapsed flag cannot say which half failed. §11.5 writes them as two clauses.
+   */
+  readonly roundOpen: Verified<boolean>;
+  /**
    * Whether the 07 §5.1 report window is still open, **read** rather than derived from the
    * epoch clock. No deadline arithmetic lives in this module.
    */
@@ -115,6 +144,11 @@ export interface ReportInputs {
   readonly reporterStake: Verified<bigint>;
   readonly freeUsdc: Verified<bigint>;
   readonly bondFloor: ReportBondFloor;
+  /**
+   * The fee asset the user selected. **No default** — `rowsFor` refuses one, because a
+   * default is a decision about somebody else's balance made silently.
+   */
+  readonly feeAsset: FeeAsset;
   /** The evidence hash the reporter supplies. Absent is a refusal, not a default. */
   readonly evidenceHash: string | undefined;
 }
@@ -136,49 +170,138 @@ export interface ReportCheck {
   readonly bondUnknown: string;
 }
 
-export function reportBlocks(inputs: ReportInputs): ReportCheck {
-  const blocks: ReportBlock[] = [];
-  if (!inputs.reportWindowOpen.value) {
-    blocks.push({
-      check: 'Report window',
-      detail:
-        'The reporting window for this measurement epoch has closed. A report now is refused ' +
-        'on chain, and the component settles neutral for this epoch.',
-    });
+/** A clause of P-13 with no predicate here — a table entry nobody implemented. */
+export class UnimplementedClauseError extends Error {
+  constructor(clause: PreconditionClause) {
+    super(
+      `P-13 declares "${clause.requirement}" (key ${String(clause.key)}) and this module has ` +
+        'no predicate for it. Refusing to evaluate the row: a clause silently skipped is a ' +
+        'check that reports "everything passes" while never having run.',
+    );
+    this.name = 'UnimplementedClauseError';
   }
-  if (!inputs.registered.value) {
-    blocks.push({
-      check: 'Reporter registry',
-      detail: 'This account is not a registered reporter, so it cannot report.',
-    });
-  } else if (inputs.stakeHeld.value < inputs.reporterStake.value) {
+}
+
+/**
+ * One predicate per P-13 clause key, and the copy shown when it fails.
+ *
+ * Keyed on the table's own `key` field rather than on requirement prose: the prose is the
+ * user's sentence and is meant to be editable, while the key is the binding.
+ */
+interface P13Check {
+  readonly check: string;
+  readonly holds: (inputs: ReportInputs) => boolean;
+  readonly detail: string;
+}
+
+const P13_CHECKS: Readonly<Record<string, P13Check>> = Object.freeze({
+  'round-open': {
+    check: 'Round open',
+    holds: (inputs) => inputs.roundOpen.value,
+    detail:
+      'This round is no longer open, so nothing can be reported into it. A counter-report ' +
+      'needs a live round; this one has been closed or settled.',
+  },
+  'report-window': {
+    check: 'Report window',
+    holds: (inputs) => inputs.reportWindowOpen.value,
+    detail:
+      'The reporting window for this measurement epoch has closed. A report now is refused ' +
+      'on chain, and the component settles neutral for this epoch. The round itself may ' +
+      'still be open — that is a different condition, checked separately.',
+  },
+  registered: {
+    check: 'Reporter registry',
+    holds: (inputs) => inputs.registered.value,
+    detail: 'This account is not a registered reporter, so it cannot report.',
+  },
+  'stake-held': {
     // Registered but under-staked — a distinct state from unregistered, and a distinct
     // remedy. A prior slash leaves the registration standing and the hold short.
-    blocks.push({
-      check: 'Reporter stake',
-      detail:
-        'Your reporter stake is no longer held in full — a previous slash left it short. ' +
-        'Reporting requires the whole stake held, so it must be topped up first.',
-    });
+    check: 'Reporter stake',
+    holds: (inputs) => !inputs.registered.value || inputs.stakeHeld.value >= inputs.reporterStake.value,
+    detail:
+      'Your reporter stake is no longer held in full — a previous slash left it short. ' +
+      'Reporting requires the whole stake held, so it must be topped up first.',
+  },
+  'bond-floor': {
+    // The floor is a `params()` read. Unreadable means no figure at all, never a default:
+    // a zero floor would let the headroom clause below pass for an empty account.
+    check: 'Round-bond floor',
+    holds: (inputs) => inputs.bondFloor.floor.value >= 0n,
+    detail:
+      'The round-bond floor could not be read from chain parameters, so this client cannot ' +
+      'state even the least the bond can be.',
+  },
+  'bond-headroom': {
+    check: 'Round bond',
+    holds: (inputs) => inputs.freeUsdc.value >= inputs.bondFloor.floor.value,
+    detail: 'Your free USDC does not cover even the floor of the round bond.',
+  },
+  evidence: {
+    check: 'Evidence',
+    holds: (inputs) => inputs.evidenceHash !== undefined && inputs.evidenceHash.length > 0,
+    detail:
+      'A report needs an evidence hash — content-addressed raw data and the recomputation ' +
+      'instructions the frozen MetricSpec requires. Evidence nobody can fetch is treated as ' +
+      'absent, which loses the round on its own.',
+  },
+});
+
+/**
+ * Evaluate P-13 **from its own clause list**.
+ *
+ * The list is the work list. A group is satisfied when any member holds (`anyOf`), which is
+ * `clauseGroupsFor`'s contract; a clause with no predicate throws rather than being skipped.
+ *
+ * `bondUnknown` remains a **required** field for the reason `RegistrationCheck.uncheckable`
+ * is: there is no shape of this result in which the unreadable part is absent, so no screen
+ * can present the check as complete. Its text is now taken from the table's own SQ-598
+ * obligation, so the module and the row cannot drift again.
+ */
+/**
+ * The predicate for one P-13 clause, or the refusal.
+ *
+ * Exported so the binding is testable in **both** directions with a synthetic clause: a
+ * clause with no predicate must throw, and a predicate with no clause is dead code. A guard
+ * proven only by the table currently agreeing with the map is a guard nothing exercises,
+ * which is the shape of every check this client has found to be silently absent.
+ */
+export function p13Predicate(clause: PreconditionClause): P13Check {
+  const key = clause.key;
+  const found = key === undefined ? undefined : P13_CHECKS[key];
+  if (found === undefined) throw new UnimplementedClauseError(clause);
+  return found;
+}
+
+/** Every clause key this module implements — the other half of the binding. */
+export const P13_CHECK_KEYS: readonly string[] = Object.freeze(Object.keys(P13_CHECKS));
+
+export function reportBlocks(inputs: ReportInputs): ReportCheck {
+  const blocks: ReportBlock[] = [];
+  for (const group of clauseGroupsFor('P-13', inputs.feeAsset)) {
+    const checks = group.map(p13Predicate);
+    if (checks.some((entry) => entry.holds(inputs))) continue;
+    // One block per failing group, named for its first member — a disjunctive group has one
+    // obligation and one reason, not one per alternative.
+    const first = checks[0];
+    if (first !== undefined) blocks.push({ check: first.check, detail: first.detail });
   }
-  if (inputs.freeUsdc.value < inputs.bondFloor.floor.value) {
-    blocks.push({
-      check: 'Round bond',
-      detail:
-        'Your free USDC does not cover even the floor of the round bond, so this report ' +
-        `cannot be posted. ${inputs.bondFloor.why}`,
-    });
+  // The caveat is the module's own user-facing sentence, **bound** to the table rather than
+  // duplicating it: P-13 must declare the gap, and if it stops declaring one this throws
+  // rather than quietly presenting a floor as a complete answer. Concatenating the table's
+  // developer-facing reason onto the user's sentence said the same thing twice; citing the
+  // id keeps the binding and gives the caveat its own expiry pointer.
+  const obligations = unreadableObligationsFor('P-13');
+  if (obligations.length === 0) {
+    throw new Error(
+      'P-13 declares no unreadable obligation, so this module’s bond caveat has nothing ' +
+        'behind it. Either the bond became computable — in which case this caveat must go — ' +
+        'or the declaration was dropped and the screen would present a floor as the amount.',
+    );
   }
-  if (inputs.evidenceHash === undefined || inputs.evidenceHash.length === 0) {
-    blocks.push({
-      check: 'Evidence',
-      detail:
-        'A report needs an evidence hash — content-addressed raw data and the recomputation ' +
-        'instructions the frozen MetricSpec requires. Evidence nobody can fetch is treated as ' +
-        'absent, which loses the round on its own.',
-    });
-  }
-  return { blocks, bondUnknown: inputs.bondFloor.why };
+  const cited = obligations.map((entry) => entry.specQuestion).join(', ');
+  return { blocks, bondUnknown: `${inputs.bondFloor.why} (${cited})` };
 }
 
 /**
