@@ -510,6 +510,9 @@ importers:
       '@bleavit/mock-runtime':
         specifier: workspace:*
         version: link:../../packages/mock-runtime
+      '@bleavit/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
       '@bleavit/shared-types':
         specifier: workspace:*
         version: link:../../packages/shared-types

@@ -24,6 +24,7 @@ import {
   DEGRADATION_ROWS,
   Outlet,
   PENDING_SCREENS,
+  pendingCopy,
   PHASE_FLAG_BITS,
   SHELL_READS,
   assertOnePin,
@@ -3265,12 +3266,48 @@ test('a pending declaration expires the moment its component exists — in both 
 test('the pending copy distinguishes the two reasons in words a user reads', () => {
   // The structured entry is for the checker; this is what reaches the screen. "Not built"
   // and "built, waiting on a transport" are different promises and must read differently.
-  const unbuilt = renderToStaticMarkup(
-    h(Outlet, { hash: '#/positions', handoffEnabled: true, implemented: {} }),
+  //
+  // The examples are **derived** from `PENDING_SCREENS` rather than named by hash. The first
+  // version pinned `#/positions` as its not-built case and broke the day S4 was built —
+  // which is the right kind of failure in the wrong file, since the fixture was an accident
+  // of which milestone had landed rather than anything about the copy.
+  const hashFor = (id: string): string => {
+    const screen = SCREENS.find((candidate) => candidate.id === id);
+    assert.ok(screen !== undefined, `${id} is pending but not in the inventory`);
+    return screen.path;
+  };
+  const pick = (state: string): string | undefined =>
+    Object.entries(PENDING_SCREENS).find(([, pending]) => pending.state === state)?.[0];
+
+  // `pendingCopy` is asserted directly as well as through the outlet, because Track F ends
+  // with `not-built` empty and a render-only test would then quietly stop exercising that
+  // arm — the vacuity this repository keeps finding in its own checkers.
+  assert.match(
+    pendingCopy({ state: 'not-built', milestone: 'FX', component: '@bleavit/x#Y' }),
+    /has not been built yet/,
   );
-  assert.match(unbuilt, /has not been built yet/);
+  assert.match(
+    pendingCopy({
+      state: 'built-unwired',
+      milestone: 'FX',
+      component: '@bleavit/x#Y',
+      waitingOn: 'a live transport',
+    }),
+    /this screen is built; it is waiting on a live transport/,
+  );
+
+  const notBuilt = pick('not-built');
+  if (notBuilt !== undefined) {
+    const unbuilt = renderToStaticMarkup(
+      h(Outlet, { hash: hashFor(notBuilt), handoffEnabled: true, implemented: {} }),
+    );
+    assert.match(unbuilt, /has not been built yet/);
+  }
+
+  const unwiredId = pick('built-unwired');
+  assert.ok(unwiredId !== undefined, 'no screen is declared built-unwired');
   const unwired = renderToStaticMarkup(
-    h(Outlet, { hash: '#/guardian', handoffEnabled: true, implemented: {} }),
+    h(Outlet, { hash: hashFor(unwiredId), handoffEnabled: true, implemented: {} }),
   );
   assert.match(unwired, /this screen is built; it is waiting on/);
   assert.ok(!unwired.includes('has not been built yet'), unwired);
