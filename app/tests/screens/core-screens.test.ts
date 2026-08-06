@@ -2087,6 +2087,45 @@ test('the decided arm of ProposalView is reachable from a read, not only from a 
   assert.equal(PROPOSAL_READS.decisionStats, 'decision_stats');
 });
 
+test('each statistic descends from the decision_stats call’s OWN pin, not the summary read’s', async () => {
+  // The two pins are equal for any reader that honours its own `at`, which is exactly why
+  // taking the nearer one would never look wrong — the same shape V-184 found in
+  // `position-reads.ts`, where a stamp copied off `reader.at` decided the provenance of a value
+  // the answer had supplied. So the double disagrees on purpose: the summary read answers at
+  // BLOCK and `decision_stats` at OTHER_BLOCK, and each leaf must follow the answer it came
+  // from. A leaf badged at a block it was not read at is a true statement about the wrong block,
+  // which no badge and no later check can detect.
+  const base = proposalsReader(['Settled'], { '0xpid0': '0xstats' });
+  const split: ProposalsReader = {
+    at: base.at,
+    crossCheckedCall: base.crossCheckedCall.bind(base),
+    async call(api: string, argsHex?: string): Promise<Finalized<string>> {
+      await base.call(api, argsHex);
+      return finalize('0xstats', { ...AT, blockHash: OTHER_BLOCK, blockNumber: 900_001 });
+    },
+  };
+  const read = await readProposals(
+    split,
+    proposalDecoders(() => OK({ outcome: 'Adopt', upliftPpm: 12_500n })),
+    STATS_ARGS,
+  );
+  const summary = read.summaries[0];
+  assert.equal(
+    summary?.state.status.kind === 'verified-finalized' ? summary.state.status.blockHash : undefined,
+    BLOCK,
+    'a summary leaf must carry the summary read’s pin',
+  );
+  const view = read.views[0];
+  assert.equal(view?.stage, 'decided');
+  const stat = view?.stage === 'decided' ? view.decisionStats.upliftPpm.status : undefined;
+  assert.equal(stat?.kind, 'verified-finalized');
+  assert.equal(
+    stat?.kind === 'verified-finalized' ? stat.blockHash : undefined,
+    OTHER_BLOCK,
+    'a statistic must carry the decision_stats call’s own pin',
+  );
+});
+
 test('doc 02 freezes the method this read calls, and the `None` rule it depends on', () => {
   const doc = readFileSync(DOC_02, 'utf8');
   assert.match(doc, /fn decision_stats\(pid: ProposalId\) -> Option<DecisionStatsView>;/);
