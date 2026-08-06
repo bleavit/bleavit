@@ -251,3 +251,17 @@ export {
   type LedgerPallet,
   type LedgerRow,
 } from './ledger-domain.js';
+export {
+  BRANCHES,
+  GATE_TYPES,
+  VoidHoldingsError,
+  decomposeVoidRecovery,
+  unpairedBranchUsdcPayout,
+  unpairedLegPayout,
+  type Branch,
+  type Consolidation,
+  type GateType,
+  type VoidHoldings,
+  type VoidRecovery,
+  type VoidResidual,
+} from './void-recovery.js';
