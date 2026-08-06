@@ -913,7 +913,7 @@ export interface SnapshotAdmission {
  *
  * The two version fields are not silently dropped: they stay on the admitted document, where a
  * caller reads them and renders the difference as an advisory line. A screen is a refusal, and
- * a version difference is not a reason to refuse. Filed as PLAN.md · *Spec questions* SQ-602,
+ * a version difference is not a reason to refuse. Filed as PLAN.md · *Spec questions* SQ-610,
  * because whether §8 wants a binding at all — and which fields — is 10's to say, not this
  * module's; the conservative reading is in force until it answers.
  */

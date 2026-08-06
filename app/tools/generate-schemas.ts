@@ -400,7 +400,7 @@ const receiptSchema = {
  * somebody outside it can write against, so the reproduce-by-anyone claim would be true only for
  * people who read the source.
  *
- * The tool's archive-node adapter is deliberately unwritten (PLAN.md · *Spec questions* SQ-604 —
+ * The tool's archive-node adapter is deliberately unwritten (PLAN.md · *Spec questions* SQ-612 —
  * no document names which read interface, endpoint, pagination or historical-metadata policy it
  * binds to). Publishing the boundary it is missing is what lets an operator supply one today.
  *

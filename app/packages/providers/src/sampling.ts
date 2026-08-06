@@ -155,7 +155,7 @@ export function afterProbe(
  * §8.4's table reads *"A provider fails its §8.3 health probe — **unreachable**, or `Failing`
  * after consecutive errors"*, and this function serves the second arm alone. The first is not
  * forgotten; the two halves of §8 disagree about it and the conservative reading is in force
- * until they are reconciled (PLAN.md · *Spec questions*, SQ-601).
+ * until they are reconciled (PLAN.md · *Spec questions*, SQ-609).
  *
  * The disagreement, stated exactly: §8.3 makes `Failing` count **consecutive** failures
  * precisely so *"one timeout in a healthy series cannot ratchet the ladder"*, and a code that

@@ -71,7 +71,7 @@
  *
  * Answering any of those by assumption is what R-2 forbids, and getting one wrong produces
  * documents that pass every screen in `@bleavit/providers` while describing a history that did
- * not happen. So it is filed as PLAN.md · *Spec questions* SQ-604 rather than approximated. The
+ * not happen. So it is filed as PLAN.md · *Spec questions* SQ-612 rather than approximated. The
  * CLI beside this file reads an export produced elsewhere, so an operator with a reader in the
  * documented shape can produce a pinned snapshot today — and the differential below is what
  * catches such a reader when it is incomplete.
