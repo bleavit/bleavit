@@ -14,8 +14,9 @@ import assert from 'node:assert/strict';
 import {
   LADDER,
   PAGES_PER_SAMPLED_ROW,
-  ProviderDisabledError,
+  ProviderCannotServeError,
   afterProbe,
+  canServeReads,
   effectiveCoverage,
   livenessRefusal,
   probeDue,
@@ -308,8 +309,47 @@ test('a disabled provider cannot be sampled at all', async () => {
   };
   await assert.rejects(
     () => runSamplingRound(off, pages(16), async () => MATCH, () => 0),
-    ProviderDisabledError,
+    ProviderCannotServeError,
   );
+});
+
+test('the round is gated on `canServeReads`, which until now nothing anywhere called', async () => {
+  // The predicate documented itself as *"the one predicate a read path calls"* and had no caller
+  // in the repository: neither production entry point consulted it, so `unprobed` — a state added
+  // precisely so an unanswered source could not serve — stopped nothing. A round over one is a
+  // verdict about rows nobody was shown, exactly like the disabled case above.
+  const unprobed: Provider = { ...HEALTHY, health: { kind: 'unprobed' } };
+  assert.equal(canServeReads(unprobed), false);
+  await assert.rejects(
+    () => runSamplingRound(unprobed, pages(16), async () => MATCH, () => 0),
+    (error: unknown) =>
+      error instanceof ProviderCannotServeError && /nothing has answered for it yet/.test(error.message),
+  );
+
+  // And it is satisfiable, which is what makes it a gate rather than a wall: a caller holding
+  // pages the source served performed the request that produced them, so it advances §8.3's
+  // ladder from that outcome first. "Probe on enable" becomes structural instead of scheduled.
+  const answered = afterProbe(unprobed, FAST);
+  assert.equal(canServeReads(answered), true);
+  const round = await runSamplingRound(answered, pages(16), async () => MATCH, () => 0);
+  assert.equal(round.outcome, 'clean');
+});
+
+test('a FAILING provider still serves, because §8.3 says only Disabled stops reads', async () => {
+  // The narrowing this predicate used to make, found while wiring it in. §8.3's normative shape is
+  // one sentence: "`Failing` counts **consecutive** failures, so one timeout in a healthy series
+  // cannot ratchet the ladder; and only `Disabled` stops reads". Excluding `failing` here is that
+  // same ratchet one clause along — one timeout would have taken the source off every read path
+  // while the ladder itself still called it live, and no sampling round could then produce the
+  // success that resets the counter.
+  const failing = afterProbe(HEALTHY, FAILED);
+  assert.equal(failing.health.kind, 'failing');
+  assert.equal(canServeReads(failing), true);
+  const round = await runSamplingRound(failing, pages(16), async () => MATCH, () => 0);
+  assert.equal(round.outcome, 'clean');
+
+  // `slow` too, for the reason §8.3 states outright: a slow provider is an honest one.
+  assert.equal(canServeReads(afterProbe(HEALTHY, SLOW)), true);
 });
 
 test('every row matching is a clean round and leaves the provider alone', async () => {

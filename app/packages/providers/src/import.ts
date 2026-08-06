@@ -63,7 +63,12 @@
  * the shape of the function, not by a cleanup path that has to run.
  */
 
-import { afterSampling, type Provider, type SampleResult } from './health.js';
+import {
+  afterSampling,
+  canSupplyPinnedImport,
+  type Provider,
+  type SampleResult,
+} from './health.js';
 import {
   EMPTY_QUOTA,
   EVICTION_DECLINED,
@@ -206,14 +211,23 @@ export type ImportOutcome =
  * a test array all already are — so the caller's transport is not this module's business, and
  * there is no path where the whole file has to exist before the first quota check runs.
  *
- * ## Two caller defects are refused before the stream is touched
+ * ## Three caller defects are refused before the stream is touched
  *
- * A provider with no id and a byte bound above §8.4's ceiling are both mistakes in the *call*,
- * not in the file, so they throw — and they throw **first**, before a chunk is read, before the
- * user is asked anything, and before anything could have been evicted. The empty id used to
- * surface from the mint, which runs *after* the eviction preview: the user was asked to give up
- * local history and then got a bare `RangeError`, which is both the wrong order and the free-text
- * error §10.4 forbids on a user path.
+ * A provider with no id, a byte bound above §8.4's ceiling, and a **source this client switched
+ * off** are all mistakes in the *call* rather than in the file, so they throw — and they throw
+ * **first**, before a chunk is read, before the user is asked anything, and before anything could
+ * have been evicted. The empty id used to surface from the mint, which runs *after* the eviction
+ * preview: the user was asked to give up local history and then got a bare `RangeError`, which is
+ * both the wrong order and the free-text error §10.4 forbids on a user path.
+ *
+ * The third is new on 2026-08-06 and closes a hole rather than tidying one. §8.3 says only
+ * `Disabled` stops reads, and this path asked nothing about health at all: an import from a source
+ * auto-disabled for contradicting the chain succeeded and minted rows badged with its id — while
+ * `FE-PROV-002`'s fixed recovery was on screen telling the user that source *"has been switched
+ * off"*. See {@link canSupplyPinnedImport} for why the test is that predicate and not
+ * `canServeReads`: a pinned file the user already holds does not depend on the endpoint having
+ * answered a probe, and gating on one nothing in this release drives would refuse every import
+ * from a freshly accepted suggestion, forever.
  */
 export async function importSnapshotStream(
   chunks: AsyncIterable<SnapshotChunk>,
@@ -236,6 +250,18 @@ export async function importSnapshotStream(
       `maxInputBytes must be a positive integer no larger than 10 §8.4's ceiling of ` +
         `${IMPORT_MAX_UNCOMPRESSED_BYTES}, got ${request.maxInputBytes}. A caller may bound an ` +
         'import further than the specification does and may not loosen it',
+    );
+  }
+  if (!canSupplyPinnedImport(request.provider)) {
+    const reason =
+      request.provider.health.kind === 'disabled' ? request.provider.health.reason : '';
+    throw new RangeError(
+      `provider ${request.provider.id} is switched off (${reason}) and 10 §8.3 makes Disabled ` +
+        'the state that stops reads. Its rows are not minted while it is off: FE-PROV-002 tells ' +
+        'the user the source was switched off and that turning it back on is their explicit act, ' +
+        'and importing under its label in the meantime contradicts the sentence they were shown. ' +
+        'Refused before the file is read, so a source that cannot supply rows never costs an ' +
+        'eviction first',
     );
   }
   const bounds: QuotaBounds = { maxBytes: request.maxInputBytes, maxRows: IMPORT_MAX_ROWS };
@@ -351,10 +377,17 @@ function rejected(
   if (spotCheck === undefined || disagreements.length === 0) {
     return { kind: 'rejected', refusal, findings, provider, disabled: undefined };
   }
+  // `compared` alone is the denominator, because the sentence this builds says *"N of M blocks
+  // this device re-derived from the chain do not match"* — and a block the light client could not
+  // reach was not re-derived. Counting the out-of-reach ones inflated M, so a document caught
+  // lying in its one readable block was reported as *1 of 3* to the user, which reads as an error
+  // rate rather than as the whole of what was checked disagreeing. `unverifiable` is therefore 0
+  // and not `outOfReach`: those blocks are outside this denominator entirely, and carrying them
+  // here would drive `effectiveCoverage`'s `checked` (rowsChecked − unverifiable) negative.
   const result: SampleResult = {
-    rowsChecked: spotCheck.compared + spotCheck.outOfReach,
+    rowsChecked: spotCheck.compared,
     mismatches: disagreements.length,
-    unverifiable: spotCheck.outOfReach,
+    unverifiable: 0,
   };
   return {
     kind: 'rejected',

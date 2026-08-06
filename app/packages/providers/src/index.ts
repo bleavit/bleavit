@@ -20,7 +20,7 @@ export * from './suggestions.js';
 
 export {
   PAGES_PER_SAMPLED_ROW,
-  ProviderDisabledError,
+  ProviderCannotServeError,
   afterProbe,
   chainRowCheck,
   livenessRefusal,

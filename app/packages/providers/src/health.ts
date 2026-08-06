@@ -90,12 +90,69 @@ export interface Provider {
  *
  * The one predicate a read path calls, and the reason `unprobed` is a state rather than a flag:
  * *"has it been probed"* and *"is it switched off"* are two questions with one answer here, and
- * a call site that had to remember both would eventually remember one. `slow` serves — §8.3 is
- * explicit that a slow provider is an honest one and that converting a network condition into a
- * missing-data incident is the failure to avoid.
+ * a call site that had to remember both would eventually remember one.
+ *
+ * ## `failing` serves, and until 2026-08-06 this said otherwise
+ *
+ * §8.3 states the ladder's normative *shape* in one sentence, and the last clause is unqualified:
+ * *"`Slow` is a latency observation and never disables on its own … `Failing` counts
+ * **consecutive** failures, so one timeout in a healthy series cannot ratchet the ladder; and only
+ * `Disabled` stops reads, always with a reason."* This function excluded `failing`, which is a
+ * narrowing §8.3 does not authorise — and it is the same ratchet the *consecutive* rule exists to
+ * prevent, moved one clause along: one timeout in a healthy series would have taken the source
+ * off every read path while the ladder itself still called it live. The defect was invisible
+ * while nothing consulted the predicate; wiring it in is what made its exact shape load-bearing.
+ *
+ * ## `unprobed` does not serve, and that is not the same narrowing
+ *
+ * *"Only `Disabled` stops reads"* is a sentence about the **ladder** — `Healthy → Slow → Failing →
+ * Disabled` — and `unprobed` is not on it: it is the state before the ladder starts, which §8.3's
+ * *"health probe on enable"* half creates and its degradation half never mentions. Refusing it is
+ * INV-FE-12's fail-closed lattice (an unproven capability is absent), not a fifth ladder state
+ * that serves. Which of §8.3's two sentences governs the gap between enabling a source and its
+ * first answer is genuinely open, and PLAN.md · *Spec questions* SQ-771 asks 10 §8.3 to say.
+ *
+ * The `switch` is exhaustive on purpose: a state added to the ladder later fails to compile here
+ * rather than falling through to *serves*, which is the direction that cannot be walked back.
  */
 export function canServeReads(provider: Provider): boolean {
-  return provider.health.kind === 'healthy' || provider.health.kind === 'slow';
+  switch (provider.health.kind) {
+    case 'healthy':
+    case 'slow':
+    case 'failing':
+      return true;
+    case 'unprobed':
+    case 'disabled':
+      return false;
+    default: {
+      const unhandled: never = provider.health;
+      return unhandled;
+    }
+  }
+}
+
+/**
+ * May a **pinned file this source published** still be imported?
+ *
+ * A second predicate rather than a second call to {@link canServeReads}, because the two answer
+ * different questions and differ on exactly one state. A snapshot arrives **out of band**: the
+ * user already holds the bytes, and what admits them is the content pin plus §8.4's screens plus
+ * the chain re-derivation — none of which asks the endpoint anything. So *"has this source
+ * answered a probe"* has no bearing on a file that is already here, and gating on it would refuse
+ * every import from a freshly accepted suggestion, permanently, since nothing in this release
+ * drives probes (see PLAN.md's F24 — §8.3's probe driver has no owner until the provider wire is
+ * specified).
+ *
+ * `disabled` is different and is refused. `FE-PROV-002`'s fixed recovery tells the user the source
+ * *"has been switched off"* and that re-enabling is theirs to do; minting fresh rows badged with
+ * that source's id in the meantime contradicts the sentence they were just shown, and unlike the
+ * probe it is satisfiable — §8.4 already makes re-enabling an explicit user action.
+ *
+ * Whether §8.3's ladder gates an out-of-band pinned file **at all** is what 10 §8 does not say:
+ * PLAN.md · *Spec questions* SQ-773, alongside SQ-630.
+ */
+export function canSupplyPinnedImport(provider: Provider): boolean {
+  return provider.health.kind !== 'disabled';
 }
 
 /**
@@ -281,8 +338,10 @@ export function fleetState(providers: readonly Provider[]): FleetState {
   if (providers.length === 0) {
     return { kind: 'none-enabled', explainer: INCOMPLETE_HISTORY_EXPLAINER };
   }
-  const down = providers.filter((p) => p.health.kind === 'disabled');
-  if (down.length < providers.length) {
+  // Through {@link allProvidersDown}, not beside it. Both held the same predicate and the
+  // exported one had no caller, so §8.3's closing sentence had two implementations and only one
+  // of them was ever executed — the shape where an edit to the tested copy changes nothing.
+  if (!allProvidersDown(providers)) {
     return {
       kind: 'serving',
       enabled: providers.length,
@@ -296,7 +355,7 @@ export function fleetState(providers: readonly Provider[]): FleetState {
   return {
     kind: 'all-down',
     enabled: providers.length,
-    reasons: down.map((p) => (p.health.kind === 'disabled' ? p.health.reason : '')),
+    reasons: providers.map((p) => (p.health.kind === 'disabled' ? p.health.reason : '')),
     explainer: INCOMPLETE_HISTORY_EXPLAINER,
     code: 'FE-PROV-001',
   };

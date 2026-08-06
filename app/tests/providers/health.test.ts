@@ -14,11 +14,15 @@ import { dirname, resolve } from 'node:path';
 import {
   SAMPLING_GUARANTEE,
   afterSampling,
+  allProvidersDown,
+  canServeReads,
+  canSupplyPinnedImport,
   defaultProviders,
   effectiveCoverage,
+  fleetState,
   shouldAutoDisable,
 } from '@bleavit/providers';
-import type { Provider } from '@bleavit/providers';
+import type { Provider, ProviderHealth } from '@bleavit/providers';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
@@ -121,5 +125,77 @@ test('the guarantee statement is bound to 10 §8.4\'s own sentence, clause by cl
   for (const [source, rendered] of clauses) {
     assert.ok(bullet.includes(source), `10 §8.4 no longer says "${source}" — re-read the copy`);
     assert.match(SAMPLING_GUARANTEE, rendered);
+  }
+});
+
+// ------------------------------------------------------------------ the fleet (§8.3's close)
+
+const HEALTHS: readonly ProviderHealth[] = [
+  { kind: 'unprobed' },
+  { kind: 'healthy' },
+  { kind: 'slow', observedMs: 9_000 },
+  { kind: 'failing', consecutiveFailures: 2 },
+  { kind: 'disabled', by: 'auto', reason: 'a spot-checked row did not match' },
+  { kind: 'disabled', by: 'user', reason: 'switched off' },
+];
+
+function providerAt(index: number): Provider {
+  const health = HEALTHS[index];
+  assert.ok(health !== undefined);
+  return { id: `p${index}`, kind: 'indexer', health };
+}
+
+test('§8.3 in one sentence: only Disabled stops reads, and unprobed is before the ladder', () => {
+  // The predicate is exhaustive over the ladder rather than a two-name allowlist, so a sixth
+  // state cannot be added and default to *serves* — the direction that cannot be walked back.
+  // `failing` serving is §8.3's own clause, not a loosening: excluding it was the same ratchet
+  // the *consecutive* rule exists to prevent, and it was invisible while nothing called this.
+  assert.deepEqual(
+    HEALTHS.map((health) => canServeReads({ id: 'p', kind: 'indexer', health })),
+    [false, true, true, true, false, false],
+  );
+  // And the second predicate differs on exactly one state: a pinned file already in the user's
+  // hands does not depend on the endpoint having answered a probe (see `canSupplyPinnedImport`).
+  assert.deepEqual(
+    HEALTHS.map((health) => canSupplyPinnedImport({ id: 'p', kind: 'indexer', health })),
+    [true, true, true, true, false, false],
+  );
+});
+
+test('an empty fleet is §8.1\'s posture and NOT an outage, in both functions', () => {
+  // `providers.every(disabled)` answers `true` for an empty list, and a UI driven by it opens on
+  // an incident banner every first run. The shipped list is empty (§8.1), so that is every run.
+  assert.equal(allProvidersDown([]), false);
+  const state = fleetState([]);
+  assert.equal(state.kind, 'none-enabled');
+  if (state.kind !== 'none-enabled') return;
+  assert.match(state.explainer, /shown as gaps rather than filled in/);
+});
+
+test('all-down carries every reason and FE-PROV-001, and none-enabled carries neither', () => {
+  const state = fleetState([providerAt(4), providerAt(5)]);
+  assert.equal(state.kind, 'all-down');
+  if (state.kind !== 'all-down') return;
+  assert.equal(state.enabled, 2);
+  assert.deepEqual(state.reasons, [
+    'a spot-checked row did not match',
+    'switched off',
+  ]);
+  assert.equal(state.code, 'FE-PROV-001');
+});
+
+test('`fleetState` decides all-down THROUGH `allProvidersDown`, not beside it', () => {
+  // Two copies of one §8.3 sentence, and only the inline one ran: the exported predicate had no
+  // caller anywhere, so editing the tested copy changed nothing the client does. Asserted over
+  // every fleet of two, which is where the two spellings could differ at all.
+  for (const first of HEALTHS.keys()) {
+    for (const second of HEALTHS.keys()) {
+      const fleet = [providerAt(first), providerAt(second)];
+      assert.equal(
+        fleetState(fleet).kind === 'all-down',
+        allProvidersDown(fleet),
+        `the two disagree on ${HEALTHS[first]?.kind} + ${HEALTHS[second]?.kind}`,
+      );
+    }
   }
 });

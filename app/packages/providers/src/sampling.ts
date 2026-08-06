@@ -49,6 +49,7 @@
 import {
   LADDER,
   afterSampling,
+  canServeReads,
   effectiveCoverage,
   shouldAutoDisable,
   type LadderThresholds,
@@ -390,23 +391,52 @@ export interface SampledRound {
   readonly [SAMPLED]: true;
 }
 
-export class ProviderDisabledError extends Error {
-  constructor(id: string) {
+/**
+ * A round was asked for over a source that is serving nothing. A caller defect, not user copy.
+ *
+ * It replaced `ProviderDisabledError` on 2026-08-06, when {@link canServeReads} was wired in here:
+ * the refusal now covers `unprobed` as well as `disabled`, and a class whose name says *disabled*
+ * would have been a false statement about the more common of the two. The message is built from
+ * the state, so the two cases stay distinguishable at a call site.
+ *
+ * The two reasons, both of which end in a verdict about rows nobody was shown:
+ *
+ * - **`disabled`** — §8.3's one state that stops reads. Sampling it would either overwrite the
+ *   user's own decision with an automatic one, or record a clean verdict about a source that
+ *   served nothing.
+ * - **`unprobed`** — nothing has answered yet, so the pages handed to this round did not come
+ *   from a source this client has established is serving. A caller that *did* fetch them holds
+ *   the outcome of that fetch and advances the ladder with {@link afterProbe} first; that is
+ *   §8.3's *"probe on enable"* made structural rather than scheduled.
+ */
+export class ProviderCannotServeError extends Error {
+  constructor(provider: Provider) {
     super(
-      `provider ${id} is disabled, so it is serving no reads and there is nothing to sample. ` +
-        'Sampling a disabled source would produce a verdict about data nobody was shown.',
+      provider.health.kind === 'disabled'
+        ? `provider ${provider.id} is disabled, so it is serving no reads and there is nothing ` +
+            'to sample. Sampling a disabled source would produce a verdict about data nobody ' +
+            'was shown.'
+        : `provider ${provider.id} is ${provider.health.kind}: nothing has answered for it yet, ` +
+            'so it is serving no reads and these pages did not come from a source this client ' +
+            'has established is live. Advance the ladder with `afterProbe` from the request that ' +
+            'fetched them before sampling — a round over an unprobed source is a verdict about ' +
+            'data nobody was shown.',
     );
-    this.name = 'ProviderDisabledError';
+    this.name = 'ProviderCannotServeError';
   }
 }
 
 /**
  * Run one sampling round over the pages a provider served.
  *
- * **Refuses a disabled provider** rather than sampling it: §8.3 makes `Disabled` the one state
- * that stops reads, so a disabled source served nothing, and a round over it would either
- * overwrite the user's own decision with an automatic one or record a clean verdict about rows
- * no user ever saw.
+ * **Refuses a source that is serving nothing** rather than sampling it — {@link canServeReads},
+ * which is `disabled` *and* `unprobed`. §8.3 makes `Disabled` the one ladder state that stops
+ * reads, so a disabled source served nothing and a round over it would either overwrite the
+ * user's own decision with an automatic one or record a clean verdict about rows no user ever saw;
+ * an unprobed source has answered nothing at all, so the same is true and more so. Until
+ * 2026-08-06 this checked `disabled` inline and `canServeReads` had **no caller anywhere** — the
+ * predicate existed, was documented as *"the one predicate a read path calls"*, and no read path
+ * called it. See {@link ProviderCannotServeError}.
  *
  * **A check that throws is `unverifiable`, and the round continues.** Aborting looks safer and
  * is not: the reference is provider-supplied, so a publisher who embeds one reference whose
@@ -438,7 +468,7 @@ export async function runSamplingRoundAtRate(
   random: () => number,
   pagesPerRow: number,
 ): Promise<SampledRound> {
-  if (provider.health.kind === 'disabled') throw new ProviderDisabledError(provider.id);
+  if (!canServeReads(provider)) throw new ProviderCannotServeError(provider);
   const selection = selectSampleAtRate(pages, random, pagesPerRow);
   const mismatches: RowMismatch[] = [];
   let unverifiable = 0;

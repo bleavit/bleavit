@@ -29,13 +29,20 @@ import {
   SNAPSHOT_FORMAT,
   SPOT_CHECK_BLOCK_CEILING,
   admitSnapshot,
+  importSnapshotStream,
   projectOp,
   rejectSnapshot,
   serializeSnapshot,
   snapshotPreimage,
   spotCheckSnapshot,
 } from '@bleavit/providers';
-import type { SnapshotDocument, SpotClaim, SpotVerdict } from '@bleavit/providers';
+import type {
+  Provider,
+  SnapshotChunk,
+  SnapshotDocument,
+  SpotClaim,
+  SpotVerdict,
+} from '@bleavit/providers';
 
 const sha256 = (preimage: Uint8Array): string =>
   createHash('sha256').update(preimage).digest('hex');
@@ -73,6 +80,12 @@ function admit(document: SnapshotDocument) {
   );
 }
 
+const PUBLISHER: Provider = { id: 'archive-one', kind: 'snapshot', health: { kind: 'healthy' } };
+
+async function* streamOf(text: string): AsyncIterable<SnapshotChunk> {
+  yield { text, bytes: new TextEncoder().encode(text).length };
+}
+
 /**
  * A light client that can serve blocks `>= reachableFrom` and knows {@link trueHistory}.
  *
@@ -89,7 +102,10 @@ function lightClient(
   const asked: number[] = [];
   const check = async (claim: SpotClaim): Promise<SpotVerdict> => {
     asked.push(claim.block);
-    if (claim.block < reachableFrom || claim.block > reachableTo) return { kind: 'out-of-reach' };
+    // The two sides are stated, not inferred, because a real light client knows both: `above` is
+    // ahead of this device's head, `below` is past the bottom of its pinned window.
+    if (claim.block > reachableTo) return { kind: 'out-of-reach', where: 'above-window' };
+    if (claim.block < reachableFrom) return { kind: 'out-of-reach', where: 'below-window' };
     const derived = truth.ops.filter((op) => op.block === claim.block).map(projectOp);
     const same =
       derived.length === claim.movements.length &&
@@ -111,6 +127,7 @@ test('an honest snapshot inside the reachable window is re-derived clean', async
   assert.deepEqual(report.findings, []);
   assert.equal(report.compared, 4);
   assert.equal(report.outOfReach, 0);
+  assert.equal(report.reach, 'whole-document', 'the walk ran out of document, not out of window');
 });
 
 // -------------------------------------------------- the case this screen exists for (TH-50)
@@ -222,7 +239,107 @@ test('a DEEP forgery is not detected, and the report says the blocks were out of
   const report = await spotCheckSnapshot(forged, chain.check);
   assert.deepEqual(report.findings, [], 'no finding — this is the stated blind spot');
   assert.equal(report.compared, 0, 'and nothing was compared, which the report states plainly');
-  assert.equal(report.outOfReach, 4);
+  // One, not four: the newest covered block already answers *below the window*, and the window is
+  // one contiguous interval, so every older covered block is unreachable too. The walk is finished
+  // rather than abandoned, and `reach` says which.
+  assert.equal(report.outOfReach, 1);
+  assert.equal(report.reach, 'window-floor');
+});
+
+test('DEEP HISTORY LARGER THAN THE CEILING is admitted, not refused as an unfinished check', async () => {
+  // The blocker this direction exists for, in the shape that reaches a user. §6.4 assigns deep
+  // history to snapshots *"by design, not by omission"*, so a document whose whole coverage sits
+  // below the reachable window is the format's primary case rather than an edge one — and it is
+  // the case an undirected `out-of-reach` got exactly backwards.
+  //
+  // With one verdict and no side, the loop inferred *above the window* from `compared === 0` and
+  // kept descending: it spent all 512 asks on blocks whose answer it already had, hit the ceiling,
+  // raised `spot-check-incomplete`, and the importer turned that into `FE-PROV-003`. §8.4 lists
+  // three causes for that code and *"this device did not finish"* is not one of them; §8.4 names
+  // the depth limit as **disclosed**, not as a refusal. So a valid 216,000-block snapshot was
+  // rejected, and INV-FE-15's acceleration obligation with it.
+  const coverage = { fromBlock: 1_000, toBlock: 217_999 };
+  assert.ok(
+    coverage.toBlock - coverage.fromBlock + 1 > SPOT_CHECK_BLOCK_CEILING,
+    'the case needs coverage LARGER than the ceiling — inside it, the old walk terminated anyway',
+  );
+  const document: SnapshotDocument = {
+    format: SNAPSHOT_FORMAT,
+    binding: { ...BINDING },
+    range: { ...coverage },
+    coverage: [{ ...coverage }],
+    vaults: [{ vault: 'v1', branches: ['FAIL', 'PASS'] }],
+    ops: [{ kind: 'split', block: 1_500, vault: 'v1', account: 'alice', amount: '1000' }],
+    balances: [
+      { vault: 'v1', account: 'alice', branch: 'FAIL', amount: '1000' },
+      { vault: 'v1', account: 'alice', branch: 'PASS', amount: '1000' },
+    ],
+  };
+  assert.equal(admit(document).kind, 'admitted', 'the file screens pass — nothing is wrong with it');
+
+  // Every answer is `below-window`: this device's pinned window is at the head and the whole
+  // document predates it.
+  let asked = 0;
+  const report = await spotCheckSnapshot(document, async () => {
+    asked += 1;
+    return { kind: 'out-of-reach', where: 'below-window' };
+  });
+
+  assert.deepEqual(report.findings, [], 'no finding: §8.4 discloses this limit, it does not refuse');
+  assert.equal(report.compared, 0, 'nothing was inside the window, and the report says so plainly');
+  assert.equal(report.outOfReach, 1);
+  assert.equal(report.reach, 'window-floor');
+  assert.equal(asked, 1, 'one ask, not 512 — the rest have a known answer');
+
+  // And end to end, which is where the refusal was measured: the importer admits it and mints.
+  const outcome = await importSnapshotStream(
+    streamOf(serializeSnapshot(document)),
+    {
+      provider: PUBLISHER,
+      admission: { expectedPin: sha256(snapshotPreimage(document)), binding: { ...BINDING } },
+      sha256,
+      maxInputBytes: 1_000_000,
+      budgetBytes: 10_000_000,
+      footprint: [],
+      importedAt: 1_700_000_000_000,
+    },
+    {
+      spotCheck: async () => ({ kind: 'out-of-reach', where: 'below-window' }),
+      confirmEviction: async () => true,
+    },
+  );
+  assert.equal(outcome.kind, 'imported');
+  if (outcome.kind !== 'imported') return;
+  assert.equal(outcome.spotCheck.reach, 'window-floor');
+  assert.equal(outcome.minted.status.kind, 'provider');
+  if (outcome.minted.status.kind !== 'provider') return;
+  // Admitted is not verified: nothing was compared, so nothing claims it was. That pairing is the
+  // whole of §8.4's honest limit — the rows load, and they say what they are.
+  assert.equal(outcome.minted.status.sampled, false);
+});
+
+test('the ceiling still refuses when the walk never reaches the bottom of the window', async () => {
+  // The other half of the distinction, so the fix cannot be read as *"stop refusing"*. Every
+  // answer here is `above-window` — this device is behind the document's own head — so the walk
+  // has not established anything about the reachable blocks below, and stopping at the ceiling
+  // leaves the mandated set unfinished. That is a genuine incomplete pass and keeps refusing.
+  const document: SnapshotDocument = {
+    ...trueHistory(),
+    range: { fromBlock: 0, toBlock: 100_000 },
+    coverage: [{ fromBlock: 0, toBlock: 100_000 }],
+  };
+  const report = await spotCheckSnapshot(document, async () => ({
+    kind: 'out-of-reach',
+    where: 'above-window',
+  }));
+  assert.equal(report.reach, 'ceiling');
+  assert.equal(report.outOfReach, SPOT_CHECK_BLOCK_CEILING);
+  assert.equal(report.findings.length, 1);
+  assert.equal(report.findings[0]?.screen, 'spot-check-incomplete');
+  // And the sentence does not claim the chain was answering, which is false in exactly this case.
+  assert.doesNotMatch(report.findings[0]?.why ?? '', /still answering/);
+  assert.match(report.findings[0]?.why ?? '', /ahead of its own head/);
+  assert.match(report.findings[0]?.why ?? '', /did not finish/);
 });
 
 test('out-of-reach is neither a pass nor a failure, and is counted separately', async () => {
@@ -236,6 +353,7 @@ test('out-of-reach is neither a pass nor a failure, and is counted separately', 
   // count is what was *asked*, and asking about the rest is spending a user's device to be told
   // something already known.
   assert.equal(report.outOfReach, 1, 'block 11 answered out-of-reach and the walk stopped there');
+  assert.equal(report.reach, 'window-floor');
   assert.deepEqual(chain.asked, [13, 12, 11]);
 });
 
@@ -249,6 +367,7 @@ test('an out-of-reach ABOVE the window does not stop the walk', async () => {
   assert.deepEqual(report.findings, []);
   assert.equal(report.compared, 3, 'blocks 12, 11 and 10, having descended past an unreachable 13');
   assert.equal(report.outOfReach, 1);
+  assert.equal(report.reach, 'whole-document');
   assert.deepEqual(chain.asked, [13, 12, 11, 10]);
 });
 
@@ -290,6 +409,7 @@ test('the pass is bounded, the bound is spent on the newest blocks, and hitting 
   assert.equal(asked[asked.length - 1], 100_000 - SPOT_CHECK_BLOCK_CEILING + 1);
   assert.equal(report.findings.length, 1);
   assert.equal(report.findings[0]?.screen, 'spot-check-incomplete');
+  assert.equal(report.reach, 'ceiling');
   assert.match(report.findings[0]?.why ?? '', /did not finish/);
 });
 

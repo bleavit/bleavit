@@ -99,7 +99,12 @@ function requestFor(document: SnapshotDocument, budgetBytes = 10_000_000): Impor
   };
 }
 
-const REACHES_NOTHING = async (): Promise<SpotVerdict> => ({ kind: 'out-of-reach' });
+// `below-window` — the deep-history posture 10 §6.4 assigns snapshots, and the one an undirected
+// verdict got backwards. See `spot-check.test.ts` for the walk's own cases.
+const REACHES_NOTHING = async (): Promise<SpotVerdict> => ({
+  kind: 'out-of-reach',
+  where: 'below-window',
+});
 const ALWAYS_AGREES = async (): Promise<SpotVerdict> => ({ kind: 'agrees' });
 
 /** Admit a document the way the importer does, so a test can hold the branded value. */
@@ -443,6 +448,76 @@ test('a chain disagreement rejects with the chain-disagreement remedy, before th
   );
   assert.match(outcome.refusal.detail, /re-derived part of the snapshot from the chain/);
   assert.equal(asked, 0);
+});
+
+test('the auto-disable sentence counts the blocks it RE-DERIVED, not the ones it could not', async () => {
+  // §10.4 gives this code fixed copy with one per-occurrence part, so the numbers in it are the
+  // whole of what the user is told. The denominator was `compared + outOfReach`, which counts
+  // blocks this device never re-derived: a publisher caught contradicting the chain in the one
+  // block inside the window was reported as *"1 of 2 blocks … do not match"*, which reads as an
+  // error rate on a sample rather than as everything that was checked disagreeing.
+  const document = validDocument();
+  const mixed = async (claim: SpotClaim): Promise<SpotVerdict> => {
+    if (claim.block === 13) return { kind: 'disagrees', derived: [] };
+    if (claim.block === 12) return { kind: 'agrees' };
+    return { kind: 'out-of-reach', where: 'below-window' };
+  };
+  const outcome = await importSnapshotStream(
+    streamOf(serializeSnapshot(document)),
+    requestFor(document),
+    deps({ spotCheck: mixed }),
+  );
+  assert.equal(outcome.kind, 'rejected');
+  if (outcome.kind !== 'rejected') return;
+  assert.equal(outcome.provider.health.kind, 'disabled');
+  if (outcome.provider.health.kind !== 'disabled') return;
+  // Two compared (13, 12) and one out of reach (11), where the walk stopped.
+  assert.match(outcome.provider.health.reason, /1 of 2 blocks this device re-derived/);
+  assert.doesNotMatch(outcome.provider.health.reason, /1 of 3/);
+});
+
+test('a SWITCHED-OFF source cannot supply rows, and is refused before a byte is read', async () => {
+  // §8.3: only `Disabled` stops reads — and this path asked nothing about health at all, so an
+  // import from a source auto-disabled for contradicting the chain succeeded and minted rows
+  // badged with its id, while `FE-PROV-002`'s recovery was telling the user that source "has been
+  // switched off" and that turning it back on was theirs to do.
+  const document = validDocument();
+  const off: Provider = {
+    ...PUBLISHER,
+    health: { kind: 'disabled', by: 'auto', reason: 'a re-derived block did not match' },
+  };
+  let chunks = 0;
+  async function* counted(): AsyncIterable<SnapshotChunk> {
+    chunks += 1;
+    yield* streamOf(serializeSnapshot(document));
+  }
+  await assert.rejects(
+    () =>
+      importSnapshotStream(
+        counted(),
+        { ...requestFor(document), provider: off },
+        deps({
+          spotCheck: ALWAYS_AGREES,
+          confirmEviction: async () => {
+            throw new Error('a source that cannot supply rows must never cost an eviction');
+          },
+        }),
+      ),
+    /is switched off/,
+  );
+  assert.equal(chunks, 0, 'refused before the stream was touched');
+
+  // An UNPROBED source is not refused here, and that asymmetry is deliberate: a pinned file the
+  // user already holds is admitted by its content hash and the §8.4 screens, none of which asks
+  // the endpoint anything — and nothing in this release drives §8.3's probe, so gating on it
+  // would refuse every import from a freshly accepted suggestion forever (SQ-773).
+  const fresh: Provider = { ...PUBLISHER, health: { kind: 'unprobed' } };
+  const admitted = await importSnapshotStream(
+    streamOf(serializeSnapshot(document)),
+    { ...requestFor(document), provider: fresh },
+    deps({ spotCheck: ALWAYS_AGREES }),
+  );
+  assert.equal(admitted.kind, 'imported');
 });
 
 test('the whole-text form and the streamed form admit exactly the same documents', async () => {

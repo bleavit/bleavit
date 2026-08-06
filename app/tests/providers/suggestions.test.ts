@@ -124,7 +124,11 @@ test('an accepted provider CANNOT be read from until a probe answers — §8.3\'
   assert.equal(canServeReads(answered), true);
   const silent = afterProbe(accepted.provider, { kind: 'failed', why: 'timeout' });
   assert.equal(silent.health.kind, 'failing');
-  assert.equal(canServeReads(silent), false, 'a failing source serves nothing either');
+  // And a failing source **does** still serve. This asserted the opposite until 2026-08-06, which
+  // was a narrowing §8.3 does not authorise: its normative shape says `Failing` counts consecutive
+  // failures "so one timeout in a healthy series cannot ratchet the ladder; and only `Disabled`
+  // stops reads". `unprobed` is refused because it is *before* the ladder, not a state on it.
+  assert.equal(canServeReads(silent), true, '§8.3: only Disabled stops reads');
 });
 
 test('the fleet counts an unprobed source as enabled and NOT as serving', () => {

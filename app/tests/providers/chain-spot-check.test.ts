@@ -115,7 +115,11 @@ function pinnedBlockNumber(runtime: MockRuntime): number {
  */
 function transcriptMovements(runtime: MockRuntime, pinned: number): BlockMovementRead {
   return async (block: number) => {
-    if (block !== pinned) return { kind: 'out-of-reach' };
+    // The corpus pins exactly one block, so the side is a comparison against it — the same fact a
+    // light client reads off its own head and pinned window, and never a guess this module makes.
+    if (block !== pinned) {
+      return { kind: 'out-of-reach', where: block > pinned ? 'above-window' : 'below-window' };
+    }
     const response = runtime.respond('chainHead_v1_storage', [
       'subscription-1',
       runtime.pinnedBlock(),
@@ -328,8 +332,13 @@ test('an EMPTY claim about a block the chain says is empty agrees', async () => 
 });
 
 test('out-of-reach passes through untouched — it is evidence of nothing', async () => {
-  const check = chainSpotCheck(async () => ({ kind: 'out-of-reach' }));
-  assert.deepEqual(await check({ block: 10, movements: [] }), { kind: 'out-of-reach' });
+  // Both sides, and the side is **carried** rather than re-decided: this adapter holds no head and
+  // no pinned window, so any rule it applied would be a guess dressed as a derivation — and it is
+  // exactly that guess, one layer up, that refused a valid deep-history snapshot.
+  for (const where of ['above-window', 'below-window'] as const) {
+    const check = chainSpotCheck(async () => ({ kind: 'out-of-reach', where }));
+    assert.deepEqual(await check({ block: 10, movements: [] }), { kind: 'out-of-reach', where });
+  }
 });
 
 test('two observations at one chain position throw — no tie-break here can be right', async () => {
