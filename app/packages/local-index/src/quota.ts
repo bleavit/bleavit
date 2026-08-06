@@ -266,7 +266,7 @@ export interface SettledProposal {
    * The **exact** `StoredEvent.id`s this summary replaces.
    *
    * Ids, not a block range, and the difference is a data-loss defect rather than a refinement.
-   * `StoredEvent` carries no proposal reference (10 §7 publishes no column list — SQ-605), so a
+   * `StoredEvent` carries no proposal reference (10 §7 publishes no column list — SQ-607), so a
    * block-span delete removes *every* event in those blocks: other proposals' events, market
    * trades, ledger movements. §9.2 permits compacting the events "for settled+reaped proposals"
    * and nothing else, and the ladder is stated to degrade "event granularity only".

@@ -142,7 +142,7 @@ export interface MetadataBlob {
  * metadata, and because §9.2's own list of what the ladder never touches names coverage
  * metadata: the label has to be written by the same transaction that deletes the rows, or a
  * crash between them produces the silent splice the sentence forbids. This is the schema half
- * of SQ-604.
+ * of SQ-606.
  */
 export type MetaRow =
   | { readonly key: 'coverage'; readonly coverage: CoverageRef }

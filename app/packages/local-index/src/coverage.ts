@@ -98,7 +98,7 @@ export interface SelfIngested {
  * earlier carries a block span, an origin, a provider id and a timestamp — no hash, no
  * genesis, no spec version — so all three checks were unimplementable and `invalidateRange`
  * had no detector that could ever call it. The fields are added here and in §6.3 together
- * (PLAN.md · Decision log, SQ-603), because a check with no substrate is not a stricter
+ * (PLAN.md · Decision log, SQ-605), because a check with no substrate is not a stricter
  * design than no check at all: it is the same design with a sentence in front of it.
  *
  * The edge is the range's **`toBlock`**, not its `fromBlock`. A range grows forward, so the

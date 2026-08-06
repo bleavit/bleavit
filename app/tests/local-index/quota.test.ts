@@ -315,7 +315,7 @@ test('settled proposals’ events compact into proposalsArchive, in one transact
   );
   // An event belonging to something else, in the same blocks. This is the whole test: §9.2
   // permits compacting "`events` for settled+reaped proposals" and nothing else, and `events`
-  // carries no proposal reference (10 §7 publishes no column list — SQ-605), so a block-span
+  // carries no proposal reference (10 §7 publishes no column list — SQ-607), so a block-span
   // delete removes other proposals' events, market trades and ledger movements alike.
   await db.events.put({
     id: '2:9',
