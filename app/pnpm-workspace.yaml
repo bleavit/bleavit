@@ -22,6 +22,13 @@ packages:
   # `packages/verify`'s own `runSelfCheck` over the tree the desktop shell is about to embed,
   # so the build gate and the in-app self-check cannot disagree about what "matches" means.
   - 'tools/desktop'
+  # `tools/render-budget` (10 §9.4, F14) is a member for the same reason and one more.
+  # Lighthouse is a ~200-package tree that launches a browser; declared at the root it
+  # would be resolvable from every client package by the parent-directory walk, so the
+  # one dependency in this repository whose job is to open a network connection and
+  # start a process would sit inside the reach of the packages 10 §10.1 keeps thin.
+  # Confined here, `import 'lighthouse'` is unresolvable everywhere else in `app/`.
+  - 'tools/render-budget'
   - 'tests/firewall'
   - 'tests/depcruise-witness'
   - 'tests/protocol'

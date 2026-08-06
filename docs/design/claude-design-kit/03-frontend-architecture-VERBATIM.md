@@ -1,10 +1,18 @@
 > **DERIVED COPY for design-tool context — DO NOT EDIT.**
 > Verbatim copy of `docs/architecture/10-frontend-architecture.md` (the source of truth),
-> regenerated 2026-08-06, picking up §9's re-derived resource budgets (SQ-557): the
-> sustained observing count is 31 trading books rather than `MaxLiveMarkets` = 196, the
-> retention-depth tables move with it, the mandatory `Traded` half of 02 §5's ingest set
-> is modelled for the first time, and §9.3's metadata cap no longer exceeds its own
-> §9.2 share — on top of §3.1's `SyncDegraded` peer-count note (SQ-597), the D-21
+> regenerated 2026-08-06, picking up §9.4's two corrected enforcement cells — the
+> first-render row gates the sample's p95 tail against the p95 column and its median
+> against p50, and the chain-spec row is measured over the specs a release **emits**
+> rather than over the source paths it declares — on top of §9.4's three newly
+> enforced budget rows (F14): chain specs, release-shipped fallback metadata and the
+> Lighthouse first-render measurement now name the gates that take them, and §9.3's
+> measured blob figure is 0.15 MB rather than the truncated 0.14 — on top of §9's
+> re-derived resource budgets
+> (SQ-557): the sustained observing count is 31 trading books rather than
+> `MaxLiveMarkets` = 196, the retention-depth tables move with it, the mandatory
+> `Traded` half of 02 §5's ingest set is modelled for the first time, and §9.3's
+> metadata cap no longer exceeds its own §9.2 share — on top of §3.1's `SyncDegraded`
+> peer-count note (SQ-597), the D-21
 > handoff (§13), the `app/` re-rooting and merged package list (§10.1), the §10.2
 > firewall restatement and its negative-compilation corpus, and the branded
 > `Finalized<T>` with the `external-proposal` provenance status (§2.1). If this copy and
@@ -483,7 +491,7 @@ What is genuinely not achievable at any depth is a chain-wide trade tape (§9.1)
 
 ### 9.3 Metadata blobs bounded (F-medium: metadata blobs)
 
-`metadataCache` (historical SCALE metadata for per-era decode; **measured 0.14 MB gz** per blob — `gzip -9` over the committed 469,581 B `metadata.scale`, against the "~1–2 MB" this section previously assumed): bounded at **≤ 8 blobs / ≤ 15 MB desktop, ≤ 3 blobs / ≤ 3.75 MB mobile**. Those byte bounds are §9.2's metadata share exactly; the previous 16 MB / 6 MB caps **exceeded their own share** in both cases (SQ-557), which is a bound that cannot bind. At the measured blob size the **count** limit is what actually binds and the byte limit is headroom against metadata growth — eight blobs are ~1.1 MB. LRU-evicted; the current and next-authorized runtime's metadata are pinned non-evictable. Eviction of a blob needed by old undecoded rows is acceptable: those rows already carry the raw-bytes "pending decoder" state (§6.5) and re-fetch/re-ship paths exist (FE-P5). Release-shipped blobs (the FE-P5 fallback) count against the same bound **and against the §9.4 bundle row**, which they previously did not have.
+`metadataCache` (historical SCALE metadata for per-era decode; **measured 0.15 MB gz** per blob — DEFLATE level 9 over the committed 469,581 B `metadata.scale`, against the "~1–2 MB" this section previously assumed): bounded at **≤ 8 blobs / ≤ 15 MB desktop, ≤ 3 blobs / ≤ 3.75 MB mobile**. Those byte bounds are §9.2's metadata share exactly; the previous 16 MB / 6 MB caps **exceeded their own share** in both cases (SQ-557), which is a bound that cannot bind. At the measured blob size the **count** limit is what actually binds and the byte limit is headroom against metadata growth — eight blobs are ~1.2 MB. This cell read 0.14 MB until `app/tools/check-artifact-budget.ts` re-measured it: the blob is 146,946 B, which is 0.15 MB at the two decimals this figure is published to, and a *measured* value has to round rather than truncate because §9.4's metadata row is derived from it. LRU-evicted; the current and next-authorized runtime's metadata are pinned non-evictable. Eviction of a blob needed by old undecoded rows is acceptable: those rows already carry the raw-bytes "pending decoder" state (§6.5) and re-fetch/re-ship paths exist (FE-P5). Release-shipped blobs (the FE-P5 fallback) count against the same bound **and against the §9.4 bundle row**, which they previously did not have.
 
 ### 9.4 Budget table
 
@@ -493,9 +501,9 @@ Measured in CI (Lighthouse + Playwright timers) on reference hardware (desktop =
 |---|---|---|
 | Initial JS (critical path, gz) | ≤ 350 KB / hard-fail 450 KB | bundle-size CI gate — `app/tools/check-bundle-budget.ts`, over the entry chunk's **static** import closure. A dynamic `import(` is not followed: that is the same lazy boundary the smoldot and chain-spec rows are budgeted on separately, and summing all of `assets/` would charge first render for code it never touches |
 | smoldot WASM (worker, lazy) | ≤ 3.5 MB gz **[VERIFY artifact size — FE-P4]** | size gate + lazy load |
-| Chain specs (relay + para + Asset Hub, gz, lazy) | ≤ 3.5 MB combined (checkpoint-trimmed) | size gate |
-| Release-shipped fallback metadata (gz, lazy) | ≤ 1.5 MB combined — §9.3's 8-blob cache bound × the measured 0.14 MB blob, rounded up for metadata growth. The release cannot ship more blobs than the cache admits | size gate |
-| First meaningful render (shell) | ≤ 1.5 s / 3 s desktop; ≤ 3 s / 6 s mobile | Lighthouse CI |
+| Chain specs (relay + para + Asset Hub, gz, lazy) | ≤ 3.5 MB combined (checkpoint-trimmed) | size gate — `app/tools/check-artifact-budget.ts`, over the specs the release **emits** into `dist/chain-specs/`. A source path is what the release is built from and a browser fetches none of it, so the emitted tree is the only artifact that can answer this row: the gate binds declaration and emission in **both** directions (a declared spec the build never copied is a release with nothing to boot from, an emitted spec no declaration covers is bytes no budget weighed) and requires every pinned `chainSpecHashes` role to be matched by an emitted file **by SHA-256**, which is the same check the client makes at boot (§4.1). **Unmeasured while none is declared**: no production chain exists, so the gate instead requires the chain-spec readiness blocker to still stand, requires the emitted tree to carry no chain spec either, and fails the moment a spec hash is pinned without a spec to weigh |
+| Release-shipped fallback metadata (gz, lazy) | ≤ 1.5 MB combined — §9.3's 8-blob cache bound × the measured 0.15 MB blob, rounded up for metadata growth. The release cannot ship more blobs than the cache admits | size gate — `app/tools/check-artifact-budget.ts`, over the committed per-`spec_version` blobs an FE-P5 fallback would carry, against **both** bounds: this combined size and §9.3's blob count |
+| First meaningful render (shell) | ≤ 1.5 s / 3 s desktop; ≤ 3 s / 6 s mobile | Lighthouse CI — `app/tools/render-budget/check.ts`. **First Contentful Paint** over the built release tree, because Lighthouse's own `first-meaningful-paint` audit yields no numeric value in 12.8.2 and binding to it would gate on nothing. The reference hardware is Lighthouse's own presets, read at run time rather than copied: its default mobile preset **is** the Moto G-class device named above, and its desktop preset supplies the viewport and network while this table's 4× CPU throttle is set explicitly, since that preset's own multiplier is 1. The gate takes **3 runs** per profile and compares each published threshold against the statistic it is stated for: the sample's **p95 tail** hard-fails against the p95 column, and its **median** warns against p50. At three samples the nearest-rank p95 is the slowest run, so the tail comparison errs toward refusing rather than toward passing — a median compared against a p95 threshold would let one run in three sit above it with the gate green, which is a gate measuring a statistic the document does not publish |
 | First **verified** current-state render | ≤ 30 s / 90 s desktop; ≤ 90 s / 240 s mobile — **hypothesis, FE-P4 gates release** | Playwright sync timer vs live testnet |
 | Finalized-head refresh work | ≤ 50 ms main-thread per head | perf marks |
 | Per-refresh storage-proof traffic | ≤ 512 KiB per pinned-block screen refresh **[VERIFY measured proof sizes — FE-P4]** | perf test |

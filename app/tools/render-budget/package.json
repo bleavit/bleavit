@@ -1,0 +1,10 @@
+{
+  "name": "@bleavit/render-budget",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "chrome-launcher": "1.2.1",
+    "lighthouse": "12.8.2"
+  }
+}
