@@ -22,6 +22,7 @@ import {
   navigationFor,
   placementOf,
   DEGRADATION_ROWS,
+  EpochHeader,
   Outlet,
   PENDING_SCREENS,
   PHASE_FLAG_BITS,
@@ -142,8 +143,13 @@ import {
   DepositTracker,
   WithdrawForm,
 } from '@bleavit/features-tx';
-import { ImportRefused, ImportReview, UnlabellableClampError } from '@bleavit/features-handoff';
-import type { ImportReviewProps } from '@bleavit/features-handoff';
+import {
+  ClampProvenanceMismatchError,
+  ImportRefused,
+  ImportReview,
+  UnlabellableClampError,
+} from '@bleavit/features-handoff';
+import type { ImportReviewProps, ReviewedClamp, ReviewedLimits } from '@bleavit/features-handoff';
 import { ShareContext } from '@bleavit/features-handoff';
 import {
   AlwaysVisible,
@@ -195,7 +201,7 @@ import type {
 } from '@bleavit/features-tx';
 import { defaultScope } from '@bleavit/contexts';
 import { refuse } from '@bleavit/handoff-envelope';
-import type { Clamped, ClampedLimits, Intent } from '@bleavit/intents';
+import type { Clamped, Intent } from '@bleavit/intents';
 import { classifyCheckpointAge } from '@bleavit/verify';
 import type { VerificationPanel } from '@bleavit/verify';
 import type { Fixture } from '@bleavit/mock-runtime';
@@ -688,13 +694,12 @@ const INTENT: Intent = {
 };
 
 const reviewProps = (
-  limits: ClampedLimits,
+  limits: ReviewedLimits,
   extra: Partial<ImportReviewProps> = {},
 ): ImportReviewProps => ({
   intent: INTENT,
   limits,
   resolvedTarget: finalized('Proposal 42 — “Fund the thing” (TREASURY, Trading)'),
-  refreshedAt: AT,
   decimals: 6,
   symbol: 'USDC',
   expert: false,
@@ -711,8 +716,21 @@ const MAX_COST: Clamped<bigint> = {
   narrowed: true,
 };
 
-const CLAMPED: ClampedLimits = {
-  maxCost: MAX_COST,
+/**
+ * Pair a clamp with the provenance of the client's own number in it.
+ *
+ * There is no `refreshedAt` prop any more. The screen used to take B′ as a bare
+ * `FinalizedBlockRef` beside `Clamped<bigint>` and assemble a `verified-finalized` status out
+ * of the two, which meant the badge was manufactured on the render path from arguments
+ * nothing related. The datum now carries its own status and the screen passes it through.
+ */
+const reviewed = (clamped: Clamped<bigint>): ReviewedClamp => ({
+  clamped,
+  chain: finalized(clamped.chain),
+});
+
+const CLAMPED: ReviewedLimits = {
+  maxCost: reviewed(MAX_COST),
   deadlineBlock: { asked: 1_000_100, chain: 1_000_064, encoded: 1_000_064, boundBy: 'chain', narrowed: true },
   anyNarrowed: true,
 };
@@ -748,7 +766,13 @@ test('the encoded number is badged by where it came from, not by where the file 
       ImportReview,
       reviewProps({
         ...CLAMPED,
-        maxCost: { ...MAX_COST, encoded: 9_000_000n, chain: 9_500_000n, boundBy: 'intent', asked: 9_000_000n },
+        maxCost: reviewed({
+          ...MAX_COST,
+          encoded: 9_000_000n,
+          chain: 9_500_000n,
+          boundBy: 'intent',
+          asked: 9_000_000n,
+        }),
       }),
     ),
   );
@@ -759,6 +783,42 @@ test('the encoded number is badged by where it came from, not by where the file 
   assert.equal(askedBound[1], 'external-proposal');
 });
 
+test('the chain-bound badge is the READ’s, not one the screen assembled', () => {
+  // The provenance now travels on the datum, so the badge the screen renders is the one the
+  // read carried. Asserting the *block number* is what makes that visible: a screen that
+  // still minted its own status would show whichever pin it was handed, and before this
+  // change there was a separate `refreshedAt` prop for exactly that.
+  const html = renderToStaticMarkup(
+    h(
+      ImportReview,
+      reviewProps({
+        ...CLAMPED,
+        maxCost: { clamped: MAX_COST, chain: finalized(MAX_COST.chain, 777_777) },
+      }),
+    ),
+  );
+  assert.ok(/data-block="777777"/.test(html) || html.includes('777777'), html);
+});
+
+test('a clamp whose datum is not its own chain number is refused', () => {
+  // The pairing is what carries the provenance. A datum holding some other number is a badge
+  // belonging to a different read, and rendering it puts a block reference beside a figure
+  // that block never described.
+  assert.throws(
+    () =>
+      renderToStaticMarkup(
+        h(
+          ImportReview,
+          reviewProps({
+            ...CLAMPED,
+            maxCost: { clamped: MAX_COST, chain: finalized(1n) },
+          }),
+        ),
+      ),
+    ClampProvenanceMismatchError,
+  );
+});
+
 test('a policy-bound clamp refuses rather than wearing a status that misdescribes it', () => {
   assert.throws(
     () =>
@@ -767,7 +827,7 @@ test('a policy-bound clamp refuses rather than wearing a status that misdescribe
           ImportReview,
           reviewProps({
             ...CLAMPED,
-            maxCost: { ...MAX_COST, boundBy: 'policy' },
+            maxCost: reviewed({ ...MAX_COST, boundBy: 'policy' }),
           }),
         ),
       ),
@@ -909,7 +969,41 @@ test('an undecodable read renders raw SCALE and is never guessed at', async () =
   const html = renderToStaticMarkup(h(Undecodable, row));
   assert.ok(html.includes('0xdeadbeef'), html);
   assert.ok(/could not decode/.test(html), html);
-  assert.equal(state.phaseLabel.value, 'unknown');
+
+  // Both fields of the failed decode are ABSENT. They used to be `0` and `'unknown'` wearing
+  // a `verified-finalized` badge, defended on the grounds that the `undecodable` row beside
+  // them said the number was not to be believed. 10 §2.2 gives that status "only to values
+  // read through smoldot with storage proofs checked, or computed client-side purely from
+  // such values", and INV-FE-9 attaches the label to the datum — so an explanation held in a
+  // sibling array is not the datum being labelled, and a renderer showing the field without
+  // the array showed an invented number as a chain answer.
+  assert.equal(state.epoch, undefined, 'a manufactured epoch was badged as a chain read');
+  assert.equal(state.phaseLabel, undefined, 'a manufactured phase was badged as a chain read');
+  // …and the header says so in words rather than rendering a number with no badge.
+  const header = renderToStaticMarkup(h(EpochHeader, { chain: state }));
+  assert.ok(/Not read yet/.test(header), header);
+  assert.ok(!/>0</.test(header), `a zero reached the header: ${header}`);
+});
+
+test('the failed-decode path treats BOTH of its fields the way phaseFlags always did', async () => {
+  // The defect this asserts against was an internal inconsistency, not just a wrong badge:
+  // one object literal chose a badged fallback for the epoch decode and `undefined` for the
+  // flags decode, three lines apart, for the identical situation. Failing both reads at once
+  // is what makes the two paths comparable.
+  const pin: FinalizedBlockRef = { chain: TEST_CHAIN, blockHash: '0xbeef', blockNumber: 42 };
+  const reader = readerDouble(pin, { [SHELL_READS.epochOf]: '0xaa', [SHELL_READS.phaseFlags]: '0xbb' });
+  const { state, undecodable } = await readShellState(reader, {
+    epochOf: () => ({ ok: false, reason: 'no' }),
+    phaseFlags: () => ({ ok: false, reason: 'no' }),
+  });
+  assert.equal(undecodable.length, 2);
+  assert.deepEqual(
+    [state.epoch, state.phaseLabel, state.phaseFlags],
+    [undefined, undefined, undefined],
+    'two identical failure paths were still resolved differently',
+  );
+  // The height is the pin itself rather than a decode, so it survives both failures.
+  assert.equal(state.finalizedHeight?.value, 42);
 });
 
 test('an unreadable PhaseFlags fails closed to the banner, not to post-sudo', async () => {
@@ -1389,8 +1483,8 @@ test('the recorded chain bytes reach the shell as the right model', async () => 
 
   const { state, undecodable } = await readShellState(reader, shellDecoders(codecs));
   assert.deepEqual(undecodable, [], JSON.stringify(undecodable));
-  assert.equal(state.epoch.value, 1);
-  assert.equal(state.phaseLabel.value, 'Intake');
+  assert.equal(state.epoch?.value, 1);
+  assert.equal(state.phaseLabel?.value, 'Intake');
   const flags = state.phaseFlags;
   assert.ok(flags, 'PhaseFlags did not decode from the recorded bytes');
   assert.equal(flags.value, 17);

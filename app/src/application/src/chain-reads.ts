@@ -24,9 +24,27 @@
  * carries the failed reads alongside the good ones, and the shell renders `Undecodable`.
  * The alternative — a `try`/`catch` that substitutes a zero — is the guess the rule forbids,
  * and it is indistinguishable on screen from a chain that really says zero.
+ *
+ * **A failed decode yields an absent leaf, not a badged fallback.** This file used to badge
+ * `0` and `'unknown'` `verified-finalized` on that path while `phaseFlags` three lines down
+ * chose `undefined` for the identical situation, and the comment defending it argued that the
+ * `undecodable` array *"is what says the number is not to be believed"*. 10 §2.2 settles it
+ * against that reading in one sentence — *"`verified-finalized` status is assigned **only** to
+ * values read through smoldot with storage proofs checked, or computed client-side purely from
+ * such values"* — and a substituted `0` is neither. The explanation living in a sibling array
+ * does not repair it either: INV-FE-9 attaches the label to *the datum*, so a renderer showing
+ * the field and not the array shows a manufactured number under a verified badge. Both paths
+ * now do what `phaseFlags` always did.
+ *
+ * ## Every leaf descends from a read, rather than being stamped after the fact
+ *
+ * The pin is attached by `derive`, which takes the `Finalized<T>` the storage call returned and
+ * carries *its* pin. The local `finalized(value)` helper it replaced took any value at all and
+ * returned a `verified-finalized` badge, so whether the badge was true depended entirely on
+ * what each of its four call sites passed — and two of them passed values no read produced.
  */
 
-import type { Finalized, FinalizedBlockRef, StorageItem } from '@bleavit/chain-client';
+import { derive, type Finalized, type FinalizedBlockRef, type StorageItem } from '@bleavit/chain-client';
 import type { Verified } from '@bleavit/shared-types';
 import type { ShellChainState } from './shell.js';
 
@@ -85,12 +103,15 @@ function firstValue(items: readonly StorageItem[]): string | undefined {
  * smaller cost.
  */
 export function assertOnePin(state: ShellChainState, blockHash: string): void {
-  const leaves: readonly Verified<unknown>[] = [
+  const declared: readonly (Verified<unknown> | undefined)[] = [
     state.epoch,
     state.phaseLabel,
     state.finalizedHeight,
-    ...(state.phaseFlags === undefined ? [] : [state.phaseFlags]),
+    state.phaseFlags,
   ];
+  // An absent leaf is checked by being absent: it carries no pin, so there is nothing for it
+  // to mix. Every leaf that *is* present must name the reader's block.
+  const leaves = declared.filter((leaf): leaf is Verified<unknown> => leaf !== undefined);
   for (const leaf of leaves) {
     const at = 'blockHash' in leaf.status ? leaf.status.blockHash : undefined;
     if (at !== blockHash) {
@@ -137,17 +158,9 @@ export async function readShellState(
 ): Promise<ShellRead> {
   const at = reader.at;
   const undecodable: UndecodableRead[] = [];
-  const finalized = <T,>(value: T): Verified<T> => ({
-    value,
-    status: {
-      kind: 'verified-finalized',
-      chain: at.chain,
-      blockHash: at.blockHash,
-      blockNumber: at.blockNumber,
-    },
-  });
 
-  const epochRaw = firstValue((await reader.storage(SHELL_READS.epochOf)).value);
+  const epochRead = await reader.storage(SHELL_READS.epochOf);
+  const epochRaw = firstValue(epochRead.value);
   const epochDecoded =
     epochRaw === undefined
       ? ({ ok: false, reason: 'the storage key returned no value' } as const)
@@ -159,8 +172,10 @@ export async function readShellState(
       reason: epochDecoded.reason,
     });
   }
+  const epochValue = epochDecoded.ok ? epochDecoded.value : undefined;
 
-  const flagsRaw = firstValue((await reader.storage(SHELL_READS.phaseFlags)).value);
+  const flagsRead = await reader.storage(SHELL_READS.phaseFlags);
+  const flagsRaw = firstValue(flagsRead.value);
   const flagsDecoded =
     flagsRaw === undefined
       ? ({ ok: false, reason: 'the storage key returned no value' } as const)
@@ -172,18 +187,23 @@ export async function readShellState(
       reason: flagsDecoded.reason,
     });
   }
+  const flagsValue = flagsDecoded.ok ? flagsDecoded.value : undefined;
 
   const state: ShellChainState = {
-    // A failed epoch decode renders 0 with the raw bytes shown beside it, rather than the
-    // header disappearing. `undecodable` is what says the number is not to be believed.
-    epoch: finalized(epochDecoded.ok ? epochDecoded.value.epoch : 0),
-    phaseLabel: finalized(epochDecoded.ok ? epochDecoded.value.phase : 'unknown'),
-    finalizedHeight: finalized(at.blockNumber),
+    // A failed epoch decode leaves both of its fields **absent**, and the raw bytes go to
+    // `undecodable` for the shell to render. Badging a substituted `0` `verified-finalized`
+    // is what 10 §2.2 forbids in as many words, and it is the reading the header's own
+    // `phaseFlags` field has always taken one line further down.
+    epoch: epochValue === undefined ? undefined : derive(epochRead, () => epochValue.epoch),
+    phaseLabel: epochValue === undefined ? undefined : derive(epochRead, () => epochValue.phase),
+    // The height is the pin, so it descends from any read made at it — taken off the read
+    // rather than off `reader.at` so it is the block the storage answer came from.
+    finalizedHeight: derive(epochRead, () => epochRead.status.blockNumber),
     // Unread and undecodable collapse here deliberately: both mean the client cannot
     // establish that sudo is gone, and INV-FE-12 gives them the same fail-closed answer.
     // The raw u32 bitset of 02 §7.3, deliberately not pre-interpreted: a screen handed a
     // boolean could not show which other flags are set.
-    phaseFlags: flagsDecoded.ok ? finalized(flagsDecoded.value) : undefined,
+    phaseFlags: flagsValue === undefined ? undefined : derive(flagsRead, () => flagsValue),
   };
 
   assertOnePin(state, at.blockHash);

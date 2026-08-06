@@ -31,8 +31,7 @@
  * site.
  */
 
-import type { Finalized, FinalizedBlockRef, StorageItem } from '@bleavit/chain-client';
-import type { Verified } from '@bleavit/shared-types';
+import { derive, type Finalized, type FinalizedBlockRef, type StorageItem } from '@bleavit/chain-client';
 import type { DecisionStats, ProposalSummary, ProposalView } from './proposals.js';
 
 /** Same shape the shell's reads use: a decode failure is data, not an exception. */
@@ -174,17 +173,6 @@ export async function readProposals(
   reader: ProposalsReader,
   decoders: ProposalDecoders,
 ): Promise<ProposalsRead> {
-  const at = reader.at;
-  const finalized = <T,>(value: T): Verified<T> => ({
-    value,
-    status: {
-      kind: 'verified-finalized',
-      chain: at.chain,
-      blockHash: at.blockHash,
-      blockNumber: at.blockNumber,
-    },
-  });
-
   const raw = await reader.crossCheckedCall({
     api: PROPOSAL_READS.summaries,
     storagePrefix: PROPOSAL_READS.proposals,
@@ -221,11 +209,15 @@ export async function readProposals(
   }
 
   return {
+    // Every leaf descends from `raw` through `derive`, which carries that call's own pin
+    // (10 §2.2's "computed client-side purely from such values"). The local stamping helper
+    // this replaced took any value and returned a `verified-finalized` badge, so it was the
+    // call site rather than the type that decided whether the badge was true.
     summaries: decoded.value.map((record) => ({
-      id: finalized(record.id),
-      title: finalized(record.title),
-      klass: finalized(record.klass),
-      state: finalized(record.state),
+      id: derive(raw, () => record.id),
+      title: derive(raw, () => record.title),
+      klass: derive(raw, () => record.klass),
+      state: derive(raw, () => record.state),
     })),
     undecodable: emptyKeys,
     anomalies: [],

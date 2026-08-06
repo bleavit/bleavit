@@ -47,13 +47,23 @@ import { sudoActive } from './phase-flags.js';
 /**
  * What the shell knows about the chain's phase.
  *
- * `phaseFlags` is `undefined` when `Constitution.PhaseFlags` could not be read — distinct
- * from a value that was read and has bit 4 clear, and the distinction decides the banner.
+ * **Every field may be absent, and absence is the only honest way to say "not established".**
+ * Each was once required, which meant the two states this header can be in — before the first
+ * read lands, and after a read whose decode failed — both had to be expressed as a *value*.
+ * They were: `0` badged `verified-best` at block 0 by the boot sentinel, and `0` badged
+ * `verified-finalized` by the reader's failure path. 10 §2.2 assigns the verified statuses
+ * *"only to values read through smoldot with storage proofs checked, or computed client-side
+ * purely from such values"*, and neither zero was. `undefined` is not a placeholder here; it
+ * is the state, and `EpochHeader` renders it as one.
+ *
+ * `phaseFlags` has always been this way — `undefined` when `Constitution.PhaseFlags` could not
+ * be read, distinct from a value that was read and has bit 4 clear, and the distinction
+ * decides the banner. The other three now match it.
  */
 export interface ShellChainState {
-  readonly epoch: Verified<number>;
-  readonly phaseLabel: Verified<string>;
-  readonly finalizedHeight: Verified<number>;
+  readonly epoch: Verified<number> | undefined;
+  readonly phaseLabel: Verified<string> | undefined;
+  readonly finalizedHeight: Verified<number> | undefined;
   /**
    * `Constitution.PhaseFlags` — the raw **u32 bitset** of 02 §7.3, finalized-read.
    *
@@ -122,17 +132,48 @@ function NavigationBar({ nav, active }: { readonly nav: Navigation; readonly act
   );
 }
 
+/**
+ * A field the client has not established.
+ *
+ * There is deliberately no number here and no badge. A badge is a claim about where a value
+ * came from, and there is no value; the six statuses of 10 §2.1 all describe an observation
+ * of some strength, and *"we have not read this"* is not a weak observation but the absence
+ * of one. What the user gets instead is a sentence, which is the form INV-FE-12's fail-closed
+ * rule takes on screen — the same shape `sudoBannerFor` already uses for an unread
+ * `PhaseFlags`.
+ */
+function NotEstablished({ what }: { readonly what: string }) {
+  return (
+    <span className="datum datum--unread" role="note">
+      Not read yet — this client cannot state {what} from finalized state. Nothing is being
+      substituted for it.
+    </span>
+  );
+}
+
 export function EpochHeader({ chain }: { readonly chain: ShellChainState }) {
   return (
     <Panel title="Epoch and phase">
       <Field label="Epoch">
-        <BlockRef datum={chain.epoch} />
+        {chain.epoch === undefined ? (
+          <NotEstablished what="the epoch" />
+        ) : (
+          <BlockRef datum={chain.epoch} />
+        )}
       </Field>
       <Field label="Phase">
-        <Phrase datum={chain.phaseLabel} />
+        {chain.phaseLabel === undefined ? (
+          <NotEstablished what="the phase" />
+        ) : (
+          <Phrase datum={chain.phaseLabel} />
+        )}
       </Field>
       <Field label="Finalized head">
-        <BlockRef datum={chain.finalizedHeight} />
+        {chain.finalizedHeight === undefined ? (
+          <NotEstablished what="the finalized head" />
+        ) : (
+          <BlockRef datum={chain.finalizedHeight} />
+        )}
       </Field>
     </Panel>
   );

@@ -46,8 +46,7 @@ import {
   type ReactNode,
 } from '@bleavit/ui';
 import { externalProposal, type Verified } from '@bleavit/shared-types';
-import type { FinalizedBlockRef } from '@bleavit/chain-client';
-import type { Clamped, ClampedLimits, Intent } from '@bleavit/intents';
+import type { Clamped, Intent } from '@bleavit/intents';
 import type { HandoffRefusal } from '@bleavit/handoff-envelope';
 
 /**
@@ -102,6 +101,53 @@ export class UnlabellableClampError extends Error {
 }
 
 /**
+ * A clamp whose chain input arrives with the provenance of the reads it came from.
+ *
+ * `Clamped<bigint>` records three numbers and which one bound, and its `chain` field is a
+ * bare `bigint` — the type has no room for where that number came from. This screen used to
+ * supply the missing half from a separate `refreshedAt: FinalizedBlockRef` prop and write the
+ * status out longhand, which meant the badge was assembled here from two props nothing
+ * related: a caller could pass a clamp computed at one block and a pin naming another, and the
+ * screen would badge the result `verified-finalized` at the second. Pairing them in one object
+ * is what makes that unsayable — there is no longer a pin to pass on its own.
+ */
+export interface ReviewedClamp {
+  readonly clamped: Clamped<bigint>;
+  /**
+   * The client's own recomputed value at B′, as read. When the client's number is the binding
+   * one, this **is** the encoded number, and its badge is this datum's status passed through.
+   */
+  readonly chain: Verified<bigint>;
+}
+
+/** The clamped limits with each chain input's provenance attached — `ClampedLimits` plus that. */
+export interface ReviewedLimits {
+  readonly maxCost?: ReviewedClamp;
+  readonly minProceeds?: ReviewedClamp;
+  readonly deadlineBlock: Clamped<number>;
+  readonly anyNarrowed: boolean;
+}
+
+/**
+ * A `ReviewedClamp` whose two halves disagree about the client's own number.
+ *
+ * The pairing is what carries the provenance, so a datum that is not the clamp's `chain`
+ * value is a badge belonging to some other read. Refusing beats rendering: the failure is
+ * silent otherwise, and what it produces is a number under a block reference that never
+ * described it.
+ */
+export class ClampProvenanceMismatchError extends Error {
+  constructor(name: string, clampChain: bigint, datum: bigint) {
+    super(
+      `"${name}" was clamped against ${clampChain} but its provenance datum carries ${datum}. ` +
+        'The datum is what supplies the badge, so these disagreeing means the badge belongs ' +
+        'to a different read than the number it would be shown beside (10 §2.2).',
+    );
+    this.name = 'ClampProvenanceMismatchError';
+  }
+}
+
+/**
  * The status of the *encoded* number, derived from which input bound it.
  *
  * The first draft of this screen badged the encoded side `external-proposal`
@@ -110,43 +156,41 @@ export class UnlabellableClampError extends Error {
  * user an external tool asked for it inverts exactly the provenance the pair exists to
  * show. 10 §2.1 gives the correct answer for that case directly — `verified-finalized` is
  * for values *"computed client-side purely from such values"*.
+ *
+ * What it does **not** give this screen is permission to write that status out itself. The
+ * chain-bound arm now returns the caller's own datum unchanged, so the badge is the one the
+ * read carried rather than one assembled here from a value and a pin that arrived separately.
  */
-function encodedStatus(
-  clamped: Clamped<bigint>,
-  refreshedAt: FinalizedBlockRef,
-  name: string,
-): Verified<bigint> {
+function encodedStatus(reviewed: ReviewedClamp, name: string): Verified<bigint> {
+  const { clamped } = reviewed;
   if (clamped.boundBy === 'policy') throw new UnlabellableClampError(name);
   if (clamped.boundBy === 'intent') return externalProposal(clamped.encoded);
-  return {
-    value: clamped.encoded,
-    status: {
-      kind: 'verified-finalized',
-      chain: refreshedAt.chain,
-      blockHash: refreshedAt.blockHash,
-      blockNumber: refreshedAt.blockNumber,
-    },
-  };
+  if (reviewed.chain.value !== clamped.chain) {
+    throw new ClampProvenanceMismatchError(name, clamped.chain, reviewed.chain.value);
+  }
+  // `clampCeiling`/`clampFloor` start from the chain value and only overwrite it for `intent`
+  // or `policy`, both handled above — so on this arm the encoded number IS the chain number,
+  // and the datum that carries its provenance is the one to render.
+  return reviewed.chain;
 }
 
 function ClampRow({
-  clamped,
+  reviewed,
   name,
   direction,
   decimals,
   symbol,
   expert,
-  refreshedAt,
 }: {
-  readonly clamped: Clamped<bigint>;
+  readonly reviewed: ReviewedClamp;
   readonly name: string;
   readonly direction: 'ceiling' | 'floor';
   readonly decimals: number;
   readonly symbol: string;
   readonly expert: boolean;
-  readonly refreshedAt: FinalizedBlockRef;
 }) {
-  const encoded = encodedStatus(clamped, refreshedAt, name);
+  const { clamped } = reviewed;
+  const encoded = encodedStatus(reviewed, name);
   return (
     <div className="clamp-row">
       {clamped.asked === undefined ? (
@@ -192,14 +236,19 @@ function ClampRow({
 
 export interface ImportReviewProps {
   readonly intent: Intent;
-  readonly limits: ClampedLimits;
+  /**
+   * The clamped limits, each carrying its chain input's own provenance (`ReviewedLimits`).
+   *
+   * There is deliberately no separate `refreshedAt` prop. B′ used to arrive as a bare
+   * `FinalizedBlockRef` and this screen combined it with `clamped.encoded` to mint a badge;
+   * carrying the pin on the datum instead means the screen has nothing left to combine.
+   */
+  readonly limits: ReviewedLimits;
   /**
    * What the action's target id resolves to on chain — §11.14.4's substitution defence.
    * Required, and `Verified<T>`, so it carries its own `verified-finalized` badge.
    */
   readonly resolvedTarget: Verified<string>;
-  /** B′ — the block the clamp's chain inputs were read at (§11.14.3). */
-  readonly refreshedAt: FinalizedBlockRef;
   readonly decimals: number;
   readonly symbol: string;
   readonly expert: boolean;
@@ -211,7 +260,6 @@ export function ImportReview({
   intent,
   limits,
   resolvedTarget,
-  refreshedAt,
   decimals,
   symbol,
   expert,
@@ -239,24 +287,22 @@ export function ImportReview({
 
       {limits.maxCost === undefined ? null : (
         <ClampRow
-          clamped={limits.maxCost}
+          reviewed={limits.maxCost}
           name="Most you will pay"
           direction="ceiling"
           decimals={decimals}
           symbol={symbol}
           expert={expert}
-          refreshedAt={refreshedAt}
         />
       )}
       {limits.minProceeds === undefined ? null : (
         <ClampRow
-          clamped={limits.minProceeds}
+          reviewed={limits.minProceeds}
           name="Least you will receive"
           direction="floor"
           decimals={decimals}
           symbol={symbol}
           expert={expert}
-          refreshedAt={refreshedAt}
         />
       )}
 

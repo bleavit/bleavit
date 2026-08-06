@@ -55,6 +55,24 @@ import {
   type WithdrawInputs,
 } from './funding.js';
 
+/**
+ * A balance the client read and could not decode.
+ *
+ * No number and no badge. The model made this field absent rather than substituting `0n`
+ * (10 §2.2, INV-FE-12), and a screen that filled the gap back in with a zero would restore
+ * the defect one layer up — the user would read a balance the chain never stated, and this
+ * time with no `Verified<T>` for a badge to hang off. The matching block is already in the
+ * list below, so this row says what is missing and the notice says what it stops.
+ */
+function BalanceUnreadable({ what }: { readonly what: string }) {
+  return (
+    <span className="datum datum--unread" role="note">
+      {what} could not be decoded from the record this client read. It is not being guessed
+      at, and nothing is being substituted for it.
+    </span>
+  );
+}
+
 export function DepositForm({
   inputs,
   xcmHealthy,
@@ -75,7 +93,11 @@ export function DepositForm({
       {/* The Asset Hub side's own figure, badged with the Asset Hub connection's status.
           Nothing on this screen combines it with a futarchy-chain balance. */}
       <Field label="Your Asset Hub balance">
-        <Amount datum={inputs.assetHubBalance} decimals={decimals} symbol={symbol} />
+        {inputs.assetHubBalance === undefined ? (
+          <BalanceUnreadable what="Your Asset Hub USDC balance" />
+        ) : (
+          <Amount datum={inputs.assetHubBalance} decimals={decimals} symbol={symbol} />
+        )}
       </Field>
 
       {blocks.map((block) => (
@@ -164,7 +186,11 @@ export function WithdrawForm({
   return (
     <Panel title="Withdraw USDC">
       <Field label="Free balance">
-        <Amount datum={inputs.freeBalance} decimals={decimals} symbol={symbol} />
+        {inputs.freeBalance === undefined ? (
+          <BalanceUnreadable what="Your free USDC balance" />
+        ) : (
+          <Amount datum={inputs.freeBalance} decimals={decimals} symbol={symbol} />
+        )}
       </Field>
       <Field label="Destination on Asset Hub">
         <Identifier datum={destination} />

@@ -77,6 +77,39 @@ export function finalize<T>(value: T, at: FinalizedBlockRef): Finalized<T> {
 }
 
 /**
+ * Carry a read's own pin onto a value computed from it — 10 §2.2's second clause.
+ *
+ * `verified-finalized` is assigned *"only to values read through smoldot with storage proofs
+ * checked, **or computed client-side purely from such values**"*. This is that second clause,
+ * and it exists because the obvious way to write it was to stamp the pin on afterwards:
+ *
+ * ```ts
+ * const finalized = <T,>(value: T): Verified<T> => ({
+ *   value,
+ *   status: { kind: 'verified-finalized', chain: at.chain, blockHash: at.blockHash, ... },
+ * });
+ * ```
+ *
+ * A helper of that shape takes **any** value and hands back a `verified-finalized` badge, so
+ * whether the badge is true is decided by what the caller passes — which is the property the
+ * type was supposed to carry. Every such helper in this client had at least one call site
+ * where the answer was no: a fallback manufactured on a decode-failure path, a caller-supplied
+ * id, a payload unwrapped out of somebody else's `Verified<T>`.
+ *
+ * `derive` grants nothing. It cannot be called without a `Finalized<A>` — a read that already
+ * happened — and the pin it attaches is that read's own, never one the caller names. So the
+ * only values it can label are values a light-client read is upstream of, which is exactly
+ * what the clause permits. A value with no read behind it has nothing to pass in.
+ *
+ * It is deliberately **not** variadic. Two reads at two blocks describe no single block, and
+ * `meet` already refuses that case with its reason stated; a fold over N reads would have to
+ * either repeat that refusal or quietly pick a pin.
+ */
+export function derive<A, B>(read: Finalized<A>, compute: (value: A) => B): Finalized<B> {
+  return finalize(compute(read.value), read.status);
+}
+
+/**
  * Meet of two finalized reads: the result is finalized only if both were read from
  * the same chain at the SAME block. Two values from different blocks are not a
  * consistent view, and INV-FE-2 requires every precondition to be evaluated at a
