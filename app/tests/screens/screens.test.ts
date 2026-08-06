@@ -123,8 +123,17 @@ import {
   incomeLabel,
   navPresentation,
   admitRegistryWindowEvent,
+  challengeBlocks,
+  escalationConsequence,
   filingBlocks,
-  REGISTRY_PALLET,
+  reportBlocks,
+  reportBondFloor,
+  ChallengeRound,
+  ProofRefused,
+  RecomputeProof,
+  SubmitReport,
+  RegistryInstanceCollisionError,
+  REPORT_BOND_NOT_ESTABLISHED,
   recomputeProof,
   maySubmitRecompute,
   ProofMismatchError,
@@ -178,6 +187,10 @@ import type {
   RecomputeInputs,
   Referendum,
   RegistrationInputs,
+  ChallengeInputs,
+  OracleRound,
+  RegistryInstances,
+  ReportInputs,
   Stream,
 } from '@bleavit/features-tx';
 import { defaultScope } from '@bleavit/contexts';
@@ -254,6 +267,15 @@ const copy = (text: string | undefined, what = 'copy'): string => {
 };
 
 /** The nth element of a result array, or a throw naming how many there really were. */
+/**
+ * Source with comments removed, for the tests that assert code by its **absence**.
+ *
+ * A raw-text scan reports the prose explaining why a thing is absent as the thing itself —
+ * the same tokenizer hole every version of `check:chain-literals` had to close.
+ */
+const stripComments = (source: string): string =>
+  source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+
 const nth = <T,>(items: readonly T[], index: number, what: string): T => {
   const item = items.at(index);
   if (item === undefined) throw new Error(`expected a ${what} at ${index}; there are ${items.length}`);
@@ -3013,8 +3035,92 @@ test('the conservative zeros are explained, not just shown as 0', () => {
 
 // ------------------ §11.8.6 the pallet-bound ingest filter and the filing path (F17)
 
+/** Just enough of `tools/release/surface-manifest.json` to name pallets and their fields. */
+interface SurfaceManifest {
+  readonly entries: readonly {
+    readonly id: string;
+    readonly pallet: string;
+    readonly layout?: { readonly fields?: readonly { readonly name: string }[] };
+  }[];
+}
+
+/**
+ * The registry pallet names come from the **frozen surface manifest**, never from the module.
+ *
+ * V-169: this filter shipped bound to `REGISTRY_PALLET = 'Registry'` and this suite built its
+ * fixtures out of that same constant, so the two agreed with each other while neither agreed
+ * with the chain. **No pallet of that name exists** — `pallet-registry` is instantiated twice
+ * — so the filter matched nothing, every real window event was rejected, and §11.8.6's
+ * countdown adjustments could never happen. Nothing in a client with no live stream yet looks
+ * different when that is true.
+ *
+ * `tools/release/surface-manifest.json` is the 02 §6 frozen surface: `surface:check`
+ * byte-compares `CRITICAL_SURFACE` against it and `test:mock-runtime` checks that against real
+ * recorded metadata in both directions. Taking the names from there is what makes this suite
+ * unable to agree with a wrong constant — and it carries the field lists too, so the oracle
+ * fixture below is the event the chain really emits rather than one written here to be refused.
+ */
+const SURFACE = JSON.parse(
+  readFileSync(join(REPO, 'tools/release/surface-manifest.json'), 'utf8'),
+) as SurfaceManifest;
+
+function surfaceEntry(id: string): SurfaceManifest['entries'][number] {
+  const entry = SURFACE.entries.find((candidate) => candidate.id === id);
+  if (entry === undefined) throw new Error(`the frozen surface has no entry ${id}`);
+  return entry;
+}
+
+function surfaceFields(id: string): readonly string[] {
+  const fields = surfaceEntry(id).layout?.fields;
+  if (fields === undefined) throw new Error(`${id} declares no field layout`);
+  return fields.map((field) => field.name);
+}
+
+const REGISTRIES: RegistryInstances = {
+  incident: surfaceEntry('event.registry.window_extended.incident').pallet,
+  milestone: surfaceEntry('event.registry.window_extended.milestone').pallet,
+};
+
+test('there is no pallet named `Registry`, and the module holds no name of its own (V-169)', () => {
+  const pallets = new Set(SURFACE.entries.map((entry) => entry.pallet));
+  assert.ok(!pallets.has('Registry'), 'the frozen surface declares no pallet named `Registry`');
+  assert.ok(pallets.has(REGISTRIES.incident));
+  assert.ok(pallets.has(REGISTRIES.milestone));
+  assert.notEqual(REGISTRIES.incident, REGISTRIES.milestone);
+
+  // Asserted by absence, the way `upgrade-crank.ts` proves it does no lead-time arithmetic:
+  // a chain identifier this module cannot name is one it cannot get wrong.
+  // Comments stripped first, the way the upgrade crank's own absence test does it: a scan
+  // over raw text sees the prose explaining why the name is absent and reports it present.
+  const source = stripComments(
+    readFileSync(join(REPO, 'app/src/features/tx/src/registry-filing.ts'), 'utf8'),
+  );
+  for (const name of ['Registry', REGISTRIES.incident, REGISTRIES.milestone]) {
+    assert.ok(
+      !source.includes(`'${name}'`) && !source.includes(`"${name}"`),
+      `registry-filing.ts must not name ${name} — the instances are supplied`,
+    );
+  }
+  // Not vacuous: the same scan finds the names where they DO live, in the frozen manifest.
+  assert.ok(REGISTRIES.incident.length > 0 && REGISTRIES.milestone.length > 0);
+});
+
+test('two registries configured under one name throw rather than merging their ids', () => {
+  // A composition mistake, not untrusted input. Collapsed, one filing's extension would move
+  // the other's countdown — the same defect the pallet binding exists to prevent, one level
+  // down, because the two instances allocate filing ids independently.
+  assert.throws(
+    () =>
+      admitRegistryWindowEvent(REG_EXTENDED(), {
+        incident: REGISTRIES.incident,
+        milestone: REGISTRIES.incident,
+      }),
+    RegistryInstanceCollisionError,
+  );
+});
+
 const REG_EXTENDED = (over: Partial<RawEvent> = {}): RawEvent => ({
-  pallet: 'Registry',
+  pallet: REGISTRIES.incident,
   variant: 'WindowExtended',
   fields: { epoch: 7, filing_id: 42, new_deadline: 9_000 },
   ...over,
@@ -3025,27 +3131,41 @@ test('an oracle event of the same name is refused — the filter binds the palle
   // ingests oracle events about a different sub-game. The symptom is a registry countdown
   // that moves when an ORACLE watchtower extends an ORACLE round, and a challenger who
   // trusted it misses their window.
-  const fromOracle = admitRegistryWindowEvent({
-    pallet: 'Oracle',
-    variant: 'WindowExtended',
-    fields: { component: 3, epoch: 7, round: 2, new_deadline: 9_000 },
-  });
+  const oracleFields = surfaceFields('event.oracle.window_extended');
+  assert.deepEqual([...oracleFields].sort(), ['component', 'epoch', 'new_deadline', 'round']);
+  const fromOracle = admitRegistryWindowEvent(
+    {
+      pallet: surfaceEntry('event.oracle.window_extended').pallet,
+      variant: 'WindowExtended',
+      fields: Object.fromEntries(oracleFields.map((name) => [name, 1])),
+    },
+    REGISTRIES,
+  );
   assert.equal(fromOracle.kind, 'rejected');
-  assert.match(fromOracle.reason, /came from Oracle, not Registry/);
+  assert.match(fromOracle.reason, /which is neither/);
 
-  // And the registry's own event is admitted, so the refusal is not vacuous.
-  const admitted = admitRegistryWindowEvent(REG_EXTENDED());
-  assert.equal(admitted.kind, 'admitted');
-  assert.equal(admitted.event.variant, 'WindowExtended');
-  assert.equal(admitted.event.filingId, 42);
-  assert.equal(admitted.event.newDeadline, 9_000);
+  // Both registries' own events are admitted, so the refusal is not vacuous — and each says
+  // WHICH registry allocated the id, because a bare `filingId` is not an identifier when two
+  // independent allocators can both produce 42.
+  for (const registry of ['incident', 'milestone'] as const) {
+    const admitted = admitRegistryWindowEvent(
+      REG_EXTENDED({ pallet: REGISTRIES[registry] }),
+      REGISTRIES,
+    );
+    assert.equal(admitted.kind, 'admitted');
+    assert.equal(admitted.event.variant, 'WindowExtended');
+    assert.equal(admitted.event.registry, registry);
+    assert.equal(admitted.event.filingId, 42);
+    assert.equal(admitted.event.newDeadline, 9_000);
+  }
 });
 
 test('a right-pallet, wrong-body event is refused too — checking the label trusts the labeller', () => {
-  // The second direction. One check alone is weaker than it looks: an event labelled
-  // Registry while carrying `component`/`round` is the same failure arriving another way.
+  // The second direction. One check alone is weaker than it looks: an event labelled with a
+  // registry while carrying `component`/`round` is the same failure arriving another way.
   const mislabelled = admitRegistryWindowEvent(
     REG_EXTENDED({ fields: { component: 3, epoch: 7, round: 2, filing_id: 42, new_deadline: 9_000 } }),
+    REGISTRIES,
   );
   assert.equal(mislabelled.kind, 'rejected');
   assert.match(mislabelled.reason, /carries `component`/);
@@ -3053,18 +3173,30 @@ test('a right-pallet, wrong-body event is refused too — checking the label tru
 });
 
 test('acknowledgements admit with their watchtower, and a missing field refuses', () => {
-  const ack = admitRegistryWindowEvent({
-    pallet: REGISTRY_PALLET,
-    variant: 'WindowAcknowledged',
-    fields: { epoch: 7, filing_id: 42, watchtower: '5Gw...' },
-  });
+  const ack = admitRegistryWindowEvent(
+    {
+      pallet: REGISTRIES.milestone,
+      variant: 'WindowAcknowledged',
+      fields: { epoch: 7, filing_id: 42, watchtower: '5Gw...' },
+    },
+    REGISTRIES,
+  );
   assert.equal(ack.kind, 'admitted');
   assert.equal(ack.event.variant, 'WindowAcknowledged');
+  assert.equal(ack.event.registry, 'milestone');
   assert.equal(ack.event.watchtower, '5Gw...');
+  // The manifest's own field list for that event, so the fixture cannot drift from the chain.
+  assert.deepEqual(
+    [...surfaceFields('event.registry.window_acknowledged.milestone')].sort(),
+    ['epoch', 'filing_id', 'watchtower'],
+  );
 
   // A refusal, never a silent drop: an event this client cannot read is information, and a
   // countdown built on a stream nobody audited is how the wrong deadline gets rendered.
-  const truncated = admitRegistryWindowEvent(REG_EXTENDED({ fields: { epoch: 7, filing_id: 42 } }));
+  const truncated = admitRegistryWindowEvent(
+    REG_EXTENDED({ fields: { epoch: 7, filing_id: 42 } }),
+    REGISTRIES,
+  );
   assert.equal(truncated.kind, 'rejected');
   assert.match(truncated.reason, /missing `new_deadline`/);
 });
@@ -3176,6 +3308,175 @@ test('a closed round blocks submission even with a reproduced proof', () => {
   const proof = recomputeProof(RECOMPUTE(), () => 1_234_000_000n);
   assert.equal(maySubmitRecompute({ proof, roundOpen: finalized(true) }), true);
   assert.equal(maySubmitRecompute({ proof, roundOpen: finalized(false) }), false);
+});
+
+// --------------------- §11.8.1 `oracle.report` / `oracle.challenge` — P-13/P-14 (F17)
+
+const ROUND = (over: Partial<OracleRound> = {}): OracleRound => ({
+  component: finalized(3),
+  epoch: finalized(7),
+  specVersion: finalized(2),
+  round: finalized(2),
+  reporter: finalized('5Reporter'),
+  value1e9: finalized(620_000_000n),
+  evidenceHash: finalized('0xev'),
+  bond: finalized(20_000_000_000n),
+  challengeDeadline: finalized(43_200),
+  ackedByWatchtowers: finalized(3),
+  escalated: finalized(true),
+  ...over,
+});
+
+const REPORT = (over: Partial<ReportInputs> = {}): ReportInputs => ({
+  reportWindowOpen: finalized(true),
+  registered: finalized(true),
+  stakeHeld: finalized(100_000_000_000n),
+  reporterStake: finalized(100_000_000_000n),
+  freeUsdc: finalized(50_000_000_000n),
+  bondFloor: reportBondFloor(finalized(10_000_000_000n)),
+  evidenceHash: '0xev',
+  ...over,
+});
+
+const CHALLENGE = (over: Partial<ChallengeInputs> = {}): ChallengeInputs => ({
+  round: ROUND(),
+  caller: '5Challenger',
+  freeUsdc: finalized(50_000_000_000n),
+  now: finalized(1_000),
+  evidenceHash: '0xev',
+  ...over,
+});
+
+test('no bond arithmetic exists in this client — the round bond is read (SQ-552 shape)', () => {
+  // P-14 says the escalation bond "doubles per round", which invites `B_1 << (round - 1)`.
+  // 07 §6.1 freezes `B_1` per game at creation and forbids re-reading `orc.bond_floor`,
+  // `orc.bond_bps` or `orc.rounds` on escalation, so a client that doubled would price the
+  // round off TODAY's parameters while the chain prices it off the frozen ones — and after
+  // any lawful amendment the user is shown a number that is not the charge.
+  const code = stripComments(
+    readFileSync(join(REPO, 'app/src/features/tx/src/oracle-reporting.ts'), 'utf8'),
+  );
+  for (const forbidden of ['**', '<<', '2n', '10_000n', 'Math.pow', 'bond_bps', 'bondBps']) {
+    assert.ok(
+      !code.includes(forbidden),
+      `oracle-reporting.ts must contain no bond arithmetic — found ${forbidden}`,
+    );
+  }
+  // And the amount a challenge compares against is the round's own read, unmodified.
+  const round = ROUND({ bond: finalized(20_000_000_000n) });
+  const short = challengeBlocks(CHALLENGE({ round, freeUsdc: finalized(19_999_999_999n) }));
+  assert.deepEqual(short.map((block) => block.check), ['Matching bond']);
+  const exact = challengeBlocks(CHALLENGE({ round, freeUsdc: finalized(20_000_000_000n) }));
+  assert.deepEqual(exact, []);
+});
+
+test('the round-1 report bond is a labelled floor, never presented as the amount (SQ-598)', () => {
+  // `StakeAtRisk` is on no frozen surface, so P-13's "recomputed and displayed" cannot be
+  // honoured for a fresh report. The honest shape is SQ-564's: state the bound that CAN be
+  // read and refuse to let a screen render it where an exact amount would go.
+  const check = reportBlocks(REPORT());
+  assert.deepEqual(check.blocks, []);
+  // Required, not optional — there is no shape of the result without it.
+  assert.equal(check.bondUnknown, REPORT_BOND_NOT_ESTABLISHED);
+  assert.match(check.bondUnknown, /cannot state the bond/);
+  assert.match(check.bondUnknown, /the least it can be/);
+
+  // Below even the floor is a true block; above it, the check stays incomplete rather than
+  // becoming a green "ready to sign".
+  const poor = reportBlocks(REPORT({ freeUsdc: finalized(9_999_999_999n) }));
+  assert.deepEqual(poor.blocks.map((block) => block.check), ['Round bond']);
+  assert.match(nth(poor.blocks, 0, 'block').detail, /even the floor/);
+});
+
+test('P-13 blocks on window, registry, a short stake and evidence — each independently', () => {
+  assert.deepEqual(reportBlocks(REPORT({ reportWindowOpen: finalized(false) })).blocks.map((b) => b.check), [
+    'Report window',
+  ]);
+  assert.deepEqual(reportBlocks(REPORT({ registered: finalized(false) })).blocks.map((b) => b.check), [
+    'Reporter registry',
+  ]);
+  // Registered but under-staked is its own state with its own remedy: a prior slash leaves
+  // the registration standing and the hold short, and "not registered" would send the user
+  // to the wrong screen.
+  const short = reportBlocks(REPORT({ stakeHeld: finalized(99_999_999_999n) }));
+  assert.deepEqual(short.blocks.map((b) => b.check), ['Reporter stake']);
+  assert.match(nth(short.blocks, 0, 'block').detail, /previous slash/);
+  // An EMPTY hash is not a hash — what an unfilled form field actually produces.
+  assert.deepEqual(reportBlocks(REPORT({ evidenceHash: '' })).blocks.map((b) => b.check), ['Evidence']);
+});
+
+test('a reporter may not challenge their own round — 07 §5.2, and the view carries it', () => {
+  // §11.5's P-14 row does not list this, but `OracleRoundView.reporter` is an exact chain
+  // read and the chain refuses the call: left out, it costs a fee and returns an error the
+  // user cannot map to anything they did.
+  const own = challengeBlocks(CHALLENGE({ caller: '5Reporter' }));
+  assert.deepEqual(own.map((block) => block.check), ['Own round']);
+  assert.match(nth(own, 0, 'block').detail, /no counterparty/);
+});
+
+test('the challenge deadline is the stored one, extension included — never recomputed', () => {
+  const round = ROUND({ challengeDeadline: finalized(43_200) });
+  assert.deepEqual(challengeBlocks(CHALLENGE({ round, now: finalized(43_200) })), []);
+  const late = challengeBlocks(CHALLENGE({ round, now: finalized(43_201) }));
+  assert.deepEqual(late.map((block) => block.check), ['Challenge window']);
+  assert.match(nth(late, 0, 'block').detail, /already includes any extension/);
+  // The consequence copy names the round rather than predicting the ladder.
+  const consequence = escalationConsequence(round);
+  assert.match(consequence, /round 2/);
+  assert.match(consequence, /does not predict it/);
+  assert.match(consequence, /40% to the counterparty and 60% to INSURANCE/);
+});
+
+test('the report screen shows the floor caveat on the CLEAN path, where it matters', () => {
+  // A blocked form already says why. The dangerous render is the one with nothing wrong,
+  // where a reporter reads the floor as the charge and budgets for the wrong number.
+  const html = renderToStaticMarkup(
+    h(SubmitReport, { inputs: REPORT(), decimals: 6, symbol: 'USDC', onReport: () => {} }),
+  );
+  assert.match(html, /a floor, not the amount/);
+  assert.match(html, /cannot state the bond/);
+  assert.match(html, /Round bond — at least/);
+});
+
+test('the challenge screen renders the chain’s own bond and the risk before the control', () => {
+  const html = renderToStaticMarkup(
+    h(ChallengeRound, { inputs: CHALLENGE(), decimals: 6, symbol: 'USDC', onChallenge: () => {} }),
+  );
+  assert.match(html, /Bond to post/);
+  assert.match(html, /Challenge window closes at/);
+  assert.match(html, /What a challenge risks/);
+  // The consequence precedes the button, because it is what decides whether to start.
+  assert.ok(html.indexOf('What a challenge risks') < html.indexOf('>Challenge<'));
+});
+
+test('the recompute screen has no arm for a contradicted proof, and its refusals differ', () => {
+  // The screen takes a submission, which requires a branded proof, which only agreement
+  // mints — so "never submit a proof the client's own recomputation contradicts" is a
+  // property of the type rather than a check this component could omit.
+  const proof = recomputeProof(RECOMPUTE(), () => 1_234_000_000n);
+  const html = renderToStaticMarkup(
+    h(RecomputeProof, { submission: { proof, roundOpen: finalized(true) }, onSubmit: () => {} }),
+  );
+  assert.match(html, /reproduces the committed value/);
+  assert.match(html, /1,234,000,000/);
+
+  const closed = renderToStaticMarkup(
+    h(RecomputeProof, { submission: { proof, roundOpen: finalized(false) }, onSubmit: () => {} }),
+  );
+  assert.match(closed, /no longer open/);
+
+  // Two refusals, not one: a non-deterministic component is not a reporter behaving badly,
+  // and collapsing them would be a false accusation in that direction.
+  const mismatch = renderToStaticMarkup(
+    h(ProofRefused, { reason: { kind: 'mismatch', claimed: 5n, recomputed: 6n } }),
+  );
+  assert.match(mismatch, /FE-ORC-001/);
+  assert.match(mismatch, /the action is a challenge, not a proof/);
+  const nonDeterministic = renderToStaticMarkup(
+    h(ProofRefused, { reason: { kind: 'non-deterministic', component: 3 } }),
+  );
+  assert.match(nonDeterministic, /FE-ORC-002/);
+  assert.match(nonDeterministic, /Nothing here indicates the reported value is wrong/);
 });
 
 // ------------------------------------------ S12/S13 the funding screens (F18)

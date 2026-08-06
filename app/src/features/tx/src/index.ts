@@ -171,13 +171,17 @@ export {
 } from './reporter.js';
 export { ApproveAction, PendingActions, ProposeAction } from './guardian-console.js';
 export {
+  ChallengeRound,
   ClaimStream,
   UpgradeCrank,
   UpgradeHashMismatch,
   InsurancePanel,
+  ProofRefused,
+  RecomputeProof,
   RegisterReporter,
   RegistryFiling,
   SnapshotCrank,
+  SubmitReport,
   TreasuryStreams,
 } from './operator-consoles.js';
 export {
@@ -207,7 +211,7 @@ export {
 } from './nav.js';
 export { NavPanel } from './operator-consoles.js';
 export {
-  REGISTRY_PALLET,
+  RegistryInstanceCollisionError,
   admitRegistryWindowEvent,
   filingBlocks,
   type Admission,
@@ -215,7 +219,21 @@ export {
   type FilingInputs,
   type FilingKind,
   type RawEvent,
+  type RegistryInstances,
   type RegistryWindowEvent,
   type RegistryWindowVariant,
 } from './registry-filing.js';
+export {
+  REPORT_BOND_NOT_ESTABLISHED,
+  challengeBlocks,
+  escalationConsequence,
+  reportBlocks,
+  reportBondFloor,
+  type ChallengeInputs,
+  type OracleRound,
+  type ReportBlock,
+  type ReportBondFloor,
+  type ReportCheck,
+  type ReportInputs,
+} from './oracle-reporting.js';
 export { DepositForm, DepositTracker, WithdrawForm } from './funding-screens.js';
