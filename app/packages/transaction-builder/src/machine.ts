@@ -24,7 +24,19 @@
 import type { FinalizedBlockRef } from '@bleavit/chain-client';
 import type { HexString } from '@bleavit/shared-types';
 import type { PreconditionResult } from './preconditions.js';
-import type { PreconditionRowId } from './rows.js';
+import type { RowId } from './rows.js';
+import type { GovernanceRowId } from './governance-rows.js';
+
+/**
+ * Any row a preparation may declare — §11.5's, §11.7.3's and §11.8's.
+ *
+ * `requires` was `PreconditionRowId[]`, which is §11.5's fifteen rows and nothing else. A
+ * call whose row lives in another table therefore had **no id it could declare**, so
+ * `gate()` had nothing to demand of it and every §11.8 console gated its own button on a
+ * module-local check. §11.4 rule 1 asks for the gate structurally, and a union that cannot
+ * name two thirds of the client's calls makes "structurally" unreachable for them.
+ */
+export type DeclarableRowId = RowId | GovernanceRowId;
 
 /** 11 §11.3's lifecycle. `Finalized` is the only success state. */
 export type TxState =
@@ -61,7 +73,7 @@ export interface TxPreparation {
    * "every precondition holds" from "nobody read one", and those are the same value:
    * `results.filter(r => !r.ok)` over an empty array is empty. See `gate`.
    */
-  readonly requires: readonly PreconditionRowId[];
+  readonly requires: readonly DeclarableRowId[];
 }
 
 declare const GATE_PASSED: unique symbol;
