@@ -1,8 +1,11 @@
 > **DERIVED COPY for design-tool context — DO NOT EDIT.**
 > Verbatim copy of `docs/architecture/11-frontend-workflows.md` (the source of truth),
-> regenerated 2026-08-05 at integration contract v27, picking up the §11.5 P-12 split of
-> the dead-man latch from the D-9-waivable triggering freeze (FE rows 12/13, batch bounds
-> renumbered to 14) alongside the D-21 handoff workflow (§11.14), screens S21/S22,
+> regenerated 2026-08-06, picking up §11.9.1's resolution of the USDC asset index — the
+> `[VERIFY asset index 1337]` tag became a stated per-release pin in the source and this
+> copy still published the unresolved tag, which is the drift the new
+> `tools/ci/check-verbatim-copies.py` gate was written to end — on top of the v27 §11.5
+> P-12 split of the dead-man latch from the D-9-waivable triggering freeze (FE rows 12/13,
+> batch bounds renumbered to 14), the D-21 handoff workflow (§11.14), screens S21/S22,
 > degradation rows E24/E25 and WBS row FE-17,
 > for upload to Claude Design. If this copy and the source ever differ, the
 > source wins. Regenerate by re-copying the source file.
@@ -56,7 +59,7 @@ The canonical frontend serves **every** protocol workflow — including the valu
 | S21 | Share verified context | **handoff** | the union of the S2/S3/S4 reads for the selected capsule kind — all `Finalized<T>` or the export is refused | — | §11.14 |
 | S22 | Review an imported action | **handoff** | the precondition rows of the calls it constructs (§11.5 P-1) | `market.buy` / `market.sell` — constructed by the client, never carried by the import | §11.14 |
 
-USDC balance reads use the `ForeignAssets` instance keyed by the pinned XCM `Location` (D-17, frozen in [02](02-integration-contract.md), incl. the `[VERIFY asset index 1337]` that lives there) — never `Assets.Account`.
+USDC balance reads use the `ForeignAssets` instance keyed by the pinned XCM `Location` (D-17, frozen in [02](02-integration-contract.md), where the asset index is **resolved** — see §11.9.1) — never `Assets.Account`. That prohibition is about **this** chain and does not reach the [02](02-integration-contract.md) §7.7 Asset Hub read, which is the same asset seen from the chain that hosts it ([02](02-integration-contract.md) §13 rule 8's v25 note).
 
 **Finalized decision statistics are not a trading preview.** `decision_stats(pid)` is available only after the registered decision windows are sealed and every decision-path input is evaluable ([02](02-integration-contract.md) §3). S2 MAY render it only as finalized decision statistics; while a proposal remains in Trade/Extended and the view returns `None`, S2 and S3 MUST render no projected uplift, projected PASS/REJECT, or other in-Trade preview derived from it.
 
@@ -373,14 +376,14 @@ USDC funding is **in scope** for the canonical frontend and ships in the same re
 
 A guided flow using a **second light-client connection to Asset Hub** (same smoldot instance, additional chain — memory budgeted in [10](10-frontend-architecture.md)) and a **pinned Asset Hub descriptor set** produced by the same descriptor pipeline and release-gated identically ([10](10-frontend-architecture.md)/[12](12-release-and-operations.md)). The deposit transaction is constructed and signed against Asset Hub through the same signer abstraction, precondition discipline and confirm-screen rules as local transactions.
 
-Construction: an AH-side `pallet_xcm` reserve transfer (`limited_reserve_transfer_assets` or the pinned descriptor set's canonical equivalent **[VERIFY exact AH extrinsic + params against the pinned AH runtime at implementation — descriptor pipeline]**) of AH-USDC (asset id per D-17, **[VERIFY asset index 1337]** owned by [02](02-integration-contract.md)) to the user's account on the futarchy chain (paraId per [02](02-integration-contract.md)).
+Construction: an AH-side `pallet_xcm` reserve transfer (`limited_reserve_transfer_assets` or the pinned descriptor set's canonical equivalent **[VERIFY exact AH extrinsic + params against the pinned AH runtime at implementation — descriptor pipeline]**) of AH-USDC (asset id per D-17, **resolved: index 1337**, owned by [02](02-integration-contract.md) §8 and verified on **both** Asset Hubs this rollout targets — Polkadot 2026-07-16 and Paseo 2026-08-04, the latter read by exact storage key from two independent operators; PLAN.md V-17 and V-105) to the user's account on the futarchy chain (paraId per [02](02-integration-contract.md)).
 
 Precondition row (reads on the **AH connection** at its own finalized B′, plus local reads):
 
 | Check | Read |
 |---|---|
 | AH connection synced & descriptors compatible | AH compat gate ([10](10-frontend-architecture.md)) |
-| AH USDC balance ≥ amount + AH-side fees | AH `Assets.Account(1337, who)` **[VERIFY id]** |
+| AH USDC balance ≥ amount + AH-side fees | AH `Assets.Account(1337, who)` — index resolved, see above; a client still takes it as a **per-release pin** rather than a literal, since [02](02-integration-contract.md) §7.7 pins the Asset Hub of the relay each release targets |
 | AH existential/fee viability | AH account remains above its existential/sufficiency requirements after the transfer: USDC is a *sufficient* asset, but AH fee payment and the account's surviving state (DOT ED vs. sufficient-asset-only account) are re-checked and displayed **[VERIFY AH fee payment in USDC via asset conversion vs. DOT-only for this call shape — descriptor pipeline]** |
 | Amount ≥ USDC `min_balance` | 10⁴ units (1 cent *(normative value: [13](13-parameters.md))*) — below it the deposit would dust |
 | **Fee-viability note (mandatory)** | first-time deposits display: *"you will pay futarchy-chain fees in USDC at the `fee.vit_usdc_rate` conversion ([08](08-treasury-and-economics.md)); deposit at least enough to cover fees"* with a concrete minimum computed from the current rate |

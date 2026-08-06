@@ -76,6 +76,7 @@ STANDALONE_GATES: tuple[tuple[str, ...], ...] = (
     # any of which going missing in CI's checkout would silently un-derive doc 10 §9.
     ("python3", "tools/ci/check-frontend-budgets.py"),
     ("python3", "tools/ci/check-plan-tables.py"),
+    ("python3", "tools/ci/check-verbatim-copies.py"),
     ("python3", "tools/ci/check-spec-question-batches.py"),
     ("python3", "tools/deploy/check-runbooks.py"),
     ("python3", "tools/limit-coverage/check-limit-coverage.py"),

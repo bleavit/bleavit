@@ -141,6 +141,14 @@ jobs:
         # have passed every gate here and looked finished. Same shape as SQ-552, SQ-580
         # and SQ-582: an obligation in prose with no mechanical reader.
         run: python3 tools/ci/check-degradation-matrix.py
+      - name: The design kit's derived copies really are verbatim
+        # Two files declare themselves byte-identical to a spec document and say "if this
+        # copy and the source ever differ, the source wins"; AGENTS.md obliges a
+        # regeneration after every spec change; nothing compared the bytes. One had been
+        # three lines stale since a `[VERIFY]` tag was resolved, and the failure is quiet
+        # by construction — a design tool is fed the copy, so a wrong copy is
+        # indistinguishable from a wrong source to whoever reads it.
+        run: python3 tools/ci/check-verbatim-copies.py
       - name: Frontend resource budgets — 10 §9 re-derived from 13 and the runtime (SQ-557)
         # 10 §9 publishes a load model and two depth tables, and nothing recomputed any
         # of it: the browser was sized against 196 concurrently-observing books when the
