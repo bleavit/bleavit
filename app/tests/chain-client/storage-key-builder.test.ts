@@ -176,6 +176,8 @@ test('an absent storage item is refused, never read as a plain value', () => {
 
 test('an unrecognised hasher tag is refused rather than defaulted', () => {
   const forged: ChainMetadata = {
+    lookup: [],
+    outerEnums: { event: 0 },
     pallets: [
       {
         name: 'Fake',
@@ -192,6 +194,8 @@ test('metadata and codecs must AGREE on arity — neither is presumed right', ()
   // The check that makes building on `args.inner` safe rather than merely convenient. If a
   // polkadot-api bump reshaped `inner`, this is what fails instead of a short key shipping.
   const oneHasherTooMany: ChainMetadata = {
+    lookup: [],
+    outerEnums: { event: 0 },
     pallets: [
       {
         name: 'System',

@@ -50,13 +50,25 @@ export type StorageHasher = 'Blake2_128Concat' | 'Twox64Concat' | 'Identity';
 /**
  * A chain's decoded metadata.
  *
- * Opaque on purpose: the unified metadata shape is a `@polkadot-api/substrate-bindings`
- * internal that has changed across minor versions, and every consumer here wants one thing
- * from it. Naming the real type in an exported signature would publish that instability to
- * every caller.
+ * Deliberately **narrow rather than opaque**, and narrower than what `unifyMetadata` returns:
+ * these are the three members this client reads, declared at the precision each consumer
+ * needs. Naming the SDK's full type in an exported signature would publish a
+ * `@polkadot-api/substrate-bindings` internal — one that has changed across minor versions —
+ * to every caller.
+ *
+ * `lookup` is `readonly unknown[]` because its element shape is a tagged union the walker in
+ * `event-accounts.ts` narrows as it descends; declaring a guessed shape here would put an
+ * unchecked claim in the type system rather than a check in the code.
+ *
+ * The alternative — declaring only `pallets` and reaching the rest through `as unknown as` —
+ * is banned across `app/` (app-code rule 2) and the `check:casts` gate caught the first draft
+ * of this file doing exactly that, in eight places. The gate was right: a double assertion
+ * here would have been a shape claim nothing could check.
  */
 export interface ChainMetadata {
   readonly pallets: readonly UnifiedPallet[];
+  readonly lookup: readonly unknown[];
+  readonly outerEnums: { readonly event: number };
 }
 
 interface UnifiedPallet {
