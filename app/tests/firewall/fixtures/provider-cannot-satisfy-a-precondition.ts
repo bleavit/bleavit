@@ -20,7 +20,7 @@ const fromAnOperator: Verified<bigint> = {
 
 export const gated = evaluate(
   {
-    id: 'P-1',
+    id: 'P-1/balance covers the trade',
     requirement: 'balance covers the trade',
     source: { kind: 'storage', key: '0xdead', query: 'value' },
     satisfiedBy: (v: bigint) => v >= 1_000n,

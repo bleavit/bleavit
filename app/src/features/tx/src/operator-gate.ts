@@ -17,21 +17,31 @@
  * ## The control is a value, and it can only be built from a gate result
  *
  * `OperatorGate.window` is a `GatePassed`, whose brand only `gate()` mints and only when
- * every declared row was read at one finalized block. A console renders its submit control
- * from that field, and its `onSubmit` **takes the window as an argument** — so a screen
- * cannot call the submitter without holding one, and cannot obtain one except from a
+ * every clause of every declared row was read at one finalized block. A console renders its
+ * submit control from that field, and its `onSubmit` **takes the window as an argument** — so
+ * a screen cannot call the submitter without holding one, and cannot obtain one except from a
  * session in `AwaitingSignature`. The old `() => void` shape is not merely discouraged; it
  * no longer typechecks.
  *
- * ## Three refusals this module adds that the machine cannot see
+ * The window also **names what it proves**: `window.prep` is the exact preparation the gate
+ * evaluated, bytes included, so a submitter encodes `window.prep.scaleHex` rather than
+ * bytes it was handed separately. Before that field existed, an authentic window paired with
+ * unrelated bytes typechecked perfectly and authorised them.
  *
- * 1. **The preparation must declare this call's row.** `gate()` checks that every row a
- *    preparation *declares* was read — it cannot check that the declaration is the right
- *    one. A preparation for `guardian.approve_action` declaring `P-1` would gate perfectly
- *    against the market row and authorise the wrong signature, so the binding from call to
- *    row is asserted here against `OPERATOR_SURFACE_ROWS` — which covers the two §11.8.1
- *    calls whose rows are §11.5's (`oracle.report`/`oracle.challenge` ⇒ P-13/P-14) as well
- *    as the nine `O-n` ones.
+ * ## Four refusals this module adds that the machine cannot see
+ *
+ * 1. **The preparation must declare this call's row, and it must exist.** `gate()` checks
+ *    that every row a preparation *declares* was read — it cannot check that the declaration
+ *    is the right one. A preparation for `guardian.approve_action` declaring `P-1` would gate
+ *    perfectly against the market row and authorise the wrong signature, so the binding from
+ *    call to row is asserted here against `OPERATOR_SURFACE_ROWS` — which covers the two
+ *    §11.8.1 calls whose rows are §11.5's (`oracle.report`/`oracle.challenge` ⇒ P-13/P-14) as
+ *    well as the nine `O-n` ones. **An absent preparation is refused rather than waived**, and
+ *    the check reads `window.prep` — the preparation the proof was minted for — rather than
+ *    whatever the session happens to be carrying.
+ * 1a. **The proof must be this session's.** `TxSession` is structural, so a hand-assembled
+ *    one can pair an authentic window with somebody else's preparation. `reduce` refuses that
+ *    pairing on the way in; this states the same rule at the consumer.
  * 2. **A blocking unreadable obligation closes the control.** `clauseGroupsFor` answers
  *    *"every declared read passed"*, which for a row whose central read 02 freezes no
  *    surface for is vacuously true. INV-FE-12's lattice says an unproven capability is
@@ -41,7 +51,7 @@
  *    has one list to render rather than two it might render only one of.
  */
 
-import type { GatePassed, TxSession } from '@bleavit/transaction-builder';
+import type { GatePassed, TxPreparation, TxSession } from '@bleavit/transaction-builder';
 import {
   OPERATOR_SURFACE_ROWS,
   blockingObligationsFor,
@@ -97,14 +107,29 @@ export interface OperatorGate {
   readonly unreadable: readonly UnreadableObligation[];
 }
 
-/** A preparation declaring the wrong row gates perfectly and authorises the wrong call. */
+/**
+ * A preparation declaring the wrong row gates perfectly and authorises the wrong call.
+ *
+ * **An absent preparation is refused, not waived.** This function used to return `undefined`
+ * for one — *"nothing declared, nothing to disagree with"* — which read as harmless and was
+ * not: paired with an authentic window it produced a `ready` control for a call whose bytes
+ * nothing had ever named. There is no state in which offering a privileged operator control
+ * with no prepared transaction behind it is correct, so it is a block with its own sentence.
+ */
 function declarationBlock(
   call: OperatorSurfaceCall,
   row: RowId,
-  session: TxSession,
+  prep: TxPreparation | undefined,
 ): OperatorBlock | undefined {
-  const prep = session.prep;
-  if (prep === undefined) return undefined;
+  if (prep === undefined) {
+    return {
+      check: 'Prepared transaction',
+      detail:
+        `There is no prepared transaction for ${call}, so there are no bytes for this control ` +
+        'to submit and nothing for the gate to have checked. A control offered here would be ' +
+        'authorising an unnamed transaction.',
+    };
+  }
   if (prep.requires.includes(row)) return undefined;
   return {
     check: 'Declared precondition row',
@@ -142,22 +167,41 @@ export function operatorGate(
 ): OperatorGate {
   const row = OPERATOR_SURFACE_ROWS[call];
   const unreadable = unreadableObligationsFor(row);
+  const window = session.signingWindow;
   const blocks: OperatorBlock[] = [
     ...blockingObligationsFor(row).map(obligationBlock),
     ...local,
   ];
-  const mismatch = declarationBlock(call, row, session);
+  // **The session must name the transaction, and the proof must be that transaction's.**
+  // Two refusals rather than one, because they fail differently. A session with no
+  // preparation has no bytes for the control to submit — and paired with an authentic window
+  // it used to produce a `ready` control regardless, since `declarationBlock` treated an
+  // absent preparation as *nothing to disagree with*. A session whose window was minted for
+  // a *different* preparation holds genuine evidence about bytes it is not going to sign.
+  const mismatch = declarationBlock(call, row, session.prep);
   if (mismatch !== undefined) blocks.push(mismatch);
+  // `reduce` already refuses to enter `AwaitingSignature` with a foreign proof, so this is
+  // the same rule stated where a hand-assembled session — `TxSession` is structural — would
+  // otherwise slip past it.
+  if (window !== undefined && window.prep !== session.prep) {
+    blocks.push({
+      check: 'Gate proof',
+      detail:
+        'The gate result held by this session was produced for a different prepared ' +
+        'transaction. A precondition set proves something about the exact bytes it was ' +
+        'evaluated for and nothing about any others, so this control stays closed.',
+    });
+  }
 
   if (blocks.length > 0) return { row, state: 'blocked', window: undefined, blocks, unreadable };
   // `AwaitingSignature` is the only state carrying a `GatePassed`, and the machine gives it
   // exactly one inbound edge. Reading the state rather than testing whether the results
   // happen to be all-`ok` is deliberate and is `mayOfferSigning`'s reason: `FE-TX-007`
   // blocks with an **empty** failed set, so "every row passed" is true of it.
-  if (session.state !== 'AwaitingSignature' || session.signingWindow === undefined) {
+  if (session.state !== 'AwaitingSignature' || window === undefined) {
     return { row, state: 'not-refreshed', window: undefined, blocks: [], unreadable };
   }
-  return { row, state: 'ready', window: session.signingWindow, blocks: [], unreadable };
+  return { row, state: 'ready', window, blocks: [], unreadable };
 }
 
 /**
@@ -187,6 +231,9 @@ export function operatorDisabledReason(gate: OperatorGate): string | undefined {
  * Returning `undefined` rather than a no-op closure is the point: a no-op is a control that
  * looks live and does nothing, and the button component's own `disabled`/`disabledReason`
  * pairing then has to be remembered separately. Here the two derive from one value.
+ *
+ * The handler receives the window, and the window carries the preparation — so the bytes to
+ * sign are `window.prep.scaleHex` and a submitter has no reason to hold a second copy.
  */
 export function operatorSubmit(
   gate: OperatorGate,

@@ -26,8 +26,16 @@
  * The bytes are still retained, deliberately: submission needs the whole Wasm as a call
  * argument, and if the caller kept its *own* copy alongside the one that was hashed, the
  * bytes submitted and the bytes verified would be two different objects that nothing binds
- * together. The verified bytes therefore live **inside the brand**, so a submission carries
- * exactly what was hashed. That is the same reason `RecomputedProof` carries its value.
+ * together. The verified bytes therefore live **inside** `VerifiedArtifact`, so a submission
+ * carries exactly what was hashed. That is the same reason `RecomputedProof` carries its
+ * value.
+ *
+ * Two ways that binding leaked, both closed here and both invisible in a green suite. The
+ * chunks were retained **by reference**, so a source reusing one buffer between yields left
+ * the concatenation describing different bytes from the ones the hasher consumed; every chunk
+ * is now snapshotted before it is hashed or kept. And `readonly bytes: Uint8Array` prevented
+ * nothing — the array's *contents* were writable through a valid brand — so the bytes are now
+ * a `#` private field reachable only through `copyBytes()`.
  *
  * ## `applicable_at` is read, never recomputed
  *
@@ -56,8 +64,6 @@
 import { combine2, type Combined, type Verified } from '@bleavit/shared-types';
 import type { FeeAsset } from '@bleavit/transaction-builder';
 
-declare const ARTIFACT_VERIFIED: unique symbol;
-
 /** What the chain authorized. Both fields are reads, not derivations. */
 export interface AuthorizedUpgrade {
   readonly codeHash: Verified<string>;
@@ -68,17 +74,54 @@ export interface AuthorizedUpgrade {
 /**
  * Bytes whose hash was checked against the authorized hash.
  *
- * Branded; `verifyArtifact` is the only producer. Without it an unverified `Uint8Array`
- * would satisfy `UpgradeSubmission` and §11.8.4 step 3's *"never reaches the wallet"* would
- * be a claim about the code rather than a property of it.
+ * `verifyArtifact` is the only producer. Without that an unverified `Uint8Array` would
+ * satisfy `UpgradeSubmission` and §11.8.4 step 3's *"never reaches the wallet"* would be a
+ * claim about the code rather than a property of it.
+ *
+ * ## `readonly bytes: Uint8Array` was not the guarantee it looked like
+ *
+ * A `readonly` property stops the *reference* being replaced and says nothing about the array
+ * it points at. `artifact.bytes[0] = 0` compiled, mutated the verified payload and left the
+ * brand intact — so a caller could hold a genuine `VerifiedArtifact`, edit the runtime inside
+ * it, and hand `UpgradeSubmission` bytes whose hash was never compared with the chain's
+ * authorization. On the most consequential signature this client can produce, the hard block
+ * of step 3 was a formality anyone downstream could step around by accident.
+ *
+ * So the bytes are **private**, in the JavaScript sense rather than the TypeScript one — a
+ * `#` field, unreachable from outside this class at runtime as well as at compile time — and
+ * the only way out is `copyBytes()`, which hands back a fresh copy each call. A caller may do
+ * whatever it likes to that copy; the verified payload is not reachable from it. The class is
+ * exported as a **type only**, so `new` is unavailable outside this module and the private
+ * field makes the shape nominal: an object literal cannot be asserted into it either, which
+ * the phantom-symbol brand permitted.
  */
-export interface VerifiedArtifact {
-  /** Exactly the bytes that were hashed — never a caller's parallel copy. */
-  readonly bytes: Uint8Array;
+class VerifiedArtifactValue {
+  /** Exactly the bytes that were hashed — never a caller's parallel copy, never reachable. */
+  readonly #bytes: Uint8Array;
+
   readonly byteLength: number;
+
   readonly hash: string;
-  readonly [ARTIFACT_VERIFIED]: true;
+
+  constructor(bytes: Uint8Array, hash: string) {
+    this.#bytes = bytes;
+    this.byteLength = bytes.byteLength;
+    this.hash = hash;
+  }
+
+  /**
+   * The verified runtime, as a copy the caller owns.
+   *
+   * A copy per call rather than one shared array: handing out the retained buffer would put
+   * the mutation back exactly where it was, one indirection further away. This is the
+   * mutation-safe submission operation — encode from what it returns, and discard it.
+   */
+  copyBytes(): Uint8Array {
+    return this.#bytes.slice();
+  }
 }
+
+export type VerifiedArtifact = VerifiedArtifactValue;
 
 /**
  * An incremental hash — `update` per chunk, `digest` once.
@@ -157,11 +200,23 @@ export async function verifyArtifact(
   const parts: Uint8Array[] = [];
   let bytesRead = 0;
   for await (const chunk of source.chunks()) {
-    // Hash and retain in the same pass. Two passes over two collections is how the bytes
-    // that were hashed and the bytes that are submitted come apart.
-    hasher.update(chunk);
-    parts.push(chunk);
-    bytesRead += chunk.byteLength;
+    // **Take an owned snapshot first, then hash and retain that.**
+    //
+    // `ArtifactSource` is an interface anybody may implement, and reusing one scratch buffer
+    // across yields is an ordinary way to write a streaming reader — `Bun`'s and Node's
+    // `read(buffer)` forms do exactly that. The hasher consumes each chunk's *contents* as it
+    // arrives, but `parts` was retaining the *reference*: with a reused buffer every entry
+    // pointed at the same memory, so the concatenation below produced the last chunk repeated
+    // and returned it as a branded artifact whose hash described entirely different bytes.
+    // A verified value that does not contain what was verified is worse than an unverified
+    // one, because everything downstream stops looking.
+    //
+    // One snapshot, used for both, so the hashed bytes and the retained bytes are the same
+    // object rather than two objects a reader has to reason about.
+    const owned = chunk.slice();
+    hasher.update(owned);
+    parts.push(owned);
+    bytesRead += owned.byteLength;
     onProgress?.({ bytesRead, totalBytes: source.totalBytes });
   }
   if (bytesRead === 0) throw new EmptyArtifactError();
@@ -177,8 +232,9 @@ export async function verifyArtifact(
     bytes.set(part, offset);
     offset += part.byteLength;
   }
-  // Phantom brand — never materialised. One mint site, as with `Finalized<T>`.
-  return { bytes, byteLength: bytesRead, hash: computed } as VerifiedArtifact;
+  // One mint site, as with `Finalized<T>` — and no assertion, because the private field makes
+  // the type unforgeable rather than merely inconvenient to forge.
+  return new VerifiedArtifactValue(bytes, computed);
 }
 
 /** A submission that can only be built from verified bytes. */

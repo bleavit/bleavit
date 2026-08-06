@@ -38,11 +38,21 @@
  *
  * The honest shape is the one this console already uses for SQ-564: state the bound that
  * *can* be read and refuse to present it as the amount. `reportBondFloor` returns a value
- * **labelled a lower bound**, and `reportBlocks` will block on failing to cover even that —
- * a true statement — while `REPORT_BOND_NOT_ESTABLISHED` says plainly that the value-scaled
- * part is unknown to this client and that the held amount will be larger for a cohort with
- * escrow. There is deliberately no `exact` arm: an arm no code path can construct is
- * `FE-HANDOFF-010`'s shape, and its presence would suggest a capability that does not exist.
+ * **labelled a lower bound**, and `REPORT_BOND_NOT_ESTABLISHED` says plainly that the
+ * value-scaled part is unknown to this client. There is deliberately no `exact` arm: an arm
+ * no code path can construct is `FE-HANDOFF-010`'s shape, and its presence would suggest a
+ * capability that does not exist.
+ *
+ * **And the path is closed, not merely captioned (2026-08-06).** Blocking only on failing to
+ * cover the floor is a true statement about a number that is not the bond: for any component
+ * with stake at risk the chain holds strictly more, so an account passing that check is
+ * either short at dispatch or has a larger sum taken than the screen showed — on a slashable
+ * action, from a figure the user was shown and can reasonably read as the price. §11.5's
+ * redemption-fee rule 5 governs the case directly (*"Unreadable ⇒ no figure, never a default …
+ * the transaction blocked"*, and the FE MUST NOT mirror the runtime's fail-open read), so
+ * P-13's obligation is `blocking` and `reportBlocks` emits it. SQ-598 must publish
+ * `StakeAtRisk` before this opens; SQ-620 records that §11.5's own text still says
+ * *"recomputed and displayed"* and needs amending to whatever that surface turns out to be.
  *
  * ## That conclusion is now the table's, not this module's
  *
@@ -71,6 +81,7 @@
 import type { Verified } from '@bleavit/shared-types';
 import { accountKey } from '@bleavit/chain-client';
 import {
+  blockingObligationsFor,
   clauseGroupsFor,
   unreadableObligationsFor,
   type FeeAsset,
@@ -113,11 +124,12 @@ export interface ReportBondFloor {
 }
 
 export const REPORT_BOND_NOT_ESTABLISHED =
-  'This client cannot state the bond your report will hold. It is value-scaled against the ' +
-  'escrow of every cohort measuring this component (07 §6), and no surface the integration ' +
-  'contract freezes publishes that figure — so what is shown is the floor, which is the ' +
-  'least it can be. For a cohort with escrow it will be larger, and the difference is held ' +
-  'from your balance when the report lands.';
+  'This client cannot state the bond your report will hold, so it will not ask you to sign ' +
+  'for it. The bond is value-scaled against the escrow of every cohort measuring this ' +
+  'component (07 §6), and no surface the integration contract freezes publishes that figure. ' +
+  'The amount shown is the floor — the least the bond can be — and for a cohort with escrow ' +
+  'the chain holds more. Reporting from this release would mean committing an amount nobody ' +
+  'could show you first.';
 
 export function reportBondFloor(floor: Verified<bigint>): ReportBondFloor {
   return { floor, why: REPORT_BOND_NOT_ESTABLISHED };
@@ -279,6 +291,22 @@ export const P13_CHECK_KEYS: readonly string[] = Object.freeze(Object.keys(P13_C
 
 export function reportBlocks(inputs: ReportInputs): ReportCheck {
   const blocks: ReportBlock[] = [];
+  // **The unreadable bond is a block, not a caveat (2026-08-06).** It shipped as `stated`,
+  // which left the control open on a floor-only check — and the floor is not the amount for
+  // any component with stake at risk, so an account that passed here either goes short at
+  // dispatch or has more taken than the screen showed. §11.5's redemption-fee rule 5 already
+  // rules this case for a monetary figure: unreadable means no figure and the transaction
+  // blocked, and the frontend MUST NOT mirror the runtime's own fail-open read. The blocks
+  // are taken from the table's own declarations so the module cannot disagree with it again.
+  for (const entry of blockingObligationsFor('P-13')) {
+    // A distinct check name from the `bond-headroom` clause's, which is also about the bond
+    // and is a different statement: *we cannot tell you the amount* against *your balance
+    // does not cover the least it can be*. Two remedies, so two sentences.
+    blocks.push({
+      check: 'Bond amount',
+      detail: `${inputs.bondFloor.why} (${entry.specQuestion})`,
+    });
+  }
   for (const group of clauseGroupsFor('P-13', inputs.feeAsset)) {
     const checks = group.map(p13Predicate);
     if (checks.some((entry) => entry.holds(inputs))) continue;

@@ -31,9 +31,29 @@ export type PreconditionSource =
    */
   | { readonly kind: 'constant'; readonly pallet: string; readonly name: string };
 
+/**
+ * The identity of one precondition **obligation** — a single clause, or an `anyOf` group.
+ *
+ * It is a template literal type (`row/discriminator`) for one reason: a bare `P-n`/`O-n`/`G-n`
+ * row id does not match it, so it cannot be used as a result id. That is the whole repair.
+ * Before it, every clause of a row carried the row's own id, and `gate()` treats a row as
+ * covered as soon as *some* result names it — so one passing read out of five minted the
+ * signing window and the other four were never evaluated. On `O-1` that meant the registry
+ * check alone could authorise a 100,000-USDC stake whose balance nobody had looked at.
+ *
+ * Build one with `clauseCoverageId` in `rows.ts`; never by hand, because the coverage check
+ * compares what a preparation *requires* against what was read, and both sides must be
+ * derived from the same table or the comparison is between two opinions.
+ */
+export type ClauseId = `${string}/${string}`;
+
 export interface PreconditionRow<T> {
-  /** The `P-n` id from the 11 §11.5–§11.9 tables, so a failure names a spec row. */
-  readonly id: string;
+  /**
+   * The obligation this predicate discharges — `clauseCoverageId(clause)`.
+   *
+   * Not the `P-n` row id. A row is a set of clauses and this is one of them; see `ClauseId`.
+   */
+  readonly id: ClauseId;
   /** What the user is told when it fails. Never a raw error code alone (rule 5). */
   readonly requirement: string;
   readonly source: PreconditionSource;
@@ -44,7 +64,14 @@ export interface PreconditionRow<T> {
 }
 
 export interface PreconditionResult {
-  readonly id: string;
+  /**
+   * Which obligation this answers — one clause, or one `anyOf` group.
+   *
+   * A disjunctive group is answered by **one** result carrying the group's id: its members
+   * are alternatives to one obligation, not obligations of their own, and emitting one
+   * result per member would let a failing alternative block a satisfied group.
+   */
+  readonly id: ClauseId;
   readonly ok: boolean;
   readonly requirement: string;
   readonly expected: string;
