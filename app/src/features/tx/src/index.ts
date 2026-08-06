@@ -281,3 +281,48 @@ export {
   type ReportInputs,
 } from './oracle-reporting.js';
 export { DepositForm, DepositTracker, WithdrawForm } from './funding-screens.js';
+export {
+  LEDGER_PALLET,
+  LedgerDomainError,
+  PRIMARY_LEDGER_CALLS,
+  UnreachableLedgerCallError,
+  callsFor,
+  domainOf,
+  ledgerCall,
+  totalOf,
+  type LedgerCall,
+  type LedgerDomain,
+  type LedgerPallet,
+  type LedgerRow,
+} from './ledger-domain.js';
+export {
+  BRANCHES,
+  GATE_TYPES,
+  VoidHoldingsError,
+  decomposeVoidRecovery,
+  unpairedBranchUsdcPayout,
+  unpairedLegPayout,
+  type Branch,
+  type Consolidation,
+  type GateType,
+  type VoidHoldings,
+  type VoidRecovery,
+  type VoidResidual,
+} from './void-recovery.js';
+export {
+  mayPrepareTrade,
+  orderTotal,
+  perbillToBps,
+  tradeBlocks,
+  type BookIdentity,
+  type BookKind,
+  type FeeReadings,
+  type ProposalState,
+  type QuoteAgreement,
+  type QuoteFigures,
+  type TradableState,
+  type TradeBlock,
+  type TradeDirection,
+  type TradeInputs,
+  type TradeOrder,
+} from './trade-ticket.js';

@@ -1,13 +1,19 @@
 /**
  * `@bleavit/protocol` — the normative TypeScript port of Bleavit's market math.
  *
- * Four layers, bottom up:
+ * Five layers, bottom up:
  *
- * * `fixed`  — the guarded 64.64 kernel (04 §4): `exp2`, `log2`, `ln`, and the
+ * * `fixed`      — the guarded 64.64 kernel (04 §4): `exp2`, `log2`, `ln`, and the
  *   maker-adverse currency rounding.
- * * `lmsr`   — the cost function, prices, buy/sell and displacement (04 §3).
- * * `quote`  — what `buy`/`sell` actually charge, in base units (04 §6.1).
- * * `twap`   — the slew-capped observation accumulator (04 §7).
+ * * `lmsr`       — the cost function, prices, buy/sell and displacement (04 §3).
+ * * `quote`      — what `buy`/`sell` actually charge, in base units (04 §6.1).
+ * * `twap`       — the slew-capped observation accumulator (04 §7).
+ * * `redemption` — what a charged redemption pays, in base units (03 §5.3a).
+ *
+ * The last one is the reason this package is *protocol* math rather than market
+ * math: 11 §11.5 makes `net` the headline figure on a redemption exactly as
+ * `quote` is on a trade, both are certified against the same generated corpus,
+ * and splitting them would put one integer-rounding discipline in two packages.
  *
  * Everything is `bigint`. Nothing here reads the chain, holds state, or knows
  * what provenance is: a value this package computes is `derived-local` in the
@@ -85,6 +91,20 @@ export {
   quoteSell,
   withinTradeBounds,
 } from './quote.js';
+
+export {
+  type PairLegs,
+  type RedemptionAmounts,
+  PERBILL_ONE,
+  RedemptionRateError,
+  SCORE_ONE_1E9,
+  firstChargedGross,
+  pairLegs,
+  redemptionAmounts,
+  redemptionAmountsPair,
+  redemptionFee,
+  redemptionFeePair,
+} from './redemption.js';
 
 export {
   type ObservationOutcome,
