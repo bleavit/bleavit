@@ -134,6 +134,15 @@ jobs:
         # mandated nothing (SQ-552). It must fail on a frontend precondition with no
         # backend check behind it — a client refusing an action the runtime accepts.
         run: python3 tools/ci/check-dispatch-mirror.py
+      - name: Execute reason codes — the client's names are the runtime's (11 §11.5)
+        # The dispatch mirror binds two documents; this binds the client's `ExecuteErrorCode`
+        # table to `pallet_execution_guard::Error<T>`. §11.5 requires each failure to block
+        # "with the same reason code the runtime would return", and four of the client's
+        # codes were names the runtime has never returned — `MeterExceeded` for
+        # `MetersBlocked`, `NotQueued` for `NotFound`/`Cancelled`, `VersionMismatch` for
+        # `StaleQueue`, and `GateSuspended` for `GuardianHold`. Renaming a union member
+        # together with its use site compiles cleanly, so `tsc` cannot see this.
+        run: python3 tools/ci/check-execute-error-codes.py
       - name: Client surface obligations — every 10/11 read names a frozen 02 surface
         # The inverse of every other surface gate. `check-chain-feed.py`, `surface:check`
         # and `test:mock-runtime` all verify that what IS declared agrees with the
