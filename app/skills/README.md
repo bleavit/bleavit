@@ -78,6 +78,6 @@ verdict: genesis `0x91b171bb…ce90c3`, `spec_version` 2, contract version 27, c
 ## Editing
 
 Edit `SKILL.md`, `reference/*.md`, or the corpus table in
-`app/tools/generate-skill-examples.mjs` — then regenerate. Never edit a generated file: a
+`app/tools/generate-skill-examples.ts` — then regenerate. Never edit a generated file: a
 vendor instruction file edited in place is the drift the generator exists to prevent, and
 an example edited to match a changed parser is a published claim nobody re-verified.

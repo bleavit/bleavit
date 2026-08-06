@@ -24,35 +24,41 @@ import {
   refuseUnverifiedExport,
   serializeReceipt,
 } from '@bleavit/receipts';
+import type {
+  BuildReceiptInput,
+  ReceiptAmount,
+  ReceiptAnchor,
+  ReceiptOutcome,
+} from '@bleavit/receipts';
 import { CONTEXT_DOMAIN_TAG } from '@bleavit/contexts';
 import { digestPreimage, equalBinding } from '@bleavit/handoff-envelope';
+import type { FinalizedBlockRef } from '@bleavit/chain-client';
+import { finalize } from '@bleavit/chain-client/testing';
 
-const decode = (bytes) => new TextDecoder().decode(bytes);
+/** The chain identity every pin in this file is read against (F18). Named, not inlined:
+ *  the field exists so two reads can agree on it, and copies agree until one is edited. */
+const TEST_CHAIN = `0x${'ce'.repeat(32)}` as `0x${string}`;
+
+
+const decode = (bytes: Uint8Array): string => new TextDecoder().decode(bytes);
 
 /**
- * A stand-in for `Finalized<T>`. The brand is a module-private symbol in `chain-client`,
- * so a test cannot mint one — and that is the property being relied on, not worked around:
- * what this suite checks is the *projection*, and TypeScript checks the provenance at the
- * one place it can be checked.
- */
-/**
- * A complete `Finalized<T>` fixture.
+ * A real `Finalized<T>`, from the real construction site (V-118).
  *
- * Two things the untyped version got wrong, both invisible at runtime. `as const` on the
- * discriminant: without it `kind` widens to `string` and the value stops being a
- * `Verified<T>` at all. And **`blockHash`/`blockNumber` are required** — the status this
- * helper claimed was `verified-finalized` carried no block, which is the one thing that
- * status *means*. Every assertion in this file has been running against a provenance label
- * with nothing behind it, which is exactly the condition 10 §2.1 exists to make untypeable.
+ * The untyped version of this helper built the shape by hand, and got two things wrong that
+ * no runtime assertion could see. Without `as const` the discriminant widened to `string`
+ * and the value stopped being a `Verified<T>` at all; and it claimed `verified-finalized`
+ * while carrying **no block**, which is the one thing that status means. Every assertion in
+ * this file was running against a provenance label with nothing behind it.
+ *
+ * Calling `finalize` instead fixes both by construction rather than by care: the fixture and
+ * production now agree because they are the same function. Reaching it needs the deliberate
+ * `@bleavit/chain-client/testing` subpath, which `no-finalized-minting-outside-chain-client`
+ * forbids production code from importing — a suite may hold this capability, the transaction
+ * path may not.
  */
-const finalized = <T,>(value: T) => ({
-  value,
-  status: {
-    kind: 'verified-finalized' as const,
-    blockHash: `0x${'11'.repeat(32)}` as const,
-    blockNumber: 7,
-  },
-});
+const AT: FinalizedBlockRef = { chain: TEST_CHAIN, blockHash: `0x${'11'.repeat(32)}`, blockNumber: 7 };
+const finalized = <T,>(value: T) => finalize(value, AT);
 
 const BINDING = {
   genesisHash: '0x91b171bb158e2d3848fa23a9f1c25182fb8e20313b2c1eb49219da7a70ce90c3',
@@ -60,11 +66,15 @@ const BINDING = {
   contractVersion: 25,
 };
 
-const input = (over = {}) => ({
+// Each leaf is annotated at its `finalized()` call rather than left to inference. Without
+// it `asset: 'VIT'` widens to `string` and stops satisfying `ReceiptAmount`'s `'USDC' |
+// 'VIT'` — the same widening that made the old `kind: 'verified-finalized'` stop being a
+// discriminant. The suite ran green through it either way; only the types can see it.
+const input = (over: Partial<BuildReceiptInput> = {}): BuildReceiptInput => ({
   binding: BINDING,
-  anchor: finalized({ blockHash: '0xabc', blockNumber: 1_234, extrinsicIndex: 2 }),
-  outcome: finalized({ call: 'Market.buy', success: true }),
-  feeCharged: finalized({ asset: 'VIT', baseUnits: 12_345_678_901n }),
+  anchor: finalized<ReceiptAnchor>({ blockHash: '0xabc', blockNumber: 1_234, extrinsicIndex: 2 }),
+  outcome: finalized<ReceiptOutcome>({ call: 'Market.buy', success: true }),
+  feeCharged: finalized<ReceiptAmount>({ asset: 'VIT', baseUnits: 12_345_678_901n }),
   ...over,
 });
 
@@ -180,13 +190,19 @@ test('named amounts are carried under their labels', () => {
   const receipt = buildReceipt(
     input({
       amounts: {
-        net: finalized({ asset: 'USDC', baseUnits: 9_970n }),
-        fee: finalized({ asset: 'USDC', baseUnits: 30n }),
+        net: finalized<ReceiptAmount>({ asset: 'USDC', baseUnits: 9_970n }),
+        fee: finalized<ReceiptAmount>({ asset: 'USDC', baseUnits: 30n }),
       },
     }),
   );
-  assert.equal(receipt.amounts.net.baseUnits, 9_970n);
-  assert.equal(receipt.amounts.fee.baseUnits, 30n);
+  // The whole map, not two lookups. `deepEqual` also fails if the projection invented a
+  // third label or dropped `asset`, neither of which a pair of `.baseUnits` reads can see —
+  // and under `noUncheckedIndexedAccess` the weaker form needs a non-null assertion per
+  // lookup, which silences precisely the check that would catch a missing key.
+  assert.deepEqual(receipt.amounts, {
+    net: { asset: 'USDC', baseUnits: 9_970n },
+    fee: { asset: 'USDC', baseUnits: 30n },
+  });
 });
 
 /* -------------------------------------------------------- the chain binding, shared */
@@ -235,7 +251,7 @@ test('the receipt pre-image is tag ++ NUL ++ canonical(core)', () => {
  */
 const AUTHENTICATION_VERBS = ['sign', 'verify', 'authenticate', 'attest', 'certify', 'validate'];
 
-const leadingVerb = (name) => (name.split(/(?=[A-Z])|_/)[0] ?? '').toLowerCase();
+const leadingVerb = (name: string): string => (name.split(/(?=[A-Z])|_/)[0] ?? '').toLowerCase();
 
 test('the package exports no signing, verification or authentication surface', async () => {
   const exported = Object.keys(await import('@bleavit/receipts'));

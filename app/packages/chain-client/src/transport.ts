@@ -22,7 +22,7 @@
  * in it is a failure branch.
  */
 
-import type { HexString } from '@bleavit/shared-types';
+import type { ChainId, HexString } from '@bleavit/shared-types';
 import type { FinalizedBlockRef } from './provenance.js';
 import type { ChainHeadTransport, StorageItem } from './reads.js';
 
@@ -55,6 +55,16 @@ export interface JsonRpcConnectionLike {
 export type JsonRpcProviderLike = (
   onMessage: (message: JsonRpcMessageLike) => void,
 ) => JsonRpcConnectionLike;
+
+/**
+ * The two `chainHead_v1_storage` query kinds this client issues.
+ *
+ * Named rather than inlined at `storage()` so a caller deriving the kind from somewhere
+ * else — a recorded transcript, most obviously — narrows against *this* declaration
+ * instead of re-stating the pair. Two copies of a closed set agree until one of them
+ * gains a member.
+ */
+export type StorageQueryType = 'value' | 'descendantsValues';
 
 /* ------------------------------------------------------------------------- errors */
 
@@ -152,6 +162,17 @@ interface PendingOperation {
 }
 
 export interface ChainHeadConnectionOptions {
+  /**
+   * Which chain this connection follows — its genesis hash (F18).
+   *
+   * **Required, with no default.** Every pin this connection hands out carries it, and
+   * every `Finalized<T>` takes its chain identity from a pin, so this one field decides
+   * what a whole connection's reads *claim to be*. A default would have to be the
+   * futarchy chain, which is precisely the wrong answer for the Asset Hub connection and
+   * wrong in the dangerous direction: an AH balance would render as a futarchy read.
+   * There is no safe default for identity, so there is no default.
+   */
+  readonly chain: ChainId;
   /** `chainHead_v1_follow(withRuntime)`. Runtime updates are what make `_call` possible. */
   readonly withRuntime?: boolean;
   /** How many announced blocks to keep pinned. See `PIN_WINDOW`. */
@@ -195,6 +216,7 @@ export class ChainHeadConnection implements ChainHeadTransport {
   readonly #orphanEvents = new Map<string, Record<string, unknown>[]>();
   readonly #headerNumbers = new Map<string, number>();
   readonly #pinWindow: number;
+  readonly #chain: ChainId;
   #pinnedOrder: HexString[] = [];
   #nextId = 1;
   #subscription: string | undefined;
@@ -205,8 +227,9 @@ export class ChainHeadConnection implements ChainHeadTransport {
   #initializationFailed: ((error: Error) => void) | undefined;
   #stopped: string | undefined;
 
-  private constructor(provider: JsonRpcProviderLike, pinWindow: number) {
+  private constructor(provider: JsonRpcProviderLike, pinWindow: number, chain: ChainId) {
     this.#pinWindow = pinWindow;
+    this.#chain = chain;
     this.#connection = provider((message) => {
       this.#onMessage(message);
     });
@@ -225,9 +248,9 @@ export class ChainHeadConnection implements ChainHeadTransport {
    */
   static async open(
     provider: JsonRpcProviderLike,
-    options: ChainHeadConnectionOptions = {},
+    options: ChainHeadConnectionOptions,
   ): Promise<ChainHeadConnection> {
-    const connection = new ChainHeadConnection(provider, options.pinWindow ?? PIN_WINDOW);
+    const connection = new ChainHeadConnection(provider, options.pinWindow ?? PIN_WINDOW, options.chain);
     const firstFinalized = new Promise<HexString>((resolve, reject) => {
       connection.#initialized = resolve;
       connection.#initializationFailed = reject;
@@ -298,13 +321,13 @@ export class ChainHeadConnection implements ChainHeadTransport {
     this.#assertLive();
     const blockHash = this.#finalized;
     if (blockHash === undefined) throw new ChainHeadError('no finalized block has been reported yet');
-    return { blockHash, blockNumber: await this.#blockNumber(blockHash) };
+    return { chain: this.#chain, blockHash, blockNumber: await this.#blockNumber(blockHash) };
   }
 
   async storage(
     at: FinalizedBlockRef,
     key: string,
-    type: 'value' | 'descendantsValues',
+    type: StorageQueryType,
   ): Promise<readonly StorageItem[]> {
     this.#assertLive();
     const started = await this.#request('chainHead_v1_storage', [

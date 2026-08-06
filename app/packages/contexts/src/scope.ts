@@ -79,21 +79,37 @@ export function pseudonymizationLabel(scope: ExportScope): string | undefined {
 
 export class ScopeError extends Error {}
 
+/** Whether a string names a scope this release knows. A real runtime check, unlike a brand. */
+function isScopeKey(key: string): key is ScopeKey {
+  return (
+    (ACCOUNT_SCOPES as readonly string[]).includes(key) ||
+    (PUBLIC_SCOPES as readonly string[]).includes(key)
+  );
+}
+
 /**
  * Build a scope from an explicit, per-export consent decision.
  *
  * `consented` is what the user chose *this time*. Anything not named is excluded, so an
  * account scope arrives only by being asked for — the default is not a starting point to
  * be edited but the answer when nothing was chosen.
+ *
+ * The parameter is `readonly string[]`, not `readonly ScopeKey[]`, and the difference is the
+ * whole point of the unknown-key refusal below. Declaring the input already valid made that
+ * branch unreachable from typed code — a validator whose signature asserts what it exists to
+ * check — while the callers that actually carry an unknown key are precisely the untyped
+ * ones: a consent list rehydrated from storage, parsed out of a document, or assembled from
+ * checkbox ids. This is the same distinction `local-index` draws about `origin: 'self'`: the
+ * union is a compile-time control, and it is not the control that catches this.
  */
-export function scopeFromConsent(consented: readonly ScopeKey[], pseudonymize = false): ExportScope {
+export function scopeFromConsent(consented: readonly string[], pseudonymize = false): ExportScope {
   const unique = [...new Set(consented)];
+  const included: ScopeKey[] = [];
   for (const key of unique) {
-    if (!(ACCOUNT_SCOPES as readonly string[]).includes(key) && !(PUBLIC_SCOPES as readonly string[]).includes(key)) {
-      throw new ScopeError(`unknown export scope "${key}"`);
-    }
+    if (!isScopeKey(key)) throw new ScopeError(`unknown export scope "${key}"`);
+    included.push(key);
   }
-  const scope: ExportScope = { included: unique, pseudonymized: pseudonymize };
+  const scope: ExportScope = { included, pseudonymized: pseudonymize };
   // Pseudonymization without account data is a claim about nothing. Refusing it keeps
   // the flag meaning one thing.
   if (pseudonymize && !includesAccountData(scope)) {

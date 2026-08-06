@@ -29,7 +29,7 @@ import {
 } from '@bleavit/contexts';
 import * as contextsModule from '@bleavit/contexts';
 
-const decode = (bytes) => new TextDecoder().decode(bytes);
+const decode = (bytes: Uint8Array): string => new TextDecoder().decode(bytes);
 
 // --- scope and consent ----------------------------------------------------
 
@@ -71,6 +71,11 @@ test('pseudonymization without account data is refused', () => {
 
 test('the pseudonymization label says what it does NOT do', () => {
   const label = pseudonymizationLabel(scopeFromConsent(['positions'], true));
+  // Asserted present before it is matched. `pseudonymizationLabel` returns `undefined` when
+  // nothing account-bearing is in scope — which is the very next test — so `assert.match`
+  // against a possibly-absent label would report a type mismatch where the real finding is
+  // that the label was not offered at all.
+  assert.ok(label !== undefined, 'no pseudonymization label was offered for an account scope');
   assert.match(label, /does not hide your holdings/i);
   assert.match(label, /fingerprint/i);
   assert.match(label, /cannot be un-sent/i);

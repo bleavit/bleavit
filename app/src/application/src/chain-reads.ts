@@ -26,7 +26,7 @@
  * and it is indistinguishable on screen from a chain that really says zero.
  */
 
-import type { FinalizedReader, StorageItem } from '@bleavit/chain-client';
+import type { Finalized, FinalizedBlockRef, StorageItem } from '@bleavit/chain-client';
 import type { Verified } from '@bleavit/shared-types';
 import type { ShellChainState } from './shell.js';
 
@@ -113,15 +113,38 @@ export function assertOnePin(state: ShellChainState, blockHash: string): void {
  * different questions: one says the client cannot vouch for the governance phase, the
  * other says exactly what it read.
  */
+/**
+ * What this function needs from a reader: one pin and finalized storage reads.
+ *
+ * Structural rather than the `FinalizedReader` class, because a class with `#private`
+ * fields is **nominal** in TypeScript — nothing but a real reader satisfies it, so a suite
+ * could only reach this code through the transport, the codecs and a recorded transcript,
+ * and a defect in any of those would make the suite agree with it. Narrowing also states
+ * the real dependency: `reader.at` is the single source of every leaf's pin, which is the
+ * property `assertOnePin` re-checks.
+ */
+export interface ShellStateReader {
+  readonly at: FinalizedBlockRef;
+  storage(
+    key: string,
+    type?: 'value' | 'descendantsValues',
+  ): Promise<Finalized<readonly StorageItem[]>>;
+}
+
 export async function readShellState(
-  reader: FinalizedReader,
+  reader: ShellStateReader,
   decoders: ShellDecoders,
 ): Promise<ShellRead> {
   const at = reader.at;
   const undecodable: UndecodableRead[] = [];
   const finalized = <T,>(value: T): Verified<T> => ({
     value,
-    status: { kind: 'verified-finalized', blockHash: at.blockHash, blockNumber: at.blockNumber },
+    status: {
+      kind: 'verified-finalized',
+      chain: at.chain,
+      blockHash: at.blockHash,
+      blockNumber: at.blockNumber,
+    },
   });
 
   const epochRaw = firstValue((await reader.storage(SHELL_READS.epochOf)).value);

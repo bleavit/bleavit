@@ -379,7 +379,11 @@ jobs:
         run: pnpm run test:protocol
       - name: Finalized<T> assertion gate (10 §2.1)
         working-directory: app
-        run: pnpm run check:casts
+        # The witness leg is not optional here. The gate reads the TypeScript AST rather
+        # than lines — it had to, once `app/`'s own tools became TypeScript and the line
+        # scanner started matching its own diagnostic strings — and a rewritten detection
+        # engine observed only through a green run is an engine nobody has seen fire.
+        run: pnpm run check:casts && pnpm run check:casts:witness
       - name: Chain feed vs the runtime source (02 §11, F2)
         # The cheap per-commit half of the descriptor-drift gate: no build, no node.
         # Compares the committed feed against `construct_runtime!` and

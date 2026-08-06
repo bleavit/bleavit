@@ -4,11 +4,13 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test *.test.js"
+    "test": "node --test"
   },
   "dependencies": {
     "@bleavit/chain-client": "workspace:*",
+    "@bleavit/descriptors": "workspace:*",
     "@bleavit/mock-runtime": "workspace:*",
+    "@bleavit/shared-types": "workspace:*",
     "@polkadot-api/descriptors": "workspace:*"
   }
 }

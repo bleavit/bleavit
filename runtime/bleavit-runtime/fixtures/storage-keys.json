@@ -1,0 +1,149 @@
+{
+ "schema": "bleavit.storage-keys.v1",
+ "prefixHash": "twox128",
+ "entries": [
+  {
+   "name": "constitution_phase_flags",
+   "pallet": "Constitution",
+   "item": "PhaseFlags",
+   "hashers": [],
+   "preimages": [],
+   "keyDescription": "plain value; the 32-byte prefix is the whole key",
+   "key": "0xfb8ccbf677a3d2ce27ab85165f32df6a4b970b8d50ccb811cd988b36f7f6cf7c"
+  },
+  {
+   "name": "epoch_proposals",
+   "pallet": "Epoch",
+   "item": "Proposals",
+   "hashers": ["Blake2_128Concat"],
+   "preimages": ["0x9210000000000000"],
+   "keyDescription": "ProposalId = 4242 (u64)",
+   "key": "0x217d0aba3b8e701c3cd0d4575ad8c33188c2f7188c6fdd1dffae2fa0d171f440a630942d9126a0c83aba875950aa5f299210000000000000"
+  },
+  {
+   "name": "scheduler_agenda",
+   "pallet": "Scheduler",
+   "item": "Agenda",
+   "hashers": ["Twox64Concat"],
+   "preimages": ["0x40420f00"],
+   "keyDescription": "BlockNumber = 1000000 (u32)",
+   "key": "0x3db7a24cfdc9de785974746c14a99df91643f5419718219c95679ddd2d825574dbd789d769a95a7f40420f00"
+  },
+  {
+   "name": "welfare_snapshots",
+   "pallet": "Welfare",
+   "item": "Snapshots",
+   "hashers": ["Blake2_128Concat"],
+   "preimages": ["0x090000000300"],
+   "keyDescription": "single map keyed by the TUPLE (EpochId = 9, MetricSpecVersion = 3): one hash over the encoded pair",
+   "key": "0xd0e479d24e8195fc9350f4d82898c8ef89de6037db607fb8fad84439c32ad3d35d8493849731298e492253c18c5723bd090000000300"
+  },
+  {
+   "name": "ledger_positions",
+   "pallet": "ConditionalLedger",
+   "item": "Positions",
+   "hashers": ["Blake2_128Concat", "Blake2_128Concat"],
+   "preimages": ["0x0092100000000000000001", "0x0708101820283038404850586068707880889098a0a8b0b8c0c8d0d8e0e8f0f8"],
+   "keyDescription": "double map (PositionId::Proposal{4242, Accept, Long}, account 7): two hashes, one per key",
+   "key": "0x94eec1b9345db53a85e5f5b9e9532fe49a4ea0593d7f97323d947a42bc6c2639dfbb4094c07a05726702b41402e3fb8a0092100000000000000001fd44e3e4ec4323bdb62639be913e8db90708101820283038404850586068707880889098a0a8b0b8c0c8d0d8e0e8f0f8"
+  },
+  {
+   "name": "ledger_positions_baseline_variant",
+   "pallet": "ConditionalLedger",
+   "item": "Positions",
+   "hashers": ["Blake2_128Concat", "Blake2_128Concat"],
+   "preimages": ["0x010900000001", "0x0708101820283038404850586068707880889098a0a8b0b8c0c8d0d8e0e8f0f8"],
+   "keyDescription": "the other PositionId variant — Baseline{9, Short} — whose SCALE encoding is a different length from Proposal{..}",
+   "key": "0x94eec1b9345db53a85e5f5b9e9532fe49a4ea0593d7f97323d947a42bc6c26390e1823d61df850aa63820331e8853a90010900000001fd44e3e4ec4323bdb62639be913e8db90708101820283038404850586068707880889098a0a8b0b8c0c8d0d8e0e8f0f8"
+  },
+  {
+   "name": "service_ledger_positions",
+   "pallet": "ServiceLedger",
+   "item": "Positions",
+   "hashers": ["Blake2_128Concat", "Blake2_128Concat"],
+   "preimages": ["0x0092100000000000000001", "0x0708101820283038404850586068707880889098a0a8b0b8c0c8d0d8e0e8f0f8"],
+   "keyDescription": "the SAME item and the SAME key in the other instance: identical suffix, different prefix",
+   "key": "0x0ff5e4a4a71cf21d2b9cd3070ce7efc69a4ea0593d7f97323d947a42bc6c2639dfbb4094c07a05726702b41402e3fb8a0092100000000000000001fd44e3e4ec4323bdb62639be913e8db90708101820283038404850586068707880889098a0a8b0b8c0c8d0d8e0e8f0f8"
+  },
+  {
+   "name": "oracle_rounds",
+   "pallet": "Oracle",
+   "item": "Rounds",
+   "hashers": ["Blake2_128Concat", "Blake2_128Concat", "Blake2_128Concat"],
+   "preimages": ["0x0500", "0x09000000", "0x0300"],
+   "keyDescription": "N-map (MetricId = 5, EpochId = 9, MetricSpecVersion = 3): three hashes, one per key",
+   "key": "0x6ecdde33e5d791e9c15595f33fdaafd67b45e7c782afb68af72fc5ebb26b974b97bbc69ac72fd5f3de244e0bcb17f39a0500f71f22775221b1945fe6cfa3c6550c7c090000003331e155f7f66b1bf9b33fb406d4127f0300"
+  },
+  {
+   "name": "foreign_assets_account",
+   "pallet": "ForeignAssets",
+   "item": "Account",
+   "hashers": ["Blake2_128Concat", "Blake2_128Concat"],
+   "preimages": ["0x010300a10f043205e514", "0x0708101820283038404850586068707880889098a0a8b0b8c0c8d0d8e0e8f0f8"],
+   "keyDescription": "double map (AssetId = the USDC XCM Location, account 7). Key 1 is a variable-length Location, NOT the u32 Asset Hub uses for the same asset (02 §7.7)",
+   "key": "0x30e64a56026f4b5e3c2d196283a9a17db99d880ec681799c0cf30e8886371da9484550ecc01d89e5e7bb33be1915aaef010300a10f043205e514fd44e3e4ec4323bdb62639be913e8db90708101820283038404850586068707880889098a0a8b0b8c0c8d0d8e0e8f0f8"
+  },
+  {
+   "name": "preimage_status_for",
+   "pallet": "Preimage",
+   "item": "StatusFor",
+   "hashers": ["Identity"],
+   "preimages": ["0x5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a"],
+   "keyDescription": "map H256 -> RequestStatus under the IDENTITY hasher: the key is its own encoding, with no digest and nothing appended",
+   "key": "0xd8f314b7f4e6b095f0f8ee4656a4482555b1ae8eced5522f3c4049bc84eda4a85a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a"
+  },
+  {
+   "name": "system_account",
+   "pallet": "System",
+   "item": "Account",
+   "hashers": ["Blake2_128Concat"],
+   "preimages": ["0x0708101820283038404850586068707880889098a0a8b0b8c0c8d0d8e0e8f0f8"],
+   "keyDescription": "map AccountId → AccountInfo — every native balance read",
+   "key": "0x26aa394eea5630e07c48ae0c9558cef7b99d880ec681799c0cf30e8886371da9fd44e3e4ec4323bdb62639be913e8db90708101820283038404850586068707880889098a0a8b0b8c0c8d0d8e0e8f0f8"
+  }
+ ],
+ "hashers": [
+  {
+   "name": "empty",
+   "input": "0x",
+   "Blake2_128Concat": "0xcae66941d9efbd404e4d88758ea67670",
+   "Twox64Concat": "0x99e9d85137db46ef",
+   "Identity": "0x"
+  },
+  {
+   "name": "one_byte",
+   "input": "0x00",
+   "Blake2_128Concat": "0x7025e075d5e2f6cde3cc051a31f0766000",
+   "Twox64Concat": "0x682705db4aa834e900",
+   "Identity": "0x00"
+  },
+  {
+   "name": "u32_le",
+   "input": "0x39050000",
+   "Blake2_128Concat": "0xe0956573baada8dd69fae1cff092d73739050000",
+   "Twox64Concat": "0xe34baf730b8ed4ef39050000",
+   "Identity": "0x39050000"
+  },
+  {
+   "name": "u64_le",
+   "input": "0x9210000000000000",
+   "Blake2_128Concat": "0xa630942d9126a0c83aba875950aa5f299210000000000000",
+   "Twox64Concat": "0xd4d4ea18e1384b569210000000000000",
+   "Identity": "0x9210000000000000"
+  },
+  {
+   "name": "account",
+   "input": "0x0708101820283038404850586068707880889098a0a8b0b8c0c8d0d8e0e8f0f8",
+   "Blake2_128Concat": "0xfd44e3e4ec4323bdb62639be913e8db90708101820283038404850586068707880889098a0a8b0b8c0c8d0d8e0e8f0f8",
+   "Twox64Concat": "0x0191a8138491aa080708101820283038404850586068707880889098a0a8b0b8c0c8d0d8e0e8f0f8",
+   "Identity": "0x0708101820283038404850586068707880889098a0a8b0b8c0c8d0d8e0e8f0f8"
+  },
+  {
+   "name": "long",
+   "input": "0x000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8",
+   "Blake2_128Concat": "0x2ddb4075f5516949e0bdaa1f2f597111000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8",
+   "Twox64Concat": "0xcf8e78c76b52b66f000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8",
+   "Identity": "0x000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f808182838485868788898a8b8c8d8e8f909192939495969798999a9b9c9d9e9fa0a1a2a3a4a5a6a7a8a9aaabacadaeafb0b1b2b3b4b5b6b7b8b9babbbcbdbebfc0c1c2c3c4c5c6c7c8"
+  }
+ ]
+}

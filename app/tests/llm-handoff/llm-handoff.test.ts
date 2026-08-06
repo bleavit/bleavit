@@ -170,6 +170,6 @@ test('this package reaches no network primitive', async () => {
   // dependency rule can see them). This asserts the package is inside its scope, because a
   // scanner that covers less than it claims reports success forever.
   const { readFileSync } = await import('node:fs');
-  const list = readFileSync(new URL('../../tools/handoff-packages.cjs', import.meta.url), 'utf8');
+  const list = readFileSync(new URL('../../tools/handoff-packages.ts', import.meta.url), 'utf8');
   assert.match(list, /llm-handoff/);
 });

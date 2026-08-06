@@ -32,32 +32,39 @@ import {
   serializeCapsule,
 } from '@bleavit/contexts';
 import * as contextsModule from '@bleavit/contexts';
+import type {
+  BuildCapsuleInput,
+  CapsuleBook,
+  CapsuleDecision,
+  CapsuleEpoch,
+  CapsuleProposal,
+  CapsuleReads,
+  ContextAnchor,
+} from '@bleavit/contexts';
 import { REFUSAL_CODES, RETIRED_CODES } from '@bleavit/handoff-envelope';
+import type { ChainBinding } from '@bleavit/handoff-envelope';
+import type { DomainBoundary, FinalizedBlockRef } from '@bleavit/chain-client';
+import { finalize } from '@bleavit/chain-client/testing';
+
+/** The chain identity every pin in this file is read against (F18). Named, not inlined:
+ *  the field exists so two reads can agree on it, and copies agree until one is edited. */
+const TEST_CHAIN = `0x${'ce'.repeat(32)}` as `0x${string}`;
+
 
 /**
- * A stand-in for `Finalized<T>` — the brand is a module-private symbol in `chain-client`
- * and a test cannot mint one. That is the property being relied on rather than worked
- * around: TypeScript checks provenance at the one place it can be checked, and this suite
- * checks the projection.
- */
-/**
- * A complete `Finalized<T>` fixture.
+ * A real `Finalized<T>`, from the real construction site (V-118).
  *
- * Two things the untyped version got wrong, both invisible at runtime. `as const` on the
- * discriminant: without it `kind` widens to `string` and the value stops being a
- * `Verified<T>` at all. And **`blockHash`/`blockNumber` are required** — the status this
- * helper claimed was `verified-finalized` carried no block, which is the one thing that
- * status *means*. Every assertion in this file has been running against a provenance label
- * with nothing behind it, which is exactly the condition 10 §2.1 exists to make untypeable.
+ * The untyped version built the shape by hand and got two things wrong that no runtime
+ * assertion could see: without `as const` the discriminant widened to `string` and the value
+ * stopped being a `Verified<T>` at all, and it claimed `verified-finalized` while carrying no
+ * block, which is the one thing that status means. Calling `finalize` fixes both by
+ * construction — the fixture and production are now the same function.
+ *
+ * Reaching it needs the deliberate `@bleavit/chain-client/testing` subpath, which
+ * `no-finalized-minting-outside-chain-client` forbids production code from importing.
  */
-const finalized = <T,>(value: T) => ({
-  value,
-  status: {
-    kind: 'verified-finalized' as const,
-    blockHash: `0x${'11'.repeat(32)}` as const,
-    blockNumber: 7,
-  },
-});
+const AT: FinalizedBlockRef = { chain: TEST_CHAIN, blockHash: `0x${'11'.repeat(32)}`, blockNumber: 7 };
+const finalized = <T,>(value: T) => finalize(value, AT);
 
 /**
  * Capture a refusal so its code, detail and recovery can be asserted.
@@ -67,29 +74,52 @@ const finalized = <T,>(value: T) => ({
  * check after it passes for free. That exact defect already shipped once in this
  * subsystem's suites and was caught by review rather than by a red run, which is the
  * reason it is worth a helper: the shape that produces it is no longer writable here.
+ *
+ * It returns `CapsuleError`, not `unknown`. Every caller immediately reads `.code`,
+ * `.detail` and `.recovery`, so an `unknown` return would push a narrowing step into each of
+ * the call sites — where the cheapest way to satisfy it is a cast, and that is how the
+ * assertion this helper exists to protect gets weakened back one site at a time.
  */
-function refusalFrom(build) {
+function refusalFrom(build: () => unknown): CapsuleError {
   try {
     build();
   } catch (error) {
+    assert.ok(error instanceof CapsuleError, `expected a CapsuleError, got ${String(error)}`);
     return error;
   }
   return assert.fail('expected a refusal; the export succeeded');
 }
 
-const BINDING = {
+/**
+ * Read an optional capsule section, failing loudly if it is absent.
+ *
+ * The one-character alternative is `capsule.positions!`, and the difference is the whole
+ * point of this suite: a capsule that announced `positions` and carried none is exactly what
+ * `FE-HANDOFF-012` exists to refuse — *empty is data, absent is not*. So absence has to be
+ * its own red assertion here, not a `TypeError` raised inside a `.map` two lines later where
+ * it reads as a broken test rather than a broken document.
+ */
+function section<T>(value: T | undefined, name: string): T {
+  assert.ok(value !== undefined, `the capsule carried no \`${name}\` section`);
+  return value;
+}
+
+const BINDING: ChainBinding = {
   genesisHash: '0x91b171bb158e2d3848fa23a9f1c25182fb8e20313b2c1eb49219da7a70ce90c3',
   specVersion: 2,
   contractVersion: 27,
 };
 
 /** `ConditionalLedger::ServiceIdBase` as the runtime publishes it (16 §7.1). */
-const BOUNDARY = { serviceIdBase: 1n << 63n };
+const BOUNDARY: DomainBoundary = { serviceIdBase: 1n << 63n };
 const SERVICE_ID = (1n << 63n) + 7n;
 
-const anchor = finalized({ blockHash: '0xfeed', blockNumber: 4_242 });
+const anchor = finalized<ContextAnchor>({ blockHash: '0xfeed', blockNumber: 4_242 });
 
-const book = (over = {}) => ({
+// `kind` is annotated rather than inferred: without it `'primary'` widens to `string` and
+// stops satisfying `LedgerDomain`, which is the field 11 §11.2a makes load-bearing — an
+// external book whose `kind` had widened would render beside a governance one.
+const book = (over: Partial<CapsuleBook> = {}): CapsuleBook => ({
   id: '12',
   kind: 'primary',
   proposalId: '3',
@@ -99,14 +129,16 @@ const book = (over = {}) => ({
 });
 
 /** The public-only default scope, with every consented read supplied. */
-const publicReads = () => ({
-  proposal: finalized([{ id: '3', state: 'Trading', title: 'Raise the fee' }]),
-  market: finalized([book()]),
-  decision: finalized([]),
-  epoch: finalized({ index: 9, startBlock: 4_000 }),
+const publicReads = (): CapsuleReads => ({
+  proposal: finalized<readonly CapsuleProposal[]>([
+    { id: '3', state: 'Trading', title: 'Raise the fee' },
+  ]),
+  market: finalized<readonly CapsuleBook[]>([book()]),
+  decision: finalized<readonly CapsuleDecision[]>([]),
+  epoch: finalized<CapsuleEpoch>({ index: 9, startBlock: 4_000 }),
 });
 
-const input = (over = {}) => ({
+const input = (over: Partial<BuildCapsuleInput> = {}): BuildCapsuleInput => ({
   binding: BINDING,
   anchor,
   scope: defaultScope(),
@@ -197,8 +229,12 @@ test('every scope key is covered by the both-directions check, not just the acco
   // A public scope that is consented but unsupplied must refuse exactly as an account one
   // does. Written as a loop over the scope vocabulary so a scope added later without a
   // read behind it fails here rather than being silently unexportable.
-  for (const key of ['proposal', 'market', 'decision', 'epoch']) {
-    const reads = { ...publicReads() };
+  // `as const` on the list and a mutable copy of the reads: without the first, `key` is
+  // `string` and cannot index `CapsuleReads`; without the second, `delete` hits a readonly
+  // property. Both are the type layer insisting the loop names real scope keys, which is
+  // the property this test is for — a scope added later with no read behind it.
+  for (const key of ['proposal', 'market', 'decision', 'epoch'] as const) {
+    const reads: { -readonly [K in keyof CapsuleReads]?: CapsuleReads[K] } = { ...publicReads() };
     delete reads[key];
     const error = refusalFrom(() => buildCapsule(input({ reads })));
     assert.equal(error.code, 'FE-HANDOFF-002', `${key} unsupplied was not refused`);
@@ -227,7 +263,7 @@ test('pseudonymization withholds the address and says so, leaving the holdings',
   // an absent one, and the holdings are untouched because that is what the label promises.
   assert.equal(capsule.scope.pseudonymized, true);
   assert.ok(capsule.scope.included.includes('address'));
-  assert.deepEqual(capsule.positions.primary, [{ bookId: '12', baseUnits: 5n }]);
+  assert.deepEqual(section(capsule.positions, 'positions').primary, [{ bookId: '12', baseUnits: 5n }]);
 });
 
 /* --------------------------------------------------- 11 §11.2a rules 1 and 2, domain */
@@ -245,8 +281,9 @@ test('positions are keyed by domain, and the domain comes from the id', () => {
       },
     }),
   );
-  assert.deepEqual(capsule.positions.primary, [{ bookId: '12', baseUnits: 5n }]);
-  assert.deepEqual(capsule.positions.service, [
+  const positions = section(capsule.positions, 'positions');
+  assert.deepEqual(positions.primary, [{ bookId: '12', baseUnits: 5n }]);
+  assert.deepEqual(positions.service, [
     { bookId: SERVICE_ID.toString(), baseUnits: 9n },
   ]);
 });
@@ -266,8 +303,9 @@ test('the document has no field a cross-domain total could occupy', () => {
   );
   // Rule 2 is enforced by shape: `positions` is a record keyed by domain, so there is
   // nowhere to put a merged figure and nothing to remember not to compute.
-  assert.deepEqual(Object.keys(capsule.positions).sort(), ['primary', 'service']);
-  assert.equal(Array.isArray(capsule.positions), false);
+  const positions = section(capsule.positions, 'positions');
+  assert.deepEqual(Object.keys(positions).sort(), ['primary', 'service']);
+  assert.equal(Array.isArray(positions), false);
 });
 
 test('a book whose label disagrees with its id is refused, not corrected', () => {
@@ -323,12 +361,12 @@ test('the id one below the boundary stays primary — the bit test runs on bigin
     }),
   );
   assert.deepEqual(
-    capsule.positions.primary.map((p) => p.bookId),
+    section(capsule.positions, 'positions').primary.map((p) => p.bookId),
     [lastPrimary.toString()],
     'the last primary id was classified into the service band',
   );
   assert.deepEqual(
-    capsule.positions.service.map((p) => p.bookId),
+    section(capsule.positions, 'positions').service.map((p) => p.bookId),
     [SERVICE_ID.toString()],
   );
 });
@@ -341,7 +379,9 @@ test('a book one below the boundary must be labelled primary, and the check sees
   const capsule = buildCapsule(
     input({ reads: { ...publicReads(), market: finalized([book({ id: lastPrimary })]) } }),
   );
-  assert.equal(capsule.market[0].kind, 'primary');
+  // The whole projected list, not `[0].kind`: this also fails if the boundary classified
+  // the id into a second book or dropped it, which a single indexed read cannot see.
+  assert.deepEqual(section(capsule.market, 'market').map((b) => b.kind), ['primary']);
 });
 
 test('a non-canonical id is refused rather than coerced', () => {
@@ -386,7 +426,12 @@ test('FE-HANDOFF-012 is now emitted by something — the code was defined and un
 
 test('009 stays retired and every live code carries a recovery', () => {
   assert.deepEqual([...RETIRED_CODES], ['FE-HANDOFF-009']);
-  assert.equal(REFUSAL_CODES.includes('FE-HANDOFF-009'), false);
+  // Widened to `string[]` on purpose. `HandoffRefusalCode` already excludes `-009`, so the
+  // narrow form is a type error rather than an assertion — and a type that excludes it is
+  // not the claim being made here. The claim is about the **array**, which is written by
+  // hand and could carry a code the union forgot; those two disagreeing is precisely the
+  // drift a `readonly HandoffRefusalCode[]` annotation would hide by refusing to compile.
+  assert.equal((REFUSAL_CODES as readonly string[]).includes('FE-HANDOFF-009'), false);
   assert.equal(REFUSAL_CODES.length, 12);
 });
 

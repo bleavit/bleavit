@@ -32,8 +32,35 @@
 
 import type { HexString } from '@bleavit/shared-types';
 
-/** A 32-byte hash as the release record carries it. */
+/**
+ * A 32-byte **chain** hash, `0x`-prefixed — a genesis hash, a chain-spec hash.
+ *
+ * Distinct from `Sha256Hex` because the release record genuinely carries the two in
+ * different spellings, and one type covering both was a claim the producer never satisfied:
+ * `release.json`'s `perFileHashes` and `descriptorMetadataHashes` are bare lowercase hex,
+ * validated against `/^[0-9a-f]{64}$/` by this package's own parser and then **asserted**
+ * into a `` `0x${string}` `` — three `as Hash32` casts propping up a type that was wrong for
+ * every value that ever flowed through it. Found by putting the release suite under `tsc`
+ * (F11/#31), which is the same class of defect as the `releaseTxid` field described below:
+ * a producer and a consumer describing the same bytes differently, with nothing comparing
+ * the two descriptions.
+ *
+ * Nothing broke while it was wrong because both sides compared with `===` under the same
+ * convention. It would break the moment any consumer acted on the prefix the type promises
+ * — stripping it before a comparison, or rendering it.
+ */
 export type Hash32 = HexString;
+
+/**
+ * A content hash as this release record writes it: 64 lowercase hex characters, **no `0x`**.
+ *
+ * Deliberately a plain alias rather than a brand. The value is checked where it enters —
+ * `parseReleaseDocument` refuses anything that does not match — so a brand would add a mint
+ * ceremony to every caller for a property already enforced at the boundary. What the alias
+ * buys is that the *spelling* is now written down in one place instead of being contradicted
+ * by the type at each use.
+ */
+export type Sha256Hex = string;
 
 /** The `spec_version` window a bundle's committed descriptors can serve (10 §5.1). */
 export interface SpecVersionRange {
@@ -71,10 +98,10 @@ export interface ReleaseIdentity {
   readonly arweaveManifestTxId: string;
   /** The commit the bundle was built from. */
   readonly sourceCommit: string;
-  /** Path → content hash, for every file in the distributed bundle. */
-  readonly perFileHashes: Readonly<Record<string, Hash32>>;
+  /** Path → content hash, for every file in the distributed bundle. Bare hex — see `Sha256Hex`. */
+  readonly perFileHashes: Readonly<Record<string, Sha256Hex>>;
   /** One metadata hash per served `spec_version` (10 §5.1's committed descriptor sets). */
-  readonly descriptorMetadataHashes: Readonly<Record<number, Hash32>>;
+  readonly descriptorMetadataHashes: Readonly<Record<number, Sha256Hex>>;
   readonly specVersionRange: SpecVersionRange;
   /** Hash of the chain-spec bytes bundled for smoldot (app-code rule 13). */
   readonly chainSpecHashes: Readonly<Record<'relay' | 'para', Hash32>>;

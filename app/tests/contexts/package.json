@@ -3,10 +3,13 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "scripts": { "test": "node --test *.test.js" },
+  "scripts": {
+    "test": "node --test"
+  },
   "dependencies": {
     "@bleavit/contexts": "workspace:*",
     "@bleavit/handoff-envelope": "workspace:*",
-    "@bleavit/receipts": "workspace:*"
+    "@bleavit/receipts": "workspace:*",
+    "@bleavit/chain-client": "workspace:*"
   }
 }

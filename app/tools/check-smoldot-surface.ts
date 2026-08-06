@@ -59,9 +59,15 @@ function pinnedPackage(storePrefix: string, packagePath: string): { version: str
         `(${dirs.join(', ')}); this gate cannot tell which one the app would run`,
     );
   }
+  // Bound to a local before use. The length check above proves there is exactly one, but
+  // it proves it to a reader and not to the compiler — `noUncheckedIndexedAccess` types
+  // `dirs[0]` as `string | undefined` regardless. This file predates `tools/*.ts` entering
+  // `tsconfig.tests.json`, so it shipped unchecked; the migration is what surfaced it.
+  const [only] = dirs;
+  if (only === undefined) throw new Error(`no pinned ${storePrefix} in the store`);
   return {
-    version: dirs[0].slice(storePrefix.length + 1),
-    dir: join(store, dirs[0], 'node_modules', packagePath),
+    version: only.slice(storePrefix.length + 1),
+    dir: join(store, only, 'node_modules', packagePath),
   };
 }
 
@@ -92,6 +98,11 @@ function issuedMethods(): string[] {
   }
   const names: string[] = [];
   for (const [, group, body] of groups) {
+    // Both come out of a regex match, so both are `string | undefined` — a capture group
+    // can be optional even when this pattern's are not. Skipping a non-match is the honest
+    // handling: the emptiness check below is what turns "matched nothing" into a failure,
+    // rather than a silent zero-length issued set.
+    if (group === undefined || body === undefined) continue;
     for (const [, key] of body.matchAll(/(\w+)\s*:/g)) names.push(`${group}${infix}${key}`);
   }
   if (names.length === 0) throw new Error('derived an empty issued-method set from methods.js');
@@ -109,8 +120,11 @@ function smoldotWasm(dir: string): Buffer {
       break;
     }
     const m = /return\s+"([A-Za-z0-9+/=]+)"/.exec(src);
-    if (!m) throw new Error(`smoldot bytecode chunk ${i} is not the expected base64 payload`);
-    chunks.push(m[1]);
+    const payload = m?.[1];
+    if (payload === undefined) {
+      throw new Error(`smoldot bytecode chunk ${i} is not the expected base64 payload`);
+    }
+    chunks.push(payload);
   }
   if (chunks.length === 0) throw new Error('found no smoldot bytecode chunks; the layout moved');
   const wasm = inflateSync(Buffer.from(chunks.join(''), 'base64'));

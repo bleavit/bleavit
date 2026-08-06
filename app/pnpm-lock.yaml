@@ -50,6 +50,9 @@ importers:
       '@bleavit/shared-types':
         specifier: workspace:*
         version: link:../shared-types
+      '@polkadot-api/substrate-bindings':
+        specifier: 0.20.3
+        version: 0.20.3
       polkadot-api:
         specifier: 2.1.8
         version: 2.1.8(esbuild@0.28.1)(rxjs@7.8.2)
@@ -326,15 +329,24 @@ importers:
       '@bleavit/chain-client':
         specifier: workspace:*
         version: link:../../packages/chain-client
+      '@bleavit/descriptors':
+        specifier: workspace:*
+        version: link:../../packages/descriptors
       '@bleavit/mock-runtime':
         specifier: workspace:*
         version: link:../../packages/mock-runtime
+      '@bleavit/shared-types':
+        specifier: workspace:*
+        version: link:../../packages/shared-types
       '@polkadot-api/descriptors':
         specifier: workspace:*
         version: link:../../packages/papi-descriptors
 
   tests/contexts:
     dependencies:
+      '@bleavit/chain-client':
+        specifier: workspace:*
+        version: link:../../packages/chain-client
       '@bleavit/contexts':
         specifier: workspace:*
         version: link:../../packages/contexts
@@ -432,6 +444,9 @@ importers:
 
   tests/receipts:
     dependencies:
+      '@bleavit/chain-client':
+        specifier: workspace:*
+        version: link:../../packages/chain-client
       '@bleavit/contexts':
         specifier: workspace:*
         version: link:../../packages/contexts
@@ -474,9 +489,15 @@ importers:
       '@bleavit/intents':
         specifier: workspace:*
         version: link:../../packages/intents
+      '@bleavit/mock-runtime':
+        specifier: workspace:*
+        version: link:../../packages/mock-runtime
       '@bleavit/shared-types':
         specifier: workspace:*
         version: link:../../packages/shared-types
+      '@bleavit/transaction-builder':
+        specifier: workspace:*
+        version: link:../../packages/transaction-builder
       '@bleavit/ui':
         specifier: workspace:*
         version: link:../../packages/ui
@@ -504,6 +525,9 @@ importers:
       '@bleavit/mock-runtime':
         specifier: workspace:*
         version: link:../../packages/mock-runtime
+      '@bleavit/shared-types':
+        specifier: workspace:*
+        version: link:../../packages/shared-types
       '@bleavit/signing':
         specifier: workspace:*
         version: link:../../packages/signing
@@ -530,6 +554,12 @@ importers:
         version: 19.2.8(react@19.2.8)
 
   tests/verify:
+    dependencies:
+      '@bleavit/verify':
+        specifier: workspace:*
+        version: link:../../packages/verify
+
+  tools/verify-release:
     dependencies:
       '@bleavit/verify':
         specifier: workspace:*

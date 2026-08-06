@@ -16,7 +16,7 @@
  * `<span>{model.price.value}</span>` typechecks, because the payload of a `Verified<bigint>`
  * is a `bigint` and React renders one. Nothing in the type system can stop a screen
  * unwrapping a value by hand, so the second half of this control is a source gate —
- * `check-render-provenance.mjs` — which fails on a `.value` access reaching JSX. The two
+ * `check-render-provenance.ts` — which fails on a `.value` access reaching JSX. The two
  * are complements, and each is weak alone: the type layer makes the correct path the easy
  * one, and the gate closes the deliberate bypass.
  *

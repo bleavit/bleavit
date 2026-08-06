@@ -122,6 +122,7 @@ function encodedStatus(
     value: clamped.encoded,
     status: {
       kind: 'verified-finalized',
+      chain: refreshedAt.chain,
       blockHash: refreshedAt.blockHash,
       blockNumber: refreshedAt.blockNumber,
     },

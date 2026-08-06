@@ -100,7 +100,7 @@ export interface ForeignChainPin {
  * from the live chain and cross-checked across two independent operators, which is what
  * R-2 prescribes for a `[VERIFY]` — and does not collide with 10 §5.1's "never a live node"
  * rule, which governs *descriptor generation*. The descriptors here are generated from the
- * wasm; only the identity fact was asked of the network, and `check-foreign-feed.mjs`
+ * wasm; only the identity fact was asked of the network, and `check-foreign-feed.ts`
  * refuses a pin recording fewer than two distinct sources.
  *
  * Emptiness stays a reachable state, not a historical one: a release targeting a relay

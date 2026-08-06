@@ -24,6 +24,12 @@ import '@bleavit/signing/testing';
 // minting `origin: 'self'` and laundering backfilled data into light-client-verified.
 import '@bleavit/local-index/testing';
 
+// And the third instance of the same matcher, for the subpath that matters most:
+// `@bleavit/chain-client/testing` is the `Finalized<T>` construction site, so a vacuous
+// `no-finalized-minting-outside-chain-client` would let `transaction-builder` mint the one
+// type the transaction path accepts. Witnessed on its own, not inferred from the two above.
+import '@bleavit/chain-client/testing';
+
 // The signing exemption's boundary, witnessed. `packages/signing` may reach
 // `polkadot-api/pjs-signer` because a signer factory cannot serve a read; everything else
 // under `polkadot-api` still constructs chains and providers, so it must still fail. A
@@ -38,3 +44,14 @@ import 'polkadot-api/ws-provider';
 // in `NON_LOCAL_DEPENDENCY_TYPES` precisely because `node:net` and `node:fs` are as much a
 // network and filesystem surface on a handoff path as any package.
 import 'node:http';
+
+// The SCOPED spelling of the same capability, and the third instance of V-86's class in
+// these matchers. `polkadot-api`'s providers are separately published, separately
+// installable packages — `@polkadot-api/ws-provider`, `@polkadot-api/sm-provider` — and the
+// bare arm of the old pattern (`^(polkadot-api|smoldot)(/|$)`) is anchored at `^`, so it
+// could never match a specifier starting with `@`. Measured before the repair: both lines
+// below were reported by `witness-could-not-resolve` alone, which fires *because* they are
+// not installed here — and declaring the dependency, which is what a package would do to
+// use one, is exactly what makes that rule stop firing. Both matchers must catch these.
+import '@polkadot-api/ws-provider';
+import '@polkadot-api/sm-provider';

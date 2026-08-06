@@ -28,6 +28,7 @@ export {
   type ProposalDecoders,
   type ProposalRecord,
   type ProposalsRead,
+  type ProposalsReader,
   type StatsRecord,
 } from './proposal-reads.js';
 export {
@@ -79,6 +80,24 @@ export {
   type FundingBlock,
   type WithdrawInputs,
 } from './funding.js';
+export {
+  FUNDING_READS,
+  SUDO_PRESENT_BIT,
+  SameChainError,
+  WrongChainInputError,
+  fundingReaders,
+  readDepositInputs,
+  readWithdrawInputs,
+  sudoActive,
+  type DepositRead,
+  type DepositReadParams,
+  type FundingDecoders,
+  type FundingKeys,
+  type FundingReader,
+  type FundingReaders,
+  type WithdrawRead,
+  type WithdrawReadParams,
+} from './funding-reads.js';
 export {
   UpgradeHashMismatchError,
   isApplicable,

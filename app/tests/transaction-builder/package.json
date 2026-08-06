@@ -4,14 +4,15 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test *.test.js"
+    "test": "node --test"
   },
   "dependencies": {
-    "@bleavit/transaction-builder": "workspace:*",
-    "@bleavit/signing": "workspace:*",
     "@bleavit/chain-client": "workspace:*",
-    "@bleavit/mock-runtime": "workspace:*",
     "@bleavit/descriptors": "workspace:*",
+    "@bleavit/mock-runtime": "workspace:*",
+    "@bleavit/shared-types": "workspace:*",
+    "@bleavit/signing": "workspace:*",
+    "@bleavit/transaction-builder": "workspace:*",
     "@noble/hashes": "1.8.0"
   }
 }

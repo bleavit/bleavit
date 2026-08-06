@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test *.test.js"
+    "test": "node --test"
   },
   "dependencies": {
     "@bleavit/application": "workspace:*",
@@ -14,7 +14,9 @@
     "@bleavit/features-tx": "workspace:*",
     "@bleavit/handoff-envelope": "workspace:*",
     "@bleavit/intents": "workspace:*",
+    "@bleavit/mock-runtime": "workspace:*",
     "@bleavit/shared-types": "workspace:*",
+    "@bleavit/transaction-builder": "workspace:*",
     "@bleavit/ui": "workspace:*",
     "@bleavit/verify": "workspace:*",
     "@polkadot-api/descriptors": "workspace:*",
