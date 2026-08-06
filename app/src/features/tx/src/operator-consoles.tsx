@@ -1,9 +1,19 @@
 /**
- * S14, S16, S18 and S19 — the operator consoles rendered over their models. F17.
+ * S14, S16, S17, S18 and S19 — the operator consoles rendered over their models. F17.
  *
  * Every refusal, every classification and every piece of required copy was decided in
  * `reporter.ts`, `treasury.ts` and `registry-crank.ts`. What a *rendering* can still get
- * wrong is narrower, and it is the same three mistakes each time.
+ * wrong is narrower, and it is the same four mistakes each time.
+ *
+ * ## 0. A submit control must be the gate's, not the screen's
+ *
+ * 11 §11.4 rule 1 wants `refreshAndGate` on every submit path **structurally**, and §11.8's
+ * opening sentence binds these workflows to §11.4. Every console here used to take an
+ * `onX: () => void` and enable it on its own model result — correct checks, computed from
+ * whatever the screen was handed, with no refresh and no gate. So each console now takes a
+ * `TxSession` and an `onSubmit` that **requires a `GatePassed`**, and derives its control
+ * through `operatorGate`. A screen cannot mint that proof and cannot obtain one outside
+ * `AwaitingSignature`, so the bypass is closed by the signature rather than by review.
  *
  * ## 1. A caveat the model returns must reach the screen
  *
@@ -11,7 +21,9 @@
  * conditions the contract does not let a client read. `RegistrationCheck.uncheckable` is a
  * required field so no screen can present a complete verdict, but a screen can still render
  * the field and not the caveat. So `RegisterReporter` renders the caveat **on the clean
- * path**, which is the only path where it matters: a blocked form already says why.
+ * path**, which is the only path where it matters: a blocked form already says why. Its
+ * `stakeHold` consequence renders there too, and for the sharper version of the same
+ * reason: a consequence is for the reader nothing is blocking.
  *
  * ## 2. A no-op must not look like an action
  *
@@ -45,6 +57,9 @@ import {
   type ReactNode,
 } from '@bleavit/ui';
 import type { Combined, Verified } from '@bleavit/shared-types';
+import type { GatePassed, TxSession } from '@bleavit/transaction-builder';
+import { operatorGate, type OperatorBlock } from './operator-gate.js';
+import { GateControl } from './gate-control.js';
 import { evidenceCopy, type EvidenceState } from './evidence.js';
 import {
   CONSERVATIVE_ZERO_HOLDINGS,
@@ -75,14 +90,20 @@ import {
   claimBlocks,
   claimableNow,
   insuranceCopy,
-  insuranceStanding,
   type ClaimContext,
+  type InsuranceStanding,
   type Stream,
 } from './treasury.js';
 import {
+  feeHeadroomBlock,
   isApplicable,
+  leadTimeCountdown,
+  progressLine,
   submissionOutlook,
+  upgradeFeeHeadroom,
   type AuthorizedUpgrade,
+  type FetchProgress,
+  type UpgradeFeeInputs,
   type UpgradeSubmission,
 } from './upgrade-crank.js';
 import {
@@ -95,6 +116,12 @@ import {
   type ChallengeWindow,
   type SnapshotStaleness,
 } from './registry-crank.js';
+import {
+  challengeFilingBlocks,
+  filingBlocks,
+  type ChallengeFilingInputs,
+  type FilingInputs,
+} from './registry-filing.js';
 
 // --------------------------------------------------------------- S14 reporter
 
@@ -102,14 +129,17 @@ export function RegisterReporter({
   inputs,
   decimals,
   symbol,
+  session,
   onRegister,
 }: {
   readonly inputs: RegistrationInputs;
   readonly decimals: number;
   readonly symbol: string;
-  readonly onRegister: () => void;
+  readonly session: TxSession;
+  readonly onRegister: (window: GatePassed) => void;
 }): ReactNode {
   const check = checkRegistration(inputs);
+  const gate = operatorGate('oracle.register_reporter', session, check.blocks);
   return (
     <Panel title="Register as a reporter">
       <Field label="Reporter stake">
@@ -119,11 +149,15 @@ export function RegisterReporter({
         <Amount datum={inputs.freeUsdc} decimals={decimals} symbol={symbol} />
       </Field>
 
-      {check.blocks.map((block) => (
-        <Notice severity="danger" heading={block.check} key={block.check}>
-          {block.detail}
-        </Notice>
-      ))}
+      {/* §11.8.1 row 1's last clause: *"stake-hold consequence displayed"*. It renders
+          **unconditionally**, and that is the repair rather than a preference — it used to
+          live inside the short-balance `RegistrationBlock`, which fires only when the stake
+          cannot be afforded, so the one reader who needs it (an account that *can* afford
+          the stake and is about to commit it) was the only one who never saw it. A
+          consequence is not a failure message. */}
+      <Notice severity="caution" heading="What registering does to these funds">
+        {check.stakeHold}
+      </Notice>
 
       {/* The two conditions the contract does not expose, always listed — never only when
           something else is wrong. `uncheckable` is a required field for exactly this reason;
@@ -141,15 +175,7 @@ export function RegisterReporter({
         {check.blocks.length === 0 ? registrationCaveat(check) : null}
       </Notice>
 
-      <Button
-        label="Register"
-        intent="primary"
-        onClick={onRegister}
-        disabled={check.blocks.length > 0}
-        {...(check.blocks.length > 0
-          ? { disabledReason: check.blocks.map((block) => block.check).join('; ') }
-          : {})}
-      />
+      <GateControl label="Register" intent="primary" gate={gate} onSubmit={onRegister} />
     </Panel>
   );
 }
@@ -167,14 +193,25 @@ export function SubmitReport({
   inputs,
   decimals,
   symbol,
+  evidence,
+  session,
   onReport,
 }: {
   readonly inputs: ReportInputs;
   readonly decimals: number;
   readonly symbol: string;
-  readonly onReport: () => void;
+  /**
+   * The round's evidence, under §11.8.1's rules. **Required**, and a state rather than an
+   * optional string: this is the console §11.8.1's evidence paragraph is written for, and
+   * an optional field lets a screen render nothing — which reads as *no evidence was filed*
+   * when the fact may be *this device could not fetch it*. 07 adjudicates on the first.
+   */
+  readonly evidence: EvidenceState;
+  readonly session: TxSession;
+  readonly onReport: (window: GatePassed) => void;
 }): ReactNode {
   const check = reportBlocks(inputs);
+  const gate = operatorGate('oracle.report', session, check.blocks);
   return (
     <Panel title="Report a component value">
       <Field label="Round bond — at least">
@@ -184,26 +221,18 @@ export function SubmitReport({
         <Amount datum={inputs.freeUsdc} decimals={decimals} symbol={symbol} />
       </Field>
 
-      {check.blocks.map((block) => (
-        <Notice severity="danger" heading={block.check} key={block.check}>
-          {block.detail}
-        </Notice>
-      ))}
+      {/* §11.8.1's dispute-evidence display, on the console that files it. It was specified
+          for this screen and rendered on none — the panel existed and no operator surface
+          mounted it, so an unretrievable evidence document was silently omitted rather than
+          stated, which is exactly what E22 forbids. */}
+      <EvidencePanel state={evidence} label="Evidence for this round" />
 
       {/* Always, never only on the blocked path — see the component note. */}
       <Notice severity="caution" heading="The bond shown is a floor, not the amount">
         {check.bondUnknown}
       </Notice>
 
-      <Button
-        label="Post the report"
-        intent="primary"
-        onClick={onReport}
-        disabled={check.blocks.length > 0}
-        {...(check.blocks.length > 0
-          ? { disabledReason: check.blocks.map((block) => block.check).join('; ') }
-          : {})}
-      />
+      <GateControl label="Post the report" intent="primary" gate={gate} onSubmit={onReport} />
     </Panel>
   );
 }
@@ -221,14 +250,20 @@ export function ChallengeRound({
   inputs,
   decimals,
   symbol,
+  evidence,
+  session,
   onChallenge,
 }: {
   readonly inputs: ChallengeInputs;
   readonly decimals: number;
   readonly symbol: string;
-  readonly onChallenge: () => void;
+  /** The reported round's evidence — §11.8.1's rules, on the screen that disputes it. */
+  readonly evidence: EvidenceState;
+  readonly session: TxSession;
+  readonly onChallenge: (window: GatePassed) => void;
 }): ReactNode {
   const blocks = challengeBlocks(inputs);
+  const gate = operatorGate('oracle.challenge', session, blocks);
   return (
     <Panel title="Challenge this round" subject={<Count datum={inputs.round.round} />}>
       <Field label="Reporter">
@@ -246,11 +281,10 @@ export function ChallengeRound({
         <Count datum={inputs.round.ackedByWatchtowers} />
       </Field>
 
-      {blocks.map((block) => (
-        <Notice severity="danger" heading={block.check} key={block.check}>
-          {block.detail}
-        </Notice>
-      ))}
+      {/* What the reporter filed, re-hashed before rendering. A challenger deciding whether
+          to stake a doubling bond needs the evidence, and E22 requires an unretrievable one
+          named as such rather than left blank. */}
+      <EvidencePanel state={evidence} label="Evidence the reporter filed" />
 
       {/* Fixed copy, and it takes no argument — see `escalationConsequence`. The round number
           it used to interpolate is the panel's own badged `subject` above. */}
@@ -258,15 +292,7 @@ export function ChallengeRound({
         {escalationConsequence()}
       </Notice>
 
-      <Button
-        label="Challenge"
-        intent="danger"
-        onClick={onChallenge}
-        disabled={blocks.length > 0}
-        {...(blocks.length > 0
-          ? { disabledReason: blocks.map((block) => block.check).join('; ') }
-          : {})}
-      />
+      <GateControl label="Challenge" intent="danger" gate={gate} onSubmit={onChallenge} />
     </Panel>
   );
 }
@@ -289,12 +315,27 @@ export function ChallengeRound({
  */
 export function RecomputeProof({
   submission,
+  session,
   onSubmit,
 }: {
   readonly submission: RecomputeSubmission;
-  readonly onSubmit: () => void;
+  readonly session: TxSession;
+  readonly onSubmit: (window: GatePassed) => void;
 }): ReactNode {
   const open = maySubmitRecompute(submission);
+  const gate = operatorGate(
+    'oracle.recompute_proof',
+    session,
+    open
+      ? []
+      : [
+          {
+            check: 'Round open',
+            detail:
+              'The round is no longer open, so a recomputation proof would not resolve it.',
+          },
+        ],
+  );
   return (
     <Panel title="Submit a recomputation proof">
       <Field label="Component">{formatCount(submission.proof.component)}</Field>
@@ -313,18 +354,7 @@ export function RecomputeProof({
         this client reproduced.
       </Notice>
 
-      <Button
-        label="Submit the proof"
-        intent="primary"
-        onClick={onSubmit}
-        disabled={!open}
-        {...(open
-          ? {}
-          : {
-              disabledReason:
-                'The round is no longer open, so a recomputation proof would not resolve it.',
-            })}
-      />
+      <GateControl label="Submit the proof" intent="primary" gate={gate} onSubmit={onSubmit} />
     </Panel>
   );
 }
@@ -365,32 +395,69 @@ export function ProofRefused({
 
 // --------------------------------------------------------------- S16 treasury
 
+/**
+ * The stream list — S16's table, with each claim control **inside its own row**.
+ *
+ * ## Three defects lived in the space between the table and the buttons
+ *
+ * The buttons used to be a second loop under the table: one identically-labelled "Claim"
+ * per claimable stream, in a column of their own with no row beside them.
+ *
+ * 1. **Nothing named which stream a button acted on.** Every one read `Claim`, and the only
+ *    thing distinguishing them was position in a list that is not the table's list — the
+ *    button loop skipped blocked streams, so the *n*th button was not the *n*th row. A user
+ *    clicking the second button was claiming from whichever stream happened to be second
+ *    after the skips.
+ * 2. **`describedBy` pointed at nothing.** It named `stream-<id>`, and no element in this
+ *    component ever carried that id. An `aria-describedby` to a missing node is not a
+ *    degraded label; assistive technology reads the button as *"Claim"* and nothing else,
+ *    so the control that was meant to carry the subject silently carried none.
+ * 3. **A blocked stream rendered no control at all**, which reads as *this stream has no
+ *    claim action* rather than *you cannot claim from it, because …*. `Button` refuses a
+ *    disabled control with no reason precisely so that absence is not the answer.
+ *
+ * The repair is one loop: the control is a cell, the row's identifier cell carries the id
+ * the control references, and a blocked stream renders the control **disabled with its
+ * reasons**. The claim flow itself is the gated `ClaimStream` panel — this table's button
+ * selects a stream, it does not submit anything, which is why it takes a plain handler.
+ */
 export function TreasuryStreams({
   streams,
   now,
   decimals,
   symbol,
   callerIsRecipient,
-  onClaim,
+  onSelect,
 }: {
   readonly streams: readonly Stream[];
   readonly now: Verified<number>;
   readonly decimals: number;
   readonly symbol: string;
   readonly callerIsRecipient: (stream: Stream) => boolean;
-  readonly onClaim: (streamId: string) => void;
+  /** Opens `ClaimStream` for this stream. Selection, not submission — no gate is involved. */
+  readonly onSelect: (streamId: string) => void;
 }): ReactNode {
   return (
     <Panel title="Treasury streams">
       <DataTable
         caption="Streams paying out to accounts, with what each has released so far"
-        headers={['Stream', 'Recipient', 'Total', 'Claimed', 'Claimable now']}
+        headers={['Stream', 'Recipient', 'Total', 'Claimed', 'Claimable now', 'Claim']}
         rows={streams.map((stream) => {
           const claimable = claimableNow(stream, now);
+          const blocks = claimBlocks({
+            stream,
+            now,
+            callerIsRecipient: callerIsRecipient(stream),
+          });
+          const labelId = `stream-${stream.id.value}`;
           return {
             key: stream.id.value,
             cells: [
-              <Identifier datum={stream.id} key={`id-${stream.id.value}`} />,
+              // The id the row's control references. It lives on the identifier rather than
+              // on the cell so the accessible description is the badged stream id itself.
+              <span id={labelId} key={`id-${stream.id.value}`}>
+                <Identifier datum={stream.id} />
+              </span>,
               <Identifier datum={stream.recipient} key={`to-${stream.id.value}`} />,
               <Amount
                 datum={stream.total}
@@ -417,22 +484,21 @@ export function TreasuryStreams({
                     : value.reason
                 }
               />,
+              <Button
+                key={`claim-${stream.id.value}`}
+                label="Claim"
+                intent="primary"
+                describedBy={labelId}
+                onClick={() => onSelect(stream.id.value)}
+                disabled={blocks.length > 0}
+                {...(blocks.length > 0
+                  ? { disabledReason: blocks.map((block) => block.check).join('; ') }
+                  : {})}
+              />,
             ],
           };
         })}
       />
-      {streams.map((stream) => {
-        const blocks = claimBlocks({ stream, now, callerIsRecipient: callerIsRecipient(stream) });
-        return blocks.length > 0 ? null : (
-          <Button
-            key={`claim-${stream.id.value}`}
-            label="Claim"
-            intent="primary"
-            describedBy={`stream-${stream.id.value}`}
-            onClick={() => onClaim(stream.id.value)}
-          />
-        );
-      })}
     </Panel>
   );
 }
@@ -441,15 +507,18 @@ export function ClaimStream({
   context,
   decimals,
   symbol,
+  session,
   onClaim,
 }: {
   readonly context: ClaimContext;
   readonly decimals: number;
   readonly symbol: string;
-  readonly onClaim: () => void;
+  readonly session: TxSession;
+  readonly onClaim: (window: GatePassed) => void;
 }): ReactNode {
   const blocks = claimBlocks(context);
   const claimable = claimableNow(context.stream, context.now);
+  const gate = operatorGate('futarchy_treasury.claim_stream', session, blocks);
   return (
     <Panel title="Claim from a stream" subject={<Identifier datum={context.stream.id} />}>
       <Field label="Claimable now">
@@ -458,40 +527,40 @@ export function ClaimStream({
           render={(value) => `${formatBaseUnits(value.amount, decimals)} ${symbol}`}
         />
       </Field>
-      {blocks.map((block) => (
-        <Notice severity="danger" heading={block.check} key={block.check}>
-          {block.detail}
-        </Notice>
-      ))}
-      <Button
-        label="Claim"
-        intent="primary"
-        onClick={onClaim}
-        disabled={blocks.length > 0}
-        {...(blocks.length > 0
-          ? { disabledReason: blocks.map((block) => block.check).join('; ') }
-          : {})}
-      />
+      <GateControl label="Claim" intent="primary" gate={gate} onSubmit={onClaim} />
     </Panel>
   );
 }
 
+/**
+ * `INSURANCE` — its standing, and the honest statement when there is none.
+ *
+ * The panel took two `Verified<bigint>`s and classified one against the other. The second
+ * one does not exist: `T_ins` is a treasury-internal counter that no frozen surface
+ * publishes (SQ-604), so the only thing a caller could have passed was a figure it made up.
+ * A classification against a made-up target is worse than no classification, because the
+ * screen's whole job here is to stop the balance reading as income and it does that by
+ * telling the reader where the balance *should* be.
+ *
+ * So it now takes a `Combined<InsuranceStanding>` whose value may be `unestablished`, and
+ * renders the refusal through `Derived` — the client says it cannot size the reserve, and
+ * still says the one thing it knows for certain, that this is not income either way.
+ */
 export function InsurancePanel({
-  balance,
-  target,
+  standing,
 }: {
-  readonly balance: Verified<bigint>;
-  readonly target: Verified<bigint>;
+  readonly standing: Combined<InsuranceStanding>;
 }): ReactNode {
-  const standing = insuranceStanding(balance, target);
   return (
     <Panel title="INSURANCE">
       {/* The classification and its copy — deliberately without the raw balance beside them.
           E1 made this normative: a rising INSURANCE balance is not protocol income, and a
           number a reader can watch move is an invitation to read it as one. */}
-      <Field label="Standing">{standing.kind}</Field>
+      <Field label="Standing">
+        <Derived combined={standing} render={(value) => value.kind} />
+      </Field>
       <Notice severity="info" heading="What this balance means">
-        {insuranceCopy(standing)}
+        <Derived combined={standing} render={insuranceCopy} />
       </Notice>
     </Panel>
   );
@@ -501,20 +570,38 @@ export function InsurancePanel({
 
 export function SnapshotCrank({
   epoch,
+  specVersion,
   boundaryPassed,
-  alreadyTaken,
+  takenAtThisVersion,
   staleness,
+  session,
   onCrank,
 }: {
   readonly epoch: Verified<number>;
+  /**
+   * The MetricSpec version this snapshot would record under.
+   *
+   * `Welfare.Snapshots` is keyed `(epoch, spec_version)` and the call is
+   * `record_snapshot(epoch, spec_version)`, so a screen that showed only the epoch could
+   * not tell an operator *which* record is missing — and the no-op copy would be about a
+   * different pair from the one the transaction writes.
+   */
+  readonly specVersion: Verified<number>;
   readonly boundaryPassed: boolean;
-  readonly alreadyTaken: boolean;
+  /** Keyed on the **pair**, never on the epoch alone — see `snapshotCrankState`. */
+  readonly takenAtThisVersion: boolean;
   /** From `snapshotStaleness`, with both thresholds read from chain params. */
   readonly staleness: Combined<SnapshotStaleness>;
-  readonly onCrank: () => void;
+  readonly session: TxSession;
+  readonly onCrank: (window: GatePassed) => void;
 }): ReactNode {
-  const state = snapshotCrankState(epoch, boundaryPassed, alreadyTaken);
+  const state = snapshotCrankState(epoch, specVersion, boundaryPassed, takenAtThisVersion);
   const warning = noOpWarning(state);
+  const gate = operatorGate(
+    'welfare.record_snapshot',
+    session,
+    warning === undefined ? [] : [{ check: 'Nothing to crank', detail: warning }],
+  );
   const engaged = staleness.kind === 'stated' && staleness.datum.value.kind === 'dead-man-engaged';
   return (
     <Panel title="Welfare snapshot">
@@ -534,6 +621,12 @@ export function SnapshotCrank({
       <Field label="Epoch">
         <Count datum={state.epoch} />
       </Field>
+      {/* The version is on screen because the refusal is about the pair. Without it, "a
+          snapshot already exists" cannot be told apart from the defect where a lawful record
+          at a *second* admissible version was refused because some other version had one. */}
+      <Field label="MetricSpec version">
+        <Count datum={state.specVersion} />
+      </Field>
       {warning === undefined ? null : (
         // §11.5: never sign a guaranteed no-op. The copy states the fee, because the button
         // looks identical either way and that is precisely why the rule exists.
@@ -541,29 +634,100 @@ export function SnapshotCrank({
           {warning}
         </Notice>
       )}
-      <Button
-        label="Take the snapshot"
-        intent="primary"
-        onClick={onCrank}
-        disabled={warning !== undefined}
-        {...(warning === undefined ? {} : { disabledReason: warning })}
-      />
+      <GateControl label="Take the snapshot" intent="primary" gate={gate} onSubmit={onCrank} />
     </Panel>
   );
 }
 
 // --------------------------------------------------------------- S19 registry
 
+/**
+ * S19's **filing** half — the screen §11.8.6's first row describes and that had none.
+ *
+ * `filingBlocks` existed and nothing rendered it, so the console offered the challenge flow
+ * and not the flow that creates the thing being challenged. The two are separate screens
+ * because they are separate calls with separate bonds and opposite postures: filing makes a
+ * claim, challenging disputes one.
+ *
+ * The kind is a **release-defined choice** — which form the operator opened — so it renders
+ * as the panel's title rather than as a badged datum. Everything else here is a read.
+ */
+export function RegistryFilingForm({
+  inputs,
+  decimals,
+  symbol,
+  evidence,
+  session,
+  onFile,
+}: {
+  readonly inputs: FilingInputs;
+  readonly decimals: number;
+  readonly symbol: string;
+  /** The evidence this filing commits to, under §11.8.1's rules (§11.8.6 applies them). */
+  readonly evidence: EvidenceState;
+  readonly session: TxSession;
+  readonly onFile: (window: GatePassed) => void;
+}): ReactNode {
+  const blocks = filingBlocks(inputs);
+  const gate = operatorGate('registry.file', session, blocks);
+  return (
+    <Panel title={inputs.kind === 'incident' ? 'File an incident' : 'File a milestone'}>
+      {/* Unconditional, exactly as on the challenge panel: a filer needs to know what their
+          claim can and cannot hold before they post a bond behind it. */}
+      <Notice severity="info" heading="What a filing holds">
+        {REGISTRY_HOLDS_SETTLEMENT}
+      </Notice>
+
+      <Field label="Filing bond">
+        <Amount datum={inputs.filingBond} decimals={decimals} symbol={symbol} />
+      </Field>
+      <Field label="Your free balance">
+        <Amount datum={inputs.freeUsdc} decimals={decimals} symbol={symbol} />
+      </Field>
+      <Field label="Filings this epoch">
+        <Count datum={inputs.filingsUsed} />
+        <Count datum={inputs.filingsBound} name="of" />
+      </Field>
+
+      <EvidencePanel state={evidence} label="Evidence this filing commits to" />
+
+      <GateControl label="File" intent="primary" gate={gate} onSubmit={onFile} />
+    </Panel>
+  );
+}
+
 export function RegistryFiling({
   filingId,
   window,
+  inputs,
+  decimals,
+  symbol,
+  evidence,
+  session,
   onChallenge,
 }: {
   readonly filingId: Verified<string>;
   readonly window: ChallengeWindow;
-  readonly onChallenge: () => void;
+  /**
+   * The challenge's own preconditions. **Required**: §11.8.6's row names a challenge bond
+   * balance, and the panel tested only the window — so it offered a challenge to an account
+   * that cannot post the bond, on the one screen where the user has a deadline and one
+   * attempt inside it.
+   */
+  readonly inputs: Omit<ChallengeFilingInputs, 'windowOpen' | 'windowReason'>;
+  readonly decimals: number;
+  readonly symbol: string;
+  /** The filing's evidence — §11.8.6 applies §11.8.1's rules to its display. */
+  readonly evidence: EvidenceState;
+  readonly session: TxSession;
+  readonly onChallenge: (window: GatePassed) => void;
 }): ReactNode {
-  const open = mayChallenge(window);
+  const blocks = challengeFilingBlocks({
+    ...inputs,
+    windowOpen: mayChallenge(window),
+    windowReason: challengeWindowCopy(window),
+  });
+  const gate = operatorGate('registry.challenge', session, blocks);
   return (
     <Panel title="Registry filing" subject={<Identifier datum={filingId} />}>
       {/* §11.8.6's required statement, and it renders unconditionally: the natural reading
@@ -579,19 +743,16 @@ export function RegistryFiling({
         </Field>
       ) : null}
 
-      <Button
-        label="Challenge this filing"
-        onClick={onChallenge}
-        disabled={!open}
-        {...(open
-          ? {}
-          : {
-              disabledReason:
-                window.kind === 'closed'
-                  ? 'The challenge window has closed.'
-                  : 'This client cannot establish when the window closes, so it will not offer a challenge it may not be able to complete.',
-            })}
-      />
+      <Field label="Challenge bond">
+        <Amount datum={inputs.challengeBond} decimals={decimals} symbol={symbol} />
+      </Field>
+      <Field label="Your free balance">
+        <Amount datum={inputs.freeUsdc} decimals={decimals} symbol={symbol} />
+      </Field>
+
+      <EvidencePanel state={evidence} label="Evidence filed with this claim" />
+
+      <GateControl label="Challenge this filing" intent="danger" gate={gate} onSubmit={onChallenge} />
     </Panel>
   );
 }
@@ -616,15 +777,53 @@ export function UpgradeCrank({
   submission,
   authorized,
   now,
+  progress,
+  fee,
+  decimals,
+  symbol,
+  session,
   onSubmit,
 }: {
   /** Undefined until bytes have been fetched and verified — there is no unverified arm. */
   readonly submission: UpgradeSubmission | undefined;
   readonly authorized: AuthorizedUpgrade;
   readonly now: Verified<number>;
-  readonly onSubmit: () => void;
+  /** E19's *"artifact fetch progress"*. Undefined before a fetch has started. */
+  readonly progress?: FetchProgress | undefined;
+  /** §11.8.4 step 4's fee headroom — required, because this is the largest fee here. */
+  readonly fee: UpgradeFeeInputs;
+  /**
+   * Decimals and symbol of the **selected fee asset**, supplied per `fee.asset`.
+   *
+   * Not derived here: VIT and USDC do not share a scale, so a component that assumed one
+   * would print a shortfall a millionfold wrong for the other — on the figure that decides
+   * whether an operator tops up before starting a multi-megabyte download.
+   */
+  readonly decimals: number;
+  readonly symbol: string;
+  readonly session: TxSession;
+  readonly onSubmit: (window: GatePassed) => void;
 }): ReactNode {
   const applicable = isApplicable(authorized, now);
+  const headroom = upgradeFeeHeadroom(fee);
+  const blocks: OperatorBlock[] = [];
+  if (submission === undefined) {
+    blocks.push({
+      check: 'Artifact',
+      detail: 'No artifact has been verified against the authorized hash yet.',
+    });
+  }
+  if (!applicable) {
+    blocks.push({
+      check: 'Applicable at',
+      detail:
+        'The stored applicable_at block has not been reached. This is the chain’s own ' +
+        'field, not a countdown this client computed.',
+    });
+  }
+  const feeBlock = feeHeadroomBlock(headroom);
+  if (feeBlock !== undefined) blocks.push(feeBlock);
+  const gate = operatorGate('system.apply_authorized_upgrade', session, blocks);
   return (
     <Panel title="Runtime upgrade">
       <Field label="Authorized code hash">
@@ -635,12 +834,43 @@ export function UpgradeCrank({
       <Field label="Applicable at">
         <Count datum={authorized.applicableAt} />
       </Field>
+      {/* E19's DescriptorLeadTime countdown. Arithmetic over the **stored** field and the
+          current block — never a derivation of `applicable_at` itself, which is what SQ-552
+          forbids. It renders through `Derived` because two reads at different blocks
+          describe no single deadline. */}
+      <Field label="Blocks until applicable">
+        <Derived
+          combined={leadTimeCountdown(authorized, now)}
+          render={(blocksLeft) =>
+            blocksLeft > 0 ? String(blocksLeft) : `reached, ${-blocksLeft} blocks ago`
+          }
+        />
+      </Field>
+      {/* Fee headroom, displayed — §11.8.4 step 4 asks for it explicitly and says why: the
+          extrinsic is large. It is a figure derived from two reads, so it is withheld rather
+          than fabricated when they disagree on a block. */}
+      <Field label="Fee headroom">
+        <Derived
+          combined={headroom}
+          render={(value) =>
+            value.covered
+              ? 'covered'
+              : `short by ${formatBaseUnits(value.shortfall, decimals)} ${symbol}`
+          }
+        />
+      </Field>
+
+      {progress === undefined ? null : (
+        <Notice severity="info" heading="Fetching the artifact">
+          {progressLine(progress)}
+        </Notice>
+      )}
 
       {submission === undefined ? (
         <Notice severity="info" heading="No artifact has been verified yet">
-          The runtime bytes are hashed on this device and compared against the authorized
-          hash above before anything is offered for signing. Until that check passes there is
-          nothing to submit.
+          The runtime bytes are hashed on this device as they arrive and compared against the
+          authorized hash above before anything is offered for signing. Until that check
+          passes there is nothing to submit.
         </Notice>
       ) : (
         // Before the control, not after: this is what decides whether to start.
@@ -649,20 +879,7 @@ export function UpgradeCrank({
         </Notice>
       )}
 
-      <Button
-        label="Submit the upgrade"
-        intent="danger"
-        onClick={onSubmit}
-        disabled={submission === undefined || !applicable}
-        {...(submission === undefined
-          ? { disabledReason: 'No artifact has been verified against the authorized hash yet.' }
-          : applicable
-            ? {}
-            : {
-                disabledReason:
-                  'The stored applicable_at block has not been reached. This is the chain’s own field, not a countdown this client computed.',
-              })}
-      />
+      <GateControl label="Submit the upgrade" intent="danger" gate={gate} onSubmit={onSubmit} />
     </Panel>
   );
 }
