@@ -12,6 +12,9 @@
       "path": "../handoff-envelope"
     },
     {
+      "path": "../local-index"
+    },
+    {
       "path": "../shared-types"
     }
   ]

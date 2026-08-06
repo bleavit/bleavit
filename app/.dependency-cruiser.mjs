@@ -150,6 +150,24 @@ export default {
       },
     },
     {
+      name: 'no-loosened-sampling-rate-in-production',
+      severity: 'error',
+      comment:
+        '10 §8.4 states the 1-in-16-page re-verification rate normatively and 14 TH-49\'s ' +
+        'residual-risk argument is computed from it. `selectSampleAtRate` and ' +
+        '`runSamplingRoundAtRate` take that rate as an argument, so holding one is holding a ' +
+        'way to switch the sampler off without failing anything: at a large enough rate every ' +
+        'import forms one stratum, one row is compared, and every round still reports `clean`. ' +
+        'They are barred from the package barrel and reachable only through ' +
+        '`@bleavit/providers/testing`; this makes that import fail in production code. Same ' +
+        'shape as `no-range-minting-outside-ingest`, and the same failure mode — a control ' +
+        'that is present, green, and doing nothing.',
+      from: { path: '^(src|packages)/', pathNot: '^tests/' },
+      to: {
+        path: WORKSPACE_SUBPATH('@bleavit/providers/testing', 'packages/providers/dist/testing'),
+      },
+    },
+    {
       name: 'no-finalized-minting-outside-chain-client',
       severity: 'error',
       comment:

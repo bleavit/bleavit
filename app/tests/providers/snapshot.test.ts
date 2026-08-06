@@ -30,7 +30,7 @@ import {
   serializeSnapshot,
   snapshotPreimage,
 } from '@bleavit/providers';
-import type { SnapshotDocument, SnapshotFinding } from '@bleavit/providers';
+import type { SnapshotDocument, SnapshotFinding, SnapshotOp } from '@bleavit/providers';
 
 const sha256 = (preimage: Uint8Array): string =>
   createHash('sha256').update(preimage).digest('hex');
@@ -169,10 +169,15 @@ test('a wrong pin is rejected, and the file is named as hashing to something els
   assert.equal(verdict.refusal.code, 'FE-PROV-003');
 });
 
-test('a non-canonical file is rejected even when it parses to the pinned document', () => {
-  // This is the case a consumer that parsed first would admit: the object is identical, so the
-  // pin over the reconstruction matches, and only the *bytes* differ. §8.2 asks for byte-
-  // identical reproduction, so the bytes are the claim.
+test('a non-canonical file fails the canonical screen AND its own pin', () => {
+  // This is the case a consumer that parsed first would admit: the object is identical and only
+  // the *bytes* differ. §8.2 asks for byte-identical reproduction, so the bytes are the claim.
+  //
+  // Both screens fire, and the second one is the repair of a real defect: the pin was taken over
+  // the **re-serialization** of what was parsed, so this file — which the publisher never shipped
+  // — hashed to the publisher's pin and passed. The message was false in the same move ("the file
+  // hashes to …" named a hash the file does not have), which is exactly the string a user
+  // compares against the publisher's page.
   const document = validDocument();
   const pin = sha256(snapshotPreimage(document));
   const prettyPrinted = JSON.stringify(document, null, 2);
@@ -180,7 +185,34 @@ test('a non-canonical file is rejected even when it parses to the pinned documen
   const verdict = admitSnapshot(prettyPrinted, { expectedPin: pin, binding: { ...BINDING } }, sha256);
   assert.equal(verdict.kind, 'rejected');
   if (verdict.kind !== 'rejected') return;
-  assert.deepEqual(screens(verdict.findings), ['canonical']);
+  assert.deepEqual(screens(verdict.findings), ['canonical', 'pin']);
+  const reported = /the file hashes to ([0-9a-f]+)/.exec(
+    verdict.findings.find((finding) => finding.screen === 'pin')?.why ?? '',
+  );
+  assert.ok(reported !== null);
+  assert.equal(
+    reported[1],
+    sha256(preimageOfSerialized(prettyPrinted)),
+    'the reported hash is the hash of THIS file, not of a document reconstructed from it',
+  );
+});
+
+test('a trailing newline is not the canonical file, and only the length check sees it', () => {
+  // The case the streamed comparison would otherwise wave through: `JSON.parse` ignores trailing
+  // whitespace, so this parses to the identical document and every emitted piece matches the text
+  // it is compared against. What catches it is that the walk must end exactly at the end of the
+  // file — a text the canonical form is a strict **prefix** of is not that canonical form, and a
+  // trailing newline is what any editor adds.
+  const document = validDocument();
+  const withNewline = `${serializeSnapshot(document)}\n`;
+  const verdict = admitSnapshot(
+    withNewline,
+    { expectedPin: sha256(snapshotPreimage(document)), binding: { ...BINDING } },
+    sha256,
+  );
+  assert.equal(verdict.kind, 'rejected');
+  if (verdict.kind !== 'rejected') return;
+  assert.ok(screens(verdict.findings).includes('canonical'));
 });
 
 test('a producer annotation is rejected as non-canonical rather than silently tolerated', () => {
@@ -288,7 +320,7 @@ test('malformed: not JSON at all', () => {
 
 // ------------------------------------------------------------------ class: wrong chain
 
-test('binding: a snapshot of another chain is refused by exact equality', () => {
+test('binding: a snapshot of another chain is refused on genesis', () => {
   const { text, pin } = pinnedFile({
     ...validDocument(),
     binding: { genesisHash: '0xbeef', specVersion: 2, contractVersion: 23 },
@@ -299,10 +331,46 @@ test('binding: a snapshot of another chain is refused by exact equality', () => 
   assert.deepEqual(screens(verdict.findings), ['binding']);
 });
 
-test('binding: a differing spec_version alone is enough', () => {
-  const { text, pin } = pinnedFile({ ...validDocument(), binding: { ...BINDING, specVersion: 3 } });
+test('binding: the wrong-chain refusal names the wrong chain, not a damaged download', () => {
+  // FE-PROV-003's recovery used to end with "check that the file downloaded completely, and
+  // compare its content hash" — true for a truncated file and actively wrong here, where
+  // acting on it costs a second download of somebody else's network's history. §10.4 keeps
+  // message and recovery fixed per code, so the per-cause remediation leads the expert detail.
+  const { text, pin } = pinnedFile({
+    ...validDocument(),
+    binding: { genesisHash: '0xbeef', specVersion: 2, contractVersion: 23 },
+  });
   const verdict = admitSnapshot(text, { expectedPin: pin, binding: { ...BINDING } }, sha256);
   assert.equal(verdict.kind, 'rejected');
+  if (verdict.kind !== 'rejected') return;
+  assert.equal(verdict.refusal.code, 'FE-PROV-003');
+  assert.match(verdict.refusal.detail, /different chain/);
+  assert.match(verdict.refusal.detail, /Re-downloading will not help/);
+  assert.doesNotMatch(verdict.refusal.recovery, /downloaded completely/);
+});
+
+test('binding: a differing spec_version alone is ADMITTED — §8 mandates no version binding', () => {
+  // The correction (F9, 2026-08-06). `equalBinding`'s exact spec/contract equality is 10 §13.1's
+  // rule for the three HANDOFF formats, which describe one block; §8 states no chain binding for
+  // a snapshot at all, and §6.4 assigns snapshots "deep history beyond 30 days" — history that
+  // necessarily predates the current runtime. Under exact equality the first runtime upgrade
+  // refuses every snapshot ever published: the normal case, refused, with copy telling the user
+  // to check a download that was never damaged.
+  const { text, pin } = pinnedFile({ ...validDocument(), binding: { ...BINDING, specVersion: 3 } });
+  const verdict = admitSnapshot(text, { expectedPin: pin, binding: { ...BINDING } }, sha256);
+  assert.equal(verdict.kind, 'admitted');
+  if (verdict.kind !== 'admitted') return;
+  // And the version is still carried, so a caller renders the difference as an advisory line.
+  assert.equal(verdict.document.binding.specVersion, 3);
+});
+
+test('binding: a differing contract version alone is ADMITTED too', () => {
+  const { text, pin } = pinnedFile({
+    ...validDocument(),
+    binding: { ...BINDING, contractVersion: 99 },
+  });
+  const verdict = admitSnapshot(text, { expectedPin: pin, binding: { ...BINDING } }, sha256);
+  assert.equal(verdict.kind, 'admitted');
 });
 
 // ------------------------------------------------------------------ class: coverage
@@ -470,7 +538,7 @@ test('a document that fails several classes reports all of them, not the first',
   const document = validDocument();
   const verdict = admit({
     ...document,
-    binding: { ...BINDING, specVersion: 99 },
+    binding: { ...BINDING, genesisHash: '0xbeef' },
     coverage: [{ fromBlock: 10, toBlock: 11 }],
     balances: [],
   });
@@ -541,6 +609,39 @@ test('canonical: adjacent coverage ranges must be written as one', () => {
       ],
     },
     'canonical',
+  );
+});
+
+test('canonical: an out-of-block-order movement list is refused (10 §8.2 rule 3)', () => {
+  // The rule this file exempted until the R-6 re-review measured what the exemption cost.
+  // §8.2 says consumers check all three canonical-form rules; two were checked and the
+  // movement list was not, so ONE history had TWO admitted spellings and therefore two pins —
+  // and `diffSnapshots` of that pair reports `disagree` with `FE-PROV-004`, which is precisely
+  // the failure §8.2's paragraph exists to prevent.
+  //
+  // The check is the block half only, and it refuses rather than reorders: sorting `ops` would
+  // let an invalid history be rearranged into a valid-looking one, because the conservation
+  // replay is order-sensitive by design.
+  //
+  // The two swapped movements are independent splits for different accounts, so the
+  // conservation replay still passes and `canonical` is the screen under test rather than a
+  // second one firing first.
+  const document = validDocument();
+  const [first, second, ...rest] = document.ops as readonly [SnapshotOp, SnapshotOp, ...SnapshotOp[]];
+  rejectedBy({ ...document, ops: [second, first, ...rest] }, 'canonical');
+});
+
+test('canonical: repeated blocks in the movement list are still fine — the rule is NON-DECREASING', () => {
+  // The anti-vacuity control. Several movements in one block is ordinary, and a rule written
+  // as strictly increasing would refuse every real snapshot while looking like this one.
+  const document = validDocument();
+  const [first] = document.ops as readonly [SnapshotOp, ...SnapshotOp[]];
+  const sameBlock = { kind: 'split', block: 10, vault: 'v1', account: 'carol', amount: '0' } as const;
+  const verdict = admit({ ...document, ops: [first, sameBlock, ...document.ops.slice(1)] });
+  assert.ok(
+    verdict.kind !== 'rejected' ||
+      !verdict.findings.some((f) => f.screen === 'canonical' && /chain order/.test(f.why)),
+    'two movements in one block must not be read as disorder',
   );
 });
 
@@ -778,9 +879,12 @@ test('a disagreement flags the PAIR and names neither as the wrong one', () => {
   assert.ok(verdict.disagreements.length > 0);
 });
 
-test('no shared coverage reports an EMPTY overlap rather than a clean bill', () => {
-  // Two producers covering disjoint history have cross-checked nothing. "Agree" with nothing
-  // compared is the shape a user reads as confirmation.
+test('no shared coverage is its own verdict, not an agreement with an empty overlap', () => {
+  // Two producers covering disjoint history have cross-checked nothing. Until 2026-08-06 this
+  // returned `agree` with `overlap: []` — the fact was there and a caller writing the obvious
+  // `if (kind === 'agree') showCrossChecked()` turned it into a cross-check that passed. §8.4
+  // offers this diff as "the only available cross-check" for depth, so a vacuous one reported
+  // as agreement manufactures exactly the confidence it declines to offer.
   const left = validDocument();
   const right: SnapshotDocument = {
     ...validDocument(),
@@ -790,9 +894,9 @@ test('no shared coverage reports an EMPTY overlap rather than a clean bill', () 
     balances: [],
   };
   const verdict = diffSnapshots(left, right);
-  assert.equal(verdict.kind, 'agree');
-  if (verdict.kind !== 'agree') return;
-  assert.deepEqual(verdict.overlap, []);
+  assert.equal(verdict.kind, 'no-overlap');
+  // And there is no `overlap` member to mistake for one: the empty array is gone, not renamed.
+  assert.ok(!('overlap' in verdict));
 });
 
 test('the overlap is the intersection of COVERAGE, not of the declared spans', () => {
@@ -819,9 +923,11 @@ test('the overlap is the intersection of COVERAGE, not of the declared spans', (
   assert.equal(admit(early).kind, 'admitted');
   assert.equal(admit(late).kind, 'admitted');
   const verdict = diffSnapshots(early, late);
-  assert.equal(verdict.kind, 'agree', 'no block is jointly observed, so nothing disagrees');
-  if (verdict.kind !== 'agree') return;
-  assert.deepEqual(verdict.overlap, [], 'and the pair has cross-checked nothing');
+  assert.equal(
+    verdict.kind,
+    'no-overlap',
+    'no block is jointly observed, so nothing was compared — and nothing compared is not agreement',
+  );
 });
 
 test('two identical movements in one block stay two — the diff is ordered, not keyed', () => {

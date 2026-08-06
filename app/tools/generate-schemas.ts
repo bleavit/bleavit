@@ -90,6 +90,19 @@ const {
 } = await loadPackage('intents');
 const { CONTEXT_SCHEMA } = await loadPackage('contexts');
 const { RECEIPT_SCHEMA } = await loadPackage('receipts');
+const { CANONICAL_AMOUNT_PATTERN } = await loadPackage('providers');
+
+/**
+ * The producer-tool input format, loaded from the tool rather than from a package.
+ *
+ * `app/tools/snapshot` is not a workspace package — 10 §10.1 places it under `app/tools/`
+ * deliberately — so its declarations are imported by relative path, from the **TypeScript
+ * source** Node 22 type-strips. There is no `dist/` to read: the tool is executed, not built.
+ */
+const { ARCHIVE_EXPORT_KEYS, ARCHIVE_EXPORT_OP_FIELDS, ARCHIVE_EXPORT_OP_KINDS } = (await import(
+  './snapshot/build.ts'
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+)) as any;
 
 function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
   return typeof value === 'object' && value !== null;
@@ -374,6 +387,171 @@ const receiptSchema = {
   additionalProperties: true,
 };
 
+/* --------------------------------------------------- the producer's input (10 §8.2, F9) */
+
+/**
+ * `bleavit.archive-export.v1` — what an archive reader hands `app/tools/snapshot`.
+ *
+ * It sits beside the three handoff formats because it has the same audience and the same
+ * failure mode. 10 §8.2 promises snapshots *"reproducible byte-identically by anyone from
+ * `tools/snapshot` against an archive node"*, and that promise is to **independent producers**:
+ * a second person has to be able to write a reader, feed this tool, and obtain the same pin. An
+ * input format that exists only as a TypeScript parser in this repository is not a format
+ * somebody outside it can write against, so the reproduce-by-anyone claim would be true only for
+ * people who read the source.
+ *
+ * The tool's archive-node adapter is deliberately unwritten (PLAN.md · *Spec questions* SQ-612 —
+ * no document names which read interface, endpoint, pagination or historical-metadata policy it
+ * binds to). Publishing the boundary it is missing is what lets an operator supply one today.
+ *
+ * **Tolerated extras are published as tolerated**, at the top level and inside each movement,
+ * because that is what `parseArchiveExport` does: it reads the fields it names and ignores the
+ * rest. The opposite asymmetry from `bleavit.intent.v1` — and correctly so. An intent's `action`
+ * is *"precisely where an encoded call would be placed"* by a hostile third party; an archive
+ * export is a file a publisher hands their own tool, and publishing `false` here would tell
+ * reader authors to delete annotations this tool happily ignores.
+ */
+const archiveAmount = decimalString(
+  128,
+  'A movement or holding amount, in base units.',
+);
+
+const archiveOpField = (name: string): SchemaFragment => {
+  if (name === 'kind') return { type: 'string' };
+  if (name === 'block') {
+    return u32(
+      "The block the movement happened in. Cross-checked against `at.block`; the tool refuses an export where the two disagree, because one of them is wrong and neither is safe to prefer.",
+    );
+  }
+  if (name === 'amount') return archiveAmount;
+  if (name === 'to') {
+    return { type: 'string', minLength: 1, description: 'Who receives the branch holding.' };
+  }
+  if (name === 'branch') {
+    return { type: 'string', minLength: 1, description: "One of the vault's declared branches." };
+  }
+  return { type: 'string', minLength: 1, description: `The movement's ${name}.` };
+};
+
+const archiveOpVariants = (ARCHIVE_EXPORT_OP_KINDS as readonly string[]).map(
+  (kind: string): SchemaFragment => ({
+    title: kind,
+    type: 'object',
+    properties: {
+      ...Object.fromEntries(
+        (ARCHIVE_EXPORT_OP_FIELDS[kind] as readonly string[]).map((name: string) => [
+          name,
+          name === 'kind' ? { const: kind } : archiveOpField(name),
+        ]),
+      ),
+    },
+    required: [...(ARCHIVE_EXPORT_OP_FIELDS[kind] as readonly string[])],
+    additionalProperties: true,
+  }),
+);
+
+const archiveRange = (description: string): SchemaFragment => ({
+  type: 'object',
+  description,
+  properties: {
+    fromBlock: u32('First block, inclusive.'),
+    toBlock: u32('Last block, inclusive.'),
+  },
+  required: ['fromBlock', 'toBlock'],
+  additionalProperties: true,
+});
+
+const archiveExportSchema = {
+  $schema: DIALECT,
+  $id: `${ID_BASE}/bleavit.archive-export.v1.schema.json`,
+  title: 'bleavit.archive-export.v1',
+  description: [
+    'What an archive reader hands `app/tools/snapshot` to be turned into a published snapshot (10 §8.2).',
+    '',
+    'This is the PRODUCER side. It is not the snapshot: the tool orders the movements, merges the coverage, folds the balances, pins the bytes and then runs the client\'s own admission screens over the result. A valid export is not a publishable snapshot — the tool refuses one whose movements disagree with the balances.',
+    '',
+    'The two fields a reader is most likely to get wrong are `observed` and `at`. `observed` is what the reader ACTUALLY saw, which is not the span it set out to cover: a reader that fails part-way and reports the requested span publishes a document claiming history it never read, and that document passes every screen because the movements it does carry are consistent. `at` is the chain position — block, extrinsic, event — and it must be complete and unique, because the conservation replay is order-sensitive and a merge before its split is a different, invalid history.',
+  ].join('\n'),
+  type: 'object',
+  properties: {
+    binding,
+    range: archiveRange('The span this export set out to cover.'),
+    observed: {
+      type: 'array',
+      description:
+        'What the reader actually observed. Ranges may arrive in any order and the tool sorts and merges them; overlapping ranges are REFUSED rather than merged, because a reader that observed one block twice has a defect and merging would hide it.',
+      items: archiveRange('One observed span.'),
+    },
+    vaults: {
+      type: 'array',
+      description:
+        "Every vault the export mentions, with its branch set frozen at creation. Order does not matter here — the tool sorts vaults and branches by code point, because canonical JSON orders object keys and not array members, so an unsorted array is two legal spellings of one history and therefore two pins.",
+      items: {
+        type: 'object',
+        properties: {
+          vault: { type: 'string', minLength: 1 },
+          branches: {
+            type: 'array',
+            minItems: 2,
+            items: { type: 'string', minLength: 1 },
+            description:
+              'At least two. One branch is not a conditional instrument and its conservation identity is vacuous.',
+          },
+        },
+        required: ['vault', 'branches'],
+        additionalProperties: true,
+      },
+    },
+    ops: {
+      type: 'array',
+      description:
+        'Every movement in the observed ranges, each with its chain position. The v1 alphabet is the branch-USDC complete set of 03 §5; the scalar, gate and Baseline instruments are outside it, because their escrow movement is not the amount burned and a replay would need each vault\'s settlement value, which the published document does not carry.',
+      items: {
+        type: 'object',
+        properties: {
+          at: {
+            type: 'object',
+            description:
+              'Where the movement sits in the chain\'s own order. Two movements sharing one position are REFUSED: their order is undefined and the replay is order-sensitive, so no tie-break can be right.',
+            properties: {
+              block: u32('Block number.'),
+              extrinsicIndex: u32('Index of the extrinsic within the block.'),
+              eventIndex: u32('Index of the event within the extrinsic.'),
+            },
+            required: ['block', 'extrinsicIndex', 'eventIndex'],
+            additionalProperties: true,
+          },
+          op: { oneOf: archiveOpVariants },
+        },
+        required: ['at', 'op'],
+        additionalProperties: true,
+      },
+    },
+    balances: {
+      type: 'array',
+      description:
+        'Holdings read from CHAIN STATE at `range.toBlock`, independently of `ops`. This is the design decision that makes the tool worth having: a producer that folded its own movements would agree with itself by construction, and the failure that actually happens to a snapshot tool is an INCOMPLETE op set — a missed event variant, a short answer from the node — which is self-consistent and invisible to a self-fold. The tool refuses to publish when the fold disagrees with these rows, in either direction.',
+      items: {
+        type: 'object',
+        properties: {
+          vault: { type: 'string', minLength: 1 },
+          account: { type: 'string', minLength: 1 },
+          branch: { type: 'string', minLength: 1 },
+          amount: archiveAmount,
+        },
+        required: ['vault', 'account', 'branch', 'amount'],
+        additionalProperties: true,
+      },
+    },
+  },
+  required: [...ARCHIVE_EXPORT_KEYS],
+  additionalProperties: true,
+  $comment: [
+    `Movement kinds: ${(ARCHIVE_EXPORT_OP_KINDS as readonly string[]).join(', ')}.`,
+    `Amounts match ${CANONICAL_AMOUNT_PATTERN.source} AND must be within the u128 Balance range, which a pattern cannot express: a value at or above 2^128 parses, replays and reconciles perfectly while describing a quantity no chain event or balance can hold.`,
+  ].join(' '),
+};
+
 /* ------------------------------------------------------------------------ emit/check */
 
 /**
@@ -422,10 +600,34 @@ assertCovers('action', [...ACTION_KEY_NAMES], publishedIn('action'));
 assertCovers('limits', [...LIMIT_KEY_NAMES], publishedIn('limits'));
 assertCovers('binding', [...BINDING_KEY_NAMES], Object.keys(binding.properties));
 
+// The producer format's own coverage check, in both directions and per movement kind. A kind
+// added to `ARCHIVE_EXPORT_OP_KINDS` with no published variant, or a field added to
+// `ARCHIVE_EXPORT_OP_FIELDS` with no published property, fails here rather than being announced
+// to reader authors as forbidden.
+assertCovers(
+  'archive export',
+  [...(ARCHIVE_EXPORT_KEYS as readonly string[])],
+  Object.keys(archiveExportSchema.properties),
+);
+assertCovers(
+  'archive export op kinds',
+  [...(ARCHIVE_EXPORT_OP_KINDS as readonly string[])],
+  archiveOpVariants.map((variant) => String(variant['title'])),
+);
+for (const kind of ARCHIVE_EXPORT_OP_KINDS as readonly string[]) {
+  const variant = archiveOpVariants.find((candidate) => candidate['title'] === kind);
+  assertCovers(
+    `archive export op '${kind}'`,
+    [...(ARCHIVE_EXPORT_OP_FIELDS[kind] as readonly string[])],
+    Object.keys((variant?.['properties'] ?? {}) as SchemaFragment),
+  );
+}
+
 const FILES: readonly (readonly [string, SchemaFragment])[] = [
   [`${INTENT_SCHEMA}.schema.json`, intentSchema],
   [`${CONTEXT_SCHEMA}.schema.json`, contextSchema],
   [`${RECEIPT_SCHEMA}.schema.json`, receiptSchema],
+  ['bleavit.archive-export.v1.schema.json', archiveExportSchema],
 ];
 
 /** Two-space JSON with a trailing newline — stable across runs and readable in a diff. */
@@ -470,7 +672,7 @@ if (!write) {
   const expectedNames = new Set([...FILES.map(([name]) => name), 'README.md']);
   for (const found of readdirSync(OUT_DIR)) {
     if (!expectedNames.has(found)) {
-      console.error(`UNEXPECTED ${found} — schemas/ holds exactly the three published formats.`);
+      console.error(`UNEXPECTED ${found} — schemas/ holds exactly the published formats.`);
       failed += 1;
     }
   }

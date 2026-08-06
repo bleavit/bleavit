@@ -80,6 +80,19 @@ export default {
       },
     },
     {
+      // The sampling-rate subpath. Witnessed on its own for the same reason as the two
+      // around it: a typo in either half of `WORKSPACE_SUBPATH` leaves
+      // `no-loosened-sampling-rate-in-production` unable to fire while every other subpath
+      // witness stays green, and a sampler a caller can widen silently is 14 TH-49's stated
+      // rate with nothing enforcing it.
+      name: 'witness-providers-testing-subpath',
+      severity: 'error',
+      from: { path: '^tests/depcruise-witness/' },
+      to: {
+        path: WORKSPACE_SUBPATH('@bleavit/providers/testing', 'packages/providers/dist/testing'),
+      },
+    },
+    {
       // The `Finalized<T>` mint subpath, witnessed separately for the same parameterisation
       // reason — and it is the one whose vacuity would cost most, since
       // `no-finalized-minting-outside-chain-client` is what stops the transaction path

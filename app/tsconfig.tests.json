@@ -68,6 +68,10 @@
     // unless this project compiles it.
     "tests/platform/**/*.ts",
     "tools/desktop/**/*.ts"
+    // Shared test helpers. Included explicitly rather than left to be pulled in by whichever
+    // suite happens to import them first: a helper nobody type-checks is where an untyped
+    // assertion hides, and this one is the only assertion four packages share.
+    "tests/shared/**/*.ts"
   ],
   // `tests/descriptors/types/*-witness.ts` joins the same class as the firewall fixtures:
   // it is an anti-vacuity control that MUST fail `tsc`, and `compat.test.ts` compiles it

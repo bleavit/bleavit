@@ -15,6 +15,13 @@
  * chunk is handed on. `admitChunk` returns the decision; there is no variant that reports a
  * breach after the fact.
  *
+ * **Both bounds are metered on the stream, and the row one needed {@link rowUpperBound} to be.**
+ * Until 2026-08-06 rows were counted only after the document parsed, so *streamed* held for
+ * bytes and not for rows: a file of four million tiny rows was fully resident and fully parsed
+ * before anything objected, which is the post-mortem shape in the half of the sentence nobody
+ * re-read. The streaming meter is an over-count and the exact count still runs after the parse;
+ * see that function for why over-counting is the only safe direction.
+ *
  * ## Both bounds, because either alone is trivially evaded
  *
  * 400 MB in 100 rows and 4 M rows totalling 10 MB are both inside one bound and outside the
@@ -44,6 +51,58 @@
 /** 10 §8.4's two bounds. Release constants — see the module note. */
 export const IMPORT_MAX_UNCOMPRESSED_BYTES = 400_000_000;
 export const IMPORT_MAX_ROWS = 4_000_000;
+
+/**
+ * The bounds one import is metered against.
+ *
+ * §8.4's pair is the **ceiling**, not the setting. A device chooses its own byte bound and passes
+ * it here: 400 MB of input is not 400 MB of memory — the admission holds the file text, the
+ * `JSON.parse` tree, the parsed model and the digest pre-image at once — and §9.4 budgets a
+ * mobile tab 350 MB of steady-state memory in total, with §9.2 capping its whole local store at
+ * 75 MB. A single constant cannot be right for both device classes, and the one that is wrong on
+ * a phone fails as a dead tab rather than as a refusal. The multiple is unmeasured and the
+ * reconciliation is 10 §8.4's to make: PLAN.md · *Spec questions* SQ-632.
+ *
+ * A caller may only ever bound this **further**. {@link importSnapshotStream} refuses a request
+ * that names a larger bound than §8.4's rather than clamping it silently — a caller asking for
+ * more than the specification allows has misunderstood something, and quietly giving them less
+ * is how that misunderstanding survives.
+ */
+export interface QuotaBounds {
+  readonly maxBytes: number;
+  readonly maxRows: number;
+}
+
+/** §8.4's own pair, as bounds. */
+export const SPEC_QUOTA_BOUNDS: QuotaBounds = Object.freeze({
+  maxBytes: IMPORT_MAX_UNCOMPRESSED_BYTES,
+  maxRows: IMPORT_MAX_ROWS,
+});
+
+/**
+ * An upper bound on the rows a chunk of the document can contain, computable **while streaming**.
+ *
+ * §8.4 asks for both quotas to be enforced on a stream, and the row count is only *exact* once
+ * the document parses — which is after the whole file is resident, at which point a row quota is
+ * a post-mortem exactly as a byte quota checked at the end would be. So the meter counts what it
+ * can see: every row this format stores (an op, a balance, a vault, a coverage range) is a JSON
+ * **object**, so the number of `{` in the file is at least the number of rows in it. Three extra
+ * objects (the document, its binding, its range) and any `{` inside a string label make it an
+ * over-count, never an under-count — so refusing on this number can never admit a document that
+ * exceeds the bound, and the exact count still runs after the parse.
+ *
+ * The over-count direction is the one that must be right, and it is the safe one: it can refuse
+ * a document slightly under the bound, which costs a user nothing (nothing is imported and
+ * nothing is evicted), while an under-count would admit one over it and leave the local database
+ * unusable — §8.4's stated reason for having a row bound at all.
+ */
+export function rowUpperBound(text: string): number {
+  let objects = 0;
+  for (let at = 0; at < text.length; at += 1) {
+    if (text.charCodeAt(at) === 0x7b) objects += 1;
+  }
+  return objects;
+}
 
 export type QuotaBreach = 'bytes' | 'rows';
 
@@ -83,6 +142,7 @@ export function admitChunk(
   state: QuotaState,
   chunkBytes: number,
   chunkRows: number,
+  bounds: QuotaBounds = SPEC_QUOTA_BOUNDS,
 ): ChunkVerdict {
   if (!Number.isInteger(chunkBytes) || chunkBytes < 0 || !Number.isInteger(chunkRows) || chunkRows < 0) {
     // A negative or fractional chunk is not a measurement, and treating it as zero would let
@@ -94,10 +154,10 @@ export function admitChunk(
   const next: QuotaState = { bytes: state.bytes + chunkBytes, rows: state.rows + chunkRows };
   // Checked in this order only for determinism of the reported breach; both are checked on
   // every chunk, so neither can be reached by staying under the other.
-  if (next.bytes > IMPORT_MAX_UNCOMPRESSED_BYTES) {
+  if (next.bytes > bounds.maxBytes) {
     return { kind: 'refused', breach: 'bytes', state: next, message: BREACH_COPY.bytes };
   }
-  if (next.rows > IMPORT_MAX_ROWS) {
+  if (next.rows > bounds.maxRows) {
     return { kind: 'refused', breach: 'rows', state: next, message: BREACH_COPY.rows };
   }
   return { kind: 'accepted', state: next };
@@ -175,6 +235,19 @@ export function planImport(
     infeasible: freed < overBy,
   };
 }
+
+/**
+ * What the client says when the user answers the preview with *no*.
+ *
+ * Fixed copy, here rather than at the import entry point, and deliberately **not** a
+ * `FE-PROV-*` refusal: §10.4's family is the error taxonomy, and a user declining an offer is
+ * not an error. Labelling it `FE-PROV-003` — *"this snapshot was rejected"* — would tell
+ * somebody their file is bad when what happened is that they kept their own data.
+ */
+export const EVICTION_DECLINED =
+  'Nothing was imported and nothing was deleted. The snapshot needed room that your local ' +
+  'history is using, and you chose to keep the history. You can import it later, or free room ' +
+  'first — the file is unchanged either way.';
 
 /** Fixed copy for the preview. Names what is lost, because that is the decision being made. */
 export function previewCopy(plan: ImportPlan): string {

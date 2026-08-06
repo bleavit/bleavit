@@ -7,6 +7,7 @@
     "test": "node --test"
   },
   "dependencies": {
+    "@bleavit/mock-runtime": "workspace:*",
     "@bleavit/providers": "workspace:*"
   }
 }
