@@ -341,6 +341,22 @@ test('out-of-reach passes through untouched — it is evidence of nothing', asyn
   }
 });
 
+test('an out-of-enum SIDE is rejected here, exactly as its two neighbours are', async () => {
+  // The one field the whole repair turns on, and the only one at this boundary that was trusted:
+  // the extrinsic and event indices below are hardened at runtime and `where` was not. An
+  // unrecognised value reads as `above-window` at every consumer testing for `below-window`,
+  // which descends the whole document, spends the ceiling and admits it having compared nothing —
+  // a silent misread ending in **admission**, which is the direction R-7 does not allow.
+  const check = chainSpotCheck(async () => ({
+    kind: 'out-of-reach',
+    where: 'sideways' as 'below-window',
+  }));
+  await assert.rejects(
+    () => check({ block: 10, movements: [] }),
+    /neither "above-window" nor "below-window"/,
+  );
+});
+
 test('two observations at one chain position throw — no tie-break here can be right', async () => {
   // One chain position holds one event. `app/tools/snapshot` refuses the identical shape on the
   // producing side, and the replay is order-sensitive, so guessing which came first is guessing

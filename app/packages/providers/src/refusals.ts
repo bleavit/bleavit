@@ -200,6 +200,17 @@ export function probeFailureReason(consecutiveFailures: number, why: string): st
  * Three causes, one code. See the module note for why that is §10.4-conformant rather than a
  * fourth code invented here: the message and the recovery are per code and fixed, and the
  * cause only selects which fixed remediation sentence leads the expert detail.
+ *
+ * **Every cause is a statement about the document**, and that is the shape rather than a
+ * coincidence. A fourth — `incomplete-check`, for a re-derivation this device could not finish —
+ * existed until 2026-08-06 and was deleted with the refusal that produced it. §8.4 gives
+ * `FE-PROV-003` three causes (content-pin mismatch, malformed encoding, failed internal
+ * consistency) and names the depth limit as **disclosed**; *"this device ran out of asks"* is
+ * none of them. Its remedy sentence was also false in one of the two configurations that
+ * reached it, which is the sharper reason: it told the user to *"try again when this device has
+ * caught up"*, and for a document with more reachable covered blocks than the work ceiling that
+ * refusal was permanent. See `SPOT_CHECK_BLOCK_CEILING`, and SQ-811 for the ruling that would
+ * bring it back.
  */
 export type SnapshotRejectionCause =
   /** §8.4's own three: content-pin mismatch, malformed encoding, failed internal consistency. */
@@ -207,9 +218,7 @@ export type SnapshotRejectionCause =
   /** The document describes a different chain (10 §7 gives one local database per chain). */
   | 'wrong-chain'
   /** Spot re-derivation inside light-client-reachable depth disagreed with the chain. */
-  | 'chain-disagreement'
-  /** The spot re-derivation could not finish, so the mandatory §8.4 check did not run in full. */
-  | 'incomplete-check';
+  | 'chain-disagreement';
 
 const REMEDY: Readonly<Record<SnapshotRejectionCause, string>> = Object.freeze({
   integrity:
@@ -227,12 +236,6 @@ const REMEDY: Readonly<Record<SnapshotRejectionCause, string>> = Object.freeze({
     'with the chain, which is what a forged snapshot looks like. Do not import it, and do not ' +
     'trust other files from the same publisher without comparing them against a second, ' +
     'unrelated one.',
-  'incomplete-check':
-    'This device could not finish re-deriving the snapshot from the chain, so the check that ' +
-    'would have caught a shallow forgery did not run in full. Nothing here says the file is ' +
-    'bad, and nothing says it is good: an unfinished check cannot stand in for a finished one, ' +
-    'so the import is refused rather than accepted on partial evidence. Nothing about the ' +
-    'publisher is implied — try again when this device has caught up with the chain.',
 });
 
 /** `FE-PROV-003`, with the fixed remediation for its cause leading the expert detail. */

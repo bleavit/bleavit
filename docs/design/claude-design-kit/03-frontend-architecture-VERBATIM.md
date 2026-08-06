@@ -1,10 +1,13 @@
 > **DERIVED COPY for design-tool context — DO NOT EDIT.**
 > Verbatim copy of `docs/architecture/10-frontend-architecture.md` (the source of truth),
-> regenerated 2026-08-06, picking up §10.2's handoff reference set gaining
-> `handoff-envelope` — the package `review.tsx` already imported `HandoffRefusal` from,
-> which §10.1 states depends on nothing at all, so the edge is transitively empty,
-> for upload to Claude Design. If this copy and the source ever differ, the
-> source wins. Regenerate by re-copying the source file.
+> regenerated 2026-08-06 on its second pass that day, picking up the §2.3 verb ruling:
+> the deep-history cross-check is one the UI *"supports and **recommends**"* in both
+> §2.3 and §8.4, where §2.3 said *"discloses"* until then and a client shipping one
+> fixed string could satisfy only one of the two. The earlier pass picked up §10.2's
+> handoff reference set gaining `handoff-envelope` — the package `review.tsx` already
+> imported `HandoffRefusal` from, which §10.1 states depends on nothing at all, so the
+> edge is transitively empty. For upload to Claude Design. If this copy and the source
+> ever differ, the source wins. Regenerate by re-copying the source file.
 
 # 10 — Frontend Architecture
 
@@ -92,7 +95,9 @@ Normative rules:
 
 Values that shape a user's *discretionary judgment* — price charts, history tables, provider-filled series — are **not** transaction-critical under this definition. Provider-fed charts influencing trading decisions are declared an **accepted residual risk**, mitigated by mandatory, non-suppressible provenance labelling (hatched/badged rendering, distinct icons, text equivalents), never by a verification claim the system cannot honor. The corresponding threat row (chart-shaping via a poisoned provider) lives in [14-threat-model.md](14-threat-model.md), not here.
 
-Consistently with this honesty: the §8.4 sampling regime is stated for what it is — it detects sloppy and inconsistent forgeries and liveness failures; **it does not detect a self-consistent forgery of history at unreachable depth**. The only cross-check for deep history is comparing two independent snapshot producers, which the UI supports and discloses.
+Consistently with this honesty: the §8.4 sampling regime is stated for what it is — it detects sloppy and inconsistent forgeries and liveness failures; **it does not detect a self-consistent forgery of history at unreachable depth**. The only cross-check for deep history is comparing two independent snapshot producers, which the UI supports and **recommends**.
+
+**On that verb, ruled 2026-08-06.** §8.4 owns the clause and designates it *normative UI copy*; this sentence is a summary of it, so it uses §8.4's verb rather than a second one. The two sections spelled it differently until this ruling — *"discloses"* here, *"recommends"* there — and a client shipping one fixed string can satisfy only one of them. **Recommending is the stronger obligation and the safe one.** A diff is a **falsifier**: urging a user to run one can reveal a forgery and can never certify one away, because §2.2's never-promote rule already bars a passing diff from becoming verification and §8.4 already scopes `FE-PROV-004` to a flag on the pair rather than a verdict on either member. *Disclosing* is also already carried by the clauses beside it, which state the limit; **recommending** is the only word in the sentence that tells a user what to do about the limit they were just shown.
 
 ### 2.4 Checkpoint age and the long-range bound (FE-P8 resolved, 2026-08-05)
 

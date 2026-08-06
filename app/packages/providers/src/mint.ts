@@ -178,8 +178,14 @@ export function mintSnapshotRows(
     );
   }
   const rows = mint('snapshot', admitted.document.balances, admitted.document.coverage, request, {
-    // Compared blocks only. `out-of-reach` is §8.4's blind spot, not a check that passed.
-    sampled: spotCheck.compared > 0,
+    // Compared blocks only, and only from a pass that **finished**. `out-of-reach` is §8.4's
+    // blind spot rather than a check that passed, and a `ceiling` pass stopped before the
+    // mandated set was exhausted — it may have compared hundreds of blocks and still cannot say
+    // it ran the check §8.4 requires. `window-floor` and `whole-document` can: there the mandated
+    // set is genuinely finished, vacuously in the first case. Understating is the safe direction
+    // — a row that says it was not compared costs a badge, and one that says it was buys a claim
+    // nothing backs. This is what keeps the ceiling's new *admission* honest (SQ-811).
+    sampled: spotCheck.reach !== 'ceiling' && spotCheck.compared > 0,
   });
   const fromBlock = admitted.document.coverage.reduce(
     (lowest, range) => Math.min(lowest, range.fromBlock),

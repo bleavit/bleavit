@@ -165,11 +165,20 @@ export function afterProbe(
  * teach somebody to ignore this family. Emitting only at disable leaves the first arm with no
  * call site, which is the finding this note answers rather than hides.
  *
- * What covers the user-visible half meanwhile is `fleetState`: a provider that is merely
- * unreachable is still `failing` and still counted as enabled, and the moment none of them is
- * serving, `all-down` carries this same code with §8.3's incomplete-history explainer. So the
- * situation the first arm describes is reported — as a statement about the fleet, which is
- * what a user can act on, rather than as one alarm per timeout.
+ * ## What covers the first arm meanwhile — corrected 2026-08-06, and it covers less
+ *
+ * This note used to say `fleetState` reported it *"the moment none of them is serving"*, since
+ * `all-down` carries the same code with §8.3's incomplete-history explainer. The
+ * `failing`-serves change made that sentence harder to satisfy, and it is no longer true as
+ * written. `failing` now **serves** — §8.3's *"only `Disabled` stops reads"* — while `all-down`
+ * requires every source to be `disabled`, so a fleet whose sources are all merely unreachable is
+ * reported as `serving` rather than `all-down`, and emits no `FE-PROV-001` anywhere.
+ *
+ * What `fleetState` does report for that fleet is `serving` beside its `failing` count, which is
+ * the honest shape of it: the sources are permitted to be read and are answering nothing. That
+ * is a disclosure, not a refusal. So §8.4's first arm still has **no** call site, the gap is
+ * wider than when SQ-609 recorded it, and the widening is stated here rather than left for the
+ * next reader to derive from the predicate. SQ-609 owns the ruling.
  */
 export function livenessRefusal(provider: Provider): ProviderRefusal | undefined {
   if (provider.health.kind !== 'disabled' || provider.health.by !== 'auto') return undefined;

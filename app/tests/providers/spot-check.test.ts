@@ -34,6 +34,7 @@ import {
   rejectSnapshot,
   serializeSnapshot,
   snapshotPreimage,
+  snapshotRefusal,
   spotCheckSnapshot,
 } from '@bleavit/providers';
 import type {
@@ -318,11 +319,13 @@ test('DEEP HISTORY LARGER THAN THE CEILING is admitted, not refused as an unfini
   assert.equal(outcome.minted.status.sampled, false);
 });
 
-test('the ceiling still refuses when the walk never reaches the bottom of the window', async () => {
-  // The other half of the distinction, so the fix cannot be read as *"stop refusing"*. Every
-  // answer here is `above-window` — this device is behind the document's own head — so the walk
-  // has not established anything about the reachable blocks below, and stopping at the ceiling
-  // leaves the mandated set unfinished. That is a genuine incomplete pass and keeps refusing.
+test('A DEVICE FURTHER BEHIND THAN THE CEILING is disclosed, not refused', async () => {
+  // The first of the two live configurations that reached the ceiling with nothing wrong with
+  // the file, and this suite asserted a refusal on it until 2026-08-06. Every answer is
+  // `above-window`: this device is more than SPOT_CHECK_BLOCK_CEILING blocks behind the
+  // document's newest covered block, which is a fact about the device and not about the
+  // publisher. §8.4's three `FE-PROV-003` causes are all statements about the document, so the
+  // pass discloses where it stopped instead of refusing.
   const document: SnapshotDocument = {
     ...trueHistory(),
     range: { fromBlock: 0, toBlock: 100_000 },
@@ -334,12 +337,28 @@ test('the ceiling still refuses when the walk never reaches the bottom of the wi
   }));
   assert.equal(report.reach, 'ceiling');
   assert.equal(report.outOfReach, SPOT_CHECK_BLOCK_CEILING);
-  assert.equal(report.findings.length, 1);
-  assert.equal(report.findings[0]?.screen, 'spot-check-incomplete');
-  // And the sentence does not claim the chain was answering, which is false in exactly this case.
-  assert.doesNotMatch(report.findings[0]?.why ?? '', /still answering/);
-  assert.match(report.findings[0]?.why ?? '', /ahead of its own head/);
-  assert.match(report.findings[0]?.why ?? '', /did not finish/);
+  assert.deepEqual(report.findings, [], 'a disclosure raises no finding');
+  assert.equal(report.compared, 0);
+  // And it does not become a refusal one layer along either: nothing here is an FE-PROV-003.
+  assert.deepEqual(rejectSnapshot(report.findings).findings, []);
+});
+
+test('THE SECOND ceiling configuration — more reachable blocks than asks — is also disclosed', async () => {
+  // The one whose refusal was **permanent**, which is what made it worse than the first. Every
+  // covered block here is inside the window and agrees, so the old remedy sentence — *"try again
+  // when this device has caught up with the chain"* — was false: this device had caught up, and
+  // the document simply covers more reachable blocks than one pass will ask about. Catching up
+  // more changes nothing, so the file could never be imported.
+  const document: SnapshotDocument = {
+    ...trueHistory(),
+    range: { fromBlock: 0, toBlock: 100_000 },
+    coverage: [{ fromBlock: 0, toBlock: 100_000 }],
+  };
+  assert.equal(admit(document).kind, 'admitted', 'the file screens pass — nothing is wrong with it');
+  const report = await spotCheckSnapshot(document, async () => ({ kind: 'agrees' }));
+  assert.equal(report.reach, 'ceiling');
+  assert.equal(report.compared, SPOT_CHECK_BLOCK_CEILING, 'every ask was spent comparing');
+  assert.deepEqual(report.findings, [], 'no finding: this device ran out of asks, not the file');
 });
 
 test('out-of-reach is neither a pass nor a failure, and is counted separately', async () => {
@@ -386,11 +405,15 @@ test('the walk is DOWNWARD from the newest covered block — the window is at th
   assert.deepEqual(chain.asked, [13, 12, 11, 10]);
 });
 
-test('the pass is bounded, the bound is spent on the newest blocks, and hitting it REFUSES', async () => {
+test('the pass is bounded, the bound is spent on the NEWEST blocks, and hitting it is STATED', async () => {
   // The ceiling exists so a document covering millions of blocks terminates. What it must never
-  // do is stop quietly: the previous constant (128) simply ended the walk and returned a clean
-  // report, so a document was admitted on a check that had not finished — and 10 §4.2 puts the
-  // peers' own pruning depth at ~256, twice the number the pass ever asked about.
+  // do is stop **quietly**: the previous constant (128) simply ended the walk and returned a
+  // clean report, so a document was admitted on a check that had not finished with nothing on
+  // the report to say so — and 10 §4.2 puts the peers' own pruning depth at ~256, twice the
+  // number the pass ever asked about.
+  //
+  // The answer to that is `reach`, not a refusal. What must hold is that the stop is visible and
+  // that the bound is spent where the light client can actually answer, which is the head.
   const document: SnapshotDocument = {
     ...trueHistory(),
     range: { fromBlock: 0, toBlock: 100_000 },
@@ -407,10 +430,8 @@ test('the pass is bounded, the bound is spent on the newest blocks, and hitting 
   assert.equal(asked.length, SPOT_CHECK_BLOCK_CEILING);
   assert.equal(asked[0], 100_000);
   assert.equal(asked[asked.length - 1], 100_000 - SPOT_CHECK_BLOCK_CEILING + 1);
-  assert.equal(report.findings.length, 1);
-  assert.equal(report.findings[0]?.screen, 'spot-check-incomplete');
-  assert.equal(report.reach, 'ceiling');
-  assert.match(report.findings[0]?.why ?? '', /did not finish/);
+  assert.equal(report.reach, 'ceiling', 'the stop is a stated fact, which is what the old bound lacked');
+  assert.deepEqual(report.findings, []);
 });
 
 test('the ceiling is derived from 10 §4.2, and is not the old truncating bound', () => {
@@ -452,20 +473,100 @@ test('a forgery past the OLD 128-block bound is now handed to the checker', asyn
   assert.match(report.findings[0]?.why ?? '', /block 99800/);
 });
 
-test('an unfinished pass refuses with the incomplete-check remedy, which blames nobody', async () => {
-  // A ceiling this client chose is a fact about this device. Refusing is right — an unfinished
-  // mandatory check cannot stand in for a finished one — and telling the user their publisher
-  // may be forging is not.
+test('EVERY snapshot refusal cause is a statement about the DOCUMENT, never about this device', async () => {
+  // The rule that decided the ceiling, kept as a property rather than as the one case that
+  // produced it. §8.4 gives `FE-PROV-003` three causes — content-pin mismatch, malformed
+  // encoding, failed internal consistency — and every one is a fact about the file. A fourth
+  // cause (`incomplete-check`) existed until 2026-08-06 and was a fact about this device's work
+  // budget; it is deleted, and this asserts the remaining set stays that shape.
+  //
+  // A ceiling this client chose can therefore never produce a refusal, however small it is set.
   const document: SnapshotDocument = {
     ...trueHistory(),
     range: { fromBlock: 0, toBlock: 100_000 },
     coverage: [{ fromBlock: 0, toBlock: 100_000 }],
   };
   const report = await spotCheckSnapshot(document, async () => ({ kind: 'agrees' }), 4);
-  const refusal = rejectSnapshot(report.findings).refusal;
-  assert.equal(refusal.code, 'FE-PROV-003');
-  assert.match(refusal.detail, /could not finish re-deriving/);
-  assert.doesNotMatch(refusal.detail, /what a forged snapshot looks like/);
+  assert.equal(report.reach, 'ceiling');
+  assert.deepEqual(report.findings, [], 'a work budget is not evidence about a file');
+
+  // And the fixed remedy copy no longer contains the sentence that was false: for a document
+  // with more reachable covered blocks than the ceiling, "try again when this device has caught
+  // up" described a wait that would never end.
+  for (const cause of ['integrity', 'wrong-chain', 'chain-disagreement'] as const) {
+    const refusal = snapshotRefusal(cause, 'detail');
+    assert.equal(refusal.code, 'FE-PROV-003');
+    assert.doesNotMatch(refusal.detail, /try again when this device has caught up/);
+  }
+});
+
+test('a document ENTIRELY ABOVE this device, smaller than the ceiling, is its own reach', async () => {
+  // `SpotCheckReach` had three arms and four producing situations until 2026-08-06, and this is
+  // the fourth. A document whose whole coverage sits ahead of this device's head asks about every
+  // covered block, compares none, raises no finding — and returned `whole-document`, whose own
+  // description reads *"the walk ran out of document, not out of window"*. It had run out of
+  // both, and a screen keying on `whole-document` to mean *fully re-derived* was therefore wrong
+  // for a pass that verified nothing.
+  //
+  // It is not `window-floor` either, and the difference is what a user is told: `window-floor` is
+  // permanent — that history is below the window and no sync brings it back — while this is
+  // transient, and the same document re-checked after a sync compares blocks.
+  const document: SnapshotDocument = {
+    ...trueHistory(),
+    range: { fromBlock: 900, toBlock: 999 },
+    coverage: [{ fromBlock: 900, toBlock: 999 }],
+    ops: [],
+    balances: [],
+    vaults: [],
+  };
+  const covered = 100;
+  assert.ok(covered < SPOT_CHECK_BLOCK_CEILING, 'smaller than the ceiling — larger is the ceiling case');
+  assert.equal(admit(document).kind, 'admitted');
+
+  let asked = 0;
+  const report = await spotCheckSnapshot(document, async () => {
+    asked += 1;
+    return { kind: 'out-of-reach', where: 'above-window' };
+  });
+  assert.equal(asked, covered, 'every covered block was asked about — the walk ran out of document');
+  assert.equal(report.reach, 'above-window-only');
+  assert.equal(report.compared, 0, 'and it verified nothing, which the arm now says');
+  assert.equal(report.outOfReach, covered);
+  assert.deepEqual(report.findings, []);
+});
+
+test('an empty document keeps whole-document — it ran out of document with nothing above it', async () => {
+  // The boundary of the arm above, so `above-window-only` cannot be read as *compared nothing*.
+  // A document covering no blocks has an empty mandated set for a reason that is about the file
+  // rather than about the window, and nothing was out of reach.
+  const document: SnapshotDocument = {
+    ...trueHistory(),
+    range: { fromBlock: 10, toBlock: 13 },
+    coverage: [],
+    ops: [],
+    balances: [],
+    vaults: [],
+  };
+  const report = await spotCheckSnapshot(document, async () => ({ kind: 'agrees' }));
+  assert.equal(report.reach, 'whole-document');
+  assert.equal(report.compared, 0);
+  assert.equal(report.outOfReach, 0);
+});
+
+test('an out-of-enum side is REFUSED rather than read as above-window', async () => {
+  // The one field the whole repair turns on. `where` is untyped at an injected boundary, so an
+  // out-of-enum value arrived as data and every `=== 'below-window'` test answered false —
+  // reading it as `above-window`, which descends the whole document, spends the ceiling and
+  // admits with `compared: 0`. Its two neighbours in `chainSpotCheck` (the extrinsic and event
+  // indices) were hardened at runtime and this was not.
+  await assert.rejects(
+    () =>
+      spotCheckSnapshot(trueHistory(), async () => ({
+        kind: 'out-of-reach',
+        where: 'sideways' as 'above-window',
+      })),
+    /neither "above-window" nor "below-window"/,
+  );
 });
 
 test('the same document and the same chain produce the same report — §8.4 says deterministic', async () => {

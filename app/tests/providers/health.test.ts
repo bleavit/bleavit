@@ -121,10 +121,47 @@ test('the guarantee statement is bound to 10 §8.4\'s own sentence, clause by cl
       'The only available cross-check is diffing two independent snapshot producers',
       /only cross-check for deep history is comparing two independent sources/,
     ],
+    // Added 2026-08-06, and its absence was the whole finding: the shipped string rendered
+    // *"supports and recommends"* as *"supports and labels"* — a third verb, belonging to a
+    // different obligation (INV-FE-15's origin labelling) — and this table extracted the four
+    // clauses around it and not this one. A gate scoped around the drift it exists to catch
+    // cannot fail on it, so the substitution survived every green run.
+    [
+      'which the import UI supports and recommends',
+      /which this client supports and recommends/,
+    ],
   ];
   for (const [source, rendered] of clauses) {
     assert.ok(bullet.includes(source), `10 §8.4 no longer says "${source}" — re-read the copy`);
     assert.match(SAMPLING_GUARANTEE, rendered);
+  }
+});
+
+test('doc 10 spells the cross-check clause ONE way — §2.3 and §8.4 must agree on the verb', () => {
+  // The contradiction the clause above was substituted around, gated so it cannot come back.
+  // §8.4 said *"which the import UI supports and recommends"* and §2.3 said *"which the UI
+  // supports and discloses"*, of the same control, and a client shipping one fixed string can
+  // satisfy only one of them. Ruled in §2.3 under R-1 on 2026-08-06 — §8.4 owns the clause and
+  // designates it normative UI copy, and recommending is the stronger and safer obligation
+  // because a diff is a falsifier. See PLAN.md · *Decision log*.
+  //
+  // Fixing `health.ts` without ruling this would have picked a side silently, and the next
+  // reader of §2.3 would have found the code disagreeing with the section they were reading.
+  const doc = readFileSync(
+    resolve(HERE, '..', '..', '..', 'docs', 'architecture', '10-frontend-architecture.md'),
+    'utf8',
+  );
+  const mentions = doc
+    .split('\n')
+    .filter((line) => /two independent snapshot producers/.test(line))
+    .filter((line) => /which the (import )?UI supports and/.test(line));
+  assert.ok(mentions.length >= 2, 'doc 10 should state this control in both §2.3 and §8.4');
+  for (const line of mentions) {
+    assert.match(
+      line,
+      /which the (import )?UI supports and \*{0,2}recommends/,
+      `doc 10 states the cross-check control with a verb other than "recommends": ${line.slice(0, 200)}`,
+    );
   }
 });
 
@@ -182,6 +219,39 @@ test('all-down carries every reason and FE-PROV-001, and none-enabled carries ne
     'switched off',
   ]);
   assert.equal(state.code, 'FE-PROV-001');
+});
+
+test('`serving` is a PERMISSION, and a fleet answering nothing says so rather than reading as fine', () => {
+  // The doc said *"sources that have answered a probe and are not switched off"* until
+  // 2026-08-06, and the `failing`-serves change made it false in the direction that matters: a
+  // `failing` source is one whose last probes did **not** answer, and §8.3's *"only Disabled
+  // stops reads"* keeps it serving. So a fleet where every source has timed out twice reports
+  // every one of them as serving, and a screen rendering that number alone says *3 sources
+  // serving* over a fleet answering nothing.
+  const allFailing = [0, 1, 2].map((n) => ({
+    id: `p${n}`,
+    kind: 'indexer' as const,
+    health: { kind: 'failing' as const, consecutiveFailures: 2 },
+  }));
+  const state = fleetState(allFailing);
+  assert.equal(state.kind, 'serving', 'not all-down: all-down needs every source DISABLED');
+  if (state.kind !== 'serving') return;
+  assert.equal(state.enabled, 3);
+  assert.equal(state.serving, 3, 'permitted to be read — that is what the field means');
+  assert.equal(state.failing, 3, 'and none of them answered, which is the half that was missing');
+  // `serving - failing` is the count that answered, so both facts are recoverable from the state.
+  assert.equal(state.serving - state.failing, 0);
+});
+
+test('`failing` is counted apart from `unprobed`, and neither is folded into the other', () => {
+  const mixed = [providerAt(1), providerAt(3), providerAt(0)];
+  const state = fleetState(mixed);
+  assert.equal(state.kind, 'serving');
+  if (state.kind !== 'serving') return;
+  assert.equal(state.enabled, 3);
+  assert.equal(state.serving, 2, 'healthy and failing serve; unprobed does not');
+  assert.equal(state.failing, 1);
+  assert.equal(state.unprobed, 1);
 });
 
 test('`fleetState` decides all-down THROUGH `allProvidersDown`, not beside it', () => {

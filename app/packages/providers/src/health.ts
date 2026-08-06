@@ -60,11 +60,18 @@ import {
  * evidence. `probeDue(null, …)` answering `true` does not fix that — it tells a caller a probe is
  * *due*, and a caller that serves a read first is not contradicted by anything.
  *
- * So the enable state is one that **cannot serve** ({@link canServeReads}), which is INV-FE-12's
- * fail-closed lattice in its own words: an unproven capability is absent, and absence disables
- * the dependent surface. It is deliberately not `slow` or `failing` either — inventing a
- * pessimistic observation is as wrong as inventing an optimistic one, and both are observations
- * nobody made.
+ * So the enable state is one that **cannot serve** ({@link canServeReads}). The authority for
+ * that is **INV-FE-3 and INV-FE-15**, and it cited INV-FE-12 until 2026-08-06, which was the
+ * wrong invariant with the right shape: INV-FE-12's subject is *"when the runtime surface is
+ * unknown or partially incompatible"* — compatibility probes, signing, SCALE decoding — and a
+ * third party's HTTP health is none of those. What makes withholding an unprobed source **safe**
+ * is INV-FE-3, under which no precondition, protocol-outcome state or transaction path depends
+ * on provider data at all; what makes it **permitted** is INV-FE-15, which makes *"absent with an
+ * explanation"* a first-class outcome beside *"present and labeled"* rather than a degradation.
+ * Which of §8.3's two sentences governs the gap is PLAN.md · *Spec questions* SQ-771.
+ *
+ * It is deliberately not `slow` or `failing` either — inventing a pessimistic observation is as
+ * wrong as inventing an optimistic one, and both are observations nobody made.
  */
 export type ProviderHealth =
   | { readonly kind: 'unprobed' }
@@ -108,9 +115,12 @@ export interface Provider {
  * *"Only `Disabled` stops reads"* is a sentence about the **ladder** — `Healthy → Slow → Failing →
  * Disabled` — and `unprobed` is not on it: it is the state before the ladder starts, which §8.3's
  * *"health probe on enable"* half creates and its degradation half never mentions. Refusing it is
- * INV-FE-12's fail-closed lattice (an unproven capability is absent), not a fifth ladder state
- * that serves. Which of §8.3's two sentences governs the gap between enabling a source and its
- * first answer is genuinely open, and PLAN.md · *Spec questions* SQ-771 asks 10 §8.3 to say.
+ * **INV-FE-3 and INV-FE-15** (nothing depends on provider data, and absent-with-an-explanation is
+ * a first-class outcome), not a fifth ladder state that serves. It cited INV-FE-12 until
+ * 2026-08-06, whose subject is an unknown **runtime** surface rather than a third party's health —
+ * see {@link ProviderHealth}. Which of §8.3's two sentences governs the gap between enabling a
+ * source and its first answer is genuinely open, and PLAN.md · *Spec questions* SQ-771 asks
+ * 10 §8.3 to say.
  *
  * The `switch` is exhaustive on purpose: a state added to the ladder later fails to compile here
  * rather than falling through to *serves*, which is the direction that cannot be walked back.
@@ -206,12 +216,24 @@ export const LADDER: LadderThresholds = Object.freeze({
   probeEveryMs: 10 * 60 * 1_000,
 });
 
-/** §8.4's normative UI copy, in one place, including the half that is unflattering. */
+/**
+ * §8.4's normative UI copy, in one place, including the half that is unflattering.
+ *
+ * **The last verb is `recommends`, and it read `labels` until 2026-08-06.** §8.4 designates this
+ * copy normative and says *"which the import UI supports and **recommends**"*; `labels` is a
+ * third verb belonging to a different obligation (INV-FE-15's *"origin to the pixel"*), so the
+ * shipped string quietly weakened the one sentence that tells a user what to **do** about the
+ * blind spot it just disclosed. The clause-by-clause binding in `tests/providers/health.test.ts`
+ * did not extract this clause, which is how a gate came to be scoped around the drift it exists
+ * to catch; it extracts it now, and also checks that 10 §2.3 and §8.4 spell it the same way.
+ * They did not — §2.3 said *"discloses"* — and the contradiction was ruled in §2.3 under R-1 on
+ * 2026-08-06 rather than picked silently here (PLAN.md · *Decision log*).
+ */
 export const SAMPLING_GUARANTEE =
   'Spot-checking catches malformed data, internally inconsistent data, shallow forgeries ' +
   'and a source that has stopped responding. It does not detect a self-consistent forgery ' +
   'of history at a depth this device cannot reach on its own. The only cross-check for deep ' +
-  'history is comparing two independent sources, which this client supports and labels.';
+  'history is comparing two independent sources, which this client supports and recommends.';
 
 /** What a sampling round found. */
 export interface SampleResult {
@@ -308,10 +330,27 @@ export type FleetState =
   | {
       readonly kind: 'serving';
       readonly enabled: number;
-      /** Sources that have answered a probe and are not switched off. */
+      /**
+       * Sources this client is **permitted to read from** — §8.3's *"only `Disabled` stops
+       * reads"*, counted through {@link canServeReads}.
+       *
+       * It said *"sources that have answered a probe and are not switched off"* until
+       * 2026-08-06, and the `failing`-serves change made that false in the direction that
+       * matters: `failing` is a source whose last probes did **not** answer, and it serves. A
+       * fleet where every source has timed out twice reports every one of them here. The field
+       * is a permission, not an observation, and {@link failing} below is what makes the
+       * observation recoverable — `serving - failing` is the count that answered.
+       */
       readonly serving: number;
       /** Sources enabled but not yet probed — serving nothing, and not an incident (§8.3). */
       readonly unprobed: number;
+      /**
+       * Permitted sources whose last probe **failed** — counted apart for the same reason
+       * `unprobed` is: a number that reads as *working* must not absorb them silently. Added
+       * 2026-08-06 with the doc correction above, because the alternative was a `serving` count
+       * a screen would render as *N sources serving* over a fleet that is answering nothing.
+       */
+      readonly failing: number;
     }
   | {
       readonly kind: 'all-down';
@@ -350,6 +389,10 @@ export function fleetState(providers: readonly Provider[]): FleetState {
       // `acceptSuggestion` used to make one layer down.
       serving: providers.filter((p) => canServeReads(p)).length,
       unprobed: providers.filter((p) => p.health.kind === 'unprobed').length,
+      // Beside `serving` rather than subtracted from it: §8.3 lets a `failing` source serve, so
+      // removing it here would contradict the predicate one line up. What a screen needs is both
+      // numbers, not one that has quietly picked a side.
+      failing: providers.filter((p) => p.health.kind === 'failing').length,
     };
   }
   return {

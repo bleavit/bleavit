@@ -213,17 +213,18 @@ export type SnapshotFinding =
   | { readonly screen: 'coverage'; readonly why: string }
   | { readonly screen: 'derived-rows'; readonly why: string }
   | { readonly screen: 'conservation'; readonly why: string }
-  /** §8.4's *deterministic spot re-derivation* — see {@link spotCheckSnapshot}. */
-  | { readonly screen: 'spot-check'; readonly why: string }
   /**
-   * The re-derivation could not **finish** — its own class, and not a disagreement.
+   * §8.4's *deterministic spot re-derivation* — see {@link spotCheckSnapshot}.
    *
-   * Kept apart from `spot-check` because the two say opposite things about the publisher: one is
-   * *this document contradicts the chain*, the other is *this device stopped asking*. Collapsed
-   * into one screen, a ceiling this client chose would disable the source (§8.3's auto-disable)
-   * and tell the user not to trust a publisher who did nothing wrong.
+   * The only class this screen raises, and there was a second (`spot-check-incomplete`) until
+   * 2026-08-06. It fired when the work ceiling stopped the walk, and the ceiling stopped being
+   * a refusal: §8.4's `FE-PROV-003` causes are all statements about the **document**, and *"this
+   * device ran out of asks"* is a statement about the device. Its remedy sentence was also false
+   * for one of the two configurations that reach it. Deleted rather than left unproduced — a
+   * finding class nobody raises is copy nobody can read. SQ-811 asks §8.4 whether an unfinished
+   * re-derivation should refuse; a ruling that way restores this class and its remedy.
    */
-  | { readonly screen: 'spot-check-incomplete'; readonly why: string };
+  | { readonly screen: 'spot-check'; readonly why: string };
 
 /**
  * The brand that makes "this document passed every screen" a thing a caller cannot assert.
@@ -1075,11 +1076,6 @@ function isCanonicalForm(document: SnapshotDocument, text: string): boolean {
 function causeOf(findings: readonly SnapshotFinding[]): SnapshotRejectionCause {
   if (findings.some((finding) => finding.screen === 'binding')) return 'wrong-chain';
   if (findings.some((finding) => finding.screen === 'spot-check')) return 'chain-disagreement';
-  // Only when nothing else fired: an unfinished check is a statement about this device, and a
-  // document that also failed a file screen is a statement about the document.
-  if (findings.every((finding) => finding.screen === 'spot-check-incomplete')) {
-    return 'incomplete-check';
-  }
   return 'integrity';
 }
 
@@ -1108,7 +1104,7 @@ export function rejectSnapshot(findings: readonly SnapshotFinding[]): RejectedSn
 // ------------------------------------------------------- §8.4's deterministic spot re-derivation
 
 /**
- * The most blocks one re-derivation pass will ask about before it **refuses**.
+ * The most blocks one re-derivation pass will ask about before it **stops and says so**.
  *
  * ## It is a work ceiling, and it is not the check's bound
  *
@@ -1131,11 +1127,24 @@ export function rejectSnapshot(findings: readonly SnapshotFinding[]): RejectedSn
  *
  * `2 × 256`, where 256 is the peer pruning depth 10 §4.2 names. Any client whose reachable depth
  * is at most that pruning depth finishes its walk before the ceiling, so the ceiling never
- * truncates a documented configuration. Reaching it means this device can see deeper than any
- * window this specification describes, which is a fact about the client rather than about the
- * document — and it is reported as a **refusal**, because a pass that stopped early cannot say
- * it checked what §8.4 requires, and admitting on an unfinished mandatory check is the one
- * outcome that reads as verification without being any.
+ * truncates a documented configuration.
+ *
+ * ## Reaching it is a **disclosure**, and it stopped being a refusal on 2026-08-06
+ *
+ * It refused until then, and that was the fixed blocker's own defect class with a narrower
+ * trigger. Two live configurations reach the ceiling with nothing wrong with the file: a device
+ * more than {@link SPOT_CHECK_BLOCK_CEILING} blocks **behind** the document's newest covered
+ * block, which answers `above-window` all the way down; and a document with more than that many
+ * **reachable** covered blocks, for which the refusal was *permanent* — the remedy copy said
+ * *"try again when this device has caught up"* and catching up changes nothing.
+ *
+ * §8.4 gives `FE-PROV-003` three causes — a content-hash pin mismatch, malformed encoding, a
+ * failed internal-consistency check — and *"this device ran out of asks"* is none of them; the
+ * bullet above them names the depth limit as **disclosed**. So the pass reports
+ * {@link SpotCheckReach} `'ceiling'`, raises no finding, and the mint refuses to badge the rows
+ * `sampled` — the same shape `window-floor` already had, which is why no new primitive was
+ * needed. Whether an unfinished re-derivation should instead refuse is PLAN.md · *Spec
+ * questions* SQ-811, and SQ-770 (is *spot* exhaustive or sampled) is upstream of both.
  */
 export const SPOT_CHECK_BLOCK_CEILING = 2 * 256;
 
@@ -1184,6 +1193,38 @@ export interface SpotClaim {
  */
 export type OutOfReachSide = 'above-window' | 'below-window';
 
+/** The two sides, as a value, so the runtime check below cannot drift from the type. */
+const OUT_OF_REACH_SIDES: readonly OutOfReachSide[] = Object.freeze([
+  'above-window',
+  'below-window',
+]);
+
+/**
+ * Reject a side that is not one of the two — the one field the whole repair turns on.
+ *
+ * Its two neighbours in {@link chainSpotCheck} (`extrinsicIndex`, `eventIndex`) are hardened at
+ * runtime and this was not, which left the asymmetry backwards: an injected reader is untyped at
+ * the boundary, so an out-of-enum `where` arrived as data and every consumer's `=== 'below-window'`
+ * test answered `false` — reading it as `above-window`, which walks the whole document, spends
+ * the ceiling and admits with `compared: 0`. A silent misread that ends in **admission** is the
+ * direction R-7 does not allow, and the two indices already show what the boundary is worth.
+ *
+ * It throws rather than defaulting, for the reason `spotCheckSnapshot` throws on any checker
+ * failure: this is the client's own code misbehaving, and a pass that continued would report a
+ * smaller comparison than it attempted.
+ */
+function requireOutOfReachSide(where: OutOfReachSide, source: string): OutOfReachSide {
+  if (!OUT_OF_REACH_SIDES.includes(where)) {
+    throw new RangeError(
+      `${source} answered out-of-reach with side ${JSON.stringify(where)}, which is neither ` +
+        '"above-window" nor "below-window". The two sides end the walk differently and an ' +
+        'unrecognised one reads as above-window — which descends the whole document, spends the ' +
+        'ceiling and admits it having compared nothing',
+    );
+  }
+  return where;
+}
+
 export type SpotVerdict =
   /** The chain agrees, movement for movement, in order. */
   | { readonly kind: 'agrees' }
@@ -1225,14 +1266,27 @@ declare const SPOT_CHECKED: unique symbol;
  * How a re-derivation pass ended — §8.4's blind spot as a stated fact, not one inferred from a
  * count.
  *
- * A caller cannot read it off `compared` and `outOfReach`: `compared: 0` is produced both by a
- * document that sits entirely below this device's window (admitted, and the limit disclosed) and
- * by a pass that ran out of ceiling before it reached anything (refused). Those are opposite
- * outcomes, and a screen that had to guess between them would be guessing about the one sentence
- * §8.4 makes normative UI copy.
+ * A caller cannot read it off `compared` and `outOfReach`. **Four** situations produce
+ * `compared: 0`, and they are not the same outcome: a document entirely below this device's
+ * window (the ordinary deep-history case), a document entirely above this device's head (this
+ * device is behind), a pass that ran out of ceiling before it compared anything, and a document
+ * covering nothing at all. A screen that had to guess between them would be guessing about the
+ * one sentence §8.4 makes normative UI copy.
+ *
+ * The arm count is the point of the type. It had three arms and four producing situations until
+ * 2026-08-06: a document wholly above this device's head, smaller than the ceiling, asked about
+ * every covered block, compared none, raised no finding — and returned `whole-document`, whose
+ * own description said the walk *"ran out of document, not out of window"*. It had run out of
+ * both. A screen keying on `whole-document` to mean *fully re-derived* was therefore wrong for
+ * a pass that verified nothing, in the case a device that is merely behind produces.
  */
 export type SpotCheckReach =
-  /** Every covered block was asked about — the walk ran out of document, not out of window. */
+  /**
+   * Every covered block was asked about **and at least one was compared** — the walk ran out of
+   * document, not out of window.
+   *
+   * The only arm that means *fully re-derived*, and the only one a screen may read that way.
+   */
   | 'whole-document'
   /**
    * The walk reached the bottom of this device's reachable window. §8.4's disclosed blind spot:
@@ -1240,7 +1294,26 @@ export type SpotCheckReach =
    * finished, and `SAMPLING_GUARANTEE` is the fixed copy a screen shows about the remainder.
    */
   | 'window-floor'
-  /** {@link SPOT_CHECK_BLOCK_CEILING} stopped the walk first. A refusal — see the finding. */
+  /**
+   * Every covered block was asked about, every one answered `above-window`, and **nothing was
+   * compared** — the whole document sits ahead of this device's own head.
+   *
+   * Its own arm rather than `window-floor`, though the mandated set is vacuously finished in
+   * both, because the two disclose opposite things to a user. `window-floor` is permanent: that
+   * history is below the window and no amount of syncing brings it back, so the second-producer
+   * diff is the only cross-check there will ever be. This one is **transient**: the device is
+   * behind, and the same document re-checked after a sync compares blocks. Merging them would
+   * tell somebody their device can never check this history when the truth is that it has not
+   * caught up yet.
+   */
+  | 'above-window-only'
+  /**
+   * {@link SPOT_CHECK_BLOCK_CEILING} stopped the walk first — a **disclosure**, not a refusal.
+   *
+   * The mandated set is genuinely unfinished, so the mint refuses to badge the rows `sampled`;
+   * the document is still admitted, because *"this device ran out of asks"* is not one of
+   * §8.4's three `FE-PROV-003` causes. See {@link SPOT_CHECK_BLOCK_CEILING}.
+   */
   | 'ceiling';
 
 export interface SpotCheckReport {
@@ -1270,7 +1343,9 @@ export interface SpotCheckReport {
    * A `window-floor` pass with `compared: 0` is a complete, successful check of an empty mandated
    * set — the ordinary deep-history case — and it is the value a screen pairs with
    * `SAMPLING_GUARANTEE` so the user is told what was *not* checked rather than left to read
-   * silence as verification.
+   * silence as verification. `above-window-only` and `ceiling` are the two other ways a pass
+   * ends having verified nothing, and each discloses something different; only `whole-document`
+   * may be read as *fully re-derived*.
    */
   readonly reach: SpotCheckReach;
   readonly findings: readonly SnapshotFinding[];
@@ -1326,9 +1401,12 @@ export interface SpotCheckReport {
  * assigns to snapshots by design — as the *above* case: it descends through the whole ceiling,
  * refuses, and returns `FE-PROV-003` on a valid file. See {@link OutOfReachSide}.
  *
- * {@link SPOT_CHECK_BLOCK_CEILING} bounds the work, and hitting it is a **finding** rather than
- * a quiet stop: an unfinished mandatory check that reports success is the shape §8.4 has no use
- * for. Reaching the window floor is not that — nothing was left unasked.
+ * {@link SPOT_CHECK_BLOCK_CEILING} bounds the work, and hitting it is **disclosed** rather than
+ * refused (2026-08-06 — see that constant for the two configurations that reach it with nothing
+ * wrong with the file). The pass reports `reach: 'ceiling'`, raises no finding, and
+ * {@link mintSnapshotRows} declines to badge the rows `sampled`: a check that stopped early is
+ * not evidence, and §8.4's three `FE-PROV-003` causes do not include one about this device.
+ * Reaching the window floor is different again — nothing was left unasked there.
  */
 export async function spotCheckSnapshot(
   document: SnapshotDocument,
@@ -1360,8 +1438,10 @@ export async function spotCheckSnapshot(
       outOfReach += 1;
       // The checker says which side, and the sides end the walk differently: below the window
       // every older covered block is unreachable too, so the mandated set is finished; above it,
-      // the reachable blocks are further down. Never inferred — see `OutOfReachSide`.
-      if (verdict.where === 'below-window') {
+      // the reachable blocks are further down. Never inferred — see `OutOfReachSide`. Validated
+      // rather than trusted: an out-of-enum value would fall through to `continue` and read as
+      // `above-window`, which walks the whole document and admits it having compared nothing.
+      if (requireOutOfReachSide(verdict.where, `the spot check at block ${block}`) === 'below-window') {
         reach = 'window-floor';
         break;
       }
@@ -1378,17 +1458,11 @@ export async function spotCheckSnapshot(
       });
     }
   }
-  if (reach === 'ceiling') {
-    findings.push({
-      screen: 'spot-check-incomplete',
-      why:
-        `this device asked about ${asked} covered blocks — comparing ${compared} against the ` +
-        `chain and finding ${outOfReach} ahead of its own head — and reached its ceiling of ` +
-        `${ceiling} without ever descending past the bottom of the window it can read. 10 §8.4 ` +
-        'requires re-derivation for every covered block inside light-client-reachable depth, and ' +
-        'this pass did not finish one — so the document is refused rather than admitted on a ' +
-        'check that stopped early.',
-    });
+  // The fourth situation, distinguished after the walk because only then is it a fact: the loop
+  // ran out of document, every answer was `above-window`, and nothing was compared. `ceiling` and
+  // `window-floor` are already set by the loop and are not overwritten here.
+  if (reach === 'whole-document' && compared === 0 && outOfReach > 0) {
+    reach = 'above-window-only';
   }
   // The one construction site of the brand — an assertion, because the phantom field has no
   // runtime representation. The local is typed, so every other field is still checked.
@@ -1480,8 +1554,18 @@ export function chainSpotCheck(read: BlockMovementRead): SnapshotSpotCheck {
   return async (claim: SpotClaim): Promise<SpotVerdict> => {
     const result = await read(claim.block);
     // The side is carried through, never re-decided here: this adapter holds no head and no
-    // window, so any rule it applied would be a guess dressed as a derivation.
-    if (result.kind === 'out-of-reach') return { kind: 'out-of-reach', where: result.where };
+    // window, so any rule it applied would be a guess dressed as a derivation. Carried is not
+    // the same as trusted — it is validated against the union, exactly as the two indices below
+    // are validated, because it is the one field the whole repair turns on.
+    if (result.kind === 'out-of-reach') {
+      return {
+        kind: 'out-of-reach',
+        where: requireOutOfReachSide(
+          result.where,
+          `this device's block-movement reader at block ${claim.block}`,
+        ),
+      };
+    }
     const seen = new Set<string>();
     for (const movement of result.observed) {
       if (!Number.isInteger(movement.extrinsicIndex) || movement.extrinsicIndex < 0) {

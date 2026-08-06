@@ -395,12 +395,19 @@ test('a rejected snapshot never reaches the preview — nothing local is put at 
   assert.equal(asked, 0);
 });
 
-test('an UNFINISHED re-derivation refuses the file and leaves the publisher alone', async () => {
-  // The distinction the auto-disable rests on. A pass that hit this device's own work ceiling is
-  // a statement about this device: refusing the file is right (an unfinished mandatory check
-  // cannot stand in for a finished one) and disabling the source is not — nothing about the
-  // publisher is implied, and a ladder that disabled sources over a local ceiling would take
-  // honest ones offline for as long as this device stayed ahead of them.
+test('an UNFINISHED re-derivation is DISCLOSED — imported unbadged, publisher untouched', async () => {
+  // This asserted a refusal until 2026-08-06, and the refusal was the fixed blocker's own defect
+  // class with a narrower trigger. §8.4 gives `FE-PROV-003` three causes — content-pin mismatch,
+  // malformed encoding, failed internal consistency — and *"this device ran out of asks"* is none
+  // of them; the bullet above them names the depth limit as **disclosed**. Two live
+  // configurations reach the ceiling with nothing wrong with the file, and for one of them (more
+  // reachable covered blocks than the ceiling) the old remedy — *"try again when this device has
+  // caught up"* — was false, so the refusal was permanent.
+  //
+  // What replaces it is not silence. The document is admitted, `reach` states that the walk
+  // stopped at the ceiling, and the mint refuses to badge the rows `sampled` however many blocks
+  // were compared — so nothing claims the check §8.4 mandates was finished. SQ-811 asks §8.4 to
+  // rule this; a ruling toward refusal brings back `spot-check-incomplete` and its remedy.
   const document: SnapshotDocument = {
     ...validDocument(),
     range: { fromBlock: 10, toBlock: 10_000 },
@@ -412,16 +419,20 @@ test('an UNFINISHED re-derivation refuses the file and leaves the publisher alon
     // Never `out-of-reach`, so nothing terminates the walk except the ceiling.
     deps({ spotCheck: ALWAYS_AGREES }),
   );
-  assert.equal(outcome.kind, 'rejected');
-  if (outcome.kind !== 'rejected') return;
-  assert.deepEqual(
-    [...new Set(outcome.findings.map((finding) => finding.screen))],
-    ['spot-check-incomplete'],
-  );
-  assert.equal(outcome.refusal.code, 'FE-PROV-003');
-  assert.match(outcome.refusal.detail, /could not finish re-deriving/);
-  assert.deepEqual(outcome.provider, PUBLISHER, 'the source is untouched');
-  assert.equal(outcome.disabled, undefined);
+  assert.equal(outcome.kind, 'imported');
+  if (outcome.kind !== 'imported') return;
+  assert.equal(outcome.spotCheck.reach, 'ceiling');
+  assert.deepEqual(outcome.spotCheck.findings, [], 'a disclosure raises no finding');
+  assert.ok(outcome.spotCheck.compared > 0, 'blocks WERE compared — the pass simply did not finish');
+  assert.equal(outcome.minted.status.kind, 'provider');
+  if (outcome.minted.status.kind !== 'provider') return;
+  // The whole of what keeps the admission honest: hundreds of blocks agreed and the rows still
+  // do not claim the mandated check ran, because it did not.
+  assert.equal(outcome.minted.status.sampled, false);
+  // The source is untouched, and now structurally so: only the `rejected` outcome carries a
+  // provider at all, because only a refusal can advance the ladder. A ceiling this client chose
+  // was never evidence about the publisher, and there is no longer a shape in which it could be.
+  assert.equal(outcome.minted.status.providerId, PUBLISHER.id);
 });
 
 test('a chain disagreement rejects with the chain-disagreement remedy, before the preview', async () => {
