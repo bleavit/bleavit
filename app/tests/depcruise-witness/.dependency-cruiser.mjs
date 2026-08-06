@@ -5,7 +5,7 @@
 // cruising a graph with no edges in it. A witness that does not share the thing it
 // witnesses is decoration.
 const { default: production } = await import('../../.dependency-cruiser.mjs');
-const { CHAIN_SDK_PACKAGES, EXTERNAL, WORKSPACE_SUBPATH, POLKADOT_API_NON_SIGNER } = await import('../../tools/depcruise-external.ts');
+const { CHAIN_SDK_PACKAGES, EXTERNAL, HOST_SDK_PACKAGES, WORKSPACE_SUBPATH, POLKADOT_API_NON_SIGNER } = await import('../../tools/depcruise-external.ts');
 const { NON_LOCAL_DEPENDENCY_TYPES } = await import('../../tools/handoff-packages.ts');
 
 export default {
@@ -24,6 +24,16 @@ export default {
       severity: 'error',
       from: { path: '^tests/depcruise-witness/' },
       to: { path: EXTERNAL(CHAIN_SDK_PACKAGES) },
+    },
+    {
+      // The HOST-SDK matcher, imported from production rather than restated. It is the one
+      // firewall rule with no real edge in the tree to catch — F22's `packages/platform`
+      // reaches a host through an injected bridge and imports no `@tauri-apps/*` — so this
+      // witness is the whole of its liveness proof.
+      name: 'witness-host-sdk-matcher',
+      severity: 'error',
+      from: { path: '^tests/depcruise-witness/' },
+      to: { path: EXTERNAL(HOST_SDK_PACKAGES) },
     },
     {
       // The signing exemption's boundary. `packages/signing` may import

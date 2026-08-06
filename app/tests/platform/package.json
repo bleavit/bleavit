@@ -1,0 +1,15 @@
+{
+  "_doc": "The F22 suite. It declares `@bleavit/llm-handoff` and `@bleavit/verify` because it is the one place the platform package's two *projections* are checked against the shapes they project onto — `transportCapabilities` onto `chooseTransport`'s input, and `AttestationFinding` onto `SelfCheckFinding`. Neither edge exists in production, deliberately: `platform` is in `src/features/tx`'s 10 §10.2 reference set and neither of those packages is, so a production import would put a handoff package and the release-verifier one hop from the transaction unit. A test dependency carries no such edge and is what makes the two restatements bound rather than parallel.",
+  "name": "@bleavit/platform-suite",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@bleavit/llm-handoff": "workspace:*",
+    "@bleavit/platform": "workspace:*",
+    "@bleavit/verify": "workspace:*"
+  }
+}
