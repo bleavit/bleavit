@@ -451,7 +451,7 @@ test('every figure carries the reader’s one pin', async () => {
 /* ------------------------------------------------- what the leaves are, and where they came from */
 
 test('the S3 reader mints no provenance of its own — every leaf descends from a read', () => {
-  // V-176. A local `finalized` helper wrapped any value in a hand-written
+  // V-182. A local `finalized` helper wrapped any value in a hand-written
   // `verified-finalized` status: brand-less, structurally a `Verified<T>`, and applied to
   // nine values — two caller-supplied inputs the chain was never asked about, and two more
   // the payload of caller-supplied `Verified<T>`s whose own status it discarded. Neither

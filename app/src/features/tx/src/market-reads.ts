@@ -39,7 +39,7 @@
  * So both `TradeInputs` fields are derived from bit 5 and neither is invented. They stay two
  * fields because `trade-ticket.ts` owns that shape and a hosted book relaxes nothing about it.
  *
- * ## Every leaf is a real read, and this module mints no provenance (V-176)
+ * ## Every leaf is a real read, and this module mints no provenance (V-182)
  *
  * `TradeInputs`' leaves are `Finalized<T>` because 11 §11.4 rule 4 says provider data never
  * satisfies a precondition, and the brand is what makes that structural (10 §2.1). This

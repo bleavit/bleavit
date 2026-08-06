@@ -97,7 +97,7 @@ test('derive is meet’s unary case, so it can grant nothing meet did not', () =
 
 test('derive chains, so a decode and a projection of it stay one pin', () => {
   // The shape `market-reads.ts` uses: bytes → decoded → the one field a row reads. A
-  // second pin appearing anywhere along that chain is the defect V-176 was.
+  // second pin appearing anywhere along that chain is the defect V-182 was.
   const decoded = derive(finalizedOn(CHAIN_A, 30), (value) => ({ bps: BigInt(value) }));
   const projected = derive(decoded, (figures) => figures.bps);
   assert.equal(projected.value, 30n);
