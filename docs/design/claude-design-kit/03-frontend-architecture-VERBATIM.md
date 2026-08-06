@@ -1,11 +1,14 @@
 > **DERIVED COPY for design-tool context — DO NOT EDIT.**
 > Verbatim copy of `docs/architecture/10-frontend-architecture.md` (the source of truth),
-> regenerated 2026-08-05, picking up §3.1's normative note on where the `SyncDegraded`
-> peer count comes from and what the client must do when it cannot be read (SQ-597) —
-> on top of the D-21 handoff (§13), the `app/` re-rooting and merged package list
-> (§10.1), the §10.2 firewall restatement and its negative-compilation corpus, and the
-> branded `Finalized<T>` with the `external-proposal` provenance status (§2.1). If this
-> copy and the source ever differ, the source wins.
+> regenerated 2026-08-06, picking up §9's re-derived resource budgets (SQ-557): the
+> sustained observing count is 31 trading books rather than `MaxLiveMarkets` = 196, the
+> retention-depth tables move with it, the mandatory `Traded` half of 02 §5's ingest set
+> is modelled for the first time, and §9.3's metadata cap no longer exceeds its own
+> §9.2 share — on top of §3.1's `SyncDegraded` peer-count note (SQ-597), the D-21
+> handoff (§13), the `app/` re-rooting and merged package list (§10.1), the §10.2
+> firewall restatement and its negative-compilation corpus, and the branded
+> `Finalized<T>` with the `external-proposal` provenance status (§2.1). If this copy and
+> the source ever differ, the source wins.
 
 # 10 — Frontend Architecture
 
@@ -95,6 +98,29 @@ Values that shape a user's *discretionary judgment* — price charts, history ta
 
 Consistently with this honesty: the §8.4 sampling regime is stated for what it is — it detects sloppy and inconsistent forgeries and liveness failures; **it does not detect a self-consistent forgery of history at unreachable depth**. The only cross-check for deep history is comparing two independent snapshot producers, which the UI supports and discloses.
 
+### 2.4 Checkpoint age and the long-range bound (FE-P8 resolved, 2026-08-05)
+
+The relay light client warp-syncs from a **checkpoint compiled into the release** (§4.1). That checkpoint is the root of everything the client later calls `verified-finalized`, and its trustworthiness expires.
+
+**The threat.** A client warp-syncing from a checkpoint at era `E` trusts the GRANDPA authority set at `E`. Validators in that set who later unbond and withdraw their stake face no slashing, so once their stake is gone they can sign an alternative finalized chain forking from `E` at no cost. A client that begins from a stale checkpoint has no way to distinguish that chain from the real one — both carry valid signatures from the authority set it was told to trust. This is the standard weak-subjectivity bound, and it is not detectable after the fact: **everything the client learns through a compromised sync is compromised, including any figure it might use to check the sync.**
+
+**The bound, derived from the relay's own constants** (verified 2026-08-05 against the Fellowship-maintained Polkadot relay runtime and the Paseo relay runtime, which agree exactly — `SessionsPerEra = 6`, `EpochDuration = 4 h`, so an era is 24 h):
+
+| Constant | Value | What lapses |
+|---|---|---|
+| `SlashDeferDuration` | 27 eras = **27 days** | The deterrent. A slash for an offence at `E` is applied at `E + 27`; past that, an equivocation by the era-`E` set may no longer be punishable. |
+| `BondingDuration` | 28 eras = **28 days** | The stake. Bonded stake from era `E` may be withdrawn at `E + 28`, after which equivocating from that checkpoint is free. |
+
+Three normative rules follow:
+
+1. **A release whose checkpoint is 28 days or older MUST NOT present any value as `verified-finalized`.** The long-range guarantee has lapsed, so the claim is false — not weaker, false. The client enters a mode with the same surface as `WorkerFailed` (§3.2): the verification panel, docs and settings render, cached data renders with `stale-cache` badges, and signing is unavailable in normal mode. This is refusal, not degradation, and it is deliberately **not** `restricted` or `read-only-incompatible` — those describe a runtime whose *surface* is partly unknown, whereas this describes a client that cannot establish which chain it is on.
+2. **At 27 days the client warns prominently**, in the verification panel and above the fold. The deterrent has lapsed while the stake has not, which is exactly the window in which an attack becomes cheap before it becomes free.
+3. **The age is measured against the device clock, and that is deliberate.** The device clock is untrusted, but it is *independent of the attacker's chain*: an adversary who controls the network cannot move it. Deriving the age from chain state would ask the possibly-forged sync how old its own checkpoint is. The release therefore records the checkpoint's wall-clock timestamp in the signed release document, and the client compares that against the device clock. A device clock **behind** the checkpoint is itself a refusal (`FE-BOOT-005`) rather than an age of zero — a clock set to the past would silently disable this control entirely, which is the cheapest possible attack on it.
+
+**An earlier advisory is permitted and needs no derivation.** Warning sooner than 27 days is strictly conservative, so a release MAY set a lower advisory threshold; what may not move is the 28-day refusal, which is a chain constant and not a policy choice. If the relay's `BondingDuration` is ever amended, this bound moves with it — the client reads the two figures from the release document, which is produced from the verified relay constants rather than from a literal in frontend source (§5.4).
+
+---
+
 ---
 
 ## 3. Boot state machine
@@ -173,7 +199,14 @@ Unchanged: one smoldot instance hosting the relay light client (GRANDPA warp syn
 **smoldot exposes the `chainHead` JSON-RPC group only. There are no `archive_*` methods.** Events are state (`System.Events`), readable only for blocks inside smoldot's pinned-block window (recent finalized blocks; peers additionally prune state at ~256 blocks by default). Consequences, normative:
 
 - Historical reads at arbitrary depth through the light client **do not exist**. Every design element that assumed `eventsAt(hash)` at depth (the old §15.4 loop unbounded, §15.6 backfill past the window, E3's "history continuous") is replaced by the three-layer model of §6.
-- Runtime calls execute as `chainHead`-scoped calls: smoldot runs the runtime locally against proof-backed storage for a pinned (finalized) block, so results carry the same verification as storage reads **[VERIFY: confirm PAPI 2.x routes typed runtime calls through `chainHead_call` pinned to a finalized hash; any call proxied to a peer unverified MUST be excluded from transaction-critical use and recomputed client-side — FE-P2, pivotal]**. Until FE-P2 resolves, every `FutarchyApi` result used on the tx path is cross-checked against direct storage reads (the conservative mode is the default, not the fallback).
+- Runtime calls execute as `chainHead`-scoped calls: smoldot runs the runtime locally against proof-backed storage for a pinned (finalized) block, so results carry the same verification as storage reads. **FE-P2 resolved 2026-08-05 — positively, and read from the pinned source rather than assumed.** Both conjuncts the tag asked for hold: PAPI 2.x issues a typed runtime call with no explicit `at` as `chainHead_v1_call` against the *finalized* hash (traced through the lockfile-pinned tree), and smoldot does **not** proxy such a call to a peer. In `smoldot@3.3.2`, `chainHead_v1_call` refuses an unpinned block outright (`-32801 unknown or unpinned block`), takes the `state_root` out of the header of the block *the client pinned*, and hands it to `runtime_service::runtime_call`, which fetches a **call proof** from a peer, runs `decode_and_verify_proof`, and then resolves every storage access through `call_proof.storage_value(block_state_trie_root_hash, key)`. The runtime itself executes in smoldot's own executor. A hostile peer can therefore **withhold** proof entries — which surfaces as `MissingProofEntry` / `InvalidCallProof`, a failed call — but cannot forge a value, because the proof must hash to a state root the client already accepted with the header.
+
+  Two consequences are normative rather than incidental:
+
+  1. **The verification chains to the header, so it inherits header/finality verification and nothing more.** A `chainHead_v1_call` result is exactly as trustworthy as the block it is pinned to. It follows that transaction-critical runtime calls MUST target a finalized, pinned block — never `"best"`, which is opt-in in PAPI and must not be passed on the transaction path.
+  2. **`system_health.is_syncing` is a heuristic and MUST NOT gate a correctness decision.** It is the only sync-progress surface a light client exposes, and smoldot computes it as `!is_near_head_of_chain_heuristic()` — the name is the API's own. There is no exact "blocks behind" figure to read. Sync state may inform a *presentation* (a warning, a disabled control with a named reason) and may never decide whether a value is verified.
+
+  **The `FutarchyApi` cross-check against direct storage reads is retained, with its reason changed.** It was the conservative mode pending this gate; it is now deliberate defence-in-depth against a different failure — a client that misreads an aggregate API's *semantics*, or decodes it wrongly, which proof verification says nothing about. Dropping a working control because one of the threats it covered was retired is the loosening this document exists to prevent, so the control stays and the rationale is written down.
 
 ### 4.3 Bootnodes and connectivity
 
@@ -354,9 +387,13 @@ The Alt-C selection stands, with its text corrected to match what the mechanism 
 
 Unchanged: **snapshots** (deterministic, canonically-serialized, content-addressed exports reproducible byte-identically by anyone from `tools/snapshot` against an archive node) and **live indexers** (minimal read-only HTTP interface; reference implementation in `optional/indexer/`). Both write only into layer-3 tables with `origin ∈ {snapshot, indexer}`; both are barred from the tx path structurally (§10).
 
+*"Reproducible byte-identically by anyone"* is a promise to **independent producers**, so what "canonically-serialized" means for this format is normative rather than an implementation detail — a second producer that cannot reconstruct the same bytes cannot cross-check the first, and `FE-PROV-004` (§8.4) then fires on every honest pair. Beyond §13.1's envelope conventions, which sort object *keys* and say nothing about array members: a set-valued array (the vault list, each vault's branch list, the derived balances) is ordered by Unicode **code point** over its identifying tuple and carries no duplicate; the coverage list is ordered, non-overlapping and **maximally merged**, so one covered set has exactly one spelling; and the movement list is in **chain order** — block, then extrinsic, then event — which is semantic rather than presentational, since the conservation replay is order-sensitive and a merge preceding its split is a different (invalid) history. A producer that cannot supply chain order cannot supply a snapshot. Consumers check these on import; a document that violates any of them is not in canonical form and its content pin therefore addresses nothing.
+
 ### 8.3 Health and degradation
 
 Per-provider health probe on enable + every 10 min; `Healthy → Slow → Failing → Disabled(auto, reason)`; auto-disable on sampling mismatch. All-providers-down ⇒ the default (provider-less) behavior with the standard incomplete-history explainer.
+
+The ladder's thresholds are **release constants, not chain constants** — a governance vote does not change how fast a third-party HTTP endpoint answers, and there is no chain surface to read them from, so §5.4's no-literal rule does not reach them (same classification as the import quotas below and as `packages/protocol`'s kernel table). What is normative is the *shape*: `Slow` is a latency observation and never disables on its own, because a slow provider is still an honest one and disabling it would convert a network condition into a missing-data incident; `Failing` counts **consecutive** failures, so one timeout in a healthy series cannot ratchet the ladder; and only `Disabled` stops reads, always with a reason.
 
 ### 8.4 Verification and sampling — honest limits (F-medium: transaction-critical/sampling)
 
@@ -365,45 +402,88 @@ Per-provider health probe on enable + every 10 min; `Healthy → Slow → Failin
 - **Honest guarantee statement (normative UI copy):** sampling and re-derivation catch malformed, internally inconsistent, and shallow forgeries, and catch liveness failures. **They do not detect a self-consistent forgery of history at depths the light client cannot reach.** The only available cross-check is diffing two independent snapshot producers (`FE-PROV-004` on mismatch), which the import UI supports and recommends. This limit is disclosed in the provider UI, and the corresponding residual-risk rows live in [14-threat-model.md](14-threat-model.md).
 - **Absolute rule (INV-FE-3):** provider data never satisfies a precondition, never renders a "passed/settled/mature/final/safe" state without a chain read; any actionable provider-supplied object triggers a direct chain fetch before the action is enabled.
 
+**The `FE-PROV-001..004` family, bound to the mechanisms above.** §10.4's taxonomy declares four codes and requires fixed user copy, expert detail and a documented recovery for each; two were bound elsewhere and two were not bound at all, which is a gap rather than a choice — an unbound code has no copy, and a mechanism with no code emits free text, which §10.4 forbids. The assignment is derived from the mechanisms these two sections describe, not selected:
+
+| Code | Fires when | Recovery |
+|---|---|---|
+| `FE-PROV-001` | A provider fails its §8.3 health probe — unreachable, or `Failing` after consecutive errors. A **liveness** failure, which sampling is stated above to catch | None needed: the app falls back to the provider-less default (§8.1) with the incomplete-history explainer. Nothing local is lost, because provider rows were never transaction-critical (INV-FE-3) |
+| `FE-PROV-002` | A §8.4 sampling round finds **any** mismatch against chain state or the self-ingested overlap window ⇒ auto-disable ([14](14-threat-model.md) TH-49) | The provider is disabled with its reason recorded; re-enabling is an explicit user action. Nothing it supplied was ever verified |
+| `FE-PROV-003` | A snapshot is **rejected at import**: content-hash pin mismatch, malformed encoding, or a failed internal-consistency check (monotone coverage, event↔derived-row agreement, conservation-identity replay) ([14](14-threat-model.md) TH-50) | Nothing is imported and nothing local is evicted — the §8.4 eviction preview happens before import precisely so a rejected snapshot costs the user nothing |
+| `FE-PROV-004` | Two independent snapshots covering the same range **disagree**, the only available cross-check for depths the light client cannot reach | Neither is trusted for the disputed range; the range is left as a labelled hole (§6.3) rather than resolved by majority — two producers cannot outvote the absence of a proof |
+
+`FE-PROV-004` is a **flag on the pair**, not a verdict on either member: the diff proves that at least one is wrong and cannot say which, and a client that picked one would be manufacturing exactly the confidence §8.4 declines to offer.
+
 Import quotas (≤ 400 MB uncompressed, ≤ 4 M rows, streamed, eviction preview before import) — unchanged.
 
 ---
 
 ## 9. Resource budgets — recomputed honestly
 
+**Units, stated once because one cell read the other way is a silent 5 % grant:** MB means
+**10⁶ bytes** throughout §9, and KB 10³. §9.2's depth tables are only reproducible under that
+reading, and `tools/ci/check-frontend-budgets.py` re-derives them under it; §9.4's size
+budgets use the same convention, and `app/tools/check-smoldot-budget.ts` — which measured its
+budget as MiB until 2026-08-06 — is bound to its published cell by that gate.
+
 ### 9.1 Load model (F-medium: growth arithmetic)
 
-The reviewed growth table assumed ~20 live books. The chain permits **196 active books** (`MaxLiveMarkets` = 32·6 + 4, *normative value: [13-parameters.md](13-parameters.md)*) and separately retains at most **2,240 readable book rows** (`MaxStoredMarkets`). Terminal observation removes each book's TWAP-checkpoint and decision-window auxiliaries before releasing its active slot, so retained archive rows emit no new observations and do not multiply the ingest/history budget below. Budgets are derived from both a **typical** early-life load and the **maximum sustained active** load, and browser retention is a function of budget, not a promise.
+The reviewed growth table assumed ~20 live books; the revision that replaced it used **196**, and 196 is the wrong bound (SQ-557). `MaxLiveMarkets = 196` counts books **without a durable terminal latch** — a book that closed at d18 keeps its slot until its vault settles at e+3 — while [04](04-markets-and-pricing.md) §2 admits trading and observation **only** while the owning proposal is `Trading`/`Extended`. Live-but-closed books provably emit nothing, and the separately retained **2,240** `MaxStoredMarkets` rows emit nothing either. The set that emits is one epoch's trading books, and the Trade phase (`[5/21, 18/21)`, [13](13-parameters.md) §3.1) does not overlap the next epoch's, so the sustained **primary** observing count is exactly
 
-Row-rate model (assumptions labelled): observations 1 per 10 blocks per book during the trading window (d5–d18 = 13 of 21 days ⇒ duty ≈ 0.62); ~120 B effective per row (Dexie overhead included). Sustained average sample rows/day ≈ `books × 890`:
+```
+primary trading books = epoch.slots·6 + 1 = 31
+```
 
-| Load | Live books | priceSamples rows/day | bytes/day |
+which is the same figure [13](13-parameters.md) §5 item 4 already derives, from the same parameters, for the keeper crank load. It is the primary partition's count only; the hosted partition is counted separately below, and an earlier revision of this section stopped here as though 31 were the whole population. **31 is the primary maximum, not a typical**: `epoch.slots` has a registry ceiling of 12, but §5 item 2's vault envelope is frozen at `MaxLiveProposals + MaxSettlingCohorts·epoch.slots` = 52 and the occupancy screen refuses every raise above 5, so no reachable parameter history admits a sixth slot. Browser retention is a function of budget, not a promise.
+
+**Non-overlap survives an `epoch.length` change, which is the premise worth checking rather than assuming.** Trade closes at `18/21` of its own epoch and the next epoch's opens `5/21` into the one after, so the two are separated by the epoch boundary itself and no pair of lengths can bring them together — the schedule is stored as kernel fractions, and in-flight cohorts keep their creation-time schedule ([13](13-parameters.md) §3.1), so a shortened epoch moves both endpoints, not one. The one case that crosses a boundary is `Extended`, whose **3 days are absolute** while the phase offsets are fractional: at the 14-day `epoch.length` floor, Trade closes on day 12 and an extended pair runs to day 15 — one day into the next epoch, which does not begin trading until day 3⅓. Two observing epochs would need that gap to close, and at the floor it is still 2⅓ days wide.
+
+**Hosted books observe too, and counting only the primary partition is the same mistake one layer down.** The canonical client **serves external books** — [11](11-frontend-workflows.md) §11.2a is normative on it, `BookKind::External` rows are ordinary trading surfaces on S3, and [02](02-integration-contract.md) §5 states `Traded`/`Observed` with **no domain filter** — so a hosted book's stream is this client's cost exactly like a primary one's. Their count is governed by a different key: `MaxLiveExternalMarkets` = `2·svc.max_live` capped at 128 ([13](13-parameters.md) §4), and `svc.max_live` is `[VERIFY]`-tagged at **16 provisional** against a registry maximum of **64**. Two figures therefore matter, and the budget is owed to the larger: **32 hosted books** today and **128** at the registry ceiling, which a PARAM row with max-Δ ×2 and a 2-epoch cooldown reaches in two amendments.
+
+**And their duty cycle is higher, which is the part that cannot be eyeballed.** A primary book trades only inside its epoch's Trade phase (d5–d18 = 13 of 21 days ⇒ duty = 13/21). A hosted book trades while its question is `Open` ([16](16-hosted-question-service.md) §7.6) — a window of its own, up to `svc.max_window` = 302,400 blocks = one full epoch — so its duty is **1**. Per book that is 1,440 sample rows/day against a primary book's 891.43, and [13](13-parameters.md) §2's own fee-floor derivation counts it the same way, at `2 · ceil(svc.max_window / mkt.obs_interval)` = 2 × 30,240 cranks per question.
+
+Row-rate model (assumptions labelled): observations 1 per `mkt.obs_interval` = 10 blocks per trading book; ~120 B effective per row (Dexie overhead included). At the 302,400-block/21-day default a primary book emits `14,400/10 × 13/21` = **891.43** rows/day and a hosted book `14,400/10` = **1,440**:
+
+| Population | Trading books | priceSamples rows/day | bytes/day |
 |---|---|---|---|
-| Typical (early phases) | 20 | ~17.8 k | ~2.1 MB |
-| Half load | 98 | ~87 k | ~10.5 MB |
-| **Max sustained** | **196** | **~175 k** | **~21 MB** |
+| Primary, 1 of 5 slots | 7 | ~6.2 k | ~0.75 MB |
+| Primary, 3 of 5 slots | 19 | ~16.9 k | ~2.0 MB |
+| Primary, 5 of 5 slots — max | 31 | ~27.6 k | ~3.3 MB |
+| + hosted at `svc.max_live` = 16 (provisional) | 63 | ~73.7 k | ~8.8 MB |
+| **+ hosted at `svc.max_live` = 64 (registry max)** | **159** | **~212.0 k** | **~25.4 MB** |
+
+**`Traded` is the larger stream, and this section omitted it entirely.** [02](02-integration-contract.md) §5 freezes the minimal client ingest set as `Traded` **+** `Observed`; only `Observed` was modelled above. Unlike observations, the trade stream is not paced by a grid — it is paced by what a block can hold. The runtime pins that ceiling (`pov_budgets::traded_event_ceiling_per_block_pinned_for_frontend_budgets`): **93 fills per block**, where **proof size binds** — `buy`'s dispatched weight is 111,860 B of PoV against the 10,485,760 B block — while ref_time would admit 204. The pin is taken through `get_dispatch_info()` rather than off the generated weight file, because `buy`'s `#[pallet::weight]` adds two reads and an external-route proof surcharge on top of the generated figure, and that surcharge alone moves the primary share from 72 to 70. **93 is a sum over both resource partitions, not the primary reservation alone**: the classifier routes a fill by book kind, so hosted trades are admitted against the separate 25 % external quota, `side_fits` checks only that side's own capacity, and both are consumable in the same block — **70 primary + 23 external = 93**, exactly saturating the block bound. At 14,400 blocks/day the chain therefore permits **1,339,200 `Traded` rows/day ≈ 160.7 MB/day** — about 6.3× the entire sample stream even at the 159-book maximum.
+
+A client cannot decline events, so that is the rate it must survive rather than the rate it expects. Two consequences bind §9.2. The events share is a **share, not a depth promise**; and the local index retains **only events attributing to the user's watched accounts**, which is §6.5's existing rule — *"worst-case overhead is proportional to the user's own activity, not chain activity"* — applied to storage as well as to body fetches. Chain-wide `Traded` is consumed into the candle aggregates as it is scanned and never stored row-by-row; a chain-wide trade tape is a bounded windowed read, never a retained table.
 
 ### 9.2 Retention auto-tunes to budget (degrades depth, never correctness)
 
-Hard caps: **300 MB desktop / 75 MB mobile** *(normative values: [13-parameters.md](13-parameters.md))*. Fixed internal shares (user-adjustable locally): raw samples 60%, candles 20%, events+archive 15%, metadata 5%. The quota manager computes retention from the *measured* ingest rate — there is no fixed "90 days" promise. Honest verified-depth table at the caps:
+Hard caps: **300 MB desktop / 75 MB mobile**. These are **client-local values owned by this section**: a browser storage quota is not a chain parameter, [13](13-parameters.md) is the chain registry, and the citation this line previously carried pointed at a document with no such row (SQ-557) — the rest of §9's budget values have always been owned here, and this line was the anomaly. Fixed internal shares (user-adjustable locally): raw samples 60%, candles 20%, events+archive 15%, metadata 5%. The quota manager computes retention from the *measured* ingest rate — there is no fixed "90 days" promise. Honest verified-depth table at the caps:
 
-| Raw-sample depth (share: 180 MB desktop / 45 MB mobile) | Typical (20 books) | Max load (196 books) |
-|---|---|---|
-| Desktop | ~84 days | **~8.5 days** |
-| Mobile | ~21 days | **~2.1 days** |
+| Raw-sample depth (share: 180 MB desktop / 45 MB mobile) | Quietest slate (7 books) | Primary max (31 books) | + hosted, provisional (63 books) | + hosted, registry max (159 books) |
+|---|---|---|---|---|
+| Desktop | ~240 days | ~54 days | ~20 days | **~7.1 days** |
+| Mobile | ~60 days | ~13.6 days | ~5.1 days | **~1.8 days** |
 
-| candles1h depth (share: 60 MB / 15 MB) | Typical | Max load |
-|---|---|---|
-| Desktop | ~2.9 years | ~106 days |
-| Mobile | ~8 months | ~26 days |
+| candles1h depth (share: 60 MB / 15 MB) | Quietest slate (7 books) | Primary max (31 books) | + hosted, provisional (63 books) | + hosted, registry max (159 books) |
+|---|---|---|---|---|
+| Desktop | ~2,976 days | ~672 days | ~331 days | **~131 days** |
+| Mobile | ~744 days | ~168 days | ~83 days | **~33 days** |
 
-Degradation ladder, applied oldest-first and in this order, deterministic and user-visible: raw samples → `candles1h` → `candles4h` → `candles1d` (a `candles1d` row costs `books × 120 B/day` ≈ 23.5 KB/day even at max load — effectively unbounded depth); `events` for settled+reaped proposals → compacted into `proposalsArchive` summaries; imported provider rows evicted before self-ingested rows at equal age. The ladder **degrades chart resolution and event granularity only**. It never touches: the tx path (structurally isolated, §10), layer-1 data (chain-served, not stored here), coverage metadata (holes stay truthful even after eviction — an evicted range becomes a labelled "downsampled" range, not a hole, and never a silent splice).
+**Hosted occupancy is the dominant term in both tables**, and it is the one the client does not control: `svc.max_live` is a governance row, so the honest planning figure is the registry-maximum column rather than today's provisional. The ladder below is what absorbs the difference — raw depth degrades first and candles survive, which is why the 159-book column is thin on raw samples and still over four months of hourly candles.
 
-At maximum chain load, deep raw-resolution history in the browser is **not achievable within the caps** — stated plainly. The honest offer at max load is: layer-1 verified summaries forever, ~days of raw verified samples, ~months of hourly candles, unbounded daily candles, and provider snapshots for everything deeper, labelled as such.
+Depths are stated in days throughout rather than glossed as years or months, because a gloss carries a calendar convention that nothing checks and that silently decides whether 2,976 days reads as 8.1 or 8.2 years.
+
+**The events share is the binding constraint, and it is measured in hours.** At the chain-permitted `Traded` ceiling (§9.1) the 15% share holds ~**6.7 h** desktop / ~**1.7 h** mobile of chain-wide trade rows, which is why the index stores watched-account events only. Measured against the user's own activity the same share is effectively unbounded: a hundred attributed rows a day costs ~12 KB/day, so the 45 MB desktop share is decades.
+
+Degradation ladder, applied oldest-first and in this order, deterministic and user-visible: raw samples → `candles1h` → `candles4h` → `candles1d` (a `candles1d` row costs `books × 120 B/day` ≈ 19.1 KB/day even at the 159-book maximum — effectively unbounded depth); `events` for settled+reaped proposals → compacted into `proposalsArchive` summaries; imported provider rows evicted before self-ingested rows at equal age. The ladder **degrades chart resolution and event granularity only**. It never touches: the tx path (structurally isolated, §10), layer-1 data (chain-served, not stored here), coverage metadata (holes stay truthful even after eviction — an evicted range becomes a labelled "downsampled" range, not a hole, and never a silent splice).
+
+**What "maximum load" means has to be said twice, because the two partitions answer differently.** Against the primary slate alone the caps are generous — ~54 days of raw verified samples on desktop and ~672 days of hourly candles — and the revision this replaced stated the opposite, *"not achievable within the caps"*, which followed from the 196-book count rather than from any measurement (SQ-557). Against a fully-subscribed hosted partition the raw tier is genuinely thin: ~7 days desktop, ~2 days mobile. Both are true, neither is the headline on its own, and quoting only the first would repeat this section's original error in the opposite direction.
+
+What is genuinely not achievable at any depth is a chain-wide trade tape (§9.1), and that is the limitation this section states plainly. The honest offer at the 159-book maximum is: layer-1 verified summaries forever, ~7 days of raw verified samples, ~131 days of hourly candles, unbounded daily candles, the user's own event history without practical bound, and provider snapshots for everything deeper, labelled as such. Raw depth is the tier that moves with hosted occupancy, so a client MUST present it as measured-and-current rather than as a promise — §9.2's opening sentence, that retention is computed from the *measured* ingest rate, is what makes that honest rather than merely cautious.
 
 ### 9.3 Metadata blobs bounded (F-medium: metadata blobs)
 
-`metadataCache` (historical SCALE metadata for per-era decode, ~1–2 MB gz each): bounded at **≤ 8 blobs / ≤ 16 MB desktop, ≤ 3 blobs / ≤ 6 MB mobile**, LRU-evicted; the current and next-authorized runtime's metadata are pinned non-evictable. Eviction of a blob needed by old undecoded rows is acceptable: those rows already carry the raw-bytes "pending decoder" state (§6.5) and re-fetch/re-ship paths exist (FE-P5). Release-shipped blobs (the FE-P5 fallback) count against the same bound.
+`metadataCache` (historical SCALE metadata for per-era decode; **measured 0.14 MB gz** per blob — `gzip -9` over the committed 469,581 B `metadata.scale`, against the "~1–2 MB" this section previously assumed): bounded at **≤ 8 blobs / ≤ 15 MB desktop, ≤ 3 blobs / ≤ 3.75 MB mobile**. Those byte bounds are §9.2's metadata share exactly; the previous 16 MB / 6 MB caps **exceeded their own share** in both cases (SQ-557), which is a bound that cannot bind. At the measured blob size the **count** limit is what actually binds and the byte limit is headroom against metadata growth — eight blobs are ~1.1 MB. LRU-evicted; the current and next-authorized runtime's metadata are pinned non-evictable. Eviction of a blob needed by old undecoded rows is acceptable: those rows already carry the raw-bytes "pending decoder" state (§6.5) and re-fetch/re-ship paths exist (FE-P5). Release-shipped blobs (the FE-P5 fallback) count against the same bound **and against the §9.4 bundle row**, which they previously did not have.
 
 ### 9.4 Budget table
 
@@ -411,9 +491,10 @@ Measured in CI (Lighthouse + Playwright timers) on reference hardware (desktop =
 
 | Budget | Target (p50 / p95) | Enforcement |
 |---|---|---|
-| Initial JS (critical path, gz) | ≤ 350 KB / hard-fail 450 KB | bundle-size CI gate |
+| Initial JS (critical path, gz) | ≤ 350 KB / hard-fail 450 KB | bundle-size CI gate — `app/tools/check-bundle-budget.ts`, over the entry chunk's **static** import closure. A dynamic `import(` is not followed: that is the same lazy boundary the smoldot and chain-spec rows are budgeted on separately, and summing all of `assets/` would charge first render for code it never touches |
 | smoldot WASM (worker, lazy) | ≤ 3.5 MB gz **[VERIFY artifact size — FE-P4]** | size gate + lazy load |
 | Chain specs (relay + para + Asset Hub, gz, lazy) | ≤ 3.5 MB combined (checkpoint-trimmed) | size gate |
+| Release-shipped fallback metadata (gz, lazy) | ≤ 1.5 MB combined — §9.3's 8-blob cache bound × the measured 0.14 MB blob, rounded up for metadata growth. The release cannot ship more blobs than the cache admits | size gate |
 | First meaningful render (shell) | ≤ 1.5 s / 3 s desktop; ≤ 3 s / 6 s mobile | Lighthouse CI |
 | First **verified** current-state render | ≤ 30 s / 90 s desktop; ≤ 90 s / 240 s mobile — **hypothesis, FE-P4 gates release** | Playwright sync timer vs live testnet |
 | Finalized-head refresh work | ≤ 50 ms main-thread per head | perf marks |
@@ -436,7 +517,7 @@ The client is rooted at **`app/`** in the chain repository — one workspace, on
 
 - **Shell** — `app/src/{application, components, routes, styles}`.
 - **Compilation units** — `app/src/features/{tx, analysis, handoff}` (§10.2).
-- **Packages** — `app/packages/{shared-types, chain-client, descriptors, protocol, simulation, transaction-builder, signing, contexts, intents, receipts, llm-handoff, ui, verify, local-index, providers, platform, mock-runtime}`.
+- **Packages** — `app/packages/{shared-types, chain-client, descriptors, protocol, simulation, transaction-builder, signing, handoff-envelope, contexts, intents, receipts, llm-handoff, ui, verify, local-index, providers, platform, mock-runtime}`.
 
 The names differ from the reviewed design; the **edges** are what carry the invariant, and they are preserved intact. `chain-client` is the reviewed `chain`; `transaction-builder` + `signing` together are the reviewed `wallet`; `protocol` keeps its name and its normative role, with `simulation` layered above it for what-if derivation only.
 
@@ -446,7 +527,8 @@ CI-fatal forbidden edges (dependency-cruiser, with the TypeScript project graph 
 - `chain-client` → anything above it
 - `providers` never imported by `transaction-builder` or `signing`
 - `shared-types` → **nothing** (it is the dependency-free root, and it MUST NOT contain `Finalized<T>`'s brand — §2.1)
-- `llm-handoff`, `contexts`, `intents`, `receipts` → `{transaction-builder, signing, providers, local-index}`; permitted: `→ {shared-types, chain-client, protocol}`
+- `llm-handoff`, `contexts`, `intents`, `receipts`, `handoff-envelope` → `{transaction-builder, signing, providers, local-index}`; permitted: `→ {shared-types, chain-client, protocol, handoff-envelope}` — **and `handoff-envelope` itself depends on nothing at all.** It carries the §13.1 envelope conventions (canonical JSON and the digest pre-image), which all three formats share and which must therefore have exactly one implementation; it is a separate package rather than a module inside `contexts` because `contexts` is the *outbound* half and depends on `chain-client` for `Finalized<T>`, while the **inbound** parser must not be able to reach a chain connection even transitively — §13's second load-bearing sentence is that the inbound format carries no chain state.
+- **No package on a handoff path imports anything external.** Not a network library, not a utility, not a node built-in: a denylist only forbids the libraries somebody thought of, and the transport here is files, the clipboard and the share sheet in every case. The client makes no network request on any handoff path (§13), and the rule that enforces it is the absence of a dependency rather than the absence of a name.
 - `platform` is the only package permitted to import a host or native SDK (`@tauri-apps/*`, `@parity/product-sdk`); `src/features/tx/**` may reference `platform` but never a concrete platform implementation
 - nothing outside test builds imports `mock-runtime` or `chain-client/testing`, and no signer adapter marked test-only may appear in a release chunk
 
@@ -495,18 +577,18 @@ For orientation (screens and full source matrix: [11-frontend-workflows.md](11-f
 
 ## 12. Prototype experiments and open questions (carried forward, updated)
 
-The [VERIFY]/prototype epistemics of the reviewed design are retained deliberately — honesty over polish. Conservative assumptions in force until resolved: runtime-API results are cross-checked (FE-P2); dedicated workers + leader election with transient second instances (FE-P3); hash routing regardless of FE-P7's finding; backfill arithmetic at 20 blk/s until FE-P4 measures reality.
+The [VERIFY]/prototype epistemics of the reviewed design are retained deliberately — honesty over polish. Conservative assumptions in force until resolved: dedicated workers + leader election with transient second instances (FE-P3); hash routing regardless of FE-P7's finding; backfill arithmetic at 20 blk/s until FE-P4 measures reality. FE-P2's cross-check of runtime-API results is no longer one of them — that gate resolved positively (§4.2), and the cross-check is retained on a *different* rationale rather than as a pending assumption.
 
 | ID | Question ([VERIFY] owner) | Experiment | Gate |
 |---|---|---|---|
 | FE-P1 | Exact PAPI 2.x surface: at-block query options, best-block observable, compatibility API, fee estimation, pjs-signer exports, CheckMetadataHash handling | 2-day spike against Paseo; pin exact APIs into `chain` | blocks FE-1 |
-| FE-P2 | **(pivotal, unchanged)** chainHead runtime-call verification semantics through smoldot; sync-progress introspection | smoldot docs/source + wire-level test with a lying mock peer | blocks trusting `FutarchyApi` on the tx path (else client-recompute-only mode stands permanently) |
+| FE-P2 | ~~**(pivotal)** chainHead runtime-call verification semantics through smoldot; sync-progress introspection~~ **RESOLVED 2026-08-05 — §4.2** | Read from `smoldot@3.3.2`'s own source at the tag the lockfile pins (`npm-smoldot-v3.3.2`), which is what the "docs/source" half asked for. The "lying mock peer" half is **not** additionally informative, and the reason is worth keeping: the lie is caught *inside* smoldot's wasm, below the JSON-RPC boundary this client's mock transport replaces — so a lying-peer test at our layer would exercise our mock, not smoldot. Same boundary FE-P5 met (V-89) | **Positive.** `FutarchyApi` on the tx path is verified state, so client-recompute-only mode does **not** stand permanently. Two normative consequences in §4.2: a transaction-critical call MUST target a finalized pinned block, and `system_health.is_syncing` is a heuristic that may never decide whether a value is verified |
 | FE-P3 | Web Locks leader election + BroadcastChannel snapshot latency on Safari; SharedWorker with `startFromWorker`; follower-tx path (proxy vs transient instance); dual-instance memory on Android | matrix spike on device lab | gates §4.4 final design; §9.4 dual-instance budget line |
 | FE-P4 | Real sync latency, smoldot artifact size + per-instance memory, ingest throughput (the 20 blk/s anchor), measured proof sizes, mobile CPU | instrumented testnet runs on device lab | release-gate values for §9.4 |
 | FE-P5 | Historical metadata retrievability via light client at depth | probe; else ship bounded metadata blobs per supported spec_version (§9.3) | affects backfill decode |
 | FE-P6 | Ledger Generic App + metadata-hash flow for a custom chain | hardware test | wallet support tier ([11](11-frontend-workflows.md)) |
 | FE-P7 | ANT n-of-m controller capability; two-pass manifest flow; undername immutability practice; resolver endpoints; manifest fallback behavior | ar.io testnet dry run of the full release pipeline | blocks distribution epic ([12](12-release-and-operations.md); D-16: single-key custody prohibited — launch blocks if neither n-of-m nor FROST materializes) |
-| FE-P8 | Long-range checkpoint policy: max safe release age before warning | analysis vs unbonding period | verification-panel copy |
+| FE-P8 | ~~Long-range checkpoint policy: max safe release age before warning~~ **RESOLVED 2026-08-05 — §2.4** | Derived from the relay's own constants rather than chosen: `BondingDuration` = 28 eras and `SlashDeferDuration` = 27 eras, at 6 sessions × 4 h = 24 h per era, verified against the Fellowship Polkadot relay runtime and the Paseo relay runtime (which agree exactly, so one bound covers both release targets — the risk this check retired was a client shipping Polkadot's number onto a testnet with a shorter one) | **Refuse** all `verified-finalized` claims at 28 days, **warn** at 27, measured against the *device* clock because the chain being checked is the one that may be forged |
 | FE-P9 | Bulletin mirror dry run (deferred D-Bulletin triggers T1–T4) | TestNet pipeline run | secondary mirror only; never canonical |
 | FE-P10 | Multi-MB Wasm extrinsic submission through smoldot/PAPI in-browser: transaction-pool/gossip size limits, peer banning on oversized transactions, mobile memory headroom ([11](11-frontend-workflows.md) §11.8.4) | instrumented testnet submission of a real runtime artifact (extends FE-P4) | gates the FE-15 upgrade-crank submission tier; the in-browser fetch + hash-verify path ships regardless, with the operator-CLI handoff as fallback |
 | FE-P11 | Handoff transports (§13.4): `navigator.share({ files })` availability across the browser/OS matrix, and confirmation that Web Share, the async Clipboard API and File System Access are **not** governed by CSP `connect-src`. The second half is load-bearing for §13's INV-FE-6 claim, so it is verified rather than assumed | read the Web Share security section, then a matrix test asserting a successful share and clipboard round-trip under `default-src 'none'` | decides whether Share ships as a primary or fallback transport. Conservative assumption in force until resolved: **clipboard and file are primary, Share is a fallback**; a negative result on the CSP half blocks §13 entirely and is the outcome to look for first |
@@ -549,7 +631,7 @@ The import path's only output is a `TxPreparation` entering **Draft**. It constr
 
 ### 13.3 Refusals
 
-`FE-HANDOFF-001..013`, joining the §9.4 taxonomy with the same discipline — fixed user copy, expert detail, and a documented recovery per code, no free text. The classes are: unknown schema, malformed document, unknown action, **foreign field inside `action`/`limits`**, wrong chain, newer-than-live runtime, limit missing/out-of-range/inconsistent, expired, digest mismatch, action infeasible at the refreshed block, scope refused, and export-from-unverified-state.
+`FE-HANDOFF-001..013`, joining the §9.4 taxonomy with the same discipline — fixed user copy, expert detail, and a documented recovery per code, no free text. The classes are: unknown schema, malformed document, unknown action, **foreign field inside a closed core object (`binding`, `action`, `limits`)**, wrong chain, newer-than-live runtime, limit missing/out-of-range/inconsistent, expired, digest mismatch, action infeasible at the refreshed block, scope refused, and export-from-unverified-state.
 
 **`FE-HANDOFF-009` is retired and MUST NOT be reassigned.** It was the replay refusal, deleted below. An error code is a user-facing identifier that appears in support threads, logs and documentation long after the release that emitted it, so the family carries a gap rather than renumbering the codes above it — a reused code is a worse defect than an absent one.
 

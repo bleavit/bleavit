@@ -72,7 +72,11 @@ STANDALONE_GATES: tuple[tuple[str, ...], ...] = (
     # committed artifact is absent from CI's checkout for any reason.
     ("python3", "tools/ci/check-chain-feed.py"),
     ("python3", "tools/ci/check-doc-links.py"),
+    # Reads doc 13, doc 10 and the runtime's pinned ceiling — three committed sources,
+    # any of which going missing in CI's checkout would silently un-derive doc 10 §9.
+    ("python3", "tools/ci/check-frontend-budgets.py"),
     ("python3", "tools/ci/check-plan-tables.py"),
+    ("python3", "tools/ci/check-verbatim-copies.py"),
     ("python3", "tools/ci/check-spec-question-batches.py"),
     ("python3", "tools/deploy/check-runbooks.py"),
     ("python3", "tools/limit-coverage/check-limit-coverage.py"),

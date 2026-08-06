@@ -141,6 +141,21 @@ jobs:
         # have passed every gate here and looked finished. Same shape as SQ-552, SQ-580
         # and SQ-582: an obligation in prose with no mechanical reader.
         run: python3 tools/ci/check-degradation-matrix.py
+      - name: The design kit's derived copies really are verbatim
+        # Two files declare themselves byte-identical to a spec document and say "if this
+        # copy and the source ever differ, the source wins"; AGENTS.md obliges a
+        # regeneration after every spec change; nothing compared the bytes. One had been
+        # three lines stale since a `[VERIFY]` tag was resolved, and the failure is quiet
+        # by construction — a design tool is fed the copy, so a wrong copy is
+        # indistinguishable from a wrong source to whoever reads it.
+        run: python3 tools/ci/check-verbatim-copies.py
+      - name: Frontend resource budgets — 10 §9 re-derived from 13 and the runtime (SQ-557)
+        # 10 §9 publishes a load model and two depth tables, and nothing recomputed any
+        # of it: the browser was sized against 196 concurrently-observing books when the
+        # chain can never exceed 31, the metadata cap exceeded the share it is drawn
+        # from, and the mandatory `Traded` half of 02 §5's ingest set was omitted
+        # outright. Same shape as SQ-552/580/593 — a derived number with no deriver.
+        run: python3 tools/ci/check-frontend-budgets.py
       - name: Bind the quickstart to the executable integration drill
         run: python3 tools/ci/check-quickstart-drill.py
       - name: Bind the pure-XCM integration page to the frozen client ABI
@@ -583,7 +598,7 @@ jobs:
         working-directory: app
         run: pnpm run check:types
 
-      - name: smoldot artifact budget (10 §9.3, FE-P4)
+      - name: smoldot artifact budget (10 §9.4, FE-P4)
         # A budget nothing measures is a sentence, and the one certain thing about a
         # dependency's compressed size is that it changes. Fails closed if the pinned
         # package's layout moved, so a version bump cannot measure nothing and pass.
@@ -735,6 +750,10 @@ jobs:
           # Re-reads the tree the line above emitted, in the SAME step: `dist/`
           # exists only within it, so a separate step would scan nothing and pass.
           pnpm run release:check
+          # 10 §9.4's initial-JS budget, whose enforcement column has named a
+          # "bundle-size CI gate" since the reviewed design while no such gate
+          # existed. Same step for the same reason as the line above.
+          pnpm run check:bundle-budget
 
       - name: Release suite (12 §1, §5.2–§5.3; F11/F13)
         working-directory: app

@@ -28,6 +28,7 @@
     "surface:check": "node tools/generate-critical-surface.ts --check",
     "test:descriptors": "node tools/run-suite.ts \"tests/descriptors/*.test.{js,ts}\"",
     "check:budget": "node tools/check-smoldot-budget.ts",
+    "check:bundle-budget": "node tools/check-bundle-budget.ts",
     "test:tx": "node tools/run-suite.ts \"tests/transaction-builder/*.test.{js,ts}\"",
     "test:verify": "node tools/run-suite.ts \"tests/verify/*.test.{js,ts}\"",
     "test:local-index": "node tools/run-suite.ts \"tests/local-index/*.test.{js,ts}\"",

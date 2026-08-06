@@ -163,6 +163,111 @@ fn chain_served_history_within_13_5_budget() {
     );
 }
 
+// --- 10 §9.1: the client's chain-permitted event-stream ceiling ----------------
+
+/// The most `Traded` events one block can carry — the ceiling
+/// [10 §9.1](../../../docs/architecture/10-frontend-architecture.md) sizes the
+/// browser's event budget against.
+///
+/// This constant is a **bridge, not a source**. The test below recomputes it from
+/// the live block budget and the committed `buy` weight and fails if it drifts;
+/// `tools/ci/check-frontend-budgets.py` reads this same literal and fails if doc 10
+/// publishes a different one. Neither side carries the answer alone, which is the
+/// property a doc-only number cannot have: 10 §9.1 modelled `Observed` and omitted
+/// `Traded` entirely, and nothing anywhere recomputed either.
+///
+/// **Proof size binds, not ref_time**, and by better than a factor of two — so a
+/// weight change that leaves ref_time alone still moves this ceiling. That is the
+/// direction the omission was hiding: a client cannot refuse events, so the whole
+/// stream is a cost it must absorb, and 02 §5 freezes `Traded` as mandatory ingest.
+///
+/// It is also why this is measured through `get_dispatch_info()` rather than read
+/// off the generated weight file. `buy`'s `#[pallet::weight]` adds two reads and
+/// `EXTERNAL_TRADE_ROUTE_PROOF_SURCHARGE` on top of the generated figure, and the
+/// surcharge alone moves the ceiling from 72 to 70 on the primary side. A
+/// derivation over `weights/pallet_market.rs` reads a number the chain does not
+/// charge.
+///
+/// **It must be summed over both resource partitions, and the first version of
+/// this pin was not.** `normal_class_budget()` is `primary_capacity()` — the 75 %
+/// reservation — but `classifier::is_external_client_call` routes a `buy` by the
+/// *book kind* (`market_call_targets_external_book`), so a hosted-book fill is
+/// admitted against the separate 25 % external reservation instead. `side_fits`
+/// checks only that side's own capacity, and the sole joint constraint is
+/// `before + amount ≤ max_block`, so both partitions are consumable in the same
+/// block. Sizing the client against the primary side alone understated the stream
+/// it must absorb by a third — the unsafe direction for a budget.
+pub(crate) const MAX_TRADED_EVENTS_PER_BLOCK: u64 = 93;
+
+/// The primary partition's own share of that ceiling, published by 10 §9.1 as the
+/// evidence that the two sides sum to the block bound rather than being capped by
+/// it — see `traded_event_ceiling_per_block_pinned_for_frontend_budgets`.
+pub(crate) const MAX_TRADED_EVENTS_PER_BLOCK_PRIMARY: u64 = 70;
+
+/// The external (hosted-book) partition's share. Hosted fills are canonical client
+/// ingest, not somebody else's traffic: 02 §5 states `Traded` with no domain
+/// filter, and 11 §11.2a makes `BookKind::External` rows ordinary trading surfaces
+/// on S3, so the browser receives these events exactly like primary ones.
+pub(crate) const MAX_TRADED_EVENTS_PER_BLOCK_EXTERNAL: u64 = 23;
+
+/// One successful `buy` emits exactly one `Traded` (02 §5, and
+/// `Pallet::deposit_trade_event`), so the fill ceiling *is* the event ceiling.
+/// Stated rather than assumed, because a future partial-fill loop emitting one
+/// event per leg would break the identity while every assertion below still passed.
+#[test]
+fn traded_event_ceiling_per_block_pinned_for_frontend_budgets() {
+    use frame_support::dispatch::GetDispatchInfo;
+
+    let buy = crate::RuntimeCall::Market(pallet_market::Call::buy {
+        market: 1,
+        side: futarchy_primitives::ScalarSide::Long,
+        amount: 1,
+        max_cost: u128::MAX,
+    })
+    .get_dispatch_info()
+    .call_weight;
+
+    let primary = normal_class_budget();
+    let external = pallet_welfare::Pallet::<Runtime>::external_capacity()
+        .expect("the external quota is `Operational.reserved`, which this runtime configures");
+    let max_block = <Runtime as frame_system::Config>::BlockWeights::get().max_block;
+
+    let by_ref_time = max_block.ref_time() / buy.ref_time();
+    let by_proof_size = max_block.proof_size() / buy.proof_size();
+
+    assert!(
+        by_proof_size < by_ref_time,
+        "proof size no longer binds the fill ceiling (ref_time {by_ref_time}, \
+         proof_size {by_proof_size}); doc 10 §9.1 states that it does and the \
+         sentence must move with the measurement"
+    );
+    assert_eq!(
+        by_proof_size, MAX_TRADED_EVENTS_PER_BLOCK,
+        "the chain-permitted `Traded` ceiling moved (ref_time admits {by_ref_time}); \
+         re-derive doc 10 §9.1's event budget and update this pin"
+    );
+
+    let primary_fills = primary.proof_size() / buy.proof_size();
+    let external_fills = external.proof_size() / buy.proof_size();
+    assert_eq!(primary_fills, MAX_TRADED_EVENTS_PER_BLOCK_PRIMARY);
+    assert_eq!(external_fills, MAX_TRADED_EVENTS_PER_BLOCK_EXTERNAL);
+
+    // The two partition ceilings are *simultaneously* reachable — that is the whole
+    // correction. If a future split made them jointly capped by `max_block` instead,
+    // the block ceiling would be the smaller number and this equality would catch it.
+    assert_eq!(
+        primary_fills + external_fills,
+        MAX_TRADED_EVENTS_PER_BLOCK,
+        "the partition shares no longer saturate the block ceiling; doc 10 §9.1 \
+         publishes them as `{MAX_TRADED_EVENTS_PER_BLOCK_PRIMARY} + \
+         {MAX_TRADED_EVENTS_PER_BLOCK_EXTERNAL}` and the sum must stay exact"
+    );
+    assert!(
+        primary.saturating_add(external).all_lte(max_block),
+        "the partition reservations over-subscribe the block"
+    );
+}
+
 // --- Per-call PoV tracking (every futarchy call and hook, worst-case args) -----
 
 macro_rules! pallet_call_weights {
