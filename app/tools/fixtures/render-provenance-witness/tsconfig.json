@@ -14,7 +14,10 @@
       "@bleavit/ui": ["../../../packages/ui/dist/index.d.ts"]
     }
   },
+  // Both extensions: rule C's real instance lived in a `.ts` model file, and a fixture that
+  // only compiled `.tsx` would leave the widened file filter unproven.
   "include": [
-    "src/**/*.tsx"
+    "src/**/*.tsx",
+    "src/**/*.ts"
   ]
 }

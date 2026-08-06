@@ -102,7 +102,75 @@ const VERIFIED_DECLARATION = /packages[/\\]shared-types[/\\](src|dist)[/\\]prove
 type DisplayPosition =
   | { readonly kind: 'child' }
   | { readonly kind: 'attribute'; readonly name: string }
-  | { readonly kind: 'borrowed-status'; readonly borrowedFrom: string };
+  | { readonly kind: 'borrowed-status'; readonly borrowedFrom: string }
+  | { readonly kind: 'laundered'; readonly fn: string };
+
+/**
+ * Rule C — a `Verified<T>` unwrapped into a **string** by a helper, which the screen renders.
+ *
+ * ```ts
+ * export function escalationConsequence(round: OracleRound): string {
+ *   return `… the amount the chain holds for round ${round.round.value}.`;
+ * }
+ * ```
+ * ```tsx
+ * <Notice heading="What a challenge risks">{escalationConsequence(inputs.round)}</Notice>
+ * ```
+ *
+ * That shipped, and rules A and B are both structurally blind to it. At the render site there
+ * is no `Verified<T>` — the helper returns a plain `string`, so nothing to type-test; and the
+ * unwrap itself sits outside JSX, which `displayPosition` deliberately ignores because model
+ * code unwraps constantly and must. The value crosses the render edge **inside a string**,
+ * which is exactly the boundary this file exists to police, and it crossed it unbadged.
+ *
+ * Two consequences shaped the rule. It is not about JSX at all, so the scan now reads `.ts`
+ * as well as `.tsx` — the helper lived in a `.ts` model file and was never opened by any
+ * earlier version of this gate. And it flags the **declaration**, not the call site: a
+ * laundering function is wrong wherever it is called, and reporting the calls would report
+ * one defect many times while leaving the one file to fix unnamed.
+ *
+ * Measured before it was written, because a rule that fires on correct code gets switched off:
+ * across the five rendering projects there are **125** `Verified<T>.value` unwraps, and after
+ * the defect above was repaired **none** of them sits inside a string-returning function. On
+ * the commit before that repair there was exactly one — the defect. One true positive, zero
+ * false positives.
+ *
+ * The repair for a real hit is never to badge the string. It is to give the helper nothing to
+ * leak: fixed copy takes no `Verified<T>`, and a value that genuinely belongs in the sentence
+ * is rendered as a `Verified<T>` beside it through a `ui` component.
+ */
+function launderingSite(
+  node: ts.Node,
+  checker: ts.TypeChecker,
+): { readonly fn: string } | undefined {
+  let parent: ts.Node | undefined = node.parent;
+  while (parent !== undefined) {
+    if (
+      ts.isFunctionDeclaration(parent) ||
+      ts.isMethodDeclaration(parent) ||
+      ts.isArrowFunction(parent) ||
+      ts.isFunctionExpression(parent)
+    ) {
+      const signature = checker.getSignatureFromDeclaration(parent);
+      if (signature === undefined) return undefined;
+      const returns = checker.getReturnTypeOfSignature(signature);
+      // `string` exactly. A `Verified<T>`-returning helper is the sanctioned path, and a
+      // component returning `ReactNode` is `ui`'s job — narrowing to the string case keeps
+      // the rule pointed at the one shape that carries a chain value past every badge.
+      if (!(returns.flags & ts.TypeFlags.String) && !(returns.flags & ts.TypeFlags.StringLiteral)) {
+        return undefined;
+      }
+      const named =
+        (ts.isFunctionDeclaration(parent) || ts.isMethodDeclaration(parent)) &&
+        parent.name !== undefined
+          ? parent.name.getText()
+          : '(anonymous)';
+      return { fn: named };
+    }
+    parent = parent.parent;
+  }
+  return undefined;
+}
 
 interface RenderFinding {
   readonly file: string;
@@ -238,7 +306,9 @@ export function scan({ projects = PROJECTS }: { projects?: readonly string[] } =
       if (source.isDeclarationFile) continue;
       const rel = relative(APP, source.fileName);
       if (rel.startsWith('..') || rel.includes('node_modules')) continue;
-      if (!rel.endsWith('.tsx')) continue;
+      // `.ts` as well as `.tsx` since rule C: the laundering helper that shipped lived in a
+      // model file, which every earlier version of this gate declined to open.
+      if (!rel.endsWith('.tsx') && !rel.endsWith('.ts')) continue;
       if (EXEMPT.has(rel)) continue;
 
       const visit = (node: ts.Node): void => {
@@ -256,7 +326,13 @@ export function scan({ projects = PROJECTS }: { projects?: readonly string[] } =
           ts.isPropertyAccessExpression(node) &&
           node.name.getText() === 'value'
         ) {
-          const position = displayPosition(node);
+          // Rule C is the fallback, not a second opinion: a `.value` already sitting in a JSX
+          // display position is rule A's finding, and reporting both would name one defect
+          // twice. The laundering shape is precisely the one rule A cannot see.
+          const laundered = launderingSite(node, checker);
+          const position =
+            displayPosition(node) ??
+            (laundered === undefined ? undefined : ({ kind: 'laundered', fn: laundered.fn } as const));
           if (position !== undefined) {
             const type = checker.getTypeAtLocation(node.expression);
             if (isVerifiedType(checker, type)) {
@@ -339,20 +415,56 @@ function checkAttributeCoverage(): string[] {
   return unclassified;
 }
 
+/**
+ * The witness fixture's files.
+ *
+ * Two, not one, and the second is the point: rule C's real instance lived in a **model**
+ * file, so a fixture made only of `.tsx` would prove the rule while leaving the widened file
+ * filter — the other half of the same hole — unproven.
+ */
+const WITNESS_FILES = ['src/witness.tsx', 'src/witness-model.ts'];
+
 function runWitness(): number {
-  const source = readFileSync(join(APP, WITNESS, 'src/witness.tsx'), 'utf8').split('\n');
-  const expectations: { rule: string; kind: string; from: number; to: number }[] = [];
-  source.forEach((line, index) => {
-    const match = /^\s*\/\/ expect: ([AB]) (\w+)$/.exec(line);
-    // The expectation sits on the line before the code it describes; a JSX expression can
-    // span lines, so accept a small window rather than an exact line.
-    if (match !== null && match[1] !== undefined && match[2] !== undefined) {
-      expectations.push({ rule: match[1], kind: match[2], from: index + 2, to: index + 5 });
-    }
-  });
+  const sources = new Map<string, string[]>(
+    WITNESS_FILES.map((name) => [name, readFileSync(join(APP, WITNESS, name), 'utf8').split('\n')]),
+  );
+  const expectations: {
+    file: string;
+    rule: string;
+    kind: string;
+    from: number;
+    to: number;
+  }[] = [];
+  for (const [name, lines] of sources) {
+    lines.forEach((line, index) => {
+      const match = /^\s*\/\/ expect: ([ABC]) ([\w-]+)$/.exec(line);
+      // The expectation sits on the line before the code it describes; a JSX expression can
+      // span lines, so accept a small window rather than an exact line.
+      if (match !== null && match[1] !== undefined && match[2] !== undefined) {
+        expectations.push({
+          file: `${WITNESS}/${name}`,
+          rule: match[1],
+          kind: match[2],
+          from: index + 2,
+          to: index + 5,
+        });
+      }
+    });
+  }
   if (expectations.length === 0) {
     console.error('witness: no `// expect:` lines found — the fixture cannot prove anything.');
     return 1;
+  }
+  // Every rule must be exercised. A fixture that lost its only rule-C case would otherwise
+  // still report "fired on all declared expectations" — the vacuity this file exists to end.
+  for (const rule of ['A', 'B', 'C']) {
+    if (!expectations.some((e) => e.rule === rule)) {
+      console.error(
+        `witness: no expectation declares rule ${rule}. Every rule needs at least one, or a ` +
+          'rule that stopped working reports success.',
+      );
+      return 1;
+    }
   }
 
   let failed = 0;
@@ -374,18 +486,29 @@ function runWitness(): number {
 
   const findings = scan({ projects: [WITNESS] });
 
+  const ruleOf = (finding: RenderFinding): string => {
+    switch (finding.position.kind) {
+      case 'borrowed-status':
+        return 'B';
+      case 'laundered':
+        return 'C';
+      default:
+        return 'A';
+    }
+  };
+
   for (const expected of expectations) {
     const hit = findings.find((finding) => {
+      if (finding.file !== expected.file) return false;
       if (finding.line < expected.from || finding.line > expected.to) return false;
-      const rule = finding.position.kind === 'borrowed-status' ? 'B' : 'A';
-      if (rule !== expected.rule) return false;
+      if (ruleOf(finding) !== expected.rule) return false;
       return expected.kind === 'borrowed'
         ? finding.position.kind === 'borrowed-status'
         : finding.position.kind === expected.kind;
     });
     if (hit === undefined) {
       console.error(
-        `witness: rule ${expected.rule}/${expected.kind} did NOT fire at witness.tsx:` +
+        `witness: rule ${expected.rule}/${expected.kind} did NOT fire at ${expected.file}:` +
           `${expected.from}-${expected.to} — the rule cannot detect the thing it forbids.`,
       );
       failed += 1;
@@ -395,10 +518,12 @@ function runWitness(): number {
   // Negative controls: anything reported outside a declared window is a false positive, and a
   // gate that fires on correct code gets switched off rather than fixed.
   const claimed = (finding: RenderFinding): boolean =>
-    expectations.some((e) => finding.line >= e.from && finding.line <= e.to);
+    expectations.some(
+      (e) => finding.file === e.file && finding.line >= e.from && finding.line <= e.to,
+    );
   for (const finding of findings.filter((f) => !claimed(f))) {
     console.error(
-      `witness: FALSE POSITIVE at witness.tsx:${finding.line} — ${finding.text}\n` +
+      `witness: FALSE POSITIVE at ${finding.file}:${finding.line} — ${finding.text}\n` +
         '  This line is a negative control: it is correct code the gate must stay silent on.',
     );
     failed += 1;
@@ -416,8 +541,10 @@ function runWitness(): number {
 
   if (failed > 0) return 1;
   console.log(
-    `witness fired on all ${expectations.length} declared expectations, no false positives ` +
-      `on ${source.filter((l) => /^export function Control/.test(l)).length} negative controls, ` +
+    `witness fired on all ${expectations.length} declared expectations across rules A/B/C, ` +
+      `no false positives on ${[...sources.values()]
+        .flat()
+        .filter((l) => /^export (function|const) Control/.test(l)).length} negative controls, ` +
       `${DISPLAY_ATTRIBUTES.length + NON_DISPLAY_PROPS.length} props classified`,
   );
   return 0;
@@ -442,6 +569,18 @@ function main() {
       console.error(
         "      Use `combine2(a, b, (x, y) => …)` from @bleavit/shared-types and render the " +
           'result with `<Derived>`.\n',
+      );
+      continue;
+    }
+    if (finding.position.kind === 'laundered') {
+      console.error(
+        `      unwrapped inside \`${finding.position.fn}()\`, which returns a plain \`string\` — ` +
+          'so the value crosses the render edge with no `Verified<T>` left for any badge, any ' +
+          'component or this gate to see.',
+      );
+      console.error(
+        '      Give the helper nothing to leak: fixed copy takes no Verified<T>, and a value ' +
+          'that belongs in the sentence is rendered beside it through a @bleavit/ui component.\n',
       );
       continue;
     }
