@@ -772,7 +772,7 @@ jobs:
           # back as an ENUMERATED FINDING of the right kind, which a throw cannot satisfy.
           pnpm run check:embedded-tree:witness
 
-      - name: Platform adapter and the capability lattice (F22, INV-FE-12; 10 §10.1)
+      - name: Platform adapter and the capability lattice (F22, app-code rule 10; 10 §10.1)
         # The fail-closed lattice: an unproven capability is ABSENT and absence carries the
         # sentence the dependent surface renders, never a boolean and never a silent
         # fallback. Also the differential half of the embedded-tree assertion — the same

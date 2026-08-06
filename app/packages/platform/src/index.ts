@@ -25,6 +25,7 @@ export type {
 export {
   DISTRIBUTION_CHANNELS,
   PlatformError,
+  SHIPPING_CHANNELS,
   desktopPlatform,
   unknownPlatform,
   webPlatform,

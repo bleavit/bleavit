@@ -313,6 +313,16 @@ pub enum AttestationError {
     /// manifest would report every file missing, which is correct but hides the real fact:
     /// asset embedding did not happen.
     EmptyTree,
+    /// The asset table listed a key the binary cannot serve.
+    ///
+    /// Refused rather than folded into the comparison, and the direction matters. The obvious
+    /// implementation substitutes empty bytes — and the SHA-256 of nothing is a **real digest**,
+    /// so a legitimately zero-byte pinned file on an unserveable key would *verify*. Dropping
+    /// the key instead is worse: the file silently stops being checked. Neither is a comparison
+    /// result, so this is an error and not a [`Finding`].
+    UnserveableAsset {
+        key: String,
+    },
     Divergent(SelfCheckReport),
 }
 
@@ -325,6 +335,11 @@ impl fmt::Display for AttestationError {
                 "this build embeds no assets at all, so there is nothing for the signed \
                  release manifest to describe"
             ),
+            Self::UnserveableAsset { key } => write!(
+                formatter,
+                "this build lists {key} among its embedded files and cannot read it back, so \
+                 there is no byte string to compare against the signed release manifest"
+            ),
             Self::Divergent(report) => write!(
                 formatter,
                 "this build does not match the release it claims to be:\n{report}"
@@ -335,19 +350,45 @@ impl fmt::Display for AttestationError {
 
 impl std::error::Error for AttestationError {}
 
+/// Hash the shell's own asset table into the shape [`run_self_check`] compares.
+///
+/// Takes `Option<&[u8]>` because that is exactly what a Tauri asset table yields: a key list,
+/// and a lookup per key that can answer `None`. Modelling the `None` here rather than at the
+/// call site is what makes it testable — the shell's `Context<Wry>` cannot be constructed in a
+/// unit test, so anything decided there is decided in code no suite executes.
+///
+/// # Errors
+///
+/// Returns [`AttestationError::UnserveableAsset`] for a key the caller could not read back.
+pub fn hash_assets<'a, I>(entries: I) -> Result<BTreeMap<String, Sha256Hex>, AttestationError>
+where
+    I: IntoIterator<Item = (&'a str, Option<&'a [u8]>)>,
+{
+    let mut out = BTreeMap::new();
+    for (key, bytes) in entries {
+        let Some(bytes) = bytes else {
+            return Err(AttestationError::UnserveableAsset {
+                key: normalise_key(key),
+            });
+        };
+        out.insert(normalise_key(key), sha256_hex(bytes));
+    }
+    Ok(out)
+}
+
 /// The whole assertion, as the shell calls it.
 ///
 /// # Errors
 ///
-/// Returns [`AttestationError`] when the manifest is uncheckable, the build embeds nothing, or
-/// any file is missing, changed or unexpected. There is deliberately no argument that softens
-/// any of those into a warning.
+/// Returns [`AttestationError`] when the manifest is uncheckable, the build embeds nothing, an
+/// asset cannot be read back, or any file is missing, changed or unexpected. There is
+/// deliberately no argument that softens any of those into a warning.
 pub fn attest<'a, I>(manifest_bytes: &[u8], entries: I) -> Result<SelfCheckReport, AttestationError>
 where
-    I: IntoIterator<Item = (&'a str, &'a [u8])>,
+    I: IntoIterator<Item = (&'a str, Option<&'a [u8]>)>,
 {
     let manifest = ReleaseManifest::parse(manifest_bytes).map_err(AttestationError::Manifest)?;
-    let served = hash_tree(entries);
+    let served = hash_assets(entries)?;
     if served.is_empty() {
         return Err(AttestationError::EmptyTree);
     }
@@ -482,10 +523,53 @@ mod tests {
     #[test]
     fn an_empty_tree_is_refused_rather_than_reported_as_all_missing() {
         let document = format!(r#"{{"perFileHashes":{{"a.js":"{}"}}}}"#, sha256_hex(b"x"));
-        let empty: Vec<(&str, &[u8])> = Vec::new();
+        let empty: Vec<(&str, Option<&[u8]>)> = Vec::new();
         assert!(matches!(
             attest(document.as_bytes(), empty),
             Err(AttestationError::EmptyTree)
+        ));
+    }
+
+    /// The shell's own asset-table shape, which is why `hash_assets` takes `Option`.
+    ///
+    /// A Tauri `Context<Wry>` cannot be constructed in a unit test, so a `None` decided at the
+    /// call site would be decided in code no suite executes. The obvious decision there is to
+    /// substitute empty bytes — and this is why that is wrong: `sha256("")` is a **real
+    /// digest**, so a legitimately zero-byte pinned file on an unserveable key would verify.
+    /// Both halves are asserted, because the second is the one a green run cannot show.
+    #[test]
+    fn an_asset_the_binary_cannot_read_back_is_refused_not_hashed_as_empty() {
+        let empty_digest = sha256_hex(b"");
+        let document = format!(r#"{{"perFileHashes":{{"a.js":"{empty_digest}"}}}}"#);
+        let entries: Vec<(&str, Option<&[u8]>)> = vec![("/a.js", None)];
+        match attest(document.as_bytes(), entries) {
+            Err(AttestationError::UnserveableAsset { key }) => assert_eq!(key, "a.js"),
+            other => panic!("expected UnserveableAsset, got {other:?}"),
+        }
+        // The negative control: the same manifest and a genuinely zero-byte asset verifies, so
+        // the refusal above is about the unreadable key and not about the digest.
+        let served: Vec<(&str, Option<&[u8]>)> = vec![("/a.js", Some(b"".as_slice()))];
+        let report = attest(document.as_bytes(), served).unwrap();
+        assert!(report.ok());
+        assert_eq!(report.verified_count, 1);
+    }
+
+    #[test]
+    fn hash_assets_normalises_rooted_keys_and_refuses_an_unreadable_one() {
+        let entries: Vec<(&str, Option<&[u8]>)> = vec![
+            ("/index.html", Some(b"<!doctype html>\n".as_slice())),
+            ("assets/app.js", Some(b"export const app = 1;\n".as_slice())),
+        ];
+        let hashed = hash_assets(entries).unwrap();
+        assert_eq!(
+            hashed.keys().collect::<Vec<_>>(),
+            vec!["assets/app.js", "index.html"]
+        );
+        let broken: Vec<(&str, Option<&[u8]>)> =
+            vec![("/index.html", Some(b"x".as_slice())), ("/gone.js", None)];
+        assert!(matches!(
+            hash_assets(broken),
+            Err(AttestationError::UnserveableAsset { .. })
         ));
     }
 
@@ -499,7 +583,8 @@ mod tests {
             r#"{{"perFileHashes":{{"assets/app.js":"{}"}}}}"#,
             sha256_hex(content)
         );
-        let entries: Vec<(&str, &[u8])> = vec![("/assets/app.js", content)];
+        let entries: Vec<(&str, Option<&[u8]>)> =
+            vec![("/assets/app.js", Some(content.as_slice()))];
         let report = attest(document.as_bytes(), entries).unwrap();
         assert!(report.ok());
         assert_eq!(report.verified_count, 1);

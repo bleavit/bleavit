@@ -210,6 +210,15 @@ Practical consequences:
     Vite 8, Dexie 4, Tauri 2.x. Do not bump majors without a PLAN.md decision-log
     entry. `app/` is its own pnpm workspace and its own cargo workspace (excluded from
     the root one); never let its dependency tree reach the runtime pins.
+
+    **The Tauri entry is the loose one, and it is stated here rather than glossed**
+    (corrected 2026-08-06, F22): 01 §9's frontend-stack list enumerates exact versions
+    and **names no Tauri version at all**; 10 §10.1 says "the Tauri stack" without one.
+    So "Tauri 2.x" above is this file's own reading, not a quotation. `src-tauri`
+    therefore pins `=`-exactly in `Cargo.toml` — `tauri-codegen` decides *what bytes get
+    embedded*, so a minor bump changes the artefact F22 attests and must be a reviewed
+    diff rather than a resolver decision. Whether the Tauri stack belongs inside 01 §9's
+    exact-pin regime is an open question for the doc set (PLAN.md · F22 residuals).
 16. **The release tree is derived, and its inputs are what you edit (F11, 12 §1/§5).**
     `app/dist/` and `app/release-out/` are build output. The committed inputs are
     `app/tools/release/sources/`: where each `connect-src` class comes from, the

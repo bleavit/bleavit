@@ -1,9 +1,15 @@
 /**
- * The platform capability lattice — INV-FE-12, app-code rule 10, F22.
+ * The platform capability lattice — app-code rule 10, F22.
  *
  * The rule this file makes structural: *"Platform and signer capabilities are a fail-closed
  * lattice: an unproven capability is **absent**, and absence disables the dependent surface
  * with a named reason — never a silent fallback."*
+ *
+ * **INV-FE-12 is the analogy, not the owner**, and the distinction is worth keeping: that
+ * invariant's subject is the *runtime* surface — `restricted` / `read-only-incompatible`,
+ * whether the client may sign, how undecodable data renders. It says nothing about platform
+ * capabilities. What the two share is the posture (unknown is a state, never a default to the
+ * permissive one), and app-code rule 10 is where that posture was extended to this domain.
  *
  * Three properties carry it, and each of them is a shape rather than a convention.
  *
@@ -116,15 +122,30 @@ export function absent(reason: string): CapabilityState {
 export function lattice(states: CapabilityLattice): CapabilityLattice {
   const out: Partial<Record<PlatformCapability, CapabilityState>> = {};
   for (const capability of PLATFORM_CAPABILITIES) {
-    const state = states[capability];
-    if (state.kind === 'absent') {
-      // Re-runs the reason check, which throws on an empty one.
-      out[capability] = absent(state.reason);
-      continue;
-    }
-    out[capability] = PROVEN;
+    out[capability] = normalise(capability, states[capability]);
   }
   return Object.freeze(out as Record<PlatformCapability, CapabilityState>);
+}
+
+/**
+ * Read one state, refusing anything that is not one of the two.
+ *
+ * The default direction is the whole point. This function exists *because* the type is not
+ * enough — a caller can spell the object literal by hand, and an untyped one (a record
+ * rehydrated from storage, a value across a bridge) reaches here with whatever it carries. An
+ * `else` branch that returns `proven` therefore turns a typo into a **proven** capability,
+ * which is the one direction a fail-closed lattice must never default to. There is no
+ * `absent` default either: a fabricated reason would be a sentence no one wrote shown to a
+ * user as if it explained something.
+ */
+function normalise(capability: PlatformCapability, state: CapabilityState): CapabilityState {
+  if (state?.kind === 'proven') return PROVEN;
+  // Re-runs the reason check, which throws on an empty one.
+  if (state?.kind === 'absent') return absent(state.reason);
+  throw new CapabilityError(
+    `${capability} carries neither \`proven\` nor \`absent\`; refusing rather than reading an ` +
+      'unrecognised state as proven, which is how a fail-closed lattice fails open',
+  );
 }
 
 /**
@@ -187,8 +208,11 @@ export function requireCapabilities(
 export function meet(left: CapabilityLattice, right: CapabilityLattice): CapabilityLattice {
   const out: Partial<Record<PlatformCapability, CapabilityState>> = {};
   for (const capability of PLATFORM_CAPABILITIES) {
-    const a = left[capability];
-    const b = right[capability];
+    // Both sides go through the same refusal `lattice` uses, so an unrecognised state cannot
+    // enter through a combination either. `meet` is where two independently-sourced records
+    // arrive, which makes it the *more* likely entry point, not the less.
+    const a = normalise(capability, left[capability]);
+    const b = normalise(capability, right[capability]);
     if (a.kind === 'proven' && b.kind === 'proven') {
       out[capability] = PROVEN;
       continue;

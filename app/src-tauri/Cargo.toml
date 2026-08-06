@@ -7,12 +7,19 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+# Pinned `=`-exactly rather than by caret range, the way the root workspace pins its SDK
+# family. The reason is specific to this crate rather than stylistic: `tauri-codegen` decides
+# **what bytes end up embedded** — it is the code that would parse and re-serialise every HTML
+# asset if a CSP were configured — so a minor bump is a change to the artefact this milestone
+# attests, and it must be a diff somebody reviewed rather than a resolver decision. 01 §9 pins
+# the frontend stack exactly and names Tauri only as "2.x"; the narrower pin is this
+# repository's habit applied to the looser statement, not a contradiction of it.
 [build-dependencies]
-tauri-build = "2"
+tauri-build = "=2.6.3"
 
 [dependencies]
 bleavit-embedded-tree = { path = "../crates/embedded-tree" }
-tauri = "2"
+tauri = "=2.11.5"
 
 [features]
 # `custom-protocol` is a **security property here, not a build convenience**, so it is a

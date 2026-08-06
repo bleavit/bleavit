@@ -60,6 +60,22 @@ const RELEASE_MANIFEST: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/releas
 /// open.
 const EXIT_UNATTESTED: i32 = 70;
 
+/// 10 §9's code for this condition, assigned by 14 TH-38: *"self-check vs signed
+/// `release.json` (`FE-REL-002`)"*.
+///
+/// 10 §9 requires *"fixed user copy + expert detail + documented recovery per code; no
+/// free-text errors"*, so the three parts are separate constants rather than one sentence
+/// assembled at the throw site. This shell is the family's first consumer; when a rendered
+/// surface exists, the copy moves to it unchanged rather than being written a second time.
+const FE_REL_002_CODE: &str = "FE-REL-002";
+const FE_REL_002_COPY: &str =
+    "This copy of Bleavit is not the release it says it is, so it will not start.";
+const FE_REL_002_RECOVERY: &str =
+    "Recovery: obtain the release from its permanent content address and verify it with \
+     `verify-release` (12 §1.3). Do not re-download from wherever these bytes came from — \
+     asking that channel again is asking the source of the wrong bytes for better ones, \
+     which is why this is reported and never repaired (INV-FE-8).";
+
 fn main() {
     let context = tauri::generate_context!();
 
@@ -71,13 +87,9 @@ fn main() {
             );
         }
         Err(error) => {
-            eprintln!(
-                "This copy of Bleavit will not start.\n\n{error}\n\n\
-                 The files it carries are not the files the release was published with. This \
-                 is reported and not repaired: re-downloading from the same place that served \
-                 these bytes would ask it for better ones. Obtain the release from its \
-                 permanent content address and verify it with `verify-release` (12 §1.3)."
-            );
+            // Fixed copy, then expert detail, then recovery — 10 §9's three parts, in that
+            // order, under the code 14 TH-38 assigns.
+            eprintln!("{FE_REL_002_CODE}: {FE_REL_002_COPY}\n\n{error}\n\n{FE_REL_002_RECOVERY}");
             std::process::exit(EXIT_UNATTESTED);
         }
     }
@@ -88,33 +100,32 @@ fn main() {
     }
 }
 
-/// Hash every embedded asset and compare it against the signed manifest.
+/// Read every embedded asset, then hand the result to the crate that decides.
 ///
 /// Bytes come from `Assets::get`, **never** from `Assets::iter`. That is not interchangeable:
 /// `tauri` enables its `compression` feature by default, so `iter()` yields each asset's
 /// stored *brotli* bytes while `get()` decompresses. Hashing what `iter()` yields would
 /// compare a compressed blob against a plaintext digest and report every file as changed —
 /// fail-closed, and permanently broken. `iter()` is used for its **keys** only.
+///
+/// The `None` arm is carried through as `None` rather than decided here. `Context<Wry>` cannot
+/// be constructed in a unit test, so anything decided in this function is decided in code no
+/// suite executes — and the obvious decision (substitute empty bytes) is wrong in a way no
+/// green run would show, because the SHA-256 of nothing is a real digest. `hash_assets` owns
+/// it, refuses it, and is tested.
 fn attest_embedded_tree(context: &Context<Wry>) -> Result<SelfCheckReport, AttestationError> {
-    let mut tree: BTreeMap<String, Vec<u8>> = BTreeMap::new();
+    let mut tree: BTreeMap<String, Option<Vec<u8>>> = BTreeMap::new();
     for (key, _stored) in context.assets.iter() {
         let asset_key = AssetKey::from(key.as_ref());
-        match context.assets.get(&asset_key) {
-            Some(bytes) => {
-                tree.insert(key.into_owned(), bytes.into_owned());
-            }
-            None => {
-                // The asset table listed a key it cannot serve. Left as an empty entry so the
-                // comparison reports it as a changed file with a digest nothing matches,
-                // rather than silently dropping it — a dropped key is a file that quietly
-                // stops being checked.
-                tree.insert(key.into_owned(), Vec::new());
-            }
-        }
+        let bytes = context
+            .assets
+            .get(&asset_key)
+            .map(|asset| asset.into_owned());
+        tree.insert(key.into_owned(), bytes);
     }
-    let borrowed: Vec<(&str, &[u8])> = tree
+    let borrowed: Vec<(&str, Option<&[u8]>)> = tree
         .iter()
-        .map(|(key, bytes)| (key.as_str(), bytes.as_slice()))
+        .map(|(key, bytes)| (key.as_str(), bytes.as_deref()))
         .collect();
     attest(RELEASE_MANIFEST, borrowed)
 }

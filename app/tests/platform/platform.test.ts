@@ -30,6 +30,7 @@ import type {
   AttestationFinding,
   AttestationState,
   CapabilityLattice,
+  CapabilityState,
   HostReport,
   PlatformCapability,
 } from '@bleavit/platform';
@@ -38,6 +39,7 @@ import {
   DISTRIBUTION_CHANNELS,
   PLATFORM_CAPABILITIES,
   PlatformError,
+  SHIPPING_CHANNELS,
   absent,
   desktopPlatform,
   lattice,
@@ -117,8 +119,12 @@ test('an unidentified host proves nothing, and says the same thing about everyth
   for (const capability of PLATFORM_CAPABILITIES) {
     assert.deepEqual(adapter.capabilities[capability], { kind: 'absent', reason });
   }
-  // INV-FE-12: unknown is a state, not a default to the permissive one.
+  // Unknown is a state, not a default to the permissive one (app-code rule 10). The channel
+  // is part of that: `web` would claim the release-scoped service worker is checking these
+  // bytes, which is reassurance nobody earned about a host that may be a native shell.
+  assert.equal(adapter.channel, 'unknown');
   assert.equal(adapter.attestation.kind, 'not-applicable');
+  assert.ok(!(SHIPPING_CHANNELS as readonly string[]).includes(adapter.channel));
 });
 
 test('requireCapabilities names every missing member, not the first one checked', () => {
@@ -167,8 +173,13 @@ test('meet takes the weaker side and keeps both reasons', () => {
   if (both.kind !== 'absent') return;
   assert.match(both.reason, /the host has no file picker/);
   assert.match(both.reason, /this release disabled file export/);
-  // Two identical reasons must not be repeated back at the user twice.
-  assert.equal(meet(left, left).file, left.file);
+  // Two identical reasons must not be repeated back at the user twice. Asserted on the
+  // reason rather than by reference: `meet` re-reads both sides through the same refusal
+  // `lattice` uses, so it returns a fresh object, and object identity was never the property.
+  assert.deepEqual(meet(left, left).file, {
+    kind: 'absent',
+    reason: 'the host has no file picker',
+  });
 });
 
 test('the web channel disables what it cannot prove, with the reason', () => {
@@ -264,18 +275,42 @@ test('`AttestationFinding` and `SelfCheckFinding` are the same shape, both ways'
   assert.deepEqual([...mirrored], ['changed', 'missing', 'unexpected']);
 });
 
-test('the channel set is direct-download and web, and names no application store', () => {
+test('the shipping channels are direct-download and web, and name no application store', () => {
   // Track F Phase 1's scoping decision, made structural. It has no citation in
   // `docs/architecture/` — see PLAN.md · Decision log (2026-08-06) — so the honest control
   // is a closed union that fails every exhaustive `switch` when somebody adds a member,
-  // rather than a configuration flag.
-  assert.deepEqual([...DISTRIBUTION_CHANNELS], ['web', 'direct-download']);
+  // rather than a configuration flag. Asserted over `SHIPPING_CHANNELS`, because
+  // `DISTRIBUTION_CHANNELS` also has to carry `unknown`, which is not a channel anything
+  // ships on.
+  assert.deepEqual([...SHIPPING_CHANNELS], ['web', 'direct-download']);
   for (const forbidden of ['app-store', 'play-store', 'store', 'msix', 'flathub', 'snap']) {
     assert.ok(
       !(DISTRIBUTION_CHANNELS as readonly string[]).includes(forbidden),
       `${forbidden} is a re-signing channel; adding one needs the argument, not a constant`,
     );
   }
+  // Every shipping channel is a distribution channel, so the narrower list cannot drift into
+  // naming something the union does not admit.
+  for (const channel of SHIPPING_CHANNELS) {
+    assert.ok((DISTRIBUTION_CHANNELS as readonly string[]).includes(channel));
+  }
+});
+
+test('an unrecognised capability state is refused, never read as proven', () => {
+  // The direction is the point: an `else` returning `proven` turns a typo — or an untyped
+  // record rehydrated from storage, or a value across a host bridge — into a capability
+  // nobody established. `lattice` exists because the type is not enough, so it cannot then
+  // trust the type.
+  // Parsed rather than asserted through `unknown`, which `check:casts` bans and which would
+  // also be the wrong illustration: the realistic source of a malformed state is untyped data
+  // arriving from outside, and this is exactly that.
+  const wrong = JSON.parse('{"kind":"unknown","reason":"x"}') as CapabilityState;
+  const base = lattice(unprovenLattice('nothing established'));
+  assert.throws(() => lattice({ ...base, file: wrong }), CapabilityError);
+  // `meet` is the *more* likely entry point, since it is where two independently-sourced
+  // records arrive, so it must refuse from either side.
+  assert.throws(() => meet({ ...base, file: wrong }, base), CapabilityError);
+  assert.throws(() => meet(base, { ...base, file: wrong }), CapabilityError);
 });
 
 test('the capability set is closed and every member is reachable from a real adapter', () => {

@@ -181,7 +181,7 @@ function runWitness(): number {
           void assertEmbeddedTree({ ...releaseDocument, perFileHashes: {} }, readTree(control)),
       ],
       [
-        'empty directory on disk',
+        'a directory that is not there at all',
         (): void => void readTree(join(scratch, 'nothing-here')),
       ],
       // The publishability leg, which the three mutations above deliberately no longer reach:

@@ -55,9 +55,20 @@ import { absent, lattice, proven, unprovenLattice } from './capabilities.js';
  * channel-honesty invariant). Stating that here rather than implying a spec basis is the
  * honest form; see PLAN.md · Decision log, 2026-08-06.
  */
-export const DISTRIBUTION_CHANNELS = Object.freeze(['web', 'direct-download'] as const);
+export const DISTRIBUTION_CHANNELS = Object.freeze(['web', 'direct-download', 'unknown'] as const);
 
 export type DistributionChannel = (typeof DISTRIBUTION_CHANNELS)[number];
+
+/**
+ * The channels a release is actually *distributed* on. `unknown` is not one of them.
+ *
+ * Separated so the no-store property is asserted over the shipping set rather than over a
+ * union that also has to carry an unidentified host. `unknown` earns its place for the
+ * opposite reason to the other two: an unrecognised host that reported `web` would carry the
+ * web channel's meaning — *your integrity control is the service worker* — which is wrong
+ * reassurance for a host that may be a native shell with no worker and no attestation.
+ */
+export const SHIPPING_CHANNELS = Object.freeze(['web', 'direct-download'] as const);
 
 /**
  * What the running process can say about the asset tree it is serving.
@@ -298,14 +309,20 @@ export function desktopPlatform(bridge: HostBridge): PlatformAdapter {
  * The adapter for a host nobody identified.
  *
  * This exists so a composition root has something correct to return on the unknown branch.
- * Nothing is proven, the channel is `web` (the only channel a release can be *served* on
- * without having been installed), and every dependent surface is disabled with the same
- * honest reason. INV-FE-12's shape: unknown is a state, not a default to the permissive one.
+ * Nothing is proven, and every dependent surface is disabled with the same honest reason.
+ *
+ * **The channel is `unknown` rather than `web`**, and the earlier draft had it wrong. Every
+ * capability being absent already stops any surface enabling, so the channel looked like a
+ * harmless default — but it is not a capability, it is a *claim about which integrity control
+ * applies*. `web` says the release-scoped service worker and the signed manifest are checking
+ * these bytes (12 §5.2). Said of a host that might be a native shell with neither, that is
+ * reassurance nobody earned. The same reasoning covers `attestation`, whose `not-applicable`
+ * reason carries this sentence rather than the web channel's.
  */
 export function unknownPlatform(reason: string): PlatformAdapter {
   const attestation: AttestationState = { kind: 'not-applicable', reason };
   return Object.freeze({
-    channel: 'web',
+    channel: 'unknown',
     host: 'unidentified',
     capabilities: unprovenLattice(reason),
     attestation,
