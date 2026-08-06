@@ -54,6 +54,7 @@
  */
 
 import type { Verified } from '@bleavit/shared-types';
+import { accountKey } from '@bleavit/chain-client';
 
 /**
  * 02 §4's `OracleRoundView`, as the client holds it.
@@ -180,9 +181,38 @@ export function reportBlocks(inputs: ReportInputs): ReportCheck {
   return { blocks, bondUnknown: inputs.bondFloor.why };
 }
 
+/**
+ * Are these two addresses the same account? Decided on the **public key**, never the string.
+ *
+ * SS58 is a *rendering*, not an identity: the same 32-byte key encodes differently under every
+ * network prefix, and this chain's is 7777 (02 §8) while a wallet that exported the key elsewhere will
+ * very often hand back the generic 42. A `===` between two renderings therefore answers *false*
+ * for one account addressed two ways — which here would clear 07 §5.2's self-challenge refusal
+ * and invite a transaction the runtime rejects with `SelfChallenge`. It is V-164's defect in the
+ * other direction (there a watched set never matched and history looked empty; here two accounts
+ * that *are* the same look different), and the repository already answers it: `accountKey` in
+ * `@bleavit/chain-client` is *"the one place the conversion happens"*, exported precisely so a
+ * second comparison is not written separately.
+ *
+ * `undecidable` is a real arm rather than a thrown error, because this comparison gates a
+ * **refusal**. An address neither side can parse must not read as *"not the reporter"* — the
+ * fail-open answer — so the caller blocks on it and says so.
+ */
+function sameAccount(a: string, b: string): 'same' | 'different' | 'undecidable' {
+  try {
+    return accountKey(a) === accountKey(b) ? 'same' : 'different';
+  } catch {
+    return 'undecidable';
+  }
+}
+
 export interface ChallengeInputs {
   readonly round: OracleRound;
-  /** The account that would sign. Compared against the round's reporter — 07 §5.2. */
+  /**
+   * The account that would sign, as an SS58 address. Compared against the round's reporter by
+   * **public key** (07 §5.2) — see `sameAccount`; the prefix the two are rendered under is not
+   * part of the identity and must not decide the refusal.
+   */
   readonly caller: string;
   readonly freeUsdc: Verified<bigint>;
   /** Chain head at B′. Compared against the **stored** deadline, never a recomputed one. */
@@ -198,23 +228,45 @@ export interface ChallengeInputs {
  */
 export function challengeBlocks(inputs: ChallengeInputs): readonly ReportBlock[] {
   const blocks: ReportBlock[] = [];
-  if (inputs.now.value > inputs.round.challengeDeadline.value) {
+  // `>=`, because 07 §5.2's window is **half-open**: `oracle_core::Oracle::challenge` enforces
+  // `now < r.challenge_deadline`, and `pallets/oracle/src/tests.rs`'s
+  // `challenge_window_is_half_open_at_the_deadline` pins the deadline block itself as
+  // `WindowClosed` — the close crank treats that block as mature, so a challenge can never
+  // race the close. A `>` here left the last block of the window enabled on screen and
+  // invited a transaction guaranteed to revert, which is 11 §11.4's discipline inverted: the
+  // client must refuse what the chain will refuse, and a boundary is where that is decided.
+  if (inputs.now.value >= inputs.round.challengeDeadline.value) {
     blocks.push({
       check: 'Challenge window',
       detail:
         'The challenge window for this round has closed. This is the deadline the chain ' +
-        'stores, so it already includes any extension that was granted.',
+        'stores, so it already includes any extension that was granted — and the deadline ' +
+        'block itself is closed, not the last open one.',
     });
   }
-  if (inputs.caller === inputs.round.reporter.value) {
-    blocks.push({
-      check: 'Own round',
-      detail:
-        'You are this round’s reporter, and a reporter may not challenge their own round. ' +
-        'The game resolves in favour of an honest counterparty, and there is no counterparty ' +
-        'when one account holds both roles — nothing about the reported value would be ' +
-        'settled by it.',
-    });
+  switch (sameAccount(inputs.caller, inputs.round.reporter.value)) {
+    case 'same':
+      blocks.push({
+        check: 'Own round',
+        detail:
+          'You are this round’s reporter, and a reporter may not challenge their own round. ' +
+          'The game resolves in favour of an honest counterparty, and there is no counterparty ' +
+          'when one account holds both roles — nothing about the reported value would be ' +
+          'settled by it.',
+      });
+      break;
+    case 'undecidable':
+      blocks.push({
+        check: 'Own round',
+        detail:
+          'This client cannot tell whether you are this round’s reporter: one of the two ' +
+          'addresses is not a 32-byte account this chain can name. A reporter may not ' +
+          'challenge their own round, so the control stays closed rather than inviting a ' +
+          'transaction whose outcome depends on a comparison that could not be made.',
+      });
+      break;
+    case 'different':
+      break;
   }
   if (inputs.freeUsdc.value < inputs.round.bond.value) {
     blocks.push({
@@ -242,13 +294,28 @@ export function challengeBlocks(inputs: ChallengeInputs): readonly ReportBlock[]
  * §6.2's ladder is a fact about the *game*, not a computation this client performs: the copy
  * names the round's own bond (read) and says the stack can grow, without predicting by how
  * much. Predicting it would mean deriving `B_r` — the thing this module refuses to do.
+ *
+ * ## It takes no argument, and that is the control rather than a simplification
+ *
+ * The first version interpolated `round.round.value` into this sentence and `ChallengeRound`
+ * rendered the result inside a `<Notice>`. That is 10 §2.1's render-edge defect in its exact
+ * documented shape — the payload of a `Verified<number>` is a `number`, so the template
+ * literal typechecks perfectly and puts a chain read on screen with no provenance badge, past
+ * a control whose whole purpose is that no such path exists. Every other chain value on that
+ * screen goes through `Count`/`Amount`/`Identifier`; this one had been unwrapped by hand.
+ *
+ * The repair is structural rather than a corrected call site: **fixed copy cannot leak a
+ * chain value, so this function is given none to leak.** The round number is already on the
+ * screen, badged, as the panel's own `subject` — restating it inside the prose was duplication
+ * before it was a provenance hole. A future sentence that genuinely needs a chain value must
+ * render it as a `Verified<T>` beside this copy, never inside it.
  */
-export function escalationConsequence(round: OracleRound): string {
+export function escalationConsequence(): string {
   return (
     'A challenge posts this round’s bond and opens an escalation the reporter may answer at ' +
     'a higher one. If the round is adjudicated against you, the whole stack you have posted ' +
     'is forfeited — 40% to the counterparty and 60% to INSURANCE. The ladder is fixed when ' +
-    'the game opens and this client does not predict it: what is shown is the amount the ' +
-    `chain holds for round ${round.round.value}.`
+    'the game opens and this client does not predict it: what is shown above is the amount ' +
+    'the chain holds for this round.'
   );
 }

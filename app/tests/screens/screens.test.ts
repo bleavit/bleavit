@@ -3312,12 +3312,23 @@ test('a closed round blocks submission even with a reproduced proof', () => {
 
 // --------------------- §11.8.1 `oracle.report` / `oracle.challenge` — P-13/P-14 (F17)
 
+// Real SS58 addresses, because 07 §5.2's self-challenge refusal is decided on the **public
+// key** and `accountKey` refuses anything that is not a valid 32-byte account. Placeholder
+// strings would take every case down the `undecidable` arm and quietly stop exercising the
+// comparison this fixture exists to drive. Alice and Bob, generic prefix 42 — deliberately
+// *not* the 7777 that 02 §8 freezes, since the whole point is that the prefix is not the
+// identity. `REPORTER_SS58_LOCAL_PREFIX` is the same key under 7777, derived rather than typed.
+const REPORTER_SS58 = '5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY';
+const CHALLENGER_SS58 = '5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty';
+/** The same key as `REPORTER_SS58`, rendered under this chain's own prefix 7777 (02 §8). */
+const REPORTER_SS58_LOCAL_PREFIX = 'fvJdNW3p1BT1RfWzfZegj9tbVTUAXWf6Zf5kD9sJukyeafVR8';
+
 const ROUND = (over: Partial<OracleRound> = {}): OracleRound => ({
   component: finalized(3),
   epoch: finalized(7),
   specVersion: finalized(2),
   round: finalized(2),
-  reporter: finalized('5Reporter'),
+  reporter: finalized(REPORTER_SS58),
   value1e9: finalized(620_000_000n),
   evidenceHash: finalized('0xev'),
   bond: finalized(20_000_000_000n),
@@ -3340,7 +3351,7 @@ const REPORT = (over: Partial<ReportInputs> = {}): ReportInputs => ({
 
 const CHALLENGE = (over: Partial<ChallengeInputs> = {}): ChallengeInputs => ({
   round: ROUND(),
-  caller: '5Challenger',
+  caller: CHALLENGER_SS58,
   freeUsdc: finalized(50_000_000_000n),
   now: finalized(1_000),
   evidenceHash: '0xev',
@@ -3409,22 +3420,53 @@ test('a reporter may not challenge their own round — 07 §5.2, and the view ca
   // §11.5's P-14 row does not list this, but `OracleRoundView.reporter` is an exact chain
   // read and the chain refuses the call: left out, it costs a fee and returns an error the
   // user cannot map to anything they did.
-  const own = challengeBlocks(CHALLENGE({ caller: '5Reporter' }));
+  const own = challengeBlocks(CHALLENGE({ caller: REPORTER_SS58 }));
   assert.deepEqual(own.map((block) => block.check), ['Own round']);
   assert.match(nth(own, 0, 'block').detail, /no counterparty/);
+
+  // The defect Codex found: SS58 is a rendering, not an identity. The same key under this
+  // chain's prefix must still be refused — a `===` on the strings answers "different" and
+  // clears the refusal, and the chain then rejects the call with `SelfChallenge`.
+  const sameKeyOtherPrefix = challengeBlocks(CHALLENGE({ caller: REPORTER_SS58_LOCAL_PREFIX }));
+  assert.deepEqual(sameKeyOtherPrefix.map((block) => block.check), ['Own round']);
+  assert.match(nth(sameKeyOtherPrefix, 0, 'block').detail, /no counterparty/);
+
+  // And an address no chain can name blocks rather than reading as "not the reporter" —
+  // the fail-open answer, on a comparison that gates a refusal.
+  const unparseable = challengeBlocks(CHALLENGE({ caller: 'not-an-address' }));
+  assert.deepEqual(unparseable.map((block) => block.check), ['Own round']);
+  assert.match(nth(unparseable, 0, 'block').detail, /cannot tell whether you are/);
 });
 
 test('the challenge deadline is the stored one, extension included — never recomputed', () => {
   const round = ROUND({ challengeDeadline: finalized(43_200) });
-  assert.deepEqual(challengeBlocks(CHALLENGE({ round, now: finalized(43_200) })), []);
+  // 07 §5.2's window is HALF-OPEN and the client must close on the same block the chain does.
+  // `oracle_core::Oracle::challenge` enforces `now < challenge_deadline`, pinned by
+  // `pallets/oracle/src/tests.rs::challenge_window_is_half_open_at_the_deadline`. The last
+  // block a challenge lands on is `deadline - 1`; the deadline block itself is `WindowClosed`.
+  assert.deepEqual(challengeBlocks(CHALLENGE({ round, now: finalized(43_199) })), []);
+  const atDeadline = challengeBlocks(CHALLENGE({ round, now: finalized(43_200) }));
+  assert.deepEqual(atDeadline.map((block) => block.check), ['Challenge window']);
   const late = challengeBlocks(CHALLENGE({ round, now: finalized(43_201) }));
   assert.deepEqual(late.map((block) => block.check), ['Challenge window']);
   assert.match(nth(late, 0, 'block').detail, /already includes any extension/);
-  // The consequence copy names the round rather than predicting the ladder.
-  const consequence = escalationConsequence(round);
-  assert.match(consequence, /round 2/);
+  // The consequence copy is FIXED and takes no argument: a `Verified<T>` interpolated into a
+  // string is 10 §2.1's render-edge defect, and this notice is rendered as raw text.
+  const consequence = escalationConsequence();
   assert.match(consequence, /does not predict it/);
   assert.match(consequence, /40% to the counterparty and 60% to INSURANCE/);
+});
+
+test('the escalation copy cannot carry a chain value — it is given none (10 §2.1)', () => {
+  // A regression guard with teeth: the defect was a template literal, so asserting the
+  // *arity* is what forbids it returning. A one-argument version typechecks at every call
+  // site and puts an unbadged chain read on screen.
+  assert.equal(escalationConsequence.length, 0, 'escalationConsequence must take no argument');
+  const code = stripComments(
+    readFileSync(join(REPO, 'app/src/features/tx/src/oracle-reporting.ts'), 'utf8'),
+  );
+  const body = code.slice(code.indexOf('export function escalationConsequence'));
+  assert.ok(!body.includes('${'), 'the escalation copy must contain no interpolation at all');
 });
 
 test('the report screen shows the floor caveat on the CLEAN path, where it matters', () => {

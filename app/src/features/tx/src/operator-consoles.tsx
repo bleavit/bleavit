@@ -252,8 +252,10 @@ export function ChallengeRound({
         </Notice>
       ))}
 
+      {/* Fixed copy, and it takes no argument — see `escalationConsequence`. The round number
+          it used to interpolate is the panel's own badged `subject` above. */}
       <Notice severity="caution" heading="What a challenge risks">
-        {escalationConsequence(inputs.round)}
+        {escalationConsequence()}
       </Notice>
 
       <Button

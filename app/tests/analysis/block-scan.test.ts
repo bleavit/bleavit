@@ -173,7 +173,7 @@ test('an ApplyExtrinsic phase with a non-index value refuses rather than being c
 });
 
 test('the scan feeds `needsBodyFetch`, and the accounts match a set built the same way', () => {
-  // V-164 end to end. PAPI renders accounts in THIS chain's SS58 prefix (22622), so a watched
+  // V-164 end to end. PAPI renders accounts in THIS chain's SS58 prefix (7777, 02 §8), so a watched
   // set in any other rendering matches nothing ever — presenting as an empty transaction
   // history with no error anywhere. `watchedAccounts` is the same conversion the scanner
   // emits, which is what makes `watched.has(account)` a comparison of like with like.
