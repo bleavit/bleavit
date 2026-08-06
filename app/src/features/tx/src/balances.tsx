@@ -60,7 +60,16 @@ import type { UndecodableRead } from './positions.js';
  * detect.
  */
 export interface AssetBalance {
-  readonly free: Verified<bigint>;
+  /**
+   * The figure, or **absent** when the record was read and did not decode (V-183).
+   *
+   * Not a substituted `0n`. 10 §2.2 assigns `verified-finalized` *"only to values read
+   * through smoldot with storage proofs checked, or computed client-side purely from such
+   * values"*, and a zero chosen by this client on a failure path is neither. An **absent
+   * account** is a different fact and stays a badged zero: the chain answered, and its
+   * answer is that the account holds nothing.
+   */
+  readonly free: Verified<bigint> | undefined;
   readonly decimals: number;
   readonly symbol: string;
 }
@@ -72,11 +81,20 @@ export interface AssetBalance {
  * a field, which is a diff a reviewer sees.
  */
 export interface BalancesView {
+  /**
+   * The account these balances belong to, under the provenance the caller resolved it with.
+   *
+   * `Verified<string>` rather than a bare `string` because it is rendered, and INV-FE-9
+   * admits no unlabeled rendering path. It is **not** a chain read: 10 §5 lists *"a
+   * selected account"* among the chosen values that *"can never be represented as
+   * verified"*, so the badge it carries is the caller's — this screen holds it and does
+   * not observe it.
+   */
   readonly who: Verified<string>;
   /** `System.Account(who).data.free` — the native asset (02 §7.4). */
   readonly vit: AssetBalance;
   /** `System.Account(who).data.reserved` — held for deposits, not spendable. */
-  readonly vitReserved: Verified<bigint>;
+  readonly vitReserved: Verified<bigint> | undefined;
   /** `ForeignAssets.Account(USDC_LOCATION, who).balance` — never `Assets.Account`. */
   readonly usdc: AssetBalance;
   /** §11.9's channel health. A warning here, never a gate. */
@@ -94,6 +112,31 @@ export const NO_COMBINED_BALANCE =
 export const USDC_SOURCE_NOTE =
   'Your USDC balance is read from the ForeignAssets instance keyed by the pinned XCM ' +
   'location of the asset, which is the identifier this chain uses for it.';
+
+/**
+ * A balance the client read and could not decode.
+ *
+ * No number and no badge. The model made the field absent rather than substituting `0n`
+ * (10 §2.2, INV-FE-12), and a screen that filled the gap back in with a zero would restore
+ * the defect one layer up — with no `Verified<T>` left for a badge to hang off, so nothing
+ * on screen would mark the figure as manufactured. The raw bytes are already in the
+ * `Undecodable` list below; this row is what stops the field itself reading as a zero.
+ *
+ * Shaped like `ui`'s own `Derived` refusal (`datum--unavailable` + a reason) so an absent
+ * figure looks the same wherever it comes from. It is not `Derived`: that component takes a
+ * `Combined<T>`, and there is nothing here to combine.
+ */
+function BalanceUnreadable({ what }: { readonly what: string }): ReactNode {
+  return (
+    <span className="datum datum--unread" role="status">
+      <span className="datum__unavailable">Not available</span>
+      <span className="datum__reason">
+        {what} was read and could not be decoded, so this client is not stating a figure for
+        it. Nothing is being substituted, and the raw bytes are shown below.
+      </span>
+    </span>
+  );
+}
 
 export function Balances({
   view,
@@ -118,13 +161,25 @@ export function Balances({
           "native" rather than by its symbol, which is a chain-identity read (02 §8) and has
           no business in a bundled string. */}
       <Field label="Native asset — available">
-        <Amount datum={view.vit.free} decimals={view.vit.decimals} symbol={view.vit.symbol} />
+        {view.vit.free === undefined ? (
+          <BalanceUnreadable what="Your available native balance" />
+        ) : (
+          <Amount datum={view.vit.free} decimals={view.vit.decimals} symbol={view.vit.symbol} />
+        )}
       </Field>
       <Field label="Native asset — reserved">
-        <Amount datum={view.vitReserved} decimals={view.vit.decimals} symbol={view.vit.symbol} />
+        {view.vitReserved === undefined ? (
+          <BalanceUnreadable what="Your reserved native balance" />
+        ) : (
+          <Amount datum={view.vitReserved} decimals={view.vit.decimals} symbol={view.vit.symbol} />
+        )}
       </Field>
       <Field label="USDC — available">
-        <Amount datum={view.usdc.free} decimals={view.usdc.decimals} symbol={view.usdc.symbol} />
+        {view.usdc.free === undefined ? (
+          <BalanceUnreadable what="Your available USDC balance" />
+        ) : (
+          <Amount datum={view.usdc.free} decimals={view.usdc.decimals} symbol={view.usdc.symbol} />
+        )}
       </Field>
       <Notice severity="info" heading="Where this USDC figure comes from">
         {USDC_SOURCE_NOTE}

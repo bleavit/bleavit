@@ -31,9 +31,9 @@ import {
   type BalanceReader,
   type BalancesView,
 } from '@bleavit/features-tx';
-import type { Finalized, StorageItem } from '@bleavit/chain-client';
+import { providerRead, type Finalized, type StorageItem } from '@bleavit/chain-client';
 import { finalize } from '@bleavit/chain-client/testing';
-import type { HexString } from '@bleavit/shared-types';
+import { externalProposal, type HexString } from '@bleavit/shared-types';
 
 import { Button } from '@bleavit/ui';
 
@@ -143,9 +143,15 @@ const DECODERS: BalanceDecoders = {
   },
 };
 
-/** Two units that cannot be confused: different widths and different symbols. */
+/**
+ * Two units that cannot be confused: different widths and different symbols.
+ *
+ * `who` arrives as a chosen value under `external-proposal`, which 10 §2.1 calls *"the one
+ * status a chosen value may carry when it is displayed as a data item"*. A selected account
+ * is exactly that (10 §5) — the reader keys two maps with it and never reads it.
+ */
 const PARAMS: BalanceReadParams = {
-  who: WHO,
+  who: externalProposal(WHO),
   vitDecimals: 12,
   vitSymbol: 'NATIVE',
   usdcDecimals: 6,
@@ -178,9 +184,9 @@ test('exactly the two mandated keys are built and read — no third read exists'
 
 test('each figure comes through its OWN decoder, so a swap is a decode failure', async () => {
   const { view } = await read();
-  assert.equal(view.vit.free.value, 7_000_000_000_000n);
-  assert.equal(view.vitReserved.value, 2_000_000_000_000n);
-  assert.equal(view.usdc.free.value, 5_000_000n);
+  assert.equal(view.vit.free?.value, 7_000_000_000_000n);
+  assert.equal(view.vitReserved?.value, 2_000_000_000_000n);
+  assert.equal(view.usdc.free?.value, 5_000_000n);
   assert.deepEqual([...view.undecodable], []);
 });
 
@@ -189,27 +195,41 @@ test('an ABSENT account is a real zero, and is not reported as undecodable', asy
   // one. That is a true zero balance; reporting it as a decode failure tells them the client
   // is broken when it is reading an empty account.
   const { view } = await read({});
-  assert.equal(view.vit.free.value, 0n);
-  assert.equal(view.vitReserved.value, 0n);
-  assert.equal(view.usdc.free.value, 0n);
+  assert.equal(view.vit.free?.value, 0n);
+  assert.equal(view.vitReserved?.value, 0n);
+  assert.equal(view.usdc.free?.value, 0n);
   assert.deepEqual([...view.undecodable], []);
 });
 
-test('an UNDECODABLE account reads zero AND is reported — both halves', async () => {
-  // Zero is the direction that cannot overstate a holding, and the `undecodable` row is what
-  // stops that zero being read as a fact about the account. A silent zero is a guess.
+test('an UNDECODABLE account has NO figure, and is reported — both halves', async () => {
+  // The V-183 repair, and the pair of facts it keeps apart. An absent record (above) is the
+  // chain saying *this account holds nothing*; an undecodable one is the client unable to
+  // say anything. Substituting `0n` for the second answers a question nobody asked and
+  // badges it `verified-finalized`, which 10 §2.2 assigns only to values actually read —
+  // so the figure is **absent** and the raw bytes go to `undecodable`.
   const { view } = await read({
     [`key:system:${WHO}`]: 'bad',
     [`key:foreign:${WHO}`]: 'bad',
   });
-  assert.equal(view.vit.free.value, 0n);
-  assert.equal(view.usdc.free.value, 0n);
+  assert.equal(view.vit.free, undefined);
+  assert.equal(view.vitReserved, undefined);
+  assert.equal(view.usdc.free, undefined);
   assert.equal(view.undecodable.length, 2);
   assert.deepEqual(
     view.undecodable.map((row) => row.label),
     [`${BALANCE_READS.account}(who)`, `${BALANCE_READS.freeUsdc}(USDC_LOCATION, who)`],
   );
   for (const row of view.undecodable) assert.equal(row.rawHex, 'bad');
+});
+
+test('one undecodable read leaves the OTHER asset’s figure alone', async () => {
+  // The complement, so "undecodable is absent" cannot quietly become "any failure empties
+  // the screen". Each surface has its own decoder and its own read, so each fails alone.
+  const { view } = await read({ ...HELD, [`key:foreign:${WHO}`]: 'bad' });
+  assert.equal(view.vit.free?.value, 7_000_000_000_000n);
+  assert.equal(view.vitReserved?.value, 2_000_000_000_000n);
+  assert.equal(view.usdc.free, undefined);
+  assert.equal(view.undecodable.length, 1);
 });
 
 test('each asset carries its own unit, so neither can be rendered in the other’s', async () => {
@@ -223,13 +243,51 @@ test('each asset carries its own unit, so neither can be rendered in the other�
   assert.notEqual(PARAMS.vitSymbol, PARAMS.usdcSymbol);
 });
 
-test('every leaf is stamped with the reader’s one pin', async () => {
+test('every figure descends from the read that produced it, at the reader’s one pin', async () => {
   const { view } = await read();
-  for (const datum of [view.who, view.vit.free, view.vitReserved, view.usdc.free]) {
-    assert.equal(datum.status.kind, 'verified-finalized');
-    assert.ok('chain' in datum.status && datum.status.chain === CHAIN);
-    assert.ok('blockNumber' in datum.status && datum.status.blockNumber === 42);
+  const figures = [view.vit.free, view.vitReserved, view.usdc.free];
+  assert.equal(figures.filter((datum) => datum !== undefined).length, 3);
+  for (const datum of figures) {
+    assert.equal(datum?.status.kind, 'verified-finalized');
+    assert.ok(datum !== undefined && 'chain' in datum.status && datum.status.chain === CHAIN);
+    assert.ok(datum !== undefined && 'blockNumber' in datum.status && datum.status.blockNumber === 42);
   }
+});
+
+test('the ACCOUNT is not stamped by this reader — it is the key, not a read (V-183)', async () => {
+  // The defect this test exists for: `who` used to be badged `verified-finalized` at the
+  // reader's own pin, and it renders in the panel's subject line. The chain was never asked
+  // for it — it is the key both maps are read at, and 10 §5 lists a selected account among
+  // the chosen values that "can never be represented as verified". So it is the caller's
+  // datum, passed through byte for byte.
+  const { view } = await read();
+  assert.equal(view.who, PARAMS.who, 'the account was rebuilt rather than passed through');
+  assert.equal(view.who.status.kind, 'external-proposal');
+  assert.equal('blockHash' in view.who.status, false, 'the reader’s pin reached the account');
+
+  // And it is really the caller's, whatever the caller says: a second status must survive
+  // the same journey, or the assertion above holds because one status happens to be produced.
+  const other = await read(HELD, { ...PARAMS, who: providerRead(WHO, 'an-address-book') });
+  assert.equal(other.view.who.status.kind, 'provider');
+});
+
+test('the S20 reader mints no provenance of its own — every figure descends from a read', () => {
+  // V-183, the shape V-182 found in `market-reads.ts`. A local `finalized` helper wrapped
+  // any value in a hand-written `verified-finalized` status object: brand-less, structurally
+  // a plain `Verified<T>`, and applied to four values — one of them the account, which is
+  // the *key* these maps are read at rather than anything they returned. Neither
+  // `check:casts` nor the render gate can see that shape (the first looks for an assertion,
+  // the second for a borrowed `.status` access), so what covers it is this source assertion.
+  const source = txSource('balance-reads.ts');
+  assert.doesNotMatch(
+    source,
+    /kind:\s*'verified-finalized'/,
+    'balance-reads.ts constructs a verification status of its own',
+  );
+  assert.doesNotMatch(source, /\bas\s+Finalized</, 'balance-reads.ts asserts the brand');
+  // And the sanctioned derivation really is what it uses, or the two assertions above hold
+  // over a module that has stopped producing finalized figures altogether.
+  assert.match(source, /\bderive\(/);
 });
 
 /* ------------------------------------------------------------------ there is no total, ever */
@@ -295,17 +353,21 @@ test('no total is rendered, and the screen says why in its own voice', async () 
   assert.equal(html.includes('7,000,005,000,000'), false, 'the two balances were added');
 });
 
-test('every rendered chain figure carries a badge', async () => {
+test('every rendered chain figure carries a badge, and the account carries its own', async () => {
   const { view } = await read();
   const html = markupOf(view);
-  // Four leaves: the account, both native figures and the USDC one. `Verified<T>` is an
-  // object React refuses to render, so the only way onto the screen is through a `ui` datum
-  // component — and each of those emits the status it was handed.
+  // Three chain figures — both native ones and the USDC one. `Verified<T>` is an object
+  // React refuses to render, so the only way onto the screen is through a `ui` datum
+  // component, and each of those emits the status it was handed.
   //
   // Counted on the **badge**, not on `data-status`: the datum wrapper carries that attribute
   // too, so a `data-status` count is twice the number of badges and would still pass if the
   // badge itself stopped rendering.
-  assert.equal([...html.matchAll(/class="badge badge--verified-finalized"/g)].length, 4);
+  assert.equal([...html.matchAll(/class="badge badge--verified-finalized"/g)].length, 3);
+  // The fourth datum is the account, and it renders under the caller's status rather than
+  // the reader's pin — four badges in total, so nothing lost its label (INV-FE-9).
+  assert.equal([...html.matchAll(/class="badge badge--external-proposal"/g)].length, 1);
+  assert.equal([...html.matchAll(/class="badge badge--/g)].length, 4);
 });
 
 test('degraded XCM health warns and disables NEITHER control', async () => {
@@ -336,8 +398,19 @@ test('degraded XCM health warns and disables NEITHER control', async () => {
 });
 
 test('an undecodable read renders its raw bytes, and no substituted figure', async () => {
-  const { view } = await read({ [`key:foreign:${WHO}`]: 'bad' });
+  const { view } = await read({ ...HELD, [`key:foreign:${WHO}`]: 'bad' });
   const html = markupOf(view);
   assert.ok(html.includes('undecodable__raw'), html);
   assert.ok(html.includes(`data-undecodable="${BALANCE_READS.freeUsdc}(USDC_LOCATION, who)"`), html);
+
+  // The other half of the test's own name, which went unasserted until V-183: the USDC field
+  // must show a refusal rather than `0.000000 USDC`. A zero under a `finalized` badge is a
+  // number the chain never stated, and the `Undecodable` row above does not unsay it —
+  // INV-FE-9 attaches the label to the datum, not to a list somewhere else on the page.
+  assert.equal(html.includes('0.000000 USDC'), false, 'a substituted zero was rendered');
+  assert.ok(html.includes('datum--unread'), html);
+  assert.equal([...html.matchAll(/class="badge badge--verified-finalized"/g)].length, 2);
+
+  // The native figures are untouched, so the refusal is the failed read's and not the page's.
+  assert.ok(html.includes('7.000000000000 NATIVE'), html);
 });

@@ -42,11 +42,29 @@
  * `funding-reads.ts`'s `WrongChainInputError` applied to the one foreign input this reader
  * has.
  *
+ * ## Every row descends from the view that returned it (V-184)
+ *
+ * This module used to define a local `finalized` helper wrapping **any** value in a
+ * hand-written `verified-finalized` status object, and it handed that helper down into
+ * {@link projectVault} as an argument. The brand is a non-exported `unique symbol` in
+ * `packages/chain-client`, so what came out was a plain `Verified<T>`: structurally
+ * indistinguishable from a read, invisible to `check:casts` (which matches an assertion) and
+ * to the render gate's rule B (which matches a borrowed `.status` access). It is the V-182
+ * defect, found in `market-reads.ts` and repaired there.
+ *
+ * Here every one of its seven call sites was a value the cross-checked call really did
+ * return, so nothing on this screen was a false badge — what was missing was the *reason*
+ * the badge was true. `derive` supplies it: the pin is the one `crossCheckedCall` came back
+ * with, and a row can be finalized only because that call was made. A later edit that reads
+ * one field from somewhere else can no longer inherit this pin by sitting next to the others.
+ *
+ * @see docs/architecture/10-frontend-architecture.md §2.1, §2.2
  * @see docs/architecture/02-integration-contract.md §7.4, §3, §9
  * @see docs/architecture/11-frontend-workflows.md §11.2, §11.2a, §11.6
  */
 
 import {
+  derive,
   positionSourceFor,
   type Finalized,
   type FinalizedBlockRef,
@@ -206,17 +224,6 @@ async function readBook<D extends LedgerDomain>(
   undecodable: UndecodableRead[],
   anomalies: PositionAnomaly[],
 ): Promise<DomainBook<D>> {
-  const at = reader.at;
-  const finalized = <T,>(value: T): Verified<T> => ({
-    value,
-    status: {
-      kind: 'verified-finalized',
-      chain: at.chain,
-      blockHash: at.blockHash,
-      blockNumber: at.blockNumber,
-    },
-  });
-
   // The pallet comes from the domain, and the API name with it. Returned together by
   // `positionSourceFor` precisely so neither can be selected without the other (10 §11).
   const source = positionSourceFor(domain as ChainLedgerDomain);
@@ -288,12 +295,16 @@ async function readBook<D extends LedgerDomain>(
       }
     }
 
+    // Every leaf descends from `raw` through `derive`, which carries that call's own pin
+    // (10 §2.2's *"computed client-side purely from such values"*). `record` **is** part of
+    // `raw.value.result` as this domain's decoder read it, so the projection ignoring its
+    // argument costs nothing: there is no other value it could be describing.
     rows.push({
       domain,
-      positionId: finalized(record.positionId),
-      instrument: finalized(record.instrument),
-      balance: finalized(record.balance),
-      vault: projectVault(record.vault, finalized),
+      positionId: derive(raw, () => record.positionId),
+      instrument: derive(raw, () => record.instrument),
+      balance: derive(raw, () => record.balance),
+      vault: projectVault(raw, record.vault),
     } as PositionRow<D>);
   }
 
@@ -314,21 +325,27 @@ async function readBook<D extends LedgerDomain>(
   };
 }
 
-function projectVault(
-  vault: DecodedVaultState,
-  finalized: <T>(value: T) => Verified<T>,
-): VaultProjection {
+/**
+ * The vault state as a projection of the read that carried it.
+ *
+ * Takes the read rather than a stamping function, which is the whole of the V-184 repair:
+ * the caller used to hand in a `finalized(value)` helper, so a settlement branch and a
+ * winner were badged `verified-finalized` by a closure that had never seen a read. Now the
+ * pin can only be the one `read` arrived with, and the two branch-free arms have nothing to
+ * badge because they carry no value at all.
+ */
+function projectVault(read: Finalized<unknown>, vault: DecodedVaultState): VaultProjection {
   switch (vault.kind) {
     case 'resolved':
-      return { kind: 'resolved', branch: finalized(vault.branch) };
+      return { kind: 'resolved', branch: derive(read, () => vault.branch) };
     case 'scalar-settled':
       return {
         kind: 'scalar-settled',
-        winner: finalized(vault.winner),
-        score: finalized(vault.score),
+        winner: derive(read, () => vault.winner),
+        score: derive(read, () => vault.score),
       };
     case 'baseline-settled':
-      return { kind: 'baseline-settled', score: finalized(vault.score) };
+      return { kind: 'baseline-settled', score: derive(read, () => vault.score) };
     case 'voided':
       return { kind: 'voided' };
     default:

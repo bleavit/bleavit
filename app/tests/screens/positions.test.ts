@@ -68,6 +68,7 @@ import {
 const CHAIN: HexString = `0x${'ce'.repeat(32)}`;
 const OTHER_CHAIN: HexString = `0x${'a5'.repeat(32)}`;
 const BLOCK: HexString = `0x${'11'.repeat(32)}`;
+const OTHER_BLOCK: HexString = `0x${'22'.repeat(32)}`;
 const AT = { chain: CHAIN, blockHash: BLOCK, blockNumber: 42 };
 const UNIT = { decimals: 6, symbol: 'USDC' } as const;
 
@@ -401,6 +402,75 @@ test('a boundary read on another chain is refused rather than applied', async ()
     }),
     WrongChainBoundaryError,
   );
+});
+
+/* ------------------------------------------- what the leaves are, and where they came from */
+
+test('the S4 reader mints no provenance of its own — every leaf descends from a read', () => {
+  // V-184, the shape V-182 found in `market-reads.ts`. A local `finalized` helper wrapped
+  // any value in a hand-written `verified-finalized` status object — brand-less, and
+  // structurally a plain `Verified<T>` — and was handed down into `projectVault` as an
+  // argument, so seven leaves were badged by a closure that had never seen a read. Neither
+  // `check:casts` nor the render gate can see that shape (the first looks for an assertion,
+  // the second for a borrowed `.status` access), so what covers it is an assertion over the
+  // source itself.
+  const source = txSource('position-reads.ts');
+  assert.doesNotMatch(
+    source,
+    /kind:\s*'verified-finalized'/,
+    'position-reads.ts constructs a verification status of its own',
+  );
+  assert.doesNotMatch(source, /\bas\s+Finalized</, 'position-reads.ts asserts the brand');
+  // And the sanctioned derivation really is what it uses, or the two assertions above hold
+  // over a module that has stopped producing finalized leaves altogether.
+  assert.match(source, /\bderive\(/);
+});
+
+test('a row’s pin is the CALL’s own, not a field copied off the reader', async () => {
+  // What `derive` establishes and a stamping helper cannot. The two agree in every real
+  // reading — the transport answers at the block it was pinned to — which is exactly why a
+  // stamp taken off `reader.at` survived review: nothing observable distinguished it from a
+  // derivation. So the double is made to disagree, and every leaf must follow the answer.
+  const answeredAt = { chain: CHAIN, blockHash: OTHER_BLOCK, blockNumber: 43 };
+  const resolved: PositionRecord = {
+    ...PRIMARY_ROW,
+    vault: { kind: 'resolved', branch: 'Accept' },
+  };
+  const { decoders } = harness(book([resolved]), book([]), { calls: [] });
+  const reader: PositionsReader = {
+    at: AT,
+    async crossCheckedCall(source): Promise<
+      Finalized<{ result: string; witness: readonly StorageItem[] }>
+    > {
+      return finalize(
+        { result: source.api, witness: [{ key: source.storagePrefix, value: source.api }] },
+        answeredAt,
+      );
+    },
+  };
+  const view = await readPositions(reader, KEYS, decoders, PARAMS);
+
+  const held = view.primary.rows[0];
+  assert.ok(held !== undefined, 'no row was read');
+  for (const leaf of [held.positionId, held.instrument, held.balance]) {
+    assert.equal(leaf.status.kind, 'verified-finalized');
+    assert.ok(
+      'blockNumber' in leaf.status && leaf.status.blockNumber === answeredAt.blockNumber,
+      'a leaf took the reader’s own field rather than the call’s answer',
+    );
+  }
+  // The vault projection is the site that took the stamping helper as an argument, so it is
+  // asserted separately rather than assumed to follow the three above.
+  assert.equal(held.vault.kind, 'resolved');
+  if (held.vault.kind !== 'resolved') return;
+  assert.ok(
+    'blockNumber' in held.vault.branch.status &&
+      held.vault.branch.status.blockNumber === answeredAt.blockNumber,
+  );
+
+  // The two pins really do differ, or every assertion above holds for the wrong reason.
+  assert.notEqual(AT.blockNumber, answeredAt.blockNumber);
+  assert.notEqual(AT.blockHash, answeredAt.blockHash);
 });
 
 /* ------------------------------------------------------------------- the positions render */
