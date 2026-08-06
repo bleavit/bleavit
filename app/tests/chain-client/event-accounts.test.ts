@@ -92,7 +92,7 @@ test('both accounts of a Balances.Transfer are found', () => {
 
 test('accounts come back as public keys, NOT as the SS58 string PAPI decoded', () => {
   // The defect this pins is total and silent. PAPI decodes `AccountId32` to SS58 in **this
-  // chain's** prefix (22622), so an event naming Alice decodes to `fvJdNW3p…` while the same
+  // chain's** prefix (7777, 02 §8), so an event naming Alice decodes to `fvJdNW3p…` while the same
   // key in generic format is `5Grwva…` — two strings with nothing in common. The ingest
   // decision is `watched.has(account)`, a string comparison, so a watched set in any other
   // rendering matches NOTHING and the user sees an empty history rather than an error.

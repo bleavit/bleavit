@@ -1,0 +1,15 @@
+{
+  "name": "@bleavit/analysis-suite",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@bleavit/chain-client": "workspace:*",
+    "@bleavit/features-analysis": "workspace:*",
+    "@bleavit/local-index": "workspace:*",
+    "@polkadot-api/descriptors": "workspace:*"
+  }
+}

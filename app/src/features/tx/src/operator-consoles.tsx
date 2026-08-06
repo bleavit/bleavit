@@ -41,6 +41,7 @@ import {
   Ratio,
   Refusal,
   formatBaseUnits,
+  formatCount,
   type ReactNode,
 } from '@bleavit/ui';
 import type { Combined, Verified } from '@bleavit/shared-types';
@@ -58,9 +59,18 @@ import {
 } from './nav.js';
 import {
   checkRegistration,
+  maySubmitRecompute,
   registrationCaveat,
+  type RecomputeSubmission,
   type RegistrationInputs,
 } from './reporter.js';
+import {
+  challengeBlocks,
+  escalationConsequence,
+  reportBlocks,
+  type ChallengeInputs,
+  type ReportInputs,
+} from './oracle-reporting.js';
 import {
   claimBlocks,
   claimableNow,
@@ -141,6 +151,215 @@ export function RegisterReporter({
           : {})}
       />
     </Panel>
+  );
+}
+
+/**
+ * `oracle.report` — P-13, and the one screen in this client that must show a bond it cannot
+ * compute.
+ *
+ * The caveat renders **unconditionally**, like `RegisterReporter`'s. Showing it only when
+ * something else blocks would restore exactly the green "ready to sign" the model exists to
+ * prevent — and here the unknown is an *amount of money*, which is worse than an unknown
+ * eligibility: a reporter who reads the floor as the charge budgets for the wrong number.
+ */
+export function SubmitReport({
+  inputs,
+  decimals,
+  symbol,
+  onReport,
+}: {
+  readonly inputs: ReportInputs;
+  readonly decimals: number;
+  readonly symbol: string;
+  readonly onReport: () => void;
+}): ReactNode {
+  const check = reportBlocks(inputs);
+  return (
+    <Panel title="Report a component value">
+      <Field label="Round bond — at least">
+        <Amount datum={inputs.bondFloor.floor} decimals={decimals} symbol={symbol} />
+      </Field>
+      <Field label="Your free balance">
+        <Amount datum={inputs.freeUsdc} decimals={decimals} symbol={symbol} />
+      </Field>
+
+      {check.blocks.map((block) => (
+        <Notice severity="danger" heading={block.check} key={block.check}>
+          {block.detail}
+        </Notice>
+      ))}
+
+      {/* Always, never only on the blocked path — see the component note. */}
+      <Notice severity="caution" heading="The bond shown is a floor, not the amount">
+        {check.bondUnknown}
+      </Notice>
+
+      <Button
+        label="Post the report"
+        intent="primary"
+        onClick={onReport}
+        disabled={check.blocks.length > 0}
+        {...(check.blocks.length > 0
+          ? { disabledReason: check.blocks.map((block) => block.check).join('; ') }
+          : {})}
+      />
+    </Panel>
+  );
+}
+
+/**
+ * `oracle.challenge` — P-14, plus 07 §5.2's rule that a reporter may not challenge their own
+ * round.
+ *
+ * Two renderings carry the module's discipline onto the screen. The bond is the **round's
+ * own** datum, badged with the provenance of the read it came from, so nothing here can look
+ * like a figure this client worked out; and the escalation consequence is shown **before**
+ * the control, because what a challenger risks is the thing that decides whether to start.
+ */
+export function ChallengeRound({
+  inputs,
+  decimals,
+  symbol,
+  onChallenge,
+}: {
+  readonly inputs: ChallengeInputs;
+  readonly decimals: number;
+  readonly symbol: string;
+  readonly onChallenge: () => void;
+}): ReactNode {
+  const blocks = challengeBlocks(inputs);
+  return (
+    <Panel title="Challenge this round" subject={<Count datum={inputs.round.round} />}>
+      <Field label="Reporter">
+        <Identifier datum={inputs.round.reporter} />
+      </Field>
+      {/* Read, never doubled — the chain's own amount for this round (07 §6.1 freezes it). */}
+      <Field label="Bond to post">
+        <Amount datum={inputs.round.bond} decimals={decimals} symbol={symbol} />
+      </Field>
+      {/* The stored deadline, extension included. No `orc.window` arithmetic exists here. */}
+      <Field label="Challenge window closes at">
+        <Count datum={inputs.round.challengeDeadline} />
+      </Field>
+      <Field label="Watchtower acknowledgements">
+        <Count datum={inputs.round.ackedByWatchtowers} />
+      </Field>
+
+      {blocks.map((block) => (
+        <Notice severity="danger" heading={block.check} key={block.check}>
+          {block.detail}
+        </Notice>
+      ))}
+
+      {/* Fixed copy, and it takes no argument — see `escalationConsequence`. The round number
+          it used to interpolate is the panel's own badged `subject` above. */}
+      <Notice severity="caution" heading="What a challenge risks">
+        {escalationConsequence()}
+      </Notice>
+
+      <Button
+        label="Challenge"
+        intent="danger"
+        onClick={onChallenge}
+        disabled={blocks.length > 0}
+        {...(blocks.length > 0
+          ? { disabledReason: blocks.map((block) => block.check).join('; ') }
+          : {})}
+      />
+    </Panel>
+  );
+}
+
+/**
+ * `oracle.recompute_proof` — §11.8.1's third row.
+ *
+ * The screen takes a `RecomputeSubmission`, which requires a branded `RecomputedProof`, which
+ * only `recomputeProof` mints and only on agreement. So there is **no arm of this component
+ * in which the client's own recomputation contradicts the reported value** — the spec's
+ * *"never submit a proof the client's own recomputation contradicts"* is a property of the
+ * type rather than a check this component performs and could omit. Same construction as
+ * `UpgradeCrank`, and for the same reason: both are signatures whose entire justification is
+ * a check that happened first.
+ *
+ * The value renders as plain text and is labelled as a **local** recomputation, not as a
+ * chain read. Badging it would claim a provenance it does not have; it is what this device
+ * computed, and the only reason it is also the committed value is that a disagreement could
+ * not have reached this screen.
+ */
+export function RecomputeProof({
+  submission,
+  onSubmit,
+}: {
+  readonly submission: RecomputeSubmission;
+  readonly onSubmit: () => void;
+}): ReactNode {
+  const open = maySubmitRecompute(submission);
+  return (
+    <Panel title="Submit a recomputation proof">
+      <Field label="Component">{formatCount(submission.proof.component)}</Field>
+      <Field label="Measurement epoch">{formatCount(submission.proof.epoch)}</Field>
+      <Field label="Frozen MetricSpec version">
+        {formatCount(submission.proof.specVersion)}
+      </Field>
+      <Field label="Value this device recomputed (1e9 grid)">
+        {formatCount(submission.proof.value1e9)}
+      </Field>
+
+      <Notice severity="info" heading="This proof reproduces the committed value">
+        The raw data committed for this round was evaluated on this device and produced the
+        value above. A recomputation that disagreed would not have reached this screen — it
+        cannot be assembled into a submission at all, because a submission requires a proof
+        this client reproduced.
+      </Notice>
+
+      <Button
+        label="Submit the proof"
+        intent="primary"
+        onClick={onSubmit}
+        disabled={!open}
+        {...(open
+          ? {}
+          : {
+              disabledReason:
+                'The round is no longer open, so a recomputation proof would not resolve it.',
+            })}
+      />
+    </Panel>
+  );
+}
+
+/**
+ * The two states in which no proof exists to submit.
+ *
+ * They are **separate refusals** because the operator's next step differs, and because
+ * collapsing them would be a false accusation in one direction: a non-deterministic component
+ * is not a reporter behaving badly, it is a component nobody promised would reproduce.
+ */
+export function ProofRefused({
+  reason,
+}: {
+  readonly reason:
+    | { readonly kind: 'mismatch'; readonly claimed: bigint; readonly recomputed: bigint }
+    | { readonly kind: 'non-deterministic'; readonly component: number };
+}): ReactNode {
+  if (reason.kind === 'non-deterministic') {
+    return (
+      <Refusal
+        code="FE-ORC-002"
+        message={`Component ${formatCount(reason.component)} cannot be recomputed deterministically.`}
+        detail="Its frozen MetricSpec does not permit deterministic recomputation, so this device cannot reproduce the reported value."
+        recovery="This round resolves by counter-report and counter-challenge, or by adjudication — not by a recomputation proof. Nothing here indicates the reported value is wrong."
+      />
+    );
+  }
+  return (
+    <Refusal
+      code="FE-ORC-001"
+      message="This device's recomputation does not match the reported value."
+      detail={`Reported: ${formatCount(reason.claimed)} — recomputed here: ${formatCount(reason.recomputed)} (1e9 grid).`}
+      recovery="No proof is submitted. A proof asserting the reported value would stake your bond on a number your own recomputation has already contradicted; if you believe the reported value is wrong, the action is a challenge, not a proof."
+    />
   );
 }
 

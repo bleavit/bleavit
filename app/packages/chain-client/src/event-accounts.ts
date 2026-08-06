@@ -51,7 +51,7 @@ declare const accountKeyBrand: unique symbol;
  * **SS58 is not that form, and the difference is total.** PAPI decodes `AccountId32` to an
  * SS58 string *in the chain's own prefix* — measured: Alice, supplied to the encoder as the
  * generic-format `5Grwva…` (prefix 42), comes back out of the decoder as `fvJdNW3p…` (prefix
- * **22622**, this chain's). Same public key, and the two strings share nothing.
+ * **7777**, this chain's, per 02 §8). Same public key, and the two strings share nothing.
  *
  * That matters because the ingest loop's decision is `watched.has(account)` — a string
  * comparison. A watched set built from addresses a user pasted, or from another chain's

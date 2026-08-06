@@ -19,12 +19,37 @@
  *
  * `admitRegistryWindowEvent` therefore checks **both directions**:
  *
- * - the pallet must be the registry's — a name match alone admits the wrong pallet;
+ * - the pallet must be a registry's — a name match alone admits the wrong pallet;
  * - the payload must carry `filing_id` and must **not** carry `component`/`round` — because
  *   an event mislabelled with the right pallet and the wrong body is the same failure
  *   arriving by another route, and checking only the label trusts the labeller.
  *
  * One check alone is weaker than it looks, which is why there are two.
+ *
+ * ## The pallet names are **supplied**, and there is no `Registry` (V-169)
+ *
+ * This module shipped with `REGISTRY_PALLET = 'Registry'` and a suite that built its
+ * fixtures out of that same constant, so the two agreed with each other and neither agreed
+ * with the chain. **No pallet of that name exists.** `pallet-registry` is instantiated
+ * *twice* — `IncidentRegistry` and `MilestoneRegistry` (02 §6 gives each its own frozen
+ * event rows) — so the filter matched nothing, every real window event was rejected, and
+ * §11.8.6's countdown adjustments could never happen. The failure direction is the one the
+ * module's own note names: an extension that never arrives leaves the base deadline on
+ * screen, and a challenger is told they are out of time while the window is still open.
+ *
+ * So there is no constant to be wrong any more. `RegistryInstances` is a **required
+ * argument** — the same discipline `admitEvidence` uses for its hash function and
+ * `fundingKeys` for the USDC location — and the composition root supplies it from the
+ * runtime's own metadata. A name this module cannot invent is a name it cannot get wrong.
+ *
+ * ## An admitted event names **which** registry, because `filing_id` alone is not an id
+ *
+ * The two instances allocate ids independently (07 §7: `FilingCount` is keyed by epoch, per
+ * instance), so incident filing 42 and milestone filing 42 are different filings. A stream
+ * that returned a bare `filingId` would let a consumer key them together, and the visible
+ * result is one filing's watchtower extension moving the other's countdown — the same defect
+ * the pallet binding exists to prevent, re-entering one level down. This is 11 §11.2a rule 2
+ * in another domain: two id spaces, never merged.
  *
  * ## A filing's preconditions are value-scaled, and the bond is not a constant
  *
@@ -36,10 +61,21 @@
 
 import type { Verified } from '@bleavit/shared-types';
 
-/** The pallet these events must come from. Compared, never assumed. */
-export const REGISTRY_PALLET = 'Registry';
+export type FilingKind = 'incident' | 'milestone';
 
-/** The two window variants 02 §6 freezes for `pallet-registry`. */
+/**
+ * The two pallets `pallet-registry` is instantiated as.
+ *
+ * Supplied, never assumed: see the module note. The composition root reads these off the
+ * runtime metadata that `CRITICAL_SURFACE` already binds (02 §6 freezes the event rows under
+ * both instance names), so this module holds no chain identifier of its own.
+ */
+export interface RegistryInstances {
+  readonly incident: string;
+  readonly milestone: string;
+}
+
+/** The two window variants 02 §6 freezes for `pallet-registry`, on both instances. */
 export type RegistryWindowVariant = 'WindowAcknowledged' | 'WindowExtended';
 
 /** A raw decoded event, before it is admitted. Deliberately loose — this is untrusted input. */
@@ -52,12 +88,15 @@ export interface RawEvent {
 export type RegistryWindowEvent =
   | {
       readonly variant: 'WindowAcknowledged';
+      /** Which registry allocated this `filingId`. Never dropped — see the module note. */
+      readonly registry: FilingKind;
       readonly epoch: number;
       readonly filingId: number;
       readonly watchtower: string;
     }
   | {
       readonly variant: 'WindowExtended';
+      readonly registry: FilingKind;
       readonly epoch: number;
       readonly filingId: number;
       readonly newDeadline: number;
@@ -71,20 +110,52 @@ export type Admission =
 const ORACLE_ONLY_FIELDS = Object.freeze(['component', 'round']);
 
 /**
- * Admit a window event only if it is the **registry's**.
+ * Two registries configured under one name would silently merge their id spaces.
+ *
+ * Thrown rather than returned: this is a composition mistake, not an untrusted input, and a
+ * mis-wired ingest filter that reported *rejected* for every event would look exactly like a
+ * quiet chain.
+ */
+export class RegistryInstanceCollisionError extends Error {
+  constructor(pallet: string) {
+    super(
+      `The incident and milestone registries are both configured as \`${pallet}\`. They are ` +
+        'separate pallet instances with independent filing-id allocators, so one name for ' +
+        'both would key two different filings together and let one filing’s extension move ' +
+        'the other’s countdown.',
+    );
+    this.name = 'RegistryInstanceCollisionError';
+  }
+}
+
+/**
+ * Admit a window event only if it is a **registry's**, and say which one.
  *
  * Rejection is a first-class result rather than a filter that drops silently: an event this
  * client refuses is information — it means the stream carried something unexpected, and a
  * countdown built on a stream nobody audited is how the wrong deadline gets rendered.
  */
-export function admitRegistryWindowEvent(raw: RawEvent): Admission {
-  if (raw.pallet !== REGISTRY_PALLET) {
+export function admitRegistryWindowEvent(
+  raw: RawEvent,
+  registries: RegistryInstances,
+): Admission {
+  if (registries.incident === registries.milestone) {
+    throw new RegistryInstanceCollisionError(registries.incident);
+  }
+  const registry: FilingKind | undefined =
+    raw.pallet === registries.incident
+      ? 'incident'
+      : raw.pallet === registries.milestone
+        ? 'milestone'
+        : undefined;
+  if (registry === undefined) {
     return {
       kind: 'rejected',
       reason:
-        `This ${raw.variant} came from ${raw.pallet}, not ${REGISTRY_PALLET}. The oracle ` +
-        'publishes events with these exact names about a different sub-game; ingesting one ' +
-        'here would move a filing’s deadline for a reason that has nothing to do with it.',
+        `This ${raw.variant} came from ${raw.pallet}, which is neither ` +
+        `${registries.incident} nor ${registries.milestone}. The oracle publishes events ` +
+        'with these exact names about a different sub-game; ingesting one here would move a ' +
+        'filing’s deadline for a reason that has nothing to do with it.',
     };
   }
   if (raw.variant !== 'WindowAcknowledged' && raw.variant !== 'WindowExtended') {
@@ -97,7 +168,7 @@ export function admitRegistryWindowEvent(raw: RawEvent): Admission {
     return {
       kind: 'rejected',
       reason:
-        `This ${raw.variant} is labelled ${REGISTRY_PALLET} but carries \`${strayOracleField}\`, ` +
+        `This ${raw.variant} is labelled ${raw.pallet} but carries \`${strayOracleField}\`, ` +
         'which only the oracle’s event of this name has. The label and the body disagree, so ' +
         'it is not admitted.',
     };
@@ -115,18 +186,22 @@ export function admitRegistryWindowEvent(raw: RawEvent): Admission {
     if (typeof watchtower !== 'string') {
       return { kind: 'rejected', reason: 'WindowAcknowledged is missing `watchtower`.' };
     }
-    return { kind: 'admitted', event: { variant: 'WindowAcknowledged', epoch, filingId, watchtower } };
+    return {
+      kind: 'admitted',
+      event: { variant: 'WindowAcknowledged', registry, epoch, filingId, watchtower },
+    };
   }
   const newDeadline = raw.fields['new_deadline'];
   if (typeof newDeadline !== 'number') {
     return { kind: 'rejected', reason: 'WindowExtended is missing `new_deadline`.' };
   }
-  return { kind: 'admitted', event: { variant: 'WindowExtended', epoch, filingId, newDeadline } };
+  return {
+    kind: 'admitted',
+    event: { variant: 'WindowExtended', registry, epoch, filingId, newDeadline },
+  };
 }
 
 // --------------------------------------------------------------- filing preconditions
-
-export type FilingKind = 'incident' | 'milestone';
 
 export interface FilingInputs {
   readonly kind: FilingKind;

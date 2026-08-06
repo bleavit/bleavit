@@ -468,6 +468,18 @@ jobs:
         working-directory: app
         run: pnpm run test:local-index
 
+      - name: Ingest scanner — the chain-client/local-index join (10 §6.5, F8)
+        # The one module that turns a decoded `System.Events` blob into a
+        # `FinalizedBlockScan`. Its safety property is a REFUSAL and it is one line
+        # either way: an empty `events` array is a well-formed answer meaning "no event
+        # in this block names anyone", so a blob that fails to decode must throw rather
+        # than degrade to one — otherwise no body is fetched, the block is recorded as
+        # ingested, and the user's transaction is simply absent from their history with
+        # nothing reporting a problem. Same for an unrecognised phase, where every
+        # available default is wrong in its own direction.
+        working-directory: app
+        run: pnpm run test:analysis
+
       - name: Hostile-intent corpus (F20, 10 §13.1-§13.3, 11 §11.14.1, 15 §4.8)
         # A handoff parser that accepts every well-formed document is trivially green and
         # worthless — the subsystem's whole security argument is made of refusals.
@@ -619,6 +631,18 @@ jobs:
         # available, so the boundary has to survive to be rendered.
         working-directory: app
         run: pnpm run test:local-index
+
+      - name: Ingest scanner — the chain-client/local-index join (10 §6.5, F8)
+        # The one module that turns a decoded `System.Events` blob into a
+        # `FinalizedBlockScan`. Its safety property is a REFUSAL and it is one line
+        # either way: an empty `events` array is a well-formed answer meaning "no event
+        # in this block names anyone", so a blob that fails to decode must throw rather
+        # than degrade to one — otherwise no body is fetched, the block is recorded as
+        # ingested, and the user's transaction is simply absent from their history with
+        # nothing reporting a problem. Same for an unrecognised phase, where every
+        # available default is wrong in its own direction.
+        working-directory: app
+        run: pnpm run test:analysis
 
       - name: Handoff formats — contexts, intents, receipts (10 §13, 11 §11.14)
         # D-21's three serverless formats. Closed action vocabulary, no bytes-typed

@@ -35,4 +35,5 @@ packages:
   - 'tests/ui'
   - 'tests/screens'
   - 'tests/providers'
+  - 'tests/analysis'
   - 'tests/snapshot'
