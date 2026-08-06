@@ -58,8 +58,9 @@ const FACTS_MODULE = join(APP_ROOT, 'packages/ui/src/disclosure.tsx');
 const AWAITING_EMITTER = Object.freeze({
   'conviction-vote-lock':
     'F16 — `VoteForm` takes it as a prop; the vote flow that constructs it is not wired yet',
-  'void-recovery-decomposition':
-    'F7b — S4’s VOID redemption screen, where the recovery decomposition is rendered',
+  // `void-recovery-decomposition` left this list when F7b built `VoidRecoveryPanel`
+  // (`src/features/tx/src/positions.tsx`). It had to: an entry that becomes wrong **fails**,
+  // which is the mechanical expiry this list exists for rather than a courtesy.
 });
 
 /** The declared facts, read from `MEANING_CHANGING_FACTS` rather than restated. */
