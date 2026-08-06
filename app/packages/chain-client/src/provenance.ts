@@ -77,6 +77,30 @@ export function finalize<T>(value: T, at: FinalizedBlockRef): Finalized<T> {
 }
 
 /**
+ * The unary case of {@link meet}: one finalized read, decoded or projected.
+ *
+ * 10 §2.2 assigns `verified-finalized` to values read through smoldot with storage
+ * proofs checked, **or computed client-side purely from such values**. `meet` served
+ * that second clause for two reads and nothing served it for one, so a reader needing a
+ * `Finalized<boolean>` out of a `Finalized<readonly StorageItem[]>` had no sanctioned
+ * path at all. `market-reads.ts` hand-built a `verified-finalized` status object
+ * instead: brand-less, structurally a `Verified<T>`, and asserting finality for values
+ * it had never read.
+ *
+ * This grants nothing the barrel did not already export. `meet(a, a, (v) => f(v))` is
+ * exactly this function, and both need a `Finalized<A>` to start from — which only a
+ * read produces. `finalize` stays withheld for the reason `index.ts` gives: it mints
+ * from a value and a pin the caller supplies, and there is no read anywhere in that.
+ *
+ * `compute` receives `A` rather than the whole `Finalized<A>`, for the reason
+ * `DatumProps.render` does: a projection that could see the pin could ignore its input
+ * and stamp an unrelated value with it, which is the laundering this replaces.
+ */
+export function derive<A, B>(read: Finalized<A>, compute: (value: A) => B): Finalized<B> {
+  return finalize(compute(read.value), read.status);
+}
+
+/**
  * Meet of two finalized reads: the result is finalized only if both were read from
  * the same chain at the SAME block. Two values from different blocks are not a
  * consistent view, and INV-FE-2 requires every precondition to be evaluated at a

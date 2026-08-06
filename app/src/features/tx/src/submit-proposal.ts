@@ -16,11 +16,26 @@
  * unsafe direction: a funder at their limit passes every client row against a fresh
  * author's count and the runtime then refuses after the user has signed.
  *
- * Nothing about a `Verified<bigint>` says whose count it is, so the reads are **branded**
+ * Nothing about a `Finalized<bigint>` says whose count it is, so the reads are **branded**
  * with the account they were taken for — `funderReads(who, …)` is the only producer — and
  * `checkSubmit` re-checks that account against the declared funder. That is the same
  * control `funding-reads.ts` applies to a chain: a value carries its subject, and the row
  * refuses when the subject is not the one the rule names.
+ *
+ * ## 1a. Every leaf is `Finalized<T>`, and the rows are read at one B′
+ *
+ * 11 §11.4 rule 4 is one sentence — *"provider/local-index data never satisfies any
+ * precondition"* — and a `Verified<T>` parameter makes it a review obligation repeated at
+ * every call site, because a `provider` read is a perfectly well-formed `Verified<T>`. A
+ * submission assembled from an operator snapshot would return an empty block list, which
+ * `maySubmit` reads as *every precondition passed*. `Finalized<T>` is constructible only
+ * inside `@bleavit/chain-client` (10 §2.1), so here the wrong input does not typecheck —
+ * the same control `transaction-builder`'s `evaluate` and the S3 ticket already use.
+ *
+ * The type carries the block but **cannot compare two of them**, so one pin across every
+ * leaf is its own row. §11.4 pins a single B′ per gate: an epoch phase read at one block
+ * beside an intake queue read at the next are each true, and their conjunction describes a
+ * state that never existed — which nothing on screen distinguishes from one that did.
  *
  * **And the count itself is not readable through any frozen surface today** — see
  * {@link UNREADABLE_SUBMIT_CONDITIONS}, which is a finding about the contract rather than
@@ -46,7 +61,7 @@
  * @see docs/architecture/06-governance-and-guardians.md §4
  */
 
-import type { Verified } from '@bleavit/shared-types';
+import type { Finalized } from '@bleavit/chain-client';
 
 /** A reason S5 cannot be signed. Rendered with what it read (INV-FE-14). */
 export interface SubmitBlock {
@@ -97,17 +112,17 @@ export interface FunderReads {
    * {@link UNREADABLE_SUBMIT_CONDITIONS}. It is nullable rather than optional so a caller
    * has to state which of the two it means.
    */
-  readonly entriesThisEpoch: Verified<number> | undefined;
+  readonly entriesThisEpoch: Finalized<number> | undefined;
   /** The funder's spendable balance, against which the class bond is checked. */
-  readonly freeBalance: Verified<bigint>;
+  readonly freeBalance: Finalized<bigint>;
   readonly [funderBrand]: true;
 }
 
 export function funderReads(
   account: string,
   reads: {
-    readonly entriesThisEpoch: Verified<number> | undefined;
-    readonly freeBalance: Verified<bigint>;
+    readonly entriesThisEpoch: Finalized<number> | undefined;
+    readonly freeBalance: Finalized<bigint>;
   },
 ): FunderReads {
   return { account, ...reads } as FunderReads;
@@ -194,9 +209,9 @@ export interface PreimageState {
   readonly bytesHash: string;
   readonly bytesLen: number;
   /** `Preimage.PreimageFor((hash, len))` holds the bytes (02 §7.6). */
-  readonly noted: Verified<boolean>;
+  readonly noted: Finalized<boolean>;
   /** `Preimage.StatusFor(hash)` is requested — pinned by `preimage.request_preimage`. */
-  readonly requested: Verified<boolean>;
+  readonly requested: Finalized<boolean>;
 }
 
 export interface SubmitInputs {
@@ -207,13 +222,13 @@ export interface SubmitInputs {
    * it*, which blocks. An unread precondition is not a passed one, and a field a caller
    * could simply omit would make the unread case indistinguishable from a passed one.
    */
-  readonly phase: Verified<string> | undefined;
+  readonly phase: Finalized<string> | undefined;
   /** `Epoch.IntakeQueue`'s current length. Nullable for {@link SubmitInputs.phase}'s reason. */
-  readonly intakeQueueLen: Verified<number> | undefined;
+  readonly intakeQueueLen: Finalized<number> | undefined;
   /** `Epoch::MaxIntakeQueue`, from the constants API — never a literal (02 §9). */
-  readonly maxIntakeQueue: Verified<number>;
+  readonly maxIntakeQueue: Finalized<number>;
   /** `params(intake.max_per_account)`, live (02 §9). */
-  readonly maxPerAccount: Verified<number>;
+  readonly maxPerAccount: Finalized<number>;
   /** The account that bears the bond. Every keyed read below is checked against it. */
   readonly funder: string;
   readonly funderReads: FunderReads;
@@ -225,7 +240,7 @@ export interface SubmitInputs {
    * (`Epoch::TreasuryBondAskBps`, 02 §9) and a screen recomputing it would be a second
    * implementation of an arithmetic the runtime owns.
    */
-  readonly classBond: Verified<bigint>;
+  readonly classBond: Finalized<bigint>;
   readonly preimage: PreimageState;
   /**
    * Whether the declared `resources` set equals `footprint(payload)` (05 §1.4).
@@ -236,7 +251,7 @@ export interface SubmitInputs {
    * reported "not checked" as "fine" would walk a user into the worst outcome in the
    * section.
    */
-  readonly resourcesMatchFootprint: Verified<boolean> | undefined;
+  readonly resourcesMatchFootprint: Finalized<boolean> | undefined;
 }
 
 /**
@@ -252,6 +267,43 @@ export interface SubmitCheck {
 }
 
 /**
+ * How one finalized read names the block it was taken at, for the pin comparison.
+ *
+ * Chain first, for `meet`'s reason: after F18 there are two light clients, and *"these two
+ * reads are comparable"* is a statement about the chain rather than one that should hold
+ * because two hashes did not collide.
+ */
+function pinOf(read: Finalized<unknown>): string {
+  return `${read.status.chain} block ${read.status.blockNumber} (${read.status.blockHash})`;
+}
+
+/**
+ * A pin row over labelled leaves, or nothing when they all came from one block.
+ *
+ * Shared by both gates in this module because both read several items and §11.4 pins one
+ * B′ for each of them; a second copy would be a second chance to compare the wrong field.
+ */
+function pinBlock(
+  check: string,
+  leaves: readonly (readonly [string, Finalized<unknown> | undefined])[],
+): SubmitBlock | undefined {
+  const byPin = new Map<string, string[]>();
+  for (const [label, read] of leaves) {
+    if (read === undefined) continue;
+    const pin = pinOf(read);
+    byPin.set(pin, [...(byPin.get(pin) ?? []), label]);
+  }
+  if (byPin.size <= 1) return undefined;
+  const spread = [...byPin].map(([pin, labels]) => `${labels.join(', ')} at ${pin}`).join('; ');
+  return {
+    check,
+    detail:
+      `this gate mixes blocks — ${spread}. Every precondition is read at one B′ ` +
+      '(11 §11.4), and rows from two blocks describe a state that never existed',
+  };
+}
+
+/**
  * Every §11.5 P-10 row that refuses this submission, in the order a screen shows them.
  *
  * All failing rows are returned rather than the first — §11.4 rule 5 asks for the diff,
@@ -264,6 +316,22 @@ export function checkSubmit(inputs: SubmitInputs): SubmitCheck {
 
   const blocks: SubmitBlock[] = [];
   const uncheckable: UnreadableCondition[] = [];
+
+  // §11.4: one B′ per gate. Every leaf is finalized by its type, so what remains checkable
+  // is whether they are the *same* finalized block.
+  const mixed = pinBlock('P-10 read pin', [
+    ['the epoch phase', inputs.phase],
+    ['Epoch.IntakeQueue', inputs.intakeQueueLen],
+    ['Epoch::MaxIntakeQueue', inputs.maxIntakeQueue],
+    ['params(intake.max_per_account)', inputs.maxPerAccount],
+    ['the funder’s intake entries', inputs.funderReads.entriesThisEpoch],
+    ['the funder’s balance', inputs.funderReads.freeBalance],
+    ['the class bond', inputs.classBond],
+    ['Preimage.PreimageFor', inputs.preimage.noted],
+    ['Preimage.StatusFor', inputs.preimage.requested],
+    ['the resource footprint', inputs.resourcesMatchFootprint],
+  ]);
+  if (mixed !== undefined) blocks.push(mixed);
 
   if (inputs.phase === undefined) {
     blocks.push({
@@ -408,11 +476,11 @@ export function submitCaveat(check: SubmitCheck): string | undefined {
 
 export interface WithdrawProposalInputs {
   /** The proposal's state — P-11 admits `Submitted` only. */
-  readonly state: Verified<string>;
+  readonly state: Finalized<string>;
   /** True while the proposal has not reached Qualify. */
-  readonly beforeQualify: Verified<boolean>;
-  readonly proposer: Verified<string>;
-  readonly funder: Verified<string>;
+  readonly beforeQualify: Finalized<boolean>;
+  readonly proposer: Finalized<string>;
+  readonly funder: Finalized<string>;
   /** The account that would sign. */
   readonly caller: string;
 }
@@ -427,6 +495,14 @@ export interface WithdrawProposalInputs {
  */
 export function withdrawProposalBlocks(inputs: WithdrawProposalInputs): readonly SubmitBlock[] {
   const blocks: SubmitBlock[] = [];
+
+  const mixed = pinBlock('P-11 read pin', [
+    ['the proposal state', inputs.state],
+    ['the Qualify boundary', inputs.beforeQualify],
+    ['the proposer', inputs.proposer],
+    ['the funder', inputs.funder],
+  ]);
+  if (mixed !== undefined) blocks.push(mixed);
 
   if (inputs.state.value !== 'Submitted') {
     blocks.push({

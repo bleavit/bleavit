@@ -59,6 +59,7 @@ import {
   cohortRow,
   executeBlocks,
   executeChecks,
+  executionDeadline,
   funderReads,
   gateReading,
   gatesOf,
@@ -124,6 +125,20 @@ const v = <T,>(value: T, blockHash: HexString = BLOCK): Verified<T> => ({
   status: { kind: 'verified-finalized', chain: CHAIN, blockHash, blockNumber: 900_000 },
 });
 
+/**
+ * A **finalized** fixture at the pinned block — what a precondition leaf must be.
+ *
+ * S5's and S6's inputs are `Finalized<T>` while S7's and S8's display models stay
+ * `Verified<T>`, and the split is the design rather than an inconsistency: 11 §11.4 rule 4
+ * binds preconditions and nothing else, so a gate taking `Verified<T>` would accept an
+ * operator snapshot, while a dashboard demanding `Finalized<T>` could not render a provider
+ * figure it is entitled to show under a badge. Passing `v` to a gate is now a compile error;
+ * `tests/firewall` proves that separately for a `provider` status in particular, which is
+ * the case a plain object literal cannot demonstrate.
+ */
+const f = <T,>(value: T, blockHash: HexString = BLOCK): Finalized<T> =>
+  finalize(value, { chain: CHAIN, blockHash, blockNumber: 900_000 });
+
 /** A slice of a document, with the anti-vacuity check every parse here owes. */
 function slice(path: string, from: string, to: string, atLeast = 400): string {
   const doc = readFileSync(path, 'utf8');
@@ -155,24 +170,24 @@ const PREIMAGE: PreimageState = {
   declaredLen: 128,
   bytesHash: PREIMAGE_HASH,
   bytesLen: 128,
-  noted: v(true),
-  requested: v(true),
+  noted: f(true),
+  requested: f(true),
 };
 
 function submitInputs(patch: Partial<SubmitInputs> = {}): SubmitInputs {
   return {
-    phase: v('Intake'),
-    intakeQueueLen: v(3),
-    maxIntakeQueue: v(64),
-    maxPerAccount: v(2),
+    phase: f('Intake'),
+    intakeQueueLen: f(3),
+    maxIntakeQueue: f(64),
+    maxPerAccount: f(2),
     funder: 'FUNDER',
     funderReads: funderReads('FUNDER', {
       entriesThisEpoch: undefined,
-      freeBalance: v(10_000_000_000n),
+      freeBalance: f(10_000_000_000n),
     }),
-    classBond: v(1_000_000_000n),
+    classBond: f(1_000_000_000n),
     preimage: PREIMAGE,
-    resourcesMatchFootprint: v(true),
+    resourcesMatchFootprint: f(true),
     ...patch,
   };
 }
@@ -195,14 +210,14 @@ test('S5 checks the clauses 11 §11.5 P-10 states, and P-10 is what names them',
   assert.deepEqual(checkSubmit(submitInputs()).blocks, []);
   const named = (patch: Partial<SubmitInputs>): readonly string[] =>
     checkSubmit(submitInputs(patch)).blocks.map((block) => block.check);
-  assert.deepEqual(named({ phase: v('Trade') }), ['P-10 epoch phase']);
-  assert.deepEqual(named({ intakeQueueLen: v(64) }), ['P-10 intake queue']);
-  assert.deepEqual(named({ classBond: v(10_000_000_001n) }), ['P-10 class bond']);
-  assert.deepEqual(named({ preimage: { ...PREIMAGE, noted: v(false) } }), ['P-10 preimage noted']);
-  assert.deepEqual(named({ preimage: { ...PREIMAGE, requested: v(false) } }), [
+  assert.deepEqual(named({ phase: f('Trade') }), ['P-10 epoch phase']);
+  assert.deepEqual(named({ intakeQueueLen: f(64) }), ['P-10 intake queue']);
+  assert.deepEqual(named({ classBond: f(10_000_000_001n) }), ['P-10 class bond']);
+  assert.deepEqual(named({ preimage: { ...PREIMAGE, noted: f(false) } }), ['P-10 preimage noted']);
+  assert.deepEqual(named({ preimage: { ...PREIMAGE, requested: f(false) } }), [
     'P-10 preimage pinned',
   ]);
-  assert.deepEqual(named({ resourcesMatchFootprint: v(false) }), ['P-10 resource domains']);
+  assert.deepEqual(named({ resourcesMatchFootprint: f(false) }), ['P-10 resource domains']);
 });
 
 test('the intake reads are keyed to the funder, and another account’s are refused', () => {
@@ -216,8 +231,8 @@ test('the intake reads are keyed to the funder, and another account’s are refu
       checkSubmit(
         submitInputs({
           funderReads: funderReads('AUTHOR', {
-            entriesThisEpoch: v(0),
-            freeBalance: v(10_000_000_000n),
+            entriesThisEpoch: f(0),
+            freeBalance: f(10_000_000_000n),
           }),
         }),
       ),
@@ -229,8 +244,8 @@ test('the intake reads are keyed to the funder, and another account’s are refu
     maySubmit(
       submitInputs({
         funderReads: funderReads('FUNDER', {
-          entriesThisEpoch: v(0),
-          freeBalance: v(10_000_000_000n),
+          entriesThisEpoch: f(0),
+          freeBalance: f(10_000_000_000n),
         }),
       }),
     ),
@@ -256,8 +271,8 @@ test('the per-funder rate limit is uncheckable, never quietly passed or blocked'
   const under = checkSubmit(
     submitInputs({
       funderReads: funderReads('FUNDER', {
-        entriesThisEpoch: v(1),
-        freeBalance: v(10_000_000_000n),
+        entriesThisEpoch: f(1),
+        freeBalance: f(10_000_000_000n),
       }),
     }),
   );
@@ -268,8 +283,8 @@ test('the per-funder rate limit is uncheckable, never quietly passed or blocked'
   const atLimit = checkSubmit(
     submitInputs({
       funderReads: funderReads('FUNDER', {
-        entriesThisEpoch: v(2),
-        freeBalance: v(10_000_000_000n),
+        entriesThisEpoch: f(2),
+        freeBalance: f(10_000_000_000n),
       }),
     }),
   );
@@ -301,10 +316,10 @@ test('an unread precondition blocks; it is never folded into a passing one', () 
 test('every failing row is returned, not only the first (§11.4 rule 5’s diff)', () => {
   const blocks = checkSubmit(
     submitInputs({
-      phase: v('Decide'),
-      intakeQueueLen: v(64),
-      classBond: v(10_000_000_001n),
-      resourcesMatchFootprint: v(false),
+      phase: f('Decide'),
+      intakeQueueLen: f(64),
+      classBond: f(10_000_000_001n),
+      resourcesMatchFootprint: f(false),
     }),
   ).blocks;
   assert.deepEqual(
@@ -369,7 +384,7 @@ test('the slash warning renders on the clean path, where the user decides to sig
 test('a blocked submission disables the button and names why', () => {
   const html = renderToStaticMarkup(
     h(SubmitProposal, {
-      inputs: submitInputs({ phase: v('Trade') }),
+      inputs: submitInputs({ phase: f('Trade') }),
       decimals: 6,
       symbol: 'USDC',
       onSubmit: () => {},
@@ -383,10 +398,10 @@ test('a blocked submission disables the button and names why', () => {
 
 function withdrawInputs(patch: Partial<WithdrawProposalInputs> = {}): WithdrawProposalInputs {
   return {
-    state: v('Submitted'),
-    beforeQualify: v(true),
-    proposer: v('AUTHOR'),
-    funder: v('FUNDER'),
+    state: f('Submitted'),
+    beforeQualify: f(true),
+    proposer: f('AUTHOR'),
+    funder: f('FUNDER'),
     caller: 'AUTHOR',
     ...patch,
   };
@@ -410,11 +425,11 @@ test('P-11 admits the proposer and the funder, and no third account', () => {
 
 test('withdrawal closes at Qualify and outside the Submitted state', () => {
   assert.deepEqual(
-    withdrawProposalBlocks(withdrawInputs({ state: v('Trading') })).map((block) => block.check),
+    withdrawProposalBlocks(withdrawInputs({ state: f('Trading') })).map((block) => block.check),
     ['P-11 proposal state'],
   );
   assert.deepEqual(
-    withdrawProposalBlocks(withdrawInputs({ beforeQualify: v(false) })).map((block) => block.check),
+    withdrawProposalBlocks(withdrawInputs({ beforeQualify: f(false) })).map((block) => block.check),
     ['P-11 before Qualify'],
   );
   const html = renderToStaticMarkup(
@@ -426,35 +441,39 @@ test('withdrawal closes at Qualify and outside the Submitted state', () => {
 // ================================================================ S6 — execute
 
 const BOUNDS: BatchBoundsInputs = {
-  decodable: v(true),
-  callCount: v(3),
-  maxCalls: v(16),
-  payloadBytes: v(4_096),
-  maxPayloadBytes: v(65_536),
-  declaredWeightWithinLimit: v(true),
-  safetyFilterClosed: v(true),
+  decodable: f(true),
+  callCount: f(3),
+  maxCalls: f(16),
+  payloadBytes: f(4_096),
+  maxPayloadBytes: f(65_536),
+  declaredWeightWithinLimit: f(true),
+  safetyFilterClosed: f(true),
 };
 
 function executeInputs(patch: Partial<ExecuteInputs> = {}): ExecuteInputs {
   return {
-    klass: v('Code'),
-    queued: v(true),
-    cancelled: v(false),
-    now: v(1_000),
-    maturity: v(500),
-    graceEnd: v(2_000),
-    preimagePresent: v(true),
-    preimageHashMatches: v(true),
-    runtimeVersionMatches: v(true),
-    ratification: v('Passed'),
-    attestationRecordsIntact: v(true),
-    capability: { domainsWithinDeclared: v(true), rulesAdmitClass: v(true) },
-    metersClear: v(true),
-    resourceLocks: { declared: v(['treasury']), held: v(['treasury', 'code']) },
-    suspension: { suspendedForEpoch: undefined, currentEpoch: v(9), delayedOnce: v(false) },
-    hardGateBreach: v(false),
-    deadMan: { guardLatch: v(false), phaseFlagBit: v(false) },
-    triggeringFreeze: { ledgerFrozen: v(false), migrationHalt: v(false), expedited: v(false) },
+    klass: f('Code'),
+    queued: f(true),
+    cancelled: f(false),
+    now: f(1_000),
+    maturity: f(500),
+    graceEnd: f(2_000),
+    // A mandate that has never failed, with the window length readable. Both halves are
+    // varied deliberately below: the retry clock replaces `grace_end` rather than extending
+    // it, and an unreadable length is a third state that blocks without ending the mandate.
+    retry: { failedAt: f(undefined), retryWindow: f(43_200) },
+    preimagePresent: f(true),
+    preimageHashMatches: f(true),
+    runtimeVersionMatches: f(true),
+    ratification: f('Passed'),
+    attestationRecordsIntact: f(true),
+    capability: { domainsWithinDeclared: f(true), rulesAdmitClass: f(true) },
+    metersClear: f(true),
+    resourceLocks: { declared: f(['treasury']), held: f(['treasury', 'code']) },
+    suspension: { suspendedForEpoch: undefined, currentEpoch: f(9), delayedOnce: f(false) },
+    hardGateBreach: f(false),
+    deadMan: { guardLatch: f(false), phaseFlagBit: f(false) },
+    triggeringFreeze: { ledgerFrozen: f(false), migrationHalt: f(false), expedited: f(false) },
     batchBounds: BOUNDS,
     ...patch,
   };
@@ -518,14 +537,14 @@ test('the dead-man latch is never waived by the expedited marker', () => {
   // The one latch D-9 makes unconditional. A client that let the exemption satisfy it would
   // offer a signature the runtime refuses, on exactly the check that exists to be unwaivable.
   for (const latch of [
-    { guardLatch: v(true), phaseFlagBit: v(false) },
-    { guardLatch: v(false), phaseFlagBit: v(true) },
-    { guardLatch: v(true), phaseFlagBit: v(true) },
+    { guardLatch: f(true), phaseFlagBit: f(false) },
+    { guardLatch: f(false), phaseFlagBit: f(true) },
+    { guardLatch: f(true), phaseFlagBit: f(true) },
   ]) {
     const row = executeChecks(
       executeInputs({
         deadMan: latch,
-        triggeringFreeze: { ledgerFrozen: v(false), migrationHalt: v(false), expedited: v(true) },
+        triggeringFreeze: { ledgerFrozen: f(false), migrationHalt: f(false), expedited: f(true) },
       }),
     ).find((entry) => entry.id === 12);
     assert.equal(row?.verdict, 'fail', JSON.stringify(latch));
@@ -536,18 +555,18 @@ test('the dead-man latch is never waived by the expedited marker', () => {
 
 test('the expedited marker waives the triggering freeze, over the conjunction', () => {
   for (const freeze of [
-    { ledgerFrozen: v(true), migrationHalt: v(false) },
-    { ledgerFrozen: v(false), migrationHalt: v(true) },
-    { ledgerFrozen: v(true), migrationHalt: v(true) },
+    { ledgerFrozen: f(true), migrationHalt: f(false) },
+    { ledgerFrozen: f(false), migrationHalt: f(true) },
+    { ledgerFrozen: f(true), migrationHalt: f(true) },
   ]) {
     const blocked = executeChecks(
-      executeInputs({ triggeringFreeze: { ...freeze, expedited: v(false) } }),
+      executeInputs({ triggeringFreeze: { ...freeze, expedited: f(false) } }),
     ).find((row) => row.id === 13);
     assert.equal(blocked?.verdict, 'fail', JSON.stringify(freeze));
     assert.equal(blocked?.code, 'FreezeActive');
 
     const waived = executeChecks(
-      executeInputs({ triggeringFreeze: { ...freeze, expedited: v(true) } }),
+      executeInputs({ triggeringFreeze: { ...freeze, expedited: f(true) } }),
     ).find((row) => row.id === 13);
     // Reporting this as a block would refuse the emergency upgrade the lane exists to admit.
     assert.equal(waived?.verdict, 'pass', JSON.stringify(freeze));
@@ -594,7 +613,7 @@ test('an unread row is a third verdict, and it blocks', () => {
   // Row 6 is the one exception, and by class rather than by omission: a non-attested class
   // passes it whether or not the read happened.
   const param = executeChecks(
-    executeInputs({ klass: v('Param'), attestationRecordsIntact: undefined }),
+    executeInputs({ klass: f('Param'), attestationRecordsIntact: undefined }),
   ).find((row) => row.id === 6);
   assert.equal(param?.verdict, 'pass');
   assert.match(param?.actual ?? '', /not applicable to class Param/);
@@ -603,7 +622,7 @@ test('an unread row is a third verdict, and it blocks', () => {
 test('a pre-grace refusal blocks without being terminal; past grace, everything is', () => {
   // §11.5 row 5: `NotRatified` before `grace_end` leaves the proposal Queued and retryable,
   // and the FE MUST NOT present it as terminal — the ratification panel stays actionable.
-  const pending = executeInputs({ ratification: v('NoPassedRecord') });
+  const pending = executeInputs({ ratification: f('NoPassedRecord') });
   const row = executeChecks(pending).find((entry) => entry.id === 5);
   assert.equal(row?.verdict, 'fail');
   assert.equal(row?.code, 'NotRatified');
@@ -613,7 +632,7 @@ test('a pre-grace refusal blocks without being terminal; past grace, everything 
   assert.equal(mandateEnded(pending), false);
 
   // Past `grace_end` the same reading is terminal, because `execute` is unreachable at all.
-  const expired = executeInputs({ ratification: v('NoPassedRecord'), now: v(2_001) });
+  const expired = executeInputs({ ratification: f('NoPassedRecord'), now: f(2_001) });
   const expiredRow = executeChecks(expired).find((entry) => entry.id === 5);
   assert.equal(expiredRow?.terminal, true);
   assert.match(expiredRow?.actual ?? '', /the grace window has closed/);
@@ -624,14 +643,14 @@ test('an in-window malformed payload is terminal even though the state reads Que
   // 09 §1.2 item 11: the dispatch errors, so the proposal keeps reading `Queued` while being
   // permanently unexecutable. Presenting it as live is the failure that rule names.
   const row = executeChecks(
-    executeInputs({ batchBounds: { ...BOUNDS, decodable: v(false) } }),
+    executeInputs({ batchBounds: { ...BOUNDS, decodable: f(false) } }),
   ).find((entry) => entry.id === 14);
   assert.equal(row?.verdict, 'fail');
   assert.equal(row?.terminal, true);
   assert.match(row?.actual ?? '', /This is permanent/);
   // A committed hash that never described its own payload is the same shape.
   assert.equal(
-    executeChecks(executeInputs({ preimageHashMatches: v(false) })).find((entry) => entry.id === 3)
+    executeChecks(executeInputs({ preimageHashMatches: f(false) })).find((entry) => entry.id === 3)
       ?.terminal,
     true,
   );
@@ -643,13 +662,13 @@ test('the window is a three-way reading, and each arm reports its own code', () 
   assert.equal(windowStateFor(2_000, 500, 2_000), 'open');
   assert.equal(windowStateFor(2_001, 500, 2_000), 'past-grace');
 
-  const early = executeChecks(executeInputs({ now: v(499) })).find((row) => row.id === 2);
+  const early = executeChecks(executeInputs({ now: f(499) })).find((row) => row.id === 2);
   assert.equal(early?.verdict, 'fail');
   assert.equal(early?.code, 'NotMature');
   assert.equal(early?.terminal, false, 'a mandate that is merely early was called dead');
 
   assert.equal(
-    executeChecks(executeInputs({ now: v(2_001) })).find((row) => row.id === 2)?.terminal,
+    executeChecks(executeInputs({ now: f(2_001) })).find((row) => row.id === 2)?.terminal,
     true,
   );
 });
@@ -659,14 +678,14 @@ test('a suspension for a past epoch blocks nothing; one for the current epoch do
   // its mere presence as a suspension refuses an execution the guard would admit.
   const stale = executeChecks(
     executeInputs({
-      suspension: { suspendedForEpoch: v(8), currentEpoch: v(9), delayedOnce: v(false) },
+      suspension: { suspendedForEpoch: f(8), currentEpoch: f(9), delayedOnce: f(false) },
     }),
   ).find((row) => row.id === 10);
   assert.equal(stale?.verdict, 'pass');
 
   const live = executeChecks(
     executeInputs({
-      suspension: { suspendedForEpoch: v(9), currentEpoch: v(9), delayedOnce: v(false) },
+      suspension: { suspendedForEpoch: f(9), currentEpoch: f(9), delayedOnce: f(false) },
     }),
   ).find((row) => row.id === 10);
   assert.equal(live?.verdict, 'fail');
@@ -674,7 +693,7 @@ test('a suspension for a past epoch blocks nothing; one for the current epoch do
 
   const held = executeChecks(
     executeInputs({
-      suspension: { suspendedForEpoch: undefined, currentEpoch: v(9), delayedOnce: v(true) },
+      suspension: { suspendedForEpoch: undefined, currentEpoch: f(9), delayedOnce: f(true) },
     }),
   ).find((row) => row.id === 10);
   assert.equal(held?.verdict, 'fail');
@@ -684,7 +703,7 @@ test('a suspension for a past epoch blocks nothing; one for the current epoch do
 test('a declared resource domain that is no longer held is named, not counted', () => {
   const row = executeChecks(
     executeInputs({
-      resourceLocks: { declared: v(['treasury', 'code', 'meta']), held: v(['treasury']) },
+      resourceLocks: { declared: f(['treasury', 'code', 'meta']), held: f(['treasury']) },
     }),
   ).find((entry) => entry.id === 9);
   assert.equal(row?.verdict, 'fail');
@@ -693,7 +712,7 @@ test('a declared resource domain that is no longer held is named, not counted', 
   // Held-but-undeclared is not a failure: the guard checks the declared set is still held,
   // not that nothing else is.
   assert.equal(
-    executeChecks(executeInputs({ resourceLocks: { declared: v([]), held: v(['treasury']) } })).find(
+    executeChecks(executeInputs({ resourceLocks: { declared: f([]), held: f(['treasury']) } })).find(
       (entry) => entry.id === 9,
     )?.verdict,
     'pass',
@@ -704,17 +723,17 @@ test('the meters row is the chain’s answer, and its copy says what that answer
   const clear = executeChecks(executeInputs()).find((row) => row.id === 8);
   assert.equal(clear?.verdict, 'pass');
   assert.match(clear?.actual ?? '', /does not predict that dispatch succeeds/);
-  const blocked = executeChecks(executeInputs({ metersClear: v(false) })).find((row) => row.id === 8);
-  assert.equal(blocked?.code, 'MeterExceeded');
+  const blocked = executeChecks(executeInputs({ metersClear: f(false) })).find((row) => row.id === 8);
+  assert.equal(blocked?.code, 'MetersBlocked');
   assert.equal(blocked?.terminal, false, 'a meter block within grace is not the end of a mandate');
 });
 
 test('each batch bound is checked against a chain-read limit, one row at a time', () => {
   const cases: readonly [Partial<BatchBoundsInputs>, RegExp][] = [
-    [{ callCount: v(17) }, /17 calls and the limit is 16/],
-    [{ payloadBytes: v(65_537) }, /65537 bytes and the limit is 65536/],
-    [{ declaredWeightWithinLimit: v(false) }, /declared weight exceeds/],
-    [{ safetyFilterClosed: v(false) }, /nested wrapper/],
+    [{ callCount: f(17) }, /17 calls and the limit is 16/],
+    [{ payloadBytes: f(65_537) }, /65537 bytes and the limit is 65536/],
+    [{ declaredWeightWithinLimit: f(false) }, /declared weight exceeds/],
+    [{ safetyFilterClosed: f(false) }, /nested wrapper/],
   ];
   for (const [patch, expected] of cases) {
     const row = executeChecks(executeInputs({ batchBounds: { ...BOUNDS, ...patch } })).find(
@@ -726,7 +745,7 @@ test('each batch bound is checked against a chain-read limit, one row at a time'
   // At the bound rather than over it, both pass: the runtime's own test is `>`.
   assert.equal(
     executeChecks(
-      executeInputs({ batchBounds: { ...BOUNDS, callCount: v(16), payloadBytes: v(65_536) } }),
+      executeInputs({ batchBounds: { ...BOUNDS, callCount: f(16), payloadBytes: f(65_536) } }),
     ).find((entry) => entry.id === 14)?.verdict,
     'pass',
   );
@@ -737,20 +756,20 @@ test('every failing dispatch row carries the code the runtime would return', () 
   // blocked without one would leave the user unable to match the client's refusal to the
   // chain's.
   const broken = executeInputs({
-    queued: v(false),
-    now: v(300),
-    preimagePresent: v(false),
-    runtimeVersionMatches: v(false),
-    ratification: v('NoPassedRecord'),
-    attestationRecordsIntact: v(false),
-    capability: { domainsWithinDeclared: v(false), rulesAdmitClass: v(true) },
-    metersClear: v(false),
-    resourceLocks: { declared: v(['a']), held: v([]) },
-    suspension: { suspendedForEpoch: v(9), currentEpoch: v(9), delayedOnce: v(false) },
-    hardGateBreach: v(true),
-    deadMan: { guardLatch: v(true), phaseFlagBit: v(false) },
-    triggeringFreeze: { ledgerFrozen: v(true), migrationHalt: v(false), expedited: v(false) },
-    batchBounds: { ...BOUNDS, decodable: v(false) },
+    queued: f(false),
+    now: f(300),
+    preimagePresent: f(false),
+    runtimeVersionMatches: f(false),
+    ratification: f('NoPassedRecord'),
+    attestationRecordsIntact: f(false),
+    capability: { domainsWithinDeclared: f(false), rulesAdmitClass: f(true) },
+    metersClear: f(false),
+    resourceLocks: { declared: f(['a']), held: f([]) },
+    suspension: { suspendedForEpoch: f(9), currentEpoch: f(9), delayedOnce: f(false) },
+    hardGateBreach: f(true),
+    deadMan: { guardLatch: f(true), phaseFlagBit: f(false) },
+    triggeringFreeze: { ledgerFrozen: f(true), migrationHalt: f(false), expedited: f(false) },
+    batchBounds: { ...BOUNDS, decodable: f(false) },
   });
   const blocking = executeBlocks(broken);
   assert.equal(blocking.length, 14, 'every row of this fixture blocks');
@@ -761,20 +780,257 @@ test('every failing dispatch row carries the code the runtime would return', () 
   assert.equal(mayExecute(broken), false);
 });
 
+test('each refusal arm carries its own code, not one code for a family', () => {
+  // The gate and the `do_execute` binding above both check the *vocabulary*. This checks the
+  // **mapping**, which is the half that was wrong in four places: one code stood in for two
+  // `ensure!`s three times over — `NotQueued` for `NotFound`/`Cancelled`, `CapabilityDenied`
+  // for the ⊆-declared check the guard refuses with `BadDomainDeclaration`, and
+  // `GateSuspended` for the `delay_once` hold the guard refuses with `GuardianHold`. A user
+  // told the family name looks for the wrong defect.
+  const codeOf = (patch: Partial<ExecuteInputs>, id: number): string | undefined =>
+    executeChecks(executeInputs(patch)).find((row) => row.id === id)?.code;
+
+  assert.equal(codeOf({ queued: f(false) }, 1), 'NotFound');
+  assert.equal(codeOf({ cancelled: f(true) }, 1), 'Cancelled');
+  assert.equal(codeOf({ now: f(300) }, 2), 'NotMature');
+  assert.equal(codeOf({ now: f(3_000) }, 2), 'GraceExpired');
+  assert.equal(codeOf({ preimagePresent: f(false) }, 3), 'BadPreimage');
+  assert.equal(codeOf({ runtimeVersionMatches: f(false) }, 4), 'StaleQueue');
+  assert.equal(codeOf({ ratification: f('NoPassedRecord') }, 5), 'NotRatified');
+  assert.equal(codeOf({ attestationRecordsIntact: f(false) }, 6), 'AttestationMissing');
+  assert.equal(
+    codeOf({ capability: { domainsWithinDeclared: f(false), rulesAdmitClass: f(true) } }, 7),
+    'BadDomainDeclaration',
+  );
+  assert.equal(
+    codeOf({ capability: { domainsWithinDeclared: f(true), rulesAdmitClass: f(false) } }, 7),
+    'CapabilityDenied',
+  );
+  assert.equal(codeOf({ metersClear: f(false) }, 8), 'MetersBlocked');
+  assert.equal(codeOf({ resourceLocks: { declared: f(['a']), held: f([]) } }, 9), 'ResourceLockMissing');
+  assert.equal(
+    codeOf({ suspension: { suspendedForEpoch: undefined, currentEpoch: f(9), delayedOnce: f(true) } }, 10),
+    'GuardianHold',
+  );
+  assert.equal(
+    codeOf({ suspension: { suspendedForEpoch: f(9), currentEpoch: f(9), delayedOnce: f(false) } }, 10),
+    'GateSuspended',
+  );
+  assert.equal(codeOf({ hardGateBreach: f(true) }, 11), 'FreezeActive');
+  assert.equal(codeOf({ deadMan: { guardLatch: f(true), phaseFlagBit: f(false) } }, 12), 'FreezeActive');
+  assert.equal(
+    codeOf({ triggeringFreeze: { ledgerFrozen: f(true), migrationHalt: f(false), expedited: f(false) } }, 13),
+    'FreezeActive',
+  );
+  assert.equal(codeOf({ batchBounds: { ...BOUNDS, decodable: f(false) } }, 14), 'BadPreimage');
+  assert.equal(codeOf({ batchBounds: { ...BOUNDS, callCount: f(17) } }, 14), 'TooManyCalls');
+  assert.equal(codeOf({ batchBounds: { ...BOUNDS, payloadBytes: f(65_537) } }, 14), 'PayloadTooLarge');
+  // Odd-looking and correct: the guard's weight ceiling is
+  // `ensure!(total_weight.all_lte(max_weight), Error::<T>::CapabilityDenied)`. §11.5 asks for
+  // the runtime's code, not the one a reader would have expected.
+  assert.equal(
+    codeOf({ batchBounds: { ...BOUNDS, declaredWeightWithinLimit: f(false) } }, 14),
+    'CapabilityDenied',
+  );
+  assert.equal(codeOf({ batchBounds: { ...BOUNDS, safetyFilterClosed: f(false) } }, 14), 'SafetyFilter');
+});
+
+test('every code S6 shows is one `do_execute` really raises', () => {
+  // The Python gate `tools/ci/check-execute-error-codes.py` binds the client's union to the
+  // pallet's error **enum**; this binds it to the pallet's `execute` **body**, which is the
+  // stronger claim and the one §11.5 actually makes: *"the same reason code the runtime
+  // would return"*. `QueueFull` is a real variant of that enum and `execute` never returns
+  // it, so an enum-membership check alone would accept it.
+  const rust = readFileSync(resolve(REPO, 'pallets/execution-guard/src/lib.rs'), 'utf8');
+  const start = rust.indexOf('fn do_execute(');
+  assert.notEqual(start, -1, '`do_execute` is gone; this binding must be re-pointed');
+  let depth = 0;
+  let end = -1;
+  for (let i = rust.indexOf('{', start); i < rust.length; i += 1) {
+    if (rust[i] === '{') depth += 1;
+    else if (rust[i] === '}') {
+      depth -= 1;
+      if (depth === 0) {
+        end = i;
+        break;
+      }
+    }
+  }
+  assert.notEqual(end, -1, '`do_execute` has no matching brace; the slice would run past it');
+  const body = rust.slice(start, end);
+  assert.ok(body.length > 4_000, `the do_execute slice is ${body.length} chars — it found nothing`);
+
+  // Anti-vacuity in the direction that matters: a variant `execute` does not raise must not
+  // be found, or the assertion below would pass for any name in the pallet.
+  assert.ok(
+    !body.includes('Error::<T>::QueueFull'),
+    'QueueFull is raised inside do_execute after all; pick another control',
+  );
+
+  // Every code the fourteen rows can emit, gathered from the rows rather than from a list
+  // written beside them — a hand-kept list would agree with itself.
+  const emitted = new Set<string>();
+  const collect = (inputs: ExecuteInputs): void => {
+    for (const row of executeChecks(inputs)) if (row.code !== undefined) emitted.add(row.code);
+  };
+  collect(executeInputs({ queued: f(false) }));
+  collect(executeInputs({ cancelled: f(true) }));
+  collect(executeInputs({ now: f(300) }));
+  collect(executeInputs({ now: f(3_000) }));
+  collect(executeInputs({ preimagePresent: f(false) }));
+  collect(executeInputs({ runtimeVersionMatches: f(false) }));
+  collect(executeInputs({ ratification: f('NoPassedRecord') }));
+  collect(executeInputs({ attestationRecordsIntact: f(false) }));
+  collect(executeInputs({ capability: { domainsWithinDeclared: f(false), rulesAdmitClass: f(true) } }));
+  collect(executeInputs({ capability: { domainsWithinDeclared: f(true), rulesAdmitClass: f(false) } }));
+  collect(executeInputs({ metersClear: f(false) }));
+  collect(executeInputs({ resourceLocks: { declared: f(['a']), held: f([]) } }));
+  collect(executeInputs({ suspension: { suspendedForEpoch: undefined, currentEpoch: f(9), delayedOnce: f(true) } }));
+  collect(executeInputs({ suspension: { suspendedForEpoch: f(9), currentEpoch: f(9), delayedOnce: f(false) } }));
+  collect(executeInputs({ hardGateBreach: f(true) }));
+  collect(executeInputs({ batchBounds: { ...BOUNDS, callCount: f(17) } }));
+  collect(executeInputs({ batchBounds: { ...BOUNDS, payloadBytes: f(65_537) } }));
+  collect(executeInputs({ batchBounds: { ...BOUNDS, declaredWeightWithinLimit: f(false) } }));
+  collect(executeInputs({ batchBounds: { ...BOUNDS, safetyFilterClosed: f(false) } }));
+  assert.ok(emitted.size >= 12, `only ${emitted.size} codes were reached; the sweep is too thin`);
+
+  for (const code of emitted) {
+    assert.ok(
+      body.includes(`Error::<T>::${code}`),
+      `S6 blocks with ${code}, which do_execute never returns — the user is told something ` +
+        'the chain did not say (11 §11.5)',
+    );
+  }
+
+  // The four names this branch replaced, kept as a regression list: each read plausibly and
+  // none is a variant of the pallet's enum at all.
+  for (const invented of ['NotQueued', 'VersionMismatch', 'MeterExceeded', 'ResourceLocked']) {
+    assert.ok(!emitted.has(invented), `${invented} is back; the runtime has never returned it`);
+    assert.ok(!rust.includes(`Error::<T>::${invented}`), `${invented} is a real error after all`);
+  }
+});
+
+test('a mandate that failed once runs on the retry clock, not on grace_end', () => {
+  // 09 §1.2(1): `failed_at + EXECUTION_RETRY_WINDOW` **replaces** `grace_end`. The
+  // substitution is not monotone, so both directions are asserted from one fixture — a test
+  // that only moved the deadline later would pass on an implementation taking the maximum.
+  const doc = slice(DOC_11, '| 2. Window |', '\n| 3. Preimage |', 400);
+  assert.match(doc, /failed_at \+ EXECUTION_RETRY_WINDOW/);
+  assert.match(doc, /replaces\*\* `grace_end`/);
+
+  // Past `grace_end` and inside the retry window: the chain would execute, so the client
+  // must not call this over. `grace_end` is 2,000 and `now` is 3,000.
+  const stillLive = executeInputs({
+    now: f(3_000),
+    retry: { failedAt: f(2_900), retryWindow: f(43_200) },
+  });
+  const live = executeChecks(stillLive).find((row) => row.id === 2);
+  assert.equal(live?.verdict, 'pass', 'a lawful retry after grace_end was refused');
+  assert.match(copy(live?.actual, 'the window actual'), /post-failure retry window/);
+  assert.equal(mandateEnded(stillLive), false);
+
+  // Inside `grace_end` and past the retry window: the chain refuses, so the client must not
+  // offer the signature. `now` is 1,000, well inside the 2,000 grace end.
+  const expired = executeInputs({ retry: { failedAt: f(10), retryWindow: f(100) } });
+  const dead = executeChecks(expired).find((row) => row.id === 2);
+  assert.equal(dead?.verdict, 'fail', 'an expired retry inside grace_end was offered');
+  assert.equal(dead?.code, 'GraceExpired');
+  assert.equal(dead?.terminal, true);
+  assert.equal(mayExecute(expired), false);
+
+  // And the ordinary mandate is unchanged: `grace_end` still governs when nothing failed.
+  assert.equal(
+    executeChecks(executeInputs({ now: f(3_000) })).find((row) => row.id === 2)?.code,
+    'GraceExpired',
+  );
+  assert.equal(windowStateFor(1_000, 500, 2_000), 'open');
+  assert.equal(executionDeadline(2_000, undefined, 43_200), 2_000);
+  assert.equal(executionDeadline(2_000, 2_900, 43_200), 46_100);
+});
+
+test('an unreadable RETRY_WINDOW blocks and does not declare the mandate over (SQ-790)', () => {
+  // No frozen surface publishes the window length, so this is the ordinary state today and
+  // must fail closed **without** the second claim: refusing a lawful retry is bad, and
+  // ending a recovery window on the client's own authority is worse.
+  const unknown = executeInputs({
+    now: f(3_000),
+    retry: { failedAt: f(2_900), retryWindow: undefined },
+  });
+  const row = executeChecks(unknown).find((entry) => entry.id === 2);
+  assert.equal(row?.verdict, 'unread');
+  assert.equal(row?.terminal, false);
+  assert.equal(row?.code, undefined, 'an unestablished deadline is not a dispatch refusal');
+  assert.match(copy(row?.actual, 'the unreadable-deadline copy'), /SQ-790/);
+  assert.match(copy(row?.actual, 'the copy'), /will not \s*guess one/);
+  assert.equal(mayExecute(unknown), false);
+  assert.equal(mandateEnded(unknown), false, 'an unproven deadline was reported as an expired one');
+  assert.equal(windowStateFor(3_000, 500, 2_000, 2_900, undefined), 'deadline-unreadable');
+  assert.equal(executionDeadline(2_000, 2_900, undefined), undefined);
+
+  // A mandate that never failed needs no window length, so the gap does not reach it.
+  assert.equal(
+    executeChecks(executeInputs({ retry: { failedAt: f(undefined), retryWindow: undefined } })).find(
+      (entry) => entry.id === 2,
+    )?.verdict,
+    'pass',
+  );
+});
+
+test('a gate assembled from two blocks is refused, in both S5 and S6', () => {
+  // §11.4 pins one B′. `Finalized<T>` carries a block and cannot compare two, so this is the
+  // half the type cannot hold — and rows read at two blocks are each true about a state that
+  // never existed, which nothing on screen distinguishes from one that did.
+  const mixedSubmit = checkSubmit(submitInputs({ intakeQueueLen: f(3, OTHER_BLOCK) }));
+  assert.deepEqual(
+    mixedSubmit.blocks.map((block) => block.check),
+    ['P-10 read pin'],
+  );
+  assert.match(copy(mixedSubmit.blocks[0]?.detail, 'the pin detail'), /mixes blocks/);
+  assert.match(copy(mixedSubmit.blocks[0]?.detail, 'the pin detail'), /Epoch\.IntakeQueue/);
+  assert.equal(maySubmit(submitInputs({ intakeQueueLen: f(3, OTHER_BLOCK) })), false);
+
+  assert.deepEqual(
+    withdrawProposalBlocks(withdrawInputs({ funder: f('FUNDER', OTHER_BLOCK) })).map((b) => b.check),
+    ['P-11 read pin'],
+  );
+
+  // S6 numbers it **0**: it is a statement about this client's reads, not a dispatch check,
+  // so it stays outside the fourteen doc 11 mirrors and carries no dispatch code.
+  const mixedExecute = executeInputs({ metersClear: f(true, OTHER_BLOCK) });
+  const rows = executeChecks(mixedExecute);
+  const pin = rows.find((row) => row.id === 0);
+  assert.equal(pin?.verdict, 'fail');
+  assert.equal(pin?.code, undefined);
+  assert.equal(pin?.terminal, false);
+  assert.match(copy(pin?.actual, 'the pin actual'), /meters_clear/);
+  assert.equal(rows.filter((row) => row.id !== 0).length, 14, 'the mirror is still fourteen rows');
+  assert.equal(mayExecute(mixedExecute), false);
+  // A nested leaf is reached too — the capability structure is not exempt from the pin.
+  assert.ok(
+    executeChecks(
+      executeInputs({
+        capability: { domainsWithinDeclared: f(true, OTHER_BLOCK), rulesAdmitClass: f(true) },
+      }),
+    ).some((row) => row.id === 0),
+  );
+  // And a clean model has no row 0 at all.
+  assert.equal(executeChecks(executeInputs()).some((row) => row.id === 0), false);
+});
+
 test('S6 renders the whole table, and a non-terminal block is not dressed as a dead one', () => {
   const entry = {
-    pid: v('7'),
-    klass: v('Code'),
-    payloadHash: v(PREIMAGE_HASH),
-    maturity: v(500),
-    graceEnd: v(2_000),
-    ratification: v('NoPassedRecord'),
-    metersClear: v(true),
+    pid: f('7'),
+    klass: f('Code'),
+    payloadHash: f(PREIMAGE_HASH),
+    maturity: f(500),
+    graceEnd: f(2_000),
+    ratification: f('NoPassedRecord'),
+    metersClear: f(true),
   };
   const html = renderToStaticMarkup(
     h(ExecutionQueue, {
       entry,
-      inputs: executeInputs({ ratification: v('NoPassedRecord') }),
+      inputs: executeInputs({ ratification: f('NoPassedRecord') }),
       onExecute: () => {},
     }),
   );
@@ -791,7 +1047,7 @@ test('S6 renders the whole table, and a non-terminal block is not dressed as a d
   const dead = renderToStaticMarkup(
     h(ExecutionQueue, {
       entry,
-      inputs: executeInputs({ ratification: v('NoPassedRecord'), now: v(2_001) }),
+      inputs: executeInputs({ ratification: f('NoPassedRecord'), now: f(2_001) }),
       onExecute: () => {},
     }),
   );
@@ -1143,8 +1399,15 @@ function reader(
       asked.push(`call:${api}:${argsHex ?? '0x'}`);
       throw new Error(`no recorded answer for ${api}`);
     },
-    async crossCheckedCall(source: { readonly api: string; readonly storagePrefix: string }) {
-      asked.push(`cross:${source.api}:${source.storagePrefix}`);
+    async crossCheckedCall(source: {
+      readonly api: string;
+      readonly storagePrefix: string;
+      readonly argsHex?: string;
+    }) {
+      asked.push(
+        `cross:${source.api}:${source.storagePrefix}` +
+          (source.argsHex === undefined ? '' : `:${source.argsHex}`),
+      );
       const answer = cross[source.api];
       if (answer === undefined) throw new Error(`no recorded answer for ${source.api}`);
       return finalize(answer, at);
@@ -1167,11 +1430,20 @@ function countingKeys(): CoreKeys & { readonly used: Set<string> } {
     gateBreachFlags: (epoch) => mark('gateBreachFlags', `k:gateBreachFlags:${epoch}`),
     executionRecords: () => mark('executionRecords', 'k:executionRecords'),
     baselineMarketOf: (epoch) => mark('baselineMarketOf', `k:baselineMarketOf:${epoch}`),
-    constitutionParamsPrefix: () => mark('constitutionParamsPrefix', 'k:params'),
+    paramsArgs: (keys) => mark('paramsArgs', `k:paramsArgs:${keys.join(',')}`),
   };
 }
 
 const KEYS: CoreKeys = countingKeys();
+
+/**
+ * The constitution keys S7 asks `params()` for.
+ *
+ * Two, and the second is never answered by the decoder below — because `params()` skips a
+ * key the constitution does not hold (13 reading rule 7), and a short answer that nothing
+ * reports is a screen claiming the missing row does not exist.
+ */
+const WANTED = { paramKeys: ['mkt.fee', 'epoch.length'] } as const;
 
 const OK = <T,>(value: T): Decoded<T> => ({ ok: true, value });
 const BAD = <T,>(reason: string): Decoded<T> => ({ ok: false, reason });
@@ -1212,21 +1484,25 @@ function decoders(patch: Partial<CoreDecoders> = {}): CoreDecoders {
           metersClear: true,
         },
       ]),
+    // The stored entry, which is where `failed_at` lives — `execution_queue()` omits it.
+    queueEntry: () => OK({ pid: '7', failedAt: undefined }),
     welfareCurrent: () => OK(WELFARE_RECORD),
     welfareSnapshot: () => OK({ epoch: 9, specVersion: 3, w1e9: 8n }),
     gateBreachFlags: () => OK({ sBreached: false, cBreached: false }),
-    paramRecord: () =>
-      OK({
-        key: 'mkt.fee',
-        value: 3_000_000n,
-        min: 0n,
-        max: 10_000_000n,
-        minNext: 1_500_000n,
-        maxNext: 6_000_000n,
-        cooldownBlocks: 201_600,
-        lastChange: 100,
-        klass: 'Param',
-      }),
+    paramViews: () =>
+      OK([
+        {
+          key: 'mkt.fee',
+          value: 3_000_000n,
+          min: 0n,
+          max: 10_000_000n,
+          minNext: 1_500_000n,
+          maxNext: 6_000_000n,
+          cooldownBlocks: 201_600,
+          lastChange: 100,
+          klass: 'Param',
+        },
+      ]),
     recentCohorts: () =>
       OK([
         {
@@ -1293,6 +1569,151 @@ test('the surfaces these readers name are the ones doc 11 §11.2 gives each scre
   assert.ok(rowFor('S5').includes('preimage flow'));
   assert.equal(SUBMIT_READS.preimageFor, 'Preimage.PreimageFor');
   assert.equal(SUBMIT_READS.preimageStatus, 'Preimage.StatusFor');
+});
+
+test('S7’s constitution rows come from params(), because the stored record has no min_next', () => {
+  // 11 §11.2's own Primary-reads column names `params()`, and 11 §11.4 rule 2 requires an
+  // exact chain read where a client computation would otherwise stand in. This reader used
+  // to read `Constitution.Params` raw and hand the bytes to a decoder asked for `min_next`,
+  // `max_next` and `cooldown_blocks` — three fields the stored record does not contain.
+  const stored = readFileSync(resolve(REPO, 'crates/constitution-core/src/lib.rs'), 'utf8');
+  const record = stored.slice(
+    stored.indexOf('pub struct ParamRecord {'),
+    stored.indexOf('impl ParamRecord {'),
+  );
+  assert.ok(record.length > 200, 'the ParamRecord slice found nothing; re-point this binding');
+  assert.match(record, /pub cooldown_epochs: u32/, 'the stored record is not what this reads');
+  for (const absent of ['min_next', 'max_next', 'cooldown_blocks']) {
+    assert.ok(
+      !record.includes(absent),
+      `${absent} is in the stored ParamRecord after all — the raw read would have been fine`,
+    );
+  }
+  // They exist only in the runtime's projection, computed from the exact interval and the
+  // live epoch length. Duplicating that in TypeScript is the computation rule 2 forbids.
+  const views = readFileSync(resolve(REPO, 'runtime/bleavit-runtime/src/views.rs'), 'utf8');
+  const params = views.slice(views.indexOf('pub fn params('), views.indexOf('pub fn nav('));
+  assert.ok(params.length > 500, 'the views.rs params slice found nothing');
+  assert.match(params, /record\.admissible_next_interval\(\)/);
+  assert.match(params, /epoch\.length/);
+  assert.match(params, /cooldown_epochs\.saturating_mul\(length\)/);
+
+  // And the client keeps no key builder for the raw prefix, so there is nothing to read it
+  // with: an injected port with no caller is how the old path would come back.
+  assert.equal(
+    Object.keys(countingKeys()).includes('constitutionParamsPrefix'),
+    false,
+    'the raw-prefix key builder is back',
+  );
+  assert.equal(WELFARE_READS.paramsApi, 'params');
+});
+
+test('S7 reads params() cross-checked against its own prefix, never the prefix alone', async () => {
+  const source = reader({
+    cross: {
+      welfare_current: { result: '0x11', witness: [] },
+      params: { result: '0x22', witness: [] },
+    },
+  });
+  const read = await readWelfare(source, KEYS, decoders(), WANTED);
+  // FE-P2: the API result admitted only alongside the storage prefix it must agree with,
+  // and the requested keys are encoded by the injected encoder rather than built here.
+  assert.ok(
+    source.asked.includes(`cross:params:${WELFARE_READS.params}:k:paramsArgs:mkt.fee,epoch.length`),
+    source.asked.join('\n'),
+  );
+  assert.ok(
+    !source.asked.some((request) => request.startsWith(`storage:${WELFARE_READS.params}`)),
+    'the raw parameter prefix was read directly',
+  );
+  // The three projected fields arrive as chain reads rather than as client arithmetic.
+  const row = read.params[0];
+  assert.equal(row?.minNext.value, 1_500_000n);
+  assert.equal(row?.maxNext.value, 6_000_000n);
+  assert.equal(row?.cooldownBlocks.value, 201_600);
+  assert.equal(row?.key.status.kind, 'verified-finalized');
+
+  // An undecodable answer is reported and leaves no rows behind, rather than half a table.
+  const broken = await readWelfare(
+    reader({
+      cross: {
+        welfare_current: { result: '0x11', witness: [] },
+        params: { result: '0x22', witness: [] },
+      },
+    }),
+    KEYS,
+    decoders({ paramViews: () => BAD('trailing bytes') }),
+    WANTED,
+  );
+  assert.deepEqual(broken.params, []);
+  assert.ok(broken.undecodable.some((entry) => entry.label === WELFARE_READS.paramsApi));
+});
+
+test('S6’s reader takes failed_at from the storage witness, paired by pid', async () => {
+  // 02 §4's `QueuedExecutionView` omits `failed_at` (SQ-791) while the frozen stored entry
+  // carries it, so the cross-check witness is read twice over. Pairing by **pid**, never by
+  // position: the API's order and the map's prefix order are different orderings of one set,
+  // and pairing by index attaches one mandate's failure stamp to another's window.
+  const twoMandates = decoders({
+    executionQueue: () =>
+      OK([
+        {
+          pid: '7',
+          klass: 'Code',
+          payloadHash: PREIMAGE_HASH,
+          maturity: 500,
+          graceEnd: 2_000,
+          cancelled: false,
+          ratification: 'Passed',
+          metersClear: true,
+        },
+        {
+          pid: '9',
+          klass: 'Param',
+          payloadHash: PREIMAGE_HASH,
+          maturity: 500,
+          graceEnd: 2_000,
+          cancelled: false,
+          ratification: 'NotRequired',
+          metersClear: true,
+        },
+      ]),
+    // The storage prefix answers in the opposite order, which is the case that matters.
+    queueEntry: (raw) =>
+      raw === '0x09' ? OK({ pid: '9', failedAt: 1_234 }) : OK({ pid: '7', failedAt: undefined }),
+  });
+  const read = await readExecutionQueue(
+    reader({
+      cross: {
+        execution_queue: {
+          result: '0xaa',
+          witness: [
+            { key: 'q9', value: '0x09' },
+            { key: 'q7', value: '0x07' },
+          ],
+        },
+      },
+    }),
+    twoMandates,
+  );
+  assert.equal(read.entries.length, 2);
+  assert.equal(read.entries[0]?.pid.value, '7');
+  assert.equal(read.entries[0]?.failedAt.value, undefined, 'a failure stamp landed on the wrong mandate');
+  assert.equal(read.entries[1]?.pid.value, '9');
+  assert.equal(read.entries[1]?.failedAt.value, 1_234);
+  assert.deepEqual(read.undecodable, []);
+
+  // A mandate the API returned and the prefix did not is reported: its deadline is not
+  // established, and a silent `None` would read as *this mandate has never failed*.
+  const halfSeen = await readExecutionQueue(
+    reader({ cross: { execution_queue: { result: '0xaa', witness: [] } } }),
+    twoMandates,
+  );
+  assert.equal(halfSeen.undecodable.length, 2);
+  assert.match(
+    copy(halfSeen.undecodable[0]?.reason, 'the unpaired-row reason'),
+    /its failed_at could not be read/,
+  );
 });
 
 test('S5’s reader distinguishes an empty queue from a queue it could not read', async () => {
@@ -1417,26 +1838,28 @@ test('S6’s queue is cross-checked against its own prefix, and gaps are reporte
 
 test('S7’s reader withholds a spec version the chain says means nothing', async () => {
   const answers: Partial<Recorded> = {
-    items: {
-      'k:gateBreachFlags:9': [{ key: 'g', value: '0x00' }],
-      'k:params': [{ key: 'p1', value: '0xaa' }, { key: 'p2' }],
+    items: { 'k:gateBreachFlags:9': [{ key: 'g', value: '0x00' }] },
+    cross: {
+      welfare_current: { result: '0x11', witness: [{ key: 's1', value: '0xbb' }] },
+      params: { result: '0x22', witness: [] },
     },
-    cross: { welfare_current: { result: '0x11', witness: [{ key: 's1', value: '0xbb' }] } },
   };
-  const available = await readWelfare(reader(answers), KEYS, decoders());
+  const available = await readWelfare(reader(answers), KEYS, decoders(), WANTED);
   assert.equal(available.activeSpecAvailable?.value, true);
   assert.equal(available.specVersion?.value, 0, 'a selected version of zero is legal');
   assert.equal(available.gateEpochSampled?.value, true);
   assert.equal(available.snapshots.length, 1);
   assert.equal(available.params.length, 1);
-  // The `params` key with no value is reported, not silently absent.
+  // A key `params()` did not answer for is reported, not silently absent: a screen showing
+  // one of two requested rows with nothing said is a screen claiming the other does not exist.
   assert.equal(available.undecodable.length, 1);
-  assert.match(copy(available.undecodable[0]?.label, 'the label'), /Constitution\.Params/);
+  assert.match(copy(available.undecodable[0]?.label, 'the label'), /^params\(epoch\.length\)$/);
 
   const unavailable = await readWelfare(
     reader(answers),
     KEYS,
     decoders({ welfareCurrent: () => OK({ ...WELFARE_RECORD, activeSpecAvailable: false }) }),
+    WANTED,
   );
   assert.equal(unavailable.activeSpecAvailable?.value, false);
   assert.equal(
@@ -1448,11 +1871,13 @@ test('S7’s reader withholds a spec version the chain says means nothing', asyn
 
 test('the gate sampling fact comes from entry presence, not from clear flags', async () => {
   const answers: Partial<Recorded> = {
-    items: { 'k:params': [] },
-    cross: { welfare_current: { result: '0x11', witness: [] } },
+    cross: {
+      welfare_current: { result: '0x11', witness: [] },
+      params: { result: '0x22', witness: [] },
+    },
   };
   // No entry at all: not sampled.
-  const unsampled = await readWelfare(reader(answers), KEYS, decoders());
+  const unsampled = await readWelfare(reader(answers), KEYS, decoders(), WANTED);
   assert.equal(unsampled.gateEpochSampled?.value, false);
   assert.equal(unsampled.sBreached?.value, false, 'the display flags are still the chain’s');
   assert.equal(gateReading(false, unsampled.gateEpochSampled?.value ?? true), 'not-sampled');
@@ -1465,6 +1890,7 @@ test('the gate sampling fact comes from entry presence, not from clear flags', a
     }),
     KEYS,
     decoders(),
+    WANTED,
   );
   assert.equal(sampled.gateEpochSampled?.value, true);
   assert.equal(gateReading(false, sampled.gateEpochSampled?.value ?? false), 'no-breach-so-far');
@@ -1473,18 +1899,27 @@ test('the gate sampling fact comes from entry presence, not from clear flags', a
 test('the gate read is keyed to the epoch the welfare view names', async () => {
   // Guessing an epoch to read would answer a question about a different one.
   const source = reader({
-    items: { 'k:params': [] },
-    cross: { welfare_current: { result: '0x11', witness: [] } },
+    cross: {
+      welfare_current: { result: '0x11', witness: [] },
+      params: { result: '0x22', witness: [] },
+    },
   });
-  await readWelfare(source, KEYS, decoders());
+  await readWelfare(source, KEYS, decoders(), WANTED);
   assert.ok(source.asked.includes('storage:k:gateBreachFlags:9:value'), source.asked.join('\n'));
 
   // With the view undecodable there is no epoch, so no keyed read is attempted at all.
   const blind = reader({
-    items: { 'k:params': [] },
-    cross: { welfare_current: { result: '0x11', witness: [] } },
+    cross: {
+      welfare_current: { result: '0x11', witness: [] },
+      params: { result: '0x22', witness: [] },
+    },
   });
-  const read = await readWelfare(blind, KEYS, decoders({ welfareCurrent: () => BAD('short read') }));
+  const read = await readWelfare(
+    blind,
+    KEYS,
+    decoders({ welfareCurrent: () => BAD('short read') }),
+    WANTED,
+  );
   assert.equal(read.gateEpochSampled, undefined);
   assert.ok(
     !blind.asked.some((request) => request.startsWith('storage:k:gateBreachFlags')),
@@ -1537,10 +1972,11 @@ test('no injected storage key is dead — every one is reached by a reader', asy
   // a real empty one. So the whole `CoreKeys` surface is exercised and counted.
   const keys = countingKeys();
   const answers: Partial<Recorded> = {
-    items: { 'k:params': [], 'k:executionRecords': [] },
+    items: { 'k:executionRecords': [] },
     cross: {
       epoch_status: { result: '0x01', witness: [] },
       welfare_current: { result: '0x11', witness: [] },
+      params: { result: '0x22', witness: [] },
       recent_cohorts: { result: '0xdd', witness: [] },
     },
   };
@@ -1548,7 +1984,7 @@ test('no injected storage key is dead — every one is reached by a reader', asy
     payloadHash: PREIMAGE_HASH,
     declaredLen: 128,
   });
-  await readWelfare(reader(answers), keys, decoders());
+  await readWelfare(reader(answers), keys, decoders(), WANTED);
   await readSettlements(reader(answers), keys, decoders());
   await readBaselineBookPresent(reader(answers), keys, 9);
 

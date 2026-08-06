@@ -306,9 +306,23 @@ export function ExecutionQueue({
       <Field label="Payload hash">
         <Identifier datum={entry.payloadHash} />
       </Field>
+      {/* `grace_end` stops being the deadline once a mandate has failed once (09 §1.2(1)),
+          so the failure stamp is rendered beside it: a window showing `grace_end` alone
+          states a deadline the chain is not enforcing. */}
       <Field label="Window">
         <BlockRef datum={entry.maturity} name="matures" />
         <BlockRef datum={entry.graceEnd} name="grace ends" />
+        {inputs.retry === undefined ? null : (
+          <Datum
+            datum={inputs.retry.failedAt}
+            name="previous failure"
+            render={(value) =>
+              value === undefined
+                ? 'none — grace_end is the deadline'
+                : `block ${value}; the deadline is that block plus RETRY_WINDOW, not grace_end`
+            }
+          />
+        )}
       </Field>
       <Field label="Ratification">
         <Phrase datum={entry.ratification} />
@@ -324,7 +338,11 @@ export function ExecutionQueue({
       {/* The whole table, passing rows included: this is expected-against-actual for all
           fourteen checks (INV-FE-14), not a list of complaints. */}
       <DataTable
-        caption="The fourteen checks execute performs at dispatch"
+        caption={
+          rows.some((row) => row.id === 0)
+            ? 'The fourteen checks execute performs at dispatch, and row 0 — this client’s own reads, which came from more than one block'
+            : 'The fourteen checks execute performs at dispatch'
+        }
         headers={['#', 'Check', 'Verdict', 'Expected', 'Actual']}
         rows={rows.map((row) => ({
           key: `check-${row.id}`,
@@ -354,7 +372,9 @@ export function ExecutionQueue({
       {blocking.length > 0 && !ended ? (
         <Notice severity="info" heading="This mandate is blocked, not finished">
           Nothing above ends it. The proposal stays queued and can be executed by anyone as
-          soon as the blocking conditions clear, up to the end of its grace window.
+          soon as the blocking conditions clear, up to the deadline shown in the window row
+          above — which is the retry deadline rather than the grace window once this mandate
+          has failed once.
         </Notice>
       ) : null}
 
