@@ -1106,6 +1106,14 @@ test('a sealed proposal does render its statistics', () => {
   assert.equal(view.decisionStats.upliftPpm.value, 12_500n);
 });
 
+/**
+ * The injected `decision_stats(pid)` argument encoder.
+ *
+ * A stub, because the real one lives in `chain-client` (only that package may encode
+ * SCALE). What matters for these two tests is that the reader is handed one at all.
+ */
+const STATS_ARGS = { decisionStats: (pid: string) => `0x${pid}` };
+
 test('the proposal list is cross-checked against its own storage prefix (FE-P2)', async () => {
   const pin: FinalizedBlockRef = { chain: TEST_CHAIN, blockHash: '0xbeef', blockNumber: 42 };
   let asked: { api: string; storagePrefix: string } | undefined;
@@ -1118,14 +1126,21 @@ test('the proposal list is cross-checked against its own storage prefix (FE-P2)'
         pin,
       );
     },
+    async call() {
+      return finalize('0x00', pin);
+    },
   };
-  const read = await readProposals(reader, {
-    proposals: (raw) => ({
-      ok: true,
-      value: raw.map((hex, i) => ({ id: String(i), title: hex, klass: 'P', state: 'Settled' })),
-    }),
-    decisionStats: () => ({ ok: true, value: undefined }),
-  });
+  const read = await readProposals(
+    reader,
+    {
+      proposals: (raw) => ({
+        ok: true,
+        value: raw.map((hex, i) => ({ id: String(i), title: hex, klass: 'P', state: 'Settled' })),
+      }),
+      decisionStats: () => ({ ok: true, value: undefined }),
+    },
+    STATS_ARGS,
+  );
   // The API and the prefix are paired by the reader, never by this call site — satisfying
   // one domain's view with the other's keys is what would make the check vacuous.
   assert.deepEqual(asked, { api: PROPOSAL_READS.summaries, storagePrefix: PROPOSAL_READS.proposals });
@@ -1142,14 +1157,21 @@ test('a prefix key with no value is reported, never silently dropped', async () 
     async crossCheckedCall() {
       return finalize({ result: '0x00', witness: [{ key: 'k1', value: '0xaa' }, { key: 'k2' }] }, pin);
     },
+    async call() {
+      return finalize('0x00', pin);
+    },
   };
-  const read = await readProposals(reader, {
-    proposals: (raw) => ({
-      ok: true,
-      value: raw.map((hex, i) => ({ id: String(i), title: hex, klass: 'P', state: 'Settled' })),
-    }),
-    decisionStats: () => ({ ok: true, value: undefined }),
-  });
+  const read = await readProposals(
+    reader,
+    {
+      proposals: (raw) => ({
+        ok: true,
+        value: raw.map((hex, i) => ({ id: String(i), title: hex, klass: 'P', state: 'Settled' })),
+      }),
+      decisionStats: () => ({ ok: true, value: undefined }),
+    },
+    STATS_ARGS,
+  );
   assert.equal(read.summaries.length, 1);
   assert.equal(read.undecodable.length, 1);
   const missing = read.undecodable[0];

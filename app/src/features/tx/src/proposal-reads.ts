@@ -2,6 +2,18 @@
  * S2's reads — `Epoch.Proposals` and `proposal_summaries()` / `decision_stats()` into the
  * models `proposals.tsx` renders.
  *
+ * ## The second read was declared and never performed (F7b)
+ *
+ * `decision_stats` was named in `PROPOSAL_READS`, decoded by `ProposalDecoders` and ruled
+ * on by `viewFor` — and **nothing called it**. Every consequence of that was silent: the
+ * `decided` arm of `ProposalView` was constructible only by hand, `ProposalDetail`'s
+ * finalized-statistics panel could not be populated by any read, and `viewFor`'s anomaly
+ * branch had no path that could emit it. A green suite said nothing about any of it,
+ * because the tests that exercised those paths built their own fixtures.
+ *
+ * The fetch below closes it, and *which* proposals it asks about is the load-bearing
+ * choice — see `STATS_WORTH_ASKING`.
+ *
  * ## `decision_stats` is gated on the proposal's own state, not only on its presence
  *
  * 11 §11.2: *"S2 MAY render it only as finalized decision statistics; while a proposal
@@ -49,6 +61,16 @@ export interface ProposalRecord {
 
 export interface StatsRecord {
   readonly outcome: string;
+  /**
+   * The measured uplift in **parts per million**, which is a projection the decoder owes.
+   *
+   * Every fixed-point field of 02 §4's `DecisionStatsView` is on the contract's **1e9**
+   * grid, and `Ratio` renders parts per million (`formatPpm` divides by 10,000 to reach a
+   * percentage). A decoder that handed a 1e9-grid scalar straight through would therefore
+   * put a figure on screen **1,000× too large**, under a `verified-finalized` badge and
+   * with every other row correct — so the projection is named in the field and stated
+   * here rather than left to the call site.
+   */
   readonly upliftPpm: bigint;
 }
 
@@ -57,6 +79,20 @@ export interface ProposalDecoders {
   readonly proposals: (raw: readonly string[]) => Decoded<readonly ProposalRecord[]>;
   /** `decision_stats(pid)`; `undefined` for the runtime's `None`, which is not a failure. */
   readonly decisionStats: (raw: string) => Decoded<StatsRecord | undefined>;
+}
+
+/**
+ * SCALE encoding for the one runtime-API argument this screen passes.
+ *
+ * Injected for the reason every decoder here is injected: `packages/chain-client` is the
+ * only package permitted to import `polkadot-api` (10 §10.1, app-code rule 13). A
+ * hand-rolled `u64` little-endian encoder in this package would be a second codec nothing
+ * gates — and a wrong argument does not fail, it asks about **a different proposal** and
+ * gets a perfectly valid answer.
+ */
+export interface ProposalArgs {
+  /** `decision_stats(pid)`'s argument, hex-encoded. */
+  decisionStats(proposalId: string): string;
 }
 
 /** The frozen 02 §7/§3 surfaces this screen reads. */
@@ -92,6 +128,33 @@ const STATS_REQUIRE_SEALED: ReadonlySet<string> = new Set([
   'MandateExpired',
 ]);
 
+/**
+ * The states for which `decision_stats(pid)` is worth asking about at all.
+ *
+ * Not the same set as {@link STATS_REQUIRE_SEALED}, and the difference is the whole reason
+ * this constant exists rather than the reader reusing the allowlist.
+ *
+ * Asking only about sealed proposals is the obvious implementation and it makes
+ * `viewFor`'s anomaly branch **unreachable from a real read** — a `Some` returned for a
+ * `Trading` proposal is precisely the contradiction that branch exists to report, and a
+ * client that never asks can never see it. That is the defect shape this repository keeps
+ * finding: a refusal with no path that can emit it, indistinguishable under a green run
+ * from one that never fires.
+ *
+ * So the open-trading states are asked about too. The runtime answers `None` for them
+ * (02 §3), which costs one bounded call and buys the only detection there is. What is
+ * skipped is the pre-market states, where the question is not merely expected to be `None`
+ * but is meaningless — no window has opened, so neither a `Some` nor a `None` says
+ * anything, and an unknown state from a newer runtime falls here and renders no statistics
+ * either way (INV-FE-12, enforced by `viewFor`'s allowlist regardless of what was fetched).
+ *
+ * The whole set is bounded by `Epoch::MaxLiveProposals` (02 §9), so the call count is too.
+ */
+const STATS_WORTH_ASKING: ReadonlySet<string> = new Set([
+  ...STATS_REQUIRE_SEALED,
+  ...OPEN_TRADING_STATES,
+]);
+
 /** Chain state the client read but cannot reconcile. Reported, never silently resolved. */
 export interface ProposalAnomaly {
   readonly proposalId: string;
@@ -100,6 +163,14 @@ export interface ProposalAnomaly {
 
 export interface ProposalsRead {
   readonly summaries: readonly ProposalSummary[];
+  /**
+   * One `ProposalView` per summary, in the same order — what `ProposalDetail` renders.
+   *
+   * This is the field the screen needs and the one the reader could not produce until the
+   * `decision_stats` fetch existed: `ProposalView`'s `decided` arm was reachable only from
+   * a hand-built fixture, so `ProposalDetail`'s dashboard was a panel no read could fill.
+   */
+  readonly views: readonly ProposalView[];
   readonly undecodable: readonly { readonly label: string; readonly rawHex: string; readonly reason: string }[];
   readonly anomalies: readonly ProposalAnomaly[];
 }
@@ -146,11 +217,12 @@ export function viewFor(
 }
 
 /**
- * Read S2's proposal list at the reader's pinned block.
+ * Read S2's proposal list **and its decision statistics** at the reader's pinned block.
  *
- * The API result is taken through `crossCheckedCall`, which pairs `proposal_summaries` with
- * its own storage prefix — FE-P2's conservative default (10 §4.2), and the reason the
- * prefix is not a caller-supplied argument.
+ * The list is taken through `crossCheckedCall`, which pairs `proposal_summaries` with its
+ * own storage prefix — FE-P2's conservative default (10 §4.2), and the reason the prefix
+ * is not a caller-supplied argument. The statistics are a plain call per proposal, for the
+ * reason given on `ProposalsReader.call`.
  */
 /**
  * What this function needs from a reader: one pin, and the FE-P2 cross-checked call.
@@ -168,11 +240,27 @@ export interface ProposalsReader {
     readonly storagePrefix: string;
     readonly argsHex?: string;
   }): Promise<Finalized<{ readonly result: string; readonly witness: readonly StorageItem[] }>>;
+  /**
+   * A plain runtime-API result, taking the **full** method name (`FutarchyApi_…`).
+   *
+   * `decision_stats` is not cross-checked and that is deliberate rather than an omission.
+   * FE-P2's conservative rule pairs an *aggregate over storage* with the prefix it
+   * aggregates (02 §3), and this view has no such prefix: it is computed from sealed
+   * decision windows, so there is nothing to re-derive it from. It is also not a
+   * transaction-path input — it is finalized statistics, and 11 §11.2 forbids any action
+   * being derived from it at all.
+   *
+   * The name is passed whole because `FinalizedReader.call` does not prefix while
+   * `crossCheckedCall` does; a port that hid the difference would compile against a reader
+   * that then calls a method the runtime does not have.
+   */
+  call(api: string, argsHex?: string): Promise<Finalized<string>>;
 }
 
 export async function readProposals(
   reader: ProposalsReader,
   decoders: ProposalDecoders,
+  args: ProposalArgs,
 ): Promise<ProposalsRead> {
   const at = reader.at;
   const finalized = <T,>(value: T): Verified<T> => ({
@@ -208,6 +296,7 @@ export async function readProposals(
   if (!decoded.ok) {
     return {
       summaries: [],
+      views: [],
       undecodable: [
         ...emptyKeys,
         {
@@ -220,14 +309,59 @@ export async function readProposals(
     };
   }
 
-  return {
-    summaries: decoded.value.map((record) => ({
-      id: finalized(record.id),
-      title: finalized(record.title),
-      klass: finalized(record.klass),
-      state: finalized(record.state),
-    })),
-    undecodable: emptyKeys,
-    anomalies: [],
-  };
+  const summaries: ProposalSummary[] = decoded.value.map((record) => ({
+    id: finalized(record.id),
+    title: finalized(record.title),
+    klass: finalized(record.klass),
+    state: finalized(record.state),
+  }));
+
+  // The second read: `decision_stats(pid)` for every proposal whose state makes the
+  // question meaningful (see `STATS_WORTH_ASKING`). Both reads are served by one reader,
+  // so both are at one pinned block — which is what lets `viewFor` treat a `Some` on an
+  // open market as a genuine contradiction rather than a race.
+  const undecodable = [...emptyKeys];
+  const anomalies: ProposalAnomaly[] = [];
+  const views: ProposalView[] = [];
+
+  for (const summary of summaries) {
+    let stats: DecisionStats | undefined;
+
+    if (STATS_WORTH_ASKING.has(summary.state.value)) {
+      const label = `${PROPOSAL_READS.decisionStats}(${summary.id.value})`;
+      let raw: string | undefined;
+      try {
+        raw = (await reader.call(
+          `FutarchyApi_${PROPOSAL_READS.decisionStats}`,
+          args.decisionStats(summary.id.value),
+        )).value;
+      } catch (error) {
+        // A failed call is not a `None`. Collapsing the two would render "no statistics
+        // yet" for a decided proposal whose read failed — a confident statement about
+        // chain state the client never obtained (INV-FE-12).
+        undecodable.push({
+          label,
+          rawHex: '0x',
+          reason: `the runtime call failed: ${error instanceof Error ? error.message : String(error)}`,
+        });
+      }
+
+      if (raw !== undefined) {
+        const stated = decoders.decisionStats(raw);
+        if (!stated.ok) undecodable.push({ label, rawHex: raw, reason: stated.reason });
+        else if (stated.value !== undefined) {
+          stats = {
+            outcome: finalized(stated.value.outcome),
+            upliftPpm: finalized(stated.value.upliftPpm),
+          };
+        }
+      }
+    }
+
+    const decided = viewFor(summary, stats);
+    views.push(decided.view);
+    if (decided.anomaly !== undefined) anomalies.push(decided.anomaly);
+  }
+
+  return { summaries, views, undecodable, anomalies };
 }
