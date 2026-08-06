@@ -22,18 +22,38 @@
  * this package cannot afford one. A Dexie `rw` transaction removes the choice: both tables
  * commit or neither does, so neither ordering exists.
  *
- * ## Events are stored for every block; rows only where the user is
+ * ## What is stored per block, after 10 §9.1's ruling
  *
- * §6.5's cost claim lives in the *caller* — `needsBodyFetch` decides whether bodies were
- * fetched at all — so by the time a write arrives, `rows` is already empty for a block the
- * user never touched. This module does not re-decide that; it would be a second, weaker copy
- * of a rule that already has one home.
+ * The heading here used to read *"events are stored for every block"*, and §9.1 withdrew that:
+ * *"the local index retains **only events attributing to the user's watched accounts**"*, because
+ * at the chain-permitted `Traded` ceiling the 15 % events share holds about 6.7 h desktop of
+ * chain-wide rows. Three things now land per block and each has a different rule:
+ *
+ * - **Events** — only those naming a watched account, chosen by the loop (which holds the
+ *   watched set) and passed here as `retainedEvents`.
+ * - **Rows** — only where the user has an extrinsic. §6.5's cost claim lives in the *caller*
+ *   (`needsBodyFetch` decides whether a body was fetched at all), so by the time a write arrives
+ *   `rows` is already empty for a block the user never touched. This module does not re-decide
+ *   it; that would be a second, weaker copy of a rule with one home.
+ * - **Candle aggregates** — **chain-wide**, because §9.1's sentence has two halves and this is
+ *   the one that makes discarding the rows honest: *"chain-wide `Traded` is consumed into the
+ *   candle aggregates as it is scanned and never stored row-by-row"*. Merged into the stored
+ *   bucket rather than written over it, and skipped for a block the stored bar already spans, so
+ *   a replay neither double-counts nor rewrites.
  */
 
+import { candleCoversBlock, mergeCandle, type Candle } from './candles.js';
 import type { HeaderSource } from './coverage.js';
 import { bodyProvenance } from './ingest.js';
 import type { BlockWrite } from './loop.js';
-import { LocalIndex, StoreError, type StoredEvent, type StoredTxRow } from './store.js';
+import {
+  LocalIndex,
+  StoreError,
+  candleTableFor,
+  rawEventId,
+  type StoredEvent,
+  type StoredTxRow,
+} from './store.js';
 
 /**
  * How an attributed row becomes a `StoredTxRow`.
@@ -106,20 +126,45 @@ export function storeWriter(
     // the index would fill its share within a working day and then evict the user's own history
     // to keep storing strangers' trades. §9.2: *"a chain-wide trade tape is a bounded windowed
     // read, never a retained table."*
-    const events: StoredEvent[] = write.retainedEvents.map(({ event, index }) => ({
-      id: `${write.blockNumber}:${index}`,
-      blockNumber: write.blockNumber,
-      ...encodeEvent(write, event, index),
-      ...provenance,
-    }));
+    const events: StoredEvent[] = write.retainedEvents.map(({ event, index }) => {
+      // The same symmetric check the rows below get, and it was missing here. `index` is the
+      // event's position **in the scan** and it becomes the stored row's primary key, so a
+      // caller that numbered the retained list instead — the exact mistake `RetainedEvent`'s own
+      // comment warns about — writes rows under ids that shift when the watched set changes, and
+      // a replay then stores a second copy of history beside the first. The scan is right here;
+      // trusting the number without asking it is trusting one of two records that must agree.
+      if (write.scan.events[index] !== event) {
+        throw new StoreError(
+          `block ${write.blockNumber} retained an event claiming scan index ${index}, where the ` +
+            'scan carries a different event (or none). The id `${block}:${index}` is derived from ' +
+            'this number, so a wrong one makes the row id a function of what the caller filtered ' +
+            'rather than of the block — and 10 §6.5 requires ingest writes to be replay-idempotent.',
+        );
+      }
+      const payload = encodeEvent(write, event, index);
+      const identity = { id: `${write.blockNumber}:${index}`, blockNumber: write.blockNumber };
+      // An encoder may report a single event as undecodable, and such a row is a pending-decoder
+      // row exactly like a whole-block raw one — so it carries `pendingBlock` too, or 10 §9.1's
+      // bound cannot reach it and `pendingRawRows` refuses the whole pass rather than quietly
+      // bounding a subset.
+      return payload.decoded
+        ? { ...identity, ...payload, ...provenance }
+        : { ...identity, ...payload, pendingBlock: write.blockNumber, ...provenance };
+    });
 
     // §6.5's raw row. A block whose era metadata was unavailable stores its `System.Events`
-    // bytes under the same deterministic key shape, so a later pass that obtains the metadata
-    // replaces the row rather than adding a second copy of it.
+    // bytes under a deterministic key, so a later pass that obtains the metadata is idempotent.
+    //
+    // `pendingBlock` is the row's own block number and is present **only** on a raw row, which
+    // makes it a sparse index: `orderBy('pendingBlock')` enumerates exactly the pending set,
+    // oldest first, without a table scan. A boolean cannot do that job — it is not a valid
+    // IndexedDB key, so a `decoded` index would hold nothing and answer zero (see
+    // `pendingDecoderCount`).
     if (write.scan.pendingDecode !== undefined) {
       events.push({
-        id: `${write.blockNumber}:raw`,
+        id: rawEventId(write.blockNumber),
         blockNumber: write.blockNumber,
+        pendingBlock: write.blockNumber,
         pallet: PENDING_DECODE_PALLET,
         name: PENDING_DECODE_NAME,
         decoded: false,
@@ -152,13 +197,55 @@ export function storeWriter(
       };
     });
 
-    // One transaction over all three tables. Both commit or neither does, so the unsafe
-    // ordering — coverage ahead of its rows — has no way to occur.
-    await db.transaction('rw', db.events, db.txHistory, db.meta, async () => {
-      if (events.length > 0) await db.events.bulkPut(events);
-      if (rows.length > 0) await db.txHistory.bulkPut(rows);
-      await db.meta.put({ key: 'coverage', coverage: write.coverageAfter });
-    });
+    // One transaction over every table this block touches. All commit or none does, so the
+    // unsafe ordering — coverage ahead of its rows — has no way to occur, and §9.1's aggregate
+    // can never summarise a block the coverage does not claim.
+    const aggregateTables = new Set(
+      write.tradeAggregates.map((candle) => candleTableFor(candle.resolution)),
+    );
+    await db.transaction(
+      'rw',
+      [db.events, db.txHistory, db.meta, ...[...aggregateTables].map((name) => db.table(name))],
+      async () => {
+        if (events.length > 0) await db.events.bulkPut(events);
+        if (rows.length > 0) await db.txHistory.bulkPut(rows);
+
+        // **The raw row is retired the moment the block decodes.** It used to be left behind:
+        // a re-ingest with the era's metadata wrote the decoded rows under `${block}:${index}`
+        // and never touched `${block}:raw`, so §6.5's "N events pending decoder" count could
+        // only ever rise, the block's events were stored twice, and the comment above the write
+        // claimed the opposite. Deleted in the same transaction as the decoded rows, because
+        // the two are one fact: a crash between them leaves the block counted as pending while
+        // its events are already readable.
+        if (write.scan.pendingDecode === undefined) {
+          await db.events.delete(rawEventId(write.blockNumber));
+        }
+
+        // §9.1's scan-time aggregate — read-modify-write, never a bare `put`.
+        //
+        // A `put` here would make each block's bar replace the bucket's, so a bucket would only
+        // ever describe its last block. And a block the stored bar already spans is **skipped**
+        // rather than merged: §6.5 requires ingest writes to be idempotent under replay, and an
+        // accumulator has no deterministic primary key to lean on — re-folding block N would add
+        // its fills a second time. The skip is conservative in the one direction that matters
+        // (it can only undercount a hole later backfilled inside an existing span, never
+        // double-count), which is the disposal SQ-762 records.
+        for (const candle of write.tradeAggregates) {
+          const table = db.table<Candle, [string, string, number]>(
+            candleTableFor(candle.resolution),
+          );
+          const existing = await table.get([candle.bookId, candle.sourceKey, candle.openAt]);
+          if (existing === undefined) {
+            await table.put(candle);
+            continue;
+          }
+          if (candleCoversBlock(existing, write.blockNumber)) continue;
+          await table.put(mergeCandle(existing, candle));
+        }
+
+        await db.meta.put({ key: 'coverage', coverage: write.coverageAfter });
+      },
+    );
   };
 }
 

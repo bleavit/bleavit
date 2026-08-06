@@ -40,6 +40,7 @@
  * function of the *header's* origin here and takes no argument that could override it.
  */
 
+import type { BlockTradeFill } from './candles.js';
 import type { RangeOrigin } from './coverage.js';
 
 /** Where in a block's execution an event was emitted. */
@@ -59,6 +60,19 @@ export interface IndexedEvent {
    * user does not watch, and the two must not collapse into one branch.
    */
   readonly accounts: readonly string[];
+  /**
+   * 02 §5's `Traded` payload, for the one event 10 §9.1 folds into the candle aggregates.
+   *
+   * Supplied by the caller's decoder for the same reason `accounts` is: `local-index` may not
+   * import the chain SDK (10 §10.2), so a field of a decoded event reaches this package as a
+   * value or not at all.
+   *
+   * **Present exactly on `Market.Traded` and nowhere else**, checked in both directions by
+   * `tradedFills`. A missing payload on a `Traded` event silently drops a fill from the
+   * aggregate — the understating failure, invisible on a chart — and a payload on any other
+   * event puts a number that is not `p_after` into a price series.
+   */
+  readonly trade?: BlockTradeFill | undefined;
 }
 
 export interface FinalizedBlockScan {
@@ -73,6 +87,20 @@ export interface FinalizedBlockScan {
   readonly hash: string;
   /** The runtime `spec_version` this block ran under — §6.3's spec-version-at-edge. */
   readonly specVersion: number;
+  /**
+   * The block's own timestamp, in milliseconds — `pallet_timestamp`'s `Moment` unit.
+   *
+   * **Required, and it is a fact about the chain rather than about this device.** 10 §9.2's
+   * candle buckets are aligned to the epoch so two clients agree on boundaries, which is only
+   * true when the instant folded into a bucket is the block's. Taken from `Date.now()` at scan
+   * time the alignment is exact and meaningless: two clients bucket one trade into different
+   * hours and each shows the other a candle with the same name and a different body.
+   *
+   * Required rather than optional because §9.1's scan-time aggregation has no other source for
+   * it, and an optional bucket key is an aggregation that silently does not happen — the
+   * defaults-off shape this client refuses for hash functions and integrity checks alike.
+   */
+  readonly blockTimestampMs: number;
   /**
    * §6.5's raw-row path, and it is deliberately **not** the same thing as a bad blob.
    *
@@ -135,6 +163,70 @@ const CORRELATION_ONLY: ReadonlySet<string> = new Set([
 
 function isAttributing(event: IndexedEvent): boolean {
   return !CORRELATION_ONLY.has(`${event.pallet}.${event.name}`);
+}
+
+/**
+ * The one event 10 §9.1 folds into the candle aggregates, under 02 §5's frozen name.
+ *
+ * §9.1: *"Chain-wide `Traded` is consumed into the candle aggregates as it is scanned and never
+ * stored row-by-row"*. 02 §5 freezes the minimal ingest set as `Traded` + `Observed` and gives
+ * `Traded.p_after` as the post-trade instantaneous price; the observation stream feeds the raw
+ * `priceSamples` tier §9.1's own row-rate model sizes. Whether the two belong in one series is
+ * SQ-762 — this constant folds only the event the sentence names.
+ */
+export const TRADED_EVENT = 'Market.Traded';
+
+/**
+ * The `Traded` fills in a scanned block, in chain order.
+ *
+ * **Chain-wide, not watched-account-filtered**, and that is the whole of §9.1's ruling: the
+ * aggregate is what survives *because* the rows do not. Filtering here would make the candle
+ * series a summary of the user's own trading rather than of the book, which is a different and
+ * much smaller claim wearing the same label.
+ *
+ * The payload/name binding is checked in **both** directions. A `Traded` event with no payload
+ * drops a fill from the bar with nothing reporting it — a chart is the one surface where a
+ * missing input looks exactly like a quiet market. A payload on any other event puts a number
+ * that is not `p_after` into a price series.
+ */
+export function tradedFills(scan: FinalizedBlockScan): readonly BlockTradeFill[] {
+  const fills: BlockTradeFill[] = [];
+  scan.events.forEach((event, eventIndex) => {
+    const isTraded = `${event.pallet}.${event.name}` === TRADED_EVENT;
+    if (!isTraded) {
+      if (event.trade !== undefined) {
+        throw new IngestError(
+          `block ${scan.number} event ${eventIndex} is ${event.pallet}.${event.name} and carries ` +
+            `a ${TRADED_EVENT} payload; 02 §5 gives p_after to Traded alone, so this would fold ` +
+            'a number that is not a post-trade price into a price series',
+        );
+      }
+      return;
+    }
+    const trade = event.trade;
+    if (trade === undefined) {
+      throw new IngestError(
+        `block ${scan.number} event ${eventIndex} is ${TRADED_EVENT} and carries no fill; a ` +
+          'dropped fill understates the bar with nothing reporting it, and on a chart a missing ' +
+          'input is indistinguishable from a quiet market',
+      );
+    }
+    if (typeof trade.bookId !== 'string' || trade.bookId === '') {
+      throw new IngestError(`block ${scan.number} event ${eventIndex} names no book`);
+    }
+    if (typeof trade.price1e9 !== 'bigint') {
+      throw new IngestError(
+        `block ${scan.number} event ${eventIndex} carries a non-integer p_after; 02 §5 publishes ` +
+          'it on the 1e9 grid, and a JS number past 2^53 folds as its rounded value with nothing thrown',
+      );
+    }
+    // The index is the event's position in **this scan**, so two fills in one block order the
+    // way the chain emitted them. Supplied rather than trusted from the payload for the same
+    // reason `RetainedEvent.index` is: a caller-numbered index is a function of what the caller
+    // filtered, not of the block.
+    fills.push({ bookId: trade.bookId, price1e9: trade.price1e9, eventIndex });
+  });
+  return fills;
 }
 
 /**

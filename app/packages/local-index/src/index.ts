@@ -16,6 +16,7 @@
 // below because callers of `runIngest` have to name it — a type cannot mint anything.
 export {
   addRange,
+  asSharedCoverageRange,
   boundarySet,
   covered,
   holesIn,
@@ -53,4 +54,5 @@ export * from './loop-store.js';
 export * from './ingest-lock.js';
 export * from './store.js';
 export * from './quota.js';
+export * from './tape.js';
 export * from './boot.js';

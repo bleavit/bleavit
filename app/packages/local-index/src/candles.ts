@@ -297,36 +297,79 @@ export function foldCandles(
   samples: readonly PriceSample[],
   resolution: Exclude<Resolution, 'raw'>,
 ): readonly Candle[] {
+  return foldPoints(
+    samples.map((sample) => {
+      if (!Number.isInteger(sample.at) || sample.at < 0) {
+        throw new CandleError(`sample for ${sample.bookId} carries a non-integer timestamp`);
+      }
+      if (!Number.isInteger(sample.blockNumber) || sample.blockNumber < 0) {
+        throw new CandleError(`sample for ${sample.bookId} carries a non-integer block number`);
+      }
+      assertProvenance(sample, `sample for ${sample.bookId}`);
+      // A stored sample carries no position inside its block: `priceSamples` is keyed
+      // `[bookId+sourceKey+blockNumber]`, so one book has at most one raw row per block and
+      // there is nothing to order within one. `0` is therefore the true value, not a filler.
+      return { ...sample, order: 0 };
+    }),
+    resolution,
+  );
+}
+
+/**
+ * One point on a book's price series, with everything an OHLC fold needs to order it.
+ *
+ * `order` exists because two prices can share a block. A raw `priceSamples` row cannot (the
+ * primary key forbids it), but a block's `Traded` fills can and routinely do — and open/close
+ * are the two fields an ordering mistake corrupts *plausibly*: an inverted candle is a bar
+ * pointing the other way, not an error.
+ */
+interface FoldPoint extends SourceKeyed {
+  readonly bookId: string;
+  readonly at: number;
+  readonly blockNumber: number;
+  readonly order: number;
+  readonly price1e9: bigint;
+}
+
+/**
+ * The fold both producers share — the raw-sample ladder and the scan-time trade aggregate.
+ *
+ * One implementation rather than two, because the part that is easy to get subtly wrong is the
+ * **ordering**, and two copies would be two orderings that agree until one is edited. Open and
+ * close are decided by `(at, blockNumber, order)` and never by array order: a caller handing
+ * rows in the order IndexedDB returned them — or an ingest loop backfilling newest-first, which
+ * §6.4 requires — would otherwise invert every candle it produced.
+ */
+function foldPoints(
+  points: readonly (FoldPoint & SampleProvenance)[],
+  resolution: Exclude<Resolution, 'raw'>,
+): readonly Candle[] {
   // Grouped by book, then by provenance, then by bucket — three nested maps rather than a
   // joined string key. A composite string key needs a separator that cannot occur in a book id
   // or a provider id, and every choice of separator is a guess about identifiers this module
   // does not own: get it wrong and two books, or two providers, silently share a candle, which
-  // is the one thing `foldCandles` must never do.
-  const byBook = new Map<string, Map<string, Map<number, PriceSample[]>>>();
-  for (const sample of samples) {
-    if (!Number.isInteger(sample.at) || sample.at < 0) {
-      throw new CandleError(`sample for ${sample.bookId} carries a non-integer timestamp`);
-    }
-    if (!Number.isInteger(sample.blockNumber) || sample.blockNumber < 0) {
-      throw new CandleError(`sample for ${sample.bookId} carries a non-integer block number`);
-    }
-    assertProvenance(sample, `sample for ${sample.bookId}`);
-    const bySource = byBook.get(sample.bookId) ?? new Map<string, Map<number, PriceSample[]>>();
-    byBook.set(sample.bookId, bySource);
-    const key = provenanceKey(sample);
-    const buckets = bySource.get(key) ?? new Map<number, PriceSample[]>();
+  // is the one thing this fold must never do.
+  const byBook = new Map<string, Map<string, Map<number, (FoldPoint & SampleProvenance)[]>>>();
+  for (const point of points) {
+    const bySource =
+      byBook.get(point.bookId) ?? new Map<string, Map<number, (FoldPoint & SampleProvenance)[]>>();
+    byBook.set(point.bookId, bySource);
+    const key = provenanceKey(point);
+    const buckets = bySource.get(key) ?? new Map<number, (FoldPoint & SampleProvenance)[]>();
     bySource.set(key, buckets);
-    const openAt = bucketStart(sample.at, resolution);
+    const openAt = bucketStart(point.at, resolution);
     const bucket = buckets.get(openAt);
-    if (bucket) bucket.push(sample);
-    else buckets.set(openAt, [sample]);
+    if (bucket) bucket.push(point);
+    else buckets.set(openAt, [point]);
   }
 
   const out: Candle[] = [];
   for (const [bookId, bySource] of byBook) {
     for (const [, buckets] of bySource) {
       for (const [openAt, bucket] of buckets) {
-        const ordered = [...bucket].sort((a, b) => (a.at === b.at ? a.blockNumber - b.blockNumber : a.at - b.at));
+        const ordered = [...bucket].sort(
+          (a, b) => a.at - b.at || a.blockNumber - b.blockNumber || a.order - b.order,
+        );
         const first = ordered[0];
         const last = ordered[ordered.length - 1];
         if (first === undefined || last === undefined) continue;
@@ -334,11 +377,11 @@ export function foldCandles(
         let low = first.price1e9;
         let fromBlock = first.blockNumber;
         let toBlock = first.blockNumber;
-        for (const sample of ordered) {
-          if (sample.price1e9 > high) high = sample.price1e9;
-          if (sample.price1e9 < low) low = sample.price1e9;
-          if (sample.blockNumber < fromBlock) fromBlock = sample.blockNumber;
-          if (sample.blockNumber > toBlock) toBlock = sample.blockNumber;
+        for (const point of ordered) {
+          if (point.price1e9 > high) high = point.price1e9;
+          if (point.price1e9 < low) low = point.price1e9;
+          if (point.blockNumber < fromBlock) fromBlock = point.blockNumber;
+          if (point.blockNumber > toBlock) toBlock = point.blockNumber;
         }
         out.push({
           bookId,
@@ -358,6 +401,150 @@ export function foldCandles(
     }
   }
   return out.sort(byBookThenBucket);
+}
+
+/**
+ * The rung the scan-time trade aggregate is written at — 10 §9.1, §9.2.
+ *
+ * §9.1 rules that *"chain-wide `Traded` is consumed into the candle aggregates as it is scanned
+ * and never stored row-by-row"* and names no table. `candles1h` is the only rung that follows
+ * from what the section does say: §9.2's ladder is `raw → candles1h → candles4h → candles1d`,
+ * so `candles1h` is the finest table the aggregate can occupy, and writing it any coarser would
+ * destroy resolution the client held at the moment it held it — the one thing the ladder is
+ * ordered to avoid. The remaining freedom is a **spec question** (SQ-762), and this is the
+ * reading that cannot overstate: no finer bar than the data supports, and no series merged into
+ * another's.
+ */
+export const SCAN_AGGREGATE_RESOLUTION: Exclude<Resolution, 'raw'> = 'candles1h';
+
+/**
+ * One `Traded` fill, reduced to what an aggregate needs — 02 §5's frozen event.
+ *
+ * The price is **`p_after`**, which 02 §5 defines as *"the post-trade instantaneous `p_L`"* on
+ * the 1e9 grid. It is not `Observed.o_t`: §9.1's sentence names `Traded` and nothing else, and
+ * §9.1's own row-rate model derives the `priceSamples` tier from the observation grid
+ * (*"observations 1 per `mkt.obs_interval` = 10 blocks per trading book"*). Whether the two
+ * belong in one series is SQ-762; folding only the one the section names is the reading that
+ * cannot overstate, because merging them would publish a bar describing neither.
+ */
+export interface BlockTradeFill {
+  readonly bookId: string;
+  /** 02 §5's `p_after`, 1e9-grid. */
+  readonly price1e9: bigint;
+  /** The fill's position in the block's event list — chain order, which decides open and close. */
+  readonly eventIndex: number;
+}
+
+/**
+ * Fold one finalized block's `Traded` fills into candle contributions — 10 §9.1's scan-time
+ * aggregation.
+ *
+ * Per **block**, because that is the unit the ingest loop commits: the contribution and the
+ * block's coverage advance land in one transaction, so a crash cannot leave a bar summarising
+ * a block the index does not claim.
+ *
+ * The provenance is the block's **header** source, exactly as every other stored row takes it
+ * (§7: *"every row carries the full four-valued `origin`"*). A fill has no provenance of its
+ * own: it was read behind whatever header the loop was driven with, and 10 §6.5 derives every
+ * other row's label from that same argument.
+ */
+export function tradeCandles(
+  input: {
+    readonly blockNumber: number;
+    readonly blockTimestampMs: number;
+    readonly fills: readonly BlockTradeFill[];
+    readonly resolution: Exclude<Resolution, 'raw'>;
+  } & SampleProvenance,
+): readonly Candle[] {
+  const { blockNumber, blockTimestampMs, fills, resolution } = input;
+  if (!Number.isInteger(blockNumber) || blockNumber < 0) {
+    throw new CandleError(`${blockNumber} is not a block height`);
+  }
+  if (!Number.isInteger(blockTimestampMs) || blockTimestampMs < 0) {
+    throw new CandleError(
+      `${blockTimestampMs} is not a block timestamp in milliseconds. 10 §9.2's buckets are ` +
+        'aligned to the epoch so two clients agree on boundaries, which is only true when the ' +
+        'instant is a fact about the chain rather than about this device.',
+    );
+  }
+  assertProvenance(input, `trade aggregate for block ${blockNumber}`);
+  const provenance = provenanceOf(input);
+  const sourceKey = sourceKeyOf(input);
+  const at = Math.floor(blockTimestampMs / 1000);
+  return foldPoints(
+    fills.map((fill) => {
+      if (!Number.isInteger(fill.eventIndex) || fill.eventIndex < 0) {
+        throw new CandleError(
+          `a fill for ${fill.bookId} in block ${blockNumber} carries no event index; the index ` +
+            'is what orders two fills inside one block, and order is what decides open and close',
+        );
+      }
+      return {
+        bookId: fill.bookId,
+        at,
+        blockNumber,
+        order: fill.eventIndex,
+        price1e9: fill.price1e9,
+        sourceKey,
+        ...provenance,
+      };
+    }),
+    resolution,
+  );
+}
+
+/** Whether a candle's block span already covers `blockNumber`. */
+export function candleCoversBlock(candle: Candle, blockNumber: number): boolean {
+  return blockNumber >= candle.fromBlock && blockNumber <= candle.toBlock;
+}
+
+/**
+ * Roll `incoming` into `existing` — the read-modify-write a stored bucket needs.
+ *
+ * **A `put` is not a merge, and the difference is §9.2 obligation 2's named failure.** The
+ * ladder writes a coarse row keyed on its bucket; writing it without reading the stored one
+ * makes whole-bucket folding hold *within* a pass and not *across* passes, so a backfill chunk
+ * landing older samples for an already-folded hour writes a bar **over** the earlier one —
+ * *"a bar describing part of an hour, rendered as the hour"*. The same applies to §9.1's
+ * scan-time aggregate, which contributes one block at a time into a bucket that spans hundreds.
+ *
+ * Open and close are taken by **block span**, not by write order: the earlier bar's open is the
+ * bucket's open and the later bar's close is its close, whichever arrived first. Where the two
+ * spans interleave the exact ordering is no longer recoverable from what is stored — the raw
+ * rows are gone, which is the whole point of the ladder — so the merge takes the outermost
+ * blocks and says so here rather than implying a precision it does not have.
+ *
+ * The caller owes one thing this cannot check: the two bars must summarise **disjoint** sample
+ * sets, or `samples` double-counts. The ladder guarantees it by deleting what it folds, and
+ * `storeWriter` guarantees it by skipping a block a stored bar already spans.
+ */
+export function mergeCandle(existing: Candle, incoming: Candle): Candle {
+  if (
+    existing.bookId !== incoming.bookId ||
+    existing.sourceKey !== incoming.sourceKey ||
+    existing.resolution !== incoming.resolution ||
+    existing.openAt !== incoming.openAt
+  ) {
+    throw new CandleError(
+      `cannot merge ${incoming.bookId}/${incoming.resolution}@${incoming.openAt} into ` +
+        `${existing.bookId}/${existing.resolution}@${existing.openAt}: a merge is a read-modify-` +
+        'write of ONE stored row, so the two must share the primary key and the resolution',
+    );
+  }
+  assertProvenance(existing, `candle for ${existing.bookId}`);
+  assertProvenance(incoming, `candle for ${incoming.bookId}`);
+  const opensFirst = incoming.fromBlock < existing.fromBlock ? incoming : existing;
+  const closesLast = incoming.toBlock > existing.toBlock ? incoming : existing;
+  return {
+    ...existing,
+    open1e9: opensFirst.open1e9,
+    close1e9: closesLast.close1e9,
+    high1e9: incoming.high1e9 > existing.high1e9 ? incoming.high1e9 : existing.high1e9,
+    low1e9: incoming.low1e9 < existing.low1e9 ? incoming.low1e9 : existing.low1e9,
+    samples: existing.samples + incoming.samples,
+    fromBlock: Math.min(existing.fromBlock, incoming.fromBlock),
+    toBlock: Math.max(existing.toBlock, incoming.toBlock),
+  } as Candle;
 }
 
 /** The grouping key for one source — the same string the stored row is keyed on. */

@@ -54,9 +54,15 @@ import {
   type RangeEdgeFacts,
 } from './coverage.js';
 import {
+  SCAN_AGGREGATE_RESOLUTION,
+  tradeCandles,
+  type Candle,
+} from './candles.js';
+import {
   attributedExtrinsics,
   bodyProvenance,
   needsBodyFetch,
+  tradedFills,
   txRowKey,
   type BodyProvenance,
   type FinalizedBlockScan,
@@ -122,6 +128,24 @@ export interface BlockWrite {
    */
   readonly retainedEvents: readonly RetainedEvent[];
   /**
+   * This block's contribution to the candle aggregates — 10 §9.1's **other** half.
+   *
+   * The retention filter above implements *"never stored row-by-row"*. This implements the
+   * clause in front of it: *"Chain-wide `Traded` **is consumed into the candle aggregates as it
+   * is scanned**"*. Without it §9.2's candle-depth tables describe a tier with no producer, and
+   * the whole chain-wide trade stream — 1,339,200 rows/day at the chain-permitted ceiling, about
+   * 6.3× the entire observation stream — is scanned, filtered out, and forgotten.
+   *
+   * It is chain-wide, unlike `retainedEvents`: the aggregate is what makes discarding the rows
+   * honest rather than lossy. One `Candle` per book per source in this block's bucket, at
+   * `SCAN_AGGREGATE_RESOLUTION`, folded from 02 §5's `p_after` in chain order.
+   *
+   * Carried on the write rather than applied by the loop so it lands in **one transaction** with
+   * the rows and the coverage advance — the same reason `coverageAfter` is here. A bar written
+   * in a second transaction can summarise a block the index does not claim.
+   */
+  readonly tradeAggregates: readonly Candle[];
+  /**
    * The header this block was ingested behind — **the origin, verbatim, not a re-derivation**.
    *
    * `BodyProvenance` has two values and `RangeOrigin` has four, so a writer handed only the
@@ -186,6 +210,15 @@ export interface IngestResult {
   readonly rowCount: number;
   /** §6.5: this block's events were stored raw because their era metadata was unavailable. */
   readonly pendingDecode: boolean;
+  /**
+   * §9.1: how many chain-wide `Traded` fills this block folded into the aggregates.
+   *
+   * Reported rather than inferred from the row count, because the two numbers answer opposite
+   * questions: `rowCount` is the user's own activity and this is the chain's. A run that stored
+   * nothing and folded thousands is the ordinary case, and it is the case in which "did the
+   * aggregation run at all" would otherwise be unanswerable.
+   */
+  readonly tradesFolded: number;
 }
 
 /**
@@ -290,11 +323,30 @@ export async function ingestBlock(
     .map((event, index) => ({ event, index }))
     .filter(({ event }) => event.accounts.some((account) => watched.has(account)));
 
+  // §9.1's other half, and the one the retention filter alone leaves unimplemented: the trades
+  // this block carried are folded **now**, while they are in hand, because nothing downstream
+  // will ever see them again. Chain-wide, deliberately — an aggregate over the user's own fills
+  // would be a different and much smaller claim under the same label.
+  const fills = tradedFills(scan);
+  const tradeAggregates =
+    fills.length === 0
+      ? []
+      : tradeCandles({
+          blockNumber: scan.number,
+          blockTimestampMs: scan.blockTimestampMs,
+          fills,
+          resolution: SCAN_AGGREGATE_RESOLUTION,
+          ...(headerSource.origin === 'self'
+            ? { origin: 'self' as const }
+            : { origin: headerSource.origin, providerId: headerSource.providerId }),
+        });
+
   await ports.write({
     blockNumber: scan.number,
     scan,
     rows,
     retainedEvents,
+    tradeAggregates,
     headerSource,
     coverageAfter: next,
   });
@@ -304,6 +356,7 @@ export async function ingestBlock(
     fetchedBody: wantsBody,
     rowCount: rows.length,
     pendingDecode: scan.pendingDecode !== undefined,
+    tradesFolded: fills.length,
   };
 }
 
@@ -331,6 +384,8 @@ export interface RunResult {
    * the difference between a block with no interesting events and a block nobody could read.
    */
   readonly pendingDecode: number;
+  /** §9.1: the chain-wide `Traded` fills this run folded into the candle aggregates. */
+  readonly tradesFolded: number;
   /**
    * §6.3's per-range checks, run once before the first block of this run.
    *
@@ -357,6 +412,7 @@ export async function runIngest(
   let ingested = 0;
   let bodiesFetched = 0;
   let pendingDecode = 0;
+  let tradesFolded = 0;
   for await (const scan of scans as AsyncIterable<FinalizedBlockScan>) {
     let result: IngestResult;
     try {
@@ -371,6 +427,7 @@ export async function runIngest(
         ingested,
         bodiesFetched,
         pendingDecode,
+        tradesFolded,
         invalidated: checked.invalidated,
         stoppedAt,
       };
@@ -379,12 +436,14 @@ export async function runIngest(
     ingested += 1;
     if (result.fetchedBody) bodiesFetched += 1;
     if (result.pendingDecode) pendingDecode += 1;
+    tradesFolded += result.tradesFolded;
   }
   return {
     coverage: current,
     ingested,
     bodiesFetched,
     pendingDecode,
+    tradesFolded,
     invalidated: checked.invalidated,
     stoppedAt: undefined,
   };

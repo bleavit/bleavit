@@ -51,7 +51,13 @@
 
 import { accountKey, decodeStorage, type AccountKey, type EventAccountReader } from '@bleavit/chain-client';
 import type { ChainCodecs } from '@bleavit/chain-client';
-import type { EventPhase, FinalizedBlockScan, IndexedEvent } from '@bleavit/local-index';
+import { TRADED_EVENT } from '@bleavit/local-index';
+import type {
+  BlockTradeFill,
+  EventPhase,
+  FinalizedBlockScan,
+  IndexedEvent,
+} from '@bleavit/local-index';
 
 /**
  * A block could not be scanned. Never downgraded to an empty scan — see the module note.
@@ -156,6 +162,50 @@ export interface BlockIdentity {
   readonly number: number;
   readonly hash: string;
   readonly specVersion: number;
+  /**
+   * The block's own timestamp in milliseconds, which 10 §9.2's candle buckets are aligned to.
+   *
+   * A **chain** fact, read where `hash` and `specVersion` are read. A device clock aligns the
+   * buckets exactly and meaninglessly: two clients bucket one trade into different hours, and
+   * each shows the other a candle with the same name and a different body.
+   */
+  readonly timestampMs: number;
+}
+
+/**
+ * 02 §5's `Traded` fields, for 10 §9.1's scan-time aggregation.
+ *
+ * The decode lives here rather than in `local-index` for the same reason `accounts` does: that
+ * package may not import the chain SDK, so a field of a decoded event reaches it as a value or
+ * not at all.
+ *
+ * **A `Traded` event this scanner cannot read is a refusal**, exactly like a block it cannot
+ * scan, and for a sharper reason: an unreadable fill that returned `undefined` would be dropped
+ * from the bar with nothing anywhere reporting it, and on a chart a missing input is
+ * indistinguishable from a quiet market. The `market` id leaves as a canonical **decimal
+ * string** — 02 §2 makes `MarketId` a `u64`, whose values run past 2^53, so a number would
+ * round two adjacent books onto one key.
+ */
+function readTrade(blockNumber: number, index: number, raw: unknown): BlockTradeFill {
+  const fields = (raw as { event?: { value?: { value?: unknown } } }).event?.value?.value;
+  if (typeof fields !== 'object' || fields === null) {
+    throw new BlockScanError(blockNumber, `event record ${index} is ${TRADED_EVENT} with no fields`);
+  }
+  const { market, p_after: pAfter } = fields as { market?: unknown; p_after?: unknown };
+  if (typeof market !== 'bigint' && typeof market !== 'number') {
+    throw new BlockScanError(
+      blockNumber,
+      `event record ${index} is ${TRADED_EVENT} and names no market id`,
+    );
+  }
+  if (typeof pAfter !== 'bigint') {
+    throw new BlockScanError(
+      blockNumber,
+      `event record ${index} is ${TRADED_EVENT} and carries no p_after; 02 §5 publishes it on ` +
+        'the 1e9 grid as a FixedU64, and a rounded number would fold a price the chain never had',
+    );
+  }
+  return { bookId: BigInt(market).toString(), price1e9: pAfter, eventIndex: index };
 }
 
 export interface BlockScanner {
@@ -219,6 +269,7 @@ export function blockScanner(codecs: ChainCodecs, reader: EventAccountReader): B
       }
       const events: IndexedEvent[] = decoded.value.map((raw, index) => {
         const record = narrowRecord(block.number, index, raw);
+        const name = `${record.event.type}.${record.event.value.type}`;
         return {
           phase: readPhase(block.number, index, record.phase),
           pallet: record.event.type,
@@ -226,9 +277,18 @@ export function blockScanner(codecs: ChainCodecs, reader: EventAccountReader): B
           // The whole outer event, not the narrowed copy: the reader walks the declared type
           // tree beside the decoded value and needs the fields the narrowing dropped.
           accounts: reader.accounts((raw as { event: unknown }).event),
+          // 10 §9.1's aggregate input, on the one event 02 §5 gives a price to. `local-index`
+          // checks the binding in both directions, so a payload attached here to anything else
+          // is refused rather than folded.
+          ...(name === TRADED_EVENT ? { trade: readTrade(block.number, index, raw) } : {}),
         };
       });
-      const identity = { number: block.number, hash: block.hash, specVersion: block.specVersion };
+      const identity = {
+        number: block.number,
+        hash: block.hash,
+        specVersion: block.specVersion,
+        blockTimestampMs: block.timestampMs,
+      };
       return extrinsicCount === undefined
         ? { ...identity, events }
         : { ...identity, extrinsicCount, events };
@@ -249,6 +309,7 @@ export function blockScanner(codecs: ChainCodecs, reader: EventAccountReader): B
         number: block.number,
         hash: block.hash,
         specVersion: block.specVersion,
+        blockTimestampMs: block.timestampMs,
         pendingDecode: { raw: hexBytes(block.number, eventsHex), reason },
         events: [],
       };
