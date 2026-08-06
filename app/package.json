@@ -31,6 +31,8 @@
     "check:bundle-budget": "node tools/check-bundle-budget.ts",
     "check:artifact-budget": "node tools/check-artifact-budget.ts",
     "check:artifact-budget:witness": "node tools/check-artifact-budget.ts --witness",
+    "check:render-budget": "node tools/render-budget/check.ts",
+    "check:render-budget:witness": "node tools/render-budget/check.ts --witness",
     "test:tx": "node tools/run-suite.ts \"tests/transaction-builder/*.test.{js,ts}\"",
     "test:verify": "node tools/run-suite.ts \"tests/verify/*.test.{js,ts}\"",
     "test:local-index": "node tools/run-suite.ts \"tests/local-index/*.test.{js,ts}\"",

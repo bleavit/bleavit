@@ -51,6 +51,7 @@ SMOLDOT_GATE = ROOT / "app" / "tools" / "check-smoldot-budget.ts"
 PRIMITIVES = ROOT / "crates" / "futarchy-primitives" / "src" / "lib.rs"
 BUNDLE_GATE = ROOT / "app" / "tools" / "check-bundle-budget.ts"
 ARTIFACT_GATE = ROOT / "app" / "tools" / "check-artifact-budget.ts"
+RENDER_GATE = ROOT / "app" / "tools" / "render-budget" / "check.ts"
 
 #: 10 §9.1's effective per-row cost, and the one modelling assumption the documents
 #: state rather than derive. It is labelled as an assumption in §9.1 itself, so it is
@@ -659,6 +660,76 @@ def main() -> int:
                 "§9 states MB = 10⁶ and KB = 10³, and a measured figure has exactly one home."
             )
         checked += 1
+
+    # --- §9.4's first-meaningful-render row and the Lighthouse gate ------------------
+    # Four thresholds, all four bound. The p50s matter as much as the p95s here: the p95
+    # is the hard failure and the p50 the warning, so an unbound p50 is a target that
+    # quietly stops being one.
+    render_row = find(
+        nine,
+        r"\| First meaningful render \(shell\) \| ≤ ([\d.]+) s / ([\d.]+) s desktop; "
+        r"≤ ([\d.]+) s / ([\d.]+) s mobile",
+        "§9.4's first-meaningful-render budget",
+    )
+    render = RENDER_GATE.read_text(encoding="utf-8")
+    for label, published, constant in (
+        ("desktop p50", render_row.group(1), "DESKTOP_TARGET_MS"),
+        ("desktop p95", render_row.group(2), "DESKTOP_HARD_FAIL_MS"),
+        ("mobile p50", render_row.group(3), "MOBILE_TARGET_MS"),
+        ("mobile p95", render_row.group(4), "MOBILE_HARD_FAIL_MS"),
+    ):
+        enforced = gate_constant(render, constant, "the render gate")
+        if enforced != float(published) * 1e3:
+            raise Fail(
+                f"§9.4's first-meaningful-render {label} is {published} s = "
+                f"{float(published) * 1e3:.0f} ms, but `app/tools/render-budget/check.ts` enforces "
+                f"{enforced:.0f} ms via {constant}."
+            )
+        checked += 1
+
+    # --- §9.4's reference hardware, which is published prose and not only a threshold ---
+    # The table's own heading names the two machines its numbers are stated for. A budget
+    # measured on other hardware is not a lenient measurement, it is a measurement of
+    # something else, so the sentence binds exactly like the cells do.
+    hardware = find(
+        nine,
+        r"on reference hardware \(desktop = [^;()]*?(\d+)× throttle; mobile = ([\w ]+?)-class",
+        "§9.4's reference-hardware sentence",
+    )
+    slowdown = gate_constant(render, "DESKTOP_CPU_SLOWDOWN", "the render gate")
+    if slowdown != float(hardware.group(1)):
+        raise Fail(
+            f"§9.4 states its desktop reference as a {hardware.group(1)}× CPU throttle, but "
+            f"`app/tools/render-budget/check.ts` requests {slowdown:g}× via DESKTOP_CPU_SLOWDOWN. "
+            "Lighthouse's own desktop preset is 1×, so this override is the whole of the "
+            "reference machine — unbound, the budget silently describes a faster one."
+        )
+    checked += 1
+
+    device = find(
+        render,
+        r"const MOBILE_REFERENCE_DEVICE = '([^']+)';",
+        "the render gate's MOBILE_REFERENCE_DEVICE",
+    ).group(1)
+    if device.lower() not in hardware.group(2).lower():
+        raise Fail(
+            f"§9.4 names its reference mobile device as {hardware.group(2)}-class, but the render "
+            f"gate checks Lighthouse's preset against {device!r}. The gate takes that preset "
+            "unmodified, so this string is the only thing standing between the published device "
+            "and whatever phone upstream emulates next."
+        )
+    checked += 1
+
+    # The render gate compares a **median**, so an even sample size would compare an
+    # average of two runs — a value neither run produced — against a percentile.
+    runs = int(gate_constant(render, "RUNS_PER_PROFILE", "the render gate"))
+    if runs < 3 or runs % 2 == 0:
+        raise Fail(
+            f"the render gate takes the median of {runs} run(s) per profile. An even count "
+            "averages two observations into a value neither run produced, and fewer than three "
+            "is not a median at all — §9.4 publishes percentiles, so the sample has to be one."
+        )
+    checked += 1
 
     if checked < 20:
         raise Fail(f"only {checked} cells were checked; the parse is too shallow to be a gate")

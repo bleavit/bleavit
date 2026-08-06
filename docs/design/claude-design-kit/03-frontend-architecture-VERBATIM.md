@@ -1,9 +1,9 @@
 > **DERIVED COPY for design-tool context — DO NOT EDIT.**
 > Verbatim copy of `docs/architecture/10-frontend-architecture.md` (the source of truth),
-> regenerated 2026-08-06, picking up §9.4's two newly enforced lazy-artifact budget
-> rows (F14) — chain specs and release-shipped fallback metadata now name the gate
-> that takes them, and §9.3's measured blob figure is 0.15 MB rather than the
-> truncated 0.14 — on top of §9's re-derived resource budgets
+> regenerated 2026-08-06, picking up §9.4's three newly enforced budget rows (F14) —
+> chain specs, release-shipped fallback metadata and the Lighthouse first-render
+> measurement now name the gates that take them, and §9.3's measured blob figure is
+> 0.15 MB rather than the truncated 0.14 — on top of §9's re-derived resource budgets
 > (SQ-557): the sustained observing count is 31 trading books rather than
 > `MaxLiveMarkets` = 196, the retention-depth tables move with it, the mandatory
 > `Traded` half of 02 §5's ingest set is modelled for the first time, and §9.3's
@@ -499,7 +499,7 @@ Measured in CI (Lighthouse + Playwright timers) on reference hardware (desktop =
 | smoldot WASM (worker, lazy) | ≤ 3.5 MB gz **[VERIFY artifact size — FE-P4]** | size gate + lazy load |
 | Chain specs (relay + para + Asset Hub, gz, lazy) | ≤ 3.5 MB combined (checkpoint-trimmed) | size gate — `app/tools/check-artifact-budget.ts`, over the specs `release-sources.json` declares. **Unmeasured while none is declared**: no production chain exists, so the gate instead requires the chain-spec readiness blocker to still stand, and fails the moment a spec hash is pinned without a spec to weigh |
 | Release-shipped fallback metadata (gz, lazy) | ≤ 1.5 MB combined — §9.3's 8-blob cache bound × the measured 0.15 MB blob, rounded up for metadata growth. The release cannot ship more blobs than the cache admits | size gate — `app/tools/check-artifact-budget.ts`, over the committed per-`spec_version` blobs an FE-P5 fallback would carry, against **both** bounds: this combined size and §9.3's blob count |
-| First meaningful render (shell) | ≤ 1.5 s / 3 s desktop; ≤ 3 s / 6 s mobile | Lighthouse CI |
+| First meaningful render (shell) | ≤ 1.5 s / 3 s desktop; ≤ 3 s / 6 s mobile | Lighthouse CI — `app/tools/render-budget/check.ts`. **First Contentful Paint** over the built release tree, because Lighthouse's own `first-meaningful-paint` audit yields no numeric value in 12.8.2 and binding to it would gate on nothing. The reference hardware is Lighthouse's own presets, read at run time rather than copied: its default mobile preset **is** the Moto G-class device named above, and its desktop preset supplies the viewport and network while this table's 4× CPU throttle is set explicitly, since that preset's own multiplier is 1. The **median of 3 runs** hard-fails against the p95 column and warns against p50 |
 | First **verified** current-state render | ≤ 30 s / 90 s desktop; ≤ 90 s / 240 s mobile — **hypothesis, FE-P4 gates release** | Playwright sync timer vs live testnet |
 | Finalized-head refresh work | ≤ 50 ms main-thread per head | perf marks |
 | Per-refresh storage-proof traffic | ≤ 512 KiB per pinned-block screen refresh **[VERIFY measured proof sizes — FE-P4]** | perf test |

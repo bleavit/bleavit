@@ -18,6 +18,13 @@ packages:
   # `forbidden-package-edge.ts` proves 10 §10.1's CI-fatal edge by being
   # UNRESOLVABLE — the fixture went from TS2307 to TS2305 (V-167).
   - 'tools/snapshot'
+  # `tools/render-budget` (10 §9.4, F14) is a member for the same reason and one more.
+  # Lighthouse is a ~200-package tree that launches a browser; declared at the root it
+  # would be resolvable from every client package by the parent-directory walk, so the
+  # one dependency in this repository whose job is to open a network connection and
+  # start a process would sit inside the reach of the packages 10 §10.1 keeps thin.
+  # Confined here, `import 'lighthouse'` is unresolvable everywhere else in `app/`.
+  - 'tools/render-budget'
   - 'tests/firewall'
   - 'tests/depcruise-witness'
   - 'tests/protocol'

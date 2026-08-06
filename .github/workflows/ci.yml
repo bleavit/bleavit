@@ -776,6 +776,17 @@ jobs:
           # "bundle-size CI gate" since the reviewed design while no such gate
           # existed. Same step for the same reason as the line above.
           pnpm run check:bundle-budget
+          # 10 §9.4's first-meaningful-render row — Lighthouse over the tree the
+          # first line emitted, on §9.4's own reference hardware. Same step for
+          # the same reason. Chrome comes from the runner image (Google Chrome is
+          # preinstalled on ubuntu-24.04, verified against the image manifest,
+          # V-175); the gate FAILS rather than skipping when it cannot start one,
+          # because a skipped measurement is an unenforced budget. The witness is one
+          # further run against a 1 ms threshold that MUST be refused — the only thing
+          # that distinguishes a gate which measured and passed from one that stopped
+          # comparing, since both print the same green line.
+          pnpm run check:render-budget
+          pnpm run check:render-budget:witness
 
       - name: Release suite (12 §1, §5.2–§5.3; F11/F13)
         working-directory: app

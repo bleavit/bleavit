@@ -26,6 +26,7 @@ SMOLDOT_GATE = ROOT / "app" / "tools" / "check-smoldot-budget.ts"
 PRIMITIVES = ROOT / "crates" / "futarchy-primitives" / "src" / "lib.rs"
 BUNDLE_GATE = ROOT / "app" / "tools" / "check-bundle-budget.ts"
 ARTIFACT_GATE = ROOT / "app" / "tools" / "check-artifact-budget.ts"
+RENDER_GATE = ROOT / "app" / "tools" / "render-budget" / "check.ts"
 
 
 def run() -> subprocess.CompletedProcess[str]:
@@ -357,6 +358,99 @@ class FrontendBudgets(unittest.TestCase):
             "| Release-shipped fallback metadata (gz, lazy) | ≤ 1.5 MB combined",
             "| Release-shipped fallback metadata (gz, lazy) | ≤ 2.5 MB combined",
             "enforces 1.5e+06",
+        )
+
+    # --- §9.4's first-meaningful-render row and the Lighthouse gate (F14) ------------
+
+    def test_a_render_gate_enforcing_a_different_desktop_target_fails(self) -> None:
+        self.assert_mutation_caught(
+            RENDER_GATE,
+            "const DESKTOP_TARGET_MS = 1_500;",
+            "const DESKTOP_TARGET_MS = 2_500;",
+            "first-meaningful-render desktop p50 is 1.5 s",
+        )
+
+    def test_a_render_gate_enforcing_a_different_desktop_hard_fail_fails(self) -> None:
+        self.assert_mutation_caught(
+            RENDER_GATE,
+            "const DESKTOP_HARD_FAIL_MS = 3_000;",
+            "const DESKTOP_HARD_FAIL_MS = 30_000;",
+            "first-meaningful-render desktop p95 is 3 s",
+        )
+
+    def test_a_render_gate_enforcing_a_different_mobile_target_fails(self) -> None:
+        self.assert_mutation_caught(
+            RENDER_GATE,
+            "const MOBILE_TARGET_MS = 3_000;",
+            "const MOBILE_TARGET_MS = 4_000;",
+            "first-meaningful-render mobile p50 is 3 s",
+        )
+
+    def test_a_render_gate_enforcing_a_different_mobile_hard_fail_fails(self) -> None:
+        self.assert_mutation_caught(
+            RENDER_GATE,
+            "const MOBILE_HARD_FAIL_MS = 6_000;",
+            "const MOBILE_HARD_FAIL_MS = 60_000;",
+            "first-meaningful-render mobile p95 is 6 s",
+        )
+
+    def test_moving_the_published_render_cell_without_the_gate_fails(self) -> None:
+        self.assert_mutation_caught(
+            FRONTEND,
+            "| First meaningful render (shell) | ≤ 1.5 s / 3 s desktop; ≤ 3 s / 6 s mobile |",
+            "| First meaningful render (shell) | ≤ 1.5 s / 5 s desktop; ≤ 3 s / 6 s mobile |",
+            "desktop p95 is 5 s",
+        )
+
+    def test_a_render_gate_throttling_a_different_desktop_fails(self) -> None:
+        """Lighthouse's desktop preset is 1×, so this override *is* the reference machine."""
+        self.assert_mutation_caught(
+            RENDER_GATE,
+            "const DESKTOP_CPU_SLOWDOWN = 4;",
+            "const DESKTOP_CPU_SLOWDOWN = 1;",
+            "states its desktop reference as a 4× CPU throttle",
+        )
+
+    def test_moving_the_published_reference_hardware_without_the_gate_fails(self) -> None:
+        self.assert_mutation_caught(
+            FRONTEND,
+            "(desktop = mid-2023 laptop 4× throttle; mobile = Moto G-class Android)",
+            "(desktop = mid-2023 laptop 2× throttle; mobile = Moto G-class Android)",
+            "states its desktop reference as a 2× CPU throttle",
+        )
+
+    def test_a_render_gate_accepting_another_reference_phone_fails(self) -> None:
+        """The gate takes Lighthouse's mobile preset unmodified, so this string is the check."""
+        self.assert_mutation_caught(
+            RENDER_GATE,
+            "const MOBILE_REFERENCE_DEVICE = 'Moto G';",
+            "const MOBILE_REFERENCE_DEVICE = 'Pixel';",
+            "checks Lighthouse's preset against 'Pixel'",
+        )
+
+    def test_moving_the_published_reference_phone_without_the_gate_fails(self) -> None:
+        self.assert_mutation_caught(
+            FRONTEND,
+            "mobile = Moto G-class Android)",
+            "mobile = Pixel-class Android)",
+            "names its reference mobile device as Pixel-class",
+        )
+
+    def test_an_even_run_count_fails(self) -> None:
+        """A median over an even sample is an average of two runs, at a value neither produced."""
+        self.assert_mutation_caught(
+            RENDER_GATE,
+            "const RUNS_PER_PROFILE = 3;",
+            "const RUNS_PER_PROFILE = 4;",
+            "median of 4 run(s)",
+        )
+
+    def test_a_single_run_is_not_a_median(self) -> None:
+        self.assert_mutation_caught(
+            RENDER_GATE,
+            "const RUNS_PER_PROFILE = 3;",
+            "const RUNS_PER_PROFILE = 1;",
+            "median of 1 run(s)",
         )
 
     # --- anti-vacuity: a parse that finds nothing must fail, not pass ---------------
