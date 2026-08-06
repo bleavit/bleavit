@@ -37,13 +37,26 @@
  * `app/tests/providers` contains such a document and asserts that it is **admitted**, because
  * a corpus that only contains documents we reject would be evidence for a guarantee this
  * mechanism declines to make ([14](14-threat-model.md) TH-50).
+ *
+ * ## The one screen that asks the chain
+ *
+ * {@link spotCheckSnapshot} is §8.4's *"deterministic spot re-derivation for the covered blocks
+ * that fall inside light-client-reachable depth"*, and it is the only thing here that compares
+ * the document against anything but itself. It is asynchronous and injected, so it lives beside
+ * {@link admitSnapshot} rather than inside it; the streamed importer runs both in order.
+ *
+ * ## An admitted document is a branded value, not a boolean somebody checked
+ *
+ * {@link admitSnapshot} returns an {@link AdmittedSnapshot} whose brand this module alone can
+ * write, and `mint.ts` takes that type. So *"nothing becomes a layer-3 row without passing every
+ * screen"* is a property of the type system rather than a rule a call site is trusted to follow.
  */
 
-import { byCodePoint, canonicalJson, digestPreimage, equalBinding } from '@bleavit/handoff-envelope';
+import { byCodePoint, canonicalJson, digestPreimage } from '@bleavit/handoff-envelope';
 import type { ChainBinding } from '@bleavit/handoff-envelope';
 
-import { providerRefusal } from './refusals.js';
-import type { ProviderRefusal } from './refusals.js';
+import { providerRefusal, snapshotRefusal } from './refusals.js';
+import type { ProviderRefusal, SnapshotRejectionCause } from './refusals.js';
 
 /** The domain-separation tag. Distinct from every handoff tag — see the module note. */
 export const SNAPSHOT_FORMAT = 'bleavit.snapshot.v1';
@@ -194,13 +207,53 @@ export type SnapshotFinding =
   | { readonly screen: 'binding'; readonly why: string }
   | { readonly screen: 'coverage'; readonly why: string }
   | { readonly screen: 'derived-rows'; readonly why: string }
-  | { readonly screen: 'conservation'; readonly why: string };
+  | { readonly screen: 'conservation'; readonly why: string }
+  /** §8.4's *deterministic spot re-derivation* — see {@link spotCheckSnapshot}. */
+  | { readonly screen: 'spot-check'; readonly why: string };
 
-export type SnapshotVerdict =
-  | { readonly kind: 'admitted'; readonly document: SnapshotDocument }
-  | { readonly kind: 'rejected'; readonly refusal: ProviderRefusal; readonly findings: readonly SnapshotFinding[] };
+/**
+ * The brand that makes "this document passed every screen" a thing a caller cannot assert.
+ *
+ * Declared here and **not exported**, so no module outside this one can name the field and
+ * therefore no module outside this one can produce an `AdmittedSnapshot` by object literal,
+ * spread or `satisfies`. Exactly the device 10 §2.1 uses for `Finalized<T>`, one layer down
+ * and for a smaller claim: not *"the light client verified this"* but *"every §8.4 screen ran
+ * over these bytes and none of them fired"*.
+ *
+ * It exists because {@link mintSnapshotRows} — the one place a document becomes layer-3 rows
+ * — takes this type rather than a `SnapshotDocument`. Without the brand the mint's argument
+ * is a structural shape any caller can build, and *"the mint is the only way an admitted
+ * document becomes rows"* would be a comment rather than a property.
+ */
+declare const ADMITTED: unique symbol;
 
-const DECIMAL = /^(0|[1-9][0-9]*)$/;
+/** A document that passed {@link admitSnapshot}. Constructible only inside this module. */
+export type AdmittedSnapshot = {
+  readonly kind: 'admitted';
+  readonly document: SnapshotDocument;
+  readonly [ADMITTED]: true;
+};
+
+export interface RejectedSnapshot {
+  readonly kind: 'rejected';
+  readonly refusal: ProviderRefusal;
+  readonly findings: readonly SnapshotFinding[];
+}
+
+export type SnapshotVerdict = AdmittedSnapshot | RejectedSnapshot;
+
+/**
+ * The wire form of an amount, as a pattern.
+ *
+ * Exported because the published JSON Schema for the producer's input format is **generated**
+ * from it (`app/schemas/`), and a schema carrying its own copy of this regex would publish a
+ * rule that agreed with {@link isCanonicalAmount} on the day it was written. The u128 bound the
+ * function additionally applies is not expressible as a pattern, which the schema says in words
+ * rather than leaving a reader to infer.
+ */
+export const CANONICAL_AMOUNT_PATTERN = /^(0|[1-9][0-9]*)$/;
+
+const DECIMAL = CANONICAL_AMOUNT_PATTERN;
 
 /**
  * The chain's `Balance` ceiling.
@@ -811,7 +864,13 @@ export type Sha256 = (preimage: Uint8Array) => string;
 export interface SnapshotAdmission {
   /** The content pin obtained from the publisher, out of band. */
   readonly expectedPin: string;
-  /** The chain this client is on. Exact equality, as every other Bleavit binding gate is. */
+  /**
+   * The chain this client is on. **Only `genesisHash` is compared** — see {@link admitSnapshot}.
+   *
+   * The whole binding is carried rather than the hash alone so a caller passes the same
+   * `ChainBinding` it holds everywhere else, and so the two unused members are visibly
+   * *declined* here rather than absent from a type that could never have had them.
+   */
   readonly binding: ChainBinding;
 }
 
@@ -836,6 +895,27 @@ export interface SnapshotAdmission {
  * unpinned bytes tells the user something about a file nobody claims authorship of. Same shape
  * as the release self-check running its chain-spec comparison before its genesis comparison
  * (F10).
+ *
+ * ## The chain binding is `genesisHash` only, and the narrowing is the correction
+ *
+ * This screen used `equalBinding`, whose exact `specVersion`/`contractVersion` equality
+ * 10 §13.1 states **for the three handoff formats** — documents describing *one block*, where a
+ * runtime the client cannot decode makes the document unreadable. §8 states no chain binding
+ * for a snapshot at all, and a snapshot is the opposite shape: §6.4 assigns it *"deep history
+ * beyond 30 days … by design, not by omission"*, which is history that necessarily predates the
+ * current runtime. Under exact equality the **first runtime upgrade refuses every snapshot ever
+ * published**, and it refuses them with `FE-PROV-003`, whose recovery told the user to check
+ * their download — for a file that was never damaged.
+ *
+ * What a snapshot must still not be is a document about **another chain**: 10 §7 gives one
+ * local database per chain identity, so importing one would file another network's history
+ * under this one's. That is `genesisHash`, and it is the whole of the binding here.
+ *
+ * The two version fields are not silently dropped: they stay on the admitted document, where a
+ * caller reads them and renders the difference as an advisory line. A screen is a refusal, and
+ * a version difference is not a reason to refuse. Filed as PLAN.md · *Spec questions* SQ-602,
+ * because whether §8 wants a binding at all — and which fields — is 10's to say, not this
+ * module's; the conservative reading is in force until it answers.
  */
 export function admitSnapshot(text: string, admission: SnapshotAdmission, sha256: Sha256): SnapshotVerdict {
   const findings: SnapshotFinding[] = [];
@@ -879,14 +959,12 @@ export function admitSnapshot(text: string, admission: SnapshotAdmission, sha256
       why: `the file hashes to ${pin}; the publisher's pin is ${admission.expectedPin}`,
     });
   }
-  if (!equalBinding(document.binding, admission.binding)) {
+  if (document.binding.genesisHash !== admission.binding.genesisHash) {
     findings.push({
       screen: 'binding',
       why:
-        `this snapshot describes genesis ${document.binding.genesisHash} at spec ` +
-        `${document.binding.specVersion}/contract ${document.binding.contractVersion}; this ` +
-        `client is on ${admission.binding.genesisHash} at ${admission.binding.specVersion}/` +
-        `${admission.binding.contractVersion}`,
+        `this snapshot describes genesis ${document.binding.genesisHash}; this client is on ` +
+        `${admission.binding.genesisHash}`,
     });
   }
   findings.push(...checkCanonicalOrder(document));
@@ -895,18 +973,190 @@ export function admitSnapshot(text: string, admission: SnapshotAdmission, sha256
   findings.push(...replay.findings);
   findings.push(...checkDerivedRows(document, replay));
   if (findings.length > 0) return reject(findings);
-  return { kind: 'admitted', document };
+  // The one construction site of the brand. An assertion rather than a literal because the
+  // phantom field has no runtime representation and cannot be written — same shape, and the
+  // same single-site discipline, as `chain-client`'s `Finalized<T>` mint (10 §2.1).
+  return { kind: 'admitted', document } as AdmittedSnapshot;
 }
 
-function reject(findings: readonly SnapshotFinding[]): SnapshotVerdict {
+/**
+ * Which fixed remediation `FE-PROV-003` leads with, chosen from the findings.
+ *
+ * Precedence, and it is not arbitrary: **wrong chain wins**, because a document about another
+ * network will also fail whichever substantive screens happen to notice, and telling the user
+ * about a conservation defect in a file that was never about their chain sends them to the
+ * publisher with the wrong complaint. **Chain disagreement is next**, because a document that
+ * is internally consistent and contradicts the chain is the one case where the remediation is
+ * *do not trust this publisher* rather than *download it again*. Everything else is `integrity`.
+ */
+function causeOf(findings: readonly SnapshotFinding[]): SnapshotRejectionCause {
+  if (findings.some((finding) => finding.screen === 'binding')) return 'wrong-chain';
+  if (findings.some((finding) => finding.screen === 'spot-check')) return 'chain-disagreement';
+  return 'integrity';
+}
+
+function reject(findings: readonly SnapshotFinding[]): RejectedSnapshot {
   return {
     kind: 'rejected',
-    refusal: providerRefusal(
-      'FE-PROV-003',
+    refusal: snapshotRefusal(
+      causeOf(findings),
       findings.map((finding) => `[${finding.screen}] ${finding.why}`).join('; '),
     ),
     findings,
   };
+}
+
+/**
+ * Reject a document that passed the file screens and then failed a chain comparison.
+ *
+ * Exported because {@link spotCheckSnapshot} runs **after** admission — it is asynchronous and
+ * `admitSnapshot` is not — so the streamed importer needs to produce the same refusal shape
+ * from findings raised outside this function. It is the same `reject`, not a second one.
+ */
+export function rejectSnapshot(findings: readonly SnapshotFinding[]): RejectedSnapshot {
+  return reject(findings);
+}
+
+// ------------------------------------------------------- §8.4's deterministic spot re-derivation
+
+/**
+ * How many covered blocks one re-derivation pass compares.
+ *
+ * A **release constant**, and a bound on work rather than on trust: a snapshot may cover
+ * millions of blocks and the light client can serve a few hundred, so an unbounded walk would
+ * spend the whole budget asking about history nothing can answer for. The pass walks **downward
+ * from the newest covered block**, which is where the pinned window is (10 §4.2), so the bound
+ * is spent on exactly the blocks that can be answered.
+ *
+ * It is not a sampling rate and deliberately not drawn at random: §8.4 says *"deterministic"*,
+ * and determinism is what makes a rejected snapshot reproducible for the publisher who has to
+ * fix it. Sampling here would also buy nothing — the window is the *whole* set of blocks the
+ * client can check, so checking a random subset of it would be strictly less evidence for the
+ * same number of reads.
+ */
+export const SPOT_CHECK_MAX_BLOCKS = 128;
+
+/** What the document claims happened at one block, as the checker will compare it. */
+export interface SpotClaim {
+  readonly block: number;
+  /**
+   * Every movement the document places at this block, canonically projected, in chain order.
+   *
+   * **Empty is a claim too**, and it is the one that matters: a covered block with no
+   * movements is the document asserting that nothing happened there. A checker handed only
+   * the blocks that carry movements could never catch an omission, which is the forgery a
+   * publisher produces by *deleting* rather than by inventing.
+   */
+  readonly movements: readonly string[];
+}
+
+export type SpotVerdict =
+  /** The chain agrees, movement for movement, in order. */
+  | { readonly kind: 'agrees' }
+  /** The chain says something else. `derived` is what this device read. */
+  | { readonly kind: 'disagrees'; readonly derived: readonly string[] }
+  /** Outside light-client-reachable depth (§8.4's own condition). Evidence of nothing. */
+  | { readonly kind: 'out-of-reach' };
+
+/**
+ * Re-derive one covered block from chain state.
+ *
+ * Injected, in the same shape {@link RowCheck} already uses and for the same structural reason:
+ * `packages/providers` may not open a chain connection (10 §4.1), so the module that decides
+ * **which** blocks to re-derive cannot be the module that knows **how**. It also keeps the
+ * comparison honest — the checker returns what *it* read, and this module never learns a way to
+ * produce a chain value of its own.
+ */
+export type SnapshotSpotCheck = (claim: SpotClaim) => Promise<SpotVerdict>;
+
+export interface SpotCheckReport {
+  /** Blocks the chain actually answered for. */
+  readonly compared: number;
+  /** Blocks the light client could not reach. Not a pass and not a failure. */
+  readonly outOfReach: number;
+  readonly findings: readonly SnapshotFinding[];
+}
+
+/**
+ * §8.4's *"deterministic spot re-derivation for the covered blocks that fall inside
+ * light-client-reachable depth"*.
+ *
+ * This is the one screen in this module that compares the document against **the chain** rather
+ * than against itself, and it is a named mitigation in 14 TH-50. Everything else here is
+ * internal consistency, which a competent forger satisfies by construction; a shallow forgery —
+ * one inside the window the client can still read — is precisely what internal consistency
+ * cannot see and this can.
+ *
+ * Two properties are load-bearing:
+ *
+ * 1. **The claim carries the block's whole movement list, including when it is empty.** A
+ *    checker asked *"is this movement real"* can only catch fabrication. Asked *"is this the
+ *    complete set at this block"* it catches deletion too, and deletion is the cheaper forgery:
+ *    a publisher who drops one `redeem` produces a document that replays, reconciles and pins
+ *    perfectly while overstating a holder's balance forever.
+ * 2. **`out-of-reach` is neither a pass nor a failure.** The report counts it separately, and a
+ *    caller that treated a wholly-out-of-reach pass as clean would be reporting §8.4's stated
+ *    blind spot as a verification result — which is the exact claim 10 §2.3 and TH-50 decline
+ *    to make.
+ *
+ * A checker that throws aborts the pass rather than being swallowed. That is the opposite of
+ * {@link runSamplingRound}'s rule and the difference is the adversary: there, the reference is
+ * *provider-supplied*, so a publisher can plant one that reliably errors and discard the round's
+ * findings; here the block numbers come from coverage this module already validated, so a throw
+ * is the client's own failure and continuing past it would report a smaller comparison than was
+ * attempted.
+ */
+export async function spotCheckSnapshot(
+  document: SnapshotDocument,
+  check: SnapshotSpotCheck,
+  maxBlocks: number = SPOT_CHECK_MAX_BLOCKS,
+): Promise<SpotCheckReport> {
+  if (!Number.isInteger(maxBlocks) || maxBlocks < 1) {
+    throw new RangeError(`maxBlocks must be a positive integer, got ${maxBlocks}`);
+  }
+  const byBlock = new Map<number, string[]>();
+  for (const op of document.ops) {
+    const at = byBlock.get(op.block);
+    if (at === undefined) byBlock.set(op.block, [projectOp(op)]);
+    else at.push(projectOp(op));
+  }
+  const findings: SnapshotFinding[] = [];
+  let compared = 0;
+  let outOfReach = 0;
+  for (const block of newestCoveredBlocks(document.coverage, maxBlocks)) {
+    const verdict = await check({ block, movements: byBlock.get(block) ?? [] });
+    if (verdict.kind === 'out-of-reach') {
+      outOfReach += 1;
+      continue;
+    }
+    compared += 1;
+    if (verdict.kind === 'disagrees') {
+      findings.push({
+        screen: 'spot-check',
+        why:
+          `block ${block}: this device re-derived ${verdict.derived.length} movement(s) from the ` +
+          `chain and the snapshot states ${(byBlock.get(block) ?? []).length}. Chain: ` +
+          `${canonicalJson(verdict.derived)}; snapshot: ${canonicalJson(byBlock.get(block) ?? [])}`,
+      });
+    }
+  }
+  return { compared, outOfReach, findings };
+}
+
+/** The newest `limit` covered blocks, descending — the pinned window is at the top (§4.2). */
+function newestCoveredBlocks(
+  coverage: readonly SnapshotRange[],
+  limit: number,
+): readonly number[] {
+  const blocks: number[] = [];
+  const descending = [...coverage].sort((a, b) => b.toBlock - a.toBlock);
+  for (const range of descending) {
+    for (let block = range.toBlock; block >= range.fromBlock; block -= 1) {
+      blocks.push(block);
+      if (blocks.length === limit) return blocks;
+    }
+  }
+  return blocks;
 }
 
 // ------------------------------------------------------------------ the two-snapshot diff
@@ -919,13 +1169,43 @@ export interface SnapshotDisagreement {
 }
 
 export type DiffVerdict =
+  /** Jointly observed history was compared, and every movement matched. */
   | { readonly kind: 'agree'; readonly overlap: readonly SnapshotRange[] }
+  /**
+   * **Nothing was compared**, because the two documents share no covered block.
+   *
+   * Its own discriminant rather than an `agree` with an empty overlap, which is what this
+   * returned until 2026-08-06. The empty array was there and carried the whole fact, and a
+   * caller writing the obvious `if (verdict.kind === 'agree') showCrossChecked()` — the shape
+   * every other verdict in this package invites — turns two producers who have never covered
+   * one block into a cross-check that passed. §8.4 offers the two-snapshot diff as *"the only
+   * available cross-check"* for depth; reporting a vacuous one as agreement manufactures
+   * exactly the confidence it declines to offer, in the case where a forger picks the ranges.
+   */
+  | { readonly kind: 'no-overlap' }
   | {
       readonly kind: 'disagree';
       readonly refusal: ProviderRefusal;
       readonly overlap: readonly SnapshotRange[];
       readonly disagreements: readonly SnapshotDisagreement[];
     };
+
+/**
+ * One movement, canonically projected for comparison.
+ *
+ * Shared by the two-snapshot diff and {@link spotCheckSnapshot} deliberately: they compare the
+ * same thing against different oracles — a second producer, and the chain — and two projections
+ * would let a movement that differs by a field one of them omits read as equal to one of them.
+ */
+export function projectOp(op: SnapshotOp): string {
+  return canonicalJson(
+    op.kind === 'redeem'
+      ? [op.block, op.kind, op.vault, op.account, op.branch, op.amount]
+      : op.kind === 'transfer'
+        ? [op.block, op.kind, op.vault, op.account, op.to, op.branch, op.amount]
+        : [op.block, op.kind, op.vault, op.account, op.amount],
+  );
+}
 
 /**
  * The blocks **both** documents claim to have observed.
@@ -961,9 +1241,10 @@ function coverageIntersection(
  * publisher already enabled — would be manufacturing exactly the confidence §8.4 declines to
  * offer. So a disagreement leaves the disputed range as a labelled hole.
  *
- * Two snapshots with **no shared coverage** agree *vacuously*, reported as an empty overlap
- * rather than as a clean bill: two producers covering disjoint history have not cross-checked
- * anything, and "agree" with nothing compared is the shape a user reads as confirmation.
+ * Two snapshots with **no shared coverage** are reported as `no-overlap`, a third discriminant
+ * rather than an `agree` carrying an empty overlap array: two producers covering disjoint
+ * history have not cross-checked anything, and "agree" with nothing compared is the shape a
+ * user reads as confirmation.
  *
  * **The comparison is over ordered sequences, not a keyed map.** One account may perform the
  * same operation on the same vault twice in one block, and a map keyed by the movement's
@@ -975,21 +1256,11 @@ function coverageIntersection(
  */
 export function diffSnapshots(left: SnapshotDocument, right: SnapshotDocument): DiffVerdict {
   const overlap = coverageIntersection(left.coverage, right.coverage);
-  if (overlap.length === 0) return { kind: 'agree', overlap };
+  if (overlap.length === 0) return { kind: 'no-overlap' };
   const covered = (block: number): boolean =>
     overlap.some((range) => block >= range.fromBlock && block <= range.toBlock);
   const project = (document: SnapshotDocument): readonly string[] =>
-    document.ops
-      .filter((op) => covered(op.block))
-      .map((op) =>
-        canonicalJson(
-          op.kind === 'redeem'
-            ? [op.block, op.kind, op.vault, op.account, op.branch, op.amount]
-            : op.kind === 'transfer'
-              ? [op.block, op.kind, op.vault, op.account, op.to, op.branch, op.amount]
-              : [op.block, op.kind, op.vault, op.account, op.amount],
-        ),
-      );
+    document.ops.filter((op) => covered(op.block)).map(projectOp);
   const leftRows = project(left);
   const rightRows = project(right);
   const disagreements: SnapshotDisagreement[] = [];

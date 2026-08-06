@@ -71,7 +71,30 @@
  *    collide on one digest; a sparse array emits `[,]`, which is not JSON at all.
  */
 export function canonicalJson(value: unknown): string {
-  return serialize(value);
+  const parts: string[] = [];
+  canonicalJsonInto(value, (piece) => parts.push(piece));
+  return parts.join('');
+}
+
+/**
+ * The same serialization, emitted piece by piece instead of returned as one string.
+ *
+ * Added for a consumer that must decide whether a **file it already holds** is in canonical
+ * form. The obvious way to answer that is `canonicalJson(parsed) === text`, and it builds a
+ * second complete copy of the document to do it: at `packages/providers`' 400 MB import
+ * ceiling (10 §8.4) that duplicate is the difference between a slow import and a tab that
+ * runs out of memory — which is a crash rather than a refusal.
+ *
+ * `canonicalJson` is a wrapper over this, deliberately, so there is still exactly **one**
+ * answer to *which bytes* (10 §13.1). A separate streaming serializer beside the returning
+ * one would agree on the day it was written and diverge at the first field, and the symptom
+ * would be a correct document reported as non-canonical.
+ *
+ * `emit` may throw to abort the walk early — a comparator that has already found a
+ * difference has no reason to serialize the remaining 399 MB.
+ */
+export function canonicalJsonInto(value: unknown, emit: (piece: string) => void): void {
+  serializeInto(value, emit);
 }
 
 /**
@@ -95,13 +118,18 @@ export function byCodePoint(a: string, b: string): number {
   return left.length - right.length;
 }
 
-function serialize(value: unknown): string {
-  if (value === null) return 'null';
+function serializeInto(value: unknown, emit: (piece: string) => void): void {
+  if (value === null) {
+    emit('null');
+    return;
+  }
   switch (typeof value) {
     case 'boolean':
-      return value ? 'true' : 'false';
+      emit(value ? 'true' : 'false');
+      return;
     case 'bigint':
-      return JSON.stringify(value.toString());
+      emit(JSON.stringify(value.toString()));
+      return;
     case 'number':
       if (!Number.isFinite(value)) {
         throw new TypeError('canonical JSON has no representation for a non-finite number');
@@ -116,19 +144,28 @@ function serialize(value: unknown): string {
           `${value} is an integer past 2^53 and would serialize lossily; pass a bigint`,
         );
       }
-      return JSON.stringify(value);
+      emit(JSON.stringify(value));
+      return;
     case 'string':
-      return JSON.stringify(value);
+      emit(JSON.stringify(value));
+      return;
     case 'undefined':
       throw new TypeError('canonical JSON has no representation for undefined');
     default:
       break;
   }
   if (Array.isArray(value)) {
-    // `Array.from` fills a sparse array's holes with `undefined`, which `serialize` then
-    // refuses. `value.map` preserves the holes and `join` renders them as nothing, so a
-    // sparse array would emit `[,]` — not JSON, and accepted by nothing that reads it back.
-    return `[${Array.from(value, serialize).join(',')}]`;
+    // A sparse array's holes are read through `Array.from`, which fills them with
+    // `undefined` — refused above. Walking `value[i]` directly would render a hole as
+    // nothing and emit `[,]`, which is not JSON and is accepted by nothing that reads it back.
+    const dense = Array.from(value as readonly unknown[]);
+    emit('[');
+    for (const [index, member] of dense.entries()) {
+      if (index > 0) emit(',');
+      serializeInto(member, emit);
+    }
+    emit(']');
+    return;
   }
   if (typeof value === 'object') {
     const prototype = Object.getPrototypeOf(value) as unknown;
@@ -143,7 +180,14 @@ function serialize(value: unknown): string {
       // an explicit null is kept, because it is a value the producer chose.
       .filter(([, v]) => v !== undefined)
       .sort(([a], [b]) => byCodePoint(a, b));
-    return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${serialize(v)}`).join(',')}}`;
+    emit('{');
+    for (const [index, [key, member]] of entries.entries()) {
+      if (index > 0) emit(',');
+      emit(`${JSON.stringify(key)}:`);
+      serializeInto(member, emit);
+    }
+    emit('}');
+    return;
   }
   throw new TypeError(`canonical JSON has no representation for ${typeof value}`);
 }

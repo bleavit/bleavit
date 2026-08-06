@@ -288,7 +288,7 @@ test('malformed: not JSON at all', () => {
 
 // ------------------------------------------------------------------ class: wrong chain
 
-test('binding: a snapshot of another chain is refused by exact equality', () => {
+test('binding: a snapshot of another chain is refused on genesis', () => {
   const { text, pin } = pinnedFile({
     ...validDocument(),
     binding: { genesisHash: '0xbeef', specVersion: 2, contractVersion: 23 },
@@ -299,10 +299,46 @@ test('binding: a snapshot of another chain is refused by exact equality', () => 
   assert.deepEqual(screens(verdict.findings), ['binding']);
 });
 
-test('binding: a differing spec_version alone is enough', () => {
-  const { text, pin } = pinnedFile({ ...validDocument(), binding: { ...BINDING, specVersion: 3 } });
+test('binding: the wrong-chain refusal names the wrong chain, not a damaged download', () => {
+  // FE-PROV-003's recovery used to end with "check that the file downloaded completely, and
+  // compare its content hash" — true for a truncated file and actively wrong here, where
+  // acting on it costs a second download of somebody else's network's history. §10.4 keeps
+  // message and recovery fixed per code, so the per-cause remediation leads the expert detail.
+  const { text, pin } = pinnedFile({
+    ...validDocument(),
+    binding: { genesisHash: '0xbeef', specVersion: 2, contractVersion: 23 },
+  });
   const verdict = admitSnapshot(text, { expectedPin: pin, binding: { ...BINDING } }, sha256);
   assert.equal(verdict.kind, 'rejected');
+  if (verdict.kind !== 'rejected') return;
+  assert.equal(verdict.refusal.code, 'FE-PROV-003');
+  assert.match(verdict.refusal.detail, /different chain/);
+  assert.match(verdict.refusal.detail, /Re-downloading will not help/);
+  assert.doesNotMatch(verdict.refusal.recovery, /downloaded completely/);
+});
+
+test('binding: a differing spec_version alone is ADMITTED — §8 mandates no version binding', () => {
+  // The correction (F9, 2026-08-06). `equalBinding`'s exact spec/contract equality is 10 §13.1's
+  // rule for the three HANDOFF formats, which describe one block; §8 states no chain binding for
+  // a snapshot at all, and §6.4 assigns snapshots "deep history beyond 30 days" — history that
+  // necessarily predates the current runtime. Under exact equality the first runtime upgrade
+  // refuses every snapshot ever published: the normal case, refused, with copy telling the user
+  // to check a download that was never damaged.
+  const { text, pin } = pinnedFile({ ...validDocument(), binding: { ...BINDING, specVersion: 3 } });
+  const verdict = admitSnapshot(text, { expectedPin: pin, binding: { ...BINDING } }, sha256);
+  assert.equal(verdict.kind, 'admitted');
+  if (verdict.kind !== 'admitted') return;
+  // And the version is still carried, so a caller renders the difference as an advisory line.
+  assert.equal(verdict.document.binding.specVersion, 3);
+});
+
+test('binding: a differing contract version alone is ADMITTED too', () => {
+  const { text, pin } = pinnedFile({
+    ...validDocument(),
+    binding: { ...BINDING, contractVersion: 99 },
+  });
+  const verdict = admitSnapshot(text, { expectedPin: pin, binding: { ...BINDING } }, sha256);
+  assert.equal(verdict.kind, 'admitted');
 });
 
 // ------------------------------------------------------------------ class: coverage
@@ -470,7 +506,7 @@ test('a document that fails several classes reports all of them, not the first',
   const document = validDocument();
   const verdict = admit({
     ...document,
-    binding: { ...BINDING, specVersion: 99 },
+    binding: { ...BINDING, genesisHash: '0xbeef' },
     coverage: [{ fromBlock: 10, toBlock: 11 }],
     balances: [],
   });
@@ -778,9 +814,12 @@ test('a disagreement flags the PAIR and names neither as the wrong one', () => {
   assert.ok(verdict.disagreements.length > 0);
 });
 
-test('no shared coverage reports an EMPTY overlap rather than a clean bill', () => {
-  // Two producers covering disjoint history have cross-checked nothing. "Agree" with nothing
-  // compared is the shape a user reads as confirmation.
+test('no shared coverage is its own verdict, not an agreement with an empty overlap', () => {
+  // Two producers covering disjoint history have cross-checked nothing. Until 2026-08-06 this
+  // returned `agree` with `overlap: []` — the fact was there and a caller writing the obvious
+  // `if (kind === 'agree') showCrossChecked()` turned it into a cross-check that passed. §8.4
+  // offers this diff as "the only available cross-check" for depth, so a vacuous one reported
+  // as agreement manufactures exactly the confidence it declines to offer.
   const left = validDocument();
   const right: SnapshotDocument = {
     ...validDocument(),
@@ -790,9 +829,9 @@ test('no shared coverage reports an EMPTY overlap rather than a clean bill', () 
     balances: [],
   };
   const verdict = diffSnapshots(left, right);
-  assert.equal(verdict.kind, 'agree');
-  if (verdict.kind !== 'agree') return;
-  assert.deepEqual(verdict.overlap, []);
+  assert.equal(verdict.kind, 'no-overlap');
+  // And there is no `overlap` member to mistake for one: the empty array is gone, not renamed.
+  assert.ok(!('overlap' in verdict));
 });
 
 test('the overlap is the intersection of COVERAGE, not of the declared spans', () => {
@@ -819,9 +858,11 @@ test('the overlap is the intersection of COVERAGE, not of the declared spans', (
   assert.equal(admit(early).kind, 'admitted');
   assert.equal(admit(late).kind, 'admitted');
   const verdict = diffSnapshots(early, late);
-  assert.equal(verdict.kind, 'agree', 'no block is jointly observed, so nothing disagrees');
-  if (verdict.kind !== 'agree') return;
-  assert.deepEqual(verdict.overlap, [], 'and the pair has cross-checked nothing');
+  assert.equal(
+    verdict.kind,
+    'no-overlap',
+    'no block is jointly observed, so nothing was compared — and nothing compared is not agreement',
+  );
 });
 
 test('two identical movements in one block stay two — the diff is ordered, not keyed', () => {
