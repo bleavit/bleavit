@@ -841,6 +841,13 @@ jobs:
       - name: Install (frozen lockfile)
         working-directory: app
         run: pnpm install --frozen-lockfile
+      - name: Build the workspace project graph
+        # `release:build` runs Vite over `src/application`, whose imports resolve through
+        # each package's `dist/`. The `app` job gets those for free because it runs the
+        # whole suite first; this job does not, and a missing `dist/` surfaces as
+        # "Rolldown failed to resolve import" rather than as a missing build step.
+        working-directory: app
+        run: pnpm run build
       - name: Build the attested release tree
         # Not a convenience. `src-tauri/build.rs` compiles `release-out/release.json` in and
         # panics with the command that produces it when it is absent, so **the desktop shell
