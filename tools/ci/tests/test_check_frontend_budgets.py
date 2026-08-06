@@ -20,6 +20,7 @@ PARAMS = ROOT / "docs" / "architecture" / "13-parameters.md"
 POV_BUDGETS = ROOT / "runtime" / "bleavit-runtime" / "src" / "pov_budgets.rs"
 SMOLDOT_GATE = ROOT / "app" / "tools" / "check-smoldot-budget.ts"
 PRIMITIVES = ROOT / "crates" / "futarchy-primitives" / "src" / "lib.rs"
+BUNDLE_GATE = ROOT / "app" / "tools" / "check-bundle-budget.ts"
 
 
 def run() -> subprocess.CompletedProcess[str]:
@@ -162,6 +163,23 @@ class FrontendBudgets(unittest.TestCase):
             "const BUDGET_GZ_BYTES = 3.5e6;",
             "const BUDGET_GZ_BYTES = 3.5 * 1024 * 1024;",
             "grants ~5 % the document does not",
+        )
+
+    def test_a_bundle_gate_enforcing_a_different_target_fails(self) -> None:
+        """§9.4 states two thresholds; both are bound, so neither can rot into decoration."""
+        self.assert_mutation_caught(
+            BUNDLE_GATE,
+            "const TARGET_GZ_BYTES = 350_000;",
+            "const TARGET_GZ_BYTES = 500_000;",
+            "initial-JS target is 350 KB",
+        )
+
+    def test_a_bundle_gate_enforcing_a_different_hard_fail_fails(self) -> None:
+        self.assert_mutation_caught(
+            BUNDLE_GATE,
+            "const HARD_FAIL_GZ_BYTES = 450_000;",
+            "const HARD_FAIL_GZ_BYTES = 450 * 1024;",
+            "initial-JS hard fail is 450 KB",
         )
 
     def test_a_stale_depth_cell_fails(self) -> None:

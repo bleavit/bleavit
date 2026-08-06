@@ -750,6 +750,10 @@ jobs:
           # Re-reads the tree the line above emitted, in the SAME step: `dist/`
           # exists only within it, so a separate step would scan nothing and pass.
           pnpm run release:check
+          # 10 §9.4's initial-JS budget, whose enforcement column has named a
+          # "bundle-size CI gate" since the reviewed design while no such gate
+          # existed. Same step for the same reason as the line above.
+          pnpm run check:bundle-budget
 
       - name: Release suite (12 §1, §5.2–§5.3; F11/F13)
         working-directory: app

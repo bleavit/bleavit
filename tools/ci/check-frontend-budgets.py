@@ -38,6 +38,7 @@ FRONTEND = ROOT / "docs" / "architecture" / "10-frontend-architecture.md"
 POV_BUDGETS = ROOT / "runtime" / "bleavit-runtime" / "src" / "pov_budgets.rs"
 SMOLDOT_GATE = ROOT / "app" / "tools" / "check-smoldot-budget.ts"
 PRIMITIVES = ROOT / "crates" / "futarchy-primitives" / "src" / "lib.rs"
+BUNDLE_GATE = ROOT / "app" / "tools" / "check-bundle-budget.ts"
 
 #: 10 §9.1's effective per-row cost, and the one modelling assumption the documents
 #: state rather than derive. It is labelled as an assumption in §9.1 itself, so it is
@@ -413,6 +414,31 @@ def main() -> int:
             "a MiB reading of this cell grants ~5 % the document does not."
         )
     checked += 1
+
+    # §9.4's initial-JS row and the gate that enforces it. Both thresholds are bound, not
+    # just the hard fail: a target nobody checks is how "≤ 350 KB" becomes decoration.
+    js_row = find(
+        nine,
+        r"\| Initial JS \(critical path, gz\) \| ≤ (\d+) KB / hard-fail (\d+) KB",
+        "§9.4's initial-JS budget",
+    )
+    bundle = BUNDLE_GATE.read_text(encoding="utf-8")
+    for label, published, constant in (
+        ("target", js_row.group(1), "TARGET_GZ_BYTES"),
+        ("hard fail", js_row.group(2), "HARD_FAIL_GZ_BYTES"),
+    ):
+        enforced = product(
+            find(bundle, rf"const {constant} = ([\d._eE+*\s]+);", f"the bundle gate's {constant}")
+            .group(1)
+            .replace("_", "")
+        )
+        if enforced != float(published) * 1e3:
+            raise Fail(
+                f"§9.4's initial-JS {label} is {published} KB = {float(published) * 1e3:.0f} B, but "
+                f"`app/tools/check-bundle-budget.ts` enforces {enforced:.0f} B via {constant}. "
+                "§9 states KB = 10³."
+            )
+        checked += 1
 
     blob_mb = float(find(nine, r"\*\*measured ([\d.]+) MB gz\*\*", "§9.3's measured blob size").group(1))
     bundle = float(

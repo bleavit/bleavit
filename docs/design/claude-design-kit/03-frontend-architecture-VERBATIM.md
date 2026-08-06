@@ -481,7 +481,7 @@ Measured in CI (Lighthouse + Playwright timers) on reference hardware (desktop =
 
 | Budget | Target (p50 / p95) | Enforcement |
 |---|---|---|
-| Initial JS (critical path, gz) | ≤ 350 KB / hard-fail 450 KB | bundle-size CI gate |
+| Initial JS (critical path, gz) | ≤ 350 KB / hard-fail 450 KB | bundle-size CI gate — `app/tools/check-bundle-budget.ts`, over the entry chunk's **static** import closure. A dynamic `import(` is not followed: that is the same lazy boundary the smoldot and chain-spec rows are budgeted on separately, and summing all of `assets/` would charge first render for code it never touches |
 | smoldot WASM (worker, lazy) | ≤ 3.5 MB gz **[VERIFY artifact size — FE-P4]** | size gate + lazy load |
 | Chain specs (relay + para + Asset Hub, gz, lazy) | ≤ 3.5 MB combined (checkpoint-trimmed) | size gate |
 | Release-shipped fallback metadata (gz, lazy) | ≤ 1.5 MB combined — §9.3's 8-blob cache bound × the measured 0.14 MB blob, rounded up for metadata growth. The release cannot ship more blobs than the cache admits | size gate |
