@@ -48,6 +48,7 @@ import {
   WidenedLimitError,
   aboveTheFold,
   abbreviateIdentifier,
+  badgeCopyFor,
   formatBaseUnits,
   formatCount,
   formatPpm,
@@ -149,6 +150,46 @@ test('every status renders a badge, and the copy comes from the status', () => {
       `${status.kind} rendered an empty badge`,
     );
   }
+});
+
+test('a derived-local badge names its SOURCES, not a count of gaps (10 §6.3, §2.3)', () => {
+  // The major this closes. `derived-local` is the one status carrying coverage, and the badge
+  // rendered `local index (2 gaps)` — a count. A count says how much is missing and nothing
+  // about who supplied what is present, so a line assembled half from this device's light
+  // client and half from an opt-in indexer rendered identically to one this device ingested
+  // entirely. 10 §6.3 makes a range boundary "a rendered fact" and §2.3 gives provider-fed
+  // history exactly one mitigation: "mandatory, non-suppressible provenance labelling".
+  const mixed: VerificationStatus = {
+    kind: 'derived-local',
+    coverage: {
+      ranges: [
+        { fromBlock: 1, toBlock: 10, origin: 'self' },
+        { fromBlock: 20, toBlock: 30, origin: 'indexer', providerId: 'acme' },
+      ],
+      holes: [{ fromBlock: 11, toBlock: 19 }],
+    },
+  };
+  // **Asserted on the `mark`, not on the rendered HTML.** A mutation run caught this: the long
+  // `title` also names the sources, so matching the whole markup passes while the short marker —
+  // the only part a reader sees without hovering — is back to a bare gap count.
+  const mark = badgeCopyFor(mixed).mark;
+  assert.match(mark, /self/, 'the verified part of the line is not named in the visible marker');
+  assert.match(mark, /indexer:acme/, 'the third-party source is invisible in the visible marker');
+  // The gaps are still stated — §6.3 makes holes first-class too — but as the second clause
+  // rather than the whole sentence.
+  assert.match(mark, /1 gap/, 'holes stopped being first-class');
+  const html = renderToStaticMarkup(h(ProvenanceBadge, { status: mixed }));
+  assert.ok(html.includes(mark), 'the badge renders something other than the copy it derived');
+  assert.match(html, /indexer:acme/);
+
+  // A wholly self-ingested line must NOT read the same, or the label distinguishes nothing.
+  const onlyMine: VerificationStatus = {
+    kind: 'derived-local',
+    coverage: { ranges: [{ fromBlock: 1, toBlock: 30, origin: 'self' }], holes: [] },
+  };
+  assert.doesNotMatch(renderToStaticMarkup(h(ProvenanceBadge, { status: onlyMine })), /indexer/);
+  assert.doesNotMatch(badgeCopyFor(onlyMine).mark, /indexer/);
+  assert.notEqual(badgeCopyFor(mixed).mark, badgeCopyFor(onlyMine).mark);
 });
 
 test('an unverified value cannot be rendered wearing a verified badge', () => {

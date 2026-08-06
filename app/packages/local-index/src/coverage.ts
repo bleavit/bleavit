@@ -36,8 +36,17 @@
  * re-implementing the promise the specification withdrew.
  */
 
-/** Where a range's blocks came from. `self` is the only light-client-verified origin. */
-export type RangeOrigin = 'self' | 'operator' | 'snapshot' | 'indexer';
+import { coverageBoundarySet, type CoverageRange as CoverageShape } from '@bleavit/shared-types';
+
+/**
+ * Where a range's blocks came from. `self` is the only light-client-verified origin.
+ *
+ * Derived from `@bleavit/shared-types`' published shape rather than restated. That package is
+ * the dependency-free root and is what `packages/ui` reads to render a `derived-local` badge, so
+ * two spellings of this union would be two answers to *"is this line third-party data"* — with
+ * the render layer holding the copy nobody re-derives.
+ */
+export type RangeOrigin = CoverageShape['origin'];
 
 declare const SELF_INGESTED: unique symbol;
 
@@ -79,11 +88,43 @@ export interface SelfIngested {
   readonly [SELF_INGESTED]: true;
 }
 
+/**
+ * The facts §6.3's per-range integrity checks are stated over.
+ *
+ * > Cursor integrity checks (hash-at-edge, genesis binding, spec-version-at-edge) apply per
+ * > range; corruption of one range invalidates that range, not the index.
+ *
+ * That sentence had nothing to read. `CoverageRange` as §6.3 declared it two paragraphs
+ * earlier carries a block span, an origin, a provider id and a timestamp — no hash, no
+ * genesis, no spec version — so all three checks were unimplementable and `invalidateRange`
+ * had no detector that could ever call it. The fields are added here and in §6.3 together
+ * (PLAN.md · Decision log, SQ-605), because a check with no substrate is not a stricter
+ * design than no check at all: it is the same design with a sentence in front of it.
+ *
+ * The edge is the range's **`toBlock`**, not its `fromBlock`. A range grows forward, so the
+ * high end is the one a resumed ingest continues from and the one a reorg or a runtime
+ * upgrade invalidates first.
+ */
+export interface RangeEdge {
+  /**
+   * §6.3's genesis binding. Redundant with the database name (§7) exactly until it is not:
+   * a range that arrives by import, by structured clone from another tab, or by a migration
+   * carries no database with it, and a range from another chain is well-formed in every
+   * other respect.
+   */
+  readonly genesisHash: string;
+  /** §6.3's hash-at-edge: the finalized block hash at `toBlock`. */
+  readonly hash: string;
+  /** §6.3's spec-version-at-edge: the runtime `spec_version` at `toBlock`. */
+  readonly specVersion: number;
+}
+
 export type CoverageRange = {
   /** Inclusive, contiguous. */
   readonly fromBlock: number;
   readonly toBlock: number;
   readonly ingestedAt: number;
+  readonly edge: RangeEdge;
 } & (
   | ({ readonly origin: 'self'; readonly providerId?: undefined } & SelfIngested)
   | { readonly origin: Exclude<RangeOrigin, 'self'>; readonly providerId: string }
@@ -102,8 +143,13 @@ export type CoverageRange = {
  * the compiler — like the `Finalized<T>` brand, whose companion cast gate exists because a
  * brand stops object literals and not assertions.
  */
-export function selfRange(fromBlock: number, toBlock: number, ingestedAt: number): CoverageRange {
-  return { fromBlock, toBlock, ingestedAt, origin: 'self' } as CoverageRange;
+export function selfRange(
+  fromBlock: number,
+  toBlock: number,
+  ingestedAt: number,
+  edge: RangeEdge,
+): CoverageRange {
+  return { fromBlock, toBlock, ingestedAt, edge, origin: 'self' } as CoverageRange;
 }
 
 /** Mint a range from a non-verifying source. `providerId` is required by the type. */
@@ -113,8 +159,9 @@ export function providerRange(
   fromBlock: number,
   toBlock: number,
   ingestedAt: number,
+  edge: RangeEdge,
 ): CoverageRange {
-  return { fromBlock, toBlock, ingestedAt, origin, providerId };
+  return { fromBlock, toBlock, ingestedAt, edge, origin, providerId };
 }
 
 /**
@@ -150,10 +197,11 @@ export function rangeForSource(
   fromBlock: number,
   toBlock: number,
   ingestedAt: number,
+  edge: RangeEdge,
 ): CoverageRange {
   return source.origin === 'self'
-    ? selfRange(fromBlock, toBlock, ingestedAt)
-    : providerRange(source.origin, source.providerId, fromBlock, toBlock, ingestedAt);
+    ? selfRange(fromBlock, toBlock, ingestedAt, edge)
+    : providerRange(source.origin, source.providerId, fromBlock, toBlock, ingestedAt, edge);
 }
 
 export interface Hole {
@@ -161,15 +209,40 @@ export interface Hole {
   readonly toBlock: number;
 }
 
-export interface Coverage {
+/**
+ * §6.3's coverage value, under §6.3's own name.
+ *
+ * The section declares `CoverageRef { ranges: CoverageRange[]; holes: Array<[number, number]> }`
+ * and `@bleavit/shared-types` names the same thing in `VerificationStatus`. This module shipped
+ * it as `Coverage` with named-field holes, so one value had two names and two shapes across
+ * three documents that all have to agree for a badge to render. The named-field form is kept —
+ * a positional pair invites `[to, from]`, which is silent and which `holesIn` refuses precisely
+ * because inverted spans read as complete coverage — and §6.3 is amended to publish it
+ * (PLAN.md · Decision log). One name, one shape.
+ */
+export interface CoverageRef {
   readonly ranges: readonly CoverageRange[];
   readonly holes: readonly Hole[];
 }
 
-/** A history answer is never data alone — 10 §6.3's "data *plus* the coverage it came from". */
+/**
+ * A history answer is never data alone — 10 §6.3's "data *plus* the coverage it came from".
+ *
+ * Deliberately **not** `{ data, coverage: CoverageRef }`. `assertCanonical` refuses a
+ * `CoverageRef` whose `holes` were computed over an explicit span, because those holes are not
+ * derivable from the ranges and every later mutation would silently recompute them without the
+ * span — dropping the edge holes and turning a bounded question into an unbounded claim. A
+ * query's answer is exactly that bounded question, so it carries its span and its span-bounded
+ * holes as separate fields rather than as a value that must never be stored.
+ */
 export interface CoveredResult<T> {
   readonly data: T;
-  readonly coverage: Coverage;
+  /** The span asked about, so a caller cannot lose which question these holes answer. */
+  readonly span: Hole;
+  /** The ranges overlapping `span`, each keeping its own origin — §6.3's rendered boundary. */
+  readonly ranges: readonly CoverageRange[];
+  /** `holesIn(ranges, span)`: the blocks inside `span` no range covers. */
+  readonly holes: readonly Hole[];
 }
 
 export class CoverageError extends Error {}
@@ -224,6 +297,47 @@ function assertWellFormed(range: CoverageRange): void {
   if (loose.origin === 'self' && loose.providerId !== undefined) {
     throw new CoverageError('a self range is light-client-ingested and has no provider');
   }
+  assertEdge(range);
+}
+
+/** `0x` + 32 bytes — the rendering every hash in this repository is carried in. */
+const HASH_32 = /^0x[0-9a-f]{64}$/;
+
+/**
+ * The edge fields §6.3's three integrity checks read.
+ *
+ * Validated at the same boundary as everything else, and for the same reason: the callers
+ * that matter are untyped. A range rehydrated from IndexedDB with `edge: undefined` would
+ * otherwise reach `verifyRange`, where every comparison against `undefined` is `false` — so
+ * a range with no edge at all would report as *corrupt* rather than as *unverifiable*, and
+ * the client would drop honest ranges on a schema slip.
+ */
+function assertEdge(range: CoverageRange): void {
+  const edge = (range as { edge?: unknown }).edge;
+  if (edge === null || typeof edge !== 'object') {
+    throw new CoverageError(
+      `range ${range.fromBlock}..${range.toBlock} carries no edge; 10 §6.3's hash-at-edge, ` +
+        'genesis-binding and spec-version-at-edge checks would have nothing to read',
+    );
+  }
+  const { genesisHash, hash, specVersion } = edge as {
+    genesisHash?: unknown;
+    hash?: unknown;
+    specVersion?: unknown;
+  };
+  if (typeof genesisHash !== 'string' || !HASH_32.test(genesisHash)) {
+    throw new CoverageError(`range ${range.fromBlock}..${range.toBlock} names no genesis hash`);
+  }
+  if (typeof hash !== 'string' || !HASH_32.test(hash)) {
+    throw new CoverageError(
+      `range ${range.fromBlock}..${range.toBlock} names no block hash at its edge`,
+    );
+  }
+  if (!Number.isInteger(specVersion) || (specVersion as number) < 0) {
+    throw new CoverageError(
+      `range ${range.fromBlock}..${range.toBlock} names no spec version at its edge`,
+    );
+  }
 }
 
 /** Two ranges may join only if nothing about their provenance differs. */
@@ -253,11 +367,24 @@ function adjacentOrOverlapping(a: CoverageRange, b: CoverageRange): boolean {
  * Different provenances may of course overlap: keeping those apart is the whole point of
  * §6.3's no-splice rule, so the check is deliberately not "no two ranges overlap".
  */
-function assertCanonical(coverage: Coverage): void {
+function assertCanonical(coverage: CoverageRef): void {
   if (coverage === null || typeof coverage !== 'object' || !Array.isArray(coverage.ranges)) {
     throw new CoverageError('coverage must carry a ranges array');
   }
   coverage.ranges.forEach(assertWellFormed);
+
+  // One coverage set describes one chain. §7 already makes that true of the *database*, and
+  // this makes it true of the value — a set holding two genesis hashes is the cross-chain
+  // contamination §7's naming exists to prevent, arriving through an import or a structured
+  // clone rather than through a shared database.
+  const genesis = coverage.ranges[0]?.edge.genesisHash;
+  const foreign = coverage.ranges.find((r) => r.edge.genesisHash !== genesis);
+  if (foreign !== undefined) {
+    throw new CoverageError(
+      `coverage spans two chains: ${String(genesis)} and ${foreign.edge.genesisHash}. One index ` +
+        'describes one chain, and rows from two chains are indistinguishable once merged.',
+    );
+  }
 
   // Sorted by provenance then position, so only neighbours can conflict. The pairwise form
   // this replaces was O(n^2) on every add, and the range list has no bound — a rehydrated
@@ -319,9 +446,22 @@ function assertCanonical(coverage: Coverage): void {
  * verified and once not — and a reader asking "is block N verified?" must be able to
  * find the `self` range that says so without the `operator` range having consumed it.
  */
-export function addRange(coverage: Coverage, incoming: CoverageRange): Coverage {
+export function addRange(coverage: CoverageRef, incoming: CoverageRange): CoverageRef {
   assertWellFormed(incoming);
   assertCanonical(coverage);
+  // §6.3's genesis binding, checked **here** rather than only on the way back in. Every other
+  // entry point refuses a two-chain set (`assertCanonical`), and `addRange` was the one that
+  // could create one: a foreign incoming range joined nothing, was appended, and the *next*
+  // mutation threw `coverage spans two chains` — so the index became unusable at a call site
+  // that had done nothing wrong, and the caller that could still have acted was long gone.
+  const chain = coverage.ranges[0]?.edge.genesisHash;
+  if (chain !== undefined && incoming.edge.genesisHash !== chain) {
+    throw new CoverageError(
+      `range ${incoming.fromBlock}..${incoming.toBlock} is bound to genesis ` +
+        `${incoming.edge.genesisHash}, but this coverage describes ${chain}. One index describes ` +
+        'one chain, and rows from two chains are indistinguishable once merged.',
+    );
+  }
   const joined: CoverageRange[] = [];
   let current = incoming;
   for (const existing of coverage.ranges) {
@@ -332,6 +472,12 @@ export function addRange(coverage: Coverage, incoming: CoverageRange): Coverage 
         toBlock: Math.max(existing.toBlock, current.toBlock),
         // The older ingest time is kept: the joined range has been held since then.
         ingestedAt: Math.min(existing.ingestedAt, current.ingestedAt),
+        // The edge belongs to the **higher** `toBlock`, because that is the block the joined
+        // range now ends at. Keeping the incoming range's edge unconditionally would leave a
+        // hash and a spec version describing a block inside the range rather than its edge,
+        // and `verifyRange` would then compare the chain's answer at `toBlock` against facts
+        // about a different block — reporting every joined range as corrupt.
+        edge: existing.toBlock > current.toBlock ? existing.edge : current.edge,
       };
     } else {
       joined.push(existing);
@@ -386,7 +532,7 @@ export function holesIn(ranges: readonly CoverageRange[], span?: Hole): readonly
   return holes.filter((h) => h.fromBlock <= h.toBlock);
 }
 
-export const EMPTY_COVERAGE: Coverage = Object.freeze({ ranges: [], holes: [] });
+export const EMPTY_COVERAGE: CoverageRef = Object.freeze({ ranges: [], holes: [] });
 
 /**
  * Whether a block is covered by a light-client-verified range.
@@ -395,7 +541,7 @@ export const EMPTY_COVERAGE: Coverage = Object.freeze({ ranges: [], holes: [] })
  * always means is "may I treat this as verified", and a general predicate makes the
  * `self` check one option among four rather than the one that matters.
  */
-export function isVerifiedAt(coverage: Coverage, block: number): boolean {
+export function isVerifiedAt(coverage: CoverageRef, block: number): boolean {
   return coverage.ranges.some(
     (r) => r.origin === 'self' && block >= r.fromBlock && block <= r.toBlock,
   );
@@ -409,7 +555,7 @@ export function isVerifiedAt(coverage: Coverage, block: number): boolean {
  * under INV-FE-7 (local storage is disposable) that is a performance event the user pays
  * for unnecessarily. The hole the drop creates is the honest result and is recomputed.
  */
-export function invalidateRange(coverage: Coverage, target: CoverageRange): Coverage {
+export function invalidateRange(coverage: CoverageRef, target: CoverageRange): CoverageRef {
   assertCanonical(coverage);
   assertWellFormed(target);
   const ranges = coverage.ranges.filter(
@@ -421,4 +567,279 @@ export function invalidateRange(coverage: Coverage, target: CoverageRange): Cove
       ),
   );
   return { ranges, holes: holesIn(ranges) };
+}
+
+/** What a range was dropped for, kept so the drop can be explained rather than only counted. */
+export interface DroppedRange {
+  readonly value: unknown;
+  readonly reason: string;
+}
+
+export interface CoverageRepair {
+  readonly coverage: CoverageRef;
+  readonly dropped: readonly DroppedRange[];
+}
+
+/**
+ * Rebuild a coverage value from untrusted input, **dropping** what fails rather than throwing.
+ *
+ * This is the other half of `assertCanonical`, and the half that was missing. The mutation
+ * path validated; the *read* path did not, and §6.3 says corruption of one range invalidates
+ * **that range, not the index**. Throwing on rehydration is the whole-index answer to a
+ * one-range fault — a full resync the user pays for, from the one function whose comment
+ * already called IndexedDB *"exactly the untrusted path INV-FE-7 assumes gets corrupted"*.
+ *
+ * Three properties, in the order they matter:
+ *
+ * 1. **A malformed range is dropped, and its blocks become a hole.** That is the honest
+ *    result: nothing local can vouch for a record that does not describe a range.
+ * 2. **A well-formed but non-canonical set is repaired, not dropped.** Two same-provenance
+ *    ranges that overlap are a canonicity fault rather than a corrupt record, and re-folding
+ *    them through `addRange` yields the joined range they should already have been. Dropping
+ *    both would delete data that is present and correct.
+ * 3. **Anything that is not a coverage value at all yields empty coverage**, never
+ *    `undefined`. A renderer that receives `undefined` treats it as full coverage, which is
+ *    the one reading this module exists to make impossible.
+ *
+ * `expectedGenesis` is **required and is an identity, not a vote.** An earlier version kept
+ * whichever genesis had the most ranges, which is a majority rule over untrusted input: a
+ * corrupted or imported record carrying more foreign ranges than honest ones wins, and
+ * `readCoverage` then returns another chain's ranges — `origin: 'self'` among them, since the
+ * brand is compile-time only and a rehydrated record carries whatever it was written with. That
+ * is the cross-chain contamination §7's per-chain database name exists to prevent, arriving
+ * through the door §6.3 opens for imports and structured clones. The database being read knows
+ * its own chain (`LocalIndex.paraGenesisHash`), so there is nothing to infer.
+ */
+export function sanitizeCoverage(value: unknown, expectedGenesis: string): CoverageRepair {
+  if (typeof expectedGenesis !== 'string' || !HASH_32.test(expectedGenesis)) {
+    throw new CoverageError(
+      `${String(expectedGenesis)} is not a genesis hash. Repair compares every range against the ` +
+        'chain this index describes, and a repair with no chain to compare against would have to ' +
+        'guess one from the data it is repairing.',
+    );
+  }
+  const dropped: DroppedRange[] = [];
+  if (value === null || typeof value !== 'object' || !Array.isArray((value as CoverageRef).ranges)) {
+    if (value !== undefined) {
+      dropped.push({ value, reason: 'the stored value does not carry a ranges array' });
+    }
+    return { coverage: EMPTY_COVERAGE, dropped };
+  }
+
+  const wellFormed: CoverageRange[] = [];
+  for (const candidate of (value as CoverageRef).ranges as readonly unknown[]) {
+    try {
+      assertWellFormed(candidate as CoverageRange);
+      wellFormed.push(candidate as CoverageRange);
+    } catch (error) {
+      dropped.push({
+        value: candidate,
+        reason: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  // A set spanning two chains is not repairable by merging: neither chain's ranges are corrupt
+  // in themselves, and keeping the wrong chain's would put another network's blocks behind this
+  // one's ids. Every range is checked against the opened database's own genesis — per range, so
+  // the disposal is §6.3's rather than a whole-index rebuild.
+  const kept: CoverageRange[] = [];
+  for (const range of wellFormed) {
+    if (range.edge.genesisHash === expectedGenesis) {
+      kept.push(range);
+      continue;
+    }
+    dropped.push({
+      value: range,
+      reason:
+        `range ${range.fromBlock}..${range.toBlock} names genesis ${range.edge.genesisHash}, ` +
+        `which is not this index’s chain (${expectedGenesis})`,
+    });
+  }
+
+  let coverage = EMPTY_COVERAGE;
+  for (const range of kept) coverage = addRange(coverage, range);
+  return { coverage, dropped };
+}
+
+/** What the chain says about a range's edge block, right now. */
+export interface RangeEdgeFacts {
+  readonly genesisHash: string;
+  readonly hash: string;
+  readonly specVersion: number;
+}
+
+export type RangeVerdict =
+  | { readonly kind: 'ok' }
+  /** The range disagrees with the chain and must be dropped (§6.3, per range). */
+  | { readonly kind: 'invalid'; readonly reason: string }
+  /** Not checkable right now. Deliberately distinct from `invalid` — see `verifyRanges`. */
+  | { readonly kind: 'unchecked' };
+
+/**
+ * §6.3's three per-range integrity checks, in one place because they share a failure mode.
+ *
+ * > Cursor integrity checks (hash-at-edge, genesis binding, spec-version-at-edge) apply per
+ * > range.
+ *
+ * Each answers a different corruption. **Genesis** catches a range from another chain, which
+ * is well-formed in every other respect and whose ids collide with this chain's. **Hash at
+ * edge** catches a reorg past the range's end and a partially-written record — the stored
+ * edge names a block this chain does not have at that height. **Spec version at edge** catches
+ * rows decoded with metadata the runtime has since replaced, which decode to plausible values
+ * of the wrong shape rather than failing.
+ */
+export function verifyRange(range: CoverageRange, observed: RangeEdgeFacts): RangeVerdict {
+  assertWellFormed(range);
+  if (range.edge.genesisHash !== observed.genesisHash) {
+    return {
+      kind: 'invalid',
+      reason:
+        `range ${range.fromBlock}..${range.toBlock} is bound to genesis ${range.edge.genesisHash} ` +
+        `but this client is on ${observed.genesisHash}`,
+    };
+  }
+  if (range.edge.hash !== observed.hash) {
+    return {
+      kind: 'invalid',
+      reason:
+        `range ${range.fromBlock}..${range.toBlock} recorded block hash ${range.edge.hash} at its ` +
+        `edge; the chain reports ${observed.hash} at block ${range.toBlock}`,
+    };
+  }
+  if (range.edge.specVersion !== observed.specVersion) {
+    return {
+      kind: 'invalid',
+      reason:
+        `range ${range.fromBlock}..${range.toBlock} was ingested under spec_version ` +
+        `${range.edge.specVersion}; block ${range.toBlock} ran ${observed.specVersion}, so its rows ` +
+        'were decoded with the wrong metadata',
+    };
+  }
+  return { kind: 'ok' };
+}
+
+export interface RangeCheck {
+  readonly range: CoverageRange;
+  readonly verdict: RangeVerdict;
+}
+
+export interface CoverageVerification {
+  readonly coverage: CoverageRef;
+  readonly invalidated: readonly RangeCheck[];
+  readonly unchecked: readonly CoverageRange[];
+}
+
+/**
+ * Apply `verifyRange` across a coverage set and drop what fails — §6.3's *"corruption of one
+ * range invalidates that range, not the index"*, as a function the ingest loop and the boot
+ * path can actually call.
+ *
+ * `observe` returning `undefined` means **not checkable now**, and such a range is **kept**.
+ * That asymmetry is the whole safety argument: an unreachable chain, a block outside smoldot's
+ * pinned window, or a light client still syncing all produce "cannot say", and dropping on
+ * "cannot say" would empty the entire index every time the network is poor — a corruption
+ * response triggered by ordinary offline use. Only a *disagreement* invalidates.
+ */
+export function verifyRanges(
+  coverage: CoverageRef,
+  observe: (range: CoverageRange) => RangeEdgeFacts | undefined,
+): CoverageVerification {
+  assertCanonical(coverage);
+  const invalidated: RangeCheck[] = [];
+  const unchecked: CoverageRange[] = [];
+  // Drops go through `invalidateRange` rather than through a second `filter` written here.
+  // Until this existed `invalidateRange` had **no caller at all** — §6.3's per-range
+  // invalidation was an exported function nothing reached, which is the same defect class as
+  // a declared-and-unemitted error code. Routing through it also means there is exactly one
+  // definition of *what dropping a range does* (recompute the holes), rather than two that
+  // agree today.
+  let kept = coverage;
+  for (const range of coverage.ranges) {
+    const facts = observe(range);
+    if (facts === undefined) {
+      unchecked.push(range);
+      continue;
+    }
+    const verdict = verifyRange(range, facts);
+    if (verdict.kind === 'invalid') {
+      invalidated.push({ range, verdict });
+      kept = invalidateRange(kept, range);
+    }
+  }
+  return { coverage: kept, invalidated, unchecked };
+}
+
+/**
+ * §6.3's *"data **plus** the coverage it came from"*, as the type a history query returns.
+ *
+ * > Every history query returns data *plus* the coverage it came from; charts render holes as
+ * > visible gaps with an explainer, tables state "complete within [ranges]".
+ *
+ * `CoveredResult<T>` was declared and **nothing produced one**, so every history read in this
+ * package returned bare rows and the sentence above had no implementation. That is worse than
+ * it sounds: rows with no coverage beside them render as a complete series, which is precisely
+ * the silent splice §6.3 forbids — the caller has no way to know the answer is partial, and
+ * "there were no trades in this hour" and "we never ingested this hour" arrive as the same
+ * empty array.
+ *
+ * Two decisions worth stating because the obvious alternatives are wrong:
+ *
+ * 1. **The ranges are returned unclipped.** Clipping them to `span` would produce ranges whose
+ *    `toBlock` is not the block their `edge` describes, so `verifyRange` would compare the
+ *    chain's answer at one height against facts recorded about another and report every
+ *    queried range as corrupt. The renderer intersects for display; the datum keeps its edge.
+ * 2. **The holes are span-bounded.** `holesIn(ranges, span)` includes the edge holes — the
+ *    blocks at either end of the question that no range reaches — which the unbounded form
+ *    drops. Those are exactly the holes a caller asking about a window needs, and dropping
+ *    them turns *"we hold the middle of what you asked for"* into *"we hold all of it"*.
+ */
+export function covered<T>(coverage: CoverageRef, span: Hole, data: T): CoveredResult<T> {
+  assertCanonical(coverage);
+  assertBlock(span.fromBlock, 'span.fromBlock');
+  assertBlock(span.toBlock, 'span.toBlock');
+  if (span.toBlock < span.fromBlock) {
+    throw new CoverageError(`span ${span.fromBlock}..${span.toBlock} runs backwards`);
+  }
+  const ranges = coverage.ranges.filter(
+    (range) => range.toBlock >= span.fromBlock && range.fromBlock <= span.toBlock,
+  );
+  return {
+    data,
+    span: { fromBlock: span.fromBlock, toBlock: span.toBlock },
+    ranges,
+    holes: holesIn(ranges, span),
+  };
+}
+
+/**
+ * The provenance boundaries inside a covered answer — §6.3's *"a range boundary is a rendered
+ * fact"*, reduced to what a badge can say without laying out a table.
+ *
+ * Returned as a set of origins rather than a count, because a count is the one summary that
+ * cannot carry the fact. *"3 sources"* reads as an abundance; `self + indexer` reads as *part
+ * of this line is third-party data*, which is what 10 §2.3's mandatory labelling is for.
+ */
+/**
+ * This module's `CoverageRange` seen as the shape `@bleavit/shared-types` publishes.
+ *
+ * The two are **not** the same type and that is a real seam: 10 §6.3 declares a range with
+ * `ingestedAt` and a `RangeEdge`, and `shared-types` carries only the span and the provenance,
+ * because the render layer may not import this package (10 §10.1) and a badge needs nothing
+ * else. Nothing checked that the narrower shape stays a *narrowing* of the wider one, so a
+ * field renamed on one side would be found by whichever consumer read it next — which for
+ * `origin` means a badge silently unable to say who supplied a line. Whether §6.3 should
+ * publish one shape is SQ-765; this function is the compile-time half in the meantime, and it
+ * is an ordinary assignment rather than a cast, so it fails the build rather than a test.
+ */
+export function asSharedCoverageRange(range: CoverageRange): CoverageShape {
+  return range;
+}
+
+export function boundarySet(ranges: readonly CoverageRange[]): readonly string[] {
+  // Delegated to `shared-types` rather than reimplemented. `packages/ui` cannot import this
+  // package (10 §10.1), so the badge must be able to compute the set from a `VerificationStatus`
+  // alone — and a second implementation here would be one rule with two spellings, differing
+  // first on the case nobody tested.
+  return coverageBoundarySet({ ranges, holes: [] });
 }

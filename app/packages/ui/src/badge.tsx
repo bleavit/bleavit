@@ -12,7 +12,7 @@
  * status lattice exists to prevent, and no test of "the badge renders" would catch it.
  */
 
-import type { VerificationStatus } from '@bleavit/shared-types';
+import { coverageBoundarySet, type VerificationStatus } from '@bleavit/shared-types';
 
 /** What a reader is told, per status. Fixed in-bundle copy (10 §2.3). */
 interface BadgeCopy {
@@ -34,12 +34,27 @@ function copyFor(status: VerificationStatus): BadgeCopy {
         mark: `unfinalized #${status.blockNumber}`,
         title: `Read at best block #${status.blockNumber}, which is not yet finalized and can still be reverted. Display only — it satisfies nothing.`,
       };
-    case 'derived-local':
+    case 'derived-local': {
+      // **The sources, not the gap count.** 10 §6.3 makes a range boundary "a rendered fact",
+      // and 10 §2.3 gives provider-fed history exactly one mitigation: "mandatory,
+      // non-suppressible provenance labelling". A gap count satisfies neither — it says how
+      // much is missing and nothing about who supplied what is present, so a line assembled
+      // half from this device's light client and half from an opt-in indexer rendered
+      // identically to one this device ingested entirely. The gaps are still stated, because
+      // §6.3 makes holes first-class too; they are the second clause rather than the whole
+      // sentence.
+      const sources = coverageBoundarySet(status.coverage);
+      const holes = status.coverage.holes.length;
+      const from = sources.length === 0 ? 'no ingested range' : sources.join(' + ');
       return {
-        mark: `local index (${status.coverage.holes.length} gap${status.coverage.holes.length === 1 ? '' : 's'})`,
+        mark: `local index (${from}${holes === 0 ? '' : `, ${holes} gap${holes === 1 ? '' : 's'}`})`,
         title:
-          'Computed from this device’s own index of past blocks. Coverage may have gaps, and gaps are not interpolated over.',
+          `Computed from this device’s own index of past blocks, assembled from: ${from === 'no ingested range' ? 'nothing yet' : from}. ` +
+          'Only a “self” range was read and verified by this device’s light client; every other ' +
+          'source is unverified and never becomes verified. ' +
+          `Coverage has ${holes === 0 ? 'no gaps' : `${holes} gap${holes === 1 ? '' : 's'}`}, and gaps are not interpolated over.`,
       };
+    }
     case 'provider':
       return {
         mark: `unverified — ${status.providerId}`,

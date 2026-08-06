@@ -34,10 +34,11 @@ const PROVIDER: VerificationStatus = { kind: 'provider', providerId: 'p', sample
 const STALE: VerificationStatus = { kind: 'stale-cache', asOfBlock: 10, ageMs: 5_000 };
 const LOCAL: VerificationStatus = {
   kind: 'derived-local',
-  // `CoverageRef` is `{ranges, holes}` of `{fromBlock, toBlock}`. This fixture said
-  // `{from, to}` — a shape the client never produces, so every assertion that reached
-  // through it was reading a coverage record the type does not admit.
-  coverage: { ranges: [{ fromBlock: 1, toBlock: 2 }], holes: [] },
+  // `CoverageRef` is `{ranges, holes}`, and a range carries its **origin** — 10 §6.3 makes a
+  // range boundary a rendered fact, so the field a badge needs most is the one this fixture
+  // used to omit. It also said `{from, to}` once, a shape the client never produces, so every
+  // assertion reaching through it was reading a coverage record the type does not admit.
+  coverage: { ranges: [{ fromBlock: 1, toBlock: 2, origin: 'self' }], holes: [] },
 };
 const PROPOSAL: VerificationStatus = { kind: 'external-proposal' };
 
