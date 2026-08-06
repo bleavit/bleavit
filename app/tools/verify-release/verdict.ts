@@ -36,6 +36,8 @@
  */
 
 import type { SelfCheckResult } from '@bleavit/verify';
+import { parseMinisignPublicKey, verifyMinisign } from './minisign.ts';
+import type { MinisignPublicKey } from './minisign.ts';
 
 export class VerifyError extends Error {
   constructor(message: string) {
@@ -53,6 +55,53 @@ export interface ReleaseSignature {
   readonly keyId: string;
   readonly generation: number;
   readonly valid: boolean;
+  /**
+   * Why it did not verify, when it did not.
+   *
+   * Optional because the field is only meaningful on the failing arm, and carried at all
+   * because *"the signature does not verify"* is the wrong sentence for the case that
+   * matters most: a **restated trusted comment** leaves the artifact bytes intact and fails
+   * only the global signature, and an operator told the bytes are wrong will go and check
+   * the bytes. `releaseSignatureFrom` fills it from `verifyMinisign`'s own reason.
+   */
+  readonly why?: string | undefined;
+}
+
+/**
+ * Build a `ReleaseSignature` by actually verifying the bytes.
+ *
+ * Until this existed, `valid` was **the caller's word** — a signature check that defaults to
+ * whatever the caller believes, which is the `assertCheckable` shape this repository has met
+ * in `admitIntent`, `admitEvidence` and `admitSnapshot`. Nothing about `countReleaseSignatures`
+ * changes: it still takes supplied values, because §1.3's promise is a verdict reproducible
+ * with no project infrastructure and a counting function that fetched could not run in the
+ * container §1.3 describes. What changes is that there is now one function that produces them
+ * honestly, and it is the one the CLI uses.
+ *
+ * `generation` is supplied rather than read from the signature, because minisign carries no
+ * generation — it is a property of the **keyring** a key belongs to (12 §2.1), and inventing
+ * a place for it inside the signature file would be inventing a format.
+ */
+export function releaseSignatureFrom(
+  message: Uint8Array,
+  signatureText: string,
+  publicKeyText: string,
+  generation: number,
+): ReleaseSignature {
+  let key: MinisignPublicKey;
+  try {
+    key = parseMinisignPublicKey(publicKeyText);
+  } catch (error) {
+    // A key file that cannot be parsed is not a signature that failed — but it is certainly
+    // not one that passed, and there is no key id to report it under.
+    throw new VerifyError(
+      `this public key cannot be read: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  const verdict = verifyMinisign(message, signatureText, key);
+  return verdict.ok
+    ? { keyId: verdict.keyId, generation, valid: true }
+    : { keyId: key.keyId, generation, valid: false, why: verdict.reason };
 }
 
 /**
@@ -113,7 +162,13 @@ export function countReleaseSignatures(
   const rejected: RejectedCredential[] = [];
   for (const signature of signatures) {
     if (!signature.valid) {
-      rejected.push({ keyId: signature.keyId, why: 'the signature does not verify' });
+      // The supplied reason when there is one: see `ReleaseSignature.why`. A restated
+      // trusted comment fails here with the artifact bytes intact, and the generic sentence
+      // would send an operator to check the bytes.
+      rejected.push({
+        keyId: signature.keyId,
+        why: signature.why ?? 'the signature does not verify',
+      });
       continue;
     }
     if (signature.generation !== keyring.generation) {
