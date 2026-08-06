@@ -633,7 +633,7 @@ def main() -> int:
     # carry its own copy of a published bound. §9.3's *measured* blob figures are bound
     # too — a measurement nothing re-takes is a number that drifts while every derivation
     # from it stays internally consistent, which is how 0.14 MB survived beside a
-    # 146,946 B file (F14).
+    # 147,008 B file (F14).
     artifact = ARTIFACT_GATE.read_text(encoding="utf-8")
     chain_spec_mb = float(
         find(

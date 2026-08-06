@@ -28,7 +28,7 @@
  * **pair**. Those are the exact bytes an FE-P5 fallback would carry, so measuring them
  * answers the question the row asks *today*, before a shipping decision has been taken:
  * would the fallback fit if it shipped? It also re-measures §9.3's own published blob
- * figures, which nothing did — and which were 0.01 MB low, because 146,946 B is 0.15 MB
+ * figures, which nothing did — and which were 0.01 MB low, because 147,008 B is 0.15 MB
  * and the section printed 0.14 (F14; the first thing this gate found).
  *
  * ## Chain specs (§9.4 row 3) — measured over the release, not over the source tree
@@ -113,7 +113,7 @@ const METADATA_BLOB_COUNT_BOUND = 8;
 /** 10 §9.3's published per-blob measurement, in decimal MB gz. */
 const MEASURED_BLOB_GZ_MB = 0.15;
 /** 10 §9.3's published raw size of the committed `metadata.scale`, in bytes. */
-const MEASURED_BLOB_RAW_BYTES = 469_581;
+const MEASURED_BLOB_RAW_BYTES = 470_546;
 
 /** A budget refusal. Thrown rather than exiting, so the witness leg can require one. */
 export class BudgetError extends Error {

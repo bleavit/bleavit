@@ -346,9 +346,9 @@ class FrontendBudgets(unittest.TestCase):
     def test_a_drifted_raw_blob_size_fails(self) -> None:
         self.assert_mutation_caught(
             ARTIFACT_GATE,
-            "const MEASURED_BLOB_RAW_BYTES = 469_581;",
+            "const MEASURED_BLOB_RAW_BYTES = 470_546;",
             "const MEASURED_BLOB_RAW_BYTES = 500_000;",
-            "publishes measured blob raw size as 469581",
+            "publishes measured blob raw size as 470546",
         )
 
     def test_moving_the_published_metadata_cell_without_the_gate_fails(self) -> None:
