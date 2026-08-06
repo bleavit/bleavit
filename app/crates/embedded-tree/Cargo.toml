@@ -1,0 +1,23 @@
+[package]
+name = "bleavit-embedded-tree"
+version = "0.0.0"
+description = "The F22 embedded-tree assertion: what a desktop shell serves is what the release signed"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+
+[lints.rust]
+unsafe_code = "forbid"
+
+# The comparison decides whether a shell may start, so a silent `unwrap` in it is a refusal
+# turned into a crash with no message. Tests are exempted through `clippy.toml`, where an
+# `unwrap` on a fixture is an assertion rather than a decision.
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"

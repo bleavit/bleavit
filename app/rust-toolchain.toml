@@ -1,0 +1,16 @@
+# The client's own Rust toolchain — deliberately NOT the runtime workspace's.
+#
+# The repository root's `Cargo.toml` excludes `app` and says why: *"its `src-tauri` shell
+# pulls the Tauri stack and desktop/mobile target triples, and its own
+# `app/rust-toolchain.toml` must not inherit this workspace's wasm targets."* This file is
+# that second half.
+#
+# `targets` is therefore **empty**: the desktop shell builds for the host, and a wasm target
+# listed here would be a target rustup installs on every developer's machine for a build that
+# never happens. The channel matches the runtime workspace's pin so a checkout needs one
+# toolchain rather than two — the separation this file exists for is about *targets and
+# dependency trees*, not about the compiler version (01 §9).
+[toolchain]
+channel = "1.89.0"
+components = ["rustfmt", "clippy"]
+profile = "minimal"

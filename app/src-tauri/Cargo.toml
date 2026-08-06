@@ -1,0 +1,26 @@
+[package]
+name = "bleavit-desktop"
+version = "0.0.0"
+description = "Bleavit desktop shell — direct download, embedded asset tree attested at startup"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[build-dependencies]
+tauri-build = "2"
+
+[dependencies]
+bleavit-embedded-tree = { path = "../crates/embedded-tree" }
+tauri = "2"
+
+[features]
+# `custom-protocol` is a **security property here, not a build convenience**, so it is a
+# default rather than something the packaging step remembers to pass. Without it Tauri's
+# `is_dev()` is true and the shell expects a development server — application code arriving
+# over the network, which is the one thing a direct-download channel exists to not do.
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[lints.rust]
+unsafe_code = "forbid"
