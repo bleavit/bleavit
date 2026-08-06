@@ -780,7 +780,7 @@ jobs:
           # first line emitted, on §9.4's own reference hardware. Same step for
           # the same reason. Chrome comes from the runner image (Google Chrome is
           # preinstalled on ubuntu-24.04, verified against the image manifest,
-          # V-175); the gate FAILS rather than skipping when it cannot start one,
+          # V-180); the gate FAILS rather than skipping when it cannot start one,
           # because a skipped measurement is an unenforced budget. The witness is one
           # further run against a 1 ms threshold that MUST be refused — the only thing
           # that distinguishes a gate which measured and passed from one that stopped

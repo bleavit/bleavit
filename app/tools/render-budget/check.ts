@@ -12,7 +12,7 @@
  *
  * §9.4 budgets *"First meaningful render (shell)"*. Lighthouse's own
  * `first-meaningful-paint` audit is retained in the config for backwards compatibility and
- * **produces no `numericValue`** in 12.8.2 — measured, not assumed (V-174) — so binding to
+ * **produces no `numericValue`** in 12.8.2 — measured, not assumed (V-179) — so binding to
  * it would be binding to `undefined`, which is the FE-P1 trap in its purest form: a gate
  * that measured nothing and reported a comfortable number. **First Contentful Paint** is
  * the metric that answers *"has the shell put anything on screen"*, and it is the one the
@@ -24,7 +24,7 @@
  * publishes one shell threshold pair per form factor, and inventing a second budget for a
  * second metric would be this repository writing a number the document does not.
  *
- * ## Reference hardware, verified rather than assumed (R-2, V-174)
+ * ## Reference hardware, verified rather than assumed (R-2, V-179)
  *
  * Both profiles come from Lighthouse's own published presets, read out of
  * `lighthouse/core/config/constants.js` at run time rather than copied here — a copied
@@ -36,7 +36,7 @@
  *   `cpuSlowdownMultiplier: 4`. Taken unmodified.
  * * **desktop** — Lighthouse's desktop preset supplies the 1350 × 940 viewport and
  *   `desktopDense4G` network, but its own `cpuSlowdownMultiplier` is **1**, not 4
- *   (verified against the installed 12.8.2, V-174). §9.4 asks for a mid-2023 laptop at
+ *   (verified against the installed 12.8.2, V-179). §9.4 asks for a mid-2023 laptop at
  *   **4× throttle**, so the multiplier is overridden to 4 and the override is asserted
  *   back out of the report — see the anti-vacuity notes below.
  *
