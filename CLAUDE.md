@@ -43,6 +43,37 @@ adversarial refutation, derivation checking) may fan out freely in one tree, but
 **authoring** jobs must never share a worktree: give each its own `git worktree` and
 merge back serially.
 
+## Output style
+
+`.claude/output-styles/plain-technical-english.md` puts every reply and all newly
+authored repo prose into a controlled register: ≤20-word instructions, ≤25-word
+descriptions, active voice, one instruction per sentence, one name per thing, no
+contractions, no semicolons, no Latin abbreviations. Read that file, not a summary
+here. It sets `keep-coding-instructions: true`, so the built-in software-engineering
+system prompt stays and only the register changes. It deliberately exempts code,
+quoted spec text (paraphrasing normative text is an R-1 change), and README.md's
+R-11 pinned lines. Note that **output styles do not reach subagents** —
+`spec-reviewer`, `test-engineer`, `doc-curator` and Codex answer in their own voice,
+so restate their findings yourself before they land in repo prose. Select it with
+`/config` → *Output style* (the standalone `/output-style` command was removed in
+Claude Code v2.1.91); the choice lands in the gitignored
+`.claude/settings.local.json` and binds after `/clear`.
+
+**Why it is not called "Simplified Technical English" (2026-08-06, user-raised).**
+The style is *informed by* ASD-STE100 but deliberately does not reproduce it. That
+standard's notice forbids reproduction "in whole or in part" without ASD's written
+authority, its enumerated free-usage grant covers aerospace/defence bodies and
+universities rather than projects like this one, and this repository is public and
+GPL-3.0 — so a file that abridged it could neither be published here nor relicensed
+under GPL. The shipped file is therefore organised around enforceable limits rather
+than around the standard's own sections, carries no rule numbering, states every
+constraint in its own words, and opens with a provenance-and-trademark notice. A
+shingle check against the specification text finds no shared 5-word run except the
+publisher's legal name and the standard's title. Keep it that way: **do not paste
+rule text or the Part 2 dictionary into this file.** ASD distributes the standard
+free to any writer at `asd-ste100.org` — reading it is unrestricted, and only
+redistribution is not.
+
 ## Hooks (installed via `.claude/settings.json` — expect these behaviors)
 
 - **SessionStart** injects git state + PLAN.md focus/milestones/last log rows. Trust it
