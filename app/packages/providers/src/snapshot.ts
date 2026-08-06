@@ -50,10 +50,48 @@ export const SNAPSHOT_FORMAT = 'bleavit.snapshot.v1';
 
 // ------------------------------------------------------------------ the document
 
-/** A ledger movement, as exported. The alphabet is the 03 §5 one, and no larger. */
+/**
+ * A ledger movement, as exported.
+ *
+ * ## What v1 covers, and why the boundary is enforced rather than trusted
+ *
+ * The **branch-USDC complete-set alphabet** of 03 §5: `split` and `merge` (mint and burn a
+ * complete set against escrow), `transfer` (`PositionTransferred` — a holding changes hands
+ * with **no** escrow and **no** supply movement), and `redeem` (burn a winning branch at par).
+ *
+ * It does **not** cover the scalar, gate and Baseline instruments or their redemption variants
+ * (`redeem_scalar`, `redeem_scalar_pair`, `redeem_gate`, `redeem_void`, `redeem_baseline*`).
+ * Those are not simply more `kind` strings: their escrow movement is not equal to the amount
+ * burned — `redeem_scalar` pays `floor(a·s)` and `redeem_void` `floor(a/2)` or `floor(a/4)` —
+ * so a replay would need each vault's settlement value, which this document does not carry.
+ * Widening the format to hold it is a v2, not a field.
+ *
+ * **The boundary is enforced at the producer, not assumed.** A missing movement is invisible to
+ * every screen here — the remaining ops stay perfectly self-consistent — so a parser cannot
+ * catch it. What catches it is `app/tools/snapshot`'s differential: `balances` are read from
+ * chain state independently of the movements, so a range containing a movement v1 cannot
+ * express fails to reconcile and the build **refuses**. That is the whole argument for reading
+ * the balance sheet from the chain rather than folding the exporter's own ops.
+ *
+ * `transfer` is in v1 rather than deferred with the rest because omitting it makes the format
+ * unable to encode *ordinary* history: after a transfer the terminal holder differs with no
+ * escrow or supply change at all, so an exporter could only drop the event — and then the
+ * balances fail replay — or misrepresent it as a split and a merge, which moves escrow that
+ * never moved.
+ */
 export type SnapshotOp =
   | { readonly kind: 'split'; readonly block: number; readonly vault: string; readonly account: string; readonly amount: string }
   | { readonly kind: 'merge'; readonly block: number; readonly vault: string; readonly account: string; readonly amount: string }
+  | {
+      readonly kind: 'transfer';
+      readonly block: number;
+      readonly vault: string;
+      readonly account: string;
+      /** Who receives it. The movement is `account → to` of `branch`. */
+      readonly to: string;
+      readonly branch: string;
+      readonly amount: string;
+    }
   | {
       readonly kind: 'redeem';
       readonly block: number;
@@ -111,6 +149,30 @@ export function snapshotPreimage(document: SnapshotDocument): Uint8Array {
   return digestPreimage(SNAPSHOT_FORMAT, document);
 }
 
+/**
+ * The same pre-image, from a serialization the caller already holds.
+ *
+ * `digestPreimage` serializes internally, so a consumer that has just produced the canonical
+ * form in order to compare it against the file would otherwise build a second copy of it — at
+ * the 400 MB import ceiling that duplicate is the difference between a slow import and a dead
+ * tab. Asserted equal to {@link snapshotPreimage} in the corpus, because a second construction
+ * of the pre-image is exactly the *"two answers to which bytes"* this module exists to avoid.
+ */
+export function preimageOfSerialized(canonical: string): Uint8Array {
+  const encoder = new TextEncoder();
+  const tag = encoder.encode(SNAPSHOT_FORMAT);
+  const body = encoder.encode(canonical);
+  const preimage = new Uint8Array(tag.length + 1 + body.length);
+  preimage.set(tag, 0);
+  // The NUL separator, written as a **byte** rather than inside a string. Typing it into
+  // source puts a raw control character on disk: invisible in an editor, and it makes git
+  // and grep treat the whole file as binary (app-code rule 14 — this function was written
+  // that way first, and `grep preimageOfSerialized` on this file returned nothing at all).
+  preimage[tag.length] = 0;
+  preimage.set(body, tag.length + 1);
+  return preimage;
+}
+
 /** The canonical serialization, for writing the file the pin describes. */
 export function serializeSnapshot(document: SnapshotDocument): string {
   return canonicalJson(document);
@@ -141,25 +203,38 @@ export type SnapshotVerdict =
 const DECIMAL = /^(0|[1-9][0-9]*)$/;
 
 /**
+ * The chain's `Balance` ceiling.
+ *
+ * Written as a shift rather than the 39-digit literal: it is a **type width**, not a chain
+ * tunable — there is no 02 §9 row, no `Params` key and nothing to read it from, the same
+ * classification `packages/protocol`'s kernel constants carry (app-code rule 7).
+ */
+const MAX_BALANCE = (1n << 128n) - 1n;
+
+/**
  * Whether a value is an amount in this format's wire form.
  *
  * Exported because the **producer** needs the same test at its own input boundary and needs it
- * to be the same test. `BigInt` is quietly permissive in both directions that matter here: it
+ * to be the same test. `BigInt` is quietly permissive in three directions that matter here: it
  * accepts a `number`, so a JSON amount past 2^53 folds as its rounded value with nothing
- * thrown (V-74), and it accepts `"007"`, which folds correctly and then makes the finished
- * document fail its own `parseSnapshot`. A second copy of this rule in the tool would drift
- * from this one exactly when the format grew.
+ * thrown (V-74); it accepts `"007"`, which folds correctly and then makes the finished document
+ * fail its own `parseSnapshot`; and it is **unbounded**, so a value at or above `2^128` parses,
+ * conserves and reconciles perfectly while describing a quantity no chain event or balance can
+ * hold. A second copy of this rule in the tool would drift from this one exactly when the
+ * format grew.
  */
 export function isCanonicalAmount(raw: unknown): raw is string {
-  return typeof raw === 'string' && DECIMAL.test(raw);
+  return typeof raw === 'string' && DECIMAL.test(raw) && BigInt(raw) <= MAX_BALANCE;
 }
 
 function amount(raw: unknown, where: string): bigint {
   if (!isCanonicalAmount(raw)) {
     throw new MalformedSnapshot(
-      `${where}: an amount must be a canonical decimal string, got ${JSON.stringify(raw)}. ` +
-        'Base units run past 2^53, so a JSON number here would be rounded on load and the ' +
-        'document would then fail its own conservation replay.',
+      `${where}: an amount must be a canonical decimal string within the u128 Balance range, ` +
+        `got ${JSON.stringify(raw)}. Base units run past 2^53, so a JSON number here would be ` +
+        'rounded on load and the document would then fail its own conservation replay; and a ' +
+        'value at or above 2^128 describes a quantity no chain event or balance can hold, ' +
+        'while replaying and reconciling perfectly.',
     );
   }
   return BigInt(raw);
@@ -265,6 +340,24 @@ export function parseSnapshot(raw: unknown): SnapshotDocument {
     if (kind === 'split' || kind === 'merge') {
       return { kind, block, vault, account, amount: record['amount'] as string };
     }
+    if (kind === 'transfer') {
+      const to = text(record['to'], `ops[${i}].to`);
+      if (to === account) {
+        throw new MalformedSnapshot(
+          `ops[${i}]: a transfer to the sending account is not a movement. Admitting one would ` +
+            'let a publisher pad a snapshot with rows that survive every screen and mean nothing.',
+        );
+      }
+      return {
+        kind,
+        block,
+        vault,
+        account,
+        to,
+        branch: text(record['branch'], `ops[${i}].branch`),
+        amount: record['amount'] as string,
+      };
+    }
     if (kind === 'redeem') {
       return {
         kind,
@@ -276,7 +369,10 @@ export function parseSnapshot(raw: unknown): SnapshotDocument {
       };
     }
     throw new MalformedSnapshot(
-      `ops[${i}].kind: expected split, merge or redeem, got ${JSON.stringify(kind)}`,
+      `ops[${i}].kind: expected split, merge, transfer or redeem, got ${JSON.stringify(kind)}. ` +
+        'The scalar, gate and Baseline instruments are outside bleavit.snapshot.v1 — their ' +
+        'escrow movement is not the amount burned, so a replay would need each vault\'s ' +
+        'settlement value, which this document does not carry.',
     );
   });
   const balances = array(root['balances'], 'document.balances').map((entry, i) => {
@@ -420,6 +516,29 @@ function replayConservation(document: SnapshotDocument): Replay {
         bump(supply, branch, value);
         bump(held, branch, value);
       }
+      continue;
+    }
+    if (op.kind === 'transfer') {
+      // `PositionTransferred` moves a holding and touches neither escrow nor supply — which is
+      // exactly why the format needs it: expressing a transfer as a merge plus a split would
+      // move escrow that never moved, and dropping it makes the balances fail their own replay.
+      if (!branches.includes(op.branch)) {
+        replay.findings.push({
+          screen: 'conservation',
+          why: `ops[${i}] transfers branch "${op.branch}", which vault "${op.vault}" does not have`,
+        });
+        continue;
+      }
+      const remaining = bump(held, op.branch, -value);
+      if (remaining < 0n) {
+        replay.findings.push({
+          screen: 'conservation',
+          why:
+            `ops[${i}] transfers ${op.amount} of branch "${op.branch}" from an account holding ` +
+            `less than that (${remaining} after the movement)`,
+        });
+      }
+      bump(holdingsOf(replay, op.vault, op.to), op.branch, value);
       continue;
     }
     if (op.kind === 'merge') {
@@ -736,7 +855,8 @@ export function admitSnapshot(text: string, admission: SnapshotAdmission, sha256
     throw error;
   }
   const canonical = serializeSnapshot(document);
-  if (canonical !== text) {
+  const inCanonicalForm = canonical === text;
+  if (!inCanonicalForm) {
     findings.push({
       screen: 'canonical',
       why:
@@ -747,7 +867,12 @@ export function admitSnapshot(text: string, admission: SnapshotAdmission, sha256
         'something other than these bytes.',
     });
   }
-  const pin = sha256(snapshotPreimage(document));
+  // Hash the serialization already in hand rather than building a third one. For any document
+  // that can be admitted the canonical form *is* the file, so `canonical` and a fresh
+  // `serializeSnapshot` inside `digestPreimage` are the same string — and at the 400 MB import
+  // ceiling an avoidable duplicate of it is the difference between a slow import and a dead
+  // tab. See the memory note on {@link admitSnapshot}.
+  const pin = sha256(preimageOfSerialized(canonical));
   if (pin !== admission.expectedPin) {
     findings.push({
       screen: 'pin',
@@ -787,65 +912,99 @@ function reject(findings: readonly SnapshotFinding[]): SnapshotVerdict {
 // ------------------------------------------------------------------ the two-snapshot diff
 
 export interface SnapshotDisagreement {
-  readonly key: string;
+  /** Position in the compared sequence, so two identical movements stay two. */
+  readonly at: number;
   readonly left: string | undefined;
   readonly right: string | undefined;
 }
 
 export type DiffVerdict =
-  | { readonly kind: 'agree'; readonly overlap: SnapshotRange | undefined }
+  | { readonly kind: 'agree'; readonly overlap: readonly SnapshotRange[] }
   | {
       readonly kind: 'disagree';
       readonly refusal: ProviderRefusal;
-      readonly overlap: SnapshotRange;
+      readonly overlap: readonly SnapshotRange[];
       readonly disagreements: readonly SnapshotDisagreement[];
     };
 
 /**
+ * The blocks **both** documents claim to have observed.
+ *
+ * Intersecting the `coverage` arrays, not the outer `range` spans, and the difference is not
+ * cosmetic: 10 §6.3 makes holes first-class, so two snapshots can each declare blocks 1–100 and
+ * observe disjoint halves of it. Comparing over the declared spans then reports every movement
+ * in either half as a disagreement — `FE-PROV-004` on an honest pair, over history neither
+ * producer contradicts — and with no movements at all reports the pair as agreeing over 100
+ * blocks that were never jointly seen. Only mutually covered history can be cross-checked.
+ */
+function coverageIntersection(
+  left: readonly SnapshotRange[],
+  right: readonly SnapshotRange[],
+): readonly SnapshotRange[] {
+  const shared: SnapshotRange[] = [];
+  for (const a of left) {
+    for (const b of right) {
+      const fromBlock = Math.max(a.fromBlock, b.fromBlock);
+      const toBlock = Math.min(a.toBlock, b.toBlock);
+      if (fromBlock <= toBlock) shared.push({ fromBlock, toBlock });
+    }
+  }
+  return shared.sort((a, b) => a.fromBlock - b.fromBlock);
+}
+
+/**
  * §8.4's only cross-check for depths the light client cannot reach: diff two independent
- * producers over the range they both claim.
+ * producers over the history they **both observed**.
  *
  * **It flags the pair, never a member.** The diff proves at least one is wrong and cannot say
  * which; a client that picked the "better" one — the newer, the larger, the one from the
  * publisher already enabled — would be manufacturing exactly the confidence §8.4 declines to
  * offer. So a disagreement leaves the disputed range as a labelled hole.
  *
- * Two snapshots with **no overlap** agree *vacuously*, and that is reported as `overlap:
- * undefined` rather than as a clean bill: two producers covering disjoint history have not
- * cross-checked anything, and "agree" with nothing compared is the shape a user reads as
- * confirmation. Comparing them anyway would be worse — every row of each would be missing
- * from the other and the pair would read as maximally contradictory.
+ * Two snapshots with **no shared coverage** agree *vacuously*, reported as an empty overlap
+ * rather than as a clean bill: two producers covering disjoint history have not cross-checked
+ * anything, and "agree" with nothing compared is the shape a user reads as confirmation.
+ *
+ * **The comparison is over ordered sequences, not a keyed map.** One account may perform the
+ * same operation on the same vault twice in one block, and a map keyed by the movement's
+ * identity collapses those two into one — after which `[split 100, split 200]` and
+ * `[split 50, split 200]` both project to `200` and the pair reports agreement. That defeats
+ * the only cross-check §8.4 offers for depth, in exactly the case where a forger is free to
+ * choose the movements. `ops` is already in chain order (see {@link checkCanonicalOrder}), so
+ * the ordered projection is well-defined for both documents without any extra field.
  */
 export function diffSnapshots(left: SnapshotDocument, right: SnapshotDocument): DiffVerdict {
-  const fromBlock = Math.max(left.range.fromBlock, right.range.fromBlock);
-  const toBlock = Math.min(left.range.toBlock, right.range.toBlock);
-  if (fromBlock > toBlock) return { kind: 'agree', overlap: undefined };
-  const overlap: SnapshotRange = { fromBlock, toBlock };
-  const project = (document: SnapshotDocument): Map<string, string> => {
-    const rows = new Map<string, string>();
-    for (const op of document.ops) {
-      if (op.block < fromBlock || op.block > toBlock) continue;
-      const branch = op.kind === 'redeem' ? op.branch : '*';
-      rows.set(JSON.stringify([op.block, op.kind, op.vault, op.account, branch]), op.amount);
-    }
-    return rows;
-  };
+  const overlap = coverageIntersection(left.coverage, right.coverage);
+  if (overlap.length === 0) return { kind: 'agree', overlap };
+  const covered = (block: number): boolean =>
+    overlap.some((range) => block >= range.fromBlock && block <= range.toBlock);
+  const project = (document: SnapshotDocument): readonly string[] =>
+    document.ops
+      .filter((op) => covered(op.block))
+      .map((op) =>
+        canonicalJson(
+          op.kind === 'redeem'
+            ? [op.block, op.kind, op.vault, op.account, op.branch, op.amount]
+            : op.kind === 'transfer'
+              ? [op.block, op.kind, op.vault, op.account, op.to, op.branch, op.amount]
+              : [op.block, op.kind, op.vault, op.account, op.amount],
+        ),
+      );
   const leftRows = project(left);
   const rightRows = project(right);
   const disagreements: SnapshotDisagreement[] = [];
-  for (const [key, value] of leftRows) {
-    const other = rightRows.get(key);
-    if (other !== value) disagreements.push({ key, left: value, right: other });
-  }
-  for (const [key, value] of rightRows) {
-    if (!leftRows.has(key)) disagreements.push({ key, left: undefined, right: value });
+  for (let at = 0; at < Math.max(leftRows.length, rightRows.length); at += 1) {
+    const a = leftRows[at];
+    const b = rightRows[at];
+    if (a !== b) disagreements.push({ at, left: a, right: b });
   }
   if (disagreements.length === 0) return { kind: 'agree', overlap };
+  const span = overlap.map((range) => `${range.fromBlock}..${range.toBlock}`).join(', ');
   return {
     kind: 'disagree',
     refusal: providerRefusal(
       'FE-PROV-004',
-      `${disagreements.length} movement(s) differ over blocks ${fromBlock}..${toBlock}`,
+      `${disagreements.length} movement(s) differ over jointly observed blocks ${span}`,
     ),
     overlap,
     disagreements,

@@ -65,10 +65,17 @@ const COPY: Readonly<Record<ProviderRefusalCode, CodeCopy>> = Object.freeze({
   },
   'FE-PROV-004': {
     message: 'Two snapshots of the same period disagree with each other.',
+    // The recovery must not offer a resolution, because 10 §8.4 declines to have one: the
+    // disputed range "is left as a labelled hole rather than resolved by majority — two
+    // producers cannot outvote the absence of a proof". An earlier wording called a third
+    // snapshot "the only thing that resolves it", which invites exactly the 2-of-3 reading the
+    // table rejects and would have a user trust one side of an unprovable disagreement.
     recovery:
       'At least one of them is wrong and this check cannot tell which, so neither is used for ' +
       'the period they disagree about — it stays visible as a gap. A third snapshot from an ' +
-      'unrelated publisher is the only thing that resolves it.',
+      'unrelated publisher is another comparison, not a decision: agreement between sources is ' +
+      'not proof, and nothing outside this device can settle a range this device cannot reach. ' +
+      'What does settle it is the chain itself, for the blocks your own light client can read.',
   },
 });
 

@@ -192,6 +192,17 @@ export function parseArchiveExport(raw: unknown): ArchiveExport {
       eventIndex: u32(at['eventIndex'], `ops[${i}].at.eventIndex`),
     };
     if (kind === 'split' || kind === 'merge') return { at: position, op: { kind, ...common } };
+    if (kind === 'transfer') {
+      return {
+        at: position,
+        op: {
+          kind,
+          ...common,
+          to: label(opRaw['to'], `ops[${i}].op.to`),
+          branch: label(opRaw['branch'], `ops[${i}].op.branch`),
+        },
+      };
+    }
     if (kind === 'redeem') {
       return {
         at: position,
@@ -199,7 +210,10 @@ export function parseArchiveExport(raw: unknown): ArchiveExport {
       };
     }
     throw new MalformedExport(
-      `ops[${i}].op.kind: expected split, merge or redeem, got ${JSON.stringify(kind)}`,
+      `ops[${i}].op.kind: expected split, merge, transfer or redeem, got ${JSON.stringify(kind)}. ` +
+        'The scalar, gate and Baseline instruments are outside bleavit.snapshot.v1; a range ' +
+        'containing one cannot be published as a v1 snapshot, and the differential below is ' +
+        'what stops an exporter silently dropping it instead.',
     );
   });
   return {

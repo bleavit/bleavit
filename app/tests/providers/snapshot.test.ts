@@ -20,11 +20,13 @@ import { createHash } from 'node:crypto';
 
 import {
   PROVIDER_REFUSAL_CODES,
+  providerRefusal,
   SNAPSHOT_FORMAT,
   admitSnapshot,
   deriveBalances,
   diffSnapshots,
   parseSnapshot,
+  preimageOfSerialized,
   serializeSnapshot,
   snapshotPreimage,
 } from '@bleavit/providers';
@@ -585,6 +587,133 @@ test('deriveBalances omits a zero holding rather than stating it', () => {
   assert.deepEqual(rows, []);
 });
 
+// -------------------------------------- the movement alphabet (03 §5) and its boundary
+
+test('a transfer moves a holding and touches neither escrow nor supply', () => {
+  // Without `transfer` the format cannot encode ORDINARY history: after a `PositionTransferred`
+  // the terminal holder differs with no escrow or supply change at all, so an exporter could
+  // only drop the event — and then the balances fail their own replay — or misrepresent it as a
+  // merge plus a split, which moves escrow that never moved.
+  const verdict = admit({
+    ...validDocument(),
+    ops: [
+      { kind: 'split', block: 10, vault: 'v1', account: 'alice', amount: '1000' },
+      { kind: 'split', block: 11, vault: 'v1', account: 'bob', amount: '500' },
+      { kind: 'merge', block: 12, vault: 'v1', account: 'alice', amount: '200' },
+      {
+        kind: 'transfer',
+        block: 12,
+        vault: 'v1',
+        account: 'alice',
+        to: 'bob',
+        branch: 'PASS',
+        amount: '300',
+      },
+      { kind: 'redeem', block: 13, vault: 'v1', account: 'bob', branch: 'PASS', amount: '500' },
+    ],
+    balances: [
+      { vault: 'v1', account: 'alice', branch: 'FAIL', amount: '800' },
+      { vault: 'v1', account: 'alice', branch: 'PASS', amount: '500' },
+      { vault: 'v1', account: 'bob', branch: 'FAIL', amount: '500' },
+      { vault: 'v1', account: 'bob', branch: 'PASS', amount: '300' },
+    ],
+  });
+  assert.equal(verdict.kind, 'admitted', JSON.stringify(verdict, null, 2));
+});
+
+test('a transfer of more than the sender holds is a conservation failure', () => {
+  rejectedBy(
+    {
+      ...validDocument(),
+      ops: [
+        { kind: 'split', block: 10, vault: 'v1', account: 'alice', amount: '1000' },
+        {
+          kind: 'transfer',
+          block: 11,
+          vault: 'v1',
+          account: 'alice',
+          to: 'bob',
+          branch: 'PASS',
+          amount: '5000',
+        },
+      ],
+      balances: [],
+    },
+    'conservation',
+  );
+});
+
+test('a transfer to the sending account is not a movement', () => {
+  rejectedBy(
+    {
+      ...validDocument(),
+      ops: [
+        { kind: 'split', block: 10, vault: 'v1', account: 'alice', amount: '1000' },
+        {
+          kind: 'transfer',
+          block: 11,
+          vault: 'v1',
+          account: 'alice',
+          to: 'alice',
+          branch: 'PASS',
+          amount: '10',
+        },
+      ],
+      balances: [],
+    },
+    'malformed',
+  );
+});
+
+test('a movement kind outside v1 is refused and says which instruments are excluded', () => {
+  // The scalar, gate and Baseline variants are not more `kind` strings: their escrow movement
+  // is not the amount burned, so a replay would need each vault's settlement value, which this
+  // document does not carry. Admitting one as an unknown kind would be worse than refusing.
+  const document = validDocument();
+  const raw = JSON.parse(serializeSnapshot(document)) as { ops: unknown[] };
+  raw.ops = [{ kind: 'redeem_scalar', block: 10, vault: 'v1', account: 'a', amount: '1' }];
+  const verdict = admitSnapshot(JSON.stringify(raw), { expectedPin: 'x', binding: { ...BINDING } }, sha256);
+  assert.equal(verdict.kind, 'rejected');
+  if (verdict.kind !== 'rejected') return;
+  assert.ok(verdict.findings.some((f) => f.screen === 'malformed' && /settlement value/.test(f.why)));
+});
+
+test('an amount at or above 2^128 is refused — no chain balance can hold it', () => {
+  // It parses, conserves and reconciles perfectly while describing a quantity that cannot
+  // exist, because `BigInt` is unbounded. Same class as the JSON-number defect one bound up.
+  const over = ((1n << 128n)).toString();
+  rejectedBy(
+    {
+      ...validDocument(),
+      ops: [{ kind: 'split', block: 10, vault: 'v1', account: 'alice', amount: over }],
+      balances: [],
+    },
+    'malformed',
+  );
+  const atMax = ((1n << 128n) - 1n).toString();
+  const verdict = admit({
+    ...validDocument(),
+    range: { fromBlock: 10, toBlock: 10 },
+    coverage: [{ fromBlock: 10, toBlock: 10 }],
+    ops: [{ kind: 'split', block: 10, vault: 'v1', account: 'alice', amount: atMax }],
+    balances: [
+      { vault: 'v1', account: 'alice', branch: 'FAIL', amount: atMax },
+      { vault: 'v1', account: 'alice', branch: 'PASS', amount: atMax },
+    ],
+  });
+  assert.equal(verdict.kind, 'admitted', 'the ceiling is inclusive');
+});
+
+test('preimageOfSerialized is the same pre-image, from bytes the caller already has', () => {
+  // Two constructions of one pre-image is exactly the "two answers to which bytes" this module
+  // exists to avoid, so the cheap one is bound to the canonical one rather than trusted.
+  const document = validDocument();
+  assert.deepEqual(
+    preimageOfSerialized(serializeSnapshot(document)),
+    snapshotPreimage(document),
+  );
+});
+
 // ------------------------------------------------------------------ THE ADMITTED FORGERY
 
 test('a self-consistent deep forgery is ADMITTED — 10 §8.4 and 14 TH-50 say so', () => {
@@ -649,7 +778,7 @@ test('a disagreement flags the PAIR and names neither as the wrong one', () => {
   assert.ok(verdict.disagreements.length > 0);
 });
 
-test('no overlap reports overlap: undefined rather than a clean bill', () => {
+test('no shared coverage reports an EMPTY overlap rather than a clean bill', () => {
   // Two producers covering disjoint history have cross-checked nothing. "Agree" with nothing
   // compared is the shape a user reads as confirmation.
   const left = validDocument();
@@ -663,7 +792,62 @@ test('no overlap reports overlap: undefined rather than a clean bill', () => {
   const verdict = diffSnapshots(left, right);
   assert.equal(verdict.kind, 'agree');
   if (verdict.kind !== 'agree') return;
-  assert.equal(verdict.overlap, undefined);
+  assert.deepEqual(verdict.overlap, []);
+});
+
+test('the overlap is the intersection of COVERAGE, not of the declared spans', () => {
+  // Both documents declare blocks 10..13 and observe disjoint halves of it. Taking the overlap
+  // from `range` reports every movement in either half as a disagreement — FE-PROV-004 on an
+  // honest pair — and with no movements at all reports agreement over four blocks neither
+  // producer jointly saw. 10 §6.3 makes holes first-class; only mutually covered history can
+  // be cross-checked.
+  const early: SnapshotDocument = {
+    ...validDocument(),
+    coverage: [{ fromBlock: 10, toBlock: 11 }],
+    ops: [{ kind: 'split', block: 10, vault: 'v1', account: 'alice', amount: '1000' }],
+    balances: [
+      { vault: 'v1', account: 'alice', branch: 'FAIL', amount: '1000' },
+      { vault: 'v1', account: 'alice', branch: 'PASS', amount: '1000' },
+    ],
+  };
+  const late: SnapshotDocument = {
+    ...validDocument(),
+    coverage: [{ fromBlock: 12, toBlock: 13 }],
+    ops: [],
+    balances: [],
+  };
+  assert.equal(admit(early).kind, 'admitted');
+  assert.equal(admit(late).kind, 'admitted');
+  const verdict = diffSnapshots(early, late);
+  assert.equal(verdict.kind, 'agree', 'no block is jointly observed, so nothing disagrees');
+  if (verdict.kind !== 'agree') return;
+  assert.deepEqual(verdict.overlap, [], 'and the pair has cross-checked nothing');
+});
+
+test('two identical movements in one block stay two — the diff is ordered, not keyed', () => {
+  // A map keyed by the movement's identity collapses them, after which
+  // `[split 100, split 200]` and `[split 50, split 200]` both project to `200` and the pair
+  // reports agreement — defeating the only cross-check §8.4 offers for depth, in exactly the
+  // case where a forger chooses the movements.
+  const twice = (first: string): SnapshotDocument => ({
+    ...validDocument(),
+    range: { fromBlock: 10, toBlock: 10 },
+    coverage: [{ fromBlock: 10, toBlock: 10 }],
+    ops: [
+      { kind: 'split', block: 10, vault: 'v1', account: 'alice', amount: first },
+      { kind: 'split', block: 10, vault: 'v1', account: 'alice', amount: '200' },
+    ],
+    balances: [
+      { vault: 'v1', account: 'alice', branch: 'FAIL', amount: String(BigInt(first) + 200n) },
+      { vault: 'v1', account: 'alice', branch: 'PASS', amount: String(BigInt(first) + 200n) },
+    ],
+  });
+  assert.equal(admit(twice('100')).kind, 'admitted');
+  const verdict = diffSnapshots(twice('100'), twice('50'));
+  assert.equal(verdict.kind, 'disagree');
+  if (verdict.kind !== 'disagree') return;
+  assert.equal(verdict.disagreements.length, 1);
+  assert.equal(verdict.disagreements[0]?.at, 0, 'the FIRST movement is the one that differs');
 });
 
 test('a movement present in one snapshot and absent from the other is a disagreement', () => {
@@ -685,6 +869,16 @@ test('the FE-PROV family is exactly 001..004, each with copy and a recovery', ()
     'FE-PROV-003',
     'FE-PROV-004',
   ]);
+});
+
+test('FE-PROV-004 offers no resolution, because 10 §8.4 declines to have one', () => {
+  // The disputed range is left as a labelled hole rather than resolved by majority — "two
+  // producers cannot outvote the absence of a proof". Copy that calls a third snapshot the
+  // thing that RESOLVES it invites exactly the 2-of-3 reading the table rejects, and would
+  // have a user trust one side of an unprovable disagreement.
+  const refusal = providerRefusal('FE-PROV-004', 'two producers disagree over blocks 1..100');
+  assert.doesNotMatch(refusal.recovery, /resolves it/);
+  assert.match(refusal.recovery, /not a decision|not proof/);
 });
 
 test('FE-PROV-003 promises that nothing was imported and nothing was deleted', () => {

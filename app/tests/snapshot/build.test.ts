@@ -314,6 +314,53 @@ test('a movement outside observed coverage is caught by the client screens, not 
   assert.ok(why.some((line) => line.startsWith('[coverage]')), why.join('\n'));
 });
 
+test('a transfer round-trips through the producer and reconciles against the chain', () => {
+  // The movement 03 §5 has and v1 needed: holdings change hands with no escrow or supply
+  // movement. An exporter without it could only drop the event or fake a merge-plus-split.
+  const read = validExport();
+  const result = built({
+    ...read,
+    ops: [
+      ...read.ops,
+      {
+        at: at(12, 5, 0),
+        op: {
+          kind: 'transfer',
+          block: 12,
+          vault: 'v1',
+          account: 'alice',
+          to: 'bob',
+          branch: 'PASS',
+          amount: '300',
+        },
+      },
+    ],
+    balances: [
+      { vault: 'v1', account: 'alice', branch: 'FAIL', amount: '800' },
+      { vault: 'v1', account: 'alice', branch: 'PASS', amount: '500' },
+      { vault: 'v1', account: 'bob', branch: 'FAIL', amount: '500' },
+      { vault: 'v1', account: 'bob', branch: 'PASS', amount: '300' },
+    ],
+  });
+  assert.equal(result.document.ops.filter((op) => op.kind === 'transfer').length, 1);
+});
+
+test('a movement v1 cannot express refuses at the DIFFERENTIAL, not at the parser', () => {
+  // This is the argument for reading balances from chain state. A scalar redemption is outside
+  // v1, so an exporter can only omit it — and the remaining ops stay perfectly self-consistent,
+  // so no screen in the client could ever see the omission. What sees it is the chain read
+  // disagreeing with the fold.
+  const read = validExport();
+  const why = refusal({
+    ...read,
+    balances: [
+      ...read.balances.filter((row) => !(row.account === 'bob' && row.branch === 'FAIL')),
+      { vault: 'v1', account: 'bob', branch: 'FAIL', amount: '125' },
+    ],
+  });
+  assert.ok(why.some((line) => /the chain read at block 13 says 125/.test(line)), why.join('\n'));
+});
+
 // ------------------------------------------------------------------ the input boundary
 
 test('a JSON NUMBER amount is refused at the boundary — V-74 in its exact shape', () => {

@@ -196,7 +196,15 @@ Practical consequences:
     not evidence about bytes it never inspects, and where the byte was a **key separator**
     the repair was to delete the separator, not to fix it — `JSON.stringify([a, b, c])` has
     no separator to corrupt, and it also closes the collision an ordinary space would have
-    left behind in any label containing one.
+    left behind in any label containing one. **A fourth arrived the same day through the
+    *Edit* tool** (V-168), so "prefer the Write tool over shell interpolation" is
+    insufficient rather than wrong: a template literal `` `${TAG}\0` `` resolves on the way
+    to disk exactly as a heredoc does. Its tell was new and worth knowing — `grep` on the
+    file returned **nothing** for a function plainly in it, because git and grep classify a
+    file holding a NUL as binary and report no matches rather than an error, which reads as
+    *the symbol does not exist*. **Write a separator as a byte, never into a string**
+    (`preimage[tag.length] = 0`, or `String.fromCharCode(0)` as `handoff-envelope` does),
+    and run the sweep before claiming the tree is clean.
 
 15. **Pinned versions.** The stack pins live in 01 §9 / 10 — PAPI 2.x, smoldot 3.x,
     Vite 8, Dexie 4, Tauri 2.x. Do not bump majors without a PLAN.md decision-log
