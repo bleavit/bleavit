@@ -16,22 +16,35 @@
 // below because callers of `runIngest` have to name it — a type cannot mint anything.
 export {
   addRange,
+  boundarySet,
+  covered,
   holesIn,
   isVerifiedAt,
   invalidateRange,
   providerRange,
+  sanitizeCoverage,
+  verifyRange,
+  verifyRanges,
   CoverageError,
   EMPTY_COVERAGE,
 } from './coverage.js';
 export type {
-  Coverage,
   CoverageRange,
+  CoverageRef,
+  CoverageRepair,
+  CoverageVerification,
   CoveredResult,
+  DroppedRange,
   HeaderSource,
   Hole,
+  RangeCheck,
+  RangeEdge,
+  RangeEdgeFacts,
   RangeOrigin,
+  RangeVerdict,
   SelfIngested,
 } from './coverage.js';
+export { chainTag, isGenesisHash, ChainTagError } from './chain-tag.js';
 export * from './ingest.js';
 export * from './backfill.js';
 export * from './candles.js';
@@ -39,3 +52,5 @@ export * from './loop.js';
 export * from './loop-store.js';
 export * from './ingest-lock.js';
 export * from './store.js';
+export * from './quota.js';
+export * from './boot.js';

@@ -64,6 +64,36 @@ export interface IndexedEvent {
 export interface FinalizedBlockScan {
   readonly number: number;
   /**
+   * The block's own hash — §6.3's hash-at-edge, carried from the scan into the coverage range.
+   *
+   * Read from the header the loop already holds, never derived: the range's edge check exists
+   * to notice a reorg past the coverage edge, and a hash the client computed from what it
+   * ingested would agree with itself by construction.
+   */
+  readonly hash: string;
+  /** The runtime `spec_version` this block ran under — §6.3's spec-version-at-edge. */
+  readonly specVersion: number;
+  /**
+   * §6.5's raw-row path, and it is deliberately **not** the same thing as a bad blob.
+   *
+   * > undecodable rows stored raw, "N events pending decoder", never guessed
+   *
+   * Two failures were being answered with one refusal. *This block's `System.Events` value is
+   * structurally unreadable* is a refusal and must stay one — an empty `events` array reads as
+   * *no event here names anyone*, so degrading to it hides the user's own transaction. But
+   * *the metadata for this block's era is not available* is a different state entirely: the
+   * bytes are intact, they are simply not decodable **yet**, and §6.5's answer is to store
+   * them raw, keep going, and count them. Refusing there stops the whole ingest run at the
+   * first block from an older runtime, which is every backfill past an upgrade.
+   *
+   * When present, `events` is empty by construction and the loop writes one raw row rather
+   * than attributing anything. Obtaining the missing metadata is FE-P5 and is not built here;
+   * *noticing that it is missing and not guessing* is, and that is the half §6.5 already owns.
+   */
+  readonly pendingDecode?:
+    | { readonly raw: Uint8Array; readonly reason: string }
+    | undefined;
+  /**
    * How many extrinsics the block contains, including the inherents — **when known**.
    *
    * `undefined` is the ordinary case, and SQ-595 is why (ruled 2026-08-05). §6.5 has the loop
@@ -122,6 +152,20 @@ export function attributedExtrinsics(
   scan: FinalizedBlockScan,
   watched: ReadonlySet<string>,
 ): readonly number[] {
+  // A block whose era metadata is unavailable attributes nothing, and the honest reason is
+  // that it is *unknown*, not *empty*. The row it produces is raw and counted as pending, so
+  // the user is told their history is incomplete for these blocks rather than shown a filtered
+  // one that looks complete.
+  if (scan.pendingDecode !== undefined) {
+    if (scan.events.length > 0) {
+      throw new IngestError(
+        `block ${scan.number} is marked pending-decode and also carries ${scan.events.length} ` +
+          'decoded event(s); a block is either decodable or it is not, and a half-decoded scan ' +
+          'would attribute from the half that decoded and silently drop the rest',
+      );
+    }
+    return [];
+  }
   const count = scan.extrinsicCount;
   if (count !== undefined && (!Number.isInteger(count) || count < 0)) {
     throw new IngestError(`block ${scan.number} declares a non-integer extrinsic count`);

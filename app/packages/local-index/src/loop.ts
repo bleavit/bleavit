@@ -45,8 +45,13 @@
 import {
   addRange,
   rangeForSource,
-  type Coverage,
+  verifyRanges,
+  type CoverageRange,
+  type CoverageRef,
   type HeaderSource,
+  type RangeCheck,
+  type RangeEdge,
+  type RangeEdgeFacts,
 } from './coverage.js';
 import {
   attributedExtrinsics,
@@ -82,6 +87,18 @@ export interface BlockWrite {
   readonly scan: FinalizedBlockScan;
   readonly rows: readonly AttributedRow[];
   /**
+   * The header this block was ingested behind — **the origin, verbatim, not a re-derivation**.
+   *
+   * `BodyProvenance` has two values and `RangeOrigin` has four, so a writer handed only the
+   * former had to guess which of `operator`, `snapshot` and `indexer` a `provider` row came
+   * from, and it guessed `operator`. That collapse is exactly what §7's own reason column
+   * forbids — *"layer-2 backfill is distinguishable from opt-in third-party providers"* — and
+   * it fails in the dangerous direction: a row an opt-in third-party indexer supplied is
+   * persisted, and would be badged, as protocol-funded layer-2 data. INV-FE-15 requires the
+   * origin to reach the pixel, so it has to reach the row first.
+   */
+  readonly headerSource: HeaderSource;
+  /**
    * The coverage that becomes current **if and only if** this write succeeds.
    *
    * Passed in rather than persisted by a second call so an implementation can commit the
@@ -90,7 +107,7 @@ export interface BlockWrite {
    * direction — but rows written *after* coverage is not, and two separate calls leave that
    * ordering to whoever writes the adapter. One transaction removes the choice.
    */
-  readonly coverageAfter: Coverage;
+  readonly coverageAfter: CoverageRef;
 }
 
 export interface LoopPorts {
@@ -103,12 +120,37 @@ export interface LoopPorts {
   readonly write: (write: BlockWrite) => Promise<void>;
   /** Wall-clock for the coverage range's `ingestedAt`. Injected so tests are deterministic. */
   readonly now: () => number;
+  /**
+   * The chain this run indexes — §6.3's genesis binding, stamped onto every range.
+   *
+   * On the ports rather than on the scan because it is a property of the run and not of a
+   * block: a per-block genesis would be a value the loop could disagree with itself about.
+   */
+  readonly genesisHash: string;
+  /**
+   * What the chain says about a stored range's edge block, or `undefined` for *cannot say*.
+   *
+   * §6.3's per-range integrity checks (hash-at-edge, genesis binding, spec-version-at-edge) run
+   * once per run, before the first block, because the failure they catch happens **while the
+   * client is not running**: a reorg past the coverage edge, or a runtime upgrade under rows
+   * already decoded. Resuming ingestion on top of a range the chain has since disowned extends
+   * a claim about a fork nobody is on.
+   *
+   * **Required, not optional.** An optional integrity check is one that defaults off, which is
+   * the shape `admitIntent` and `admitSnapshot` both refuse for their hash functions and which
+   * this repository keeps finding. A caller with no chain access supplies a function returning
+   * `undefined`, and everything is kept — that is the fail-safe state, stated in a signature
+   * rather than reached by omission.
+   */
+  readonly observeEdge: (range: CoverageRange) => RangeEdgeFacts | undefined;
 }
 
 export interface IngestResult {
-  readonly coverage: Coverage;
+  readonly coverage: CoverageRef;
   readonly fetchedBody: boolean;
   readonly rowCount: number;
+  /** §6.5: this block's events were stored raw because their era metadata was unavailable. */
+  readonly pendingDecode: boolean;
 }
 
 /**
@@ -119,7 +161,7 @@ export interface IngestResult {
  * advancing before the write lands — is the failure this whole module is shaped around.
  */
 export async function ingestBlock(
-  coverage: Coverage,
+  coverage: CoverageRef,
   scan: FinalizedBlockScan,
   watched: ReadonlySet<string>,
   headerSource: HeaderSource,
@@ -192,15 +234,28 @@ export async function ingestBlock(
   // `true` for it. That is the promotion 10 §2.2 says has no path — reached through
   // backfill rather than through a merge, and invisible to every test that only checked
   // the rows.
-  const next = addRange(coverage, rangeForSource(headerSource, scan.number, scan.number, ports.now()));
+  const edge: RangeEdge = {
+    genesisHash: ports.genesisHash,
+    hash: scan.hash,
+    specVersion: scan.specVersion,
+  };
+  const next = addRange(
+    coverage,
+    rangeForSource(headerSource, scan.number, scan.number, ports.now(), edge),
+  );
 
   // Computed before the write so the adapter can commit both atomically, **returned** only
   // after it resolves. The distinction is the whole of rule 1: computing early is fine,
   // handing back advanced coverage from a failed write is not — a throw here leaves the
   // caller's coverage exactly as it was.
-  await ports.write({ blockNumber: scan.number, scan, rows, coverageAfter: next });
+  await ports.write({ blockNumber: scan.number, scan, rows, headerSource, coverageAfter: next });
 
-  return { coverage: next, fetchedBody: wantsBody, rowCount: rows.length };
+  return {
+    coverage: next,
+    fetchedBody: wantsBody,
+    rowCount: rows.length,
+    pendingDecode: scan.pendingDecode !== undefined,
+  };
 }
 
 /**
@@ -215,22 +270,44 @@ export async function ingestBlock(
  * learns about, and this is the one place the loop can still report it.
  */
 export interface RunResult {
-  readonly coverage: Coverage;
+  readonly coverage: CoverageRef;
   readonly ingested: number;
   readonly bodiesFetched: number;
+  /**
+   * §6.5's *"N events pending decoder"*, counted for this run.
+   *
+   * A run that ingested blocks from an era whose metadata is unavailable did **not** fail, and
+   * it did not succeed silently either. This is the number the surface names, and the reason
+   * it is a return value rather than a log line is that nothing else in this package can tell
+   * the difference between a block with no interesting events and a block nobody could read.
+   */
+  readonly pendingDecode: number;
+  /**
+   * §6.3's per-range checks, run once before the first block of this run.
+   *
+   * Reported rather than logged for the same reason the run's block count is: an index that
+   * silently shrank between two sessions is one the user re-backfills without knowing why.
+   */
+  readonly invalidated: readonly RangeCheck[];
   readonly stoppedAt: IngestLoopError | undefined;
 }
 
 export async function runIngest(
-  coverage: Coverage,
+  coverage: CoverageRef,
   scans: AsyncIterable<FinalizedBlockScan> | Iterable<FinalizedBlockScan>,
   watched: ReadonlySet<string>,
   headerSource: HeaderSource,
   ports: LoopPorts,
 ): Promise<RunResult> {
-  let current = coverage;
+  // §6.3's integrity checks first, and **before** the first block rather than after it. Ingesting
+  // onto a range the chain has since disowned extends the wrong history by one block before the
+  // check that would have caught it — and the extension joins the bad range, which makes the
+  // disposal coarser than it needed to be.
+  const checked = verifyRanges(coverage, ports.observeEdge);
+  let current = checked.coverage;
   let ingested = 0;
   let bodiesFetched = 0;
+  let pendingDecode = 0;
   for await (const scan of scans as AsyncIterable<FinalizedBlockScan>) {
     let result: IngestResult;
     try {
@@ -240,11 +317,26 @@ export async function runIngest(
         error instanceof IngestLoopError
           ? error
           : new IngestLoopError(scan.number, error instanceof Error ? error.message : String(error));
-      return { coverage: current, ingested, bodiesFetched, stoppedAt };
+      return {
+        coverage: current,
+        ingested,
+        bodiesFetched,
+        pendingDecode,
+        invalidated: checked.invalidated,
+        stoppedAt,
+      };
     }
     current = result.coverage;
     ingested += 1;
     if (result.fetchedBody) bodiesFetched += 1;
+    if (result.pendingDecode) pendingDecode += 1;
   }
-  return { coverage: current, ingested, bodiesFetched, stoppedAt: undefined };
+  return {
+    coverage: current,
+    ingested,
+    bodiesFetched,
+    pendingDecode,
+    invalidated: checked.invalidated,
+    stoppedAt: undefined,
+  };
 }

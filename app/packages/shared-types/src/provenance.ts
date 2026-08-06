@@ -10,10 +10,57 @@
 
 export type HexString = `0x${string}`;
 
-/** Opaque to this package; `@bleavit/local-index` owns the real shape. */
+/**
+ * The structural half of `@bleavit/local-index`'s coverage value — 10 §6.3.
+ *
+ * This package is the dependency-free root, so it carries the shape rather than the module
+ * that maintains it. What it carries had to grow: a range's **origin** is not decoration on it.
+ *
+ * 10 §6.3 declares `origin` on `CoverageRange` and makes the boundary between two origins a
+ * **rendered fact** (*"never silently spliced … a range boundary is a rendered fact"*), and
+ * 10 §2.3 states that provider-fed history is an accepted residual risk whose *only* mitigation
+ * is *"mandatory, non-suppressible provenance labelling"*. The shape here omitted the field, so
+ * the one status that carries coverage — `derived-local` — reached every badge in the client
+ * with the provenance already discarded, and the badge could say nothing truer than how many
+ * gaps there were. A count of gaps is not a label: it says how much is missing and nothing
+ * about who supplied what is present, which is the half INV-FE-15 requires *"to the pixel"*.
+ */
+export type CoverageRange = {
+  readonly fromBlock: number;
+  readonly toBlock: number;
+} & (
+  /**
+   * `self` is the only light-client-verified origin (10 §6.3, §2.2 — no promotion path), and a
+   * discriminated union rather than an optional field because *"operator"* on its own is not a
+   * describable state: two operators are two sources, and one lying does not implicate the
+   * other. An optional `providerId` lets a provider range exist without naming its provider,
+   * which is exactly the range a later reader is tempted to treat as verified.
+   */
+  | { readonly origin: 'self'; readonly providerId?: undefined }
+  | { readonly origin: 'operator' | 'snapshot' | 'indexer'; readonly providerId: string }
+);
+
 export interface CoverageRef {
-  readonly ranges: readonly { readonly fromBlock: number; readonly toBlock: number }[];
+  readonly ranges: readonly CoverageRange[];
   readonly holes: readonly { readonly fromBlock: number; readonly toBlock: number }[];
+}
+
+/**
+ * The distinct sources a coverage set was assembled from, sorted — the boundary set 10 §6.3
+ * calls a rendered fact.
+ *
+ * A set rather than a count, because a count is the one summary that cannot carry the fact:
+ * *"3 sources"* reads as abundance, while `self + indexer:acme` reads as *part of this line is
+ * third-party data*. It lives here rather than in `local-index` because the render layer must
+ * be able to compute it from a `VerificationStatus` alone, and `packages/ui` may not import the
+ * index (10 §10.1).
+ */
+export function coverageBoundarySet(coverage: CoverageRef): readonly string[] {
+  const seen = new Set<string>();
+  for (const range of coverage.ranges) {
+    seen.add(range.origin === 'self' ? 'self' : `${range.origin}:${range.providerId ?? '?'}`);
+  }
+  return [...seen].sort();
 }
 
 /**

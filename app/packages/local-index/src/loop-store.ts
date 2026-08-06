@@ -30,9 +30,10 @@
  * of a rule that already has one home.
  */
 
-import type { Coverage } from './coverage.js';
+import type { HeaderSource } from './coverage.js';
+import { bodyProvenance } from './ingest.js';
 import type { BlockWrite } from './loop.js';
-import { LocalIndex, readCoverage, type StoredEvent, type StoredTxRow } from './store.js';
+import { LocalIndex, StoreError, type StoredEvent, type StoredTxRow } from './store.js';
 
 /**
  * How an attributed row becomes a `StoredTxRow`.
@@ -47,12 +48,39 @@ export type RowDecoder = (row: BlockWrite['rows'][number]) => {
   readonly call: string;
 };
 
-/** How a scanned event becomes a `StoredEvent`. Same reasoning as `RowDecoder`. */
+/**
+ * How a scanned event becomes a stored one — **the decoded content only**.
+ *
+ * It used to return a whole `StoredEvent`, `origin` included, and nothing checked what it
+ * returned. So the field that decides whether a row renders as light-client-verified or as
+ * third-party data was supplied by an injected callback which is never handed the
+ * `HeaderSource` and therefore cannot know the answer: every existing caller wrote a constant.
+ * Narrowing the return type is the repair — the encoder supplies what it decoded, this module
+ * supplies what it knows, and there is no longer an origin the encoder could name.
+ */
+export type EventPayload = {
+  readonly pallet: string;
+  readonly name: string;
+} & (
+  | { readonly decoded: true; readonly raw?: undefined }
+  | { readonly decoded: false; readonly raw: Uint8Array }
+);
+
 export type EventEncoder = (
   write: BlockWrite,
   event: BlockWrite['scan']['events'][number],
   eventIndex: number,
-) => StoredEvent;
+) => EventPayload;
+
+/**
+ * The `pallet`/`name` a raw row carries — §6.5's "N events pending decoder", not a guess.
+ *
+ * A pending row has no decoded pallet or event name by definition, and inventing plausible
+ * ones is precisely what §6.5 forbids (*"never guessed"*). Two fixed sentinels are used
+ * instead, so the row sorts and renders as what it is.
+ */
+export const PENDING_DECODE_PALLET = '(pending decoder)';
+export const PENDING_DECODE_NAME = '(era metadata unavailable)';
 
 /**
  * Build a `write` port that commits a block's events, rows and coverage atomically.
@@ -67,20 +95,54 @@ export function storeWriter(
   encodeEvent: EventEncoder,
 ): (write: BlockWrite) => Promise<void> {
   return async (write: BlockWrite) => {
-    const events: StoredEvent[] = write.scan.events.map((event, index) =>
-      encodeEvent(write, event, index),
-    );
+    // The one place a stored row learns where it came from. Taken verbatim from the header the
+    // loop was driven with — the same argument `rangeForSource` derives the coverage range's
+    // origin from — so a row and the range that claims its block cannot disagree.
+    const provenance = stamp(write.headerSource);
+
+    const events: StoredEvent[] = write.scan.events.map((event, index) => ({
+      id: `${write.blockNumber}:${index}`,
+      blockNumber: write.blockNumber,
+      ...encodeEvent(write, event, index),
+      ...provenance,
+    }));
+
+    // §6.5's raw row. A block whose era metadata was unavailable stores its `System.Events`
+    // bytes under the same deterministic key shape, so a later pass that obtains the metadata
+    // replaces the row rather than adding a second copy of it.
+    if (write.scan.pendingDecode !== undefined) {
+      events.push({
+        id: `${write.blockNumber}:raw`,
+        blockNumber: write.blockNumber,
+        pallet: PENDING_DECODE_PALLET,
+        name: PENDING_DECODE_NAME,
+        decoded: false,
+        raw: write.scan.pendingDecode.raw,
+        ...provenance,
+      });
+    }
+
     const rows: StoredTxRow[] = write.rows.map((row) => {
+      // The body's provenance and the header's are two records of one fact, and §6.5 derives
+      // the first from the second. A row whose stated body provenance does not follow from the
+      // header it was ingested behind means the loop and the writer were driven with different
+      // arguments — the shape of the defect this repair replaces, in the other direction.
+      const expected = bodyProvenance(write.headerSource.origin);
+      if (row.provenance !== expected) {
+        throw new StoreError(
+          `block ${row.blockNumber} extrinsic ${row.extrinsicIndex} claims body provenance ` +
+            `"${row.provenance}" behind a "${write.headerSource.origin}" header, which derives ` +
+            `"${expected}". 10 §6.5 derives one from the other, so the two cannot disagree.`,
+        );
+      }
       const decoded = decodeRow(row);
       return {
         id: row.key,
         blockNumber: row.blockNumber,
         extrinsicIndex: row.extrinsicIndex,
         account: decoded.account,
-        // The row's provenance is the *header's*, decided in the loop. Recording anything
-        // else here would let a body fetched at depth be stored as light-client verified.
-        origin: row.provenance === 'verified-finalized' ? 'self' : 'operator',
         call: decoded.call,
+        ...provenance,
       };
     });
 
@@ -95,12 +157,15 @@ export function storeWriter(
 }
 
 /**
- * Read back the coverage a `storeWriter` committed.
+ * The header's provenance, as every stored row carries it.
  *
- * Thin on purpose — `readCoverage` already applies the empty default at the boundary so a
- * fresh database cannot hand `undefined` to a renderer that would treat it as full coverage.
- * This exists so a caller resuming after a restart has one obvious place to start from.
+ * One function so `origin` and `providerId` travel together. Spelling them out at each write
+ * site is how a `providerId` gets dropped for one table and not another, and a `snapshot` row
+ * that lost its provider id renders as *unverified — undefined*.
  */
-export async function resumeCoverage(db: LocalIndex): Promise<Coverage> {
-  return readCoverage(db);
+function stamp(source: HeaderSource): HeaderSource {
+  return source.origin === 'self'
+    ? { origin: 'self' }
+    : { origin: source.origin, providerId: source.providerId };
 }
+

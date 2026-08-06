@@ -143,6 +143,21 @@ function readPhase(blockNumber: number, index: number, phase: EventRecord['phase
  * whose events this client cannot read should fail while the app wires itself up, not on the
  * first block of a backfill.
  */
+/**
+ * What the header already told the caller about the block being scanned.
+ *
+ * `hash` and `specVersion` are 10 §6.3's hash-at-edge and spec-version-at-edge, and they enter
+ * the index here because this is where the block is turned into a scan. They are **read from
+ * the header**, never derived from what was ingested: the edge check exists to notice a reorg
+ * past the coverage edge, and a hash the client computed from its own rows would agree with
+ * itself by construction — the vacuous-check shape this client keeps finding.
+ */
+export interface BlockIdentity {
+  readonly number: number;
+  readonly hash: string;
+  readonly specVersion: number;
+}
+
 export interface BlockScanner {
   /**
    * Scan one finalized block's `System.Events` value.
@@ -152,24 +167,60 @@ export interface BlockScanner {
    * it stamps, which is the read-at-the-block-I-pinned rule `chain-client` makes structural.
    *
    * `extrinsicCount` is passed through untouched and defaults to absent (SQ-595).
+   *
+   * **Refuses an unreadable blob.** See `pendingScan` for the other half of §6.5's discipline.
    */
-  scan(blockNumber: number, eventsHex: string, extrinsicCount?: number): FinalizedBlockScan;
+  scan(block: BlockIdentity, eventsHex: string, extrinsicCount?: number): FinalizedBlockScan;
+
+  /**
+   * The **other** §6.5 decode failure, and it is deliberately a different function.
+   *
+   * > undecodable rows stored raw, "N events pending decoder", never guessed
+   *
+   * Two failures were being answered with one refusal, and only one of them is a refusal:
+   *
+   * - *This block's `System.Events` value is structurally unreadable.* The bytes are wrong, or
+   *   the record shape is not one this scanner recognises. `scan` **throws**, because an empty
+   *   `events` array reads as *no event here names anyone* — no body is fetched, the block is
+   *   recorded ingested, and the user's own transaction is missing from their history with
+   *   nothing anywhere reporting a problem.
+   * - *The metadata for this block's era is not available.* The bytes are intact; they are
+   *   simply not decodable **yet**. Refusing here stops the whole ingest run at the first block
+   *   from an older runtime — which is every backfill across an upgrade — so §6.5's answer is
+   *   to store them raw, keep going, and **count** them.
+   *
+   * The caller reaches this arm when it has no codecs for the block's `spec_version` at all,
+   * which is precisely why it cannot be decided inside `scan`: a scanner bound to one runtime's
+   * codecs has nothing to test. Obtaining the missing metadata is FE-P5 and is not built here;
+   * *noticing it is missing and not guessing* is, and that is the half §6.5 already owns.
+   */
+  pendingScan(block: BlockIdentity, eventsHex: string, reason: string): FinalizedBlockScan;
+}
+
+function hexBytes(blockNumber: number, hex: string): Uint8Array {
+  const body = hex.startsWith('0x') ? hex.slice(2) : hex;
+  if (body.length % 2 !== 0 || /[^0-9a-fA-F]/.test(body)) {
+    throw new BlockScanError(blockNumber, 'the raw System.Events value is not a hex string');
+  }
+  const out = new Uint8Array(body.length / 2);
+  for (let i = 0; i < out.length; i += 1) out[i] = Number.parseInt(body.slice(i * 2, i * 2 + 2), 16);
+  return out;
 }
 
 export function blockScanner(codecs: ChainCodecs, reader: EventAccountReader): BlockScanner {
   return {
-    scan(blockNumber, eventsHex, extrinsicCount) {
+    scan(block, eventsHex, extrinsicCount) {
       const decoded = decodeStorage<readonly unknown[]>(codecs, 'System', 'Events', eventsHex);
       if (!decoded.ok) {
-        throw new BlockScanError(blockNumber, decoded.reason);
+        throw new BlockScanError(block.number, decoded.reason);
       }
       if (!Array.isArray(decoded.value)) {
-        throw new BlockScanError(blockNumber, 'System.Events did not decode to a list');
+        throw new BlockScanError(block.number, 'System.Events did not decode to a list');
       }
       const events: IndexedEvent[] = decoded.value.map((raw, index) => {
-        const record = narrowRecord(blockNumber, index, raw);
+        const record = narrowRecord(block.number, index, raw);
         return {
-          phase: readPhase(blockNumber, index, record.phase),
+          phase: readPhase(block.number, index, record.phase),
           pallet: record.event.type,
           name: record.event.value.type,
           // The whole outer event, not the narrowed copy: the reader walks the declared type
@@ -177,9 +228,30 @@ export function blockScanner(codecs: ChainCodecs, reader: EventAccountReader): B
           accounts: reader.accounts((raw as { event: unknown }).event),
         };
       });
+      const identity = { number: block.number, hash: block.hash, specVersion: block.specVersion };
       return extrinsicCount === undefined
-        ? { number: blockNumber, events }
-        : { number: blockNumber, extrinsicCount, events };
+        ? { ...identity, events }
+        : { ...identity, extrinsicCount, events };
+    },
+
+    pendingScan(block, eventsHex, reason) {
+      if (reason.trim().length === 0) {
+        throw new BlockScanError(
+          block.number,
+          'a pending-decode block must name why its era metadata is unavailable — §6.5 surfaces ' +
+            'this as "N events pending decoder", and a row with no reason cannot be explained',
+        );
+      }
+      // `events` is empty **by construction** and `attributedExtrinsics` refuses a
+      // pending-decode scan that also carries decoded events: a half-decoded block would
+      // attribute from the half that decoded and silently drop the rest.
+      return {
+        number: block.number,
+        hash: block.hash,
+        specVersion: block.specVersion,
+        pendingDecode: { raw: hexBytes(block.number, eventsHex), reason },
+        events: [],
+      };
     },
   };
 }
