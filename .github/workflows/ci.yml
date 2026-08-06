@@ -120,6 +120,15 @@ jobs:
         run: python3 tools/ci/check-plan-tables.py
       - name: Check spec-question batch index
         run: python3 tools/ci/check-spec-question-batches.py
+      - name: Unreadable client obligations expire with their spec question
+        # `rows.ts` declares the §11.8 reads 02 freezes no surface for, and a `blocking`
+        # entry CLOSES an operator control. The file said those declarations expire "by
+        # the row closing, not by somebody remembering to delete a comment" and nothing
+        # checked it: contract v28 resolved SQ-615/616/619 and three entries stayed, so
+        # the guardian console, the upgrade crank and the registry challenge panel could
+        # not be opened at all — and a screen that can never open is one nothing has
+        # exercised, so its suite had settled for asserting the refusal.
+        run: python3 tools/ci/check-unreadable-obligations.py
       - name: Dispatch-check mirror — 09 §1.2 ↔ 11 §11.5 (15 §4.8)
         # Both documents mandated this diff and both credited it to doc 15, which
         # mandated nothing (SQ-552). It must fail on a frontend precondition with no

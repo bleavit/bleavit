@@ -34,6 +34,7 @@
  */
 
 import type { SurfaceId } from '@bleavit/descriptors';
+import type { ClauseId } from './preconditions.js';
 import type { ClauseSource, ClauseSubject } from './rows.js';
 
 /** The 11 §11.7.3 rows. Separate from `PreconditionRowId` because the tables are separate. */
@@ -237,6 +238,39 @@ export const GOVERNANCE_ROW_IDS: readonly GovernanceRowId[] = Object.freeze(
 /** The clauses for a row. Total over the closed union — no unknown-row branch exists. */
 export function governanceRowsFor(row: GovernanceRowId): readonly GovernanceClause[] {
   return GOVERNANCE_ROWS[row];
+}
+
+/** Whether an arbitrary declarable row id belongs to this table. */
+export function isGovernanceRowId(row: string): row is GovernanceRowId {
+  return (GOVERNANCE_ROW_IDS as readonly string[]).includes(row);
+}
+
+/**
+ * Every obligation a G-row imposes — the same per-clause coverage identity the P/O table
+ * derives, for the same reason.
+ *
+ * A G-row's clauses carry no `key` and no `anyOf`, so the discriminator is the requirement
+ * sentence. Duplicated text within one row would merge two obligations into one, so it is
+ * refused here rather than silently collapsed. `aboveTheFold` clauses are **included**: they
+ * state a consequence rather than a condition, but 11 §11.7.6 requires them read and shown,
+ * and dropping them from the coverage set would make "the lock this vote imposes" the one
+ * fact a gate never demanded.
+ */
+export function governanceCoverageIds(row: GovernanceRowId): readonly ClauseId[] {
+  const ids: ClauseId[] = [];
+  const seen = new Set<ClauseId>();
+  for (const entry of governanceRowsFor(row)) {
+    const coverageId: ClauseId = `${entry.row}/${entry.requirement}`;
+    if (seen.has(coverageId)) {
+      throw new Error(
+        `${row} declares "${entry.requirement}" twice, so two obligations share one coverage ` +
+          'id and a single result would certify both.',
+      );
+    }
+    seen.add(coverageId);
+    ids.push(coverageId);
+  }
+  return ids;
 }
 
 /**

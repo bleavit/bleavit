@@ -25,6 +25,10 @@ import {
   CONVICTIONS,
   CRANK_CALLS,
   GOVERNANCE_ROW_IDS,
+  OPERATOR_ROWS,
+  OPERATOR_SURFACE_ROWS,
+  blockingObligationsFor,
+  unreadableObligationsFor,
   NO_WRAPPER,
   PRECONDITION_ROWS,
   aboveTheFoldClauses,
@@ -45,6 +49,7 @@ import type {
   CrankCall,
   FeeAsset,
   GovernanceRowId,
+  OperatorRowId,
   PreconditionClause,
   PreconditionRowId,
 } from '@bleavit/transaction-builder';
@@ -643,7 +648,10 @@ test('every crank has its own staleness read, or a named refusal (#16)', () => {
   // The row previously applied four generic clauses to all six cranks, so
   // `ledger.sweep_redemption_fees` was gated on epoch, market and welfare state unrelated to
   // whether any fees have accrued — the user signs a guaranteed no-op.
-  assert.equal(CRANK_CALLS.length, 6);
+  //
+  // Seven since F17: §11.8.5's welfare snapshot binds itself to P-15 by name and was absent
+  // from the union, so the one crank §11.8's own text puts in this table could not be gated.
+  assert.equal(CRANK_CALLS.length, 7);
   // The **mapping** is asserted, not a count of distinct surfaces. A first version of this
   // test checked `distinct >= 3` and a mutation that repointed `market.crank_observe` at the
   // epoch item survived it — three surfaces remained, and the crank was reading state
@@ -657,6 +665,7 @@ test('every crank has its own staleness read, or a named refusal (#16)', () => {
     'market.crank_observe': 'storage.market.markets',
     'market.reap': 'storage.market.markets',
     'epoch.settle_cohort': 'storage.epoch.cohorts',
+    'welfare.record_snapshot': 'storage.welfare.snapshots',
   };
   for (const call of CRANK_CALLS) {
     const staleness = crankStaleness(call);
@@ -809,4 +818,183 @@ test('only a standard vote accepts a conviction', () => {
   assert.equal(acceptsConviction({ kind: 'standard', aye: true, balance: 1n }), true);
   assert.equal(acceptsConviction({ kind: 'split', aye: 1n, nay: 1n }), false);
   assert.equal(acceptsConviction({ kind: 'split-abstain', aye: 1n, nay: 1n, abstain: 1n }), false);
+});
+
+// ------------------------------------- 11 §11.8's operator rows (F17)
+
+/**
+ * `satisfies`, as with the P-rows: §11.8's nine calls are checked against the union
+ * `rows.ts` publishes, so a row added on one side without the other is a compile error.
+ */
+const OPERATOR_IDS = [
+  'O-1', 'O-2', 'O-3', 'O-4', 'O-5', 'O-6', 'O-7', 'O-8', 'O-9',
+] as const satisfies readonly OperatorRowId[];
+
+test('11 §11.8 publishes an operator row family, separate from §11.5’s fifteen', () => {
+  // The blocker this closes: `PreconditionRowId` closed at P-15, so `oracle.register_reporter`,
+  // `guardian.approve_action`, `futarchy_treasury.claim_stream`, `system.apply_authorized_upgrade`
+  // and the rest had **no id they could declare** in `TxPreparation.requires`. `gate()` then
+  // had nothing to demand of them, and every §11.8 console gated its own button on a
+  // module-local check — the bypass §11.4 rule 1 names, reached by omission.
+  assert.deepEqual(Object.keys(OPERATOR_ROWS).sort(), [...OPERATOR_IDS].sort());
+  for (const id of OPERATOR_IDS) {
+    assert.ok(rowsFor(id, 'USDC').length > 0, `${id} has no clauses — it would pass the gate by default`);
+  }
+  // Separate unions, so §11.5's "fifteen rows" stays a checkable spec fact.
+  for (const id of OPERATOR_IDS) {
+    assert.ok(!(id in PRECONDITION_ROWS), `${id} leaked into §11.5's table`);
+  }
+  assert.equal(Object.keys(PRECONDITION_ROWS).length, 15);
+});
+
+test('every §11.8 submit call names exactly one row, and that row has clauses', () => {
+  // A convention is what a hurried edge ignores; this is the data a gate can be built on.
+  // The two §11.8.1 calls whose rows live in §11.5 are here too — its own table routes
+  // `oracle.report`/`oracle.challenge` to "rows P-13/P-14 (§11.5)", and giving them a second
+  // `O-n` row would be two tables for one obligation.
+  const rows = new Set<string>();
+  for (const [call, row] of Object.entries(OPERATOR_SURFACE_ROWS)) {
+    assert.ok(rowsFor(row as PreconditionRowId, 'USDC').length > 0, `${call} → ${row} has no clauses`);
+    rows.add(row);
+  }
+  assert.equal(OPERATOR_SURFACE_ROWS['oracle.report'], 'P-13');
+  assert.equal(OPERATOR_SURFACE_ROWS['oracle.challenge'], 'P-14');
+  // Every operator row is reachable from some call — an unreferenced row is a table entry
+  // nothing declares, which is exactly as unenforced as no row at all.
+  for (const id of OPERATOR_IDS) assert.ok(rows.has(id), `${id} is named by no call`);
+});
+
+test('every operator row computes fee headroom in the SELECTED asset', () => {
+  // 11 §11.3: "USDC-only accounts are always viable: every precondition table below computes
+  // fee headroom in the *selected* fee asset". A single hardcoded read would report VIT
+  // headroom for an account paying in USDC — a balance the transaction never touches.
+  for (const id of OPERATOR_IDS) {
+    for (const asset of ['VIT', 'USDC'] as const satisfies readonly FeeAsset[]) {
+      const fee = rowsFor(id, asset).filter((clause) => clause.feeAsset !== undefined);
+      assert.equal(fee.length, 1, `${id} has ${fee.length} fee clauses under ${asset}`);
+      assert.equal(nth(fee, 0, 'fee clause').feeAsset, asset);
+    }
+  }
+  // And the two assets read *different* surfaces, or the selector would be decoration.
+  const vit = nth(rowsFor('O-1', 'VIT').filter((c) => c.feeAsset !== undefined), 0, 'clause');
+  const usdc = nth(rowsFor('O-1', 'USDC').filter((c) => c.feeAsset !== undefined), 0, 'clause');
+  assert.notEqual(vit.surface, usdc.surface);
+});
+
+test('P-13 no longer recomputes the bond, and its escrow clause is gone', () => {
+  // Two disagreeing implementations of P-13 shipped in one client: this table declared the
+  // bond "recomputed and displayed" from a cohort escrow, while `oracle-reporting.ts` had
+  // already concluded it is structurally uncomputable and shipped that. A bonded, slashable
+  // action carried two different answers to "what will this hold?".
+  const clauses = rowsFor('P-13', 'USDC');
+  // The escrow clause cited `storage.epoch.cohorts`, and `CohortInfo { epoch, proposals,
+  // status }` carries no escrow field at all — a clause reading a map that cannot answer it,
+  // which typechecks because a `SurfaceId` says nothing about what the item holds.
+  assert.ok(
+    !clauses.some((clause) => clause.surface === 'storage.epoch.cohorts'),
+    'P-13 still reads the cohort map for an escrow it does not carry',
+  );
+  assert.ok(
+    !clauses.some((clause) => /recomputed|recompute/i.test(clause.requirement)),
+    'P-13 still promises a recomputed bond',
+  );
+  // What survives is what can be read: the floor, and whether the balance covers it.
+  assert.ok(clauses.some((clause) => clause.key === 'bond-floor'));
+  assert.ok(clauses.some((clause) => clause.key === 'bond-headroom'));
+  // And the gap is declared rather than implied, with the open question that retires it.
+  const unreadable = unreadableObligationsFor('P-13');
+  assert.equal(unreadable.length, 1);
+  assert.equal(nth(unreadable, 0, 'obligation').specQuestion, 'SQ-598');
+});
+
+test('P-13 splits "round open" from "report window not elapsed"', () => {
+  // §11.5 writes them with a semicolon between them, and they come apart on a live round: a
+  // round still open whose report window has elapsed refuses the report, and one collapsed
+  // flag cannot say which half failed.
+  const keys = rowsFor('P-13', 'USDC').map((clause) => clause.key);
+  assert.ok(keys.includes('round-open'), 'the round-open clause is missing');
+  assert.ok(keys.includes('report-window'), 'the report-window clause is missing');
+});
+
+/**
+ * The status cell of a PLAN.md spec-question row, or `undefined` when there is no such row.
+ *
+ * The table is `| id | question | spec refs | raised | status |`, and the status cell is the
+ * last one. Read rather than searched for a keyword, because "Resolved" appears inside the
+ * *question* text of several rows that are still open.
+ */
+function specQuestionStatus(plan: string, id: string): string | undefined {
+  const row = plan.split('\n').find((line) => line.startsWith(`| ${id} |`));
+  if (row === undefined) return undefined;
+  const cells = row.split('|');
+  // `split` yields a leading and a trailing empty cell for a well-formed GFM row.
+  return cells[cells.length - 2]?.trim();
+}
+
+test('an unreadable obligation names an OPEN spec question, and blocking ones close a control', () => {
+  // The declaration expires the way the limit-coverage registry's unwired keys do — by the
+  // row closing in PLAN.md, not by somebody remembering to delete a comment.
+  //
+  // **That is what this test says and, until 2026-08-06, not what it checked.** It asserted
+  // the cited id was *a row* in the table and never looked at the row's status, so contract
+  // v28 could resolve SQ-615, SQ-616 and SQ-619 — freezing six surfaces in this branch's own
+  // base — while three `blocking` entries stayed behind and closed S15, S17 and S19 for good.
+  // A screen that can never reach `ready` is a screen nothing has exercised, and the operator
+  // suite had settled for asserting the block. The status cell is now read.
+  const plan = readFileSync(join(REPO, 'PLAN.md'), 'utf8');
+  const all = [...ROW_IDS, ...OPERATOR_IDS].flatMap((id) => unreadableObligationsFor(id));
+  assert.ok(all.length > 0, 'no obligations declared — this test would be vacuous');
+  for (const entry of all) {
+    assert.match(entry.specQuestion, /^SQ-\d+$/, `${entry.requirement} cites no spec question`);
+    const status = specQuestionStatus(plan, entry.specQuestion);
+    assert.ok(status !== undefined, `${entry.specQuestion} is not a row in PLAN.md's spec-question table`);
+    assert.ok(
+      /open/i.test(status) && !/^resolved/i.test(status),
+      `${entry.specQuestion} is "${status}" in PLAN.md, so this declaration outlived the ` +
+        'question it waits on and is closing a control for a reason that no longer holds',
+    );
+    assert.ok(entry.reason.length > 40, `${entry.specQuestion}'s reason says nothing usable`);
+  }
+  // Anti-vacuity for the status check itself: a resolved row must be rejected, or the
+  // predicate above could be matching everything.
+  assert.ok(
+    !/open/i.test(specQuestionStatus(plan, 'SQ-615') ?? ''),
+    'SQ-615 reads as open — the resolved-row half of this check proves nothing',
+  );
+  // Both dispositions are present, so neither arm is dead code — `stated` is §11.8.1's
+  // SQ-564 posture (the transaction is offered with the gap named) and `blocking` is
+  // INV-FE-12's (an unproven capability is absent).
+  assert.ok(all.some((entry) => entry.disposition === 'stated'));
+  assert.ok(all.some((entry) => entry.disposition === 'blocking'));
+  // O-6's seam is retired: contract v28 froze `System.AuthorizedUpgrade` and
+  // `ExecutionGuard.PendingUpgrade`, so §11.8.4 steps 1 and 4 are ordinary clauses and S17
+  // can reach `ready`.
+  assert.deepEqual(blockingObligationsFor('O-6'), [], 'S17 is still closed on a resolved question');
+  assert.ok(
+    rowsFor('O-6', 'USDC').some((clause) => clause.surface === 'storage.system.authorized_upgrade'),
+    'O-6 does not read the authorized hash it is supposed to compare against',
+  );
+  assert.ok(
+    rowsFor('O-6', 'USDC').some((clause) => clause.surface === 'storage.execution_guard.pending_upgrade'),
+    'O-6 does not read the stored applicable_at',
+  );
+  // P-13 **blocks**: the bond is money the client cannot state, and §11.5's redemption-fee
+  // rule 5 already rules that case — no figure, and the transaction blocked.
+  assert.deepEqual(
+    blockingObligationsFor('P-13').map((entry) => entry.specQuestion),
+    ['SQ-598'],
+    'P-13 offers a report whose bond nobody can show the reporter',
+  );
+});
+
+test('the welfare snapshot crank is in P-15’s staleness table', () => {
+  // §11.8.5 binds it to row P-15 by name — "otherwise 'no-op — nothing to crank' (row
+  // P-15)" — while `CrankCall` listed six members and this was not one. `crankStaleness`
+  // throws on an unrecognised call by design, so the one crank §11.8's own text puts in the
+  // table could not be gated at all, and the S18 console had to answer the staleness
+  // question itself.
+  assert.ok(CRANK_CALLS.includes('welfare.record_snapshot'), CRANK_CALLS.join(', '));
+  const staleness = crankStaleness('welfare.record_snapshot');
+  assert.equal(staleness.kind, 'readable', 'Welfare.Snapshots is frozen surface — it needs no exemption');
+  assert.equal(staleness.clause.surface, 'storage.welfare.snapshots');
 });

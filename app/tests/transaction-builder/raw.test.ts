@@ -19,7 +19,7 @@ import {
   requireCapability,
 } from '@bleavit/signing';
 import type { RawPayloadPresentation, SigningRequest } from '@bleavit/signing';
-import { gate } from '@bleavit/transaction-builder';
+import { declaredCoverageIds, gate } from '@bleavit/transaction-builder';
 import type { GatePassed, TxPreparation } from '@bleavit/transaction-builder';
 
 /** The chain identity every pin in this file is read against (F18). Named, not inlined:
@@ -54,6 +54,7 @@ const PREP: TxPreparation = {
   builtFor: { specVersion: 2, metadataHash: `0x${'ab'.repeat(32)}` },
   preparedAt: { chain: TEST_CHAIN, blockHash: `0x${'22'.repeat(32)}`, blockNumber: 41 },
   requires: ['P-1'],
+  feeAsset: 'USDC',
 };
 
 /**
@@ -65,9 +66,20 @@ const PREP: TxPreparation = {
  */
 const WINDOW: GatePassed = (() => {
   const at = { chain: TEST_CHAIN, blockHash: `0x${'11'.repeat(32)}` as const, blockNumber: 42 };
-  const outcome = gate(PREP, at, PREP.builtFor, [
-    { id: 'P-1', ok: true, requirement: 'r', expected: 'e', actual: 'a', at },
-  ]);
+  // Every obligation `P-1` imposes, not one result naming the row: coverage is per clause.
+  const outcome = gate(
+    PREP,
+    at,
+    PREP.builtFor,
+    declaredCoverageIds('P-1', PREP.feeAsset).map((id) => ({
+      id,
+      ok: true,
+      requirement: 'r',
+      expected: 'e',
+      actual: 'a',
+      at,
+    })),
+  );
   assert.equal(outcome.kind, 'proceed', 'the gate fixture no longer opens');
   return outcome.passed;
 })();

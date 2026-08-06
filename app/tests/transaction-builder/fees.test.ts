@@ -14,13 +14,19 @@ import {
   MORTAL_ERA_BLOCKS_RAW_EXTERNAL,
   PHASE_PROXIMITY_WARNING_BLOCKS,
   admitRate,
+  declaredCoverageIds,
   estimateFee,
   gate,
   mortalityFor,
   nonceFor,
   phaseBoundaryWarning,
 } from '@bleavit/transaction-builder';
-import type { GatePassed, TxPreparation, VitUsdcRate } from '@bleavit/transaction-builder';
+import type {
+  GatePassed,
+  PreconditionResult,
+  TxPreparation,
+  VitUsdcRate,
+} from '@bleavit/transaction-builder';
 // `finalize` is test-only on purpose — see packages/chain-client/src/testing.ts.
 import { finalize } from '@bleavit/chain-client/testing';
 import type { Finalized, FinalizedBlockRef } from '@bleavit/chain-client';
@@ -43,7 +49,24 @@ const GATE_PREP: TxPreparation = {
   builtFor: { specVersion: 2, metadataHash: `0x${'ab'.repeat(32)}` },
   preparedAt: { chain: TEST_CHAIN, blockHash: `0x${'22'.repeat(32)}`, blockNumber: 99 },
   requires: ['P-1'],
+  feeAsset: 'USDC',
 };
+
+/**
+ * One passing result per obligation `P-1` imposes.
+ *
+ * The whole set, because the gate demands coverage **per clause** rather than per row: a
+ * lone result naming `P-1` used to satisfy the row and now covers one of its obligations.
+ */
+const passingResults = (at: FinalizedBlockRef): readonly PreconditionResult[] =>
+  declaredCoverageIds('P-1', GATE_PREP.feeAsset).map((id) => ({
+    id,
+    ok: true,
+    requirement: 'r',
+    expected: 'e',
+    actual: 'a',
+    at,
+  }));
 
 /**
  * A real `GatePassed`, pinned to a chosen block.
@@ -55,9 +78,7 @@ const GATE_PREP: TxPreparation = {
  */
 const gatePin = (blockHash: HexString = `0x${'11'.repeat(32)}`, blockNumber = 1): GatePassed => {
   const at: FinalizedBlockRef = { chain: TEST_CHAIN, blockHash, blockNumber };
-  const outcome = gate(GATE_PREP, at, GATE_PREP.builtFor, [
-    { id: 'P-1', ok: true, requirement: 'r', expected: 'e', actual: 'a', at },
-  ]);
+  const outcome = gate(GATE_PREP, at, GATE_PREP.builtFor, passingResults(at));
   assert.equal(outcome.kind, 'proceed', 'the gate fixture no longer opens');
   return outcome.passed;
 };

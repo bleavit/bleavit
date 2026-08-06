@@ -1,5 +1,5 @@
 /**
- * The upgrade crank — 11 §11.8.4. F17's most safety-critical piece.
+ * The upgrade crank — 11 §11.8.4, E19. F17's most safety-critical piece.
  *
  * ## The artifact is verified before the wallet ever sees it
  *
@@ -13,6 +13,30 @@
  * prevents is a user signing a runtime upgrade for code nobody checked, which is the single
  * most consequential signature the client can produce.
  *
+ * ## "Streaming" is the word the specification uses, and it had to be made true
+ *
+ * The first implementation took a whole `Uint8Array` and hashed it in one call. That is not
+ * what step 3 says, and the difference is not stylistic. A 5 MB runtime arrives from a
+ * gateway as a response body; materialising it before hashing needs the whole artifact
+ * resident **and** a hash function that accepts it in one piece, which is the combination
+ * §11.8.4's own memory note calls out as the architecturally heavy part of this screen. So
+ * the input is an **async chunk source** and the hasher is an incremental one, fed chunk by
+ * chunk — the bounded-memory half of the note is now a property of the signature.
+ *
+ * The bytes are still retained, deliberately: submission needs the whole Wasm as a call
+ * argument, and if the caller kept its *own* copy alongside the one that was hashed, the
+ * bytes submitted and the bytes verified would be two different objects that nothing binds
+ * together. The verified bytes therefore live **inside** `VerifiedArtifact`, so a submission
+ * carries exactly what was hashed. That is the same reason `RecomputedProof` carries its
+ * value.
+ *
+ * Two ways that binding leaked, both closed here and both invisible in a green suite. The
+ * chunks were retained **by reference**, so a source reusing one buffer between yields left
+ * the concatenation describing different bytes from the ones the hasher consumed; every chunk
+ * is now snapshotted before it is hashed or kept. And `readonly bytes: Uint8Array` prevented
+ * nothing — the array's *contents* were writable through a valid brand — so the bytes are now
+ * a `#` private field reachable only through `copyBytes()`.
+ *
  * ## `applicable_at` is read, never recomputed
  *
  * > read the stored field, do **not** recompute `authorized_at + DescriptorLeadTime`
@@ -24,6 +48,11 @@
  * field** here and there is no lead-time arithmetic in this module at all — a reader can
  * confirm that by its absence.
  *
+ * `leadTimeCountdown` is not that arithmetic and the distinction is exact: it subtracts
+ * `now` from the **stored** `applicable_at`, and never derives `applicable_at` from
+ * anything. E19 asks for the countdown; the prohibition is on producing the deadline, not
+ * on saying how far away the chain's own deadline is.
+ *
  * ## The memory cost is stated rather than discovered
  *
  * §11.8.4's honesty note: hashing streams in bounded chunks, but *submission* needs the
@@ -32,9 +61,8 @@
  * says so rather than implying it will work.
  */
 
-import type { Verified } from '@bleavit/shared-types';
-
-declare const ARTIFACT_VERIFIED: unique symbol;
+import { combine2, type Combined, type Verified } from '@bleavit/shared-types';
+import type { FeeAsset } from '@bleavit/transaction-builder';
 
 /** What the chain authorized. Both fields are reads, not derivations. */
 export interface AuthorizedUpgrade {
@@ -46,17 +74,87 @@ export interface AuthorizedUpgrade {
 /**
  * Bytes whose hash was checked against the authorized hash.
  *
- * Branded; `verifyArtifact` is the only producer. Without it an unverified `Uint8Array`
- * would satisfy `UpgradeSubmission` and §11.8.4 step 3's *"never reaches the wallet"* would
- * be a claim about the code rather than a property of it.
+ * `verifyArtifact` is the only producer. Without that an unverified `Uint8Array` would
+ * satisfy `UpgradeSubmission` and §11.8.4 step 3's *"never reaches the wallet"* would be a
+ * claim about the code rather than a property of it.
+ *
+ * ## `readonly bytes: Uint8Array` was not the guarantee it looked like
+ *
+ * A `readonly` property stops the *reference* being replaced and says nothing about the array
+ * it points at. `artifact.bytes[0] = 0` compiled, mutated the verified payload and left the
+ * brand intact — so a caller could hold a genuine `VerifiedArtifact`, edit the runtime inside
+ * it, and hand `UpgradeSubmission` bytes whose hash was never compared with the chain's
+ * authorization. On the most consequential signature this client can produce, the hard block
+ * of step 3 was a formality anyone downstream could step around by accident.
+ *
+ * So the bytes are **private**, in the JavaScript sense rather than the TypeScript one — a
+ * `#` field, unreachable from outside this class at runtime as well as at compile time — and
+ * the only way out is `copyBytes()`, which hands back a fresh copy each call. A caller may do
+ * whatever it likes to that copy; the verified payload is not reachable from it. The class is
+ * exported as a **type only**, so `new` is unavailable outside this module and the private
+ * field makes the shape nominal: an object literal cannot be asserted into it either, which
+ * the phantom-symbol brand permitted.
  */
-export interface VerifiedArtifact {
+class VerifiedArtifactValue {
+  /** Exactly the bytes that were hashed — never a caller's parallel copy, never reachable. */
+  readonly #bytes: Uint8Array;
+
   readonly byteLength: number;
+
   readonly hash: string;
-  readonly [ARTIFACT_VERIFIED]: true;
+
+  constructor(bytes: Uint8Array, hash: string) {
+    this.#bytes = bytes;
+    this.byteLength = bytes.byteLength;
+    this.hash = hash;
+  }
+
+  /**
+   * The verified runtime, as a copy the caller owns.
+   *
+   * A copy per call rather than one shared array: handing out the retained buffer would put
+   * the mutation back exactly where it was, one indirection further away. This is the
+   * mutation-safe submission operation — encode from what it returns, and discard it.
+   */
+  copyBytes(): Uint8Array {
+    return this.#bytes.slice();
+  }
 }
 
-/** The one hard block this screen can produce. */
+export type VerifiedArtifact = VerifiedArtifactValue;
+
+/**
+ * An incremental hash — `update` per chunk, `digest` once.
+ *
+ * Injected for the reason the one-shot version was: BLAKE2b-256 is not in `SubtleCrypto`,
+ * so it is a bundled or host implementation, while the *comparison* — the part that decides
+ * whether a user is asked to sign — is identical everywhere and lives here.
+ */
+export interface StreamingHasher {
+  update(chunk: Uint8Array): void;
+  digest(): string;
+}
+
+/**
+ * Where the artifact bytes come from.
+ *
+ * `totalBytes` is optional because a gateway may not declare one, and **`undefined` is not
+ * zero**: a progress display that treated an undeclared length as zero would render a
+ * complete-looking bar for a download that has not started. E19 asks for fetch progress;
+ * `FetchProgress` carries the distinction rather than flattening it.
+ */
+export interface ArtifactSource {
+  readonly totalBytes?: number | undefined;
+  chunks(): AsyncIterable<Uint8Array>;
+}
+
+/** E19's *"artifact fetch progress"* — bytes seen, and whether a total was ever declared. */
+export interface FetchProgress {
+  readonly bytesRead: number;
+  readonly totalBytes: number | undefined;
+}
+
+/** One hard block this screen can produce. */
 export class UpgradeHashMismatchError extends Error {
   readonly code = 'FE-UPG-001';
 
@@ -71,28 +169,72 @@ export class UpgradeHashMismatchError extends Error {
   }
 }
 
+/** A source that yields nothing hashes to the empty digest, which is a real hash of nothing. */
+export class EmptyArtifactError extends Error {
+  constructor() {
+    super(
+      'The artifact source yielded no bytes. An empty download is not a runtime, and hashing ' +
+        'it would produce a well-formed digest of nothing — which a comparison against the ' +
+        'authorized hash would simply report as a mismatch, hiding a transport failure behind ' +
+        'a content failure. Refetch the artifact.',
+    );
+    this.name = 'EmptyArtifactError';
+  }
+}
+
 /**
- * Verify downloaded bytes against the authorized hash.
- *
- * `computeHash` is injected: BLAKE2b-256 belongs to whatever hashing the platform provides
- * (`SubtleCrypto` has no BLAKE2b, so this is a bundled implementation or a host one), and
- * the *comparison* — the part that decides whether a user is asked to sign — is identical
- * everywhere and lives here. Same split `packages/verify` uses.
+ * Stream the artifact, hash it as it arrives, and verify it against the authorized hash.
  *
  * Throws rather than returning a result. A refusal that a caller can ignore is not a hard
  * block, and §11.8.4 calls this one.
+ *
+ * `onProgress` is optional because progress is a *display*, and a verification that
+ * depended on somebody watching it would be a verification with an optional step.
  */
-export function verifyArtifact(
-  bytes: Uint8Array,
+export async function verifyArtifact(
+  source: ArtifactSource,
   authorized: AuthorizedUpgrade,
-  computeHash: (bytes: Uint8Array) => string,
-): VerifiedArtifact {
-  const computed = computeHash(bytes);
+  hasher: StreamingHasher,
+  onProgress?: (progress: FetchProgress) => void,
+): Promise<VerifiedArtifact> {
+  const parts: Uint8Array[] = [];
+  let bytesRead = 0;
+  for await (const chunk of source.chunks()) {
+    // **Take an owned snapshot first, then hash and retain that.**
+    //
+    // `ArtifactSource` is an interface anybody may implement, and reusing one scratch buffer
+    // across yields is an ordinary way to write a streaming reader — `Bun`'s and Node's
+    // `read(buffer)` forms do exactly that. The hasher consumes each chunk's *contents* as it
+    // arrives, but `parts` was retaining the *reference*: with a reused buffer every entry
+    // pointed at the same memory, so the concatenation below produced the last chunk repeated
+    // and returned it as a branded artifact whose hash described entirely different bytes.
+    // A verified value that does not contain what was verified is worse than an unverified
+    // one, because everything downstream stops looking.
+    //
+    // One snapshot, used for both, so the hashed bytes and the retained bytes are the same
+    // object rather than two objects a reader has to reason about.
+    const owned = chunk.slice();
+    hasher.update(owned);
+    parts.push(owned);
+    bytesRead += owned.byteLength;
+    onProgress?.({ bytesRead, totalBytes: source.totalBytes });
+  }
+  if (bytesRead === 0) throw new EmptyArtifactError();
+
+  const computed = hasher.digest();
   if (computed !== authorized.codeHash.value) {
     throw new UpgradeHashMismatchError(authorized.codeHash.value, computed);
   }
-  // Phantom brand — never materialised. One mint site, as with `Finalized<T>`.
-  return { byteLength: bytes.byteLength, hash: computed } as VerifiedArtifact;
+
+  const bytes = new Uint8Array(bytesRead);
+  let offset = 0;
+  for (const part of parts) {
+    bytes.set(part, offset);
+    offset += part.byteLength;
+  }
+  // One mint site, as with `Finalized<T>` — and no assertion, because the private field makes
+  // the type unforgeable rather than merely inconvenient to forge.
+  return new VerifiedArtifactValue(bytes, computed);
 }
 
 /** A submission that can only be built from verified bytes. */
@@ -104,6 +246,84 @@ export interface UpgradeSubmission {
 /** Whether the stored `applicable_at` has been reached. Read, not recomputed. */
 export function isApplicable(authorized: AuthorizedUpgrade, now: Verified<number>): boolean {
   return now.value >= authorized.applicableAt.value;
+}
+
+/**
+ * E19's lead-time countdown — blocks remaining until the **stored** `applicable_at`.
+ *
+ * A `Combined<number>` because it is arithmetic over two reads: taking `applicable_at`'s
+ * badge for the difference would claim the chain told us the current block, and a pair read
+ * at different blocks describes neither. Negative means the deadline has passed, which is a
+ * real answer and is not clamped to zero — an operator whose control is disabled for some
+ * *other* reason needs to be able to tell "not yet" from "long since".
+ */
+export function leadTimeCountdown(
+  authorized: AuthorizedUpgrade,
+  now: Verified<number>,
+): Combined<number> {
+  return combine2(authorized.applicableAt, now, (applicableAt, current) => applicableAt - current);
+}
+
+/**
+ * §11.8.4 step 4's *"fee headroom for a multi-MB extrinsic (displayed — it is large)"*.
+ *
+ * The row carried no fee clause at all until this review, on the one extrinsic in the
+ * client whose fee is genuinely different in kind: length fees scale with the call, and a
+ * multi-megabyte argument makes this the most expensive transaction the app can build. An
+ * operator who reaches the wallet and is refused for fee has lost the download too.
+ *
+ * The estimate is **supplied**, never derived: it comes from the runtime's own fee query
+ * for these exact bytes, and a client-side approximation of a length fee is the hardcoded
+ * chain constant app-code rule 7 forbids, wearing arithmetic.
+ */
+export interface UpgradeFeeInputs {
+  /** Which asset the fee is paid in — 11 §11.3's selector, no default. */
+  readonly asset: FeeAsset;
+  /** Free balance in that asset. `System.Account` for VIT, `ForeignAssets` for USDC. */
+  readonly free: Verified<bigint>;
+  /** The chain's estimate for **these** bytes. Supplied, never approximated here. */
+  readonly estimatedFee: Verified<bigint>;
+}
+
+export interface FeeHeadroom {
+  readonly covered: boolean;
+  /** Zero when covered; otherwise how much more is needed, in the selected asset. */
+  readonly shortfall: bigint;
+}
+
+export function upgradeFeeHeadroom(inputs: UpgradeFeeInputs): Combined<FeeHeadroom> {
+  return combine2(inputs.free, inputs.estimatedFee, (free, fee) =>
+    free >= fee ? { covered: true, shortfall: 0n } : { covered: false, shortfall: fee - free },
+  );
+}
+
+/**
+ * Whether fee headroom blocks the submission.
+ *
+ * An **incomparable** headroom blocks, exactly as an insufficient one does. This is the
+ * largest fee the client can incur and the direction of error is a lost download plus a
+ * failed signature, so "we could not establish it" is not a reason to proceed.
+ */
+export function feeHeadroomBlock(
+  headroom: Combined<FeeHeadroom>,
+): { readonly check: string; readonly detail: string } | undefined {
+  if (headroom.kind === 'incomparable') {
+    return {
+      check: 'Fee headroom',
+      detail:
+        `This client cannot establish whether your balance covers the fee. ${headroom.reason} ` +
+        'A runtime upgrade is the largest extrinsic this client builds, so its fee is not ' +
+        'assumed to be small enough not to matter.',
+    };
+  }
+  if (headroom.datum.value.covered) return undefined;
+  return {
+    check: 'Fee headroom',
+    detail:
+      'Your balance in the selected fee asset does not cover the fee for this extrinsic. A ' +
+      'runtime upgrade carries the whole Wasm as a call argument, so its length fee is far ' +
+      'larger than any other transaction here — this is not the usual rounding shortfall.',
+  };
 }
 
 /**
@@ -123,4 +343,18 @@ export function submissionOutlook(artifact: VerifiedArtifact): string {
     'artifact is already verified — the same bytes can be submitted with the operator CLI, ' +
     'and nothing needs re-downloading.'
   );
+}
+
+/** E19's progress line. Says *how much* when a total was declared, and says so when not. */
+export function progressLine(progress: FetchProgress): string {
+  const read = (progress.bytesRead / (1024 * 1024)).toFixed(1);
+  if (progress.totalBytes === undefined) {
+    return (
+      `${read} MiB fetched. This gateway did not declare a length, so there is no ` +
+      'percentage to show — the download is not stalled and its size is simply not known ' +
+      'in advance.'
+    );
+  }
+  const total = (progress.totalBytes / (1024 * 1024)).toFixed(1);
+  return `${read} MiB of ${total} MiB fetched.`;
 }

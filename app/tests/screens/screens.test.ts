@@ -141,6 +141,25 @@ import {
   DepositForm,
   DepositTracker,
   WithdrawForm,
+  EmptyArtifactError,
+  INSURANCE_TARGET_UNREADABLE,
+  POWER_FIELDS,
+  RatificationTracker,
+  P13_CHECK_KEYS,
+  RegistryFilingForm,
+  STAKE_HOLD_CONSEQUENCE,
+  UnimplementedClauseError,
+  challengeFilingBlocks,
+  feeHeadroomBlock,
+  leadTimeCountdown,
+  operatorGate,
+  operatorSubmit,
+  progressLine,
+  proposeFormBlocks,
+  ratificationCopy,
+  p13Predicate,
+  ratificationFor,
+  upgradeFeeHeadroom,
 } from '@bleavit/features-tx';
 import { ImportRefused, ImportReview, UnlabellableClampError } from '@bleavit/features-handoff';
 import type { ImportReviewProps } from '@bleavit/features-handoff';
@@ -156,11 +175,17 @@ import type { HexString, Combined, Verified } from '@bleavit/shared-types';
 import type { FinalizedBlockRef } from '@bleavit/chain-client';
 // `finalize` is test-only on purpose — see packages/chain-client/src/testing.ts.
 import { finalize } from '@bleavit/chain-client/testing';
-import { gate } from '@bleavit/transaction-builder';
+import {
+  OPERATOR_SURFACE_ROWS,
+  declaredCoverageIds,
+  gate,
+  rowsFor,
+} from '@bleavit/transaction-builder';
 import type {
+  ClauseId,
+  DeclarableRowId,
   GatePassed,
   PreconditionResult,
-  PreconditionRowId,
   TxPreparation,
   TxSession,
   TxState,
@@ -190,8 +215,20 @@ import type {
   ChallengeInputs,
   OracleRound,
   RegistryInstances,
+  ReportBlock,
   ReportInputs,
   Stream,
+  ArtifactSource,
+  ChallengeFilingInputs,
+  EvidenceState,
+  FetchProgress,
+  FilingInputs,
+  InsuranceTarget,
+  RatificationEvent,
+  ReviewReferendum,
+  StreamingHasher,
+
+  UpgradeFeeInputs,
 } from '@bleavit/features-tx';
 import { defaultScope } from '@bleavit/contexts';
 import { refuse } from '@bleavit/handoff-envelope';
@@ -541,6 +578,25 @@ const PREP: TxPreparation = {
   builtFor: { specVersion: 2, metadataHash: '0xfeed' },
   preparedAt: AT,
   requires: ['P-1'],
+  feeAsset: 'USDC',
+};
+
+/**
+ * Every obligation a row imposes under this fixture's fee asset.
+ *
+ * A row is a set of clauses, and the gate demands a result per clause: one result naming
+ * `O-1` used to satisfy all five of its obligations, so the registry read alone could mint a
+ * signing window for a 100,000-USDC stake nobody had checked the balance for. Fixtures
+ * therefore build complete sets rather than a token row.
+ */
+const coverageOf = (row: DeclarableRowId): readonly ClauseId[] =>
+  declaredCoverageIds(row, PREP.feeAsset);
+
+/** One obligation of a row, where a fixture needs an id rather than the set. */
+const firstCoverage = (row: DeclarableRowId): ClauseId => {
+  const [id] = coverageOf(row);
+  assert.ok(id, `${row} declares no obligations`);
+  return id;
 };
 
 const DECODER = (): RawDecoded => ({
@@ -550,7 +606,7 @@ const DECODER = (): RawDecoded => ({
 });
 
 const PASSING_ROW: PreconditionResult = {
-  id: 'P-1',
+  id: firstCoverage('P-1'),
   ok: true,
   requirement: 'the proposal is trading',
   expected: 'Trading',
@@ -592,7 +648,7 @@ test('every precondition row renders expected against actual', () => {
       decoded: decodeForConfirm(PREP.scaleHex, DECODER),
       preconditions: [
         PASSING_ROW,
-        { ...PASSING_ROW, id: 'P-2', ok: false, expected: 'Open', actual: 'Closed' },
+        { ...PASSING_ROW, id: firstCoverage('P-2'), ok: false, expected: 'Open', actual: 'Closed' },
       ],
       sudoActive: false,
       onSign: () => {},
@@ -1171,9 +1227,12 @@ const session = (overrides: Partial<TxSession> = {}): TxSession => ({
  * the only thing that can mint one, and the reason `as unknown as` is banned across
  * `app/` (10 §2.1). The rows are the ones the caller wants the confirm surface to show.
  */
-const gatePassedAt = (at: FinalizedBlockRef, results: readonly PreconditionResult[]): GatePassed => {
-  const prep: TxPreparation = { ...PREP, requires: results.map((r) => r.id as PreconditionRowId) };
-  const outcome = gate(prep, at, prep.builtFor, results.map((r) => ({ ...r, at, ok: true })));
+const gatePassedAt = (at: FinalizedBlockRef, rows: readonly DeclarableRowId[]): GatePassed => {
+  const prep: TxPreparation = { ...PREP, requires: rows };
+  const results = rows.flatMap((row) =>
+    coverageOf(row).map((id) => ({ ...PASSING_ROW, id, at })),
+  );
+  const outcome = gate(prep, at, prep.builtFor, results);
   assert.equal(outcome.kind, 'proceed', 'the gate fixture no longer opens');
   return outcome.passed;
 };
@@ -1181,6 +1240,71 @@ const gatePassedAt = (at: FinalizedBlockRef, results: readonly PreconditionResul
 const confirmInputs = () => ({
   decoded: decodeForConfirm(PREP.scaleHex, DECODER),
   sudoActive: false, expert: false, onSign: () => {}, onEdit: () => {},
+});
+
+/**
+ * A session in which the §11.8 gate is **open** for one row.
+ *
+ * Built by running the real `gate()`, exactly as `gatePassedAt` is and for the same reason:
+ * `GatePassed` is branded by a non-exported symbol, so a fixture cannot fake one, and an
+ * operator console that could be driven by a hand-made object would prove nothing about the
+ * property under test.
+ */
+const readySession = (row: DeclarableRowId): TxSession => {
+  const prep: TxPreparation = { ...PREP, requires: [row] };
+  // Every obligation of the row, because the gate demands one result per clause — and the
+  // preparation the proof names must be the one the session holds, because `reduce` and
+  // `operatorGate` both refuse a proof minted for different bytes.
+  const results = coverageOf(row).map((id) => ({ ...PASSING_ROW, id, at: AT }));
+  const outcome = gate(prep, AT, prep.builtFor, results);
+  assert.equal(outcome.kind, 'proceed', 'the operator gate fixture no longer opens');
+  return session({ state: 'AwaitingSignature', prep, signingWindow: outcome.passed });
+};
+
+/** A session that has not been refreshed — a prepared transaction, no gate result. */
+const preparedSession = (row: DeclarableRowId): TxSession =>
+  session({ state: 'Prepared', prep: { ...PREP, requires: [row] } });
+
+const EVIDENCE_FIXTURE: EvidenceState = evidenceUnavailable(3);
+const noSubmit = (_window: GatePassed): void => {};
+
+/**
+ * Whether a `Field` with **exactly** this label is on screen.
+ *
+ * `assert.match(html, /Fee headroom/)` is satisfied by a field renamed `Fee headroom-NOT`,
+ * and three mutations renaming labels survived the first version of these tests. The label
+ * is its own element, so the exact element is what gets asserted.
+ */
+const fieldPresent = (html: string, label: string): boolean =>
+  html.includes(`<span class="field__label">${label}</span>`);
+
+/** §11.8.6 row 2's inputs, minus the two the panel derives from its own window. */
+const CHALLENGE_FILING = (
+  over: Partial<Omit<ChallengeFilingInputs, 'windowOpen' | 'windowReason'>> = {},
+): Omit<ChallengeFilingInputs, 'windowOpen' | 'windowReason'> => ({
+  kind: 'incident',
+  freeUsdc: finalized(10_000_000n),
+  challengeBond: finalized(1_000_000n),
+  evidenceHash: '0xevidence',
+  ...over,
+});
+
+/** §11.8.6 row 1's inputs — the clean path, so a refusal elsewhere is not this fixture. */
+const FILING = (over: Partial<FilingInputs> = {}): FilingInputs => ({
+  kind: 'incident',
+  freeUsdc: finalized(10_000_000n),
+  filingBond: finalized(1_000_000n),
+  filingsUsed: finalized(1),
+  filingsBound: finalized(8),
+  evidenceHash: '0xevidence',
+  ...over,
+});
+
+/** A fee the account covers — the neutral case, so a refusal elsewhere is not this one. */
+const COVERED_FEE = (): UpgradeFeeInputs => ({
+  asset: 'VIT',
+  free: finalized(10_000_000_000_000n),
+  estimatedFee: finalized(1_000_000_000n),
 });
 
 test('no confirm screen exists before the chain has been re-read', () => {
@@ -1197,33 +1321,30 @@ test('no confirm screen exists before the chain has been re-read', () => {
 });
 
 test('AwaitingSignature renders the gate’s own passing rows', () => {
-  const passed = gatePassedAt(AT, [PASSING_ROW, { ...PASSING_ROW, id: 'P-2' }]);
+  const passed = gatePassedAt(AT, ['P-1', 'P-2']);
   const props = confirmProps(
     session({ state: 'AwaitingSignature', prep: PREP, signingWindow: passed }),
     confirmInputs(),
   );
   assert.ok(props);
-  assert.deepEqual(props.preconditions.map((r) => r.id), ['P-1', 'P-2']);
+  assert.deepEqual(props.preconditions.map((r) => r.id), [...coverageOf('P-1'), ...coverageOf('P-2')]);
   assert.equal(mayOfferSigning(session({ state: 'AwaitingSignature' })), true);
 });
 
 test('Blocked renders the failures only — rule 5’s diff view, not a padded set', () => {
-  const failed = [{ ...PASSING_ROW, id: 'P-2', ok: false, expected: 'Open', actual: 'Closed' }];
+  const failed = [{ ...PASSING_ROW, id: firstCoverage('P-2'), ok: false, expected: 'Open', actual: 'Closed' }];
   // The session MUST carry a stale signing window, and the first version of this test did
   // not: with `signingWindow: undefined` a controller that preferred the window would fall
   // back to `failed` and pass. Mutation M34 survived on exactly that. The dangerous session
   // is `Blocked` reached *after* a gate once passed — a full set of rows that were true at
   // a block B′ has already moved past.
-  const stale = gatePassedAt({ chain: TEST_CHAIN, blockHash: '0xold', blockNumber: 999 }, [
-    PASSING_ROW,
-    { ...PASSING_ROW, id: 'P-3' },
-  ]);
+  const stale = gatePassedAt({ chain: TEST_CHAIN, blockHash: '0xold', blockNumber: 999 }, ['P-1', 'P-3']);
   const props = confirmProps(
     session({ state: 'Blocked', prep: PREP, failed, signingWindow: stale }),
     confirmInputs(),
   );
   assert.ok(props);
-  assert.deepEqual(props.preconditions.map((r) => r.id), ['P-2']);
+  assert.deepEqual(props.preconditions.map((r) => r.id), [firstCoverage('P-2')]);
   assert.ok(!props.preconditions.some((r) => r.ok), 'a superseded passing row was rendered');
 });
 
@@ -2012,12 +2133,38 @@ const AUTHORIZED: AuthorizedUpgrade = {
   applicableAt: finalized(5_000),
 };
 
-test('a mismatched artifact hard-blocks and never becomes a submission', () => {
+/** A chunked source: §11.8.4 step 3's "streaming … over the downloaded bytes". */
+const chunkSource = (chunks: readonly Uint8Array[], totalBytes?: number): ArtifactSource => ({
+  ...(totalBytes === undefined ? {} : { totalBytes }),
+  async *chunks() {
+    for (const chunk of chunks) yield chunk;
+  },
+});
+
+/** An incremental hasher that records what it was actually fed, chunk by chunk. */
+const recordingHasher = (digestValue: string) => {
+  const seen: number[] = [];
+  return {
+    seen,
+    hasher: {
+      update(chunk: Uint8Array) {
+        for (const byte of chunk) seen.push(byte);
+      },
+      digest: () => digestValue,
+    } satisfies StreamingHasher,
+  };
+};
+
+test('a mismatched artifact hard-blocks and never becomes a submission', async () => {
   // §11.8.4 step 3: "a mismatch hard-blocks with FE-UPG-001 and never reaches the wallet."
   // It throws rather than returning a result, because a refusal a caller can ignore is not
   // a hard block — and this is the most consequential signature the client can produce.
-  assert.throws(
-    () => verifyArtifact(new Uint8Array([1, 2, 3]), AUTHORIZED, () => '0xbbbb'),
+  await assert.rejects(
+    verifyArtifact(
+      chunkSource([new Uint8Array([1, 2, 3])]),
+      AUTHORIZED,
+      recordingHasher('0xbbbb').hasher,
+    ),
     (error: unknown) => {
       assert.ok(error instanceof UpgradeHashMismatchError, `not the hard block: ${String(error)}`);
       assert.equal(error.code, 'FE-UPG-001');
@@ -2028,15 +2175,169 @@ test('a mismatched artifact hard-blocks and never becomes a submission', () => {
   );
 });
 
-test('a matching artifact verifies, and the brand stays phantom', () => {
-  const artifact = verifyArtifact(new Uint8Array(4_194_304), AUTHORIZED, () => '0xaaaa');
+test('the hash is fed in chunks, and the verified bytes are exactly the hashed ones', async () => {
+  // §11.8.4 step 3 says *streaming*, and the first implementation hashed a whole array in
+  // one call. The distinction is load-bearing twice over: the memory note in §11.8.4 is
+  // about bounded chunks, and — the part a passing one-shot test cannot see — the bytes a
+  // submission carries must be the bytes that were hashed. A caller keeping its own copy
+  // beside the verified one is how a verified hash comes to describe different bytes.
+  const { seen, hasher } = recordingHasher('0xaaaa');
+  const artifact = await verifyArtifact(
+    chunkSource([new Uint8Array([1, 2]), new Uint8Array([3]), new Uint8Array([4, 5])]),
+    AUTHORIZED,
+    hasher,
+  );
+  assert.deepEqual(seen, [1, 2, 3, 4, 5], 'the hasher was not fed every chunk, in order');
+  assert.deepEqual([...artifact.copyBytes()], seen, 'the retained bytes are not the hashed bytes');
+  assert.equal(artifact.byteLength, 5);
+});
+
+test('an empty source is its own refusal, not a hash of nothing', async () => {
+  // A zero-byte body yields a well-formed digest, which a comparison reports as a content
+  // mismatch — hiding a transport failure behind FE-UPG-001 and sending the operator to
+  // look for a corrupted artifact that is not the problem.
+  await assert.rejects(
+    verifyArtifact(chunkSource([]), AUTHORIZED, recordingHasher('0xaaaa').hasher),
+    (error: unknown) => {
+      assert.ok(error instanceof EmptyArtifactError, `not the empty refusal: ${String(error)}`);
+      assert.match(error.message, /not a runtime/);
+      return true;
+    },
+  );
+});
+
+test('fetch progress reports bytes, and an undeclared length is not zero', async () => {
+  // E19 asks for fetch progress. `undefined` total is not the same as a zero-length
+  // download: a bar computed from it would read complete before anything arrived.
+  const seenProgress: FetchProgress[] = [];
+  await verifyArtifact(
+    chunkSource([new Uint8Array(2), new Uint8Array(3)], 5),
+    AUTHORIZED,
+    recordingHasher('0xaaaa').hasher,
+    (progress) => seenProgress.push(progress),
+  );
+  assert.deepEqual(
+    seenProgress.map((entry) => entry.bytesRead),
+    [2, 5],
+    'progress must be reported per chunk, cumulatively',
+  );
+  assert.match(progressLine({ bytesRead: 1_048_576, totalBytes: 5_242_880 }), /1\.0 MiB of 5\.0 MiB/);
+  const unknown = progressLine({ bytesRead: 1_048_576, totalBytes: undefined });
+  assert.match(unknown, /did not declare a length/);
+  assert.match(unknown, /not stalled/);
+  assert.doesNotMatch(unknown, /of 0\.0 MiB/, 'an undeclared length rendered as zero');
+});
+
+test('a matching artifact verifies, and the brand stays phantom', async () => {
+  const artifact = await verifyArtifact(
+    chunkSource([new Uint8Array(4_194_304)]),
+    AUTHORIZED,
+    recordingHasher('0xaaaa').hasher,
+  );
   assert.equal(artifact.hash, '0xaaaa');
   assert.equal(artifact.byteLength, 4_194_304);
+  // **The verified bytes are not a property.** `readonly bytes: Uint8Array` stopped the
+  // reference being replaced and left the array's contents writable through a valid brand,
+  // so a caller could edit the runtime after verification and keep the proof. They now live
+  // in a `#` private field, which is unreachable at runtime as well as at compile time —
+  // asserted here rather than argued, because "private" in TypeScript alone is a comment.
   assert.deepEqual(
     Object.keys(artifact).sort(),
     ['byteLength', 'hash'],
-    'the brand materialised at runtime — it must stay phantom and uncopyable',
+    'the verified bytes are enumerable again — a caller can reach and mutate them',
   );
+  assert.equal(
+    Object.getOwnPropertyDescriptor(artifact, 'bytes'),
+    undefined,
+    'a `bytes` property exists — the private field was reintroduced as a public one',
+  );
+});
+
+test('the verified bytes cannot be mutated through the artifact (Codex #3730437896)', async () => {
+  // The defect in its exact shape: `readonly` prevents `artifact.bytes = other` and permits
+  // `artifact.bytes[0] = 0`, so bytes whose hash was never compared with the authorization
+  // could be carried into `UpgradeSubmission` under a genuine brand — on the single most
+  // consequential signature this client can produce.
+  const original = Uint8Array.from([1, 2, 3, 4]);
+  const artifact = await verifyArtifact(
+    chunkSource([original]),
+    AUTHORIZED,
+    recordingHasher('0xaaaa').hasher,
+  );
+  const first = artifact.copyBytes();
+  first.fill(0xff);
+  const second = artifact.copyBytes();
+  assert.deepEqual([...second], [1, 2, 3, 4], 'the copy is a view — mutating it edited the artifact');
+  // Two copies are independent of each other as well as of the artifact, because a shared
+  // buffer handed out twice is the same defect one indirection further away.
+  assert.notEqual(first.buffer, second.buffer);
+  // And mutating the caller's *input* after verification does not reach the verified bytes:
+  // the artifact snapshotted them.
+  original.fill(0x99);
+  assert.deepEqual([...artifact.copyBytes()], [1, 2, 3, 4], 'the artifact aliases the caller\'s buffer');
+});
+
+test('a source that reuses one buffer between yields is snapshotted (Codex #3730437903)', async () => {
+  // `ArtifactSource` is an interface anybody may implement, and reusing a scratch buffer
+  // across yields is an ordinary way to write a streaming reader. The hasher consumes each
+  // chunk's contents immediately; `parts` was retaining the reference, so every entry
+  // pointed at the same memory and the concatenation produced the LAST chunk repeated —
+  // returned as a branded artifact whose hash described entirely different bytes.
+  const scratch = new Uint8Array(2);
+  const reusing = {
+    totalBytes: 4,
+    async *chunks(): AsyncIterable<Uint8Array> {
+      scratch.set([1, 2]);
+      yield scratch;
+      scratch.set([3, 4]);
+      yield scratch;
+    },
+  };
+  const seen: number[] = [];
+  const hasher = {
+    update: (chunk: Uint8Array) => { seen.push(...chunk); },
+    digest: () => '0xaaaa',
+  };
+  const artifact = await verifyArtifact(reusing, AUTHORIZED, hasher);
+  assert.deepEqual(seen, [1, 2, 3, 4], 'the hasher did not see the stream in order');
+  assert.deepEqual(
+    [...artifact.copyBytes()],
+    seen,
+    'the retained bytes are not the bytes that were hashed — the chunk was kept by reference',
+  );
+});
+
+test('the lead-time countdown is over the STORED field, and refuses across blocks', async () => {
+  // E19 wants the countdown; SQ-552 forbids deriving `applicable_at`. Those are compatible
+  // and the difference is exact — this subtracts `now` from the chain's own field.
+  assert.equal(stated(leadTimeCountdown(AUTHORIZED, finalized(4_900))), 100);
+  assert.equal(stated(leadTimeCountdown(AUTHORIZED, finalized(5_050))), -50);
+  const split = leadTimeCountdown(AUTHORIZED, {
+    value: 4_900,
+    status: { kind: 'verified-finalized', chain: TEST_CHAIN, blockHash: '0xbeef', blockNumber: 7 },
+  });
+  assert.equal(split.kind, 'incomparable', 'a countdown spanning two blocks is a deadline for neither');
+});
+
+test('fee headroom blocks when short AND when it cannot be established', () => {
+  // §11.8.4 step 4 asks for fee headroom "displayed — it is large", and the row carried no
+  // fee clause at all. Both failure directions block: this is the biggest fee the client
+  // can incur, and the cost of guessing wrong is a lost multi-megabyte download.
+  const covered = upgradeFeeHeadroom({ asset: 'VIT', free: finalized(100n), estimatedFee: finalized(60n) });
+  assert.deepEqual(stated(covered), { covered: true, shortfall: 0n });
+  assert.equal(feeHeadroomBlock(covered), undefined);
+
+  const short = upgradeFeeHeadroom({ asset: 'VIT', free: finalized(50n), estimatedFee: finalized(60n) });
+  assert.deepEqual(stated(short), { covered: false, shortfall: 10n });
+  assert.match(copy(feeHeadroomBlock(short)?.detail), /length fee is far/);
+
+  const split = upgradeFeeHeadroom({
+    asset: 'USDC',
+    free: { value: 100n, status: { kind: 'verified-finalized', chain: TEST_CHAIN, blockHash: '0xbeef', blockNumber: 7 } },
+    estimatedFee: finalized(60n),
+  });
+  assert.equal(split.kind, 'incomparable');
+  assert.match(copy(feeHeadroomBlock(split)?.detail), /cannot establish/);
 });
 
 test('applicable_at is read, and no lead-time arithmetic exists in the module', () => {
@@ -2048,16 +2349,26 @@ test('applicable_at is read, and no lead-time arithmetic exists in the module', 
     join(REPO, 'app/src/features/tx/src/upgrade-crank.ts'),
     'utf8',
   );
+  const code = source.replace(/\/\*[\s\S]*?\*\//g, '');
   assert.ok(
-    !/DescriptorLeadTime|authorized_at\s*\+|leadTime/i.test(source.replace(/\/\*[\s\S]*?\*\//g, '')),
+    !/DescriptorLeadTime|authorized_at/i.test(code),
     'lead-time arithmetic reappeared in the upgrade crank',
   );
+  // E19's countdown is NOT that arithmetic, and the difference is exact: it subtracts `now`
+  // from the **stored** field and never produces `applicable_at`. Asserted rather than left
+  // to the reader, because a blanket ban on the word would have to delete the countdown the
+  // degradation matrix requires.
+  assert.match(code, /applicableAt,\s*now,\s*\(applicableAt, current\) => applicableAt - current/);
 });
 
-test('the submission outlook states uncertainty rather than predicting success', () => {
+test('the submission outlook states uncertainty rather than predicting success', async () => {
   // FE-P10 is unresolved. A screen that implied a 4 MiB extrinsic will go through would be
   // asserting the very thing the prototype gate exists to find out.
-  const artifact = verifyArtifact(new Uint8Array(4_194_304), AUTHORIZED, () => '0xaaaa');
+  const artifact = await verifyArtifact(
+    chunkSource([new Uint8Array(4_194_304)]),
+    AUTHORIZED,
+    recordingHasher('0xaaaa').hasher,
+  );
   const outlook = submissionOutlook(artifact);
   assert.match(outlook, /has not been established/);
   assert.match(outlook, /FE-P10/);
@@ -2303,18 +2614,46 @@ test('vesting stops at the end block rather than continuing past it', () => {
   assert.equal(stated(claimableNow(STREAM(), finalized(99_999))).amount, 1_000_000n);
 });
 
+const READ_TARGET = (value: bigint): InsuranceTarget => ({ kind: 'read', value: finalized(value) });
+
 test('INSURANCE is classified against its target, never shown as a bare trend', () => {
   // E1: a rising INSURANCE balance is not protocol income. The screen gets a
   // classification, not a number a component could plot as earnings.
-  assert.deepEqual(insuranceStanding(finalized(100n), finalized(100n)), { kind: 'at-target' });
+  assert.deepEqual(stated(insuranceStanding(finalized(100n), READ_TARGET(100n))), { kind: 'at-target' });
   assert.deepEqual(
-    insuranceStanding(finalized(60n), finalized(100n)),
+    stated(insuranceStanding(finalized(60n), READ_TARGET(100n))),
     { kind: 'below-target', shortfall: 40n },
   );
   assert.deepEqual(
-    insuranceStanding(finalized(140n), finalized(100n)),
+    stated(insuranceStanding(finalized(140n), READ_TARGET(100n))),
     { kind: 'awaiting-overflow', excess: 40n },
   );
+});
+
+test('an unobtainable T_ins is its own arm, never rendered as "at target"', () => {
+  // SQ-616: `T_ins` is a treasury-internal counter (08 §1.2) and no frozen surface carries
+  // it — `NavView` publishes `insurance` and nothing beside it. The old signature demanded
+  // a `Verified<bigint>` target, so the only way to satisfy it was to invent one, and an
+  // invented zero classifies an empty reserve as *exactly sized*.
+  const standing = insuranceStanding(finalized(140n), {
+    kind: 'unestablished',
+    reason: INSURANCE_TARGET_UNREADABLE,
+  });
+  assert.equal(stated(standing).kind, 'unestablished');
+  assert.match(INSURANCE_TARGET_UNREADABLE, /SQ-616/);
+  // It still carries the balance's own provenance — the block is knowable, the comparison
+  // is not, and collapsing the two would withhold more than is actually missing.
+  assert.equal(standing.kind === 'stated' && standing.datum.status.kind, 'verified-finalized');
+  // And the copy still says the one thing that holds either way.
+  assert.match(copy(insuranceCopy(stated(standing))), /not protocol income/);
+});
+
+test('a standing derived across two blocks is refused, not classified', () => {
+  const split = insuranceStanding(finalized(140n), {
+    kind: 'read',
+    value: { value: 100n, status: { kind: 'verified-finalized', chain: TEST_CHAIN, blockHash: '0xbeef', blockNumber: 7 } },
+  });
+  assert.equal(split.kind, 'incomparable');
 });
 
 test('an above-target INSURANCE says it is not income and not a surplus', () => {
@@ -2342,19 +2681,45 @@ test('only the recipient may claim, and both blocks report together', () => {
 test('a crank that would do nothing says so before it costs a fee', () => {
   // §11.5 row P-15: "never sign a guaranteed no-op without an explicit expert override".
   // The part a user cannot see is that the button looks identical either way.
-  const notYet = snapshotCrankState(finalized(7), false, false);
+  const notYet = snapshotCrankState(finalized(7), finalized(3), false, false);
   assert.equal(notYet.kind, 'no-op');
   assert.match(copy(noOpWarning(notYet)), /pay a fee and change nothing/);
 
-  const done = snapshotCrankState(finalized(7), true, true);
+  const done = snapshotCrankState(finalized(7), finalized(3), true, true);
   assert.equal(done.kind, 'no-op');
   assert.equal(done.reason, 'already-taken');
-  assert.match(copy(noOpWarning(done)), /already been taken/);
+  assert.match(copy(noOpWarning(done)), /already exists for this epoch at this MetricSpec version/);
 
   // Ready is distinct, and carries no warning — so the control is not vacuously warning.
-  const ready = snapshotCrankState(finalized(7), true, false);
+  const ready = snapshotCrankState(finalized(7), finalized(3), true, false);
   assert.equal(ready.kind, 'ready');
   assert.equal(noOpWarning(ready), undefined);
+});
+
+test('"already taken" is keyed on the PAIR, so a second admissible version is not refused', () => {
+  // `Welfare.Snapshots` is keyed `(epoch, spec_version)` and the call is
+  // `record_snapshot(epoch, spec_version)`. A bare `alreadyTaken` boolean stood in for the
+  // epoch alone, so across a MetricSpec amendment a lawful record at the **active** version
+  // was refused because some *other* version already had one for that epoch — a client
+  // refusing what the chain accepts, on the crank whose overdue state engages the dead-man
+  // rule. The signature no longer admits an epoch-only answer.
+  const otherVersionTaken = snapshotCrankState(finalized(7), finalized(4), true, false);
+  assert.equal(otherVersionTaken.kind, 'ready', 'a lawful second-version record was refused');
+  assert.equal(otherVersionTaken.specVersion.value, 4, 'the version must travel with the state');
+  // And the refusal copy names the pair, so an operator can tell a genuine no-op from this.
+  const taken = snapshotCrankState(finalized(7), finalized(4), true, true);
+  assert.match(copy(noOpWarning(taken)), /about the pair, not about the epoch/);
+  // The version must reach the screen too: without it "a snapshot already exists" cannot be
+  // told apart from the defect above, which is the whole reason the pair is carried.
+  const html = renderToStaticMarkup(
+    h(SnapshotCrank, {
+      epoch: finalized(7), specVersion: finalized(4), boundaryPassed: true, takenAtThisVersion: false,
+      staleness: snapshotStaleness(finalized(100), finalized(200), 1_000, 5_000),
+      session: readySession('O-7'), onCrank: noSubmit,
+    }),
+  );
+  assert.ok(fieldPresent(html, 'MetricSpec version'), html);
+  assert.match(html, />4</, 'the version itself must be on screen, badged');
 });
 
 test('the registry copy says a challenge cannot stall a decision', () => {
@@ -2451,7 +2816,7 @@ test('m-of-n shows BOTH numbers — never a percentage and never a bar alone', (
   // "3 of 5 required" tells a guardian whether their signature closes it. "60%" does not,
   // and at 4-of-5 versus 5-of-7 a bar looks the same while the decisions differ entirely.
   const html = renderToStaticMarkup(
-    h(PendingActions, { actions: [ACTION_ROW()], onOpen: () => {} }),
+    h(PendingActions, { actions: [ACTION_ROW()], justifications: () => JUSTIFICATION(), onOpen: () => {} }),
   );
   assert.match(html, />2</, 'the approvals so far must be on screen');
   assert.match(html, />5</, 'the threshold must be on screen');
@@ -2470,7 +2835,8 @@ test('a blocked approval lists EVERY reason, not the first', () => {
         now: finalized(99_999),
         justification: JUSTIFICATION(),
       },
-      onApprove: () => {},
+      session: readySession('O-3'),
+      onApprove: noSubmit,
     }),
   );
   // Asserted on the notice HEADINGS, not on the raw string. The button's `title` joins every
@@ -2479,6 +2845,12 @@ test('a blocked approval lists EVERY reason, not the first', () => {
   const headings = [...html.matchAll(/<strong class="notice__heading">([^<]*)<\/strong>/g)].map(
     (match) => match[1],
   );
+  // Three headings, and it used to be five. Contract v28 froze `Guardian.PendingActions` and
+  // `Guardian.Approvals` (SQ-616), so O-3's pending-action read is an ordinary clause and the
+  // row carries no unreadable obligation at all — which also removes the caveat list the gate
+  // control renders for one. Until that seam was retired every render of this control carried
+  // a blocking reason and the approve button could never open, so this suite had only ever
+  // seen S15 refuse.
   assert.deepEqual(headings.sort(), ['Already approved', 'Expiry', 'Membership']);
 });
 
@@ -2489,7 +2861,9 @@ test('the unratified consequence renders BEFORE any propose action, unconditiona
   const clean = renderToStaticMarkup(
     h(ProposeAction, {
       meter: { power: 'pause_intake', used: finalized(0), limit: finalized(3) },
-      onPropose: () => {},
+      inputs: { args: { power: 'pause_intake', until: 5_000 }, justificationHash: '0xj' },
+      session: readySession('O-4'),
+      onPropose: noSubmit,
     }),
   );
   assert.ok(clean.includes(UNRATIFIED_CONSEQUENCE), 'must state the bond consequence');
@@ -2507,7 +2881,9 @@ test('a propose panel offers nothing when the allowance cannot be established', 
         used: finalized(0, 1_000_000),
         limit: { value: 3, status: { kind: 'verified-finalized', chain: TEST_CHAIN, blockHash: '0xbeef', blockNumber: 9 } },
       },
-      onPropose: () => {},
+      inputs: { args: { power: 'pause_intake', until: 5_000 }, justificationHash: '0xj' },
+      session: readySession('O-4'),
+      onPropose: noSubmit,
     }),
   );
   assert.ok(buttonDisabled(html, 'Propose'), html);
@@ -2528,7 +2904,8 @@ test('the reporter console shows its two unreadable conditions on the CLEAN path
       },
       decimals: 6,
       symbol: 'USDC',
-      onRegister: () => {},
+      session: readySession('O-1'),
+      onRegister: noSubmit,
     }),
   );
   for (const condition of UNCHECKABLE_REGISTRATION_CONDITIONS) {
@@ -2542,10 +2919,12 @@ test('a no-op crank is disabled and says the fee would be spent for nothing', ()
   const html = renderToStaticMarkup(
     h(SnapshotCrank, {
       epoch: finalized(7),
+      specVersion: finalized(3),
       boundaryPassed: false,
-      alreadyTaken: false,
+      takenAtThisVersion: false,
       staleness: snapshotStaleness(finalized(100), finalized(200), 1_000, 5_000),
-      onCrank: () => {},
+      session: readySession('O-7'),
+      onCrank: noSubmit,
     }),
   );
   assert.ok(buttonDisabled(html, 'Take the snapshot'), html);
@@ -2554,10 +2933,12 @@ test('a no-op crank is disabled and says the fee would be spent for nothing', ()
   const ready = renderToStaticMarkup(
     h(SnapshotCrank, {
       epoch: finalized(7),
+      specVersion: finalized(3),
       boundaryPassed: true,
-      alreadyTaken: false,
+      takenAtThisVersion: false,
       staleness: snapshotStaleness(finalized(100), finalized(200), 1_000, 5_000),
-      onCrank: () => {},
+      session: readySession('O-7'),
+      onCrank: noSubmit,
     }),
   );
   assert.ok(!buttonDisabled(ready, 'Take the snapshot'), ready);
@@ -2572,7 +2953,16 @@ test('a registry filing states what a challenge holds — on every arm of the wi
     { kind: 'indeterminate', reason: 'the watchtower read failed' },
   ] satisfies readonly ChallengeWindow[]) {
     const html = renderToStaticMarkup(
-      h(RegistryFiling, { filingId: finalized('0xfile'), window, onChallenge: () => {} }),
+      h(RegistryFiling, {
+        filingId: finalized('0xfile'),
+        window,
+        inputs: CHALLENGE_FILING(),
+        decimals: 6,
+        symbol: 'USDC',
+        evidence: EVIDENCE_FIXTURE,
+        session: readySession('O-9'),
+        onChallenge: noSubmit,
+      }),
     );
     assert.ok(html.includes(REGISTRY_HOLDS_SETTLEMENT), `missing on ${window.kind}`);
   }
@@ -2583,22 +2973,41 @@ test('an indeterminate challenge window disables the challenge rather than guess
     h(RegistryFiling, {
       filingId: finalized('0xfile'),
       window: { kind: 'indeterminate', reason: 'the watchtower read failed' },
-      onChallenge: () => {},
+      inputs: CHALLENGE_FILING(),
+      decimals: 6,
+      symbol: 'USDC',
+      evidence: EVIDENCE_FIXTURE,
+      session: readySession('O-9'),
+      onChallenge: noSubmit,
     }),
   );
   assert.ok(buttonDisabled(html, 'Challenge this filing'), html);
-  assert.match(html, /cannot establish when the window closes/);
+  assert.match(html, /cannot say when the window closes/);
 });
 
 test('INSURANCE renders its classification and never a bare balance beside it', () => {
   // E1: a rising INSURANCE balance is not protocol income. A number a reader can watch move
   // is an invitation to read it as one, so the panel shows the standing and the copy only.
   const html = renderToStaticMarkup(
-    h(InsurancePanel, { balance: finalized(140n), target: finalized(100n) }),
+    h(InsurancePanel, { standing: insuranceStanding(finalized(140n), READ_TARGET(100n)) }),
   );
   assert.match(html, /awaiting-overflow/);
   assert.match(html, /not protocol income/);
   assert.ok(!html.includes('140'), 'the raw balance must not be rendered beside the copy');
+});
+
+test('an unestablished INSURANCE standing renders the refusal, never a classification', () => {
+  const html = renderToStaticMarkup(
+    h(InsurancePanel, {
+      standing: insuranceStanding(finalized(140n), {
+        kind: 'unestablished',
+        reason: INSURANCE_TARGET_UNREADABLE,
+      }),
+    }),
+  );
+  assert.match(html, /unestablished/);
+  assert.doesNotMatch(html, /at-target|below-target|awaiting-overflow/, 'a standing was invented');
+  assert.match(html, /not protocol income/, 'the one thing that holds either way must survive');
 });
 
 test('a claimable amount derived across two blocks is withheld in the streams table', () => {
@@ -2612,11 +3021,40 @@ test('a claimable amount derived across two blocks is withheld in the streams ta
       decimals: 6,
       symbol: 'USDC',
       callerIsRecipient: () => true,
-      onClaim: () => {},
+      onSelect: () => {},
     }),
   );
   assert.match(html, /Not available/);
-  assert.ok(!html.includes('Claim</button>'), 'no claim is offered against a figure it cannot state');
+  assert.ok(buttonDisabled(html, 'Claim'), 'no claim is offered against a figure it cannot state');
+});
+
+test('every stream row carries its own claim control, named by that row', () => {
+  // Three defects lived in the gap between the table and a second loop of buttons: every
+  // button read "Claim" with nothing naming its stream, the loop **skipped** blocked streams
+  // so the nth button was not the nth row, and `describedBy` pointed at an id no element
+  // carried — an `aria-describedby` to nothing, which reads as an unlabelled control rather
+  // than as a degraded one.
+  const claimable = STREAM({ id: finalized('s1') });
+  const blocked = STREAM({ id: finalized('s2'), cancelled: finalized(true) });
+  const html = renderToStaticMarkup(
+    h(TreasuryStreams, {
+      streams: [blocked, claimable],
+      now: finalized(600),
+      decimals: 6,
+      symbol: 'USDC',
+      callerIsRecipient: () => true,
+      onSelect: () => {},
+    }),
+  );
+  // One control per stream — a blocked one is disabled with a reason, never absent, since
+  // absence reads as "this stream has no claim action".
+  assert.equal((html.match(/>Claim<\/button>/g) ?? []).length, 2, html);
+  // Every `aria-describedby` resolves to an element that exists in this markup.
+  const referenced = [...html.matchAll(/aria-describedby="([^"]+)"/g)].map((match) => match[1]);
+  assert.deepEqual(referenced.sort(), ['stream-s1', 'stream-s2'], html);
+  for (const id of referenced) {
+    assert.ok(html.includes(`id="${id}"`), `aria-describedby="${id}" resolves to nothing`);
+  }
 });
 
 const AUTH_FOR_SCREEN = () => ({ codeHash: finalized('0xcode'), applicableAt: finalized(5_000) });
@@ -2629,21 +3067,33 @@ test('the upgrade crank offers nothing until an artifact has been verified', () 
       submission: undefined,
       authorized: AUTH_FOR_SCREEN(),
       now: finalized(9_000),
-      onSubmit: () => {},
+      fee: COVERED_FEE(),
+      decimals: 12,
+      symbol: 'VIT',
+      session: readySession('O-6'),
+      onSubmit: noSubmit,
     }),
   );
   assert.ok(buttonDisabled(html, 'Submit the upgrade'), html);
   assert.match(html, /hashed on this device/);
 });
 
-test('the FE-P10 outlook precedes the submit control, because it decides whether to start', () => {
-  const artifact = verifyArtifact(new Uint8Array(3 * 1024 * 1024), AUTH_FOR_SCREEN(), () => '0xcode');
+test('the FE-P10 outlook precedes the submit control, because it decides whether to start', async () => {
+  const artifact = await verifyArtifact(
+    chunkSource([new Uint8Array(3 * 1024 * 1024)]),
+    AUTH_FOR_SCREEN(),
+    recordingHasher('0xcode').hasher,
+  );
   const html = renderToStaticMarkup(
     h(UpgradeCrank, {
       submission: { artifact, authorized: AUTH_FOR_SCREEN() },
       authorized: AUTH_FOR_SCREEN(),
       now: finalized(9_000),
-      onSubmit: () => {},
+      fee: COVERED_FEE(),
+      decimals: 12,
+      symbol: 'VIT',
+      session: readySession('O-6'),
+      onSubmit: noSubmit,
     }),
   );
   assert.match(html, /has not been established \(FE-P10\)/);
@@ -2651,23 +3101,93 @@ test('the FE-P10 outlook precedes the submit control, because it decides whether
     html.indexOf('FE-P10') < html.indexOf('Submit the upgrade'),
     'the outlook must come before the control it qualifies',
   );
-  assert.ok(!buttonDisabled(html, 'Submit the upgrade'), 'a verified, applicable upgrade submits');
+  // **The control opens, and until this review it could not.** `UNREADABLE['O-6']` declared
+  // both of §11.8.4's reads unfrozen and `blocking`, so `operatorGate` returned `blocked`
+  // for every session — contract v28 had already frozen `System.AuthorizedUpgrade` and
+  // `ExecutionGuard.PendingUpgrade` in this branch's own base and PLAN.md marked SQ-615
+  // resolved. S17 was unreachable, and this assertion said so instead of exercising it: a
+  // verified artifact, a reached `applicable_at`, covered fees and a live gate is the whole
+  // point of the screen.
+  assert.ok(!buttonDisabled(html, 'Submit the upgrade'), html);
+  assert.ok(!/SQ-615/.test(html), 'a resolved spec question is still closing this control');
+  assert.ok(!/No artifact has been verified/.test(html), 'the artifact half must have succeeded');
 });
 
-test('an upgrade before its stored applicable_at is refused with the chain’s own field', () => {
-  const artifact = verifyArtifact(new Uint8Array(16), AUTH_FOR_SCREEN(), () => '0xcode');
+test('an upgrade before its stored applicable_at is refused with the chain’s own field', async () => {
+  const artifact = await verifyArtifact(
+    chunkSource([new Uint8Array(16)]),
+    AUTH_FOR_SCREEN(),
+    recordingHasher('0xcode').hasher,
+  );
   const html = renderToStaticMarkup(
     h(UpgradeCrank, {
       submission: { artifact, authorized: AUTH_FOR_SCREEN() },
       authorized: AUTH_FOR_SCREEN(),
       now: finalized(4_999),
-      onSubmit: () => {},
+      fee: COVERED_FEE(),
+      decimals: 12,
+      symbol: 'VIT',
+      session: readySession('O-6'),
+      onSubmit: noSubmit,
     }),
   );
   assert.ok(buttonDisabled(html, 'Submit the upgrade'), html);
   // SQ-552: the field is read, not recomputed, and the copy says so rather than presenting
   // a countdown this client derived.
   assert.match(html, /not a countdown this client computed/);
+});
+
+test('§11.8.4 step 4 fee headroom is displayed, and a shortfall blocks the submission', async () => {
+  const artifact = await verifyArtifact(
+    chunkSource([new Uint8Array(16)]),
+    AUTH_FOR_SCREEN(),
+    recordingHasher('0xcode').hasher,
+  );
+  const html = renderToStaticMarkup(
+    h(UpgradeCrank, {
+      submission: { artifact, authorized: AUTH_FOR_SCREEN() },
+      authorized: AUTH_FOR_SCREEN(),
+      now: finalized(9_000),
+      fee: { asset: 'VIT', free: finalized(1n), estimatedFee: finalized(1_000_000_000_000n) },
+      decimals: 12,
+      symbol: 'VIT',
+      session: readySession('O-6'),
+      onSubmit: noSubmit,
+    }),
+  );
+  // The **exact** label, not a substring: `assert.match(html, /Fee headroom/)` passes on a
+  // field renamed `Fee headroom-NOT`, and a mutation doing exactly that survived the first
+  // version of this test.
+  assert.ok(fieldPresent(html, 'Fee headroom'), 'the figure step 4 asks to display is absent');
+  assert.match(html, /short by/);
+  assert.ok(buttonDisabled(html, 'Submit the upgrade'), html);
+});
+
+test('E19 renders fetch progress and the lead-time countdown', async () => {
+  const artifact = await verifyArtifact(
+    chunkSource([new Uint8Array(16)]),
+    AUTH_FOR_SCREEN(),
+    recordingHasher('0xcode').hasher,
+  );
+  const html = renderToStaticMarkup(
+    h(UpgradeCrank, {
+      submission: { artifact, authorized: AUTH_FOR_SCREEN() },
+      authorized: AUTH_FOR_SCREEN(),
+      now: finalized(4_900),
+      progress: { bytesRead: 2_097_152, totalBytes: 5_242_880 },
+      fee: COVERED_FEE(),
+      decimals: 12,
+      symbol: 'VIT',
+      session: readySession('O-6'),
+      onSubmit: noSubmit,
+    }),
+  );
+  assert.match(html, /2\.0 MiB of 5\.0 MiB/, 'E19 requires fetch progress');
+  assert.ok(
+    fieldPresent(html, 'Blocks until applicable'),
+    'E19 requires the DescriptorLeadTime countdown',
+  );
+  assert.match(html, />100</, 'the countdown must show the remaining blocks');
 });
 
 test('a hash mismatch is a refusal with both hashes — never a retry', () => {
@@ -2749,7 +3269,8 @@ test('the approve flow renders every call in the batch, decoded', () => {
         now: finalized(100),
         justification: JUSTIFICATION(),
       },
-      onApprove: () => {},
+      session: readySession('O-3'),
+      onApprove: noSubmit,
     }),
   );
   for (const name of ['Constitution', 'set_param', 'Epoch', 'force_rerun']) {
@@ -2768,7 +3289,14 @@ test('the approve flow renders every call in the batch, decoded', () => {
   assert.ok(!/\bhidden\b/.test(nth(list, 1, 'capture')), `the batch list is hidden: ${nth(list, 0, 'capture')}`);
   assert.ok(!/aria-hidden="true"/.test(nth(list, 1, 'capture')), `the batch list is aria-hidden: ${nth(list, 0, 'capture')}`);
   assert.ok(!/display:\s*none/.test(nth(list, 1, 'capture')), `the batch list is display:none: ${nth(list, 0, 'capture')}`);
-  assert.ok(!buttonDisabled(html, 'Approve'), 'a fully decoded batch approves');
+  // **And the control opens.** Until contract v28 froze `Guardian.PendingActions` this row
+  // carried a blocking unreadable obligation, so this assertion read `buttonDisabled` and
+  // matched `SQ-616` — a test that could pass with the batch rendering nothing at all,
+  // because the refusal came from somewhere else entirely. A decoded batch on a live session
+  // is the case S15 exists for, and it is the case nothing had ever exercised.
+  assert.ok(!buttonDisabled(html, 'Approve'), html);
+  assert.ok(!/SQ-616/.test(html), 'a resolved spec question is still closing this control');
+  assert.ok(!/Empty batch|Undecodable call/.test(html), `the batch itself must not block: ${html}`);
 });
 
 test('an undecodable call blocks the approval and renders as raw bytes, never a name', () => {
@@ -2786,7 +3314,8 @@ test('an undecodable call blocks the approval and renders as raw bytes, never a 
         now: finalized(100),
         justification: JUSTIFICATION(),
       },
-      onApprove: () => {},
+      session: readySession('O-3'),
+      onApprove: noSubmit,
     }),
   );
   assert.ok(buttonDisabled(html, 'Approve'), html);
@@ -2828,10 +3357,12 @@ test('an engaged dead-man rule is a danger notice, not a staleness count', () =>
   const html = renderToStaticMarkup(
     h(SnapshotCrank, {
       epoch: finalized(7),
+      specVersion: finalized(3),
       boundaryPassed: true,
-      alreadyTaken: false,
+      takenAtThisVersion: false,
       staleness: snapshotStaleness(finalized(0), finalized(6_000), 1_000, 5_000),
-      onCrank: () => {},
+      session: readySession('O-7'),
+      onCrank: noSubmit,
     }),
   );
   assert.match(html, /data-severity="danger"/);
@@ -2841,10 +3372,12 @@ test('an engaged dead-man rule is a danger notice, not a staleness count', () =>
   const fine = renderToStaticMarkup(
     h(SnapshotCrank, {
       epoch: finalized(7),
+      specVersion: finalized(3),
       boundaryPassed: true,
-      alreadyTaken: false,
+      takenAtThisVersion: false,
       staleness: snapshotStaleness(finalized(0), finalized(10), 1_000, 5_000),
-      onCrank: () => {},
+      session: readySession('O-7'),
+      onCrank: noSubmit,
     }),
   );
   assert.ok(!fine.includes('data-severity="danger"'), fine);
@@ -3244,7 +3777,7 @@ test('the pending-actions list shows the target, not just the power', () => {
   // "delay_once" says a delay is proposed and not what is being delayed; a guardian cannot
   // weigh a force_rerun without knowing which cohort it re-runs.
   const html = renderToStaticMarkup(
-    h(PendingActions, { actions: [ACTION_ROW()], onOpen: () => {} }),
+    h(PendingActions, { actions: [ACTION_ROW()], justifications: () => JUSTIFICATION(), onOpen: () => {} }),
   );
   assert.match(html, /Target/);
   assert.match(html, /cohort-42/);
@@ -3339,6 +3872,8 @@ const ROUND = (over: Partial<OracleRound> = {}): OracleRound => ({
 });
 
 const REPORT = (over: Partial<ReportInputs> = {}): ReportInputs => ({
+  roundOpen: finalized(true),
+  feeAsset: 'USDC',
   reportWindowOpen: finalized(true),
   registered: finalized(true),
   stakeHeld: finalized(100_000_000_000n),
@@ -3385,35 +3920,60 @@ test('the round-1 report bond is a labelled floor, never presented as the amount
   // `StakeAtRisk` is on no frozen surface, so P-13's "recomputed and displayed" cannot be
   // honoured for a fresh report. The honest shape is SQ-564's: state the bound that CAN be
   // read and refuse to let a screen render it where an exact amount would go.
+  // **The path is closed, not captioned.** The floor is not the bond for any component with
+  // stake at risk, so an account passing a floor-only check is either short at dispatch or
+  // has more taken than the screen showed — money the user was shown and would reasonably
+  // read as the price. §11.5's redemption-fee rule 5 rules exactly this case: unreadable ⇒
+  // no figure and the transaction blocked, and the FE must not mirror the runtime's own
+  // fail-open read. The block is the table's declaration, so the module cannot disagree
+  // with it again.
   const check = reportBlocks(REPORT());
-  assert.deepEqual(check.blocks, []);
-  // Required, not optional — there is no shape of the result without it.
-  assert.equal(check.bondUnknown, REPORT_BOND_NOT_ESTABLISHED);
+  assert.deepEqual(check.blocks.map((block) => block.check), ['Bond amount']);
+  assert.match(nth(check.blocks, 0, 'block').detail, /SQ-598/);
+  // Required, not optional — there is no shape of the result without it. It is the module's
+  // own sentence **bound to the table's obligation by id**, so the two answers that once
+  // shipped disagreeing cannot drift again: drop P-13's declaration and this throws.
+  assert.ok(check.bondUnknown.startsWith(REPORT_BOND_NOT_ESTABLISHED), check.bondUnknown);
   assert.match(check.bondUnknown, /cannot state the bond/);
-  assert.match(check.bondUnknown, /the least it can be/);
+  assert.match(check.bondUnknown, /the least the bond can be/);
+  assert.match(check.bondUnknown, /SQ-598/, 'the caveat must carry its own expiry pointer');
 
-  // Below even the floor is a true block; above it, the check stays incomplete rather than
-  // becoming a green "ready to sign".
+  // Below even the floor the row says both things: the bond is unknown AND the balance does
+  // not cover the least it can be. Two reasons rather than one, because they have different
+  // remedies and a merged sentence would send the user to the wrong one.
   const poor = reportBlocks(REPORT({ freeUsdc: finalized(9_999_999_999n) }));
-  assert.deepEqual(poor.blocks.map((block) => block.check), ['Round bond']);
-  assert.match(nth(poor.blocks, 0, 'block').detail, /even the floor/);
+  assert.deepEqual(poor.blocks.map((block) => block.check), ['Bond amount', 'Round bond']);
+  assert.match(nth(poor.blocks, 1, 'block').detail, /even the floor/);
+});
+
+test('the report control is CLOSED while the bond is unreadable (Codex #3730437906)', () => {
+  // R-7's direction, applied to the gate rather than to the model: a reporter must not be
+  // walked to a signature for a value-scaled bond nobody can show them. `operatorGate`
+  // converts P-13's blocking obligation into a closed control, and the anti-vacuity half is
+  // `oracle.challenge`, whose bond IS readable (`OracleRoundView.bond`) and which opens on
+  // the same session shape.
+  const report = operatorGate('oracle.report', readySession('P-13'), []);
+  assert.equal(report.state, 'blocked', 'a report was offered on a bond nobody can state');
+  assert.equal(report.window, undefined);
+  assert.ok(report.blocks.some((block) => block.detail.includes('SQ-598')), 'the block names no reason');
+  assert.equal(operatorGate('oracle.challenge', readySession('P-14'), []).state, 'ready');
 });
 
 test('P-13 blocks on window, registry, a short stake and evidence — each independently', () => {
-  assert.deepEqual(reportBlocks(REPORT({ reportWindowOpen: finalized(false) })).blocks.map((b) => b.check), [
-    'Report window',
-  ]);
-  assert.deepEqual(reportBlocks(REPORT({ registered: finalized(false) })).blocks.map((b) => b.check), [
-    'Reporter registry',
-  ]);
+  // Every case carries the unreadable-bond block as well, since it holds unconditionally;
+  // what this test is about is that the *clause* blocks are reported one per failing group.
+  const clauseBlocks = (over: Partial<ReportInputs>): readonly string[] =>
+    reportBlocks(REPORT(over)).blocks.map((b) => b.check).filter((check) => check !== 'Bond amount');
+  assert.deepEqual(clauseBlocks({ reportWindowOpen: finalized(false) }), ['Report window']);
+  assert.deepEqual(clauseBlocks({ registered: finalized(false) }), ['Reporter registry']);
   // Registered but under-staked is its own state with its own remedy: a prior slash leaves
   // the registration standing and the hold short, and "not registered" would send the user
   // to the wrong screen.
   const short = reportBlocks(REPORT({ stakeHeld: finalized(99_999_999_999n) }));
-  assert.deepEqual(short.blocks.map((b) => b.check), ['Reporter stake']);
-  assert.match(nth(short.blocks, 0, 'block').detail, /previous slash/);
+  assert.deepEqual(clauseBlocks({ stakeHeld: finalized(99_999_999_999n) }), ['Reporter stake']);
+  assert.match(nth(short.blocks.filter((b) => b.check === 'Reporter stake'), 0, 'block').detail, /previous slash/);
   // An EMPTY hash is not a hash — what an unfilled form field actually produces.
-  assert.deepEqual(reportBlocks(REPORT({ evidenceHash: '' })).blocks.map((b) => b.check), ['Evidence']);
+  assert.deepEqual(clauseBlocks({ evidenceHash: '' }), ['Evidence']);
 });
 
 test('a reporter may not challenge their own round — 07 §5.2, and the view carries it', () => {
@@ -3473,7 +4033,14 @@ test('the report screen shows the floor caveat on the CLEAN path, where it matte
   // A blocked form already says why. The dangerous render is the one with nothing wrong,
   // where a reporter reads the floor as the charge and budgets for the wrong number.
   const html = renderToStaticMarkup(
-    h(SubmitReport, { inputs: REPORT(), decimals: 6, symbol: 'USDC', onReport: () => {} }),
+    h(SubmitReport, {
+      inputs: REPORT(),
+      decimals: 6,
+      symbol: 'USDC',
+      evidence: EVIDENCE_FIXTURE,
+      session: readySession('P-13'),
+      onReport: noSubmit,
+    }),
   );
   assert.match(html, /a floor, not the amount/);
   assert.match(html, /cannot state the bond/);
@@ -3482,7 +4049,14 @@ test('the report screen shows the floor caveat on the CLEAN path, where it matte
 
 test('the challenge screen renders the chain’s own bond and the risk before the control', () => {
   const html = renderToStaticMarkup(
-    h(ChallengeRound, { inputs: CHALLENGE(), decimals: 6, symbol: 'USDC', onChallenge: () => {} }),
+    h(ChallengeRound, {
+      inputs: CHALLENGE(),
+      decimals: 6,
+      symbol: 'USDC',
+      evidence: EVIDENCE_FIXTURE,
+      session: readySession('P-14'),
+      onChallenge: noSubmit,
+    }),
   );
   assert.match(html, /Bond to post/);
   assert.match(html, /Challenge window closes at/);
@@ -3497,13 +4071,21 @@ test('the recompute screen has no arm for a contradicted proof, and its refusals
   // property of the type rather than a check this component could omit.
   const proof = recomputeProof(RECOMPUTE(), () => 1_234_000_000n);
   const html = renderToStaticMarkup(
-    h(RecomputeProof, { submission: { proof, roundOpen: finalized(true) }, onSubmit: () => {} }),
+    h(RecomputeProof, {
+      submission: { proof, roundOpen: finalized(true) },
+      session: readySession('O-2'),
+      onSubmit: noSubmit,
+    }),
   );
   assert.match(html, /reproduces the committed value/);
   assert.match(html, /1,234,000,000/);
 
   const closed = renderToStaticMarkup(
-    h(RecomputeProof, { submission: { proof, roundOpen: finalized(false) }, onSubmit: () => {} }),
+    h(RecomputeProof, {
+      submission: { proof, roundOpen: finalized(false) },
+      session: readySession('O-2'),
+      onSubmit: noSubmit,
+    }),
   );
   assert.match(closed, /no longer open/);
 
@@ -3643,4 +4225,578 @@ test('an unverifiable withdraw destination warns in its own words, and does not 
   );
   assert.match(dusting, /risks the funds being dusted on arrival/);
   assert.ok(!dusting.includes('has not been established'), 'the two states must read differently');
+});
+
+// ============================================ F17's operator gate and its consoles
+
+/**
+ * 11 §11.4 rule 1, applied to §11.8: *"Every submit path passes through `refreshAndGate` —
+ * **structurally** (the tx machine has no bypass edge), not by convention."*
+ *
+ * These tests are written against the bypass, not the happy path. A console rendering
+ * correctly proves nothing here: the defect was that each one enabled its control on its own
+ * module-local check, with no refresh, no `spec_version` re-check and no proof that the reads
+ * described one state — all of which a green render is entirely consistent with.
+ */
+
+/**
+ * The §11.8 calls whose row this release can actually read end to end.
+ *
+ * It was five and it is now nine. Contract v28 froze the guardian pending-action pair, the
+ * two upgrade items and the registry's three maps (SQ-615/616/619), which retired the
+ * `blocking` declarations that had kept S15, S17 and S19 shut; `oracle.report` left the list
+ * in the other direction, because its bond is money no frozen surface publishes.
+ */
+const OPENABLE_CALLS = [
+  'oracle.register_reporter',
+  'oracle.recompute_proof',
+  'welfare.record_snapshot',
+  'oracle.challenge',
+  'guardian.approve_action',
+  'system.apply_authorized_upgrade',
+  'registry.challenge',
+] as const;
+
+test('no operator control opens without a gate result the screen cannot mint', () => {
+  // The structural half: `operatorGate` yields a `window` only from `AwaitingSignature`, and
+  // that state has one inbound edge requiring a `GatePassed` whose brand only `gate()` mints.
+  for (const call of Object.keys(OPERATOR_SURFACE_ROWS) as (keyof typeof OPERATOR_SURFACE_ROWS)[]) {
+    const row = OPERATOR_SURFACE_ROWS[call];
+    const notRefreshed = operatorGate(call, preparedSession(row), []);
+    assert.notEqual(notRefreshed.state, 'ready', call);
+    assert.equal(notRefreshed.window, undefined, `${call} offered a window without a gate`);
+  }
+  // For a row this release can read end to end, the state is `not-refreshed` and **not**
+  // `blocked`: nothing is wrong, the chain has simply not been re-read, and telling an
+  // operator a condition failed sends them hunting a problem that does not exist. The other
+  // four rows are `blocked` for a stated reason — asserted separately below.
+  for (const call of OPENABLE_CALLS) {
+    const gated = operatorGate(call, preparedSession(OPERATOR_SURFACE_ROWS[call]), []);
+    assert.equal(gated.state, 'not-refreshed', call);
+    assert.deepEqual(gated.blocks, [], call);
+    // And a refreshed session opens it, so `not-refreshed` is not a permanent refusal.
+    assert.equal(operatorGate(call, readySession(OPERATOR_SURFACE_ROWS[call]), []).state, 'ready', call);
+  }
+});
+
+test('every row whose central read 02 does not freeze is CLOSED, with its id named', () => {
+  // INV-FE-12's lattice: an unproven capability is absent, and absence disables the
+  // dependent surface with a named reason.
+  //
+  // **Four rows, and it was six.** Contract v28 froze six surfaces in this branch's own base
+  // and PLAN.md marked SQ-615, SQ-616 and SQ-619 resolved, while the declarations stayed —
+  // so S15, S17 and S19 could not reach `ready` at all and this test asserted that as though
+  // it were the specification. What is left is genuinely unread: the trigger→item mapping
+  // §11.8.2 never states (SQ-730), the per-stream treasury read §7.6 forbids (SQ-601), the
+  // filing bond's exposure (SQ-731) and the report bond's `StakeAtRisk` (SQ-598).
+  const closed: Record<string, string> = {
+    'guardian.propose_action': 'SQ-730',
+    'futarchy_treasury.claim_stream': 'SQ-601',
+    'registry.file': 'SQ-731',
+    'oracle.report': 'SQ-598',
+  };
+  for (const [call, sq] of Object.entries(closed)) {
+    const row = OPERATOR_SURFACE_ROWS[call as keyof typeof OPERATOR_SURFACE_ROWS];
+    const gated = operatorGate(call as keyof typeof OPERATOR_SURFACE_ROWS, readySession(row), []);
+    assert.equal(gated.state, 'blocked', `${call} opened on an unread condition`);
+    assert.equal(gated.window, undefined, call);
+    assert.ok(
+      gated.blocks.some((block) => block.detail.includes(sq)),
+      `${call} is closed without naming ${sq}`,
+    );
+  }
+  // The retired ones open, which is the half a "closed" list can never assert about itself.
+  for (const call of ['guardian.approve_action', 'system.apply_authorized_upgrade', 'registry.challenge'] as const) {
+    const gated = operatorGate(call, readySession(OPERATOR_SURFACE_ROWS[call]), []);
+    assert.equal(gated.state, 'ready', `${call} is still closed on a resolved spec question`);
+  }
+});
+
+test('a preparation declaring somebody else’s row is refused, not gated against it', () => {
+  // `gate()` verifies the rows a preparation *declares* — it cannot know whether the
+  // declaration is the right one for the call being signed. A preparation for
+  // `guardian.approve_action` declaring `P-1` gates perfectly against the market row and
+  // authorises the wrong signature, so the call→row binding is data and it is checked here.
+  const wrong = operatorGate('oracle.register_reporter', readySession('P-1'), []);
+  assert.equal(wrong.state, 'blocked');
+  assert.equal(wrong.window, undefined);
+  assert.deepEqual(wrong.blocks.map((block) => block.check), ['Declared precondition row']);
+  assert.match(nth(wrong.blocks, 0, 'block').detail, /passes its gate and authorises this signature/);
+  // And the right declaration opens, so the refusal is not vacuous.
+  assert.equal(operatorGate('oracle.register_reporter', readySession('O-1'), []).state, 'ready');
+});
+
+test('an authentic window with NO preparation is refused (Codex #3730437885)', () => {
+  // `declarationBlock` returned `undefined` for an absent preparation — "nothing declared,
+  // nothing to disagree with" — which read as harmless and was not: paired with a real window
+  // it produced a `ready` control for a call whose bytes nothing had ever named. `TxSession`
+  // is structural, so this session is assemblable by any screen.
+  const real = readySession('O-1');
+  const orphaned = { ...real, prep: undefined } as TxSession;
+  const gated = operatorGate('oracle.register_reporter', orphaned, []);
+  assert.equal(gated.state, 'blocked', 'a privileged control opened over no transaction');
+  assert.equal(gated.window, undefined);
+  // Two reasons, and both are true of this session: it names no transaction, and the proof
+  // it holds was minted for one it does not name.
+  assert.deepEqual(
+    gated.blocks.map((block) => block.check).sort(),
+    ['Gate proof', 'Prepared transaction'],
+  );
+});
+
+test('an authentic window minted for OTHER bytes is refused, not honoured', () => {
+  // A `GatePassed` is evidence about the preparation it names and nothing else. The window
+  // here is real — it came out of `gate()` — and it describes a different transaction.
+  const mine = readySession('O-1');
+  const theirs = readySession('O-1');
+  const crossed = { ...mine, signingWindow: theirs.signingWindow } as TxSession;
+  const gated = operatorGate('oracle.register_reporter', crossed, []);
+  assert.equal(gated.state, 'blocked', 'a proof for another preparation opened this control');
+  assert.ok(gated.blocks.some((block) => block.check === 'Gate proof'), gated.blocks.map((b) => b.check).join(', '));
+  // Anti-vacuity: the untampered session opens, so the refusal is the crossing's.
+  assert.equal(operatorGate('oracle.register_reporter', mine, []).state, 'ready');
+});
+
+test('the window a control hands its submitter carries the bytes it proves', () => {
+  // What makes the binding usable rather than decorative: a submitter encodes
+  // `window.prep.scaleHex` and has no reason to hold a second copy of the payload.
+  const ready = operatorGate('oracle.register_reporter', readySession('O-1'), []);
+  assert.equal(ready.state, 'ready');
+  let handed: GatePassed | undefined;
+  const submit = operatorSubmit(ready, (window) => { handed = window; });
+  assert.ok(submit, 'a ready control offered no handler');
+  submit();
+  assert.equal(handed?.prep.scaleHex, PREP.scaleHex);
+  assert.ok(handed?.prep.requires.includes('O-1'));
+});
+
+test('a blocking unreadable obligation closes the control even with a passing gate', () => {
+  // `clauseGroupsFor` answers "every declared read passed", which for a row whose central
+  // read 02 freezes no surface for is **vacuously** true. INV-FE-12's lattice says an
+  // unproven capability is absent, so the row is closed with its spec question named.
+  const blocked = operatorGate('futarchy_treasury.claim_stream', readySession('O-5'), []);
+  assert.equal(blocked.state, 'blocked', 'a row with no lawful source opened its control');
+  assert.match(nth(blocked.blocks, 0, 'block').detail, /SQ-601/);
+  assert.match(nth(blocked.blocks, 0, 'block').detail, /control is closed rather than offered/);
+  // Anti-vacuity: a row with no blocking obligation opens on the same session shape, so the
+  // refusal above is the obligation's and not a gate that never opens for anything.
+  assert.equal(operatorGate('welfare.record_snapshot', readySession('O-7'), []).state, 'ready');
+});
+
+test('a STATED obligation is carried without blocking, and never dropped', () => {
+  // §11.8.1's SQ-564 posture: the transaction is offered and the gap is named. The two
+  // dispositions are genuinely different and collapsing either into the other is wrong in
+  // one direction each — blocking a stated gap removes a lawful action, and stating a
+  // blocking one acts on a condition nobody read.
+  const stated = operatorGate('oracle.register_reporter', readySession('O-1'), []);
+  assert.equal(stated.state, 'ready', 'a stated gap must not close the control');
+  assert.equal(stated.unreadable.length, 2, 'the two SQ-564 conditions must travel with the gate');
+  for (const entry of stated.unreadable) assert.equal(entry.disposition, 'stated');
+});
+
+test('the model’s own blocks reach the control, and every one of them is reported', () => {
+  const gated = operatorGate('oracle.register_reporter', readySession('O-1'), [
+    { check: 'First', detail: 'one' },
+    { check: 'Second', detail: 'two' },
+  ]);
+  assert.equal(gated.state, 'blocked');
+  assert.deepEqual(gated.blocks.map((block) => block.check), ['First', 'Second']);
+});
+
+test('every operator console refuses to submit from an unrefreshed session', () => {
+  // The end-to-end form of the first test: each console's control must be disabled, with a
+  // reason, when the chain has not been re-read. A rendering check rather than a model one,
+  // because the model can be right while the screen wires its own handler.
+  const cases: readonly { readonly label: string; readonly node: ReturnType<typeof h> }[] = [
+    {
+      label: 'Register',
+      node: h(RegisterReporter, {
+        inputs: { freeUsdc: finalized(10_000_000n), reporterStake: finalized(1_000_000n), alreadyRegistered: finalized(false) },
+        decimals: 6, symbol: 'USDC', session: preparedSession('O-1'), onRegister: noSubmit,
+      }),
+    },
+    {
+      label: 'Post the report',
+      node: h(SubmitReport, {
+        inputs: REPORT(), decimals: 6, symbol: 'USDC', evidence: EVIDENCE_FIXTURE,
+        session: preparedSession('P-13'), onReport: noSubmit,
+      }),
+    },
+    {
+      label: 'Take the snapshot',
+      node: h(SnapshotCrank, {
+        epoch: finalized(7), specVersion: finalized(3), boundaryPassed: true, takenAtThisVersion: false,
+        staleness: snapshotStaleness(finalized(100), finalized(200), 1_000, 5_000),
+        session: preparedSession('O-7'), onCrank: noSubmit,
+      }),
+    },
+    {
+      label: 'File',
+      node: h(RegistryFilingForm, {
+        inputs: FILING(), decimals: 6, symbol: 'USDC', evidence: EVIDENCE_FIXTURE,
+        session: preparedSession('O-8'), onFile: noSubmit,
+      }),
+    },
+  ];
+  for (const { label, node } of cases) {
+    const html = renderToStaticMarkup(node);
+    assert.ok(buttonDisabled(html, label), `${label} submitted without a gate result:\n${html}`);
+  }
+});
+
+test('a gated console enables its control, so the refusals above are not vacuous', () => {
+  const html = renderToStaticMarkup(
+    h(SnapshotCrank, {
+      epoch: finalized(7), specVersion: finalized(3), boundaryPassed: true, takenAtThisVersion: false,
+      staleness: snapshotStaleness(finalized(100), finalized(200), 1_000, 5_000),
+      session: readySession('O-7'), onCrank: noSubmit,
+    }),
+  );
+  assert.ok(!buttonDisabled(html, 'Take the snapshot'), html);
+});
+
+// -------------------------------------------- P-13 has ONE implementation now
+
+test('reportBlocks consumes P-13’s clause list rather than re-deriving one', () => {
+  // The blocker: `rows.ts` recomputed the round bond and checked USDC headroom against it
+  // while `oracle-reporting.ts` declared the bond structurally uncomputable — two answers to
+  // "what will this hold?" in one release, on a bonded and slashable action. The repair is a
+  // direction of dependency, and this asserts the direction rather than the agreement.
+  const keys = rowsFor('P-13', 'USDC').map((clause) => clause.key);
+  assert.ok(keys.every((key) => key !== undefined), 'a P-13 clause lost its key');
+  // Every clause has a predicate: one at a time, make exactly that clause fail and require a
+  // block. A clause the module silently skipped would produce none.
+  const failing: Record<string, Partial<ReportInputs>> = {
+    'round-open': { roundOpen: finalized(false) },
+    'report-window': { reportWindowOpen: finalized(false) },
+    registered: { registered: finalized(false) },
+    'stake-held': { stakeHeld: finalized(1n) },
+    'bond-headroom': { freeUsdc: finalized(0n) },
+    evidence: { evidenceHash: undefined },
+  };
+  for (const [key, over] of Object.entries(failing)) {
+    const check = reportBlocks(REPORT(over)).blocks.filter((block) => block.check !== 'Bond amount');
+    assert.ok(check.length > 0, `P-13 clause ${key} has no predicate that can fail`);
+  }
+  assert.deepEqual(
+    reportBlocks(REPORT()).blocks.map((block) => block.check),
+    ['Bond amount'],
+    'the clean fixture must block on the unreadable bond and nothing else',
+  );
+  // And the caveat text is the table's own obligation, so the two cannot drift again.
+  assert.match(reportBlocks(REPORT()).bondUnknown, /SQ-598|not computable|StakeAtRisk/);
+});
+
+test('a P-13 clause with no predicate throws rather than being skipped', () => {
+  // The failure mode this closes is a check that is absent while the screen still reports
+  // that everything passes. `clauseGroupsFor` is the work list, so a clause added to the
+  // table must be implemented, and the guard is exercised here with a synthetic clause
+  // rather than proven by the table happening to agree with the map today.
+  const real = nth(rowsFor('P-13', 'USDC'), 0, 'clause');
+  assert.ok(p13Predicate(real), 'a real P-13 clause has no predicate');
+  assert.throws(
+    () => p13Predicate({ ...real, key: 'a-clause-nobody-implemented' }),
+    (error: unknown) => {
+      assert.ok(error instanceof UnimplementedClauseError, String(error));
+      assert.match(error.message, /reports "everything passes" while never having run/);
+      return true;
+    },
+  );
+  // A clause that lost its key entirely is the same refusal — not a silent skip.
+  const { key: _dropped, ...keyless } = real;
+  assert.throws(() => p13Predicate(keyless), UnimplementedClauseError);
+  // And the other direction: a predicate with no clause behind it is dead code.
+  const tableKeys = new Set(rowsFor('P-13', 'USDC').map((clause) => clause.key));
+  for (const key of P13_CHECK_KEYS) {
+    assert.ok(tableKeys.has(key), `${key} is implemented and P-13 declares no such clause`);
+  }
+});
+
+test('round open and report window are reported as SEPARATE blocks', () => {
+  // A counter-report on a live round: the round is open and the window has elapsed. One
+  // collapsed flag cannot say which half failed, and the two have different remedies.
+  const clauseBlocks = (over: Partial<ReportInputs>): readonly ReportBlock[] =>
+    reportBlocks(REPORT(over)).blocks.filter((block) => block.check !== 'Bond amount');
+  const windowGone = clauseBlocks({ reportWindowOpen: finalized(false) });
+  assert.deepEqual(windowGone.map((block) => block.check), ['Report window']);
+  assert.deepEqual(clauseBlocks({ roundOpen: finalized(false) }).map((b) => b.check), ['Round open']);
+  assert.match(nth(windowGone, 0, 'block').detail, /round itself may still be open/);
+});
+
+// ------------------------------------- §11.8.1's stake-hold consequence (F17)
+
+test('the stake-hold consequence is a REQUIRED field and renders on the clean path', () => {
+  // §11.8.1 row 1's last clause is "stake-hold consequence displayed". It shipped inside a
+  // `RegistrationBlock` detail, which fires only when free USDC is short — so the one reader
+  // who needs it, an account that CAN afford the stake and is about to commit it, was the
+  // only one who never saw it. A consequence is not a failure message.
+  const clean = checkRegistration({
+    freeUsdc: finalized(10_000_000n),
+    reporterStake: finalized(1_000_000n),
+    alreadyRegistered: finalized(false),
+  });
+  assert.deepEqual(clean.blocks, [], 'the fixture must be the clean path');
+  assert.equal(clean.stakeHold, STAKE_HOLD_CONSEQUENCE);
+  const html = renderToStaticMarkup(
+    h(RegisterReporter, {
+      inputs: { freeUsdc: finalized(10_000_000n), reporterStake: finalized(1_000_000n), alreadyRegistered: finalized(false) },
+      decimals: 6, symbol: 'USDC', session: readySession('O-1'), onRegister: noSubmit,
+    }),
+  );
+  assert.ok(html.includes(STAKE_HOLD_CONSEQUENCE), `the consequence is absent on the clean path:\n${html}`);
+  // It says what a hold *is* — not spent, not transferred, and not available either.
+  assert.match(STAKE_HOLD_CONSEQUENCE, /not available to you/);
+  assert.match(STAKE_HOLD_CONSEQUENCE, /registration survives the slash/);
+});
+
+// -------------------------------------- §11.8.2's ratification tracker (F17)
+
+const REVIEW_UNREAD: ReviewReferendum = { kind: 'unread', reason: 'the referendum read failed' };
+
+test('an unobserved review is NOT "no review required" — the fail-closed arm', () => {
+  // §11.8.2: every executed action's review is **auto-scheduled**. So an action with no
+  // `ReviewScheduled` in the ingested window means this client has not seen it, never that
+  // none exists. Rendering that as "not subject to ratification" tells a guardian their
+  // exposure has ended, about their own bond.
+  const state = ratificationFor('a1', [], REVIEW_UNREAD);
+  assert.equal(state.kind, 'unobserved');
+  assert.match(copy(ratificationCopy(state)), /gap in what this device has seen/);
+  assert.match(copy(ratificationCopy(state)), /not a statement that none exists/);
+});
+
+test('the tracker folds the four frozen guardian events, keyed by action', () => {
+  const events: readonly RatificationEvent[] = [
+    { variant: 'ReviewScheduled', actionId: 'a1', referendum: 42 },
+    { variant: 'ReviewFailed', actionId: 'a2', slashedEach: 500n },
+    { variant: 'RecallScheduled', actionId: 'a2', referendum: 43 },
+    { variant: 'ActionRatified', actionId: 'a3' },
+  ];
+  const pending = ratificationFor('a1', events, REVIEW_UNREAD);
+  assert.equal(pending.kind, 'pending');
+  assert.equal(pending.kind === 'pending' && pending.referendum, 42);
+  const failed = ratificationFor('a2', events, REVIEW_UNREAD);
+  assert.equal(failed.kind, 'failed');
+  assert.equal(failed.kind === 'failed' && failed.slashedEach, 500n);
+  assert.equal(failed.kind === 'failed' && failed.recall, 43);
+  assert.equal(ratificationFor('a3', events, REVIEW_UNREAD).kind, 'ratified');
+  // Another action's events must not become this one's verdict — an action id is the only
+  // thing binding these events, so the filter lives here rather than in a caller.
+  assert.equal(ratificationFor('a4', events, REVIEW_UNREAD).kind, 'unobserved');
+});
+
+test('two terminal events for one action refuse rather than pick a winner', () => {
+  // Chain-impossible, so it is evidence the stream is mis-keyed. Resolving it by precedence
+  // would report a definite outcome from an ingest just shown to be untrustworthy — and the
+  // wrong half of that coin tells a guardian their bond is safe.
+  const state = ratificationFor(
+    'a1',
+    [
+      { variant: 'ActionRatified', actionId: 'a1' },
+      { variant: 'ReviewFailed', actionId: 'a1', slashedEach: 1n },
+    ],
+    REVIEW_UNREAD,
+  );
+  assert.equal(state.kind, 'contradictory');
+  assert.match(copy(ratificationCopy(state)), /keyed\s+wrongly/);
+});
+
+test('the tracker screen states the consequence first, and never hides an unread review', () => {
+  const html = renderToStaticMarkup(
+    h(RatificationTracker, {
+      actionId: finalized('a1'),
+      state: ratificationFor('a1', [{ variant: 'ReviewScheduled', actionId: 'a1', referendum: 42 }], REVIEW_UNREAD),
+    }),
+  );
+  assert.ok(html.includes(UNRATIFIED_CONSEQUENCE), 'the 50%-slash consequence must be stated');
+  assert.ok(
+    html.indexOf(UNRATIFIED_CONSEQUENCE) < html.indexOf('Where the review stands'),
+    'the consequence must precede the state, not depend on which arm rendered',
+  );
+  assert.match(html, /could not be read/, 'an unread review must be stated, not rendered as quiet');
+  assert.match(html, /treat the consequence above as live/);
+});
+
+// ------------------------------------- §11.8.2's power-specific forms (F17)
+
+test('each power renders its OWN arguments, and the empty one says so', () => {
+  // SQ-621: one call, five argument sets. `suspend_on_gate` takes none, so a generic form
+  // renders an empty one — which reads as a form that failed to load, on the screen whose
+  // next click is a privileged signature.
+  assert.deepEqual(POWER_FIELDS.suspend_on_gate, []);
+  assert.equal(POWER_FIELDS.activate_playbook.length, 4);
+  const empty = renderToStaticMarkup(
+    h(ProposeAction, {
+      meter: { power: 'suspend_on_gate', used: finalized(0), limit: finalized(3) },
+      inputs: { args: { power: 'suspend_on_gate' }, justificationHash: '0xj' },
+      session: readySession('O-4'), onPropose: noSubmit,
+    }),
+  );
+  assert.match(empty, /This power takes no arguments/);
+  const playbook = renderToStaticMarkup(
+    h(ProposeAction, {
+      meter: { power: 'activate_playbook', used: finalized(0), limit: finalized(3) },
+      inputs: {
+        args: { power: 'activate_playbook', id: 'PB-1', trigger: 'GateBreach', expiry: 9_000 },
+        justificationHash: '0xj',
+      },
+      trigger: { kind: 'active', since: finalized(10) },
+      session: readySession('O-4'), onPropose: noSubmit,
+    }),
+  );
+  for (const field of POWER_FIELDS.activate_playbook) {
+    assert.ok(playbook.includes(field), `${field} must be on the activate_playbook form`);
+  }
+});
+
+test('the propose form refuses a missing justification and a misplaced cohort target', () => {
+  // `propose_action(power, justification_hash)` — the hash is an argument, and the pending
+  // list resolves the document behind it, so proposing without one asks six other guardians
+  // to approve something with no stated reason.
+  assert.deepEqual(
+    proposeFormBlocks({ args: { power: 'suspend_on_gate' }, justificationHash: undefined })
+      .map((block) => block.check),
+    ['Justification'],
+  );
+  // `ActivatePlaybook.target` is accepted by the VOID playbook and rejected by every other,
+  // so a form offering it generally builds a call the chain refuses after signing.
+  assert.deepEqual(
+    proposeFormBlocks({
+      args: { power: 'activate_playbook', id: 'PB-1', trigger: 'GateBreach', expiry: 1, target: 7 },
+      justificationHash: '0xj',
+    }).map((block) => block.check),
+    ['Cohort target'],
+  );
+  assert.deepEqual(
+    proposeFormBlocks({
+      args: { power: 'activate_playbook', id: 'PB-1', trigger: 'VoidInFlight', expiry: 1, target: 7 },
+      justificationHash: '0xj',
+    }),
+    [],
+    'the VOID playbook does take a target — the refusal must not be blanket',
+  );
+});
+
+// -------------------------- §11.8.2's pending list: hash AND resolved document
+
+test('the pending list renders the justification hash and the resolved document', () => {
+  // §11.8.2's row is field-by-field: "power, target, justification_hash (+ resolved
+  // justification document …), current approvals m-of-7, expiry". The table carried neither
+  // of the middle two, so the list ranked five privileged actions by nothing but their ids
+  // and the document that distinguishes them appeared one click after the choice it informs.
+  const html = renderToStaticMarkup(
+    h(PendingActions, {
+      actions: [ACTION_ROW()],
+      justifications: () => evidenceUnavailable(3),
+      onOpen: () => {},
+    }),
+  );
+  assert.match(html, /<th scope="col">Justification<\/th>/, 'the justification column is missing');
+  assert.ok(html.includes(ACTION_ROW().justificationHash.value), 'the hash itself must be on the row');
+  assert.match(html, /evidence unretrievable/i, 'an unfetchable document must be stated, not blank');
+  // Present in the markup is not the same as shown — the same limit `tests/ui` states for
+  // the call batch. A mutation wrapping the cell in `hidden` left every assertion above
+  // passing while the column was invisible, which is the exact failure the column exists to
+  // prevent: a guardian ranking privileged actions by their ids alone.
+  const cell = /<span[^>]*>\s*<span class="datum datum--identifier"[^>]*title="0xjust"/.exec(html);
+  assert.ok(cell !== null, `the justification cell must render: ${html}`);
+  const opening = /<span([^>]*)>\s*<span class="datum datum--identifier"[^>]*title="0xjust"/.exec(html);
+  const attrs = opening === null ? '' : nth(opening, 1, 'capture');
+  assert.ok(!/\bhidden\b/.test(attrs), `the justification cell is hidden: ${attrs}`);
+  assert.ok(!/aria-hidden="true"/.test(attrs), `the justification cell is aria-hidden: ${attrs}`);
+  assert.ok(!/display:\s*none/.test(attrs), `the justification cell is display:none: ${attrs}`);
+});
+
+// ------------------------------------------ S19: the filing screen and the bond
+
+test('registry.challenge checks the bond balance, not only the window', () => {
+  // §11.8.6 row 2 reads "filing within its 72 h challenge window …; challenge bond balance",
+  // and `mayChallenge` tested only the window — so the client offered a challenge to an
+  // account that cannot post the bond, on the screen where the user has a deadline and one
+  // attempt inside it.
+  assert.deepEqual(
+    challengeFilingBlocks({ ...CHALLENGE_FILING(), windowOpen: true, windowReason: 'open' }),
+    [],
+  );
+  assert.deepEqual(
+    challengeFilingBlocks({
+      ...CHALLENGE_FILING({ freeUsdc: finalized(1n) }),
+      windowOpen: true,
+      windowReason: 'open',
+    }).map((block) => block.check),
+    ['Challenge bond'],
+  );
+  // Both directions together, and the window's own reason travels with it.
+  assert.deepEqual(
+    challengeFilingBlocks({
+      ...CHALLENGE_FILING({ freeUsdc: finalized(1n), evidenceHash: undefined }),
+      windowOpen: false,
+      windowReason: 'the watchtower extension could not be read',
+    }).map((block) => block.check),
+    ['Challenge window', 'Challenge bond', 'Evidence'],
+  );
+});
+
+test('a challenge with no bond is disabled on the screen, not only in the model', () => {
+  const html = renderToStaticMarkup(
+    h(RegistryFiling, {
+      filingId: finalized('0xfile'),
+      window: { kind: 'open', closesAt: finalized(900), extended: false },
+      inputs: CHALLENGE_FILING({ freeUsdc: finalized(1n) }),
+      decimals: 6, symbol: 'USDC', evidence: EVIDENCE_FIXTURE,
+      session: readySession('O-9'), onChallenge: noSubmit,
+    }),
+  );
+  assert.ok(buttonDisabled(html, 'Challenge this filing'), html);
+  assert.match(html, /does not cover the challenge bond/);
+});
+
+test('S19 has a filing screen, and it renders the bond, the bounds and the evidence', () => {
+  // `filingBlocks` existed and nothing rendered it: the console offered the flow that
+  // disputes a filing and not the one that creates it.
+  const html = renderToStaticMarkup(
+    h(RegistryFilingForm, {
+      inputs: FILING(), decimals: 6, symbol: 'USDC', evidence: EVIDENCE_FIXTURE,
+      session: readySession('O-8'), onFile: noSubmit,
+    }),
+  );
+  assert.match(html, /File an incident/);
+  assert.match(html, /Filing bond/);
+  assert.match(html, /Filings this epoch/);
+  assert.ok(html.includes(REGISTRY_HOLDS_SETTLEMENT), 'the settlement statement must reach the filer too');
+  assert.match(html, /evidence unretrievable/i, 'the evidence panel must render here');
+});
+
+// --------------------------------------- evidence reaches the round and filing panels
+
+test('EvidencePanel renders on the round and the filing panels, not only in the model', () => {
+  // §11.8.1's evidence paragraph is written for the reporter console and §11.8.6 applies its
+  // rules to the registry. The panel existed and no operator surface mounted it, so an
+  // unretrievable document was silently omitted — exactly what E22 forbids.
+  const report = renderToStaticMarkup(
+    h(SubmitReport, {
+      inputs: REPORT(), decimals: 6, symbol: 'USDC', evidence: EVIDENCE_FIXTURE,
+      session: readySession('P-13'), onReport: noSubmit,
+    }),
+  );
+  const challenge = renderToStaticMarkup(
+    h(ChallengeRound, {
+      inputs: CHALLENGE(), decimals: 6, symbol: 'USDC', evidence: EVIDENCE_FIXTURE,
+      session: readySession('P-14'), onChallenge: noSubmit,
+    }),
+  );
+  for (const html of [report, challenge]) {
+    assert.ok(html.includes(EVIDENCE_UNRETRIEVABLE), `the evidence state is not rendered:\n${html}`);
+  }
+});
+
+// ------------------------------------------------ S17's pending declaration (F17)
+
+test('S17 waits on what the screen needs, not on the prototype gating its submit control', () => {
+  // §11.8.4's own fallback: steps 1–3 ship regardless, and "verification stays in-browser
+  // even when submission cannot". Naming FE-P10 as what the *screen* waits on said the
+  // opposite, and would keep a working verification surface unwired for an outcome it does
+  // not depend on.
+  const s17 = PENDING_SCREENS['S17'];
+  assert.ok(s17 !== undefined && s17.state === 'built-unwired');
+  assert.ok(!s17.waitingOn.includes('FE-P10'), `S17 still waits on FE-P10: ${s17.waitingOn}`);
 });

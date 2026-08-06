@@ -88,7 +88,13 @@ export const PENDING_SCREENS: Readonly<Record<string, PendingScreen>> = Object.f
   S14: { state: 'built-unwired', milestone: 'F17', component: `${TX}#RegisterReporter`, waitingOn: 'a live transport and a signer session' },
   S15: { state: 'built-unwired', milestone: 'F17', component: `${TX}#PendingActions`, waitingOn: 'a live transport and a signer session' },
   S16: { state: 'built-unwired', milestone: 'F17', component: `${TX}#TreasuryStreams`, waitingOn: 'a live transport and a signer session' },
-  S17: { state: 'built-unwired', milestone: 'F17', component: `${TX}#UpgradeCrank`, waitingOn: 'a live transport and the FE-P10 outcome' },
+  // FE-P10 gates the **submit control**, not the screen. §11.8.4's own fallback says steps
+  // 1–3 — read the authorization, fetch the artifact, hash-verify it — ship regardless,
+  // with the verified blob handed to an operator CLI when in-browser submission fails, and
+  // *"verification stays in-browser even when submission cannot"*. Naming FE-P10 as what
+  // the screen waits on said the opposite, and would keep a working verification surface
+  // unwired for a prototype outcome it does not depend on.
+  S17: { state: 'built-unwired', milestone: 'F17', component: `${TX}#UpgradeCrank`, waitingOn: 'a live transport and a signer session' },
   S18: { state: 'built-unwired', milestone: 'F17', component: `${TX}#SnapshotCrank`, waitingOn: 'a live transport and a signer session' },
   S19: { state: 'built-unwired', milestone: 'F17', component: `${TX}#RegistryFiling`, waitingOn: 'a live transport and a signer session' },
   S20: { state: 'not-built', milestone: 'F7b', component: `${TX}#Balances` },
