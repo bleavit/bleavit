@@ -1,14 +1,10 @@
 > **DERIVED COPY for design-tool context — DO NOT EDIT.**
 > Verbatim copy of `docs/architecture/10-frontend-architecture.md` (the source of truth),
-> regenerated 2026-08-06, picking up §9's re-derived resource budgets (SQ-557): the
-> sustained observing count is 31 trading books rather than `MaxLiveMarkets` = 196, the
-> retention-depth tables move with it, the mandatory `Traded` half of 02 §5's ingest set
-> is modelled for the first time, and §9.3's metadata cap no longer exceeds its own
-> §9.2 share — on top of §3.1's `SyncDegraded` peer-count note (SQ-597), the D-21
-> handoff (§13), the `app/` re-rooting and merged package list (§10.1), the §10.2
-> firewall restatement and its negative-compilation corpus, and the branded
-> `Finalized<T>` with the `external-proposal` provenance status (§2.1). If this copy and
-> the source ever differ, the source wins.
+> regenerated 2026-08-06, picking up §10.2's handoff reference set gaining
+> `handoff-envelope` — the package `review.tsx` already imported `HandoffRefusal` from,
+> which §10.1 states depends on nothing at all, so the edge is transitively empty,
+> for upload to Claude Design. If this copy and the source ever differ, the
+> source wins. Regenerate by re-copying the source file.
 
 # 10 — Frontend Architecture
 
@@ -539,7 +535,9 @@ The reviewed design (whose application package was then called `apps/web`) enfor
 - `app/src` is split into **separate build-time compilation units**, each its own TypeScript project (project references) with an exact reference set:
   - `app/src/features/tx/**` — transaction surfaces, form state, confirm flows — references exactly `{shared-types, chain-client, protocol, simulation, transaction-builder, signing, platform, ui}`.
   - `app/src/features/analysis/**` — provider-fed and local-index-fed stores and screens — references `{shared-types, chain-client, protocol, simulation, local-index, providers, receipts, ui}`.
-  - `app/src/features/handoff/**` — context export and intent review — references `{shared-types, chain-client, protocol, contexts, intents, receipts, llm-handoff, ui}`.
+  - `app/src/features/handoff/**` — context export and intent review — references `{shared-types, chain-client, protocol, contexts, handoff-envelope, intents, receipts, llm-handoff, ui}`.
+
+  `handoff-envelope` joined the handoff set on 2026-08-06 (F9), correcting an omission rather than widening the firewall: the review surface renders the `FE-HANDOFF-001..013` refusals and must name their type, which §10.1 places in that package as the single home of the §13.1 envelope conventions. The edge is transitively empty — §10.1 states that `handoff-envelope` **depends on nothing at all** — so it cannot lead to a signer, a provider, a local index or a chain connection. The tx unit's exclusion of it is unchanged and remains CI-fatal.
 
   An import from `tx/**` into `analysis/**` or `handoff/**`, or into `providers`/`local-index`, **fails compilation** — module resolution cannot see it. This requires an isolated `node_modules` layout: under a hoisted layout the undeclared import resolves and only `tsc -b` objects, which demotes the primary gate to the secondary one. dependency-cruiser remains as the second, redundant gate.
 - **Type-level enforcement on top of the import boundary.** Transaction form state is the product of two things, and conflating them is a defect this section previously carried: **(a) chosen values** — a typed amount, a selected account, a chosen fee asset, an imported ceiling — which assert nothing *about the chain* and therefore **can never be represented as verified**, and **(b) `Finalized<T>` chain values**. The two are not interchangeable and the distinction is typed. A chosen value that is *displayed as a data item* — an imported ceiling shown beside the chain-derived value it is clamped to — carries `external-proposal` (§2.1), because INV-FE-9 admits no unlabeled rendering path. A value the user is presently typing into a field is form input rather than a displayed data item and needs no status; what it needs, and what INV-FE-1 requires, is that it never satisfies a precondition and is evaluated against `Finalized<T>` before it can reach a signature. Every `PreconditionCheck` input is `Finalized<T>` without exception. Since `Finalized<T>` is constructible only inside `packages/chain-client` (§2.1), a provider- or index-fed value cannot inhabit either role even if a future refactor breached the import boundary. The firewall's target — provider- and index-fed values structurally unable to seed tx state — is unchanged and unweakened by this restatement.
