@@ -301,7 +301,16 @@ this file loads whenever a session touches `app/**`, which is when they apply.
 channel. `platform` is the fail-closed capability lattice of rule 10 made structural: there is no boolean,
 `absent` **carries the sentence the surface renders** (an empty one throws), the record is **total** so a
 forgotten capability is a type error rather than an `undefined` that reads as *probably fine*, and `meet`
-keeps **both** reasons — a user told one reason fixes it and meets the next. It imports **no host SDK**, and
+keeps **both** reasons — a user told one reason fixes it and meets the next. **A capability that has
+evidence is *derived* from it, never written beside it** (added after review, PR #252): `desktopPlatform`
+deliberately returns on a reported divergence, since INV-FE-8 surfaces and never repairs and a thrown
+adapter is a divergence nobody can render — and the literal `proven()` next to that branch enabled every
+`embedded-tree-attestation` surface in the one state the host said the tree had failed. It is now a total
+`switch` over the attestation arm, so the two cannot disagree and a new arm fails to compile. The same
+review found its two siblings in the same function: the desktop channel's `external-navigation` was the web
+adapter's argument about *browsers* copied to a shell that grants no such permission, and a
+`reported-verified` report over **zero pinned files** was believed, which is the empty-findings refusal's
+exact mirror. It imports **no host SDK**, and
 that is a decision: the permission 10 §10.1 grants would force host code into the web bundle or a second
 build path, and the second is what F22 forbids, so the host arrives as an injected `HostBridge`. The
 consequence is that `only-platform-touches-host-sdks` has **no real edge anywhere in the tree** and the

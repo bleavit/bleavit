@@ -32,6 +32,7 @@ import type {
   CapabilityLattice,
   CapabilityState,
   HostReport,
+  PlatformAdapter,
   PlatformCapability,
 } from '@bleavit/platform';
 import {
@@ -61,12 +62,27 @@ const reportedVerified: AttestationState = {
   sourceCommit: '0'.repeat(40),
 };
 
+const divergence: AttestationFinding = {
+  kind: 'changed',
+  path: 'index.html',
+  detail: 'index.html does not match the hash this release signed',
+};
+
+const reportedDivergent: AttestationState = {
+  kind: 'reported-divergent',
+  findings: [divergence],
+};
+
 function hostReport(overrides: Partial<HostReport> = {}): HostReport {
   return {
     host: 'tauri',
     file: true,
     clipboard: true,
     share: false,
+    // False by default because it is what the shipped shell reports: `src-tauri` registers no
+    // host plugin and `gen/schemas/capabilities.json` is `{}`. A helper whose defaults are
+    // all `true` tests a host nobody built.
+    externalNavigation: false,
     attestation: reportedVerified,
     ...overrides,
   };
@@ -233,15 +249,129 @@ test('the desktop adapter refuses a divergence that names nothing', () => {
   );
   // ...and admits one that does, unchanged. Surfaced, never repaired: the adapter has no
   // branch that turns a divergence into anything else.
-  const finding: AttestationFinding = {
+  const adapter = desktopPlatform({ report: hostReport({ attestation: reportedDivergent }) });
+  assert.deepEqual(adapter.attestation, reportedDivergent);
+});
+
+test('the desktop adapter refuses a verification that compared no file', () => {
+  // The exact mirror of the empty-findings refusal above, and it was missing: "I compared
+  // nothing and found no divergence" is the vacuous pass, and `pinnedCount: 0` is what a
+  // bridge that lost the field produces. No honest release reaches it — `readPerFileHashes`
+  // and the Rust `attest` both refuse an empty manifest — so it means the report is wrong.
+  assert.throws(
+    () =>
+      desktopPlatform({
+        report: hostReport({
+          attestation: { kind: 'reported-verified', pinnedCount: 0, sourceCommit: '0'.repeat(40) },
+        }),
+      }),
+    PlatformError,
+  );
+  // The negative control: one pinned file is a comparison, and it verifies.
+  assert.equal(
+    desktopPlatform({
+      report: hostReport({
+        attestation: { kind: 'reported-verified', pinnedCount: 1, sourceCommit: '0'.repeat(40) },
+      }),
+    }).capabilities['embedded-tree-attestation'].kind,
+    'proven',
+  );
+});
+
+test('a reported divergence leaves the embedded-tree capability absent, naming what diverged', () => {
+  // The defect this asserts against: the adapter deliberately RETURNS on a divergence, and
+  // the capability beside that branch was the literal `proven()`. Every surface guarded on
+  // `embedded-tree-attestation` was therefore enabled in exactly the state where the host had
+  // said the embedded tree failed verification.
+  const adapter = desktopPlatform({ report: hostReport({ attestation: reportedDivergent }) });
+  const state = adapter.capabilities['embedded-tree-attestation'];
+  assert.equal(state.kind, 'absent');
+  if (state.kind !== 'absent') return;
+  // Absence disables the dependent surface WITH A NAMED REASON (app-code rule 10), and the
+  // reason has to be about this divergence rather than a generic sentence.
+  assert.match(state.reason, /index\.html/);
+  assert.match(state.reason, /1 file/);
+
+  const verdict = requireCapabilities(adapter.capabilities, ['embedded-tree-attestation']);
+  assert.equal(verdict.kind, 'disabled');
+  if (verdict.kind !== 'disabled') return;
+  assert.deepEqual([...verdict.missing], ['embedded-tree-attestation']);
+
+  // Disabling the capability must not swallow the divergence: INV-FE-8 surfaces it, and the
+  // findings are what a verification panel renders.
+  assert.deepEqual(adapter.attestation, reportedDivergent);
+});
+
+test('a divergence names a bounded number of files and always the true count', () => {
+  // A reason nobody finishes reading is the unexplained control again, so the list is capped
+  // — but the count is exact, because "3 files" for a wholesale replacement is a different
+  // event from "412 files" and the user is the one deciding what to do about it.
+  const findings: AttestationFinding[] = Array.from({ length: 9 }, (_unused, index) => ({
     kind: 'changed',
-    path: 'index.html',
-    detail: 'index.html does not match the hash this release signed',
-  };
+    path: `assets/chunk-${index}.js`,
+    detail: 'digest mismatch',
+  }));
   const adapter = desktopPlatform({
-    report: hostReport({ attestation: { kind: 'reported-divergent', findings: [finding] } }),
+    report: hostReport({ attestation: { kind: 'reported-divergent', findings } }),
   });
-  assert.deepEqual(adapter.attestation, { kind: 'reported-divergent', findings: [finding] });
+  const state = adapter.capabilities['embedded-tree-attestation'];
+  assert.equal(state.kind, 'absent');
+  if (state.kind !== 'absent') return;
+  assert.match(state.reason, /9 file/);
+  assert.match(state.reason, /and 6 more/);
+  assert.match(state.reason, /assets\/chunk-0\.js/);
+  assert.ok(!state.reason.includes('assets/chunk-8.js'), 'the reason is unbounded');
+});
+
+test('the capability and the attestation cannot disagree, in any constructor', () => {
+  // The property the fix is FOR, asserted over every adapter this package can produce rather
+  // than over the one branch that was wrong. A capability computed from the attestation arm
+  // cannot fall out of step with it; a literal written beside a divergence check can, and did.
+  const adapters: readonly PlatformAdapter[] = [
+    webPlatform(EVERY_WEB_PROBE),
+    webPlatform({ file: false, clipboard: false, share: false, serviceWorker: false }),
+    unknownPlatform('this host was not identified'),
+    desktopPlatform({ report: hostReport() }),
+    desktopPlatform({ report: hostReport({ attestation: reportedDivergent }) }),
+  ];
+  for (const adapter of adapters) {
+    assert.equal(
+      adapter.capabilities['embedded-tree-attestation'].kind === 'proven',
+      adapter.attestation.kind === 'reported-verified',
+      `${adapter.channel}/${adapter.host}: the capability disagrees with the attestation it ` +
+        'is supposed to be derived from',
+    );
+  }
+  // Both sides of that equivalence are actually exercised, so it is not satisfied by an
+  // absence. Without this the loop passes on five adapters that all report the same arm.
+  const arms = new Set(adapters.map((adapter) => adapter.attestation.kind));
+  assert.deepEqual(
+    [...arms].sort(),
+    ['not-applicable', 'reported-divergent', 'reported-verified'],
+  );
+});
+
+test('the desktop channel does not inherit the browser argument for external navigation', () => {
+  // `webPlatform` proves this unconditionally and is right to: a browser cannot lack a
+  // top-level navigation (10 §13.4). That argument is about browsers. A downloaded
+  // application opens an external URL only where its host grants it, and the shell this
+  // milestone ships grants nothing — so the copied `proven()` offered a control that would
+  // do nothing when clicked.
+  const withoutGrant = desktopPlatform({ report: hostReport({ externalNavigation: false }) });
+  const state = withoutGrant.capabilities['external-navigation'];
+  assert.equal(state.kind, 'absent');
+  if (state.kind !== 'absent') return;
+  assert.ok(state.reason.trim().length > 0);
+  assert.equal(
+    requireCapabilities(withoutGrant.capabilities, ['external-navigation']).kind,
+    'disabled',
+  );
+
+  const withGrant = desktopPlatform({ report: hostReport({ externalNavigation: true }) });
+  assert.equal(withGrant.capabilities['external-navigation'].kind, 'proven');
+  // The browser's own claim is untouched: this is a correction to one channel, not a
+  // withdrawal of the capability.
+  assert.equal(webPlatform(EVERY_WEB_PROBE).capabilities['external-navigation'].kind, 'proven');
 });
 
 test('`transportCapabilities` is exactly what `chooseTransport` consumes', () => {
