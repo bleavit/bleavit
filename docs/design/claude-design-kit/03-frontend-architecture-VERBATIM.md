@@ -1,5 +1,6 @@
 > **DERIVED COPY for design-tool context — DO NOT EDIT.**
 > Verbatim copy of `docs/architecture/10-frontend-architecture.md` (the source of truth),
+<<<<<<< HEAD
 > regenerated 2026-08-06, picking up §9's re-derived resource budgets (SQ-557): the
 > sustained observing count is 31 trading books rather than `MaxLiveMarkets` = 196, the
 > retention-depth tables move with it, the mandatory `Traded` half of 02 §5's ingest set
@@ -9,6 +10,16 @@
 > firewall restatement and its negative-compilation corpus, and the branded
 > `Finalized<T>` with the `external-proposal` provenance status (§2.1). If this copy and
 > the source ever differ, the source wins.
+=======
+> regenerated 2026-08-06, picking up §6.3's `RangeEdge`/`CoveredResult<T>`, §7's chart-row
+> origin and per-source keys, §9.2's three degradation obligations and §2.1's `chain` field
+> (F8, R-1) — on top of §3.1's normative note on where the `SyncDegraded`
+> peer count comes from and what the client must do when it cannot be read (SQ-597) —
+> on top of the D-21 handoff (§13), the `app/` re-rooting and merged package list
+> (§10.1), the §10.2 firewall restatement and its negative-compilation corpus, and the
+> branded `Finalized<T>` with the `external-proposal` provenance status (§2.1). If this
+> copy and the source ever differ, the source wins.
+>>>>>>> e3be4be2 (spec(10): §6.3/§7/§9.2/§2.1 — four sentences that had nothing to implement (F8, R-1))
 
 # 10 — Frontend Architecture
 
@@ -41,9 +52,11 @@ What changed relative to FRONTEND_PLAN.md, and why, is the subject of the rest o
 Every store value is a `Verified<T>`: payload plus `VerificationStatus` and provenance block reference. UI data components accept only `Verified<T>`; a component cannot render a value without a status.
 
 ```ts
+export type ChainId = HexString;                                             // genesis hash, §3.1
+
 export type VerificationStatus =
-  | { kind: 'verified-finalized'; blockHash: HexString; blockNumber: number }
-  | { kind: 'verified-best'; blockHash: HexString; blockNumber: number }      // display-only
+  | { kind: 'verified-finalized'; chain: ChainId; blockHash: HexString; blockNumber: number }
+  | { kind: 'verified-best'; chain: ChainId; blockHash: HexString; blockNumber: number } // display-only
   | { kind: 'derived-local'; coverage: CoverageRef }                          // local index, layer 3
   | { kind: 'provider'; providerId: string; sampled: boolean }                // untrusted, labelled
   | { kind: 'stale-cache'; asOfBlock: number; ageMs: number }                 // pre-sync IndexedDB
@@ -64,6 +77,8 @@ export type Finalized<T> = Verified<T>
   & { status: { kind: 'verified-finalized' } }
   & { readonly [FINALIZED]: true };
 ```
+
+**The two verified statuses name their chain, and that is normative rather than an implementation convenience.** §11.9.1 connects a **second** light client (the Asset Hub of the relay this release targets, 02 §7.7), and a status that named only a block does not identify an observation once there is more than one chain to observe: `blockNumber` collides trivially — every chain has a block 1,000 — so *"these two reads are comparable"* was being inferred from the block rather than stated. The chain is its **genesis hash**, which is the one identifier the light client has already proved for itself (§3.1's identity check) rather than one taken on the word of whatever served the read. It is what lets a derivation over two reads refuse a cross-chain combination *for the stated reason* instead of by a collision argument that holds only accidentally — a deposit figure read on Asset Hub and one read here would otherwise sit side by side as indistinguishable "verified" values.
 
 `Finalized<T>` has **no public constructor outside `packages/chain-client`**. Provider-status and derived-local values are unrepresentable as `Finalized<T>` at the type level; the promotion bug class of F-2 is therefore not merely forbidden but untypeable.
 
@@ -314,21 +329,36 @@ Protocol-funded bootnode/RPC operators commit to serving **30 days** *(normative
 The local index no longer models history as a single contiguous cursor. It models **coverage**:
 
 ```ts
+export interface RangeEdge {
+  genesisHash: HexString;                       // §6.3's genesis binding
+  hash: HexString;                              // the finalized block hash AT toBlock
+  specVersion: number;                          // the runtime spec_version AT toBlock
+}
 export interface CoverageRange {
   fromBlock: number; toBlock: number;          // inclusive, contiguous
   origin: 'self' | 'operator' | 'snapshot' | 'indexer';
   providerId?: string;                          // origin ≠ self
   ingestedAt: number;
+  edge: RangeEdge;                              // what the integrity checks below read
 }
-export interface CoverageRef { ranges: CoverageRange[]; holes: Array<[number, number]>; }
+export interface Hole { fromBlock: number; toBlock: number; }
+export interface CoverageRef { ranges: CoverageRange[]; holes: Hole[]; }
+
+/** A history query's answer: data plus the coverage it came from, bounded by the question. */
+export interface CoveredResult<T> {
+  data: T;
+  span: Hole;                                   // the span asked about
+  ranges: CoverageRange[];                      // the ranges overlapping it, unclipped
+  holes: Hole[];                                // the blocks inside span no range covers
+}
 ```
 
 Normative rules:
 
-- **Holes are first-class states.** Every history query returns data *plus* the coverage it came from; charts render holes as visible gaps with an explainer, tables state "complete within [ranges]". A hole is never interpolated over, never elided.
-- **Never silently spliced**: adjacent ranges with different origins are never merged; an `origin ≠ self` range keeps its origin forever (there is no promotion, §2.2). A range boundary is a rendered fact.
+- **Holes are first-class states.** Every history query returns data *plus* the coverage it came from — a `CoveredResult<T>`, never bare rows, because bare rows render as a complete series and *"there were no observations in this window"* and *"we never ingested this window"* then arrive as the same empty answer. Charts render holes as visible gaps with an explainer, tables state "complete within [ranges]". A hole is never interpolated over, never elided.
+- **Never silently spliced**: adjacent ranges with different origins are never merged; an `origin ≠ self` range keeps its origin forever (there is no promotion, §2.2). A range boundary is a rendered fact, so a surface summarising coverage names its **distinct sources** rather than counting its gaps: a count states how much is missing and nothing about who supplied what is present, which is the half §2.3's mandatory labelling requires.
 - **The corrected E3 promise** *(degradation matrix owned by [11-frontend-workflows.md](11-frontend-workflows.md))*: on returning after a gap, forward ingestion resumes from the live pinned window; the gap between the old coverage edge and the new one becomes a **visible hole, provider-fillable** from layer 2 (labelled) — *not* "local-index catch-up; history continuous". A 2-hour gap (1,200 blocks) exceeds the pinned window and cannot be closed with verified data; the old promise was impossible and is withdrawn.
-- Cursor integrity checks (hash-at-edge, genesis binding, spec-version-at-edge) apply per range; corruption of one range invalidates that range, not the index.
+- Cursor integrity checks (hash-at-edge, genesis binding, spec-version-at-edge) apply per range; corruption of one range invalidates that range, not the index. **The three checks read `RangeEdge`, and the edge is the range's `toBlock`** — a range grows forward, so its high end is the block a resumed ingest continues from and the one a reorg or runtime upgrade invalidates first. A range whose edge is missing is refused rather than checked: every comparison against an absent field is false, so a missing edge would report as *corrupt* rather than as *unverifiable* and the client would drop honest ranges on a schema slip. **A check that cannot be performed keeps the range**: an unreachable chain, a block outside the pinned window and a client still syncing all mean *cannot say*, and dropping on *cannot say* would empty the index during ordinary offline use. Only a disagreement invalidates.
 
 ### 6.4 Backfill — honest arithmetic (F-medium: backfill math)
 
@@ -369,6 +399,8 @@ Dexie DB `futarchy@<paraGenesisHash-prefix8>`, one DB per chain identity. Tables
 |---|---|
 | `meta.cursor` → `meta.coverage: CoverageRange[]` (+ derived holes) | gap tolerance (§6.3) |
 | every row's `origin` gains `'operator'` | layer-2 backfill is distinguishable from opt-in third-party providers |
+| **every row carries the full four-valued `origin` (+ `providerId`), including `priceSamples` and the candle tables** | the row's origin is the *whole* mitigation §2.3 offers for chart data, and INV-FE-15 requires it "to the pixel". A two-valued provenance forces the writer to guess which third party a `provider` row came from, and the guess badges an opt-in indexer's row as protocol-funded layer-2 data |
+| **a chart row's primary key includes its source**, so one book's observations from two sources are two rows | provenance is not decoration on the row: a key without it takes the two rows the no-splice rule produced and stores one on top of the other. The label survives and the datum under it becomes whichever source wrote last |
 | `candles4h`, `candles1d` tables added | auto-tuned downsampling ladder (§9.2) |
 | `metadataCache` gains `lastUsedAt`, byte size; bounded (§9.3) | metadata blobs were unbounded |
 | corruption invalidates per-range, not whole-index (where detectable); whole-DB rebuild (`FE-IDX-001`) remains the fallback | §6.3 |
@@ -476,6 +508,14 @@ Depths are stated in days throughout rather than glossed as years or months, bec
 **The events share is the binding constraint, and it is measured in hours.** At the chain-permitted `Traded` ceiling (§9.1) the 15% share holds ~**6.7 h** desktop / ~**1.7 h** mobile of chain-wide trade rows, which is why the index stores watched-account events only. Measured against the user's own activity the same share is effectively unbounded: a hundred attributed rows a day costs ~12 KB/day, so the 45 MB desktop share is decades.
 
 Degradation ladder, applied oldest-first and in this order, deterministic and user-visible: raw samples → `candles1h` → `candles4h` → `candles1d` (a `candles1d` row costs `books × 120 B/day` ≈ 19.1 KB/day even at the 159-book maximum — effectively unbounded depth); `events` for settled+reaped proposals → compacted into `proposalsArchive` summaries; imported provider rows evicted before self-ingested rows at equal age. The ladder **degrades chart resolution and event granularity only**. It never touches: the tx path (structurally isolated, §10), layer-1 data (chain-served, not stored here), coverage metadata (holes stay truthful even after eviction — an evicted range becomes a labelled "downsampled" range, not a hole, and never a silent splice).
+
+Three obligations follow from that last clause and are normative, because each is a way the ladder tells the user something false while freeing exactly the bytes it was asked to free:
+
+1. **The "downsampled" label is written in the same storage transaction that deletes the rows.** Written afterwards it is absent for as long as it takes a tab to close mid-eviction, and what remains is the silent splice this paragraph forbids — produced by the most ordinary failure the ladder meets.
+2. **Degradation is applied in whole, closed buckets.** Folding part of a bucket now and the rest later writes two coarse rows under one bucket key, the second replacing the first, so the chart shows a bar describing part of an hour labelled as the hour.
+3. **Provenance is never degraded on the way.** A coarse row carries one origin, so a verified observation and a provider-supplied one are summarised separately at every rung; the ladder degrades resolution and may not relabel a source to do it (§2.2, §6.3).
+
+*"Imported before self-ingested at equal age"* is an ordering with a reason worth stating: a provider row can be re-fetched from the provider that supplied it, while a self-ingested row past the light client's pinned window cannot be recovered at all (§6.2). Age leads and provenance breaks the tie — the reverse would evict a fresh provider row ahead of an ancient verified one.
 
 **What "maximum load" means has to be said twice, because the two partitions answer differently.** Against the primary slate alone the caps are generous — ~54 days of raw verified samples on desktop and ~672 days of hourly candles — and the revision this replaced stated the opposite, *"not achievable within the caps"*, which followed from the 196-book count rather than from any measurement (SQ-557). Against a fully-subscribed hosted partition the raw tier is genuinely thin: ~7 days desktop, ~2 days mobile. Both are true, neither is the headline on its own, and quoting only the first would repeat this section's original error in the opposite direction.
 
