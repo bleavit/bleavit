@@ -47,6 +47,7 @@
     "tests/descriptors/**/*.ts",
     "tests/chain-client/**/*.ts",
     "tests/local-index/**/*.ts",
+    "tests/analysis/**/*.ts",
     "tests/transaction-builder/**/*.ts",
     "tests/screens/**/*.ts",
     "tests/release/**/*.ts",

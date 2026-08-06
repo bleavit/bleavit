@@ -327,6 +327,21 @@ importers:
         specifier: workspace:*
         version: link:../../../packages/ui
 
+  tests/analysis:
+    dependencies:
+      '@bleavit/chain-client':
+        specifier: workspace:*
+        version: link:../../packages/chain-client
+      '@bleavit/features-analysis':
+        specifier: workspace:*
+        version: link:../../src/features/analysis
+      '@bleavit/local-index':
+        specifier: workspace:*
+        version: link:../../packages/local-index
+      '@polkadot-api/descriptors':
+        specifier: workspace:*
+        version: link:../../packages/papi-descriptors
+
   tests/chain-client:
     dependencies:
       '@bleavit/chain-client':
