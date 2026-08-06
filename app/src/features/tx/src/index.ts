@@ -237,3 +237,17 @@ export {
   type ReportInputs,
 } from './oracle-reporting.js';
 export { DepositForm, DepositTracker, WithdrawForm } from './funding-screens.js';
+export {
+  LEDGER_PALLET,
+  LedgerDomainError,
+  PRIMARY_LEDGER_CALLS,
+  UnreachableLedgerCallError,
+  callsFor,
+  domainOf,
+  ledgerCall,
+  totalOf,
+  type LedgerCall,
+  type LedgerDomain,
+  type LedgerPallet,
+  type LedgerRow,
+} from './ledger-domain.js';

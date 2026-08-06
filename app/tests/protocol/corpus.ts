@@ -198,6 +198,47 @@ export interface WindowStaleScenario {
   stale_events: number;
 }
 
+/**
+ * One replayed ledger operation inside a `ledger_fee_scenarios` row.
+ *
+ * `gross`/`fee`/`net` are present on the operations that pay USDC and absent on
+ * the ones that do not (`merge_scalar` mints, `settle_*` records, `sweep_*`
+ * moves the counter), so all three are optional — and the redemption suite
+ * **refuses** an operation it classified as a payout but that carries no
+ * figures, rather than skipping it. A row silently not compared is the failure
+ * mode a differential exists to prevent.
+ *
+ * `args.s` carries the settlement score on the `settle_scalar` / `settle_baseline`
+ * operations; the pair calls need it and do not restate it.
+ */
+export interface LedgerFeeOp {
+  op: string;
+  args: { account?: string; amount?: number; s?: number; side?: string; gate?: string };
+  gross?: number;
+  fee?: number;
+  net?: number;
+}
+
+/**
+ * A 03 §5.3a fee scenario: the parameters it ran under, and every operation.
+ *
+ * `params.redeem_fee_perbill` and `params.min_split` are what make the row
+ * replayable standalone (04 §5), and they are read rather than assumed — one row
+ * runs at a rate **above** the Perbill domain, which is the case this port
+ * deliberately treats differently from the runtime.
+ */
+export interface LedgerFeeScenario {
+  name: string;
+  params: {
+    contract_version: number;
+    min_split: number;
+    protocol_accounts: string[];
+    redeem_fee_perbill: number;
+  };
+  ops: LedgerFeeOp[];
+  fees_charged_total: number;
+}
+
 export interface Corpus {
   schema: string;
   lmsr_vectors: LmsrVectors;
@@ -205,6 +246,7 @@ export interface Corpus {
   transcendental_corpus: TranscendentalCorpus;
   twap_scenarios: TwapScenario[];
   window_stale_scenarios: WindowStaleScenario[];
+  ledger_fee_scenarios: LedgerFeeScenario[];
 }
 
 /**
