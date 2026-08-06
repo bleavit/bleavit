@@ -596,6 +596,18 @@ jobs:
         working-directory: app
         run: pnpm run test:providers
 
+      - name: Snapshot producer — byte-identical reproduction and the chain differential (10 §8.2)
+        # The producer half of the format `test:providers` consumes. Two properties, and
+        # neither is the happy path: a shuffled export must yield the SAME bytes and the
+        # SAME pin (§8.2's published promise is about bytes, so it is proven by shuffling
+        # rather than asserted), and `balances` are read from chain state and diffed
+        # against the fold — a producer that folded its own movements would agree with
+        # itself by construction, and §8.4's derived-row screen could never fail on
+        # anything it emitted. The failure that actually happens to a snapshot tool is a
+        # missing movement, which is self-consistent and invisible to a self-fold.
+        working-directory: app
+        run: pnpm run test:snapshot-tool
+
       - name: Release self-check and the verification panel (10 §5.4, 12 §1)
         working-directory: app
         run: pnpm run test:verify

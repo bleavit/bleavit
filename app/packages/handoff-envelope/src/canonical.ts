@@ -75,11 +75,17 @@ export function canonicalJson(value: unknown): string {
 }
 
 /**
- * Order two keys by Unicode **code point**, as `sort_keys` does everywhere else.
+ * Order two strings by Unicode **code point**, as `sort_keys` does everywhere else.
  *
  * `a < b` would compare UTF-16 code units and put every astral character before `U+E000`.
+ *
+ * Exported because canonical JSON sorts object *keys* and leaves array order alone, so any
+ * format whose arrays must also be canonical needs the same comparator — and a second
+ * implementation beside this one would agree on every ASCII label and disagree on the first
+ * astral character, which is the "two producers, two digests" failure this module exists to
+ * close. One answer to *which order*, as there is one answer to *which bytes*.
  */
-function byCodePoint(a: string, b: string): number {
+export function byCodePoint(a: string, b: string): number {
   const left = Array.from(a);
   const right = Array.from(b);
   for (let i = 0; i < Math.min(left.length, right.length); i += 1) {
