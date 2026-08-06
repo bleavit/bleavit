@@ -121,9 +121,29 @@ export interface FundingKeys {
   localFreeUsdc(who: string): string;
 }
 
+/**
+ * The value decoders, **one per surface** — never one per shape.
+ *
+ * The USDC balance is read on both chains, and an earlier version served both with a single
+ * `assetAccount` decoder because both are `pallet-assets` account records. That is the same
+ * mistake as `readDepositInputs(reader, reader, …)` wearing different clothes: a decoder is
+ * bound to one chain's codecs at the composition root, so one of the two legs would have
+ * been decoding Asset Hub bytes through this chain's type or the reverse.
+ *
+ * It happened to work. Measured on the pinned pair: the two `AssetAccount` types are
+ * byte-identical today, and each chain's codec decodes the other's record. But that is a
+ * coincidence of both runtimes carrying the same `pallet-assets` with the same `Extra`, it
+ * is gated by nothing, and the day it stops holding the failure is either a spurious decode
+ * error or — worse, and quite possible if a field is added ahead of `balance` — a wrong
+ * balance rendered with a `verified-finalized` badge.
+ *
+ * So the surfaces are named separately, exactly as {@link FundingKeys} names them.
+ */
 export interface FundingDecoders {
-  /** A `pallet-assets` account record. `undefined` for an absent account, which is not a failure. */
-  readonly assetAccount: (raw: string) => Decoded<{ readonly balance: bigint } | undefined>;
+  /** 02 §7.7 — Asset Hub's `Assets.Account`. `undefined` for an absent account, not a failure. */
+  readonly assetHubUsdc: (raw: string) => Decoded<{ readonly balance: bigint } | undefined>;
+  /** 02 §7.4 — **this** chain's `ForeignAssets.Account`. A different chain, a different codec. */
+  readonly localFreeUsdc: (raw: string) => Decoded<{ readonly balance: bigint } | undefined>;
   /**
    * A `frame_system` account record, reduced to the one question §11.9.1 asks of it.
    *
@@ -269,7 +289,7 @@ export async function readDepositInputs(
   const usdcDecoded =
     usdcRaw === undefined
       ? ({ ok: true, value: undefined } as const) // an absent account is a real zero balance
-      : decoders.assetAccount(usdcRaw);
+      : decoders.assetHubUsdc(usdcRaw);
   if (!usdcDecoded.ok) {
     undecodable.push({
       label: `${FUNDING_READS.assetHub.usdc}(${params.assetId}, who)`,
@@ -365,7 +385,7 @@ export async function readWithdrawInputs(
   const undecodable: UndecodableRead[] = [];
   const raw = firstValue((await reader.storage(keys.localFreeUsdc(params.who))).value);
   const decoded =
-    raw === undefined ? ({ ok: true, value: undefined } as const) : decoders.assetAccount(raw);
+    raw === undefined ? ({ ok: true, value: undefined } as const) : decoders.localFreeUsdc(raw);
   if (!decoded.ok) {
     undecodable.push({
       label: `${FUNDING_READS.local.freeUsdc}(who)`,
