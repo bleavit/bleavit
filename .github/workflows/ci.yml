@@ -141,6 +141,13 @@ jobs:
         # have passed every gate here and looked finished. Same shape as SQ-552, SQ-580
         # and SQ-582: an obligation in prose with no mechanical reader.
         run: python3 tools/ci/check-degradation-matrix.py
+      - name: Frontend resource budgets — 10 §9 re-derived from 13 and the runtime (SQ-557)
+        # 10 §9 publishes a load model and two depth tables, and nothing recomputed any
+        # of it: the browser was sized against 196 concurrently-observing books when the
+        # chain can never exceed 31, the metadata cap exceeded the share it is drawn
+        # from, and the mandatory `Traded` half of 02 §5's ingest set was omitted
+        # outright. Same shape as SQ-552/580/593 — a derived number with no deriver.
+        run: python3 tools/ci/check-frontend-budgets.py
       - name: Bind the quickstart to the executable integration drill
         run: python3 tools/ci/check-quickstart-drill.py
       - name: Bind the pure-XCM integration page to the frozen client ABI

@@ -163,6 +163,65 @@ fn chain_served_history_within_13_5_budget() {
     );
 }
 
+// --- 10 §9.1: the client's chain-permitted event-stream ceiling ----------------
+
+/// The most `Traded` events one block can carry — the ceiling
+/// [10 §9.1](../../../docs/architecture/10-frontend-architecture.md) sizes the
+/// browser's event budget against.
+///
+/// This constant is a **bridge, not a source**. The test below recomputes it from
+/// the live block budget and the committed `buy` weight and fails if it drifts;
+/// `tools/ci/check-frontend-budgets.py` reads this same literal and fails if doc 10
+/// publishes a different one. Neither side carries the answer alone, which is the
+/// property a doc-only number cannot have: 10 §9.1 modelled `Observed` and omitted
+/// `Traded` entirely, and nothing anywhere recomputed either.
+///
+/// **Proof size binds, not ref_time**, and by better than a factor of two — so a
+/// weight change that leaves ref_time alone still moves this ceiling. That is the
+/// direction the omission was hiding: a client cannot refuse events, so the whole
+/// stream is a cost it must absorb, and 02 §5 freezes `Traded` as mandatory ingest.
+///
+/// It is also why this is measured through `get_dispatch_info()` rather than read
+/// off the generated weight file. `buy`'s `#[pallet::weight]` adds two reads and
+/// `EXTERNAL_TRADE_ROUTE_PROOF_SURCHARGE` on top of the generated figure, and the
+/// surcharge alone moves the ceiling from 72 to 70. A derivation over
+/// `weights/pallet_market.rs` reads a number the chain does not charge.
+pub(crate) const MAX_TRADED_EVENTS_PER_BLOCK: u64 = 70;
+
+/// One successful `buy` emits exactly one `Traded` (02 §5, and
+/// `Pallet::deposit_trade_event`), so the fill ceiling *is* the event ceiling.
+/// Stated rather than assumed, because a future partial-fill loop emitting one
+/// event per leg would break the identity while every assertion below still passed.
+#[test]
+fn traded_event_ceiling_per_block_pinned_for_frontend_budgets() {
+    use frame_support::dispatch::GetDispatchInfo;
+
+    let buy = crate::RuntimeCall::Market(pallet_market::Call::buy {
+        market: 1,
+        side: futarchy_primitives::ScalarSide::Long,
+        amount: 1,
+        max_cost: u128::MAX,
+    })
+    .get_dispatch_info()
+    .call_weight;
+
+    let budget = normal_class_budget();
+    let by_ref_time = budget.ref_time() / buy.ref_time();
+    let by_proof_size = budget.proof_size() / buy.proof_size();
+
+    assert!(
+        by_proof_size < by_ref_time,
+        "proof size no longer binds the fill ceiling (ref_time {by_ref_time}, \
+         proof_size {by_proof_size}); doc 10 §9.1 states that it does and the \
+         sentence must move with the measurement"
+    );
+    assert_eq!(
+        by_proof_size, MAX_TRADED_EVENTS_PER_BLOCK,
+        "the chain-permitted `Traded` ceiling moved (ref_time admits {by_ref_time}); \
+         re-derive doc 10 §9.1's event budget and update this pin"
+    );
+}
+
 // --- Per-call PoV tracking (every futarchy call and hook, worst-case args) -----
 
 macro_rules! pallet_call_weights {

@@ -409,37 +409,51 @@ Import quotas (≤ 400 MB uncompressed, ≤ 4 M rows, streamed, eviction preview
 
 ### 9.1 Load model (F-medium: growth arithmetic)
 
-The reviewed growth table assumed ~20 live books. The chain permits **196 active books** (`MaxLiveMarkets` = 32·6 + 4, *normative value: [13-parameters.md](13-parameters.md)*) and separately retains at most **2,240 readable book rows** (`MaxStoredMarkets`). Terminal observation removes each book's TWAP-checkpoint and decision-window auxiliaries before releasing its active slot, so retained archive rows emit no new observations and do not multiply the ingest/history budget below. Budgets are derived from both a **typical** early-life load and the **maximum sustained active** load, and browser retention is a function of budget, not a promise.
+The reviewed growth table assumed ~20 live books; the revision that replaced it used **196**, and 196 is the wrong bound (SQ-557). `MaxLiveMarkets = 196` counts books **without a durable terminal latch** — a book that closed at d18 keeps its slot until its vault settles at e+3 — while [04](04-markets-and-pricing.md) §2 admits trading and observation **only** while the owning proposal is `Trading`/`Extended`. Live-but-closed books provably emit nothing, and the separately retained **2,240** `MaxStoredMarkets` rows emit nothing either. The set that emits is one epoch's trading books, and the Trade phase (`[5/21, 18/21)`, [13](13-parameters.md) §3.1) does not overlap the next epoch's, so the sustained observing count is exactly
 
-Row-rate model (assumptions labelled): observations 1 per 10 blocks per book during the trading window (d5–d18 = 13 of 21 days ⇒ duty ≈ 0.62); ~120 B effective per row (Dexie overhead included). Sustained average sample rows/day ≈ `books × 890`:
+```
+trading books = epoch.slots·6 + 1 = 31
+```
 
-| Load | Live books | priceSamples rows/day | bytes/day |
+which is the same figure [13](13-parameters.md) §5 item 4 already derives, from the same parameters, for the keeper crank load. **31 is the maximum, not a typical**: `epoch.slots` has a registry ceiling of 12, but §5 item 2's vault envelope is frozen at `MaxLiveProposals + MaxSettlingCohorts·epoch.slots` = 52 and the occupancy screen refuses every raise above 5, so no reachable parameter history admits a sixth slot. Browser retention is a function of budget, not a promise.
+
+Row-rate model (assumptions labelled): observations 1 per `mkt.obs_interval` = 10 blocks per book during the trading window (d5–d18 = 13 of 21 days ⇒ duty = 13/21); ~120 B effective per row (Dexie overhead included). At the 302,400-block/21-day default that is `14,400/10 × 13/21` = **891.43** sample rows/book/day:
+
+| Slate (`epoch.slots` occupied) | Trading books | priceSamples rows/day | bytes/day |
 |---|---|---|---|
-| Typical (early phases) | 20 | ~17.8 k | ~2.1 MB |
-| Half load | 98 | ~87 k | ~10.5 MB |
-| **Max sustained** | **196** | **~175 k** | **~21 MB** |
+| 1 of 5 | 7 | ~6.2 k | ~0.75 MB |
+| 3 of 5 | 19 | ~16.9 k | ~2.0 MB |
+| **5 of 5 — max sustained** | **31** | **~27.6 k** | **~3.3 MB** |
+
+**`Traded` is the larger stream, and this section omitted it entirely.** [02](02-integration-contract.md) §5 freezes the minimal client ingest set as `Traded` **+** `Observed`; only `Observed` was modelled above. Unlike observations, the trade stream is not paced by a grid — it is paced by what a block can hold. The runtime pins that ceiling (`pov_budgets::traded_event_ceiling_per_block_pinned_for_frontend_budgets`): **70 fills per block**, where **proof size binds** — `buy`'s dispatched weight is 111,860 B of PoV against the 7,864,320 B primary reservation — while ref_time would admit 153. The pin is taken through `get_dispatch_info()` rather than off the generated weight file, because `buy`'s `#[pallet::weight]` adds two reads and an external-route proof surcharge on top of the generated figure, and that surcharge alone moves the ceiling from 72 to 70. At 14,400 blocks/day the chain therefore permits **1,008,000 `Traded` rows/day ≈ 121 MB/day** — about 36× the entire sample stream at the maximum slate.
+
+A client cannot decline events, so that is the rate it must survive rather than the rate it expects. Two consequences bind §9.2. The events share is a **share, not a depth promise**; and the local index retains **only events attributing to the user's watched accounts**, which is §6.5's existing rule — *"worst-case overhead is proportional to the user's own activity, not chain activity"* — applied to storage as well as to body fetches. Chain-wide `Traded` is consumed into the candle aggregates as it is scanned and never stored row-by-row; a chain-wide trade tape is a bounded windowed read, never a retained table.
 
 ### 9.2 Retention auto-tunes to budget (degrades depth, never correctness)
 
-Hard caps: **300 MB desktop / 75 MB mobile** *(normative values: [13-parameters.md](13-parameters.md))*. Fixed internal shares (user-adjustable locally): raw samples 60%, candles 20%, events+archive 15%, metadata 5%. The quota manager computes retention from the *measured* ingest rate — there is no fixed "90 days" promise. Honest verified-depth table at the caps:
+Hard caps: **300 MB desktop / 75 MB mobile**. These are **client-local values owned by this section**: a browser storage quota is not a chain parameter, [13](13-parameters.md) is the chain registry, and the citation this line previously carried pointed at a document with no such row (SQ-557) — the rest of §9's budget values have always been owned here, and this line was the anomaly. Fixed internal shares (user-adjustable locally): raw samples 60%, candles 20%, events+archive 15%, metadata 5%. The quota manager computes retention from the *measured* ingest rate — there is no fixed "90 days" promise. Honest verified-depth table at the caps:
 
-| Raw-sample depth (share: 180 MB desktop / 45 MB mobile) | Typical (20 books) | Max load (196 books) |
+| Raw-sample depth (share: 180 MB desktop / 45 MB mobile) | Quietest slate (7 books) | Max slate (31 books) |
 |---|---|---|
-| Desktop | ~84 days | **~8.5 days** |
-| Mobile | ~21 days | **~2.1 days** |
+| Desktop | ~240 days | **~54 days** |
+| Mobile | ~60 days | **~13.6 days** |
 
-| candles1h depth (share: 60 MB / 15 MB) | Typical | Max load |
+| candles1h depth (share: 60 MB / 15 MB) | Quietest slate (7 books) | Max slate (31 books) |
 |---|---|---|
-| Desktop | ~2.9 years | ~106 days |
-| Mobile | ~8 months | ~26 days |
+| Desktop | ~2,976 days | ~672 days |
+| Mobile | ~744 days | ~168 days |
 
-Degradation ladder, applied oldest-first and in this order, deterministic and user-visible: raw samples → `candles1h` → `candles4h` → `candles1d` (a `candles1d` row costs `books × 120 B/day` ≈ 23.5 KB/day even at max load — effectively unbounded depth); `events` for settled+reaped proposals → compacted into `proposalsArchive` summaries; imported provider rows evicted before self-ingested rows at equal age. The ladder **degrades chart resolution and event granularity only**. It never touches: the tx path (structurally isolated, §10), layer-1 data (chain-served, not stored here), coverage metadata (holes stay truthful even after eviction — an evicted range becomes a labelled "downsampled" range, not a hole, and never a silent splice).
+Depths are stated in days throughout rather than glossed as years or months, because a gloss carries a calendar convention that nothing checks and that silently decides whether 2,976 days reads as 8.1 or 8.2 years.
 
-At maximum chain load, deep raw-resolution history in the browser is **not achievable within the caps** — stated plainly. The honest offer at max load is: layer-1 verified summaries forever, ~days of raw verified samples, ~months of hourly candles, unbounded daily candles, and provider snapshots for everything deeper, labelled as such.
+**The events share is the binding constraint, and it is measured in hours.** At the chain-permitted `Traded` ceiling (§9.1) the 15% share holds ~**8.9 h** desktop / ~**2.2 h** mobile of chain-wide trade rows, which is why the index stores watched-account events only. Measured against the user's own activity the same share is effectively unbounded: a hundred attributed rows a day costs ~12 KB/day, so the 45 MB desktop share is decades.
+
+Degradation ladder, applied oldest-first and in this order, deterministic and user-visible: raw samples → `candles1h` → `candles4h` → `candles1d` (a `candles1d` row costs `books × 120 B/day` ≈ 3.7 KB/day even at the maximum slate — effectively unbounded depth); `events` for settled+reaped proposals → compacted into `proposalsArchive` summaries; imported provider rows evicted before self-ingested rows at equal age. The ladder **degrades chart resolution and event granularity only**. It never touches: the tx path (structurally isolated, §10), layer-1 data (chain-served, not stored here), coverage metadata (holes stay truthful even after eviction — an evicted range becomes a labelled "downsampled" range, not a hole, and never a silent splice).
+
+At maximum chain load, deep raw-resolution history in the browser **is** achievable within the caps: ~54 days of raw verified samples on desktop and ~672 days of hourly candles. The previous revision stated the opposite — *"not achievable within the caps"* — and that followed from the 196-book count rather than from any measurement (SQ-557). What is genuinely not achievable at any depth is a chain-wide trade tape (§9.1), and that is the limitation this section states plainly. The honest offer at max load is: layer-1 verified summaries forever, ~54 days of raw verified samples, ~672 days of hourly candles, unbounded daily candles, the user's own event history without practical bound, and provider snapshots for everything deeper, labelled as such.
 
 ### 9.3 Metadata blobs bounded (F-medium: metadata blobs)
 
-`metadataCache` (historical SCALE metadata for per-era decode, ~1–2 MB gz each): bounded at **≤ 8 blobs / ≤ 16 MB desktop, ≤ 3 blobs / ≤ 6 MB mobile**, LRU-evicted; the current and next-authorized runtime's metadata are pinned non-evictable. Eviction of a blob needed by old undecoded rows is acceptable: those rows already carry the raw-bytes "pending decoder" state (§6.5) and re-fetch/re-ship paths exist (FE-P5). Release-shipped blobs (the FE-P5 fallback) count against the same bound.
+`metadataCache` (historical SCALE metadata for per-era decode; **measured 0.14 MB gz** per blob — `gzip -9` over the committed 469,581 B `metadata.scale`, against the "~1–2 MB" this section previously assumed): bounded at **≤ 8 blobs / ≤ 15 MB desktop, ≤ 3 blobs / ≤ 3.75 MB mobile**. Those byte bounds are §9.2's metadata share exactly; the previous 16 MB / 6 MB caps **exceeded their own share** in both cases (SQ-557), which is a bound that cannot bind. At the measured blob size the **count** limit is what actually binds and the byte limit is headroom against metadata growth — eight blobs are ~1.1 MB. LRU-evicted; the current and next-authorized runtime's metadata are pinned non-evictable. Eviction of a blob needed by old undecoded rows is acceptable: those rows already carry the raw-bytes "pending decoder" state (§6.5) and re-fetch/re-ship paths exist (FE-P5). Release-shipped blobs (the FE-P5 fallback) count against the same bound **and against the §9.4 bundle row**, which they previously did not have.
 
 ### 9.4 Budget table
 
@@ -450,6 +464,7 @@ Measured in CI (Lighthouse + Playwright timers) on reference hardware (desktop =
 | Initial JS (critical path, gz) | ≤ 350 KB / hard-fail 450 KB | bundle-size CI gate |
 | smoldot WASM (worker, lazy) | ≤ 3.5 MB gz **[VERIFY artifact size — FE-P4]** | size gate + lazy load |
 | Chain specs (relay + para + Asset Hub, gz, lazy) | ≤ 3.5 MB combined (checkpoint-trimmed) | size gate |
+| Release-shipped fallback metadata (gz, lazy) | ≤ 1.5 MB combined — §9.3's 8-blob cache bound × the measured 0.14 MB blob, rounded up for metadata growth. The release cannot ship more blobs than the cache admits | size gate |
 | First meaningful render (shell) | ≤ 1.5 s / 3 s desktop; ≤ 3 s / 6 s mobile | Lighthouse CI |
 | First **verified** current-state render | ≤ 30 s / 90 s desktop; ≤ 90 s / 240 s mobile — **hypothesis, FE-P4 gates release** | Playwright sync timer vs live testnet |
 | Finalized-head refresh work | ≤ 50 ms main-thread per head | perf marks |
