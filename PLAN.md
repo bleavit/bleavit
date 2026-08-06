@@ -76,7 +76,8 @@ Legend: ⬜ pending · 🔨 in progress · ✅ done · ⛔ blocked · 🅿 defer
 > **Gates:** runtime 457 tests / 12 `pov_budgets` green · `tools/ci` **245 OK** · reference-model
 > **701 OK** · frontend-budgets 47 cells · fmt + clippy clean · doc links, PLAN tables,
 > spec-question batches, verbatim copies green (the verbatim gate caught doc 10's own drift and
-> repaired it). **Next:** #248's five Codex comments, then merge both PRs when green.
+> repaired it). **Next:** #248 merged 2026-08-06 as `b0851ca8`; this branch is rebased onto it
+> and merges when green.
 >
 > ### ⇨ CURRENT (2026-08-06) — **SQ-557 ruled: 10 §9 sized the browser against a book count the chain cannot reach, and omitted the larger half of the event stream**
 >
