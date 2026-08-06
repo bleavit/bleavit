@@ -456,6 +456,9 @@ importers:
 
   tests/providers:
     dependencies:
+      '@bleavit/mock-runtime':
+        specifier: workspace:*
+        version: link:../../packages/mock-runtime
       '@bleavit/providers':
         specifier: workspace:*
         version: link:../../packages/providers

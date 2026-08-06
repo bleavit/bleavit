@@ -22,6 +22,8 @@ import {
   runSamplingRound,
   selectSample,
 } from '@bleavit/providers';
+import * as barrel from '@bleavit/providers';
+import { runSamplingRoundAtRate, selectSampleAtRate } from '@bleavit/providers/testing';
 import type { Provider, ProviderPage, RowVerdict, SampledRow } from '@bleavit/providers';
 
 const HEALTHY: Provider = { id: 'p1', kind: 'indexer', health: { kind: 'healthy' } };
@@ -223,10 +225,64 @@ test('the draw is over ROWS in the window, not over pages', () => {
   // Pages are not uniform in size, and drawing a page first then a row inside it would sample
   // a row on a 1-row page 40 times as often as a row on a 40-row page.
   const uneven: readonly ProviderPage[] = [pages(1, 1)[0]!, pages(1, 3)[0]!];
-  const selection = selectSample(uneven, () => 0.99, PAGES_PER_SAMPLED_ROW);
+  const selection = selectSample(uneven, () => 0.99);
   assert.equal(selection.rows.length, 1);
   assert.equal(selection.rows[0]?.page, 1);
   assert.equal(selection.rows[0]?.index, 2);
+});
+
+// --------------------------------------------------- the rate is not a caller's to choose
+
+test('the production entry points take NO rate argument', () => {
+  // §8.4 states 1-in-16 normatively and 14 TH-49's residual-risk arithmetic is computed from
+  // it, so a rate parameter on the production path is a control a caller switches off by
+  // passing a number: at a large enough rate every import forms one stratum, one row is
+  // compared, and every round still reports `clean`. Nothing fails; the sampler is off.
+  //
+  // Two halves, as with the required hash function. *Type level*: the directive is itself the
+  // assertion — if a third parameter ever came back, `tsc` reports it as unused and
+  // `check:types` goes red. *Runtime*: the arity catches a signature that grew an **optional**
+  // rate, which every existing call site still satisfies and no type error would reveal.
+  const uncallable: () => unknown = () =>
+    // @ts-expect-error the 1-in-16 rate is normative; the loosened form is behind /testing
+    selectSample(pages(64), () => 0, 1_000_000);
+  assert.equal(typeof uncallable, 'function');
+  assert.equal(selectSample.length, 2);
+  assert.equal(runSamplingRound.length, 4);
+});
+
+test('the loosened form is NOT reachable from the package barrel', () => {
+  // The other half of the control, and the half a dependency-cruiser rule cannot supply.
+  // `no-loosened-sampling-rate-in-production` forbids production code importing
+  // `@bleavit/providers/testing` — it says nothing about the barrel, so one line
+  // (`export { selectSampleAtRate } from './sampling.js'`) puts the rate back in every
+  // consumer's reach with no subpath import anywhere and the rule still green. Measured, not
+  // assumed: that mutation survived the whole gate set on 2026-08-06 until this test existed.
+  //
+  // Same hole exists in shape for `@bleavit/local-index`'s `selfRange`, where the barrel
+  // omission is likewise enforced by discipline. Noted rather than fixed here: that package is
+  // another milestone's, and a drive-by edit to it is not this one's to make.
+  assert.equal('selectSampleAtRate' in barrel, false);
+  assert.equal('runSamplingRoundAtRate' in barrel, false);
+  // Anti-vacuity: the barrel is real and does export the production entry points.
+  assert.equal('selectSample' in barrel, true);
+  assert.equal('runSamplingRound' in barrel, true);
+});
+
+test('the loosened form still exists, and behaves — it is quarantined, not deleted', async () => {
+  // The stratification logic is untestable at a single rate, so the rate-taking form has to
+  // exist. `@bleavit/providers/testing` is where it lives, and
+  // `no-loosened-sampling-rate-in-production` is what stops production code importing it.
+  const selection = selectSampleAtRate(pages(64), () => 0, 32);
+  assert.equal(selection.strata, 2);
+  const round = await runSamplingRoundAtRate(HEALTHY, pages(64), async () => MATCH, () => 0, 32);
+  assert.equal(round.outcome, 'clean');
+  assert.equal(round.result.rowsChecked, 2);
+});
+
+test('a rate below 1 is refused rather than silently clamped', () => {
+  assert.throws(() => selectSampleAtRate(pages(4), () => 0, 0), RangeError);
+  assert.throws(() => selectSampleAtRate(pages(4), () => 0, 1.5), RangeError);
 });
 
 // ------------------------------------------------------------------ the round
