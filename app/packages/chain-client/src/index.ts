@@ -27,7 +27,7 @@
 // it takes a `Finalized<A>` and returns a `Finalized<B>` computed from it, so a caller must
 // already hold a read and cannot label anything it did not read. `meet(a, a, …)` was that
 // function under another name, so this widens nothing. What it removes is the incentive that
-// produced V-186 — a reader hand-writing a `verified-finalized` status object because the
+// produced V-182 — a reader hand-writing a `verified-finalized` status object because the
 // unary case had no sanctioned spelling, which is the same brand-less mint one layer out.
 export type { Finalized, FinalizedBlockRef } from './provenance.js';
 export { derive, meet, hasFinalizedStatus, readmitFromLeader } from './provenance.js';

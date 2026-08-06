@@ -287,7 +287,7 @@ function firstValue(items: readonly StorageItem[]): string | undefined {
  * value in a hand-written `verified-finalized` status object. The brand is a non-exported
  * `unique symbol` in `packages/chain-client`, so what that helper produced was a plain
  * `Verified<T>`, and every model leaf it fed asserted finality for a value whose provenance
- * nothing had checked. It is the V-186 defect, and it matters more here than in the render
+ * nothing had checked. It is the V-182 defect, and it matters more here than in the render
  * layer that one was found in: these leaves feed the S5 and S6 **precondition** gates, and
  * 11 §11.4 rule 4 says provider data never satisfies a precondition.
  *
