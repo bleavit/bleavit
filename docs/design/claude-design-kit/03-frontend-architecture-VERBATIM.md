@@ -1,9 +1,11 @@
 > **DERIVED COPY for design-tool context — DO NOT EDIT.**
 > Verbatim copy of `docs/architecture/10-frontend-architecture.md` (the source of truth),
-> regenerated 2026-08-03 at integration contract v22, picking up the D-21 handoff (§13), the
-> `app/` re-rooting and merged package list (§10.1), the §10.2 firewall restatement and its
-> negative-compilation corpus, the branded `Finalized<T>` and the new `external-proposal`
-> provenance status (§2.1). If this copy and the source ever differ, the source
+> regenerated 2026-08-05, picking up §3.1's normative note on where the `SyncDegraded`
+> peer count comes from and what the client must do when it cannot be read (SQ-597) —
+> on top of the D-21 handoff (§13), the `app/` re-rooting and merged package list
+> (§10.1), the §10.2 firewall restatement and its negative-compilation corpus, and the
+> branded `Finalized<T>` with the `external-proposal` provenance status (§2.1). If this
+> copy and the source ever differ, the source wins.
 
 # 10 — Frontend Architecture
 
@@ -137,6 +139,14 @@ New states, normatively:
 - **`WasmFailed`** (`FE-BOOT-004`): smoldot WASM instantiation or memory failure (observed class: iOS memory pressure). Same surface as `WorkerFailed`, plus device guidance. Reduced-memory mode trims app features only — the parachain client cannot run without the relay client, so "single-chain mode" does not exist.
 - **`ReadyRestricted`**: boot-time `restricted` mode. Compatibility probing (§5.2) is a lattice, not a boolean; when only part of `CRITICAL_SURFACE` passes at boot, the app boots directly into restricted mode with named disabled surfaces — it does not pretend to be `Ready` and fail lazily.
 - **`SyncDegraded`**: pre-`Ready` degradation is now a state with the same peer-diagnostics panel as post-`Ready` `Degraded` (per-bootnode dial results, port-443 note, add-bootnode, expert RPC option). Previously the machine could only degrade after `Ready`, leaving the most common real-world failure (cannot reach peers on first load) stateless.
+
+**Where the peer count comes from, and what happens when it does not (normative; SQ-597, 2026-08-05).** The two `SyncDegraded` entry conditions above are written in **peer counts**, and the light client publishes those only through the **legacy** JSON-RPC method `system_health` — the newer interface spec that owns `chainHead_v1_*` has no peer or sync-progress surface at all. That dependency is therefore named here rather than discovered later, with its three properties stated:
+
+1. **It is real.** Measured against the pinned client, offline: `system_health` returns `{ isSyncing, peers, shouldHavePeers }`, including the **zero-peer** reading — which is the one these transitions need, and the one no connected test can produce.
+2. **It is not spec-compliant, so the release pins it and gates it.** The light client warns on every call that legacy functions *"cannot be properly implemented on a light client"*, and the RPC layer reaches them only through an escape hatch marked unstable across minor versions. A release therefore pins both packages exactly and carries a build-time check that the pinned client still serves what the pinned RPC layer issues — an unstable dependency behind an exact pin is a **bump-time** risk, and it is caught at the bump.
+3. **An unavailable reading is `unknown`, never zero.** If the call errors, is unimplemented, or does not return, the client MUST NOT treat that as *no peers*: it degrades on the weaker, spec-compliant observable instead — no `chainHead` follow progress for the same window — and labels the diagnosis **indeterminate**, because that observable cannot distinguish *no peers* from *a chain that has stalled*. Reading a broken introspection path as a peer count of zero would send the user to a peer-diagnostics panel for a fault that is not theirs, and would do it exactly when the client is otherwise healthy.
+
+The first call to `system_health` is **not free and must never be first**: on the pinned client it completes only when the sync service publishes its first status — measured at ~30 s with no peers — and it head-of-line blocks that chain's whole JSON-RPC queue until it does, which the client's own reads share. Subsequent calls return immediately. So boot MUST NOT gate on it, and it MUST NOT be the first request issued on a chain; polling it thereafter costs nothing.
 
 ### 3.2 Relation to the compatibility machine (explicit mapping)
 
@@ -474,6 +484,13 @@ For orientation (screens and full source matrix: [11-frontend-workflows.md](11-f
 | Layer-3 local index | self-ingested finalized events + opt-in imports | `derived-local` (with coverage) / `provider` | §9.2 auto-tuned |
 | Opt-in providers | snapshots/indexers, empty default list | `provider`, sampled | §8.4 quotas |
 
+**Two ledger domains, one data layer (contract v23, SQ-571).** The first row spans **both** conditional-ledger instances: the primary domain (`()`) and the service domain (`ServiceLedger` = `pallet_conditional_ledger::<Instance1>`), whose `{Vaults, BaselineVaults, Positions, PositionTotals}` became canonical ingest surface at contract v23 ([02](02-integration-contract.md) §7.1). Nothing about provenance changes — both are smoldot finalized storage reads and both yield `Finalized<T>` on the same terms — so this adds a **dimension to the data, not a status to `VerificationStatus`**. Four consequences the store layer must carry rather than leave to screens:
+
+- **Domain is a property of the datum, not of the query that fetched it.** A position, vault or book record carries its domain from the id-band boundary ([16](16-hosted-question-service.md) §7.1) — a total function of an id the client already holds. Deriving it from call site or cache key instead is how a service row ends up rendered as a primary one after a refactor. The boundary is read from the **`ConditionalLedger::ServiceIdBase` metadata constant** ([02](02-integration-contract.md) §9), never written as a literal: §11's own no-hardcode rule applies to it like any other chain value, which is exactly why v23 gave it a metadata home rather than leaving the client to spell `1n << 63n`.
+- **The write path routes by the same test.** The two domains are two *pallets* (`ConditionalLedger`, `ServiceLedger`), so the transaction builder selects the instance from the datum's domain and carries no default ([11](11-frontend-workflows.md) §11.2a rule 5). `market.buy`/`sell` are the sole domain-agnostic calls, because the market pallet routes internally; every ledger call must be addressed explicitly.
+- **The two domains never aggregate.** I-4 solvency is per instance against its own sovereign, so any store selector producing a combined total is wrong at the data layer, not merely at the display layer ([11](11-frontend-workflows.md) §11.2a rule 2). Per-domain selectors only.
+- **The FE-P2 conservative cross-check is per domain.** While FE-P2 is unresolved every `FutarchyApi` result on the transaction path is re-derived from direct storage reads (§4.2); `service_positions()` cross-checks against the `ServiceLedger` prefix and `account_positions()` against instance `()`. Satisfying one with the other's keys would make the check vacuous in exactly the case it exists for.
+
 ---
 
 ## 12. Prototype experiments and open questions (carried forward, updated)
@@ -553,6 +570,8 @@ Every confirm screen reached from an import carries a **fixed, non-dismissible**
 ### 13.5 Scope
 
 Convenience only. No protocol workflow depends on this subsystem, every action expressible as an intent is a strict subset of what the transaction screens already do by hand, and disabling the whole thing breaks no INV-FE-4 workflow — which is why the no-infrastructure certification run is executed with these surfaces disabled ([15](15-invariants-and-testing.md) §4.8). DB-5 holds by construction: convenience is not load-bearing.
+
+**This survives the handoff being the client's default surface ([11 §11.2](11-frontend-workflows.md), 2026-08-03), and the two statements are not in tension.** *Default* is which surface a user meets first; *load-bearing* is whether a workflow can be completed without it. Only the first changed. The test that keeps them apart is mechanical and already exists: the certification run disables these surfaces and every INV-FE-4 workflow must still complete. A release in which that run fails has made the subsystem load-bearing regardless of what this section claims, which is why the property is asserted by a suite and not by this paragraph.
 
 The residual this subsystem cannot remove is that a persuasive tool can shape a user's judgement. It cannot alter the client, or the client's reading of chain state, or what the user is shown before signing — but it can argue for a bad trade, and no detection mechanism changes that. It is recorded as an accepted residual in the [14](14-threat-model.md) TH-49 class, and the control is the transaction boundary, not detection.
 

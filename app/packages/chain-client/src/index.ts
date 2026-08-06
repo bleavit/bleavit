@@ -27,6 +27,7 @@ export { meet, hasFinalizedStatus, readmitFromLeader } from './provenance.js';
 
 export * from './domain.js';
 export * from './boot.js';
+export * from './health.js';
 export * from './reads.js';
 export * from './codecs.js';
 export * from './chain-spec.js';
