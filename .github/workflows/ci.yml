@@ -754,6 +754,38 @@ jobs:
           # "bundle-size CI gate" since the reviewed design while no such gate
           # existed. Same step for the same reason as the line above.
           pnpm run check:bundle-budget
+          # F22, in the same step and for the same reason. The desktop shell embeds
+          # `dist/` and the assertion is that what it embeds IS the attested tree, so
+          # this reads the tree the two lines above just produced, against the
+          # `release.json` they just wrote. Three directions, and the third is the one a
+          # manifest-driven loop cannot see: a file in the tree that nothing signed.
+          # It also checks the shell's own configuration, because a byte-identity claim
+          # about `dist/` says nothing if the shell is set up to rewrite what it embeds —
+          # and a configured Tauri CSP does exactly that, re-serialising every embedded
+          # HTML file at build time.
+          pnpm run check:embedded-tree
+          # The witness leg is not ceremony here, it is the reason the gate is worth
+          # anything. Its first version passed with the self-check replaced by a
+          # hardcoded clean verdict, because 12 §1.2's publishability gate ran first and
+          # threw on every mutation — so the comparison this milestone is about was
+          # unreachable under a fully green run. It now requires each mutation to come
+          # back as an ENUMERATED FINDING of the right kind, which a throw cannot satisfy.
+          pnpm run check:embedded-tree:witness
+
+      - name: Platform adapter and the capability lattice (F22, INV-FE-12; 10 §10.1)
+        # The fail-closed lattice: an unproven capability is ABSENT and absence carries the
+        # sentence the dependent surface renders, never a boolean and never a silent
+        # fallback. Also the differential half of the embedded-tree assertion — the same
+        # corpus this suite reads is read in place by `crates/embedded-tree`'s own tests, so
+        # the build-time comparison and the one the shipped binary runs cannot drift apart.
+        # And the two deliberate RESTATEMENTS in `packages/platform` are bound here:
+        # `AttestationFinding` against `verify`'s `SelfCheckFinding`, and
+        # `transportCapabilities` against `llm-handoff`'s `TransportCapabilities`. Both are
+        # restated rather than imported because 10 §10.2 keeps `verify` and the handoff
+        # packages out of the tx unit's reference set, and a restatement nothing checks is
+        # two declarations drifting quietly.
+        working-directory: app
+        run: pnpm run test:platform
 
       - name: Release suite (12 §1, §5.2–§5.3; F11/F13)
         working-directory: app
@@ -785,6 +817,91 @@ jobs:
       - name: ...and the witness, because a checker that cannot fail reports success
         working-directory: app
         run: pnpm run check:smoldot-surface:witness
+
+  # F22 — the desktop shell's own cargo workspace (10 §10.1; 12 §1).
+  #
+  # A separate job, not extra steps on `app`, because it needs a Rust toolchain and the
+  # Tauri Linux system libraries and the `app` job needs neither. It is also a separate
+  # *workspace*: `app/Cargo.toml` is excluded from the repository root one so the Tauri
+  # dependency tree can never perturb the runtime's `=`-exact `polkadot-stable2606` pins
+  # (app-code rule 15), and the `rust` job above therefore never compiles any of this.
+  desktop-shell:
+    name: Desktop shell (F22)
+    runs-on: ubuntu-latest
+    env:
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: app/.nvmrc
+      - name: Enable corepack (pnpm pin comes from packageManager)
+        working-directory: app
+        run: corepack enable && corepack install
+      - name: Install (frozen lockfile)
+        working-directory: app
+        run: pnpm install --frozen-lockfile
+      - name: Build the attested release tree
+        # Not a convenience. `src-tauri/build.rs` compiles `release-out/release.json` in and
+        # panics with the command that produces it when it is absent, so **the desktop shell
+        # cannot be built without the attested release tree** — which is the property the
+        # milestone is about, expressed as a build dependency rather than a rule to remember.
+        working-directory: app
+        run: pnpm run release:build
+      - name: Install Tauri's Linux system libraries
+        # webkit2gtk 4.1 + GTK3 + libsoup3 are what `tauri`/`wry` link against on Linux.
+        # Pinned to the 4.1 line because Tauri 2 dropped 4.0 (01 §9 pins Tauri 2.x).
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            librsvg2-dev libsoup-3.0-dev patchelf
+      - uses: dtolnay/rust-toolchain@1.89.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app
+      - name: Formatting
+        working-directory: app
+        run: cargo fmt --all -- --check
+      - name: Clippy (warnings are errors)
+        working-directory: app
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: The startup assertion and its differential corpus
+        # `crates/embedded-tree` is deliberately pure — no Tauri, no window, no system
+        # library — because the comparison that decides whether the shell may start is the
+        # part that must be testable anywhere. Its corpus is
+        # `fixtures/self-check-cases.json`, read IN PLACE by these tests and by
+        # `app/tests/platform/embedded-tree.test.ts`, so the two implementations of one
+        # comparison cannot drift: a divergence turns one of them red.
+        working-directory: app
+        run: cargo test --workspace --locked
+      - name: The shell links, with the release tree embedded
+        working-directory: app
+        run: cargo build --locked -p bleavit-desktop
+      - name: ...and does not, without it
+        # The negative control for the build dependency above. A gate that only ever sees
+        # the release tree present cannot tell whether it is required; measured here by
+        # removing it and requiring the build to fail. `mv` rather than `rm`, so a later
+        # step on this runner still has the tree if one is ever added.
+        working-directory: app
+        run: |
+          set -euo pipefail
+          mv release-out ../release-out.stashed
+          if cargo build --locked -p bleavit-desktop 2> build-without-release.log; then
+            mv ../release-out.stashed release-out
+            echo "FAIL: the desktop shell built with no attested release tree to embed" >&2
+            exit 1
+          fi
+          mv ../release-out.stashed release-out
+          grep -q 'release:build' build-without-release.log || {
+            echo "FAIL: the build failed, but not with the message naming how to fix it" >&2
+            cat build-without-release.log >&2
+            exit 1
+          }
+          rm -f build-without-release.log
+          echo "the shell cannot be built without the attested release tree"
 
   environments:
     name: Environment definitions
