@@ -120,9 +120,31 @@ Legend: ⬜ pending · 🔨 in progress · ✅ done · ⛔ blocked · 🅿 defer
 > **A hosted book relaxes no row** (§11.2a rule 4): the domain is carried so the caller must have
 > established it, and the suite asserts both domains produce identical verdicts.
 > 
-> **Next:** merge #249 when its pending jobs settle, then #250. F7b's remainder is the render
-> layer plus its reads — S4's position reads across both domains, S20 balances, S2's finalized
-> decision dashboard, and the components over all of it.
+> **Resume state (2026-08-06, session close).** `main` is at `c17f3bef` (#248, then #251's output
+> style). **Both open PRs are rebased onto it, mergeable, and had zero failures at close, but
+> neither was green yet** — that is the whole of what is outstanding, and it is CI wall-clock
+> rather than work:
+> 
+> - **#249** `track-f/frontend-budgets` — SQ-557's budget repair and the two-partition follow-up.
+>   Ready for review, not draft. Merge it **first**; it is the older branch and #250 is the one
+>   that rebases more cheaply.
+> - **#250** `track-f/advanced-surface` — F7b's model layer (this block) plus V-173. **Still a
+>   draft**: mark it ready once its exhaustive run is green (R-12), then merge.
+> 
+> Both edit PLAN.md's *Current focus*, *Verification log* and *Session log*, so whichever merges
+> second needs a rebase with the usual append-only resolutions; `rerere` already holds this
+> session's. Verify a rebase the way this session did — the branch's diffstat against the new
+> base must equal its diffstat against the old one, or something moved that should not have.
+> 
+> **Next work after the merges:** F7b's remainder is the render layer plus its reads — S4's
+> position reads across both domains, S20 balances, S2's finalized decision dashboard, and the
+> components over all of it. The model layer they sit on is done and covered.
+> 
+> **Two rulings only the user can give**, both filed and neither guessed at: **SQ-600** (may a
+> half-stake reporter still report — it decides whether audit-scope oracle code gains a check or
+> doc 11 §11.5's P-13 clause is corrected) and **SQ-599** (a 02 §4 contract addition for a
+> separately named *currently challenged* field, which is a contract bump with joint sign-off and
+> was deliberately not ridden inside a client fix).
 >
 > ### ⇨ CURRENT (2026-08-06) — **The SQ-557 repair counted one resource partition and there are two: hosted books emit the same events, at a higher duty cycle, and nothing in §9 saw them**
 >
