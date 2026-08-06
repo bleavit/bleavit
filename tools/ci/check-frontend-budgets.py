@@ -720,14 +720,33 @@ def main() -> int:
         )
     checked += 1
 
-    # The render gate compares a **median**, so an even sample size would compare an
-    # average of two runs — a value neither run produced — against a percentile.
+    # The sample size is published too, in the same enforcement cell, so it is bound like
+    # every other figure there. The gate compares a **median** against p50, so an even count
+    # would compare an average of two runs — a value neither run produced — against a
+    # percentile; and a single run is neither a median nor a tail.
     runs = int(gate_constant(render, "RUNS_PER_PROFILE", "the render gate"))
     if runs < 3 or runs % 2 == 0:
         raise Fail(
-            f"the render gate takes the median of {runs} run(s) per profile. An even count "
-            "averages two observations into a value neither run produced, and fewer than three "
-            "is not a median at all — §9.4 publishes percentiles, so the sample has to be one."
+            f"the render gate takes {runs} run(s) per profile. An even count averages two "
+            "observations into a value neither run produced, and fewer than three is not a "
+            "median at all — §9.4 publishes percentiles, so the sample has to be one."
+        )
+    checked += 1
+
+    published_runs = int(
+        find(
+            nine,
+            r"The gate takes \*\*(\d+) runs\*\* per profile",
+            "§9.4's published render-gate sample size",
+        ).group(1)
+    )
+    if published_runs != runs:
+        raise Fail(
+            f"§9.4 states the render gate takes {published_runs} runs per profile and "
+            f"`app/tools/render-budget/check.ts` takes {runs} via RUNS_PER_PROFILE. The sample "
+            "size decides what the p95 comparison is — at nineteen runs or fewer the nearest-rank "
+            "p95 is the slowest run, and from twenty it stops being — so it is a published figure "
+            "with one home, not a detail of the gate."
         )
     checked += 1
 

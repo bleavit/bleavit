@@ -442,7 +442,7 @@ class FrontendBudgets(unittest.TestCase):
             RENDER_GATE,
             "const RUNS_PER_PROFILE = 3;",
             "const RUNS_PER_PROFILE = 4;",
-            "median of 4 run(s)",
+            "takes 4 run(s) per profile",
         )
 
     def test_a_single_run_is_not_a_median(self) -> None:
@@ -450,7 +450,24 @@ class FrontendBudgets(unittest.TestCase):
             RENDER_GATE,
             "const RUNS_PER_PROFILE = 3;",
             "const RUNS_PER_PROFILE = 1;",
-            "median of 1 run(s)",
+            "takes 1 run(s) per profile",
+        )
+
+    def test_a_run_count_that_leaves_the_published_sentence_behind_fails(self) -> None:
+        """The sample size decides what the p95 comparison is, so it is published and bound."""
+        self.assert_mutation_caught(
+            RENDER_GATE,
+            "const RUNS_PER_PROFILE = 3;",
+            "const RUNS_PER_PROFILE = 5;",
+            "§9.4 states the render gate takes 3 runs per profile",
+        )
+
+    def test_moving_the_published_run_count_without_the_gate_fails(self) -> None:
+        self.assert_mutation_caught(
+            FRONTEND,
+            "The gate takes **3 runs** per profile",
+            "The gate takes **9 runs** per profile",
+            "§9.4 states the render gate takes 9 runs per profile",
         )
 
     # --- anti-vacuity: a parse that finds nothing must fail, not pass ---------------

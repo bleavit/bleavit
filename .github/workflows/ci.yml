@@ -605,27 +605,18 @@ jobs:
         working-directory: app
         run: pnpm run check:budget
 
-      - name: Lazy-artifact budgets — chain specs and fallback metadata (10 §9.3, §9.4)
-        # §9.4's other two size rows, neither of which had the "size gate" its enforcement
-        # column names. The metadata row is measured over the committed per-spec_version
-        # blobs an FE-P5 fallback would carry, against BOTH bounds — the combined size and
-        # §9.3's blob count, which at the measured blob size is the one that actually
-        # binds. It also re-measures §9.3's own published blob figures, which nothing did:
-        # the section printed 0.14 MB beside a 146,946 B file, and every derivation from
-        # that cell stayed internally consistent while describing a blob the repository no
-        # longer contained.
-        #
-        # The chain-spec half has no artifact yet, and it does not pass quietly on that
-        # account: with no spec declared it requires the chain-spec readiness blocker to
-        # still stand, and fails the moment a spec hash is pinned with no spec to weigh.
-        # A size gate over an empty list would measure nothing and report a comfortable
-        # number, which is the failure this whole row exists to prevent.
-        #
-        # The witness leg runs every one of those comparisons against a bound the
-        # committed artifacts must violate and requires each to be refused. A size gate
-        # whose comparison stopped firing looks exactly like a release that got smaller.
+      - name: Budget-gate statistics and emitted-artifact bindings (10 §9.4)
+        # The two §9.4 gates whose defect could not be a wrong number. The render row
+        # publishes p50 AND p95 and the gate compared a three-run median against both, so
+        # one run in three could sit far over the hard-fail threshold with CI green; the
+        # chain-spec row budgets what a browser lazily fetches and the gate weighed the
+        # SOURCE paths, which no step ever copied into the bundle. Neither is visible to a
+        # threshold-binding checker — `check-frontend-budgets.py` proved both gates carried
+        # the published numbers, which they did. This suite drives the statistics on samples
+        # a Lighthouse run cannot be made to produce, and the chain-spec bindings over
+        # release trees it builds in a temp directory.
         working-directory: app
-        run: pnpm run check:artifact-budget && pnpm run check:artifact-budget:witness
+        run: pnpm run test:budgets
 
       - name: Foreign-chain feed vs the pinned Asset Hub runtime (02 §7.7, F4)
         # `check-chain-feed.py` cannot do this job: it reads metadata v15 obtained by
@@ -776,6 +767,23 @@ jobs:
           # "bundle-size CI gate" since the reviewed design while no such gate
           # existed. Same step for the same reason as the line above.
           pnpm run check:bundle-budget
+          # 10 §9.4's two lazy-artifact size rows. The metadata half weighs the
+          # committed per-spec_version blobs an FE-P5 fallback would carry, against
+          # both §9.4's combined size and §9.3's blob count, and re-measures §9.3's
+          # own published blob figures. The chain-spec half weighs `dist/chain-specs/`
+          # — the EMITTED tree, which is why it lives in this step and not beside the
+          # source-tree gates: a declared source path is what the release is built
+          # from and a browser fetches none of it, so a release could pin a hash,
+          # name a file, be weighed and ship no chain spec at all. Declaration and
+          # emission are now bound in both directions, and every pinned role must be
+          # matched by an emitted file by SHA-256 — the comparison the client makes
+          # at boot. No spec is declared today, so that half additionally requires
+          # the readiness blocker to stand and the emitted tree to carry none either.
+          # The witness leg refuses a release for each of those bindings and admits a
+          # consistent one, so it cannot be satisfied by a checker that refuses
+          # everything.
+          pnpm run check:artifact-budget
+          pnpm run check:artifact-budget:witness
           # 10 §9.4's first-meaningful-render row — Lighthouse over the tree the
           # first line emitted, on §9.4's own reference hardware. Same step for
           # the same reason. Chrome comes from the runner image (Google Chrome is

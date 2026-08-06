@@ -23,8 +23,8 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import type { OriginBearing } from './connect-src.ts';
@@ -75,6 +75,22 @@ const RECIPE_INPUTS = [
  * client they are actually running, rather than from a code host (F21).
  */
 const PRODUCER_ASSETS = ['schemas', 'skills'];
+
+/**
+ * Where the release puts the chain specs it bundles — 10 §4.1, §9.4; app-code rule 13.
+ *
+ * A chain spec is trusted input to smoldot and the client verifies the **bundled bytes**
+ * against the release pin before handing them over, so the bytes have to be *in the
+ * release*. Declaring a source path is not shipping one: `connect-src.ts` reads those paths
+ * at build time for their bootnode multiaddrs and nothing copied them, so a release could
+ * pin a chain-spec hash, name its file, and emit no chain spec for a browser to boot from
+ * (P1 on PR #254, 2026-08-06).
+ *
+ * Exported because `check-artifact-budget.ts` weighs this directory against §9.4's budget.
+ * One home for the name: a gate looking in a directory the build does not write measures an
+ * empty set and reports a comfortable number.
+ */
+export const RELEASE_CHAIN_SPEC_DIR = 'chain-specs';
 
 /**
  * A parsed JSON object. Every field is a claim until a reader below checks it.
@@ -132,6 +148,45 @@ function buildTree() {
 function copyProducerAssets(): void {
   for (const name of PRODUCER_ASSETS) {
     cpSync(join(APP_ROOT, name), join(DIST, name), { recursive: true });
+  }
+}
+
+/**
+ * The declared chain specs, copied into the release tree (10 §4.1, §9.4).
+ *
+ * Copied **before** anything is hashed, for the same reason `copyProducerAssets` is: the
+ * files land in the service worker's baked map, so they are pinned, re-verified on read, and
+ * refused if they are not what the release published. A chain spec added to the tree after
+ * the map is written would be a same-origin path the worker refuses — and that refusal
+ * arrives as a light client that cannot start.
+ *
+ * A basename collision is refused rather than resolved. Two declarations landing on one
+ * emitted file would ship one chain's genesis under both names, and the survivor is whichever
+ * was copied last, which is a property of list order rather than of anything anyone decided.
+ */
+function copyChainSpecs(chainSpecs: readonly string[]): void {
+  if (chainSpecs.length === 0) return;
+  const target = join(DIST, RELEASE_CHAIN_SPEC_DIR);
+  mkdirSync(target, { recursive: true });
+  const emitted = new Map<string, string>();
+  for (const relative of chainSpecs) {
+    const name = basename(relative);
+    const clash = emitted.get(name);
+    if (clash !== undefined) {
+      throw new Error(
+        `two declared chain specs share the emitted name ${name} (${clash} and ${relative}). ` +
+          'One would overwrite the other and the release would ship one chain under both pins.',
+      );
+    }
+    emitted.set(name, relative);
+    const source = resolve(REPO_ROOT, relative);
+    if (!existsSync(source)) {
+      throw new Error(
+        `${relative} is declared as a bundled chain spec and is not on disk, so the release ` +
+          'would ship no bytes for it. A missing spec is a light client that cannot start.',
+      );
+    }
+    cpSync(source, join(target, name));
   }
 }
 
@@ -207,6 +262,19 @@ function readChainIdentity(sources: unknown): {
     decimals: isRecord(decimals) ? tokenDecimals(decimals, blockers) : null,
   };
   if (identity.decimals === null) blockers.push('chain identity: token decimals are undeclared');
+  // 10 §9.4 budgets **three** bundled chain specs — relay, parachain and Asset Hub — and
+  // 11 §11.9.1 opens a second light client against the third. `chainSpecHashes` has room for
+  // two, so the Asset Hub spec has no pin for `verifyBundledChainSpec` to compare against and
+  // no role any gate could require. Named here rather than discovered by the first release
+  // that ships the funding leg, and the blocker expires by itself once the format grows the
+  // slot (SQ-720).
+  if (!('assetHub' in specHashes)) {
+    blockers.push(
+      'chain identity: the Asset Hub chain spec has no pin — chainSpecHashes carries relay and ' +
+        'para only, while 10 §9.4 budgets relay + para + Asset Hub and 11 §11.9.1 boots a second ' +
+        'light client against it (SQ-720)',
+    );
+  }
   return { identity, blockers };
 }
 
@@ -340,6 +408,7 @@ export function pipeline({ check = false }: PipelineOptions = {}) {
   if (!check) {
     buildTree();
     copyProducerAssets();
+    copyChainSpecs(declared.chainSpecs);
   }
 
   // 3 — determinism, before anything is hashed.
@@ -469,6 +538,9 @@ export function pipeline({ check = false }: PipelineOptions = {}) {
     throw new Error('sw.js still carries the asset-map placeholder; it would refuse to install');
   }
   assertNoTestOnlySigner(DIST, files);
+  // Held over any tree, built or checked, because `--check` does not copy: a re-checked tree
+  // that lost its chain specs is exactly the release this gate exists to refuse.
+  assertChainSpecsEmitted(DIST, declared.chainSpecs);
 
   return { release, sbom, allowlist, connectSrc, diff, assetHashes, blockers, files, sources };
 }
@@ -503,6 +575,28 @@ export function readBakedAssetMap(workerSource: string): Record<string, string> 
   const encoded = /RELEASE_ASSETS_JSON\s*=\s*"((?:\\.|[^"\\])*)"/.exec(workerSource);
   if (!encoded) throw new Error('sw.js carries no substituted asset map');
   return JSON.parse(JSON.parse(`"${encoded[1]}"`));
+}
+
+/**
+ * Every declared chain spec is present in the emitted tree — 10 §4.1, §9.4.
+ *
+ * The declaration and the emission are separate acts, and until F14's review round only the
+ * first existed: `release-sources.json` could name a spec, `connect-src.ts` could take its
+ * bootnodes, `chainIdentity` could pin its hash, and `dist/` could contain no chain spec at
+ * all. The client verifies bundled bytes against that pin (§4.1), so the shipped release
+ * would fail at the user with a hash comparison against nothing.
+ */
+export function assertChainSpecsEmitted(distDir: string, chainSpecs: readonly string[]): void {
+  const missing = chainSpecs.filter(
+    (relative) => !existsSync(join(distDir, RELEASE_CHAIN_SPEC_DIR, basename(relative))),
+  );
+  if (missing.length > 0) {
+    throw new Error(
+      `${missing.length} declared chain spec(s) are absent from the emitted release tree ` +
+        `(${missing.join(', ')}). 10 §4.1 verifies the *bundled* bytes against the release pin, ` +
+        'so a spec that never reached dist/ is a light client with nothing to boot from.',
+    );
+  }
 }
 
 /**

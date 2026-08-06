@@ -51,6 +51,7 @@
     "tests/transaction-builder/**/*.ts",
     "tests/screens/**/*.ts",
     "tests/release/**/*.ts",
+    "tests/budgets/**/*.ts",
     // The tools themselves, which are the thing the suites above exercise. `tools/release/`
     // decides what a release contains; leaving it unchecked while checking the suite that
     // reads it would put the type boundary on the wrong side of the artefact.

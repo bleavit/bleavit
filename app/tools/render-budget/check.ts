@@ -53,15 +53,21 @@
  * on a shared CI runner would. Measured locally over four 3-run passes the whole spread
  * was under 10 ms on both profiles — desktop 401–408 ms, mobile 1,803–1,809 ms.
  *
- * ## Why a median against the p95 column
+ * ## Two published thresholds, two statistics
  *
- * §9.4 publishes p50 and p95 for each form factor. A single run gated on p50 is a
- * coin-flip on a shared runner; a warning-only gate is a budget nobody enforces. So the
- * **median of N runs** is compared against the **p95** column as a hard failure and
- * against the **p50** column as a loud non-fatal warning — the same two-threshold
- * treatment `check-bundle-budget.ts` gives §9.4's initial-JS row, and for the same
- * reason: the document states two numbers and collapsing them to one either blocks work
- * the document permits or lets the target rot into decoration.
+ * §9.4 publishes p50 and p95 for each form factor, and they are statistics of the same
+ * sample rather than two spellings of one number. So the sample's **tail** is compared
+ * against the **p95** column as a hard failure and its **median** against the **p50**
+ * column as a loud non-fatal warning. `statistic.ts` carries both and explains why the
+ * tail at three runs is the slowest run.
+ *
+ * The pairing used to be median-against-both, and that was a gate measuring the wrong
+ * statistic: three runs of 2 s, 2 s and 20 s have a 2 s median and pass a 6 s p95
+ * threshold while a third of the sample sits over three times above it (P1 on PR #254).
+ * Keeping two thresholds and two statistics is the same treatment
+ * `check-bundle-budget.ts` gives §9.4's initial-JS row, for the same reason: the document
+ * states two numbers, and collapsing them either blocks work the document permits or lets
+ * the tail rot into decoration.
  *
  * ## Fails closed, and cannot pass without having measured
  *
@@ -90,6 +96,8 @@ import type { AddressInfo } from 'node:net';
 import lighthouse from 'lighthouse';
 import * as chromeLauncher from 'chrome-launcher';
 import * as lighthouseConstants from 'lighthouse/core/config/constants.js';
+
+import { assess, median, tailP95 } from './statistic.ts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const APP = resolve(HERE, '..', '..');
@@ -127,9 +135,14 @@ const DESKTOP_CPU_SLOWDOWN = 4;
 const MOBILE_REFERENCE_DEVICE = 'Moto G';
 
 /**
- * Runs per form factor. Odd, so the median is an observation rather than an average of
- * two — an average can sit between two runs at a value neither run produced, which is the
- * wrong thing to compare against a percentile.
+ * Runs per form factor, bound to §9.4's own enforcement sentence by
+ * `tools/ci/check-frontend-budgets.py`.
+ *
+ * Odd, so the median is an observation rather than an average of two — an average can sit
+ * between two runs at a value neither run produced, which is the wrong thing to compare
+ * against a percentile. Raising it costs run time and buys a better p50 estimate; it does
+ * not change what the p95 comparison is, until the count reaches twenty and nearest rank
+ * stops selecting the slowest run (`statistic.ts`).
  */
 const RUNS_PER_PROFILE = 3;
 
@@ -337,14 +350,6 @@ function entryChunk(): string {
   return match[1].replace(/^\.\//, '');
 }
 
-/** The median of an odd-length sample. */
-function median(values: readonly number[]): number {
-  const sorted = [...values].sort((a, b) => a - b);
-  const middle = sorted[(sorted.length - 1) / 2];
-  if (middle === undefined) fail('no runs were recorded; the measurement produced nothing');
-  return middle;
-}
-
 function numericAudit(
   audits: Record<string, { numericValue?: number } | undefined>,
   id: string,
@@ -490,26 +495,29 @@ async function main(): Promise<void> {
         lcpSamples.push(numericAudit(lhr.audits, 'largest-contentful-paint', profile.label));
       }
 
-      const fcp = median(samples);
-      const lcp = median(lcpSamples);
       const ms = (n: number): string => `${(n / 1000).toFixed(2)} s`;
-      // The witness compares the same measured median against a threshold nothing can
-      // meet. A refusal therefore proves the comparison fires *on a real measurement* —
-      // a gate that had stopped measuring would produce no number to refuse.
+      // The witness compares the same measured sample against thresholds nothing can meet.
+      // A refusal therefore proves the comparison fires *on a real measurement* — a gate
+      // that had stopped measuring would produce no number to refuse.
       const targetMs = WITNESS ? 1 : profile.targetMs;
       const hardFailMs = WITNESS ? 1 : profile.hardFailMs;
+      if (samples.length === 0) fail('no runs were recorded; the measurement produced nothing');
+      const fcp = assess(samples, { targetMs, hardFailMs });
       console.log(
-        `${profile.label}: FCP median ${ms(fcp)} over ${runsPerProfile} run(s) ` +
-          `[${samples.map((s) => Math.round(s)).join(', ')} ms], LCP median ${ms(lcp)} ` +
+        `${profile.label}: FCP p95 tail ${ms(fcp.tail)}, median ${ms(fcp.median)} over ` +
+          `${runsPerProfile} run(s) [${samples.map((s) => Math.round(s)).join(', ')} ms], ` +
+          `LCP tail ${ms(tailP95(lcpSamples))} / median ${ms(median(lcpSamples))} ` +
           `(10 §9.4 target ${ms(profile.targetMs)}, hard fail ${ms(profile.hardFailMs)})`,
       );
 
       try {
-        if (fcp > hardFailMs) {
+        if (fcp.overHardFail) {
           throw new BudgetError(
-            `${profile.label} first meaningful render is ${ms(fcp)}, over 10 §9.4's ` +
-              `${ms(hardFailMs)} p95 threshold by ${ms(fcp - hardFailMs)}. This is the wait ` +
-              'before the client shows anything at all, on the hardware §9.4 names.',
+            `${profile.label} first meaningful render is ${ms(fcp.tail)} at the p95 tail of ` +
+              `${runsPerProfile} run(s), over 10 §9.4's ${ms(hardFailMs)} p95 threshold by ` +
+              `${ms(fcp.tail - hardFailMs)}. This is the wait before the client shows anything ` +
+              'at all, on the hardware §9.4 names. The median is not the statistic this ' +
+              'threshold is stated for — a tail this size is exactly what it exists to catch.',
           );
         }
       } catch (error) {
@@ -518,10 +526,10 @@ async function main(): Promise<void> {
         refusals += 1;
         console.log(`witness fired: ${error.message.slice(0, 90)}…`);
       }
-      if (!WITNESS && fcp > targetMs) {
+      if (!WITNESS && fcp.overTarget) {
         console.warn(
-          `WARN ${profile.label} first meaningful render is ${ms(fcp)}, over 10 §9.4's ` +
-            `${ms(targetMs)} p50 target by ${ms(fcp - targetMs)} and inside the ` +
+          `WARN ${profile.label} first meaningful render has a median of ${ms(fcp.median)}, over ` +
+            `10 §9.4's ${ms(targetMs)} p50 target by ${ms(fcp.median - targetMs)} and inside the ` +
             `${ms(profile.hardFailMs)} p95 threshold. The document permits this; it does not ` +
             'expect it to stay that way.',
         );
