@@ -1,0 +1,376 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://bleavit.org/schemas/bleavit.archive-export.v1.schema.json",
+  "title": "bleavit.archive-export.v1",
+  "description": "What an archive reader hands `app/tools/snapshot` to be turned into a published snapshot (10 §8.2).\n\nThis is the PRODUCER side. It is not the snapshot: the tool orders the movements, merges the coverage, folds the balances, pins the bytes and then runs the client's own admission screens over the result. A valid export is not a publishable snapshot — the tool refuses one whose movements disagree with the balances.\n\nThe two fields a reader is most likely to get wrong are `observed` and `at`. `observed` is what the reader ACTUALLY saw, which is not the span it set out to cover: a reader that fails part-way and reports the requested span publishes a document claiming history it never read, and that document passes every screen because the movements it does carry are consistent. `at` is the chain position — block, extrinsic, event — and it must be complete and unique, because the conservation replay is order-sensitive and a merge before its split is a different, invalid history.",
+  "type": "object",
+  "properties": {
+    "binding": {
+      "type": "object",
+      "description": "The chain binding (10 §13.1). Gated on the live chain by exact equality — a schema cannot check that, so a valid binding here is not an admitted one.",
+      "properties": {
+        "genesisHash": {
+          "type": "string",
+          "pattern": "^0x[0-9a-fA-F]{64}$",
+          "description": "Genesis hash of the chain this document was prepared against."
+        },
+        "specVersion": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295,
+          "description": "The runtime spec_version. A NEWER one than the client is refused; an older one is rebuilt."
+        },
+        "contractVersion": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295,
+          "description": "INTEGRATION_CONTRACT_VERSION, as the producing client reported it."
+        }
+      },
+      "required": [
+        "genesisHash",
+        "specVersion",
+        "contractVersion"
+      ],
+      "additionalProperties": false
+    },
+    "range": {
+      "type": "object",
+      "description": "The span this export set out to cover.",
+      "properties": {
+        "fromBlock": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295,
+          "description": "First block, inclusive."
+        },
+        "toBlock": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295,
+          "description": "Last block, inclusive."
+        }
+      },
+      "required": [
+        "fromBlock",
+        "toBlock"
+      ],
+      "additionalProperties": true
+    },
+    "observed": {
+      "type": "array",
+      "description": "What the reader actually observed. Ranges may arrive in any order and the tool sorts and merges them; overlapping ranges are REFUSED rather than merged, because a reader that observed one block twice has a defect and merging would hide it.",
+      "items": {
+        "type": "object",
+        "description": "One observed span.",
+        "properties": {
+          "fromBlock": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295,
+            "description": "First block, inclusive."
+          },
+          "toBlock": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4294967295,
+            "description": "Last block, inclusive."
+          }
+        },
+        "required": [
+          "fromBlock",
+          "toBlock"
+        ],
+        "additionalProperties": true
+      }
+    },
+    "vaults": {
+      "type": "array",
+      "description": "Every vault the export mentions, with its branch set frozen at creation. Order does not matter here — the tool sorts vaults and branches by code point, because canonical JSON orders object keys and not array members, so an unsorted array is two legal spellings of one history and therefore two pins.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "vault": {
+            "type": "string",
+            "minLength": 1
+          },
+          "branches": {
+            "type": "array",
+            "minItems": 2,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "description": "At least two. One branch is not a conditional instrument and its conservation identity is vacuous."
+          }
+        },
+        "required": [
+          "vault",
+          "branches"
+        ],
+        "additionalProperties": true
+      }
+    },
+    "ops": {
+      "type": "array",
+      "description": "Every movement in the observed ranges, each with its chain position. The v1 alphabet is the branch-USDC complete set of 03 §5; the scalar, gate and Baseline instruments are outside it, because their escrow movement is not the amount burned and a replay would need each vault's settlement value, which the published document does not carry.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "at": {
+            "type": "object",
+            "description": "Where the movement sits in the chain's own order. Two movements sharing one position are REFUSED: their order is undefined and the replay is order-sensitive, so no tie-break can be right.",
+            "properties": {
+              "block": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295,
+                "description": "Block number."
+              },
+              "extrinsicIndex": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295,
+                "description": "Index of the extrinsic within the block."
+              },
+              "eventIndex": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 4294967295,
+                "description": "Index of the event within the extrinsic."
+              }
+            },
+            "required": [
+              "block",
+              "extrinsicIndex",
+              "eventIndex"
+            ],
+            "additionalProperties": true
+          },
+          "op": {
+            "oneOf": [
+              {
+                "title": "merge",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "merge"
+                  },
+                  "block": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 4294967295,
+                    "description": "The block the movement happened in. Cross-checked against `at.block`; the tool refuses an export where the two disagree, because one of them is wrong and neither is safe to prefer."
+                  },
+                  "vault": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "The movement's vault."
+                  },
+                  "account": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "The movement's account."
+                  },
+                  "amount": {
+                    "type": "string",
+                    "pattern": "^(?:0|[1-9][0-9]*)$",
+                    "description": "A movement or holding amount, in base units. A canonical decimal string for a u128 — no sign, no leading zeros, no exponent. It is a string because base units run past 2^53 and JSON.parse corrupts a larger number silently."
+                  }
+                },
+                "required": [
+                  "kind",
+                  "block",
+                  "vault",
+                  "account",
+                  "amount"
+                ],
+                "additionalProperties": true
+              },
+              {
+                "title": "redeem",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "redeem"
+                  },
+                  "block": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 4294967295,
+                    "description": "The block the movement happened in. Cross-checked against `at.block`; the tool refuses an export where the two disagree, because one of them is wrong and neither is safe to prefer."
+                  },
+                  "vault": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "The movement's vault."
+                  },
+                  "account": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "The movement's account."
+                  },
+                  "branch": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "One of the vault's declared branches."
+                  },
+                  "amount": {
+                    "type": "string",
+                    "pattern": "^(?:0|[1-9][0-9]*)$",
+                    "description": "A movement or holding amount, in base units. A canonical decimal string for a u128 — no sign, no leading zeros, no exponent. It is a string because base units run past 2^53 and JSON.parse corrupts a larger number silently."
+                  }
+                },
+                "required": [
+                  "kind",
+                  "block",
+                  "vault",
+                  "account",
+                  "branch",
+                  "amount"
+                ],
+                "additionalProperties": true
+              },
+              {
+                "title": "split",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "split"
+                  },
+                  "block": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 4294967295,
+                    "description": "The block the movement happened in. Cross-checked against `at.block`; the tool refuses an export where the two disagree, because one of them is wrong and neither is safe to prefer."
+                  },
+                  "vault": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "The movement's vault."
+                  },
+                  "account": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "The movement's account."
+                  },
+                  "amount": {
+                    "type": "string",
+                    "pattern": "^(?:0|[1-9][0-9]*)$",
+                    "description": "A movement or holding amount, in base units. A canonical decimal string for a u128 — no sign, no leading zeros, no exponent. It is a string because base units run past 2^53 and JSON.parse corrupts a larger number silently."
+                  }
+                },
+                "required": [
+                  "kind",
+                  "block",
+                  "vault",
+                  "account",
+                  "amount"
+                ],
+                "additionalProperties": true
+              },
+              {
+                "title": "transfer",
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "const": "transfer"
+                  },
+                  "block": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 4294967295,
+                    "description": "The block the movement happened in. Cross-checked against `at.block`; the tool refuses an export where the two disagree, because one of them is wrong and neither is safe to prefer."
+                  },
+                  "vault": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "The movement's vault."
+                  },
+                  "account": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "The movement's account."
+                  },
+                  "to": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Who receives the branch holding."
+                  },
+                  "branch": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "One of the vault's declared branches."
+                  },
+                  "amount": {
+                    "type": "string",
+                    "pattern": "^(?:0|[1-9][0-9]*)$",
+                    "description": "A movement or holding amount, in base units. A canonical decimal string for a u128 — no sign, no leading zeros, no exponent. It is a string because base units run past 2^53 and JSON.parse corrupts a larger number silently."
+                  }
+                },
+                "required": [
+                  "kind",
+                  "block",
+                  "vault",
+                  "account",
+                  "to",
+                  "branch",
+                  "amount"
+                ],
+                "additionalProperties": true
+              }
+            ]
+          }
+        },
+        "required": [
+          "at",
+          "op"
+        ],
+        "additionalProperties": true
+      }
+    },
+    "balances": {
+      "type": "array",
+      "description": "Holdings read from CHAIN STATE at `range.toBlock`, independently of `ops`. This is the design decision that makes the tool worth having: a producer that folded its own movements would agree with itself by construction, and the failure that actually happens to a snapshot tool is an INCOMPLETE op set — a missed event variant, a short answer from the node — which is self-consistent and invisible to a self-fold. The tool refuses to publish when the fold disagrees with these rows, in either direction.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "vault": {
+            "type": "string",
+            "minLength": 1
+          },
+          "account": {
+            "type": "string",
+            "minLength": 1
+          },
+          "branch": {
+            "type": "string",
+            "minLength": 1
+          },
+          "amount": {
+            "type": "string",
+            "pattern": "^(?:0|[1-9][0-9]*)$",
+            "description": "A movement or holding amount, in base units. A canonical decimal string for a u128 — no sign, no leading zeros, no exponent. It is a string because base units run past 2^53 and JSON.parse corrupts a larger number silently."
+          }
+        },
+        "required": [
+          "vault",
+          "account",
+          "branch",
+          "amount"
+        ],
+        "additionalProperties": true
+      }
+    }
+  },
+  "required": [
+    "binding",
+    "range",
+    "observed",
+    "vaults",
+    "ops",
+    "balances"
+  ],
+  "additionalProperties": true,
+  "$comment": "Movement kinds: merge, redeem, split, transfer. Amounts match ^(0|[1-9][0-9]*)$ AND must be within the u128 Balance range, which a pattern cannot express: a value at or above 2^128 parses, replays and reconciles perfectly while describing a quantity no chain event or balance can hold."
+}

@@ -1,14 +1,37 @@
-# `app/schemas/` — the published handoff formats
+# `app/schemas/` — the published formats
 
-Machine-readable JSON Schema for the three formats [10 §13.1](../../docs/architecture/10-frontend-architecture.md)
-defines. They exist so somebody writing a producer — an Agent Skill, a script, a hosted
-assistant — can check a document before a user ever sees it.
+Machine-readable JSON Schema for the three handoff formats
+[10 §13.1](../../docs/architecture/10-frontend-architecture.md) defines, plus the producer-tool
+input format [10 §8.2](../../docs/architecture/10-frontend-architecture.md) promises anyone can
+write against. They exist so somebody writing a producer — an Agent Skill, a script, a hosted
+assistant, an archive reader — can check a document before a user ever sees it.
 
 | File | Direction | What it is |
 |---|---|---|
 | `bleavit.intent.v1.schema.json` | **in** | A proposed action. The only inbound format, and the subsystem's whole attack surface |
 | `bleavit.context.v1.schema.json` | out | A verified view of the chain at one finalized block, limited to what the user consented to share |
 | `bleavit.receipt.v1.schema.json` | out | What the chain recorded about one finalized extrinsic |
+| `bleavit.archive-export.v1.schema.json` | tool input | What an archive reader hands `app/tools/snapshot`. Not a client format — it never reaches the app |
+
+## Why the archive export is here
+
+[10 §8.2](../../docs/architecture/10-frontend-architecture.md) promises snapshots
+*"reproducible byte-identically by anyone from `tools/snapshot` against an archive node"*, and
+that promise is to **independent producers**: a second person has to be able to write a reader,
+feed this tool, and obtain the same pin. An input format that exists only as a TypeScript parser
+in this repository is not a format somebody outside it can write against, so the
+reproduce-by-anyone claim would hold only for people who read the source.
+
+The tool's own archive-node adapter is deliberately unwritten (`PLAN.md` · *Spec questions*
+SQ-604 — no document names which read interface, endpoint, pagination or historical-metadata
+policy it binds to). Publishing the boundary it is missing is what lets an operator supply one
+today.
+
+**Its `additionalProperties` are `true`, which is the opposite of `bleavit.intent.v1` and is
+deliberate.** An intent's `action` is *"precisely where an encoded call would be placed"* by a
+hostile third party. An archive export is a file a publisher hands their own tool, and
+`parseArchiveExport` reads the fields it names and ignores the rest — so publishing `false`
+would tell reader authors to delete annotations this tool happily accepts.
 
 **Generated, never hand-written.** `pnpm -C app run schemas:generate` writes them from the
 parser's own declarations; `pnpm -C app run schemas:check` regenerates into memory and
