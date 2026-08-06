@@ -10,22 +10,12 @@ N10 adds a reusable client-runtime pallet and ABI under `pallets/bleavit-client/
 added to Bleavit's production `construct_runtime!`; update the executable quickstart binding when
 changing its drill helper.
 
-## Skills (invoke with `/name`; auto-invoke when the description matches)
+## Skills and subagents
 
-| Skill | Use for |
-|---|---|
-| `/implement [id]` | The session driver: PLAN.md milestones, spec-first, verified, PLAN updated — closing one and continuing to the next. Default entry point for "continue"/"next step". |
-| `/spec-audit [scope]` | Compliance sweep of implemented code against `docs/architecture/` (report-only; logs to PLAN.md · Audit log). |
-| `/sync-docs` | Re-true README/PLAN/AGENTS/CLAUDE and the `.claude`/`.codex` assets against the actual repo. |
-| `/new-pallet <name>` | Scaffold a FRAME pallet with spec-cited stubs, mock, test/benchmark stubs, try-state hook. |
-
-## Subagents (delegate via the Agent tool)
-
-| Agent | Role |
-|---|---|
-| `spec-reviewer` | Read-only compliance audit of a component vs its owning doc. Run it before marking any milestone ✅ (R-6). |
-| `test-engineer` | Authors the doc-15 test obligations (PT suites, limit-coverage, negative origin tests, try-state, differential vectors). |
-| `doc-curator` | End-of-session living-document sync when the delta is large. |
+The four skills (`.claude/skills/`) and three subagents (`.claude/agents/`) are listed
+into every session from their own frontmatter descriptions — read those rather than a
+copy here, which could only drift. `/implement` is the default entry point for
+"continue"/"next step"; `spec-reviewer` runs before any milestone is marked ✅ (R-6).
 
 **Delegating to Codex.** R-13 (AGENTS.md) governs: explicit `--sandbox` on every
 `codex exec`, `read-only` unless the job must author, no bypass flags. Note that the

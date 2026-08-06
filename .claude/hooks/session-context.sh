@@ -2,7 +2,11 @@
 # SessionStart hook — injects the living project status into every new session
 # (startup | resume | clear | compact) so implementation continues seamlessly
 # across sessions. Output on stdout becomes context for the agent.
-set -euo pipefail
+# No `pipefail`: every section below ends in `| head -N`, which closes the pipe and
+# SIGPIPEs its upstream once the limit is reached. Under `pipefail` that made the
+# whole script exit 141, and a non-zero SessionStart hook has its stdout discarded —
+# so this context silently stopped reaching sessions once PLAN.md grew past `head -25`.
+set -eu
 cd "${CLAUDE_PROJECT_DIR:-$(pwd)}"
 
 echo "=== Bleavit auto-context (SessionStart hook) ==="
