@@ -379,12 +379,25 @@ Unchanged: **snapshots** (deterministic, canonically-serialized, content-address
 
 Per-provider health probe on enable + every 10 min; `Healthy → Slow → Failing → Disabled(auto, reason)`; auto-disable on sampling mismatch. All-providers-down ⇒ the default (provider-less) behavior with the standard incomplete-history explainer.
 
+The ladder's thresholds are **release constants, not chain constants** — a governance vote does not change how fast a third-party HTTP endpoint answers, and there is no chain surface to read them from, so §5.4's no-literal rule does not reach them (same classification as the import quotas below and as `packages/protocol`'s kernel table). What is normative is the *shape*: `Slow` is a latency observation and never disables on its own, because a slow provider is still an honest one and disabling it would convert a network condition into a missing-data incident; `Failing` counts **consecutive** failures, so one timeout in a healthy series cannot ratchet the ladder; and only `Disabled` stops reads, always with a reason.
+
 ### 8.4 Verification and sampling — honest limits (F-medium: transaction-critical/sampling)
 
 - **Snapshots:** content-hash pin before import; deterministic spot re-derivation for the covered blocks that fall inside light-client-reachable depth; internal-consistency checks (monotone coverage, event↔derived-row agreement, conservation-identity replay per [03-conditional-ledger.md](03-conditional-ledger.md) identities).
 - **Live indexers:** 1-in-16-page row re-verification against live chain state where the referenced object still exists, or against the self-ingested overlap window.
 - **Honest guarantee statement (normative UI copy):** sampling and re-derivation catch malformed, internally inconsistent, and shallow forgeries, and catch liveness failures. **They do not detect a self-consistent forgery of history at depths the light client cannot reach.** The only available cross-check is diffing two independent snapshot producers (`FE-PROV-004` on mismatch), which the import UI supports and recommends. This limit is disclosed in the provider UI, and the corresponding residual-risk rows live in [14-threat-model.md](14-threat-model.md).
 - **Absolute rule (INV-FE-3):** provider data never satisfies a precondition, never renders a "passed/settled/mature/final/safe" state without a chain read; any actionable provider-supplied object triggers a direct chain fetch before the action is enabled.
+
+**The `FE-PROV-001..004` family, bound to the mechanisms above.** §10.4's taxonomy declares four codes and requires fixed user copy, expert detail and a documented recovery for each; two were bound elsewhere and two were not bound at all, which is a gap rather than a choice — an unbound code has no copy, and a mechanism with no code emits free text, which §10.4 forbids. The assignment is derived from the mechanisms these two sections describe, not selected:
+
+| Code | Fires when | Recovery |
+|---|---|---|
+| `FE-PROV-001` | A provider fails its §8.3 health probe — unreachable, or `Failing` after consecutive errors. A **liveness** failure, which sampling is stated above to catch | None needed: the app falls back to the provider-less default (§8.1) with the incomplete-history explainer. Nothing local is lost, because provider rows were never transaction-critical (INV-FE-3) |
+| `FE-PROV-002` | A §8.4 sampling round finds **any** mismatch against chain state or the self-ingested overlap window ⇒ auto-disable ([14](14-threat-model.md) TH-49) | The provider is disabled with its reason recorded; re-enabling is an explicit user action. Nothing it supplied was ever verified |
+| `FE-PROV-003` | A snapshot is **rejected at import**: content-hash pin mismatch, malformed encoding, or a failed internal-consistency check (monotone coverage, event↔derived-row agreement, conservation-identity replay) ([14](14-threat-model.md) TH-50) | Nothing is imported and nothing local is evicted — the §8.4 eviction preview happens before import precisely so a rejected snapshot costs the user nothing |
+| `FE-PROV-004` | Two independent snapshots covering the same range **disagree**, the only available cross-check for depths the light client cannot reach | Neither is trusted for the disputed range; the range is left as a labelled hole (§6.3) rather than resolved by majority — two producers cannot outvote the absence of a proof |
+
+`FE-PROV-004` is a **flag on the pair**, not a verdict on either member: the diff proves that at least one is wrong and cannot say which, and a client that picked one would be manufacturing exactly the confidence §8.4 declines to offer.
 
 Import quotas (≤ 400 MB uncompressed, ≤ 4 M rows, streamed, eviction preview before import) — unchanged.
 

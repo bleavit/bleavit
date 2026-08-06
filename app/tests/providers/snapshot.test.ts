@@ -1,0 +1,592 @@
+/**
+ * The snapshot format, its pin, and the forged corpus — 10 §8.2/§8.4, 15 §4.8 (F9).
+ *
+ * 15 §4.8's malicious-provider row asks for a *"forged-snapshot corpus rejected **per class**"*,
+ * which is why {@link SnapshotFinding} names its screens rather than returning a boolean: a
+ * corpus that only proves "bad snapshots are rejected" cannot tell you which screen was
+ * load-bearing when one of them regresses, and a screen that stops firing is invisible under a
+ * fully green run.
+ *
+ * **The corpus deliberately contains a document that is admitted.** 10 §8.4 and 14 TH-50 both
+ * state the limit plainly: these screens do not catch a self-consistent forgery of history at a
+ * depth the light client cannot reach. A corpus made only of rejections would be evidence for a
+ * guarantee this mechanism declines to make, and the honest form is to write the undetectable
+ * forgery down and assert that it passes.
+ */
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+
+import {
+  PROVIDER_REFUSAL_CODES,
+  SNAPSHOT_FORMAT,
+  admitSnapshot,
+  diffSnapshots,
+  parseSnapshot,
+  serializeSnapshot,
+  snapshotPreimage,
+} from '@bleavit/providers';
+import type { SnapshotDocument, SnapshotFinding } from '@bleavit/providers';
+
+const sha256 = (preimage: Uint8Array): string =>
+  createHash('sha256').update(preimage).digest('hex');
+
+const BINDING = { genesisHash: '0xfeed', specVersion: 2, contractVersion: 23 } as const;
+
+/**
+ * A small, valid history — and note it is a **settled** one.
+ *
+ * The `redeem` at block 13 burns PASS alone, so after it the branches no longer agree:
+ * escrow 800, PASS supply 800, FAIL supply 1300. That is exactly the state a conservation
+ * check written as I-1's cross-branch equality would report as a forgery, which is why this
+ * document rather than an unsettled one is the fixture every other case is derived from.
+ */
+function validDocument(): SnapshotDocument {
+  return {
+    format: SNAPSHOT_FORMAT,
+    binding: { ...BINDING },
+    range: { fromBlock: 10, toBlock: 13 },
+    coverage: [{ fromBlock: 10, toBlock: 13 }],
+    vaults: [{ vault: 'v1', branches: ['PASS', 'FAIL'] }],
+    ops: [
+      { kind: 'split', block: 10, vault: 'v1', account: 'alice', amount: '1000' },
+      { kind: 'split', block: 11, vault: 'v1', account: 'bob', amount: '500' },
+      { kind: 'merge', block: 12, vault: 'v1', account: 'alice', amount: '200' },
+      { kind: 'redeem', block: 13, vault: 'v1', account: 'bob', branch: 'PASS', amount: '500' },
+    ],
+    balances: [
+      { vault: 'v1', account: 'alice', branch: 'PASS', amount: '800' },
+      { vault: 'v1', account: 'alice', branch: 'FAIL', amount: '800' },
+      { vault: 'v1', account: 'bob', branch: 'FAIL', amount: '500' },
+    ],
+  };
+}
+
+function pinnedFile(document: SnapshotDocument): { text: string; pin: string } {
+  const text = serializeSnapshot(document);
+  return { text, pin: sha256(snapshotPreimage(document)) };
+}
+
+/** Admit a document that was built here, with its own correct pin. */
+function admit(document: SnapshotDocument) {
+  const { text, pin } = pinnedFile(document);
+  return admitSnapshot(text, { expectedPin: pin, binding: { ...BINDING } }, sha256);
+}
+
+function screens(findings: readonly SnapshotFinding[]): readonly string[] {
+  return [...new Set(findings.map((finding) => finding.screen))].sort();
+}
+
+/** Assert a forged document is rejected, and rejected by exactly the screen claimed. */
+function rejectedBy(document: SnapshotDocument, screen: SnapshotFinding['screen']): void {
+  const verdict = admit(document);
+  assert.equal(verdict.kind, 'rejected');
+  if (verdict.kind !== 'rejected') return;
+  assert.equal(verdict.refusal.code, 'FE-PROV-003');
+  assert.ok(
+    screens(verdict.findings).includes(screen),
+    `expected the ${screen} screen to fire; fired: ${screens(verdict.findings).join(', ')}`,
+  );
+}
+
+// ------------------------------------------------------------------ the positive control
+
+test('the valid, already-settled document is admitted', () => {
+  // The anti-vacuity control for every rejection below: without it, a screen that rejected
+  // everything would look identical to a screen that works.
+  const verdict = admit(validDocument());
+  assert.equal(verdict.kind, 'admitted', JSON.stringify(admit(validDocument()), null, 2));
+});
+
+test('a settled vault is admitted — cross-branch equality is NOT the identity checked', () => {
+  // I-1's `supply[b] == escrow` for every branch holds only until settlement, because `redeem`
+  // burns the winning branch alone. The fixture is post-redemption: escrow 800, PASS 800,
+  // FAIL 1300. A conservation check written the obvious way flags every settled vault in
+  // existence, which is a screen that would have to be switched off within a day.
+  const document = validDocument();
+  const redeems = document.ops.filter((op) => op.kind === 'redeem');
+  assert.equal(redeems.length, 1, 'the fixture must stay settled or this test proves nothing');
+  assert.equal(admit(document).kind, 'admitted');
+});
+
+// ------------------------------------------------------------------ determinism (INV-FE-15)
+
+test('serialization is deterministic and independent of key insertion order', () => {
+  // 10 §8.2: "reproducible byte-identically by anyone". Two producers that built the same
+  // history with fields assigned in a different order must emit one file.
+  const forward = validDocument();
+  const shuffled: SnapshotDocument = {
+    balances: forward.balances,
+    ops: forward.ops,
+    vaults: forward.vaults,
+    coverage: forward.coverage,
+    range: { toBlock: 13, fromBlock: 10 },
+    binding: { contractVersion: 23, specVersion: 2, genesisHash: '0xfeed' },
+    format: SNAPSHOT_FORMAT,
+  };
+  assert.equal(serializeSnapshot(shuffled), serializeSnapshot(forward));
+  assert.equal(sha256(snapshotPreimage(shuffled)), sha256(snapshotPreimage(forward)));
+});
+
+test('the pin is stable across a serialize → parse → serialize round trip', () => {
+  const document = validDocument();
+  const text = serializeSnapshot(document);
+  const reparsed = parseSnapshot(JSON.parse(text));
+  assert.equal(serializeSnapshot(reparsed), text);
+  assert.equal(sha256(snapshotPreimage(reparsed)), sha256(snapshotPreimage(document)));
+});
+
+test('the snapshot tag is distinct, so a snapshot digest can never validate a capsule', () => {
+  // `digestPreimage` is domain-separated for exactly this: two formats sharing a tag means a
+  // document of one type satisfies the other's integrity check.
+  assert.equal(SNAPSHOT_FORMAT, 'bleavit.snapshot.v1');
+  const preimage = new TextDecoder().decode(snapshotPreimage(validDocument()));
+  // The separator is built from its code point, never written as an escape. Writing it
+  // inline puts a raw NUL in this file, which is invisible in every editor, makes git
+  // classify the source as binary, and is dropped by anything that round-trips the text.
+  // `cat -A` caught it here, which is the third time in this repository (app-code rule 14).
+  const nul = String.fromCharCode(0);
+  assert.ok(preimage.startsWith(`${SNAPSHOT_FORMAT}${nul}`));
+  assert.ok(!preimage.startsWith(`${SNAPSHOT_FORMAT} `), 'a space is a legal tag character');
+});
+
+// ------------------------------------------------------------------ the pin and the bytes
+
+test('a wrong pin is rejected, and the file is named as hashing to something else', () => {
+  const { text } = pinnedFile(validDocument());
+  const verdict = admitSnapshot(
+    text,
+    { expectedPin: '0'.repeat(64), binding: { ...BINDING } },
+    sha256,
+  );
+  assert.equal(verdict.kind, 'rejected');
+  if (verdict.kind !== 'rejected') return;
+  assert.deepEqual(screens(verdict.findings), ['pin']);
+  assert.equal(verdict.refusal.code, 'FE-PROV-003');
+});
+
+test('a non-canonical file is rejected even when it parses to the pinned document', () => {
+  // This is the case a consumer that parsed first would admit: the object is identical, so the
+  // pin over the reconstruction matches, and only the *bytes* differ. §8.2 asks for byte-
+  // identical reproduction, so the bytes are the claim.
+  const document = validDocument();
+  const pin = sha256(snapshotPreimage(document));
+  const prettyPrinted = JSON.stringify(document, null, 2);
+  assert.notEqual(prettyPrinted, serializeSnapshot(document));
+  const verdict = admitSnapshot(prettyPrinted, { expectedPin: pin, binding: { ...BINDING } }, sha256);
+  assert.equal(verdict.kind, 'rejected');
+  if (verdict.kind !== 'rejected') return;
+  assert.deepEqual(screens(verdict.findings), ['canonical']);
+});
+
+test('a producer annotation is rejected as non-canonical rather than silently tolerated', () => {
+  const document = validDocument();
+  const pin = sha256(snapshotPreimage(document));
+  const annotated = JSON.stringify({ ...document, producedBy: 'somebody' });
+  const verdict = admitSnapshot(annotated, { expectedPin: pin, binding: { ...BINDING } }, sha256);
+  assert.equal(verdict.kind, 'rejected');
+  if (verdict.kind !== 'rejected') return;
+  assert.ok(screens(verdict.findings).includes('canonical'));
+});
+
+test('the hash function is required — there is no pin that defaults off', () => {
+  // An optional hash function is a content pin that **defaults off**, and a pin that defaults
+  // off is indistinguishable — in every log, every test run and every screen — from one that
+  // was checked and passed. Same defect F20 made structural in `admitIntent`, where
+  // `FE-HANDOFF-010` shipped defined and unreachable.
+  //
+  // Two halves, because each catches what the other cannot.
+  //
+  // *Type level*: `@ts-expect-error` is itself an assertion — if this call ever started
+  // compiling, `tsc` reports the directive as unused and `check:types` goes red. It is here
+  // rather than in the negative-compilation corpus because that corpus contains a fixture
+  // proving `@bleavit/providers` is **unresolvable** from `tests/firewall` (10 §10.1's
+  // CI-fatal edge), and declaring the dependency there to test an arity would have voided the
+  // firewall fixture that depends on its absence. Measured, not assumed: adding it turned
+  // `forbidden-package-edge.ts` from TS2307 to TS2305 and the corpus caught it immediately.
+  //
+  // *Runtime*: the arity check catches the change the type check cannot see — a signature that
+  // grew an **optional** `sha256`, which every existing call site still satisfies.
+  const uncallable: () => unknown = () =>
+    // @ts-expect-error the content pin's hash function is required and is never defaulted
+    admitSnapshot('{}', { expectedPin: 'x', binding: { ...BINDING } });
+  assert.equal(typeof uncallable, 'function');
+  assert.equal(admitSnapshot.length, 3);
+});
+
+// ------------------------------------------------------------------ class: malformed
+
+test('malformed: a foreign format tag', () => {
+  const verdict = admitSnapshot(
+    JSON.stringify({ ...validDocument(), format: 'bleavit.snapshot.v2' }),
+    { expectedPin: 'irrelevant', binding: { ...BINDING } },
+    sha256,
+  );
+  assert.equal(verdict.kind, 'rejected');
+  if (verdict.kind !== 'rejected') return;
+  assert.deepEqual(screens(verdict.findings), ['malformed']);
+});
+
+test('malformed: an amount written as a JSON number', () => {
+  // V-74's shape. `u128` base units run past 2^53, so a JSON number is rounded on load and the
+  // document then fails its own conservation replay for reasons that look like a forgery.
+  const document = validDocument();
+  const text = serializeSnapshot(document).replace('"amount":"1000"', '"amount":1000');
+  const verdict = admitSnapshot(text, { expectedPin: 'x', binding: { ...BINDING } }, sha256);
+  assert.equal(verdict.kind, 'rejected');
+  if (verdict.kind !== 'rejected') return;
+  assert.deepEqual(screens(verdict.findings), ['malformed']);
+  assert.match(verdict.findings[0]!.why, /canonical decimal string/);
+});
+
+test('malformed: a leading-zero amount, which two producers would render differently', () => {
+  const text = serializeSnapshot(validDocument()).replace('"amount":"1000"', '"amount":"01000"');
+  const verdict = admitSnapshot(text, { expectedPin: 'x', binding: { ...BINDING } }, sha256);
+  assert.equal(verdict.kind, 'rejected');
+});
+
+test('malformed: a zero-amount movement, which survives every other screen and means nothing', () => {
+  const document = validDocument();
+  const forged: SnapshotDocument = {
+    ...document,
+    ops: [...document.ops, { kind: 'split', block: 13, vault: 'v1', account: 'mallory', amount: '0' }],
+  };
+  rejectedBy(forged, 'malformed');
+});
+
+test('malformed: an unknown op kind', () => {
+  const text = serializeSnapshot(validDocument()).replace('"kind":"merge"', '"kind":"mint"');
+  const verdict = admitSnapshot(text, { expectedPin: 'x', binding: { ...BINDING } }, sha256);
+  assert.equal(verdict.kind, 'rejected');
+  if (verdict.kind !== 'rejected') return;
+  assert.deepEqual(screens(verdict.findings), ['malformed']);
+});
+
+test('malformed: a one-branch vault, whose conservation identity would be vacuous', () => {
+  const document = validDocument();
+  rejectedBy({ ...document, vaults: [{ vault: 'v1', branches: ['PASS'] }] }, 'malformed');
+});
+
+test('malformed: a block height that is not a u32', () => {
+  const text = serializeSnapshot(validDocument()).replace('"toBlock":13', '"toBlock":13.5');
+  const verdict = admitSnapshot(text, { expectedPin: 'x', binding: { ...BINDING } }, sha256);
+  assert.equal(verdict.kind, 'rejected');
+  if (verdict.kind !== 'rejected') return;
+  assert.deepEqual(screens(verdict.findings), ['malformed']);
+});
+
+test('malformed: not JSON at all', () => {
+  const verdict = admitSnapshot('<html>404</html>', { expectedPin: 'x', binding: { ...BINDING } }, sha256);
+  assert.equal(verdict.kind, 'rejected');
+  if (verdict.kind !== 'rejected') return;
+  assert.deepEqual(screens(verdict.findings), ['malformed']);
+});
+
+// ------------------------------------------------------------------ class: wrong chain
+
+test('binding: a snapshot of another chain is refused by exact equality', () => {
+  const { text, pin } = pinnedFile({
+    ...validDocument(),
+    binding: { genesisHash: '0xbeef', specVersion: 2, contractVersion: 23 },
+  });
+  const verdict = admitSnapshot(text, { expectedPin: pin, binding: { ...BINDING } }, sha256);
+  assert.equal(verdict.kind, 'rejected');
+  if (verdict.kind !== 'rejected') return;
+  assert.deepEqual(screens(verdict.findings), ['binding']);
+});
+
+test('binding: a differing spec_version alone is enough', () => {
+  const { text, pin } = pinnedFile({ ...validDocument(), binding: { ...BINDING, specVersion: 3 } });
+  const verdict = admitSnapshot(text, { expectedPin: pin, binding: { ...BINDING } }, sha256);
+  assert.equal(verdict.kind, 'rejected');
+});
+
+// ------------------------------------------------------------------ class: coverage
+
+test('coverage: overlapping ranges are not monotone coverage', () => {
+  const document = validDocument();
+  rejectedBy(
+    {
+      ...document,
+      coverage: [
+        { fromBlock: 10, toBlock: 12 },
+        { fromBlock: 11, toBlock: 13 },
+      ],
+    },
+    'coverage',
+  );
+});
+
+test('coverage: a range outside the declared span', () => {
+  const document = validDocument();
+  rejectedBy({ ...document, coverage: [{ fromBlock: 10, toBlock: 99 }] }, 'coverage');
+});
+
+test('coverage: a movement at a block no declared range covers', () => {
+  // The one a forger reaches for: declare coverage of a short window, ship history from
+  // outside it, and the document never even claims to have observed the blocks it reports.
+  const document = validDocument();
+  rejectedBy(
+    {
+      ...document,
+      range: { fromBlock: 10, toBlock: 99 },
+      coverage: [{ fromBlock: 10, toBlock: 11 }],
+    },
+    'coverage',
+  );
+});
+
+test('coverage: an inverted span', () => {
+  const document = validDocument();
+  rejectedBy({ ...document, range: { fromBlock: 13, toBlock: 10 } }, 'coverage');
+});
+
+// ------------------------------------------------------------------ class: conservation
+
+test('conservation: merging more than an account holds', () => {
+  const document = validDocument();
+  rejectedBy(
+    {
+      ...document,
+      ops: [
+        { kind: 'split', block: 10, vault: 'v1', account: 'alice', amount: '1000' },
+        { kind: 'merge', block: 11, vault: 'v1', account: 'alice', amount: '4000' },
+      ],
+      balances: [],
+    },
+    'conservation',
+  );
+});
+
+test('conservation: a movement in an undeclared vault', () => {
+  const document = validDocument();
+  rejectedBy(
+    {
+      ...document,
+      ops: [...document.ops, { kind: 'split', block: 13, vault: 'ghost', account: 'x', amount: '5' }],
+    },
+    'conservation',
+  );
+});
+
+test('conservation: redeeming a branch the vault does not have', () => {
+  const document = validDocument();
+  rejectedBy(
+    {
+      ...document,
+      ops: [
+        { kind: 'split', block: 10, vault: 'v1', account: 'alice', amount: '1000' },
+        { kind: 'redeem', block: 11, vault: 'v1', account: 'alice', branch: 'MAYBE', amount: '10' },
+      ],
+      balances: [
+        { vault: 'v1', account: 'alice', branch: 'PASS', amount: '1000' },
+        { vault: 'v1', account: 'alice', branch: 'FAIL', amount: '1000' },
+      ],
+    },
+    'conservation',
+  );
+});
+
+test('conservation is checked at EVERY step, not only at the end', () => {
+  // The mutation this test exists for: fold everything, then check once. An account that goes
+  // negative and back again ends in a perfectly consistent state, and the intermediate state
+  // is the one that could never have existed on chain — alice never held 500 to merge at
+  // block 11, and the later split does not retroactively make her solvent.
+  const document = validDocument();
+  const forged: SnapshotDocument = {
+    ...document,
+    ops: [
+      { kind: 'split', block: 10, vault: 'v1', account: 'bob', amount: '500' },
+      { kind: 'merge', block: 11, vault: 'v1', account: 'alice', amount: '500' },
+      { kind: 'split', block: 12, vault: 'v1', account: 'alice', amount: '500' },
+    ],
+    balances: [
+      { vault: 'v1', account: 'bob', branch: 'PASS', amount: '500' },
+      { vault: 'v1', account: 'bob', branch: 'FAIL', amount: '500' },
+    ],
+  };
+  // The end state is self-consistent: alice nets to zero, bob holds what he split.
+  const replayEndsClean = forged.balances.every((row) => BigInt(row.amount) > 0n);
+  assert.equal(replayEndsClean, true, 'the fixture must end clean or it proves nothing');
+  rejectedBy(forged, 'conservation');
+});
+
+// ------------------------------------------------------------------ class: derived rows
+
+test('derived rows: a fabricated balance no movement produces', () => {
+  const document = validDocument();
+  rejectedBy(
+    {
+      ...document,
+      balances: [
+        ...document.balances,
+        { vault: 'v1', account: 'mallory', branch: 'PASS', amount: '9999' },
+      ],
+    },
+    'derived-rows',
+  );
+});
+
+test('derived rows: an omitted holding — the direction that renders an account as empty', () => {
+  // The omission direction is the one that matters. A snapshot that drops a holder's rows says
+  // that account holds nothing, which is a false statement about the chain rather than a
+  // missing one, and no badge distinguishes the two.
+  const document = validDocument();
+  rejectedBy({ ...document, balances: document.balances.slice(0, 2) }, 'derived-rows');
+});
+
+test('derived rows: a stated amount that disagrees with the fold', () => {
+  const document = validDocument();
+  const [first, ...rest] = document.balances;
+  rejectedBy({ ...document, balances: [{ ...first!, amount: '801' }, ...rest] }, 'derived-rows');
+});
+
+test('derived rows: one holding stated twice', () => {
+  const document = validDocument();
+  rejectedBy({ ...document, balances: [...document.balances, document.balances[0]!] }, 'derived-rows');
+});
+
+test('derived rows: a zero holding is an absent row, not a row saying zero', () => {
+  // bob's PASS is fully redeemed at block 13. Requiring a `0` row would make every merged-out
+  // position owe a row forever, and two honest producers would then disagree about a history
+  // they both observed correctly.
+  const document = validDocument();
+  rejectedBy(
+    {
+      ...document,
+      balances: [...document.balances, { vault: 'v1', account: 'bob', branch: 'PASS', amount: '0' }],
+    },
+    'derived-rows',
+  );
+});
+
+// ------------------------------------------------------------------ every screen reports
+
+test('a document that fails several classes reports all of them, not the first', () => {
+  const document = validDocument();
+  const verdict = admit({
+    ...document,
+    binding: { ...BINDING, specVersion: 99 },
+    coverage: [{ fromBlock: 10, toBlock: 11 }],
+    balances: [],
+  });
+  assert.equal(verdict.kind, 'rejected');
+  if (verdict.kind !== 'rejected') return;
+  const fired = screens(verdict.findings);
+  assert.ok(fired.includes('binding'));
+  assert.ok(fired.includes('coverage'));
+  assert.ok(fired.includes('derived-rows'));
+});
+
+// ------------------------------------------------------------------ THE ADMITTED FORGERY
+
+test('a self-consistent deep forgery is ADMITTED — 10 §8.4 and 14 TH-50 say so', () => {
+  // This is the honest half of the guarantee, written down and asserted rather than left as
+  // prose. Every movement below is fabricated: alice and bob never existed, this history never
+  // happened. It passes every screen because it is *internally* consistent — coverage is
+  // monotone, escrow and supply reconcile at every step, and the balances are exactly what the
+  // movements produce.
+  //
+  // Nothing in this module can catch it, and the design says so instead of implying otherwise.
+  // What limits the damage is elsewhere and structural: `Finalized<T>` is unnameable in this
+  // package, so none of this can ever satisfy a precondition or render as verified (INV-FE-3),
+  // and 14 TH-49 records provider chart manipulation as a declared accepted residual.
+  const forgery: SnapshotDocument = {
+    format: SNAPSHOT_FORMAT,
+    binding: { ...BINDING },
+    range: { fromBlock: 1, toBlock: 100 },
+    coverage: [{ fromBlock: 1, toBlock: 100 }],
+    vaults: [{ vault: 'never-existed', branches: ['PASS', 'FAIL'] }],
+    ops: [
+      { kind: 'split', block: 1, vault: 'never-existed', account: 'ghost', amount: '100000000000000000001' },
+      { kind: 'merge', block: 50, vault: 'never-existed', account: 'ghost', amount: '30000000000000000000' },
+    ],
+    balances: [
+      { vault: 'never-existed', account: 'ghost', branch: 'PASS', amount: '70000000000000000001' },
+      { vault: 'never-existed', account: 'ghost', branch: 'FAIL', amount: '70000000000000000001' },
+    ],
+  };
+  assert.equal(admit(forgery).kind, 'admitted');
+  // And the amounts survived intact, which is the point of decimal strings: past 2^53 a JSON
+  // number would have been rounded here — the trailing 1 is what disappears — and the forgery
+  // would have been caught for the wrong reason, making this test claim a detection the
+  // mechanism does not have.
+  const held = BigInt(forgery.balances[0]!.amount);
+  assert.equal(held, BigInt('70000000000000000001'));
+  assert.notEqual(held, BigInt(Number(forgery.balances[0]!.amount)));
+});
+
+// ------------------------------------------------------------------ the two-snapshot diff
+
+test('two producers that agree over their overlap agree', () => {
+  const left = validDocument();
+  const right: SnapshotDocument = { ...validDocument(), range: { fromBlock: 10, toBlock: 13 } };
+  const verdict = diffSnapshots(left, right);
+  assert.equal(verdict.kind, 'agree');
+});
+
+test('a disagreement flags the PAIR and names neither as the wrong one', () => {
+  const left = validDocument();
+  const document = validDocument();
+  const [first, ...rest] = document.ops;
+  assert.equal(first!.kind, 'split');
+  const right: SnapshotDocument = { ...document, ops: [{ ...first!, amount: '999' }, ...rest] };
+  const verdict = diffSnapshots(left, right);
+  assert.equal(verdict.kind, 'disagree');
+  if (verdict.kind !== 'disagree') return;
+  assert.equal(verdict.refusal.code, 'FE-PROV-004');
+  // The recovery must not tell the user to pick one. Two producers cannot outvote the absence
+  // of a proof, and a client that resolved this would manufacture exactly the confidence
+  // §8.4 declines to offer.
+  assert.match(verdict.refusal.recovery, /neither is used/);
+  assert.ok(verdict.disagreements.length > 0);
+});
+
+test('no overlap reports overlap: undefined rather than a clean bill', () => {
+  // Two producers covering disjoint history have cross-checked nothing. "Agree" with nothing
+  // compared is the shape a user reads as confirmation.
+  const left = validDocument();
+  const right: SnapshotDocument = {
+    ...validDocument(),
+    range: { fromBlock: 500, toBlock: 600 },
+    coverage: [{ fromBlock: 500, toBlock: 600 }],
+    ops: [],
+    balances: [],
+  };
+  const verdict = diffSnapshots(left, right);
+  assert.equal(verdict.kind, 'agree');
+  if (verdict.kind !== 'agree') return;
+  assert.equal(verdict.overlap, undefined);
+});
+
+test('a movement present in one snapshot and absent from the other is a disagreement', () => {
+  const left = validDocument();
+  const right: SnapshotDocument = { ...validDocument(), ops: validDocument().ops.slice(0, 3) };
+  const verdict = diffSnapshots(left, right);
+  assert.equal(verdict.kind, 'disagree');
+  if (verdict.kind !== 'disagree') return;
+  assert.equal(verdict.disagreements.length, 1);
+  assert.equal(verdict.disagreements[0]!.right, undefined);
+});
+
+// ------------------------------------------------------------------ the refusal family
+
+test('the FE-PROV family is exactly 001..004, each with copy and a recovery', () => {
+  assert.deepEqual([...PROVIDER_REFUSAL_CODES], [
+    'FE-PROV-001',
+    'FE-PROV-002',
+    'FE-PROV-003',
+    'FE-PROV-004',
+  ]);
+});
+
+test('FE-PROV-003 promises that nothing was imported and nothing was deleted', () => {
+  // §8.4's eviction preview runs *before* the import precisely so a rejected snapshot costs
+  // the user nothing, and the copy is where that promise becomes visible.
+  const verdict = admitSnapshot('{}', { expectedPin: 'x', binding: { ...BINDING } }, sha256);
+  assert.equal(verdict.kind, 'rejected');
+  if (verdict.kind !== 'rejected') return;
+  assert.match(verdict.refusal.message, /nothing was imported/);
+  assert.match(verdict.refusal.recovery, /Nothing local was deleted/);
+});

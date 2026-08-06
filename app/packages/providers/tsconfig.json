@@ -9,6 +9,9 @@
   ],
   "references": [
     {
+      "path": "../handoff-envelope"
+    },
+    {
       "path": "../shared-types"
     }
   ]
