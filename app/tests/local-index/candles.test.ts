@@ -25,6 +25,7 @@ import {
   holesIn,
   mergeCandle,
   nextResolution,
+  previousResolution,
   priceSample,
   rollUp,
   sourceKeyOf,
@@ -177,6 +178,34 @@ test('an evicted range is downsampled — not a hole, and not a silent splice', 
   // And the blocks stay covered — `holesIn` over the same span reports nothing missing.
   const coverage = [selfRange(1_000, 2_000, 1, EDGE)];
   assert.deepEqual(holesIn(coverage, { fromBlock: 1_000, toBlock: 2_000 }), []);
+});
+
+test('the rendered reason names the rung that was folded, not "raw" on every rung', () => {
+  // §9.2's ladder is `raw → candles1h → candles4h → candles1d` and `DownsampledRange.reason` is
+  // *"rendered, not logged"* — so it is user copy. It read *"raw samples for these blocks were
+  // evicted"* whatever the rung, which is true of exactly one of the three: a range degraded to
+  // `candles4h` lost its **hourly candles**, and its raw samples went one pass earlier at the rung
+  // below. A user told the raw tier was just evicted asks why the chart lost an hour of detail it
+  // had five minutes ago, and the answer names the wrong event.
+  assert.match(downsample(1, 2, 'candles1h', 1).reason, /^raw samples for these blocks/);
+  assert.match(downsample(1, 2, 'candles4h', 1).reason, /^hourly candles for these blocks/);
+  assert.match(downsample(1, 2, 'candles1d', 1).reason, /^four-hourly candles for these blocks/);
+  // Every rung still says what survives and that this is not a gap — the part that was right.
+  for (const rung of ['candles1h', 'candles4h', 'candles1d'] as const) {
+    assert.match(downsample(1, 2, rung, 1).reason, new RegExp(`covered at ${rung} resolution`));
+    assert.match(downsample(1, 2, rung, 1).reason, /not a gap/);
+  }
+
+  // Derived from `DEGRADATION_LADDER` rather than written out a second time: the ladder IS the
+  // degradation guarantee, so a copy of it is how the two disagree. `previousResolution` is the
+  // inverse of `nextResolution`, and the pair is asserted as one round trip rather than twice.
+  for (const rung of DEGRADATION_LADDER) {
+    const next = nextResolution(rung);
+    if (next === undefined) continue;
+    assert.equal(previousResolution(next), rung, `${rung} → ${next} does not come back`);
+  }
+  // `raw` is the floor of the ladder in the other direction: nothing folds into it.
+  assert.throws(() => previousResolution('raw' as Exclude<Resolution, 'raw'>), CandleError);
 });
 
 test('a malformed range or timestamp is refused rather than summarised', () => {

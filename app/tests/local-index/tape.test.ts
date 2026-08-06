@@ -86,7 +86,16 @@ test('an over-wide window is REFUSED, never truncated', async () => {
     },
   );
   // The boundary is inclusive on both ends, so the widest admissible window is exactly the bound.
-  assert.deepEqual(await readTradeTape([], { fromBlock: 0, toBlock: bound.maxBlocks - 1 }, bound), []);
+  const widest = await readTradeTape([], { fromBlock: 0, toBlock: bound.maxBlocks - 1 }, bound);
+  assert.deepEqual([...widest.fills], []);
+  // ...and an empty stream over an admissible window is the whole window MISSING, not a quiet
+  // market. This is the degenerate case of the same rule the gap test below asserts.
+  assert.deepEqual([...widest.observed], []);
+  assert.deepEqual(
+    [...widest.missing],
+    [{ fromBlock: 0, toBlock: bound.maxBlocks - 1 }],
+    'an empty stream reported the window as delivered and quiet',
+  );
 
   // An inverted window reads as *no fills*, which on a trade tape is *the market was quiet* — the
   // same silent inversion `holesIn` refuses for a coverage span.
@@ -95,7 +104,7 @@ test('an over-wide window is REFUSED, never truncated', async () => {
 
 test('the tape reads the SCAN STREAM and reports fills in chain order', async () => {
   const bound = tradeTapeBound(platformBudget('desktop'), SIZES);
-  const fills = await readTradeTape(
+  const tape = await readTradeTape(
     [
       traded(100, [{ bookId: '7', price1e9: 100n }]),
       // Outside the window: skipped rather than refused, because the caller drives one
@@ -109,16 +118,74 @@ test('the tape reads the SCAN STREAM and reports fills in chain order', async ()
     { fromBlock: 100, toBlock: 200 },
     bound,
   );
-  assert.equal(fills.length, 3, 'a fill outside the window was reported, or one inside was dropped');
+  assert.equal(tape.fills.length, 3, 'a fill outside the window was reported, or one inside was dropped');
   assert.deepEqual(
-    fills.map((fill) => [fill.blockNumber, fill.bookId, fill.price1e9, fill.eventIndex]),
+    tape.fills.map((fill) => [fill.blockNumber, fill.bookId, fill.price1e9, fill.eventIndex]),
     [
       [100, '7', 100n, 0],
       [101, '7', 200n, 0],
       [101, '9', 300n, 1],
     ],
   );
-  assert.equal(nth(fills, 0, 'fill').price1e9, 100n);
+  assert.equal(nth(tape.fills, 0, 'fill').price1e9, 100n);
+  // The two blocks the stream delivered inside the window, merged — and 400 is not among them,
+  // because an out-of-window scan is not an observation of the window.
+  assert.deepEqual([...tape.observed], [{ fromBlock: 100, toBlock: 101 }]);
+  assert.deepEqual([...tape.missing], [{ fromBlock: 102, toBlock: 200 }]);
+});
+
+test('a block the stream never delivered is DISCLOSED, not reported as a quiet market (SQ-900)', async () => {
+  // The defect this closes, in one sentence: a scan outside the window and a block the stream
+  // never delivered were skipped by the same `continue`, so a reconnect gap inside 100..200 came
+  // back as fewer fills with nothing saying why — which is exactly what a surface renders as *the
+  // market was quiet*. The module already refuses an INVERTED window for that reason and did not
+  // apply the reasoning to a gap.
+  //
+  // Whether 10 §6.3's "every history query returns data plus the coverage it came from" binds this
+  // read is SQ-900: §6.3 is scoped to the layer-3 index and §9.1 makes the tape deliberately not
+  // layer 3, while INV-FE-15's "never silently spliced" carries no such scoping. The conservative
+  // reading is implemented and the question is filed rather than settled here.
+  const bound = tradeTapeBound(platformBudget('desktop'), SIZES);
+  const tape = await readTradeTape(
+    [
+      traded(100, [{ bookId: '7', price1e9: 100n }]),
+      traded(101, []),
+      // 102..149 never arrive — a dropped subscription, a paused tab, a stream that resumed late.
+      traded(150, [{ bookId: '7', price1e9: 500n }]),
+    ],
+    { fromBlock: 100, toBlock: 200 },
+    bound,
+  );
+  // The fills are the honest ones: two, over a window whose middle nobody saw.
+  assert.equal(tape.fills.length, 2);
+  // A block that WAS delivered and carried no fills is an observation — *the market was quiet
+  // here* is a true statement about block 101 and a false one about 102..149. That distinction is
+  // the whole content of this test: both look like "no fills" to the caller without it.
+  assert.deepEqual([...tape.observed], [
+    { fromBlock: 100, toBlock: 101 },
+    { fromBlock: 150, toBlock: 150 },
+  ]);
+  assert.deepEqual([...tape.missing], [
+    { fromBlock: 102, toBlock: 149 },
+    { fromBlock: 151, toBlock: 200 },
+  ]);
+});
+
+test('out-of-order and duplicated scans do not manufacture coverage of the window', async () => {
+  // A subscription is not a sorted list, and a re-delivered block must not read as two. Both are
+  // properties of the `Set` + merge rather than of a running cursor, and a cursor is the obvious
+  // implementation — it would report 100..101 for a stream that delivered 101 twice.
+  const bound = tradeTapeBound(platformBudget('desktop'), SIZES);
+  const tape = await readTradeTape(
+    [traded(103, []), traded(101, []), traded(101, []), traded(102, [])],
+    { fromBlock: 100, toBlock: 104 },
+    bound,
+  );
+  assert.deepEqual([...tape.observed], [{ fromBlock: 101, toBlock: 103 }]);
+  assert.deepEqual([...tape.missing], [
+    { fromBlock: 100, toBlock: 100 },
+    { fromBlock: 104, toBlock: 104 },
+  ]);
 });
 
 test('a chain busier than §9.1’s ceiling refuses PART-WAY rather than answering short', async () => {

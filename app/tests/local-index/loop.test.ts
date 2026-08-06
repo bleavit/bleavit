@@ -20,10 +20,13 @@ import assert from 'node:assert/strict';
 import {
   EMPTY_COVERAGE,
   IngestLoopError,
+  addRange,
   ingestBlock,
   isVerifiedAt,
+  providerRange,
   runIngest,
 } from '@bleavit/local-index';
+import { selfRange } from '@bleavit/local-index/testing';
 import { nth } from './nth.ts';
 import type {
   BlockWrite,
@@ -302,4 +305,56 @@ test('the index guard is >=, not > — index N against N extrinsics is out of ra
   };
   const ok = await ingestBlock(EMPTY_COVERAGE, lastValid, WATCHED, SELF, ports());
   assert.equal(ok.rowCount, 1);
+});
+
+test('the run reports the ranges nothing could CHECK, not only the ones it dropped', async () => {
+  // §6.3's last bullet is what decides what an absent report means: *"a caller is handed such
+  // ranges as the set that could not be checked … so a range that appears in neither the
+  // invalidated nor the unchecked set is one that genuinely passed."* `verifyRanges` computes
+  // both sets and `RunResult` carried only the first, so on the path that runs **every session** a
+  // provider range read to its caller as one the chain had agreed with.
+  //
+  // It is not an edge case. Since the `unverifiable` edge arm landed, a provider range is
+  // checkable for genesis and for nothing else, so **every** provider range verdicts `unchecked`
+  // by construction. `checkIndexAtBoot` forwarded it all along, which is the part worth naming:
+  // the boot report told the truth while the per-session path did not, about the same coverage.
+  const imported = providerRange('snapshot', 'pub-1', 1, 10, 1, {
+    kind: 'unverifiable',
+    genesisHash: GENESIS,
+    why: 'imported from a snapshot file, which carries no block hash',
+  });
+  const verified = selfRange(20, 30, 1, {
+    kind: 'checked',
+    genesisHash: GENESIS,
+    hash: blockHash(30),
+    specVersion: 3,
+  });
+  const coverage = addRange(addRange(EMPTY_COVERAGE, verified), imported);
+
+  const run = await runIngest(coverage, [scan(100)], WATCHED, SELF, ports({
+    // A chain that answers: the self range is genuinely checked and agrees, so it must appear in
+    // neither list. Without this arm the assertion below passes for the wrong reason — every
+    // range is unchecked when nothing can be observed.
+    observeEdge: (range) => ({ genesisHash: GENESIS, hash: blockHash(range.toBlock), specVersion: 3 }),
+  }));
+
+  assert.deepEqual([...run.invalidated], [], 'nothing disagreed, so nothing may be invalidated');
+  assert.equal(run.unchecked.length, 1, 'the provider range is in neither list, so it reads as passed');
+  assert.equal(nth(run.unchecked, 0, 'range').origin, 'snapshot');
+  assert.equal(
+    run.unchecked.some((range) => range.origin === 'self'),
+    false,
+    'a range the chain agreed with was reported as unchecked, which is the other wrong answer',
+  );
+
+  // ...and on the failure path too. A run that stops mid-way still made the checks before its
+  // first block, and a caller that learns nothing about them from a failed run is the same
+  // silence one branch over.
+  const stopped = await runIngest(coverage, [scan(101, { watched: true })], WATCHED, SELF, ports({
+    observeEdge: (range) => ({ genesisHash: GENESIS, hash: blockHash(range.toBlock), specVersion: 3 }),
+    fetchBodies: async () => { throw new Error('peer disconnected'); },
+  }));
+  assert.ok(stopped.stoppedAt instanceof IngestLoopError);
+  assert.equal(stopped.unchecked.length, 1, 'the failure path dropped the unchecked set');
+  assert.equal(nth(stopped.unchecked, 0, 'range').origin, 'snapshot');
 });

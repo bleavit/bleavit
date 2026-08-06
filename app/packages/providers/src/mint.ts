@@ -79,11 +79,13 @@ export type ProviderOrigin = 'snapshot' | 'indexer';
 /**
  * `0x` + 32 bytes — the rendering every hash in this repository is carried in.
  *
- * Restated here rather than imported, because `@bleavit/local-index`'s copy is module-private
- * and importing its barrel for a regex would pull Dexie into this package's graph — the exact
- * edge the type-only `CoverageRange` import above exists to avoid. The two are checked against
- * each other by the mint suite, which asserts a range this module produces is accepted by that
- * package's own `assertCanonical`.
+ * Restated here rather than imported, because importing `@bleavit/local-index`'s barrel for a
+ * regex would pull Dexie into this package's graph — the exact edge the type-only `CoverageRange`
+ * import above exists to avoid. That is the whole reason: the claim that the other copy is
+ * *module-private* was false while `isGenesisHash` was barrel-exported beside it, and a reason
+ * that is not true is one a later reader repairs by importing the thing. The two regexes are
+ * checked against each other by the mint suite, which asserts a range this module produces is
+ * accepted by that package's own `assertCanonical`.
  */
 const HASH_32 = /^0x[0-9a-f]{64}$/;
 

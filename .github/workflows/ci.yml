@@ -678,6 +678,23 @@ jobs:
         working-directory: app
         run: pnpm run test:local-index
 
+      - name: No chart tier is readable as bare rows (10 §6.3, INV-FE-15)
+        # 10 §6.3: "Every history query returns data plus the coverage it came from — a
+        # CoveredResult<T>, never bare rows, because bare rows render as a complete
+        # series." That sentence was violated three review rounds running and every repair
+        # was a function nothing was obliged to call, because `db.candles1h.toArray()`
+        # typechecks, needs no cast, crosses no firewall edge and returns an array that
+        # looks exactly like a complete history. So the convention is made structural:
+        # outside `local-index` a chart tier may not be named at all, and inside it a
+        # reference must sit in a `coveredQuery(...)` or in one of two named modules that
+        # answer no history question (the §9.2 ladder and the §9.1 scan-time aggregate).
+        # AST-based, so a tier named in a comment, a string body or a type declaration is
+        # not a property access. The witness leg reads one fixture under both rules and
+        # requires the covered-read control to stay silent under the second — an exemption
+        # widened to "anything in the package" would otherwise pass every expectation.
+        working-directory: app
+        run: pnpm run check:covered-history && pnpm run check:covered-history:witness
+
       - name: Ingest scanner — the chain-client/local-index join (10 §6.5, F8)
         # The one module that turns a decoded `System.Events` blob into a
         # `FinalizedBlockScan`. Its safety property is a REFUSAL and it is one line

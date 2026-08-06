@@ -679,6 +679,39 @@ export interface DownsampledRange {
   readonly at: number;
 }
 
+/**
+ * What each rung is called in a sentence a user reads.
+ *
+ * A record rather than a formatter, so a fifth rung cannot be added without deciding what to call
+ * it: `Record<Resolution, string>` fails to compile until the new key is written down.
+ */
+const RUNG_COPY: Readonly<Record<Resolution, string>> = Object.freeze({
+  raw: 'raw samples',
+  candles1h: 'hourly candles',
+  candles4h: 'four-hourly candles',
+  candles1d: 'daily candles',
+});
+
+/**
+ * The rung one step **finer** than `of` — what the ladder folded away to produce it.
+ *
+ * The inverse of `nextResolution`, and the reason it exists is that `downsample`'s rendered
+ * `reason` said *"raw samples for these blocks were evicted"* on **every** rung. §9.2's ladder is
+ * `raw → candles1h → candles4h → candles1d`, so a range degraded to `candles4h` lost its hourly
+ * candles and its raw samples went at the previous rung, one eviction pass earlier — the sentence
+ * was true of exactly one of three cases, and the reason is *"rendered, not logged"*.
+ *
+ * Derived from `DEGRADATION_LADDER` rather than written out, because the ladder **is** the
+ * degradation guarantee (see `laddersAgree`) and a second copy of it is how the two disagree.
+ */
+export function previousResolution(of: Exclude<Resolution, 'raw'>): Resolution {
+  const previous = DEGRADATION_LADDER[DEGRADATION_LADDER.indexOf(of) - 1];
+  if (previous === undefined) {
+    throw new CandleError(`${of} is not a rung of 10 §9.2's ladder, so nothing folds into it`);
+  }
+  return previous;
+}
+
 export function downsample(
   fromBlock: number,
   toBlock: number,
@@ -695,9 +728,9 @@ export function downsample(
     resolution: to,
     at,
     reason:
-      `raw samples for these blocks were evicted to stay inside the storage budget; the ` +
-      `range is still covered at ${to} resolution. This is not a gap — nothing is missing, ` +
-      'and refetching would not add detail this client ever had.',
+      `${RUNG_COPY[previousResolution(to)]} for these blocks were folded away to stay inside the ` +
+      `storage budget; the range is still covered at ${to} resolution. This is not a gap — ` +
+      'nothing is missing, and refetching would not add detail this client ever had.',
   };
 }
 

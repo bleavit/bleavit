@@ -33,7 +33,6 @@ import {
   readDownsampled,
   sourceKeyOf,
   writeCoverage,
-  writeDownsampled,
 } from '@bleavit/local-index';
 import {
   MAX_REPORTED_STEPS,
@@ -49,7 +48,10 @@ import {
   readPendingRawEvicted,
 } from '@bleavit/local-index';
 import type { Candle, PriceSample, QuotaShares, RowSizes, SettledProposal } from '@bleavit/local-index';
-import { selfRange } from '@bleavit/local-index/testing';
+// `writeDownsampled` is reachable only here, and that is 10 §9.2 obligation 1 as a boundary rather
+// than a note: through the barrel any consumer could write the label with no eviction behind it,
+// leaving rows present and `meta.downsampled` claiming they were folded.
+import { selfRange, writeDownsampled } from '@bleavit/local-index/testing';
 import { nth } from './nth.ts';
 
 const GENESIS = `0x${'e5'.repeat(32)}`;
@@ -167,11 +169,11 @@ test('§9.3’s byte bound IS §9.2’s metadata share, and the count is what bi
   // The `min` is kept even though the two agree: they are two independently editable numbers in
   // two sections, and the tighter one is the only safe composition.
   assert.equal(platformBudget('desktop').metadataBytes, Math.min(15 * 1000 * 1000, METADATA_BOUND.desktop.bytes));
-  // At the measured 0.14 MB gz blob the COUNT limit is what actually binds: eight blobs are
-  // ~1.1 MB against a 15 MB budget.
+  // At the measured 0.15 MB gz blob the COUNT limit is what actually binds: eight blobs are
+  // ~1.2 MB against a 15 MB budget.
   assert.equal(platformBudget('desktop').metadataBlobs, 8);
   assert.equal(platformBudget('mobile').metadataBlobs, 3);
-  assert.ok(8 * 0.14 * 1000 * 1000 < platformBudget('desktop').metadataBytes);
+  assert.ok(8 * 0.15 * 1000 * 1000 < platformBudget('desktop').metadataBytes);
 });
 
 test('there is no default platform — a client that cannot say takes the phone’s cap by mistake', () => {

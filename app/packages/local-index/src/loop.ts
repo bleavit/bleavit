@@ -398,6 +398,22 @@ export interface RunResult {
    * silently shrank between two sessions is one the user re-backfills without knowing why.
    */
   readonly invalidated: readonly RangeCheck[];
+  /**
+   * The ranges nothing could check on this run — and the field this result was missing.
+   *
+   * §6.3's last bullet decides what its absence means: *"a caller is handed such ranges as the set
+   * that could not be checked … so a range that appears in neither the invalidated nor the
+   * unchecked set is one that genuinely passed."* `verifyRanges` computes it and `runIngest`
+   * dropped it, so on the path that runs **every session** a range in neither list read as one
+   * that passed. That is not a rare case since the `unverifiable` edge arm landed: a provider
+   * range can be checked for genesis and for nothing else, so **every** provider range verdicts
+   * `unchecked` by construction, and the client was reporting each of them as verified-and-agreed.
+   *
+   * `checkIndexAtBoot` forwarded it correctly all along, which made the two paths disagree about
+   * the same coverage — and the per-session one is the worse of the two to get wrong, because it
+   * is the one a long-running tab reads after the boot report has scrolled away.
+   */
+  readonly unchecked: readonly CoverageRange[];
   readonly stoppedAt: IngestLoopError | undefined;
 }
 
@@ -434,6 +450,7 @@ export async function runIngest(
         pendingDecode,
         tradesFolded,
         invalidated: checked.invalidated,
+        unchecked: checked.unchecked,
         stoppedAt,
       };
     }
@@ -450,6 +467,7 @@ export async function runIngest(
     pendingDecode,
     tradesFolded,
     invalidated: checked.invalidated,
+    unchecked: checked.unchecked,
     stoppedAt: undefined,
   };
 }

@@ -21,6 +21,7 @@ import 'fake-indexeddb/auto';
 import {
   EMPTY_COVERAGE,
   LocalIndex,
+  coveredCandles,
   isVerifiedAt,
   pendingDecoderCount,
   readCoverage,
@@ -552,6 +553,35 @@ test('a scanned block’s Traded fills are FOLDED into candles1h, chain-wide (10
   assert.equal(bar.close1e9, 600_000_000n);
   assert.equal(bar.samples, 2);
   assert.equal(bar.origin, 'self', 'the bar took its provenance from something other than the header');
+  db.close();
+});
+
+test('the tier this writer FILLS has a covered read — the chart path, end to end', async () => {
+  // Major 1 of F8's fifth review, and the reason it is asserted here rather than in `store.test`:
+  // this file holds the **production producer**. `coveredQuery` is generic and took a `read`
+  // callback precisely so a second call site could exist, and the only one written reads
+  // `priceSamples` — the tier SQ-782 records as having no producer at all. So every covered read
+  // in the package answered over a permanently empty table, while `candles1h`, which this writer
+  // fills on every block carrying a fill, could be reached **only** as bare rows. A chart drawn
+  // from `db.candles1h.toArray()` is the bare-rows reading 10 §6.3 exists to forbid, arriving by
+  // the one route the repair left open.
+  const db = await freshDb();
+  await runIngest(
+    EMPTY_COVERAGE,
+    [traded(600, [{ bookId: '7', price1e9: 400_000_000n }, { bookId: '7', price1e9: 600_000_000n }])],
+    WATCHED,
+    SELF,
+    ports(db),
+  );
+
+  const answer = await coveredCandles(db, '7', 'candles1h', { fromBlock: 600, toBlock: 700 });
+  assert.equal(answer.covered.data.length, 1, 'the covered read cannot see the rows this writer wrote');
+  assert.equal(nth(answer.covered.data, 0, 'candle').close1e9, 600_000_000n);
+  // ...and the answer carries the coverage it came from, which is the whole of §6.3's rule. The
+  // ingest claimed block 600 only, so 601..700 is a **hole** — not an absence a caller has to
+  // notice, and not a flat line drawn over blocks nobody ingested.
+  assert.equal(nth(answer.covered.ranges, 0, 'range').origin, 'self');
+  assert.deepEqual([...answer.covered.holes], [{ fromBlock: 601, toBlock: 700 }]);
   db.close();
 });
 

@@ -43,7 +43,7 @@
  * kept even though the two now agree, because they are two independently editable numbers in two
  * sections and the tighter one is the only safe composition: an error here is a cache slightly
  * smaller than one section permits rather than a budget the other forbids. At the measured blob
- * size (0.14 MB gz) the **count** limit is what actually binds and the byte limit is headroom.
+ * size (0.15 MB gz) the **count** limit is what actually binds and the byte limit is headroom.
  */
 
 import type { Table } from 'dexie';

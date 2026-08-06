@@ -24,6 +24,25 @@ import { SCHEMA_V1, databaseName } from './store.js';
 export { selfRange } from './coverage.js';
 
 /**
+ * §9.2's label writer — production code inside this package, **test-only reachability** outside it.
+ *
+ * `writeDownsampled` takes no transaction of its own: §9.2 obligation 1 binds the label to the
+ * delete (*"written in the same storage transaction that deletes the rows"*), so it must be called
+ * inside the `rw` that performs the eviction, and `applyQuota` is its only production caller —
+ * through a relative import, not through this file. What it may not be is a **barrel** export: any
+ * consumer could then write the label with no eviction behind it, leaving rows present and
+ * `meta.downsampled` claiming they were folded. That exact phantom-label state was found by
+ * mutation one round ago inside this package, and a barrel export is the way to reach it from
+ * outside.
+ *
+ * It lives here rather than nowhere because the suites must exercise the **real** writer: a test
+ * that hand-wrote `db.meta.put({ key: 'downsampled', … })` would assert against its own idea of
+ * the row shape, which is how a storage test passes while the storage does not agree — the same
+ * reason `legacyIndexV1` below is a helper rather than raw IndexedDB calls.
+ */
+export { writeDownsampled } from './store.js';
+
+/**
  * A database at the **schema this package first shipped** — the thing a migration upgrades from.
  *
  * It lives here rather than in the suite because `dexie` is `local-index`'s dependency and not

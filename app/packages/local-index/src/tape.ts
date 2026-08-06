@@ -30,6 +30,27 @@
  * reports a quiet market. So an over-wide window throws before a single scan is read, naming the
  * bound it exceeded, and the caller narrows the question instead of being handed an answer to a
  * different one.
+ *
+ * ## The same reasoning applies to a block the stream never delivered — SQ-900
+ *
+ * The paragraph above refused an inverted window because *no fills* reads as *the market was
+ * quiet*, and then the scan loop skipped a block the stream never delivered with the same
+ * `continue` that skips a block outside the window. Those are not the same event: one is the
+ * caller's question, the other is a reconnect gap, a paused subscription or a stream that started
+ * late — and a window `100..200` answered from scans for `100..150` returns fewer fills and renders
+ * as exactly the quiet market this module refuses to report anywhere else.
+ *
+ * So the read reports **which blocks it saw**, beside the fills. It is the conservative reading of
+ * a genuinely open question: 10 §6.3's *"every history query returns data plus the coverage it
+ * came from"* is scoped to the layer-3 local index, and §9.1 makes this read deliberately *"a
+ * bounded windowed read, never a retained table"* — so §6.3 may not bind it at all. INV-FE-15's
+ * *"never silently spliced"* carries no such scoping. SQ-900 asks which governs; until it is ruled
+ * the answer discloses, because the unsafe direction is the silent one.
+ *
+ * The disclosure deliberately does **not** borrow §6.3's vocabulary: these spans are not
+ * `CoverageRange`s (they have no origin, no edge and no `ingestedAt` — nothing was ingested) and
+ * the gaps are not `Hole`s. Naming them so would answer SQ-900 in the code while the row stayed
+ * open. The tracking is bounded by the same bound the fills are: at most `maxBlocks` numbers.
  */
 
 import { tradedFills, type FinalizedBlockScan } from './ingest.js';
@@ -96,6 +117,34 @@ export interface TradeTapeBound {
 }
 
 /**
+ * A contiguous run of block numbers, in this module's own words.
+ *
+ * Not `Hole` and not `CoverageRange`: those are §6.3's layer-3 vocabulary, and whether §6.3 binds
+ * this read at all is SQ-900. A span here is a statement about **what the stream delivered**, with
+ * no claim that anything was ingested, stored or verified.
+ */
+export interface TapeSpan {
+  readonly fromBlock: number;
+  readonly toBlock: number;
+}
+
+/**
+ * The tape's answer: the fills, and the blocks the stream actually delivered.
+ *
+ * `missing` is derived from `observed` and the window rather than supplied, for the reason
+ * `CoverageRef.holes` is derived: a stored or caller-supplied gap list drifts from the thing it
+ * describes, and the drift is invisible in the one direction that matters — a gap that quietly
+ * disappears turns a partial answer back into a complete-looking one.
+ */
+export interface TradeTapeRead {
+  readonly fills: readonly TapeFill[];
+  /** The blocks inside the window at least one scan carried, merged into contiguous runs. */
+  readonly observed: readonly TapeSpan[];
+  /** The blocks inside the window no scan carried. Empty means the window was fully delivered. */
+  readonly missing: readonly TapeSpan[];
+}
+
+/**
  * The widest chain-wide trade window this platform may read at once.
  *
  * Derived, never chosen: `maxRows` is §9.2's events share over the caller's measured row size,
@@ -132,13 +181,15 @@ export function tradeTapeHours(bound: TradeTapeBound): number {
  * discovered part-way. Both throw rather than truncating: a clipped tape reports a quiet market.
  *
  * Scans outside the window are skipped rather than refused, because the caller drives one
- * subscription for the whole ingest loop and cannot be asked to run a second for this.
+ * subscription for the whole ingest loop and cannot be asked to run a second for this. A block
+ * *inside* the window that no scan delivered is skipped by the same statement and is a different
+ * event entirely, so the answer names the blocks it saw — see the module note and SQ-900.
  */
 export async function readTradeTape(
   scans: AsyncIterable<FinalizedBlockScan> | Iterable<FinalizedBlockScan>,
   window: { readonly fromBlock: number; readonly toBlock: number },
   bound: TradeTapeBound,
-): Promise<readonly TapeFill[]> {
+): Promise<TradeTapeRead> {
   const { fromBlock, toBlock } = window;
   if (!Number.isInteger(fromBlock) || !Number.isInteger(toBlock) || fromBlock < 0) {
     throw new TradeTapeError(`${fromBlock}..${toBlock} is not a block window`);
@@ -159,8 +210,12 @@ export async function readTradeTape(
     );
   }
   const fills: TapeFill[] = [];
+  // Every in-window block the stream carried. A set rather than a running cursor, because scans
+  // are not guaranteed ordered and a duplicate delivery must not read as two blocks.
+  const seen = new Set<number>();
   for await (const scan of scans as AsyncIterable<FinalizedBlockScan>) {
     if (scan.number < fromBlock || scan.number > toBlock) continue;
+    seen.add(scan.number);
     for (const fill of tradedFills(scan)) {
       fills.push({ blockNumber: scan.number, ...fill });
       if (fills.length > bound.maxRows) {
@@ -173,5 +228,40 @@ export async function readTradeTape(
       }
     }
   }
-  return fills;
+  const observed = mergeBlocks(seen);
+  return { fills, observed, missing: gapsIn(observed, { fromBlock, toBlock }) };
+}
+
+/** The block numbers seen, as contiguous runs. Sorted numerically — never by string order. */
+function mergeBlocks(seen: ReadonlySet<number>): readonly TapeSpan[] {
+  const ordered = [...seen].sort((a, b) => a - b);
+  const spans: TapeSpan[] = [];
+  for (const block of ordered) {
+    const last = spans[spans.length - 1];
+    if (last !== undefined && block === last.toBlock + 1) {
+      spans[spans.length - 1] = { fromBlock: last.fromBlock, toBlock: block };
+      continue;
+    }
+    spans.push({ fromBlock: block, toBlock: block });
+  }
+  return spans;
+}
+
+/**
+ * The window minus what was observed, **including the edges**.
+ *
+ * The edge case is the one that matters and the one an interior-gaps-only version drops: a stream
+ * that starts late or stops early leaves the window's ends undelivered, and those are precisely
+ * the blocks a caller asking about `100..200` would otherwise believe were quiet. Same reasoning
+ * as `holesIn`'s span-bounded form, reached independently because these are not coverage holes.
+ */
+function gapsIn(observed: readonly TapeSpan[], window: TapeSpan): readonly TapeSpan[] {
+  const gaps: TapeSpan[] = [];
+  let cursor = window.fromBlock;
+  for (const span of observed) {
+    if (span.fromBlock > cursor) gaps.push({ fromBlock: cursor, toBlock: span.fromBlock - 1 });
+    cursor = Math.max(cursor, span.toBlock + 1);
+  }
+  if (cursor <= window.toBlock) gaps.push({ fromBlock: cursor, toBlock: window.toBlock });
+  return gaps;
 }

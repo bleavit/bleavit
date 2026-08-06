@@ -33,6 +33,7 @@ import {
   StoreError,
   applyQuota,
   checkIndexAtBoot,
+  coveredCandles,
   coveredSamples,
   databaseName,
   downsample,
@@ -50,13 +51,15 @@ import {
   rawEventId,
   rebuild,
   sanitizeCoverage,
+  sourceKeyOf,
   writeCoverage,
-  writeDownsampled,
 } from '@bleavit/local-index';
 import { isVerifiedAt } from '@bleavit/local-index';
 import type { CoverageRange } from '@bleavit/local-index';
-// `selfRange` is test-only on purpose — see packages/local-index/src/testing.ts.
-import { legacyIndexV1, selfRange } from '@bleavit/local-index/testing';
+// `selfRange` is test-only on purpose — see packages/local-index/src/testing.ts. `writeDownsampled`
+// is production code with test-only *reachability*: §9.2 obligation 1 binds its label to the delete,
+// so a barrel export would let any consumer write the label with no eviction behind it.
+import { legacyIndexV1, selfRange, writeDownsampled } from '@bleavit/local-index/testing';
 import { nth } from './nth.ts';
 
 const PASEO = `0x${'a1'.repeat(32)}`;
@@ -186,7 +189,7 @@ test('the metadata cache evicts least-recently-used until it fits, and says what
 test('§9.3’s blob COUNT is a bound too, not only its byte budget', async () => {
   // The section states three obligations and an earlier draft enforced one. A byte budget alone
   // lets an unbounded number of small blobs accumulate — which is the shape a metadata cache
-  // actually grows in, since a compressed blob is a measured 0.14 MB gz against a 15 MB budget —
+  // actually grows in, since a compressed blob is a measured 0.15 MB gz against a 15 MB budget —
   // which is why §9.3's COUNT limit is the one that binds and the byte limit is headroom.
   const db = new LocalIndex(PASEO);
   await db.open();
@@ -210,7 +213,7 @@ test('the pinned runtimes are never evicted, and a budget they do not fit is REF
   // §9.3: "the current and next-authorized runtime's metadata are pinned non-evictable". LRU
   // with no pin set evicts exactly them, because they are the blobs whose era is *current* and
   // therefore the ones an old-era decode has not touched — turning the live era into "pending
-  // decoder" rows to save a fraction of a 15 MB budget, at the measured 0.14 MB gz per blob.
+  // decoder" rows to save a fraction of a 15 MB budget, at the measured 0.15 MB gz per blob.
   const db = new LocalIndex(PASEO);
   await db.open();
   await db.metadataCache.clear();
@@ -415,9 +418,10 @@ test('a database created under SCHEMA_V1 UPGRADES rather than failing to open', 
     'the declared version ladder moved without the record following it',
   );
   // The span named is the one `meta.coverage` still claims — exactly where the surviving coverage
-  // and the surviving rows now disagree.
-  assert.equal(discard.fromBlock, 1);
-  assert.equal(discard.toBlock, 9);
+  // and the surviving rows now disagree. It is one field with three arms rather than two optional
+  // numbers, because `undefined` meant both *coverage named nothing* and *coverage could not be
+  // read* — an ordinary client and a corruption event, which no surface can then tell apart.
+  assert.deepEqual(discard.span, { kind: 'named', fromBlock: 1, toBlock: 9 });
   assert.ok(discard.at > 0);
   assert.match(discard.detail, /the blocks are still covered/);
 
@@ -740,4 +744,287 @@ test('a raw row the sparse index cannot see FAILS the bound rather than shrinkin
   } as Parameters<typeof db.events.put>[0]);
   await assert.rejects(() => pendingRawRows(db), /cannot be reached by the 10 §9.1 bound/);
   await db.delete();
+});
+
+test('the candle tiers have a covered read too — and it is the tier with a producer', async () => {
+  // 10 §6.3: *"Every history query returns data plus the coverage it came from — a
+  // `CoveredResult<T>`, never bare rows"*. `coveredQuery` takes a `read` callback precisely so a
+  // second call site could exist, and the only one written reads `priceSamples`, which SQ-782
+  // records as having **no producer in production**. So the disclosure machinery pointed at the
+  // permanently empty tier while `candles1h` — filled by `storeWriter` on every block carrying a
+  // fill — had no covered path at all, leaving `db.candles1h.toArray()` as the only way to draw a
+  // chart. That is the bare-rows reading arriving by the one route left open.
+  const genesis = `0x${'e1'.repeat(32)}`;
+  const db = new LocalIndex(genesis);
+  await db.delete();
+  await db.open();
+  await writeCoverage(db, addRange(EMPTY_COVERAGE, selfRange(1, 500, 1, edgeAt(500, genesis))));
+
+  const bar = (bookId: string, openAt: number, fromBlock: number, toBlock: number, over = {}) => ({
+    bookId,
+    resolution: 'candles1h' as const,
+    openAt,
+    open1e9: 1n,
+    high1e9: 2n,
+    low1e9: 1n,
+    close1e9: 2n,
+    samples: 1,
+    fromBlock,
+    toBlock,
+    origin: 'self' as const,
+    sourceKey: sourceKeyOf({ origin: 'self' }),
+    ...over,
+  });
+  await db.candles1h.bulkPut([
+    bar('book-1', 0, 10, 90),
+    // Straddles the low edge of the question. Returned, because a candle summarises a block span
+    // and dropping the straddling bar silently narrows the answer at both ends — the renderer
+    // clips for display exactly as it does for `CoveredResult.ranges`.
+    bar('book-1', 3_600, 95, 105),
+    bar('book-1', 7_200, 150, 160),
+    // Another source for one book is another row (§7's keyed-by-source rule) and both are
+    // returned: filtering to the verified ones draws a line with invisible gaps.
+    bar('book-1', 7_200, 150, 160, {
+      origin: 'indexer' as const,
+      providerId: 'acme',
+      sourceKey: sourceKeyOf({ origin: 'indexer', providerId: 'acme' }),
+    }),
+    bar('book-2', 3_600, 95, 105),
+  ]);
+
+  const answer = await coveredCandles(db, 'book-1', 'candles1h', { fromBlock: 100, toBlock: 200 });
+  assert.deepEqual(
+    answer.covered.data.map((candle) => [candle.openAt, candle.origin]),
+    [
+      [3_600, 'self'],
+      [7_200, 'indexer'],
+      [7_200, 'self'],
+    ],
+  );
+  assert.equal(nth(answer.covered.ranges, 0, 'range').origin, 'self');
+  assert.deepEqual([...answer.covered.holes], [], 'the span is covered — nothing is a hole here');
+
+  // It is the same wrapper, so the two absence channels reach it: a caller cannot get the rows
+  // without the reasons rows can be missing from a span that is still covered.
+  await writeDownsampled(db, [downsample(1, 500, 'candles4h', 10)]);
+  const later = await coveredCandles(db, 'book-1', 'candles1h', { fromBlock: 100, toBlock: 200 });
+  assert.equal(later.downsampled.length, 1, 'the covered candle read is not going through coveredQuery');
+  assert.equal(nth(later.downsampled, 0, 'label').resolution, 'candles4h');
+
+  // The coarser tiers are reachable by the same call rather than by three functions, and an empty
+  // rung answers empty **with** its coverage — which is the difference between "no bars here" and
+  // "we never ingested this".
+  const daily = await coveredCandles(db, 'book-1', 'candles1d', { fromBlock: 100, toBlock: 200 });
+  assert.deepEqual([...daily.covered.data], []);
+  assert.equal(daily.covered.ranges.length, 1, 'an empty rung lost the coverage beside it');
+  await db.delete();
+});
+
+test('a covered answer is ONE transaction, and the rows are read before the labels', async () => {
+  // §9.2 obligation 1 binds the "downsampled" label to the delete so a crash cannot leave rows
+  // gone and nothing saying so. The first version of `coveredQuery` reassembled exactly that split
+  // on the read side: `Promise.all([coverage, downsampled, chartDiscard])` and *then* `read(db)`,
+  // which is four separate IndexedDB transactions. A fold committing between them returns rows
+  // that are already deleted beside labels that predate the deletion — the same silent splice,
+  // produced by the reader instead of the writer.
+  //
+  // Asserted structurally rather than by racing a fold, because a race is only as deterministic as
+  // the scheduler: what makes the mixed answer impossible is that there is one moment to read at,
+  // and that is a property of the transaction rather than of the timing. The ORDER is asserted too,
+  // because it is the property that still holds if a future refactor drops the transaction: labels
+  // only grow, so rows-then-labels can only over-explain, while labels-then-rows under-explains —
+  // and under-explaining is what renders as a complete series.
+  const genesis = `0x${'e2'.repeat(32)}`;
+  const db = new LocalIndex(genesis);
+  const reads: { table: string; trans: unknown }[] = [];
+  // Installed before `open()`: middleware added afterwards does not reach the already-built stack.
+  db.use({
+    stack: 'dbcore',
+    name: 'observe-covered-reads',
+    create: (down) => ({
+      ...down,
+      table: (name: string) => {
+        const table = down.table(name);
+        return {
+          ...table,
+          get: (req: Parameters<typeof table.get>[0]) => {
+            reads.push({ table: name, trans: req.trans });
+            return table.get(req);
+          },
+          query: (req: Parameters<typeof table.query>[0]) => {
+            reads.push({ table: name, trans: req.trans });
+            return table.query(req);
+          },
+          openCursor: (req: Parameters<typeof table.openCursor>[0]) => {
+            reads.push({ table: name, trans: req.trans });
+            return table.openCursor(req);
+          },
+        };
+      },
+    }),
+  });
+  await db.delete();
+  await db.open();
+  await writeCoverage(db, addRange(EMPTY_COVERAGE, selfRange(1, 500, 1, edgeAt(500, genesis))));
+  await db.priceSamples.bulkPut([
+    priceSample({ bookId: 'book-1', blockNumber: 100, blockTimestampMs: 600_000, price1e9: 1n, origin: 'self' }),
+  ]);
+
+  reads.length = 0;
+  const answer = await coveredSamples(db, 'book-1', { fromBlock: 1, toBlock: 500 });
+  assert.equal(answer.covered.data.length, 1, 'the fixture read nothing, so the trace proves nothing');
+
+  const distinct = new Set(reads.map((read) => read.trans));
+  assert.equal(
+    distinct.size,
+    1,
+    `the covered answer was assembled from ${distinct.size} transactions: ${reads
+      .map((read) => read.table)
+      .join(', ')}. A fold committing between them returns rows already deleted beside labels ` +
+      'that predate the deletion.',
+  );
+  const chartAt = reads.findIndex((read) => read.table === 'priceSamples');
+  const metaAt = reads.findIndex((read) => read.table === 'meta');
+  assert.ok(chartAt >= 0 && metaAt >= 0, `both reads must appear: ${reads.map((r) => r.table).join(', ')}`);
+  assert.ok(chartAt < metaAt, 'the labels were read before the rows, which is the order that under-explains');
+  await db.delete();
+});
+
+test('a fold before or after the read gives two truthful answers, and never the mixed one', async () => {
+  // The two admissible outcomes, stated so the property above is legible as a claim about
+  // *answers* rather than about transactions. Before the fold: rows present, no label — nothing
+  // has been folded yet. After it: rows gone, label present. The third combination — rows gone,
+  // no label, over a span coverage still claims — is the silent splice, and it is the one the
+  // single transaction removes.
+  const genesis = `0x${'e3'.repeat(32)}`;
+  const db = new LocalIndex(genesis);
+  await db.delete();
+  await db.open();
+  await writeCoverage(db, addRange(EMPTY_COVERAGE, selfRange(1, 500, 1, edgeAt(500, genesis))));
+  await db.priceSamples.bulkPut([
+    priceSample({ bookId: 'book-1', blockNumber: 100, blockTimestampMs: 600_000, price1e9: 1n, origin: 'self' }),
+  ]);
+
+  const before = await coveredSamples(db, 'book-1', { fromBlock: 1, toBlock: 500 });
+  assert.equal(before.covered.data.length, 1);
+  assert.deepEqual([...before.downsampled], []);
+
+  // The fold, as §9.2 obligation 1 requires it: the delete and the label in one transaction.
+  await db.transaction('rw', db.priceSamples, db.meta, async () => {
+    await db.priceSamples.clear();
+    await writeDownsampled(db, [downsample(1, 500, 'candles1h', 10)]);
+  });
+
+  const after = await coveredSamples(db, 'book-1', { fromBlock: 1, toBlock: 500 });
+  assert.deepEqual([...after.covered.data], []);
+  assert.equal(after.downsampled.length, 1, 'the rows are gone and the answer says nothing about why');
+  assert.deepEqual([...after.covered.holes], [], 'a folded range became a hole — it was ingested');
+  await db.delete();
+});
+
+test('a corrupt meta record returns UNDEFINED rather than throwing out of the render path', async () => {
+  // INV-FE-7: corruption of this store is *"a performance and convenience event only"*, and this
+  // package's own note calls storage *"exactly the untrusted path INV-FE-7 assumes gets
+  // corrupted"*. `readCoverage` sanitizes and `readDownsampled` checks `Array.isArray`; these two
+  // returned `row.record` unchecked. That was survivable while the boot report was their only
+  // reader — one spoiled panel — and stopped being survivable the moment `coveredQuery` reads
+  // `chartDiscard` on **every** history query: `discardOver` dereferences `record.span`, so a
+  // record corrupted to `null` throws a `TypeError` out of the chart path. A chart that will not
+  // draw is not a convenience event.
+  const genesis = `0x${'e4'.repeat(32)}`;
+  const db = new LocalIndex(genesis);
+  await db.delete();
+  await db.open();
+  await writeCoverage(db, addRange(EMPTY_COVERAGE, selfRange(1, 500, 1, edgeAt(500, genesis))));
+
+  // Written as an untyped row, which is what a partial write, an older schema or a corrupted
+  // record looks like coming back out of IndexedDB.
+  const putRaw = async (key: string, record: unknown): Promise<void> => {
+    await db.table('meta').put({ key, record });
+  };
+
+  for (const corrupt of [null, 'a string', 42, {}, { span: { kind: 'named' } }]) {
+    await putRaw('chartDiscard', corrupt);
+    assert.equal(await readChartDiscard(db), undefined, `${JSON.stringify(corrupt)} was believed`);
+    // ...and the query path survives it, which is the half that matters: this is the call a chart
+    // makes, and before the check it threw rather than answering.
+    const answer = await coveredSamples(db, 'book-1', { fromBlock: 1, toBlock: 500 });
+    assert.equal(answer.chartDiscard, undefined);
+    assert.equal(nth(answer.covered.ranges, 0, 'range').origin, 'self', 'the answer lost its coverage');
+  }
+
+  for (const corrupt of [null, [], { blocks: 1 }, { blocks: 1, bytes: 2, oldestBlock: 3, newestBlock: 4, at: 5 }]) {
+    await putRaw('pendingRawEvicted', corrupt);
+    assert.equal(await readPendingRawEvicted(db), undefined, `${JSON.stringify(corrupt)} was believed`);
+  }
+
+  // A well-formed record is still returned — without this the checks above pass by refusing
+  // everything, which is a reader that reports "nothing was ever discarded" forever.
+  const record = {
+    fromSchema: 1,
+    toSchema: 3,
+    tables: [...REKEYED_TABLES],
+    rows: 2,
+    span: { kind: 'named' as const, fromBlock: 1, toBlock: 9 },
+    at: 5,
+    detail: 'the chart tables were re-keyed',
+  };
+  await putRaw('chartDiscard', record);
+  assert.deepEqual(await readChartDiscard(db), record);
+  assert.deepEqual(
+    (await coveredSamples(db, 'book-1', { fromBlock: 1, toBlock: 500 })).chartDiscard,
+    record,
+  );
+  // The two unnamed arms are carried rather than dropped, and they are two different sentences:
+  // `none` is a client that charted nothing, `unreadable` is a coverage row that would not parse.
+  for (const kind of ['none', 'unreadable'] as const) {
+    await putRaw('chartDiscard', { ...record, span: { kind } });
+    assert.deepEqual((await readChartDiscard(db))?.span, { kind });
+    // Reported for EVERY span, because overlap cannot be ruled out when no blocks are named.
+    const far = await coveredSamples(db, 'book-1', { fromBlock: 400, toBlock: 500 });
+    assert.equal(far.chartDiscard?.span.kind, kind, 'an unnamed envelope dropped its explanation');
+  }
+  await db.delete();
+});
+
+test('the migration tells an empty coverage row apart from an unreadable one', async () => {
+  // `ChartDiscardRecord` carried `fromBlock`/`toBlock` as `number | undefined`, and `undefined`
+  // meant two different things: *coverage named no blocks* — an ordinary client that has charted
+  // nothing — and *the coverage row would not parse*, which is the corruption INV-FE-7 expects of
+  // this store. A surface rendering one encoding has to pick a sentence, so it announces a
+  // corruption that did not happen or hides one that did. `discardOver` treats both the same (no
+  // blocks named, so overlap cannot be ruled out), which is why the distinction has to live in the
+  // datum rather than in the disposal.
+  const chartRow = (bookId: string) => ({ bookId, at: 10, blockNumber: 5, price1e9: 1n, origin: 'self' });
+
+  // (a) A version-1 database with NO coverage row at all: nothing was covered.
+  const emptyGenesis = `0x${'e6'.repeat(32)}`;
+  const emptyLegacy = legacyIndexV1(emptyGenesis);
+  await emptyLegacy.delete();
+  await emptyLegacy.open();
+  await emptyLegacy.table('priceSamples').put(chartRow('book-1'));
+  await emptyLegacy.table('meta').put({ key: 'coverage', coverage: { ranges: [], holes: [] } });
+  emptyLegacy.close();
+  const empty = new LocalIndex(emptyGenesis);
+  await empty.open();
+  assert.deepEqual((await readChartDiscard(empty))?.span, { kind: 'none' });
+  await empty.delete();
+
+  // (b) A version-1 database whose coverage row is corrupt — the state `sanitizeCoverage` exists
+  // for, arriving during an upgrade where it cannot run (it needs the genesis hash and would drop
+  // rather than summarise). The drop is still announced; what changes is that the record says it
+  // cannot name the span, which is a true sentence and a different one.
+  const brokenGenesis = `0x${'e7'.repeat(32)}`;
+  const brokenLegacy = legacyIndexV1(brokenGenesis);
+  await brokenLegacy.delete();
+  await brokenLegacy.open();
+  await brokenLegacy.table('priceSamples').put(chartRow('book-1'));
+  await brokenLegacy.table('meta').put({ key: 'coverage', coverage: { ranges: 'not an array' } });
+  brokenLegacy.close();
+  const broken = new LocalIndex(brokenGenesis);
+  await broken.open();
+  const record = await readChartDiscard(broken);
+  assert.deepEqual(record?.span, { kind: 'unreadable' });
+  assert.equal(record?.rows, 1, 'the drop itself was not recorded, so the span is beside the point');
+  await broken.delete();
 });

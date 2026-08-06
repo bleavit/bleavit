@@ -243,6 +243,26 @@ export interface PendingRawEvictionRecord {
  * Its precedent is `PendingRawEvictionRecord` above, and it is deliberately the same shape: a
  * summary written in the transaction that performs the disposal, read back by the boot path.
  */
+/**
+ * The block envelope a discard record names — **three states, not two numbers**.
+ *
+ * The first draft carried `fromBlock`/`toBlock` as `number | undefined`, and `undefined` had two
+ * meanings that a surface has to tell apart: *the coverage row named no blocks* and *the coverage
+ * row could not be read*. The second is a corruption event INV-FE-7 expects and the first is the
+ * ordinary state of a client that has charted nothing, so one encoding for both makes every
+ * rendering of it wrong in one direction — announcing corruption that did not happen, or hiding
+ * one that did. `discardOver` treats the two identically (neither can rule out overlap, so both
+ * report for every span), which is why the distinction had to live in the datum rather than in
+ * the disposal.
+ */
+export type ChartDiscardSpan =
+  /** The envelope `meta.coverage` claimed when the migration ran. */
+  | { readonly kind: 'named'; readonly fromBlock: number; readonly toBlock: number }
+  /** Coverage was readable and claimed nothing — the rows sat over blocks nothing covers. */
+  | { readonly kind: 'none' }
+  /** The coverage row could not be parsed, so the span cannot be named at all. */
+  | { readonly kind: 'unreadable' };
+
 export interface ChartDiscardRecord {
   /** The schema the database was at, and the one it reached. */
   readonly fromSchema: number;
@@ -254,10 +274,9 @@ export interface ChartDiscardRecord {
   /**
    * The block envelope `meta.coverage` still claims, and over which the chart tiers are now
    * empty. That is the span the record has to name: it is exactly where the surviving coverage
-   * and the surviving rows disagree. `undefined` when nothing was covered.
+   * and the surviving rows disagree.
    */
-  readonly fromBlock: number | undefined;
-  readonly toBlock: number | undefined;
+  readonly span: ChartDiscardSpan;
   readonly at: number;
   /**
    * A **technical** statement, for the boot report and an expert panel.
@@ -426,7 +445,6 @@ async function recordChartDiscard(tx: Transaction): Promise<void> {
   let rows = 0;
   for (const table of REKEYED_TABLES) rows += await tx.table(table).count();
   if (rows === 0) return;
-  const span = coverageEnvelope(await tx.table('meta').get('coverage'));
   const record: ChartDiscardRecord = {
     // **Neither number is copied.** `toSchema` is the version this open is upgrading to, read off
     // the database itself, so adding a `version(4)` cannot leave the record claiming the schema
@@ -439,8 +457,7 @@ async function recordChartDiscard(tx: Transaction): Promise<void> {
     toSchema: tx.db.verno,
     tables: [...REKEYED_TABLES],
     rows,
-    fromBlock: span?.fromBlock,
-    toBlock: span?.toBlock,
+    span: coverageEnvelope(await tx.table('meta').get('coverage')),
     at: Date.now(),
     detail:
       'the chart tables were re-keyed (priceSamples gained sourceKey and lost the device clock; ' +
@@ -487,13 +504,17 @@ async function backfillPendingBlock(tx: Transaction): Promise<void> {
  * range contributes nothing rather than making the whole record unwritable: the point of the
  * record is that the drop is announced, and an unparseable span is a reason to say *"we cannot
  * name the span"*, never a reason to say nothing at all.
+ *
+ * **The two ways of naming no span stay apart.** An empty coverage list is an ordinary client
+ * that charted nothing; a coverage row that will not parse is the corruption INV-FE-7 expects.
+ * Both leave the envelope unnamed and they are not the same sentence to a reader, so they are
+ * two arms rather than one `undefined` (see `ChartDiscardSpan`).
  */
-function coverageEnvelope(
-  row: unknown,
-): { readonly fromBlock: number; readonly toBlock: number } | undefined {
+function coverageEnvelope(row: unknown): ChartDiscardSpan {
   const coverage = (row as { coverage?: unknown } | undefined)?.coverage;
   const ranges = (coverage as { ranges?: unknown } | undefined)?.ranges;
-  if (!Array.isArray(ranges)) return undefined;
+  if (!Array.isArray(ranges)) return { kind: 'unreadable' };
+  if (ranges.length === 0) return { kind: 'none' };
   let fromBlock: number | undefined;
   let toBlock: number | undefined;
   for (const range of ranges) {
@@ -503,8 +524,10 @@ function coverageEnvelope(
     if (fromBlock === undefined || from < fromBlock) fromBlock = from;
     if (toBlock === undefined || to > toBlock) toBlock = to;
   }
-  if (fromBlock === undefined || toBlock === undefined) return undefined;
-  return { fromBlock, toBlock };
+  // Ranges were present and none of them named two block numbers: the row exists and cannot be
+  // read, which is the corruption arm rather than the empty one.
+  if (fromBlock === undefined || toBlock === undefined) return { kind: 'unreadable' };
+  return { kind: 'named', fromBlock, toBlock };
 }
 
 /**
@@ -612,10 +635,10 @@ export interface CoveredHistory<T> {
    * A migration discard whose block envelope overlaps the span, and therefore explains rows that
    * are missing here. `undefined` when none does.
    *
-   * A record whose envelope could not be named (`fromBlock`/`toBlock` absent — the coverage row
-   * was unreadable when the migration ran) is reported for **every** span: overlap cannot be
-   * ruled out, and dropping the explanation on *cannot say* is the one disposal that turns an
-   * announced loss back into a silent one.
+   * A record whose envelope was not `named` — the coverage row claimed nothing, or could not be
+   * read at all when the migration ran — is reported for **every** span: overlap cannot be ruled
+   * out, and dropping the explanation on *cannot say* is the one disposal that turns an announced
+   * loss back into a silent one.
    */
   readonly chartDiscard: ChartDiscardRecord | undefined;
 }
@@ -636,18 +659,40 @@ export interface CoveredHistory<T> {
  * `read` is a callback rather than a table argument so this cannot become "the covered query
  * for price samples" and then a second, uncovered one for everything else — the wrapping is
  * the boundary, and the boundary is one function.
+ *
+ * ## All four reads are one transaction, and the order inside it is not arbitrary
+ *
+ * The first version resolved the three labels through `Promise.all` and *then* awaited `read`:
+ * four separate IndexedDB transactions, with the retention ladder free to commit between them.
+ * A fold that lands in that window deletes rows the answer has already missed and writes the
+ * label after it was already read, so the answer carries rows that are gone beside labels that
+ * predate the deletion — the silent splice §9.2 obligation 1 binds the label to the delete to
+ * prevent, reassembled on the read side.
+ *
+ * One `db.transaction('r', …)` removes the window. The **order** is kept anyway, because it is
+ * the property that survives a future refactor dropping the transaction: labels only ever grow
+ * (§9.2's ladder adds them and nothing retracts one), so reading rows **first** and labels after
+ * can only over-explain — an answer claiming a label for rows it still holds. The reverse can
+ * under-explain, which is the direction that renders as a complete series.
+ *
+ * Two constraints follow and both fail loudly rather than quietly, which is why they are stated
+ * here instead of being designed around. `read` must issue Dexie operations only: awaiting
+ * anything else inside a transaction scope lets it commit early. And a covered read may not be
+ * called from **inside** a narrower transaction — Dexie refuses a sub-transaction whose scope is
+ * wider than its parent's. Neither can produce a wrong answer, only a refused one.
  */
 export async function coveredQuery<T>(
   db: LocalIndex,
   span: Hole,
   read: (db: LocalIndex) => Promise<T>,
 ): Promise<CoveredHistory<T>> {
-  const [coverage, labels, discard] = await Promise.all([
-    readCoverage(db),
-    readDownsampled(db),
-    readChartDiscard(db),
-  ]);
-  const result = covered(coverage, span, await read(db));
+  // Every table, because `read` is a caller's callback and this function cannot know which ones
+  // it touches; a narrower scope would refuse the second covered read somebody writes.
+  const [data, coverage, labels, discard] = await db.transaction('r', db.tables, async () => {
+    const rows = await read(db);
+    return [rows, await readCoverage(db), await readDownsampled(db), await readChartDiscard(db)] as const;
+  });
+  const result = covered(coverage, span, data);
   return {
     covered: result,
     downsampled: labels.filter(
@@ -663,8 +708,11 @@ function discardOver(
   span: Hole,
 ): ChartDiscardRecord | undefined {
   if (discard === undefined) return undefined;
-  if (discard.fromBlock === undefined || discard.toBlock === undefined) return discard;
-  return discard.toBlock >= span.fromBlock && discard.fromBlock <= span.toBlock
+  // `none` and `unreadable` are different sentences to a reader and the same disposal here:
+  // neither names blocks, so neither can rule the overlap out, and dropping the explanation on
+  // *cannot say* is what turns an announced loss back into a silent one.
+  if (discard.span.kind !== 'named') return discard;
+  return discard.span.toBlock >= span.fromBlock && discard.span.fromBlock <= span.toBlock
     ? discard
     : undefined;
 }
@@ -688,6 +736,46 @@ export async function coveredSamples(
       .equals(bookId)
       .filter((s) => s.blockNumber >= span.fromBlock && s.blockNumber <= span.toBlock)
       .sortBy('blockNumber'),
+  );
+}
+
+/**
+ * One book's candles at one rung, with the coverage they came from — the **candle tier's** covered
+ * read, and the reason `coveredQuery` was written generic.
+ *
+ * `coveredSamples` was this package's only covered read, and it serves `priceSamples`: the tier
+ * SQ-782 records as having **no producer in production** — `priceSample()` has no caller outside
+ * the suites, so the raw table is permanently empty and every disclosure attached to it fires over
+ * nothing. The tier that a production writer does fill is `candles1h`, folded per block by
+ * `storeWriter` from §9.1's scan-time aggregate, and it had no covered path at all. So the whole
+ * §6.3 apparatus pointed at the empty tier while the full one could be reached only as bare rows —
+ * which is the reading *"never bare rows"* exists to forbid, arriving by the one route left open.
+ *
+ * **Overlapping, not contained.** A bucket that straddles the edge of the question is returned,
+ * because a candle is a summary of a block span and dropping the straddling bar would silently
+ * narrow the answer at both ends — the renderer clips for display exactly as it does for
+ * `CoveredResult.ranges`.
+ *
+ * **Not filtered to one provenance**, for the same reason `coveredSamples` is not: two sources'
+ * bars for one bucket are two rows by primary key (§7), they each carry their origin, and hiding
+ * the provider ones would draw a line with invisible gaps.
+ */
+export async function coveredCandles(
+  db: LocalIndex,
+  bookId: string,
+  resolution: Exclude<Resolution, 'raw'>,
+  span: Hole,
+): Promise<CoveredHistory<readonly Candle[]>> {
+  // Resolved before the transaction opens, so an unknown rung is a `StoreError` naming the rung
+  // rather than a Dexie failure naming a table that does not exist.
+  const table = candleTableFor(resolution);
+  return coveredQuery(db, span, async (inner) =>
+    inner
+      .table<Candle, CandleKey>(table)
+      .where('bookId')
+      .equals(bookId)
+      .filter((candle) => candle.toBlock >= span.fromBlock && candle.fromBlock <= span.toBlock)
+      .sortBy('openAt'),
   );
 }
 
@@ -721,7 +809,7 @@ export async function writeDownsampled(
  * failure — LRU with no pin set evicts **the current runtime's metadata**, which §9.3 declares
  * non-evictable. That blob is the one every live decode uses, so evicting it turns the whole
  * current era into "pending decoder" rows in order to save a few megabytes — and at the measured
- * 0.14 MB per blob it is the **count** limit that binds, not the bytes.
+ * 0.15 MB per blob it is the **count** limit that binds, not the bytes.
  *
  * A budget whose pinned set alone does not fit is **refused**, not satisfied by evicting a
  * pin. That state is a release-configuration error — more pinned runtimes than the platform
@@ -819,20 +907,75 @@ export async function pendingDecoderCount(db: LocalIndex): Promise<number> {
   return db.events.filter((event) => event.decoded === false).count();
 }
 
+/**
+ * The `meta` rows are read back from *"exactly the untrusted path INV-FE-7 assumes gets
+ * corrupted"*, and a record is not made trustworthy by the key it was stored under.
+ *
+ * `readCoverage` sanitizes and `readDownsampled` checks `Array.isArray`; these two returned
+ * `row.record` unchecked, which was survivable while the boot report was their only reader — a
+ * corrupt record spoiled one panel. Once `coveredQuery` reads `chartDiscard` on **every** history
+ * query, `discardOver` dereferences `record.span` and a `record` corrupted to `null` throws a
+ * `TypeError` out of the render path. INV-FE-7 is explicit that corruption here is *"a performance
+ * and convenience event only"*; a chart that will not draw is not that.
+ *
+ * So both validate and both return `undefined` on a malformed row, matching `readDownsampled`'s
+ * disposal. `undefined` reads as *no such record*, which is the truthful answer about a record
+ * nothing can read — and it is not a loss of disclosure, because a record that cannot be parsed
+ * cannot be rendered either.
+ */
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
+function isChartDiscardSpan(value: unknown): value is ChartDiscardSpan {
+  if (typeof value !== 'object' || value === null) return false;
+  const span = value as { kind?: unknown; fromBlock?: unknown; toBlock?: unknown };
+  if (span.kind === 'none' || span.kind === 'unreadable') return true;
+  return span.kind === 'named' && isFiniteNumber(span.fromBlock) && isFiniteNumber(span.toBlock);
+}
+
+function isChartDiscardRecord(value: unknown): value is ChartDiscardRecord {
+  if (typeof value !== 'object' || value === null) return false;
+  const record = value as Record<string, unknown>;
+  return (
+    isFiniteNumber(record.fromSchema) &&
+    isFiniteNumber(record.toSchema) &&
+    isFiniteNumber(record.rows) &&
+    isFiniteNumber(record.at) &&
+    Array.isArray(record.tables) &&
+    record.tables.every((table) => typeof table === 'string') &&
+    typeof record.detail === 'string' &&
+    isChartDiscardSpan(record.span)
+  );
+}
+
+function isPendingRawEvictionRecord(value: unknown): value is PendingRawEvictionRecord {
+  if (typeof value !== 'object' || value === null) return false;
+  const record = value as Record<string, unknown>;
+  return (
+    isFiniteNumber(record.blocks) &&
+    isFiniteNumber(record.bytes) &&
+    isFiniteNumber(record.oldestBlock) &&
+    isFiniteNumber(record.newestBlock) &&
+    isFiniteNumber(record.at) &&
+    typeof record.reason === 'string'
+  );
+}
+
 /** §9.2's downsampled-label sibling: what the pending-raw bound has discarded, or `undefined`. */
 export async function readPendingRawEvicted(
   db: LocalIndex,
 ): Promise<PendingRawEvictionRecord | undefined> {
   const row = await db.meta.get('pendingRawEvicted');
   if (row === undefined || row.key !== 'pendingRawEvicted') return undefined;
-  return row.record;
+  return isPendingRawEvictionRecord(row.record) ? row.record : undefined;
 }
 
 /** What a schema migration discarded, or `undefined` when no migration has dropped anything. */
 export async function readChartDiscard(db: LocalIndex): Promise<ChartDiscardRecord | undefined> {
   const row = await db.meta.get('chartDiscard');
   if (row === undefined || row.key !== 'chartDiscard') return undefined;
-  return row.record;
+  return isChartDiscardRecord(row.record) ? row.record : undefined;
 }
 
 /**
