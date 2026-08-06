@@ -1489,7 +1489,7 @@ function* coveredBlocksNewestFirst(coverage: readonly SnapshotRange[]): Generato
  *
  * The two indices are §8.2's chain order — *"block, then extrinsic, then event"* — and they are
  * here rather than in {@link SnapshotOp} because the *file* cannot carry them (`bleavit.snapshot.v1`
- * discards them, PLAN.md · *Spec questions* SQ-615). That asymmetry is what makes this comparison
+ * discards them, PLAN.md · *Spec questions* SQ-840). That asymmetry is what makes this comparison
  * strictly stronger than any file screen: within a block, the document's order must match the
  * chain's for every block this device can reach.
  */

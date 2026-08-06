@@ -287,7 +287,7 @@ const MOVEMENT = (block: number, account: string, amount: string): SnapshotOp =>
 });
 
 test('the derived list is put in CHAIN order — block, then extrinsic, then event', async () => {
-  // §8.2's rule, and the half `bleavit.snapshot.v1` cannot express (SQ-615): the file carries only
+  // §8.2's rule, and the half `bleavit.snapshot.v1` cannot express (SQ-840): the file carries only
   // the block. The chain side carries both indices, so within a reachable block the document's
   // order must match the chain's — which makes this comparison strictly stronger than any file
   // screen. A reader returning events in whatever order a decoder walked them would otherwise
