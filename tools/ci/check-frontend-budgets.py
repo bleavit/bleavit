@@ -37,6 +37,7 @@ PARAMS = ROOT / "docs" / "architecture" / "13-parameters.md"
 FRONTEND = ROOT / "docs" / "architecture" / "10-frontend-architecture.md"
 POV_BUDGETS = ROOT / "runtime" / "bleavit-runtime" / "src" / "pov_budgets.rs"
 SMOLDOT_GATE = ROOT / "app" / "tools" / "check-smoldot-budget.ts"
+PRIMITIVES = ROOT / "crates" / "futarchy-primitives" / "src" / "lib.rs"
 
 #: 10 §9.1's effective per-row cost, and the one modelling assumption the documents
 #: state rather than derive. It is labelled as an assumption in §9.1 itself, so it is
@@ -221,17 +222,38 @@ def main() -> int:
     doc = FRONTEND.read_text(encoding="utf-8")
     nine = section(doc, "## 9. Resource budgets", "## 10. Package structure", "doc 10 §9")
 
+    checked = 0
     row_bytes = number(
         find(nine, re.escape(ROW_BYTES_ANCHOR).replace("120", r"(\d+)"), "§9.1's per-row byte model").group(1)
     )
     blocks_per_day = Fraction(int(p["epoch_length"]), int(p["epoch_days"]))
+    # The day count comes from a parenthetical on 13 §1's `epoch.length` row — the one
+    # input here that is a label rather than a value, and every rate below scales with it.
+    # The kernel publishes the same figure as a constant, so the two are cross-checked
+    # rather than one of them trusted.
+    kernel_per_day = int(
+        find(
+            PRIMITIVES.read_text(encoding="utf-8"),
+            r"pub const BLOCKS_PER_DAY: u32 = ([\d_]+);",
+            "the kernel's `BLOCKS_PER_DAY`",
+        )
+        .group(1)
+        .replace("_", "")
+    )
+    if blocks_per_day != kernel_per_day:
+        raise Fail(
+            f"13 §1's `epoch.length` row implies {float(blocks_per_day):g} blocks/day "
+            f"({int(p['epoch_length'])} blocks over its '{int(p['epoch_days'])} d' label), but the "
+            f"kernel pins BLOCKS_PER_DAY = {kernel_per_day}. Every rate in §9 scales with this, so "
+            "the disagreement has to be resolved before any cell can be derived."
+        )
+    checked += 1
     obs_per_book_day = blocks_per_day / int(p["obs_interval"]) * p["trade_fraction"]
 
     def books(slots: int) -> int:
         return slots * int(p["books_per_slot"]) + int(p["baseline_books"])
 
     max_books = books(int(p["max_slots"]))
-    checked = 0
 
     # --- §9.1's slate lattice -------------------------------------------------------
     for cells in table_rows(nine, "Trading books", "§9.1's load table"):

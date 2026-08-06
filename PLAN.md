@@ -112,6 +112,13 @@ Legend: ⬜ pending · 🔨 in progress · ✅ done · ⛔ blocked · 🅿 defer
 > (no copies found, a copy naming no source, a copy naming a source that does not exist);
 > `tools/ci` **231 OK**.
 >
+> **One input was still a label rather than a value, and it is now cross-checked.** Every rate
+> in §9 scales with blocks/day, which the checker derived from the *parenthetical* `(21 d)` on
+> 13 §1's `epoch.length` row — the weakest link in a gate whose whole point is that numbers
+> have owners. `futarchy-primitives` publishes `BLOCKS_PER_DAY = 14_400` as a kernel constant,
+> so the two are now compared and a disagreement refuses before any cell is derived rather
+> than silently rescaling all of them. **27 cells; 19 mutation tests; `tools/ci` 233 OK.**
+>
 > **Next:** F14's derivation half is unblocked; its Lighthouse/Playwright half still needs
 > reference hardware, and of §9.4's twelve rows only the smoldot one is gated today — the
 > chain-spec and initial-JS size rows are artifact-blocked behind F11/F18, and the remaining

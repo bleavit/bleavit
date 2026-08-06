@@ -19,6 +19,7 @@ FRONTEND = ROOT / "docs" / "architecture" / "10-frontend-architecture.md"
 PARAMS = ROOT / "docs" / "architecture" / "13-parameters.md"
 POV_BUDGETS = ROOT / "runtime" / "bleavit-runtime" / "src" / "pov_budgets.rs"
 SMOLDOT_GATE = ROOT / "app" / "tools" / "check-smoldot-budget.ts"
+PRIMITIVES = ROOT / "crates" / "futarchy-primitives" / "src" / "lib.rs"
 
 
 def run() -> subprocess.CompletedProcess[str]:
@@ -169,6 +170,23 @@ class FrontendBudgets(unittest.TestCase):
             "| Desktop | ~240 days | **~54 days** |",
             "| Desktop | ~240 days | **~8.5 days** |",
             "cell publishes 8.5 days",
+        )
+
+    def test_a_day_label_disagreeing_with_the_kernel_fails(self) -> None:
+        """Blocks/day is the one input taken from a label; the kernel pins the same figure."""
+        self.assert_mutation_caught(
+            PARAMS,
+            "| `epoch.length` | u32 | blocks | 302,400 (21 d) |",
+            "| `epoch.length` | u32 | blocks | 302,400 (14 d) |",
+            "kernel pins BLOCKS_PER_DAY",
+        )
+
+    def test_moving_the_kernel_constant_fails_too(self) -> None:
+        self.assert_mutation_caught(
+            PRIMITIVES,
+            "pub const BLOCKS_PER_DAY: u32 = 14_400;",
+            "pub const BLOCKS_PER_DAY: u32 = 7_200;",
+            "kernel pins BLOCKS_PER_DAY = 7200",
         )
 
     # --- anti-vacuity: a parse that finds nothing must fail, not pass ---------------
