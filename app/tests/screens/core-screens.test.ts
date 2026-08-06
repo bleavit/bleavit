@@ -67,6 +67,7 @@ import {
   mayExecute,
   maySubmit,
   mayWithdrawProposal,
+  projectStats,
   readBaselineBookPresent,
   readExecutionQueue,
   readProposals,
@@ -93,6 +94,7 @@ import type {
   ProposalArgs,
   ProposalDecoders,
   ProposalsReader,
+  StatsRecord,
   SettlementsView,
   SubmitInputs,
   WelfareCurrentRecord,
@@ -2013,6 +2015,33 @@ test('every leaf of every model belongs to the reader’s own block', () => {
 
 const STATS_ARGS: ProposalArgs = { decisionStats: (pid) => `0xpid${pid}` };
 
+/**
+ * One `DecisionStatsView` as decoded — 02 §4, every field the runtime publishes.
+ *
+ * A helper rather than a literal per test: the view has fourteen fields and a test that spelled
+ * them out would be a place for one of them to be quietly dropped. `pid` defaults to the
+ * proposal these readers hand out first, because it is compared rather than rendered.
+ */
+function statsRecord(overrides: Partial<StatsRecord> = {}): StatsRecord {
+  return {
+    pid: '0',
+    twapAccept1e9: 562_000_000n,
+    twapReject1e9: 521_000_000n,
+    twapBaseline1e9: 523_000_000n,
+    rEff1e9: 521_000_000n,
+    trailingAccept1e9: 562_000_000n,
+    trailingReject1e9: 522_200_000n,
+    coveragePct: 97,
+    tradedVolume: 1_000_000n,
+    vMinRequired: 500_000n,
+    converged: true,
+    gateTwaps1e9: [11_000_000n, 9_000_000n, 17_000_000n, 15_000_000n],
+    attackCostHat: 9_000_000n,
+    inCapPrize: 1_000_000n,
+    ...overrides,
+  };
+}
+
 function proposalsReader(
   states: readonly string[],
   stats: Record<string, string>,
@@ -2051,7 +2080,7 @@ function proposalDecoders(
       OK(
         raw.map((state, index) => ({
           id: String(index),
-          title: `proposal ${index}`,
+          payloadHash: `0x${'ab'.repeat(31)}${index}${index}`,
           klass: 'Treasury',
           state,
         })),
@@ -2068,16 +2097,23 @@ test('the decided arm of ProposalView is reachable from a read, not only from a 
   const source = proposalsReader(['Settled'], { '0xpid0': '0xstats' });
   const read = await readProposals(
     source,
-    proposalDecoders(() => OK({ outcome: 'Adopt', upliftPpm: 12_500n })),
+    proposalDecoders(() => OK(statsRecord())),
     STATS_ARGS,
   );
   assert.equal(read.views.length, 1);
   const view = read.views[0];
   assert.equal(view?.stage, 'decided', 'the decided arm is still unreachable from a read');
-  assert.equal(view?.stage === 'decided' ? view.decisionStats.outcome.value : undefined, 'Adopt');
-  assert.equal(view?.stage === 'decided' ? view.decisionStats.upliftPpm.value : undefined, 12_500n);
+  assert.equal(
+    view?.stage === 'decided' ? view.decisionStats.twapAccept1e9.value : undefined,
+    562_000_000n,
+  );
+  // The one derived figure — `twap_accept − r_eff`, 05 §5.4 step 6's left side minus its floor.
+  assert.equal(
+    view?.stage === 'decided' ? view.decisionStats.uplift1e9.value : undefined,
+    41_000_000n,
+  );
   // Every leaf carries the reader's own pin, including the ones the second call produced.
-  const status = view?.stage === 'decided' ? view.decisionStats.outcome.status : undefined;
+  const status = view?.stage === 'decided' ? view.decisionStats.twapAccept1e9.status : undefined;
   assert.equal(status?.kind, 'verified-finalized');
   assert.equal(status?.kind === 'verified-finalized' ? status.blockHash : undefined, BLOCK);
   assert.deepEqual(read.anomalies, []);
@@ -2106,7 +2142,7 @@ test('each statistic descends from the decision_stats call’s OWN pin, not the 
   };
   const read = await readProposals(
     split,
-    proposalDecoders(() => OK({ outcome: 'Adopt', upliftPpm: 12_500n })),
+    proposalDecoders(() => OK(statsRecord())),
     STATS_ARGS,
   );
   const summary = read.summaries[0];
@@ -2117,7 +2153,7 @@ test('each statistic descends from the decision_stats call’s OWN pin, not the 
   );
   const view = read.views[0];
   assert.equal(view?.stage, 'decided');
-  const stat = view?.stage === 'decided' ? view.decisionStats.upliftPpm.status : undefined;
+  const stat = view?.stage === 'decided' ? view.decisionStats.uplift1e9.status : undefined;
   assert.equal(stat?.kind, 'verified-finalized');
   assert.equal(
     stat?.kind === 'verified-finalized' ? stat.blockHash : undefined,
@@ -2151,7 +2187,7 @@ test('the read asks about open markets too, which is what makes the anomaly reac
   });
   const read = await readProposals(
     source,
-    proposalDecoders((raw) => (raw === '0xsome' ? OK({ outcome: 'Adopt', upliftPpm: 1n }) : OK(undefined))),
+    proposalDecoders((raw) => (raw === '0xsome' ? OK(statsRecord()) : OK(undefined))),
     STATS_ARGS,
   );
   assert.deepEqual(
@@ -2212,11 +2248,11 @@ test('viewFor’s allowlist still governs, whatever the fetch decided to ask', (
   // handed some back.
   const summary = {
     id: v('7'),
-    title: v('a proposal'),
+    payloadHash: v(`0x${'cd'.repeat(32)}`),
     klass: v('Treasury'),
     state: v('SomethingNewer'),
   };
-  const stats = { outcome: v('Adopt'), upliftPpm: v(1n) };
+  const stats = projectStats(finalize('0xstats', AT), statsRecord({ pid: '7' }));
   const ruled = viewFor(summary, stats);
   assert.equal(ruled.view.stage, 'pre-decision');
   assert.notEqual(ruled.anomaly, undefined);

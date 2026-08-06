@@ -11,17 +11,23 @@ export {
   type RedemptionPayout,
 } from './confirm.js';
 export {
+  DECISION_STATS_NOTE,
+  DecisionDashboard,
   EpochShrinkNotice,
+  NO_TRAILING_UPLIFT_NOTE,
   ProposalDetail,
   ProposalList,
   type DecisionStats,
+  type GateTwaps,
   type ProposalSummary,
   type ProposalView,
   type SlotsShrunk,
 } from './proposals.js';
 export {
   PROPOSAL_READS,
+  projectStats,
   readProposals,
+  statsSubjectAnomaly,
   viewFor,
   type Decoded,
   type ProposalAnomaly,
@@ -106,6 +112,22 @@ export {
   type FundingChains,
   type FundingKeyInputs,
 } from './funding-composition.js';
+export {
+  balanceDecoders,
+  balanceKeys,
+  marketDecoders,
+  marketKeys,
+  positionSubject,
+  positionDecoders,
+  positionKeys,
+  proposalArgs,
+  proposalDecoders,
+  quoteArgs,
+  type BalanceKeyInputs,
+  type PositionSubjectKeys,
+  type ScreenChain,
+  type TradeSideName,
+} from './screen-composition.js';
 export {
   EmptyArtifactError,
   UpgradeHashMismatchError,
@@ -374,6 +396,7 @@ export {
   readPositions,
   voidRecoveryView,
   type DecodedVaultState,
+  type DomainPositionDecoders,
   type PositionDecoders,
   type PositionKeys,
   type PositionReadParams,

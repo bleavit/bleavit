@@ -139,7 +139,25 @@ test('P-1 admits Trading and Extended, and nothing else (D-8 cut forecast tradin
   for (const state of ['Trading', 'Extended'] as const) {
     assert.deepEqual(tradeBlocks(decisionTicket({ proposalState: at(state) })), []);
   }
-  for (const state of ['Submitted', 'Deciding', 'Resolved', 'Settled', 'Voided'] as const) {
+  // 02 §2's own enum, minus the two tradable states. Written out rather than sampled, so a
+  // state added to the union without a decision here fails to compile rather than going
+  // untested — and every one of these is a real variant now (the previous list named five
+  // that were not, so five of its ten cases blocked for a reason the runtime cannot produce).
+  for (const state of [
+    'Submitted',
+    'Screening',
+    'Qualified',
+    'Queued',
+    'Suspended',
+    'Rerun',
+    'Rejected',
+    'Executed',
+    'FailedExecuted',
+    'Measuring',
+    'Settled',
+    'Cancelled',
+    'Expired',
+  ] as const) {
     const blocked = checks(decisionTicket({ proposalState: at<ProposalState>(state) }));
     assert.ok(
       blocked.includes('P-1 proposal state'),
@@ -317,7 +335,7 @@ test('every failing row is reported, not just the first (11 §11.4 rule 5)', () 
   // per signing attempt.
   const blocked = checks(
     decisionTicket({
-      proposalState: at<ProposalState>('Resolved'),
+      proposalState: at<ProposalState>('Settled'),
       marketOpen: at(false),
       tradingEnabled: at(false),
       ledgerFrozen: at(true),

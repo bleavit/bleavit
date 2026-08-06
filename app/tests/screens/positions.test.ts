@@ -40,6 +40,7 @@ import {
   quoteRedemption,
   readPositions,
   voidRecoveryView,
+  type DomainPositionDecoders,
   type PositionDecoders,
   type PositionKeys,
   type PositionReadParams,
@@ -227,7 +228,10 @@ function harness(primary: Book, service: Book, log: CallLog) {
       );
     },
   };
-  const decoders: PositionDecoders = {
+  // One pair **per domain**, which is what `PositionDecoders` now requires. The two stubs are
+  // deliberately identical here: what is under test is that `readBook` reaches for the pair
+  // belonging to the domain it is reading, and the double keys its books by API name anyway.
+  const pairFor = (): DomainPositionDecoders => ({
     positions: (raw) => {
       const found = books.get(raw);
       if (found === undefined || found.decodesView === false) {
@@ -242,7 +246,8 @@ function harness(primary: Book, service: Book, log: CallLog) {
       }
       return { ok: true, value: found.witness };
     },
-  };
+  });
+  const decoders: PositionDecoders = { primary: pairFor(), service: pairFor() };
   return { reader, decoders };
 }
 

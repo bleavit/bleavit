@@ -53,24 +53,45 @@ export type Decoded<T> =
 
 export interface ProposalRecord {
   readonly id: string;
-  readonly title: string;
+  /** `payload_hash` — the commitment. There is no title on this chain; see `ProposalSummary`. */
+  readonly payloadHash: string;
   readonly klass: string;
   readonly state: string;
 }
 
+/**
+ * One `DecisionStatsView` as decoded — 02 §4, field for field.
+ *
+ * **Raw, on the grids the runtime publishes.** Every `FixedU64` here stays on the contract's
+ * 1e9 grid and is named `…1e9`, and the balances stay in USDC base units. The superseded
+ * version of this interface had two fields, `outcome` and `upliftPpm`, and neither survived
+ * contact with the view: `DecisionStatsView` declares **no** outcome, and `upliftPpm` asked a
+ * decoder to divide a 1e9 scalar by a thousand before anything could read the digits it
+ * discarded — the projection `WelfarePillars` warns about, in the losing direction.
+ */
 export interface StatsRecord {
-  readonly outcome: string;
+  /** The `ProposalId` the view echoes. Compared, never rendered — see {@link statsSubjectAnomaly}. */
+  readonly pid: string;
+  readonly twapAccept1e9: bigint;
+  readonly twapReject1e9: bigint;
+  readonly twapBaseline1e9: bigint;
+  readonly rEff1e9: bigint;
+  readonly trailingAccept1e9: bigint;
+  readonly trailingReject1e9: bigint;
+  readonly coveragePct: number;
+  readonly tradedVolume: bigint;
+  readonly vMinRequired: bigint;
+  readonly converged: boolean;
   /**
-   * The measured uplift in **parts per million**, which is a projection the decoder owes.
+   * `gate_twaps_1e9` — `undefined` for the runtime's `None`, else exactly four.
    *
-   * Every fixed-point field of 02 §4's `DecisionStatsView` is on the contract's **1e9**
-   * grid, and `Ratio` renders parts per million (`formatPpm` divides by 10,000 to reach a
-   * percentage). A decoder that handed a 1e9-grid scalar straight through would therefore
-   * put a figure on screen **1,000× too large**, under a `verified-finalized` badge and
-   * with every other row correct — so the projection is named in the field and stated
-   * here rather than left to the call site.
+   * A fixed-length tuple rather than `readonly bigint[]`, because 02 §4 freezes the array at
+   * `[FixedU64; 4]` and its order — `(S,C) × (adopt, reject)` — is wire format. A decoder
+   * that returned three would otherwise leave one gate book rendered as `undefined`.
    */
-  readonly upliftPpm: bigint;
+  readonly gateTwaps1e9: readonly [bigint, bigint, bigint, bigint] | undefined;
+  readonly attackCostHat: bigint;
+  readonly inCapPrize: bigint;
 }
 
 export interface ProposalDecoders {
@@ -111,20 +132,43 @@ export const PROPOSAL_READS = Object.freeze({
 const OPEN_TRADING_STATES: ReadonlySet<string> = new Set(['Trading', 'Extended']);
 
 /**
+ * The one state in which the decision has been reset and its windows reopen (05 §2.1 T13/T25).
+ *
+ * Neither sealed nor open, and neither of the other two sentences is true of it: the markets
+ * are not currently trading, and *"have not opened yet"* is false for a proposal whose books
+ * are about to reopen under a raised hurdle.
+ */
+const REOPENING_STATE = 'Rerun';
+
+/**
  * The states in which statistics may render at all.
  *
  * An allowlist, and it is the load-bearing half: a state this client has never heard of —
  * from a runtime upgrade, or from a decode that produced something plausible — must render
  * **no** statistics, per INV-FE-12's fail-closed rule. A denylist alone would admit it.
+ *
+ * **Three of the seven names this list carried were not `ProposalState` variants at all**, and
+ * the composition root is what exposed it: once a decoder produced the variant name straight
+ * out of metadata, `Measured`, `Delayed` and `MandateExpired` matched nothing the runtime can
+ * emit, while `FailedExecuted`, `Cancelled`, `Expired` and `Suspended` — all four real, all
+ * four post-decision — were missing. The direction was safe (an unmatched state renders no
+ * statistics) and the effect was not: a decided proposal in any of those four was told *"there
+ * are no decision statistics yet"*, which is a confident false statement about the chain.
+ *
+ * The nine below are 02 §2's frozen enum minus the four pre-decision states, the two
+ * open-trading ones and {@link REOPENING_STATE}, and `app/tests/screens` derives that
+ * subtraction from the document rather than trusting this list.
  */
 const STATS_REQUIRE_SEALED: ReadonlySet<string> = new Set([
   'Queued',
-  'Executed',
+  'Suspended',
   'Rejected',
+  'Executed',
+  'FailedExecuted',
+  'Measuring',
   'Settled',
-  'Measured',
-  'Delayed',
-  'MandateExpired',
+  'Cancelled',
+  'Expired',
 ]);
 
 /**
@@ -160,6 +204,35 @@ export interface ProposalAnomaly {
   readonly detail: string;
 }
 
+/**
+ * The one check that can catch a wrong `decision_stats` argument.
+ *
+ * `ProposalArgs` states the hazard in as many words: *"a wrong argument does not fail, it
+ * asks about **a different proposal** and gets a perfectly valid answer."* Nothing checked
+ * it, because the decoder discarded the `pid` the view echoes — so an off-by-one in the SCALE
+ * encoding would have put one proposal's decision statistics under another's heading, every
+ * figure genuine, every badge true, and no path that could report it.
+ *
+ * Comparing the echo closes that, and it is the *only* thing that can: the argument is opaque
+ * hex by the time it leaves this module, and the runtime answers whatever it decodes to.
+ *
+ * Exported because it is a rule rather than a step, per {@link viewFor}.
+ */
+export function statsSubjectAnomaly(
+  summary: ProposalSummary,
+  statsPid: string,
+): ProposalAnomaly | undefined {
+  if (statsPid === summary.id.value) return undefined;
+  return {
+    proposalId: summary.id.value,
+    detail:
+      `${PROPOSAL_READS.decisionStats}() answered about proposal ${statsPid} while this ` +
+      `client asked about ${summary.id.value}. The statistics are not being rendered: they ` +
+      'are a true reading of a different proposal, which under this proposal’s heading is a ' +
+      'false statement made entirely out of genuine chain bytes.',
+  };
+}
+
 export interface ProposalsRead {
   readonly summaries: readonly ProposalSummary[];
   /**
@@ -180,6 +253,14 @@ export interface ProposalsRead {
  * Exported because it is the whole rule, and a test that could only reach it through a
  * reader would be testing the reader.
  */
+/** Which sentence a proposal with no statistics gets. One name per state, per `viewFor`. */
+function reasonFor(state: string): 'trading' | 'extended' | 'reopening' | 'not-yet-opened' {
+  if (state === 'Extended') return 'extended';
+  if (OPEN_TRADING_STATES.has(state)) return 'trading';
+  if (state === REOPENING_STATE) return 'reopening';
+  return 'not-yet-opened';
+}
+
 export function viewFor(
   summary: ProposalSummary,
   stats: DecisionStats | undefined,
@@ -188,19 +269,14 @@ export function viewFor(
   const sealed = STATS_REQUIRE_SEALED.has(state);
 
   if (stats === undefined) {
-    const reason = OPEN_TRADING_STATES.has(state)
-      ? state === 'Extended'
-        ? ('extended' as const)
-        : ('trading' as const)
-      : ('not-yet-opened' as const);
-    return { view: { stage: 'pre-decision', summary, reason }, anomaly: undefined };
+    return { view: { stage: 'pre-decision', summary, reason: reasonFor(state) }, anomaly: undefined };
   }
 
   if (!sealed) {
     // Both reads came from one pinned block, so this is not a race. Refusing is the only
     // direction that cannot put a projected outcome on an open market.
     return {
-      view: { stage: 'pre-decision', summary, reason: OPEN_TRADING_STATES.has(state) ? 'trading' : 'not-yet-opened' },
+      view: { stage: 'pre-decision', summary, reason: reasonFor(state) },
       anomaly: {
         proposalId: summary.id.value,
         detail:
@@ -213,6 +289,52 @@ export function viewFor(
   }
 
   return { view: { stage: 'decided', summary, decisionStats: stats }, anomaly: undefined };
+}
+
+/**
+ * One `DecisionStatsView` as the dashboard renders it, every leaf descending from `read`.
+ *
+ * `derive` throughout, never a status written beside the values (10 §2.1/§2.2, V-182/V-200):
+ * the pin can only be the one the `decision_stats` call came back with, and a later edit that
+ * reads a figure from somewhere else cannot inherit it by sitting next to the others.
+ *
+ * `uplift1e9` is the one derived figure, and it is derived from **this same read** — 10 §2.2's
+ * *"computed client-side purely from such values"*. It is `twap_accept − r_eff`, the left side
+ * of 05 §5.4 step 6 minus its floor. Nothing is derived for the trailing window, because
+ * step 7's floor needs a trailing Baseline TWAP the view does not publish.
+ *
+ * Exported for the reason {@link viewFor} is: it is the projection rule, and a test that could
+ * only reach it through a reader would be testing the reader.
+ */
+export function projectStats(read: Finalized<unknown>, record: StatsRecord): DecisionStats {
+  const gates = record.gateTwaps1e9;
+  return {
+    twapAccept1e9: derive(read, () => record.twapAccept1e9),
+    twapReject1e9: derive(read, () => record.twapReject1e9),
+    twapBaseline1e9: derive(read, () => record.twapBaseline1e9),
+    rEff1e9: derive(read, () => record.rEff1e9),
+    trailingAccept1e9: derive(read, () => record.trailingAccept1e9),
+    trailingReject1e9: derive(read, () => record.trailingReject1e9),
+    uplift1e9: derive(read, () => record.twapAccept1e9 - record.rEff1e9),
+    coveragePct: derive(read, () => record.coveragePct),
+    tradedVolume: derive(read, () => record.tradedVolume),
+    vMinRequired: derive(read, () => record.vMinRequired),
+    converged: derive(read, () => record.converged),
+    attackCostHat: derive(read, () => record.attackCostHat),
+    inCapPrize: derive(read, () => record.inCapPrize),
+    gates:
+      gates === undefined
+        ? { present: false }
+        : {
+            present: true,
+            // Positional, and the order is 02 §4's own `(S,C) × (adopt, reject)`. Written out
+            // here rather than passed as a tuple so the four names exist in exactly one place.
+            survivalAdopt1e9: derive(read, () => gates[0]),
+            survivalReject1e9: derive(read, () => gates[1]),
+            securityAdopt1e9: derive(read, () => gates[2]),
+            securityReject1e9: derive(read, () => gates[3]),
+          },
+  };
 }
 
 /**
@@ -303,7 +425,7 @@ export async function readProposals(
   // rather than the type that decided whether the badge was true (V-200).
   const summaries: ProposalSummary[] = decoded.value.map((record) => ({
     id: derive(raw, () => record.id),
-    title: derive(raw, () => record.title),
+    payloadHash: derive(raw, () => record.payloadHash),
     klass: derive(raw, () => record.klass),
     state: derive(raw, () => record.state),
   }));
@@ -349,10 +471,12 @@ export async function readProposals(
         if (!stated.ok) undecodable.push({ label, rawHex: answer.value, reason: stated.reason });
         else if (stated.value !== undefined) {
           const record = stated.value;
-          stats = {
-            outcome: derive(answer, () => record.outcome),
-            upliftPpm: derive(answer, () => record.upliftPpm),
-          };
+          // The echoed subject, before anything is projected. A mismatch means this client
+          // asked about a different proposal, so there is nothing here to render under this
+          // heading and the block is dropped rather than shown (see `statsSubjectAnomaly`).
+          const mismatch = statsSubjectAnomaly(summary, record.pid);
+          if (mismatch !== undefined) anomalies.push(mismatch);
+          else stats = projectStats(answer, record);
         }
       }
     }

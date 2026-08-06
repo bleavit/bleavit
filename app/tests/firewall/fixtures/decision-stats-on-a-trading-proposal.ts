@@ -4,12 +4,13 @@
 // uplift. Verified rather than assumed: TypeScript narrows a discriminated union by its
 // discriminant *before* excess-property checking, so a property belonging to the other
 // member is rejected rather than tolerated.
-import type { ProposalView, ProposalSummary } from '@bleavit/features-tx';
+import type { DecisionStats, ProposalView, ProposalSummary } from '@bleavit/features-tx';
 
 declare const summary: ProposalSummary;
+declare const stats: DecisionStats;
 export const view: ProposalView = {
   stage: 'pre-decision',
   summary,
   reason: 'trading',
-  decisionStats: { outcome: summary.title, upliftPpm: summary.id },
+  decisionStats: stats,
 };
