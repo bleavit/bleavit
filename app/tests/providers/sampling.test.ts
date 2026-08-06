@@ -23,7 +23,10 @@ import {
   selectSample,
 } from '@bleavit/providers';
 import * as barrel from '@bleavit/providers';
+import * as testing from '@bleavit/providers/testing';
 import { runSamplingRoundAtRate, selectSampleAtRate } from '@bleavit/providers/testing';
+
+import { assertTestingSubpathIsQuarantined } from '../shared/testing-subpath.ts';
 import type { Provider, ProviderPage, RowVerdict, SampledRow } from '@bleavit/providers';
 
 const HEALTHY: Provider = { id: 'p1', kind: 'indexer', health: { kind: 'healthy' } };
@@ -259,14 +262,20 @@ test('the loosened form is NOT reachable from the package barrel', () => {
   // consumer's reach with no subpath import anywhere and the rule still green. Measured, not
   // assumed: that mutation survived the whole gate set on 2026-08-06 until this test existed.
   //
-  // Same hole exists in shape for `@bleavit/local-index`'s `selfRange`, where the barrel
-  // omission is likewise enforced by discipline. Noted rather than fixed here: that package is
-  // another milestone's, and a drive-by edit to it is not this one's to make.
-  assert.equal('selectSampleAtRate' in barrel, false);
-  assert.equal('runSamplingRoundAtRate' in barrel, false);
-  // Anti-vacuity: the barrel is real and does export the production entry points.
-  assert.equal('selectSample' in barrel, true);
-  assert.equal('runSamplingRound' in barrel, true);
+  // It enumerated two names by hand until 2026-08-06, which is the same defect one level up: a
+  // third loosened export would have slipped past a test that lists what to look for. The shared
+  // helper takes the whole `/testing` **namespace**, so the quarantine covers whatever is in it.
+  // The same hole in `chain-client`, `local-index` and `signing` is closed by the same helper in
+  // their own suites.
+  assertTestingSubpathIsQuarantined(
+    {
+      packageName: '@bleavit/providers',
+      barrel,
+      testing,
+      barrelMustExport: ['selectSample', 'runSamplingRound'],
+    },
+    assert,
+  );
 });
 
 test('the loosened form still exists, and behaves — it is quarantined, not deleted', async () => {
@@ -362,7 +371,7 @@ test('a round where nothing was comparable is INCONCLUSIVE, not clean', async ()
   assert.deepEqual(round.provider, HEALTHY, 'and it is not disabled either: nothing was proven');
   assert.equal(round.result.unverifiable, 2);
   assert.equal(effectiveCoverage(round.result).checked, 0);
-  assert.equal(effectiveCoverage(round.result).meaningful, false);
+  assert.equal(effectiveCoverage(round.result).ratio, 0);
 });
 
 test('unverifiable rows count neither for nor against, and coverage says so', async () => {
@@ -379,7 +388,7 @@ test('unverifiable rows count neither for nor against, and coverage says so', as
   const coverage = effectiveCoverage(round.result);
   assert.equal(coverage.checked, 1);
   assert.equal(coverage.ofTotal, 4);
-  assert.equal(coverage.meaningful, false, 'one comparable row in four is weak evidence');
+  assert.equal(coverage.ratio, 0.25, 'one comparable row in four, reported as exactly that');
 });
 
 test('rows are checked sequentially, so a round is reproducible from its inputs', async () => {

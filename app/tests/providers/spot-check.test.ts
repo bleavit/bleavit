@@ -27,7 +27,7 @@ import { createHash } from 'node:crypto';
 
 import {
   SNAPSHOT_FORMAT,
-  SPOT_CHECK_MAX_BLOCKS,
+  SPOT_CHECK_BLOCK_CEILING,
   admitSnapshot,
   projectOp,
   rejectSnapshot,
@@ -81,11 +81,15 @@ function admit(document: SnapshotDocument) {
  * construction, which is the same defect `app/tools/snapshot` avoids by reading balances from
  * chain state instead of folding its own ops.
  */
-function lightClient(reachableFrom: number, truth: SnapshotDocument = trueHistory()) {
+function lightClient(
+  reachableFrom: number,
+  truth: SnapshotDocument = trueHistory(),
+  reachableTo = Number.POSITIVE_INFINITY,
+) {
   const asked: number[] = [];
   const check = async (claim: SpotClaim): Promise<SpotVerdict> => {
     asked.push(claim.block);
-    if (claim.block < reachableFrom) return { kind: 'out-of-reach' };
+    if (claim.block < reachableFrom || claim.block > reachableTo) return { kind: 'out-of-reach' };
     const derived = truth.ops.filter((op) => op.block === claim.block).map(projectOp);
     const same =
       derived.length === claim.movements.length &&
@@ -227,7 +231,25 @@ test('out-of-reach is neither a pass nor a failure, and is counted separately', 
   const report = await spotCheckSnapshot(document, chain.check);
   assert.deepEqual(report.findings, []);
   assert.equal(report.compared, 2, 'blocks 12 and 13');
-  assert.equal(report.outOfReach, 2, 'blocks 10 and 11');
+  // One, not two: the walk stops the moment it leaves the window below, because the reachable
+  // window is one contiguous interval and every older covered block is unreachable too. The
+  // count is what was *asked*, and asking about the rest is spending a user's device to be told
+  // something already known.
+  assert.equal(report.outOfReach, 1, 'block 11 answered out-of-reach and the walk stopped there');
+  assert.deepEqual(chain.asked, [13, 12, 11]);
+});
+
+test('an out-of-reach ABOVE the window does not stop the walk', async () => {
+  // The asymmetry a simpler rule gets wrong. A document whose newest covered block is ahead of
+  // this device's head answers `out-of-reach` at the top; stopping there would compare nothing
+  // while the blocks a few positions down are perfectly readable.
+  const document = trueHistory();
+  const chain = lightClient(10, trueHistory(), 12);
+  const report = await spotCheckSnapshot(document, chain.check);
+  assert.deepEqual(report.findings, []);
+  assert.equal(report.compared, 3, 'blocks 12, 11 and 10, having descended past an unreachable 13');
+  assert.equal(report.outOfReach, 1);
+  assert.deepEqual(chain.asked, [13, 12, 11, 10]);
 });
 
 // ------------------------------------------------------------------ determinism and bounds
@@ -245,7 +267,11 @@ test('the walk is DOWNWARD from the newest covered block — the window is at th
   assert.deepEqual(chain.asked, [13, 12, 11, 10]);
 });
 
-test('the pass is bounded, and the bound is spent on the newest blocks', async () => {
+test('the pass is bounded, the bound is spent on the newest blocks, and hitting it REFUSES', async () => {
+  // The ceiling exists so a document covering millions of blocks terminates. What it must never
+  // do is stop quietly: the previous constant (128) simply ended the walk and returned a clean
+  // report, so a document was admitted on a check that had not finished — and 10 §4.2 puts the
+  // peers' own pruning depth at ~256, twice the number the pass ever asked about.
   const document: SnapshotDocument = {
     ...trueHistory(),
     range: { fromBlock: 0, toBlock: 100_000 },
@@ -253,13 +279,73 @@ test('the pass is bounded, and the bound is spent on the newest blocks', async (
   };
   assert.equal(admit(document).kind, 'admitted');
   const asked: number[] = [];
-  await spotCheckSnapshot(document, async (claim) => {
+  const report = await spotCheckSnapshot(document, async (claim) => {
     asked.push(claim.block);
-    return { kind: 'out-of-reach' };
+    // Never `out-of-reach`: this device can see further than any window the specification
+    // describes, so nothing terminates the walk except the ceiling.
+    return { kind: 'agrees' };
   });
-  assert.equal(asked.length, SPOT_CHECK_MAX_BLOCKS);
+  assert.equal(asked.length, SPOT_CHECK_BLOCK_CEILING);
   assert.equal(asked[0], 100_000);
-  assert.equal(asked[asked.length - 1], 100_000 - SPOT_CHECK_MAX_BLOCKS + 1);
+  assert.equal(asked[asked.length - 1], 100_000 - SPOT_CHECK_BLOCK_CEILING + 1);
+  assert.equal(report.findings.length, 1);
+  assert.equal(report.findings[0]?.screen, 'spot-check-incomplete');
+  assert.match(report.findings[0]?.why ?? '', /did not finish/);
+});
+
+test('the ceiling is derived from 10 §4.2, and is not the old truncating bound', () => {
+  // A number with a derivation rather than a preference: §4.2 states peers "prune state at ~256
+  // blocks by default", so a client whose reachable depth is at most that finishes its walk well
+  // inside this. Written as the product so the derivation is in the source and not only here.
+  assert.equal(SPOT_CHECK_BLOCK_CEILING, 512);
+  assert.ok(SPOT_CHECK_BLOCK_CEILING > 256, 'a ceiling below the documented pruning depth truncates');
+});
+
+test('a forgery past the OLD 128-block bound is now handed to the checker', async () => {
+  // The regression in its exact shape. With the walk fixed at 128 blocks, a document covering
+  // deep history put every forgery below the 128th-newest reachable block out of the checker's
+  // sight — admitted, `findings: []`, and minted `sampled: true`.
+  const truth: SnapshotDocument = {
+    format: SNAPSHOT_FORMAT,
+    binding: { ...BINDING },
+    range: { fromBlock: 0, toBlock: 100_000 },
+    coverage: [{ fromBlock: 0, toBlock: 100_000 }],
+    vaults: [],
+    ops: [],
+    balances: [],
+  };
+  const forged: SnapshotDocument = {
+    ...truth,
+    vaults: [{ vault: 'v1', branches: ['FAIL', 'PASS'] }],
+    ops: [{ kind: 'split', block: 99_800, vault: 'v1', account: 'mallory', amount: '1000' }],
+    balances: [
+      { vault: 'v1', account: 'mallory', branch: 'FAIL', amount: '1000' },
+      { vault: 'v1', account: 'mallory', branch: 'PASS', amount: '1000' },
+    ],
+  };
+  assert.equal(admit(forged).kind, 'admitted', 'every internal screen passes — that is the point');
+  const chain = lightClient(99_700, truth);
+  const report = await spotCheckSnapshot(forged, chain.check);
+  assert.ok(chain.asked.length > 128, `the old bound asked 128; this asked ${chain.asked.length}`);
+  assert.equal(report.findings.length, 1);
+  assert.equal(report.findings[0]?.screen, 'spot-check');
+  assert.match(report.findings[0]?.why ?? '', /block 99800/);
+});
+
+test('an unfinished pass refuses with the incomplete-check remedy, which blames nobody', async () => {
+  // A ceiling this client chose is a fact about this device. Refusing is right — an unfinished
+  // mandatory check cannot stand in for a finished one — and telling the user their publisher
+  // may be forging is not.
+  const document: SnapshotDocument = {
+    ...trueHistory(),
+    range: { fromBlock: 0, toBlock: 100_000 },
+    coverage: [{ fromBlock: 0, toBlock: 100_000 }],
+  };
+  const report = await spotCheckSnapshot(document, async () => ({ kind: 'agrees' }), 4);
+  const refusal = rejectSnapshot(report.findings).refusal;
+  assert.equal(refusal.code, 'FE-PROV-003');
+  assert.match(refusal.detail, /could not finish re-deriving/);
+  assert.doesNotMatch(refusal.detail, /what a forged snapshot looks like/);
 });
 
 test('the same document and the same chain produce the same report — §8.4 says deterministic', async () => {
@@ -314,7 +400,7 @@ test('a spot-check finding rejects as FE-PROV-003 with the chain-disagreement re
   assert.doesNotMatch(refusal.detail, /Check that the download completed/);
 });
 
-test('maxBlocks must be a positive integer — a zero bound would check nothing and pass', async () => {
+test('the ceiling must be a positive integer — a zero bound would check nothing and pass', async () => {
   await assert.rejects(() => spotCheckSnapshot(trueHistory(), async () => ({ kind: 'agrees' }), 0), RangeError);
   await assert.rejects(
     () => spotCheckSnapshot(trueHistory(), async () => ({ kind: 'agrees' }), 1.5),

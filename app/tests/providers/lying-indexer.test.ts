@@ -199,7 +199,7 @@ test('an HONEST indexer serving the recorded values survives a round untouched',
   assert.equal(round.result.mismatches, 0);
   assert.equal(round.refusal, undefined);
   assert.ok(round.result.rowsChecked > 0, 'a clean round that compared nothing proves nothing');
-  assert.equal(effectiveCoverage(round.result).meaningful, true);
+  assert.equal(effectiveCoverage(round.result).ratio, 1, 'every sampled row was comparable');
 });
 
 test('a LYING indexer is caught by the adapter and auto-disabled — 15 §4.8', async () => {
@@ -303,7 +303,7 @@ test('depth the light client cannot reach is UNVERIFIABLE, and distinguishable f
   );
   assert.equal(round.outcome, 'inconclusive');
   assert.equal(effectiveCoverage(round.result).checked, 0);
-  assert.equal(effectiveCoverage(round.result).meaningful, false);
+  assert.equal(effectiveCoverage(round.result).ratio, 0);
 });
 
 test('the ladder still refuses to sample a disabled source after it caught one', async () => {

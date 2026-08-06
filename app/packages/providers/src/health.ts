@@ -46,11 +46,28 @@
 import {
   INCOMPLETE_HISTORY_EXPLAINER,
   samplingMismatchReason,
+  type MismatchSubject,
   type ProviderRefusalCode,
 } from './refusals.js';
 
-/** §8.3's ladder. `disabled` carries why — it is not a bare state. */
+/**
+ * §8.3's ladder. `disabled` carries why — it is not a bare state.
+ *
+ * `unprobed` is the state before the ladder starts, and it is not decoration. §8.3 requires a
+ * probe *"on enable"*, and until 2026-08-06 {@link acceptSuggestion} returned a provider already
+ * marked `healthy`: nothing had been asked, nothing had answered, and every read taken before the
+ * scheduler's first tick came from a source this client had described to itself as healthy on no
+ * evidence. `probeDue(null, …)` answering `true` does not fix that — it tells a caller a probe is
+ * *due*, and a caller that serves a read first is not contradicted by anything.
+ *
+ * So the enable state is one that **cannot serve** ({@link canServeReads}), which is INV-FE-12's
+ * fail-closed lattice in its own words: an unproven capability is absent, and absence disables
+ * the dependent surface. It is deliberately not `slow` or `failing` either — inventing a
+ * pessimistic observation is as wrong as inventing an optimistic one, and both are observations
+ * nobody made.
+ */
 export type ProviderHealth =
+  | { readonly kind: 'unprobed' }
   | { readonly kind: 'healthy' }
   | { readonly kind: 'slow'; readonly observedMs: number }
   | { readonly kind: 'failing'; readonly consecutiveFailures: number }
@@ -69,6 +86,19 @@ export interface Provider {
 }
 
 /**
+ * May this source be read from at all?
+ *
+ * The one predicate a read path calls, and the reason `unprobed` is a state rather than a flag:
+ * *"has it been probed"* and *"is it switched off"* are two questions with one answer here, and
+ * a call site that had to remember both would eventually remember one. `slow` serves — §8.3 is
+ * explicit that a slow provider is an honest one and that converting a network condition into a
+ * missing-data incident is the failure to avoid.
+ */
+export function canServeReads(provider: Provider): boolean {
+  return provider.health.kind === 'healthy' || provider.health.kind === 'slow';
+}
+
+/**
  * The shipped provider list.
  *
  * Takes **no argument**, so there is nothing for a build, a release channel or a previous
@@ -81,18 +111,28 @@ export function defaultProviders(): readonly Provider[] {
 // ------------------------------------------------------------------ release constants
 
 /**
- * §8.3's ladder thresholds, its probe interval, and the coverage floor §8.4 reports against.
+ * §8.3's ladder thresholds and its probe interval.
  *
  * **Release constants, not chain constants** (10 §8.3): a governance vote does not change how
  * fast a third-party HTTP endpoint answers, and there is no chain surface to read them from,
- * so 10 §5.4's no-literal rule does not reach them. They are named — rather than typed at the
+ * so 10 §5.4's no-literal rule does not reach them. They are named — rather than written at the
  * site that uses them — so a caller can pass a different set instead of a call site inventing
- * one, which is the property `meaningfulAtLeast` was violating while this interface argued for
- * it: the 50 % floor was written as `checked * 2 >= rowsChecked` inside `effectiveCoverage`,
- * where no caller could see it, name it or replace it.
+ * one.
  *
- * They live in this module rather than beside the sampling loop because `effectiveCoverage`
- * needs one of them and is here; the alternative was an import cycle.
+ * They live in this module rather than beside the sampling loop because the ladder and the
+ * round report are both consumed here; the alternative was an import cycle.
+ *
+ * ## What is deliberately **not** in this set
+ *
+ * There is no sufficiency threshold — no number saying how much of a round must have been
+ * comparable before the client calls it evidence. One shipped here as `meaningfulAtLeast: 0.5`
+ * and was removed on 2026-08-06: §8.3's release-constant licence covers *"how fast a
+ * third-party HTTP endpoint answers"*, which is a fact about networks, and a line between
+ * weak and strong evidence is not that. Nothing anchors 0.5 — not a kernel constant, not a
+ * 13 §1 key, not published calibration — so it was a value picked rather than derived, which
+ * R-2 forbids. {@link effectiveCoverage} now reports the raw ratio and makes no claim about
+ * it; a screen that wants to describe a round needs a number the specification names, and
+ * PLAN.md · *Spec questions* SQ-633 asks 10 §8.4 for one.
  */
 export interface LadderThresholds {
   /** Above this, a *response* is `slow`. Slow never disables on its own (§8.3). */
@@ -101,26 +141,12 @@ export interface LadderThresholds {
   readonly disableAfter: number;
   /** §8.3: "on enable + every 10 min". */
   readonly probeEveryMs: number;
-  /**
-   * The share of sampled rows that must have been **comparable** before a round is reported
-   * as meaningful evidence.
-   *
-   * A release constant with no chain anchor and no calibration behind it, stated plainly
-   * rather than derived: what it encodes is *"at least as many rows were compared as were
-   * not"*, and no measurement decides where that line belongs. It is deliberately **not** a
-   * pass/fail threshold — {@link shouldAutoDisable} ignores it entirely, and a round below it
-   * is still clean if everything comparable matched. It only governs whether the client
-   * describes the round as evidence, and {@link effectiveCoverage} reports the raw ratio
-   * beside the verdict so a caller never has to take the boolean's word for it.
-   */
-  readonly meaningfulAtLeast: number;
 }
 
 export const LADDER: LadderThresholds = Object.freeze({
   slowAboveMs: 2_000,
   disableAfter: 3,
   probeEveryMs: 10 * 60 * 1_000,
-  meaningfulAtLeast: 0.5,
 });
 
 /** §8.4's normative UI copy, in one place, including the half that is unflattering. */
@@ -158,46 +184,52 @@ export function shouldAutoDisable(result: SampleResult): boolean {
  * Reported separately from the pass/fail so a round that verified almost nothing is
  * visible as such. A round of 100 rows where 98 were unverifiable is not a 100-row check,
  * and calling it one is the "passes by shrinking" shape this repository keeps refusing.
+ *
+ * It returns three numbers and **no verdict**. The verdict it used to carry — `meaningful`,
+ * true at or above a 50 % floor — is gone for the reason {@link LadderThresholds} states: the
+ * floor was invented here, and a client that calls a round *evidence* on a number nobody
+ * specified is making a claim §8.4 never authorised. A caller that must describe a round says
+ * *"n of m rows were comparable"*, which is a fact, until 10 §8.4 names a line (SQ-633).
  */
-export function effectiveCoverage(
-  result: SampleResult,
-  thresholds: LadderThresholds = LADDER,
-): {
+export function effectiveCoverage(result: SampleResult): {
   readonly checked: number;
   readonly ofTotal: number;
-  /** Comparable rows as a share of sampled rows. Reported so the boolean is never the only fact. */
+  /** Comparable rows as a share of sampled rows. `0` when nothing was sampled. */
   readonly ratio: number;
-  readonly meaningful: boolean;
 } {
   const checked = result.rowsChecked - result.unverifiable;
-  const ratio = result.rowsChecked > 0 ? checked / result.rowsChecked : 0;
   return {
     checked,
     ofTotal: result.rowsChecked,
-    ratio,
-    // Below the named floor the round is weak evidence. Stated rather than hidden, so a green
-    // sample cannot stand in for a check that did not happen — and named rather than inlined,
-    // so a caller with a different view of "weak" can pass one.
-    meaningful: result.rowsChecked > 0 && ratio >= thresholds.meaningfulAtLeast,
+    ratio: result.rowsChecked > 0 ? checked / result.rowsChecked : 0,
   };
 }
 
 /**
  * Advance the ladder from a sampling round.
  *
- * The **one** place a sampling round disables a provider. `runSamplingRound` routes through
- * it rather than constructing the disabled state itself: the two built the same sentence
- * independently until 2026-08-06, and a second builder is how one of them silently becomes
- * the older wording (see `refusals.ts`'s module note).
+ * The **one** place a §8.4 comparison against chain state disables a provider. Both callers
+ * route through it rather than constructing the disabled state themselves: the sampling loop
+ * (`runSamplingRound`, rows re-read from storage) and the snapshot import (`importSnapshotStream`,
+ * blocks re-derived by {@link chainSpotCheck}). They once built the same sentence independently,
+ * and a second builder is how one of them silently becomes the older wording (see `refusals.ts`).
+ *
+ * `subject` selects which fixed noun phrase the recorded reason uses — sampled rows or
+ * re-derived blocks. It is a typed discriminant rather than a string the caller composes,
+ * because §10.4 forbids free text and a template with a hole in it is free text.
  */
-export function afterSampling(provider: Provider, result: SampleResult): Provider {
+export function afterSampling(
+  provider: Provider,
+  result: SampleResult,
+  subject: MismatchSubject = 'sampled-rows',
+): Provider {
   if (shouldAutoDisable(result)) {
     return {
       ...provider,
       health: {
         kind: 'disabled',
         by: 'auto',
-        reason: samplingMismatchReason(result.mismatches, result.rowsChecked),
+        reason: samplingMismatchReason(result.mismatches, result.rowsChecked, subject),
       },
     };
   }
@@ -216,7 +248,14 @@ export function afterSampling(provider: Provider, result: SampleResult): Provide
  */
 export type FleetState =
   | { readonly kind: 'none-enabled'; readonly explainer: string }
-  | { readonly kind: 'serving'; readonly enabled: number; readonly serving: number }
+  | {
+      readonly kind: 'serving';
+      readonly enabled: number;
+      /** Sources that have answered a probe and are not switched off. */
+      readonly serving: number;
+      /** Sources enabled but not yet probed — serving nothing, and not an incident (§8.3). */
+      readonly unprobed: number;
+    }
   | {
       readonly kind: 'all-down';
       readonly enabled: number;
@@ -244,7 +283,15 @@ export function fleetState(providers: readonly Provider[]): FleetState {
   }
   const down = providers.filter((p) => p.health.kind === 'disabled');
   if (down.length < providers.length) {
-    return { kind: 'serving', enabled: providers.length, serving: providers.length - down.length };
+    return {
+      kind: 'serving',
+      enabled: providers.length,
+      // Counted from `canServeReads`, not as "everything that is not disabled": a source waiting
+      // for its first probe is serving nothing, and reporting it as serving is the same claim
+      // `acceptSuggestion` used to make one layer down.
+      serving: providers.filter((p) => canServeReads(p)).length,
+      unprobed: providers.filter((p) => p.health.kind === 'unprobed').length,
+    };
   }
   return {
     kind: 'all-down',

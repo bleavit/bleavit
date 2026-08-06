@@ -20,18 +20,24 @@ import { createHash } from 'node:crypto';
 import {
   EVICTION_DECLINED,
   IMPORT_MAX_ROWS,
+  IMPORT_MAX_UNCOMPRESSED_BYTES,
   SNAPSHOT_FORMAT,
+  admitSnapshot,
   importSnapshotStream,
   mintIndexerRows,
   mintSnapshotRows,
+  rowUpperBound,
+  runSamplingRound,
   serializeSnapshot,
   snapshotPreimage,
+  spotCheckSnapshot,
 } from '@bleavit/providers';
 import type {
   ImportDependencies,
   ImportPlan,
   ImportRequest,
   LocalFootprint,
+  Provider,
   SnapshotChunk,
   SnapshotDocument,
   SpotClaim,
@@ -79,11 +85,14 @@ const FOOTPRINT: readonly LocalFootprint[] = [
   { table: 'events', rows: 4_000, bytes: 400_000, oldestBlock: 50 },
 ];
 
+const PUBLISHER: Provider = { id: 'archive-one', kind: 'snapshot', health: { kind: 'healthy' } };
+
 function requestFor(document: SnapshotDocument, budgetBytes = 10_000_000): ImportRequest {
   return {
-    providerId: 'archive-one',
+    provider: PUBLISHER,
     admission: { expectedPin: sha256(snapshotPreimage(document)), binding: { ...BINDING } },
     sha256,
+    maxInputBytes: IMPORT_MAX_UNCOMPRESSED_BYTES,
     budgetBytes,
     footprint: FOOTPRINT,
     importedAt: 1_700_000_000_000,
@@ -92,6 +101,19 @@ function requestFor(document: SnapshotDocument, budgetBytes = 10_000_000): Impor
 
 const REACHES_NOTHING = async (): Promise<SpotVerdict> => ({ kind: 'out-of-reach' });
 const ALWAYS_AGREES = async (): Promise<SpotVerdict> => ({ kind: 'agrees' });
+
+/** Admit a document the way the importer does, so a test can hold the branded value. */
+function admit(document: SnapshotDocument) {
+  const verdict = admitSnapshot(
+    serializeSnapshot(document),
+    { expectedPin: sha256(snapshotPreimage(document)), binding: { ...BINDING } },
+    sha256,
+  );
+  assert.equal(verdict.kind, 'admitted');
+  if (verdict.kind !== 'admitted') throw new Error('unreachable');
+  return verdict;
+}
+
 
 function deps(overrides: Partial<ImportDependencies> = {}): ImportDependencies {
   return {
@@ -195,6 +217,73 @@ test('nothing is previewed or minted once a quota refuses', async () => {
   );
   assert.equal(outcome.kind, 'over-quota');
   assert.equal(previews, 0, 'a refused import never asks the user to give anything up');
+});
+
+test('the ROW quota is metered on the stream too, not only after the parse', async () => {
+  // §8.4 says "streamed", and until 2026-08-06 that held for bytes and not for rows: the row
+  // count was taken from the parsed document, so a file of four million tiny rows was fully
+  // resident and fully parsed before anything objected.
+  //
+  // The discriminating assertion is that this input is **not JSON**. If the row meter ran only
+  // after the parse, the outcome would be `rejected`/`malformed`; `over-quota`/`rows` can only
+  // come from a meter that ran while the bytes were arriving.
+  const document = validDocument();
+  let pulled = 0;
+  async function* manyRows(): AsyncIterable<SnapshotChunk> {
+    pulled += 1;
+    const text = '{'.repeat(IMPORT_MAX_ROWS + 1);
+    yield { text, bytes: text.length };
+    pulled += 1;
+    yield { text: '{', bytes: 1 };
+  }
+  const outcome = await importSnapshotStream(manyRows(), requestFor(document), deps());
+  assert.equal(outcome.kind, 'over-quota');
+  if (outcome.kind !== 'over-quota') return;
+  assert.equal(outcome.breach, 'rows');
+  assert.equal(pulled, 1, 'and pulling stopped at the chunk that crossed the bound');
+});
+
+test('the streaming row meter over-counts and never under-counts', async () => {
+  // The direction is the whole safety argument: every row this format stores is a JSON object, so
+  // `{` is an upper bound on rows. Over-counting can refuse a document just under the bound,
+  // which costs a user nothing; under-counting would admit one over it, which is the unusable
+  // local database §8.4 has a row bound for.
+  const document = validDocument();
+  const text = serializeSnapshot(document);
+  const exact =
+    document.ops.length +
+    document.balances.length +
+    document.vaults.length +
+    document.coverage.length;
+  assert.ok(rowUpperBound(text) >= exact, `${rowUpperBound(text)} must bound ${exact}`);
+  // Three objects that are not rows — the document, its binding and its range.
+  assert.equal(rowUpperBound(text), exact + 3);
+});
+
+test('the byte bound is the DEVICE\'s, and a caller may only narrow it', async () => {
+  // 400 MB of input is not 400 MB of memory, and §9.4 budgets a mobile tab 350 MB in total while
+  // §9.2 caps its whole local store at 75 MB. So the bound is a required field with no default —
+  // and a caller cannot use it to grant themselves more than §8.4 allows (SQ-632).
+  const document = validDocument();
+  await assert.rejects(
+    () =>
+      importSnapshotStream(
+        streamOf(serializeSnapshot(document)),
+        { ...requestFor(document), maxInputBytes: IMPORT_MAX_UNCOMPRESSED_BYTES + 1 },
+        deps(),
+      ),
+    /may bound an import further than the specification does and may not loosen it/,
+  );
+
+  // And a narrower bound refuses at the chunk that crosses it, exactly as the spec ceiling does.
+  const tight = await importSnapshotStream(
+    streamOf(serializeSnapshot(document), 4),
+    { ...requestFor(document), maxInputBytes: 32 },
+    deps(),
+  );
+  assert.equal(tight.kind, 'over-quota');
+  if (tight.kind !== 'over-quota') return;
+  assert.equal(tight.breach, 'bytes');
 });
 
 test('the row quota is a separate bound, checked once the document parses', async () => {
@@ -301,6 +390,35 @@ test('a rejected snapshot never reaches the preview — nothing local is put at 
   assert.equal(asked, 0);
 });
 
+test('an UNFINISHED re-derivation refuses the file and leaves the publisher alone', async () => {
+  // The distinction the auto-disable rests on. A pass that hit this device's own work ceiling is
+  // a statement about this device: refusing the file is right (an unfinished mandatory check
+  // cannot stand in for a finished one) and disabling the source is not — nothing about the
+  // publisher is implied, and a ladder that disabled sources over a local ceiling would take
+  // honest ones offline for as long as this device stayed ahead of them.
+  const document: SnapshotDocument = {
+    ...validDocument(),
+    range: { fromBlock: 10, toBlock: 10_000 },
+    coverage: [{ fromBlock: 10, toBlock: 10_000 }],
+  };
+  const outcome = await importSnapshotStream(
+    streamOf(serializeSnapshot(document)),
+    requestFor(document),
+    // Never `out-of-reach`, so nothing terminates the walk except the ceiling.
+    deps({ spotCheck: ALWAYS_AGREES }),
+  );
+  assert.equal(outcome.kind, 'rejected');
+  if (outcome.kind !== 'rejected') return;
+  assert.deepEqual(
+    [...new Set(outcome.findings.map((finding) => finding.screen))],
+    ['spot-check-incomplete'],
+  );
+  assert.equal(outcome.refusal.code, 'FE-PROV-003');
+  assert.match(outcome.refusal.detail, /could not finish re-deriving/);
+  assert.deepEqual(outcome.provider, PUBLISHER, 'the source is untouched');
+  assert.equal(outcome.disabled, undefined);
+});
+
 test('a chain disagreement rejects with the chain-disagreement remedy, before the preview', async () => {
   const document = validDocument();
   let asked = 0;
@@ -340,56 +458,179 @@ test('the whole-text form and the streamed form admit exactly the same documents
   assert.deepEqual(streamed.minted, oneChunk.minted);
 });
 
-test('the mint cannot be reached with a document that was never admitted', () => {
+test('the mint cannot be reached with a document that was never admitted', async () => {
   // "The mint is the only way an admitted document becomes rows" has to be a property of the
   // type system, not a comment. `AdmittedSnapshot` carries a phantom field only `snapshot.ts`
   // can name, so a plausible object literal — parsed, well shaped, unscreened — is untypeable
   // here. The directive is itself the assertion: if this ever compiled, `tsc` reports it as
   // unused and `check:types` goes red.
+  const report = await spotCheckSnapshot(validDocument(), ALWAYS_AGREES);
   const uncallable: () => unknown = () =>
     mintSnapshotRows(
       // @ts-expect-error an admitted snapshot is minted by admitSnapshot, never built
       { kind: 'admitted', document: validDocument() },
-      {
-        providerId: 'forger',
-        pin: 'whatever',
-        importedAt: 0,
-        spotCheck: { compared: 0, outOfReach: 0, findings: [] },
-      },
+      report,
+      { providerId: 'forger', pin: 'whatever', importedAt: 0 },
     );
   assert.equal(typeof uncallable, 'function');
 });
 
-test('an indexer mint labels `indexer`, and shares the labelling code with the snapshot one', () => {
+test('the mint cannot be reached with a spot-check report that was never run', () => {
+  // The second half of the same property, and the half that was open until 2026-08-06: the
+  // admission brand certifies the *file screens*, and §8.4 additionally mandates a comparison
+  // against the chain. With the report as a plain field of the request, any holder of an admitted
+  // document could write `{ compared: 1, outOfReach: 0, findings: [] }` and mint rows badged
+  // `sampled: true` having compared nothing.
+  const admitted = admit(validDocument());
+  const uncallable: () => unknown = () =>
+    mintSnapshotRows(
+      admitted,
+      // @ts-expect-error a spot-check report is produced by spotCheckSnapshot, never built
+      { document: validDocument(), compared: 1, outOfReach: 0, findings: [] },
+      { providerId: 'forger', pin: 'whatever', importedAt: 0 },
+    );
+  assert.equal(typeof uncallable, 'function');
+});
+
+test('a real report for a DIFFERENT document does not mint this one', async () => {
+  // The brand proves a pass happened, not that it happened over this file. A caller holding two
+  // documents could otherwise spot-check the honest one and mint the forged one with its report.
+  const admitted = admit(validDocument());
+  const elsewhere = await spotCheckSnapshot(validDocument(), ALWAYS_AGREES);
+  assert.throws(
+    () => mintSnapshotRows(admitted, elsewhere, { providerId: 'p', pin: 'x', importedAt: 0 }),
+    /produced for a different document/,
+  );
+});
+
+test('a report that CAUGHT a disagreement mints nothing', async () => {
+  // Measured before the fix: `mint()` read `compared > 0` and ignored `findings` entirely, so a
+  // report whose whole content was "this document contradicts the chain" produced exactly the
+  // rows a clean one did — badged `sampled: true`, which is the badge saying the comparison
+  // passed.
+  const document = validDocument();
+  const admitted = admit(document);
+  const caught = await spotCheckSnapshot(admitted.document, async (claim) =>
+    claim.block === 13 ? { kind: 'disagrees', derived: [] } : { kind: 'agrees' },
+  );
+  assert.ok(caught.findings.length > 0);
+  assert.ok(caught.compared > 0, 'and it did compare, so `sampled` would have been true');
+  assert.throws(
+    () => mintSnapshotRows(admitted, caught, { providerId: 'p', pin: 'x', importedAt: 0 }),
+    /carries 1 finding/,
+  );
+});
+
+test('an indexer mint labels `indexer`, and shares the labelling code with the snapshot one', async () => {
   // Two origins, one labelling discipline. A second mint would drift, and the drift is
   // invisible: both produce rows that render, and only one of them is honest about where they
-  // came from.
-  const minted = mintIndexerRows(
-    validDocument().balances,
-    validDocument().coverage,
-    {
-      providerId: 'live-one',
-      pin: 'not-a-file',
-      importedAt: 7,
-      spotCheck: { compared: 3, outOfReach: 1, findings: [] },
-    },
+  // came from. The evidence differs by §8.4's own design — indexers get *sampling* where
+  // snapshots get *screens* — so the argument is a `SampledRound` and not a snapshot's report.
+  const round = await runSamplingRound(
+    { id: 'live-one', kind: 'indexer', health: { kind: 'healthy' } },
+    [{ rows: [{ reference: 'k', claimed: 'v' }] }],
+    async () => ({ kind: 'match' }),
+    () => 0,
   );
+  const minted = mintIndexerRows(validDocument().balances, validDocument().coverage, round, {
+    providerId: 'live-one',
+    importedAt: 7,
+  });
   for (const row of minted.balances) {
     assert.equal(row.value.origin, 'indexer');
     assert.equal(row.status.kind, 'provider');
   }
   assert.equal(minted.coverage[0]?.origin, 'indexer');
+  assert.equal(minted.coverage[0]?.ingestedAt, 7, '§6.3 requires it on every range');
+  assert.equal(minted.status.kind, 'provider');
+  if (minted.status.kind !== 'provider') return;
+  assert.equal(minted.status.sampled, true, 'one row was actually compared');
+  // And no `snapshotsImported` record: an indexer pins no file, so there is nothing to key one by.
+  assert.equal('record' in minted, false);
 });
 
-test('a provider row cannot be minted without naming its provider', async () => {
+test('an indexer mint cannot be reached with a round nobody ran', () => {
+  // The literal below is complete **except for the brand** — every other field of a `SampledRound`
+  // is present and correctly typed. That is deliberate: a literal missing three fields fails to
+  // typecheck whatever the brand does, so the directive would keep firing for the wrong reason and
+  // dropping the brand would survive. Measured: it did, until this fixture was completed.
+  const uncallable: () => unknown = () =>
+    mintIndexerRows(
+      validDocument().balances,
+      validDocument().coverage,
+      // @ts-expect-error a sampled round is produced by runSamplingRound, never built
+      {
+        provider: PUBLISHER,
+        outcome: 'clean',
+        result: { rowsChecked: 9, mismatches: 0, unverifiable: 0 },
+        selection: { rows: [], strata: 1, emptyStrata: 0 },
+        mismatches: [],
+        refusal: undefined,
+      },
+      { providerId: 'live-one', importedAt: 7 },
+    );
+  assert.equal(typeof uncallable, 'function');
+});
+
+test('a round that caught the indexer lying mints none of its rows', async () => {
+  const round = await runSamplingRound(
+    { id: 'live-one', kind: 'indexer', health: { kind: 'healthy' } },
+    [{ rows: [{ reference: 'k', claimed: 'a lie' }] }],
+    async () => ({ kind: 'mismatch', expected: 'the truth' }),
+    () => 0,
+  );
+  assert.equal(round.outcome, 'mismatch');
+  assert.throws(
+    () =>
+      mintIndexerRows(validDocument().balances, validDocument().coverage, round, {
+        providerId: 'live-one',
+        importedAt: 7,
+      }),
+    /was disabled by this sampling round/,
+  );
+});
+
+test('an inconclusive round mints rows that say `sampled: false`', async () => {
+  const round = await runSamplingRound(
+    { id: 'live-one', kind: 'indexer', health: { kind: 'healthy' } },
+    [{ rows: [{ reference: 'k', claimed: 'v' }] }],
+    async () => ({ kind: 'unverifiable', why: 'beyond-reach' }),
+    () => 0,
+  );
+  const minted = mintIndexerRows(validDocument().balances, validDocument().coverage, round, {
+    providerId: 'live-one',
+    importedAt: 7,
+  });
+  assert.equal(minted.status.kind, 'provider');
+  if (minted.status.kind !== 'provider') return;
+  assert.equal(minted.status.sampled, false, 'nothing was comparable, so nothing was compared');
+});
+
+test('an import that cannot label its rows refuses BEFORE it reads a byte', async () => {
+  // It used to surface from the mint, which runs after the eviction preview: the user was asked
+  // to give up local history and then got a bare `RangeError` — the wrong order, and the
+  // free-text error §10.4 forbids on a user path. Now nothing is read, nothing is asked.
   const document = validDocument();
+  let pulled = 0;
+  let asked = 0;
+  async function* counted(): AsyncIterable<SnapshotChunk> {
+    pulled += 1;
+    yield { text: serializeSnapshot(document), bytes: 1_000 };
+  }
   await assert.rejects(
     () =>
       importSnapshotStream(
-        streamOf(serializeSnapshot(document)),
-        { ...requestFor(document), providerId: '' },
-        deps(),
+        counted(),
+        { ...requestFor(document), provider: { ...PUBLISHER, id: '' } },
+        deps({
+          confirmEviction: async () => {
+            asked += 1;
+            return true;
+          },
+        }),
       ),
     RangeError,
   );
+  assert.equal(pulled, 0, 'the stream was never pulled');
+  assert.equal(asked, 0, 'and the user was never asked to evict anything');
 });

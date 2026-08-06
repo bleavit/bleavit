@@ -360,7 +360,19 @@ export interface RowMismatch {
   readonly expected: string;
 }
 
-export interface SamplingRound {
+/**
+ * The brand that makes *"a sampling round happened"* unassertable.
+ *
+ * Declared here and **not exported**, the same device `AdmittedSnapshot` and `SpotCheckReport`
+ * use, and for the same defect: {@link mintIndexerRows} labels rows `sampled`, and until
+ * 2026-08-06 it took a `SpotCheckReport`-shaped object literal — so a caller could mint indexer
+ * rows badged *"this row was compared against the chain"* having compared nothing, and the type
+ * it was handed belonged to the **snapshot** arm, which §8.4 gives screens rather than sampling.
+ * A `SampledRound` can only come from {@link runSamplingRound}.
+ */
+declare const SAMPLED: unique symbol;
+
+export interface SampledRound {
   /** The provider after the round; auto-disabled on any mismatch. */
   readonly provider: Provider;
   /**
@@ -375,6 +387,7 @@ export interface SamplingRound {
   readonly selection: SampleSelection;
   readonly mismatches: readonly RowMismatch[];
   readonly refusal: ProviderRefusal | undefined;
+  readonly [SAMPLED]: true;
 }
 
 export class ProviderDisabledError extends Error {
@@ -410,7 +423,7 @@ export async function runSamplingRound(
   pages: readonly ProviderPage[],
   check: RowCheck,
   random: () => number,
-): Promise<SamplingRound> {
+): Promise<SampledRound> {
   return runSamplingRoundAtRate(provider, pages, check, random, PAGES_PER_SAMPLED_ROW);
 }
 
@@ -424,7 +437,7 @@ export async function runSamplingRoundAtRate(
   check: RowCheck,
   random: () => number,
   pagesPerRow: number,
-): Promise<SamplingRound> {
+): Promise<SampledRound> {
   if (provider.health.kind === 'disabled') throw new ProviderDisabledError(provider.id);
   const selection = selectSampleAtRate(pages, random, pagesPerRow);
   const mismatches: RowMismatch[] = [];
@@ -452,7 +465,7 @@ export async function runSamplingRoundAtRate(
           `${mismatch.row.row.claimed}, this device read ${mismatch.expected}`,
       )
       .join('; ');
-    return {
+    const caught: Unbranded = {
       // Through `afterSampling`, not beside it. Both sites built this disabled state
       // independently and each held its own copy of the reason; `refusals.ts` is the one
       // home for the sentence and this is the one home for the transition.
@@ -463,9 +476,10 @@ export async function runSamplingRoundAtRate(
       mismatches,
       refusal: providerRefusal('FE-PROV-002', detail),
     };
+    return caught as SampledRound;
   }
   const coverage = effectiveCoverage(result);
-  return {
+  const round: Unbranded = {
     provider,
     outcome: coverage.checked > 0 ? 'clean' : 'inconclusive',
     result,
@@ -473,4 +487,12 @@ export async function runSamplingRoundAtRate(
     mismatches: [],
     refusal: undefined,
   };
+  // The one construction site of the brand. An assertion rather than a literal because the
+  // phantom field has no runtime representation and cannot be written — the same shape, and the
+  // same single-site discipline, as `admitSnapshot`'s `AdmittedSnapshot`. The local is typed, so
+  // the fields are still checked: only the brand is asserted.
+  return round as SampledRound;
 }
+
+/** The round minus its brand — what the two construction sites below build and assert from. */
+type Unbranded = Omit<SampledRound, typeof SAMPLED>;

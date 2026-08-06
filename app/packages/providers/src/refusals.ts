@@ -150,17 +150,39 @@ export function providerRefusal(code: ProviderRefusalCode, detail: string): Prov
 // ------------------------------------------------------------------ the reasons, in one place
 
 /**
- * Why a provider was switched off after a sampling round.
+ * What a §8.4 comparison against chain state was comparing.
+ *
+ * Two mechanisms disable a provider for the same reason and count different things: the live
+ * sampler re-reads **rows** (§8.4's 1-in-16-page re-verification) and the snapshot importer
+ * re-derives **blocks** (§8.4's deterministic spot re-derivation). Telling a user that
+ * *"2 of 128 spot-checked rows"* disagreed when what disagreed was two blocks is a small lie
+ * in the one sentence they are given to act on, so the noun is part of the copy rather than
+ * a number formatted into a generic template.
+ */
+export type MismatchSubject = 'sampled-rows' | 'rederived-blocks';
+
+const SUBJECT: Readonly<Record<MismatchSubject, string>> = Object.freeze({
+  'sampled-rows': 'spot-checked rows did not match what this device read from the chain',
+  'rederived-blocks':
+    'blocks this device re-derived from the chain do not match what the source says happened ' +
+    'in them',
+});
+
+/**
+ * Why a provider was switched off after a §8.4 comparison against chain state.
  *
  * A **required field** of the disabled state (see `health.ts`), and built here rather than at
- * either of the two sites that can raise it. Both sites once held their own copy of this
- * sentence; they agreed, until one of them was edited.
+ * any of the sites that can raise it. Those sites once held their own copy of this sentence;
+ * they agreed, until one of them was edited.
  */
-export function samplingMismatchReason(mismatches: number, rowsChecked: number): string {
+export function samplingMismatchReason(
+  mismatches: number,
+  checked: number,
+  subject: MismatchSubject = 'sampled-rows',
+): string {
   return (
-    `${mismatches} of ${rowsChecked} spot-checked rows did not match what this device read ` +
-    'from the chain. The source is switched off; nothing it supplied was ever treated as ' +
-    'verified.'
+    `${mismatches} of ${checked} ${SUBJECT[subject]}. The source is switched off; nothing it ` +
+    'supplied was ever treated as verified.'
   );
 }
 
@@ -185,7 +207,9 @@ export type SnapshotRejectionCause =
   /** The document describes a different chain (10 §7 gives one local database per chain). */
   | 'wrong-chain'
   /** Spot re-derivation inside light-client-reachable depth disagreed with the chain. */
-  | 'chain-disagreement';
+  | 'chain-disagreement'
+  /** The spot re-derivation could not finish, so the mandatory §8.4 check did not run in full. */
+  | 'incomplete-check';
 
 const REMEDY: Readonly<Record<SnapshotRejectionCause, string>> = Object.freeze({
   integrity:
@@ -203,6 +227,12 @@ const REMEDY: Readonly<Record<SnapshotRejectionCause, string>> = Object.freeze({
     'with the chain, which is what a forged snapshot looks like. Do not import it, and do not ' +
     'trust other files from the same publisher without comparing them against a second, ' +
     'unrelated one.',
+  'incomplete-check':
+    'This device could not finish re-deriving the snapshot from the chain, so the check that ' +
+    'would have caught a shallow forgery did not run in full. Nothing here says the file is ' +
+    'bad, and nothing says it is good: an unfinished check cannot stand in for a finished one, ' +
+    'so the import is refused rather than accepted on partial evidence. Nothing about the ' +
+    'publisher is implied — try again when this device has caught up with the chain.',
 });
 
 /** `FE-PROV-003`, with the fixed remediation for its cause leading the expert detail. */

@@ -39,6 +39,6 @@ export type {
   RowVerdict,
   SampleSelection,
   SampledRow,
-  SamplingRound,
+  SampledRound,
   UnverifiableReason,
 } from './sampling.js';

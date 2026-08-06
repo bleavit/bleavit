@@ -52,7 +52,12 @@
  * screen"* is a property of the type system rather than a rule a call site is trusted to follow.
  */
 
-import { byCodePoint, canonicalJson, digestPreimage } from '@bleavit/handoff-envelope';
+import {
+  byCodePoint,
+  canonicalJson,
+  canonicalJsonInto,
+  digestPreimage,
+} from '@bleavit/handoff-envelope';
 import type { ChainBinding } from '@bleavit/handoff-envelope';
 
 import { providerRefusal, snapshotRefusal } from './refusals.js';
@@ -209,7 +214,16 @@ export type SnapshotFinding =
   | { readonly screen: 'derived-rows'; readonly why: string }
   | { readonly screen: 'conservation'; readonly why: string }
   /** §8.4's *deterministic spot re-derivation* — see {@link spotCheckSnapshot}. */
-  | { readonly screen: 'spot-check'; readonly why: string };
+  | { readonly screen: 'spot-check'; readonly why: string }
+  /**
+   * The re-derivation could not **finish** — its own class, and not a disagreement.
+   *
+   * Kept apart from `spot-check` because the two say opposite things about the publisher: one is
+   * *this document contradicts the chain*, the other is *this device stopped asking*. Collapsed
+   * into one screen, a ceiling this client chose would disable the source (§8.3's auto-disable)
+   * and tell the user not to trust a publisher who did nothing wrong.
+   */
+  | { readonly screen: 'spot-check-incomplete'; readonly why: string };
 
 /**
  * The brand that makes "this document passed every screen" a thing a caller cannot assert.
@@ -964,8 +978,7 @@ export function admitSnapshot(text: string, admission: SnapshotAdmission, sha256
     }
     throw error;
   }
-  const canonical = serializeSnapshot(document);
-  const inCanonicalForm = canonical === text;
+  const inCanonicalForm = isCanonicalForm(document, text);
   if (!inCanonicalForm) {
     findings.push({
       screen: 'canonical',
@@ -977,12 +990,15 @@ export function admitSnapshot(text: string, admission: SnapshotAdmission, sha256
         'something other than these bytes.',
     });
   }
-  // Hash the serialization already in hand rather than building a third one. For any document
-  // that can be admitted the canonical form *is* the file, so `canonical` and a fresh
-  // `serializeSnapshot` inside `digestPreimage` are the same string — and at the 400 MB import
-  // ceiling an avoidable duplicate of it is the difference between a slow import and a dead
-  // tab. See the memory note on {@link admitSnapshot}.
-  const pin = sha256(preimageOfSerialized(canonical));
+  // Over the FILE's bytes, never over a re-serialization of what was parsed out of them. For a
+  // document in canonical form the two are the same string, which is exactly why hashing the
+  // re-serialization looked harmless — and for every other document it hashes something the
+  // publisher never shipped. Measured before the change: a file with one space added hashed to
+  // the publisher's pin and passed this screen, so the only thing standing between a mutated
+  // file and admission was the canonical screen beside it. The message also stopped being true
+  // ("the file hashes to …" named a hash the file does not have), which is the half a user acts
+  // on when they compare it against the publisher's page.
+  const pin = sha256(preimageOfSerialized(text));
   if (pin !== admission.expectedPin) {
     findings.push({
       screen: 'pin',
@@ -1009,6 +1025,43 @@ export function admitSnapshot(text: string, admission: SnapshotAdmission, sha256
   return { kind: 'admitted', document } as AdmittedSnapshot;
 }
 
+/** Thrown to stop the walk in {@link isCanonicalForm}. Private, so nothing else can catch it. */
+const DIVERGED = Symbol('canonical form diverged');
+
+/**
+ * Is `text` exactly the canonical serialization of `document`?
+ *
+ * Answered **without building a second copy of the file**. `canonicalJson(document) === text` is
+ * the obvious form and allocates a whole second document to answer a question that fails at the
+ * first differing character; at §8.4's import ceiling that duplicate is the difference between a
+ * slow import and a tab that runs out of memory — a crash rather than a refusal. So the
+ * serializer emits into a comparator (`canonicalJsonInto`, which `handoff-envelope` added for
+ * exactly this consumer and which nothing used until now), the comparator walks an offset
+ * through the text it already holds, and the walk **aborts at the first divergence** — its own
+ * documented escape.
+ *
+ * `canonicalJson` is a thin wrapper over the same emitter, so there is still exactly one answer
+ * to *which bytes* (10 §13.1). A comparator over a second serializer would agree on the day it
+ * was written and diverge at the first field, and the symptom would be a correct document
+ * reported as corrupt.
+ *
+ * The trailing length check is not a formality: a text that is a strict **prefix** of the
+ * canonical form matches every emitted piece and is not the same file.
+ */
+function isCanonicalForm(document: SnapshotDocument, text: string): boolean {
+  let at = 0;
+  try {
+    canonicalJsonInto(document, (piece) => {
+      if (!text.startsWith(piece, at)) throw DIVERGED;
+      at += piece.length;
+    });
+  } catch (error) {
+    if (error === DIVERGED) return false;
+    throw error;
+  }
+  return at === text.length;
+}
+
 /**
  * Which fixed remediation `FE-PROV-003` leads with, chosen from the findings.
  *
@@ -1022,6 +1075,11 @@ export function admitSnapshot(text: string, admission: SnapshotAdmission, sha256
 function causeOf(findings: readonly SnapshotFinding[]): SnapshotRejectionCause {
   if (findings.some((finding) => finding.screen === 'binding')) return 'wrong-chain';
   if (findings.some((finding) => finding.screen === 'spot-check')) return 'chain-disagreement';
+  // Only when nothing else fired: an unfinished check is a statement about this device, and a
+  // document that also failed a file screen is a statement about the document.
+  if (findings.every((finding) => finding.screen === 'spot-check-incomplete')) {
+    return 'incomplete-check';
+  }
   return 'integrity';
 }
 
@@ -1050,21 +1108,36 @@ export function rejectSnapshot(findings: readonly SnapshotFinding[]): RejectedSn
 // ------------------------------------------------------- §8.4's deterministic spot re-derivation
 
 /**
- * How many covered blocks one re-derivation pass compares.
+ * The most blocks one re-derivation pass will ask about before it **refuses**.
  *
- * A **release constant**, and a bound on work rather than on trust: a snapshot may cover
- * millions of blocks and the light client can serve a few hundred, so an unbounded walk would
- * spend the whole budget asking about history nothing can answer for. The pass walks **downward
- * from the newest covered block**, which is where the pinned window is (10 §4.2), so the bound
- * is spent on exactly the blocks that can be answered.
+ * ## It is a work ceiling, and it is not the check's bound
  *
- * It is not a sampling rate and deliberately not drawn at random: §8.4 says *"deterministic"*,
- * and determinism is what makes a rejected snapshot reproducible for the publisher who has to
- * fix it. Sampling here would also buy nothing — the window is the *whole* set of blocks the
- * client can check, so checking a random subset of it would be strictly less evidence for the
- * same number of reads.
+ * §8.4 mandates re-derivation *"for the covered blocks that fall inside light-client-reachable
+ * depth"* — every one of them, and it names no number. What decides reachability is the client,
+ * so the pass asks the injected checker and stops when the checker says it has left the window
+ * (see {@link spotCheckSnapshot}). This constant exists only so a pass over a document covering
+ * millions of blocks terminates.
+ *
+ * ## Why the previous constant was a defect rather than a small number
+ *
+ * It was `SPOT_CHECK_MAX_BLOCKS = 128` and the pass simply **stopped** there, silently, and
+ * admitted the document. 10 §4.2 states that peers *"prune state at ~256 blocks by default"*, so
+ * a client whose window is the documented one could re-derive roughly twice as many blocks as the
+ * pass ever asked about — and a forgery in the 129th-newest reachable block was never handed to
+ * the checker at all. A truncation that reports nothing is worse than a smaller check: the
+ * report said `compared: 128`, `findings: []`, and the mint labelled the rows `sampled: true`.
+ *
+ * ## The value, derived rather than picked
+ *
+ * `2 × 256`, where 256 is the peer pruning depth 10 §4.2 names. Any client whose reachable depth
+ * is at most that pruning depth finishes its walk before the ceiling, so the ceiling never
+ * truncates a documented configuration. Reaching it means this device can see deeper than any
+ * window this specification describes, which is a fact about the client rather than about the
+ * document — and it is reported as a **refusal**, because a pass that stopped early cannot say
+ * it checked what §8.4 requires, and admitting on an unfinished mandatory check is the one
+ * outcome that reads as verification without being any.
  */
-export const SPOT_CHECK_MAX_BLOCKS = 128;
+export const SPOT_CHECK_BLOCK_CEILING = 2 * 256;
 
 /** What the document claims happened at one block, as the checker will compare it. */
 export interface SpotClaim {
@@ -1099,12 +1172,42 @@ export type SpotVerdict =
  */
 export type SnapshotSpotCheck = (claim: SpotClaim) => Promise<SpotVerdict>;
 
+/**
+ * The brand that makes *"the chain comparison ran over this document"* unassertable.
+ *
+ * Declared here and **not exported**, exactly as {@link AdmittedSnapshot}'s is, and for a defect
+ * one layer along from the one that brand closed. `admitSnapshot` certifies the **synchronous
+ * file screens**; §8.4 additionally mandates a chain comparison, and until 2026-08-06 the mint
+ * took a plain `{ compared, outOfReach, findings }` object. So any holder of an admitted document
+ * could write `{ compared: 1, outOfReach: 0, findings: [] }` and mint rows badged `sampled: true`
+ * — a claim that this device compared a block against the chain, made by a caller that never
+ * did. The brand means the only way to obtain one is to have run {@link spotCheckSnapshot}.
+ */
+declare const SPOT_CHECKED: unique symbol;
+
 export interface SpotCheckReport {
+  /**
+   * The document this pass ran over — the **identity** of it, not a copy.
+   *
+   * Carried because the brand alone proves that *a* pass happened, not that it happened over
+   * *this* file: a caller holding two documents could otherwise spot-check the honest one and
+   * mint the forged one with its report. {@link mintSnapshotRows} compares by reference against
+   * the admitted document, which only `admitSnapshot` produces, so the two halves cannot be
+   * taken from different files.
+   */
+  readonly document: SnapshotDocument;
   /** Blocks the chain actually answered for. */
   readonly compared: number;
-  /** Blocks the light client could not reach. Not a pass and not a failure. */
+  /**
+   * Blocks the pass asked about and the light client could not reach. Not a pass, not a failure.
+   *
+   * It counts what was **asked**, which is not the number of unreachable covered blocks: the
+   * walk stops once it has left the reachable window (see {@link spotCheckSnapshot}), so a
+   * snapshot of deep history reports a handful here rather than millions.
+   */
   readonly outOfReach: number;
   readonly findings: readonly SnapshotFinding[];
+  readonly [SPOT_CHECKED]: true;
 }
 
 /**
@@ -1135,14 +1238,30 @@ export interface SpotCheckReport {
  * findings; here the block numbers come from coverage this module already validated, so a throw
  * is the client's own failure and continuing past it would report a smaller comparison than was
  * attempted.
+ *
+ * ## Where the walk stops, and why the checker decides it
+ *
+ * The pass walks **downward from the newest covered block**, because the reachable window is at
+ * the head (10 §4.2). It stops at the first `out-of-reach` answer that follows a comparison —
+ * the window is one contiguous interval, so leaving it below means every older covered block is
+ * unreachable too, and asking is spending the user's device on a question with a known answer.
+ *
+ * It does **not** stop at an `out-of-reach` before the first comparison, and that asymmetry is
+ * the case a simpler rule gets wrong: a document whose newest covered block is *ahead* of this
+ * device's head answers `out-of-reach` at the top, and a pass that stopped there would compare
+ * nothing while the blocks a few positions down are perfectly readable.
+ *
+ * {@link SPOT_CHECK_BLOCK_CEILING} bounds the work, and hitting it is a **finding** rather than
+ * a quiet stop: an unfinished mandatory check that reports success is the shape §8.4 has no use
+ * for.
  */
 export async function spotCheckSnapshot(
   document: SnapshotDocument,
   check: SnapshotSpotCheck,
-  maxBlocks: number = SPOT_CHECK_MAX_BLOCKS,
+  ceiling: number = SPOT_CHECK_BLOCK_CEILING,
 ): Promise<SpotCheckReport> {
-  if (!Number.isInteger(maxBlocks) || maxBlocks < 1) {
-    throw new RangeError(`maxBlocks must be a positive integer, got ${maxBlocks}`);
+  if (!Number.isInteger(ceiling) || ceiling < 1) {
+    throw new RangeError(`the block ceiling must be a positive integer, got ${ceiling}`);
   }
   const byBlock = new Map<number, string[]>();
   for (const op of document.ops) {
@@ -1153,10 +1272,19 @@ export async function spotCheckSnapshot(
   const findings: SnapshotFinding[] = [];
   let compared = 0;
   let outOfReach = 0;
-  for (const block of newestCoveredBlocks(document.coverage, maxBlocks)) {
+  let asked = 0;
+  let exhausted = true;
+  for (const block of coveredBlocksNewestFirst(document.coverage)) {
+    if (asked === ceiling) {
+      exhausted = false;
+      break;
+    }
+    asked += 1;
     const verdict = await check({ block, movements: byBlock.get(block) ?? [] });
     if (verdict.kind === 'out-of-reach') {
       outOfReach += 1;
+      // Below the window, if we were ever inside it. Above it, keep descending.
+      if (compared > 0) break;
       continue;
     }
     compared += 1;
@@ -1170,23 +1298,135 @@ export async function spotCheckSnapshot(
       });
     }
   }
-  return { compared, outOfReach, findings };
+  if (!exhausted) {
+    findings.push({
+      screen: 'spot-check-incomplete',
+      why:
+        `this device asked about ${asked} covered blocks and the chain was still answering when ` +
+        `the pass reached its ceiling of ${ceiling}. 10 §8.4 requires re-derivation for every ` +
+        'covered block inside light-client-reachable depth, and this pass did not finish one — ' +
+        'so the document is refused rather than admitted on a check that stopped early.',
+    });
+  }
+  // The one construction site of the brand — an assertion, because the phantom field has no
+  // runtime representation. The local is typed, so every other field is still checked.
+  const report: Omit<SpotCheckReport, typeof SPOT_CHECKED> = {
+    document,
+    compared,
+    outOfReach,
+    findings,
+  };
+  return report as SpotCheckReport;
 }
 
-/** The newest `limit` covered blocks, descending — the pinned window is at the top (§4.2). */
-function newestCoveredBlocks(
-  coverage: readonly SnapshotRange[],
-  limit: number,
-): readonly number[] {
-  const blocks: number[] = [];
+/** Every covered block, newest first — the reachable window is at the top (§4.2). */
+function* coveredBlocksNewestFirst(coverage: readonly SnapshotRange[]): Generator<number> {
   const descending = [...coverage].sort((a, b) => b.toBlock - a.toBlock);
   for (const range of descending) {
-    for (let block = range.toBlock; block >= range.fromBlock; block -= 1) {
-      blocks.push(block);
-      if (blocks.length === limit) return blocks;
-    }
+    for (let block = range.toBlock; block >= range.fromBlock; block -= 1) yield block;
   }
-  return blocks;
+}
+
+/**
+ * One movement as **this device** observed it on chain, with the position that orders it.
+ *
+ * The two indices are §8.2's chain order — *"block, then extrinsic, then event"* — and they are
+ * here rather than in {@link SnapshotOp} because the *file* cannot carry them (`bleavit.snapshot.v1`
+ * discards them, PLAN.md · *Spec questions* SQ-615). That asymmetry is what makes this comparison
+ * strictly stronger than any file screen: within a block, the document's order must match the
+ * chain's for every block this device can reach.
+ */
+export interface ObservedMovement {
+  /** The extrinsic that produced it, in the block's own numbering. */
+  readonly extrinsicIndex: number;
+  /** Its position among that extrinsic's events. */
+  readonly eventIndex: number;
+  readonly op: SnapshotOp;
+}
+
+export type BlockMovements =
+  | { readonly kind: 'movements'; readonly observed: readonly ObservedMovement[] }
+  /** Outside light-client-reachable depth (§8.4's own condition). Evidence of nothing. */
+  | { readonly kind: 'out-of-reach' };
+
+/**
+ * Read one block's ledger movements from chain state and events. Injected, because this package
+ * may not open a chain connection (10 §4.1) and may not name the chain SDK.
+ */
+export type BlockMovementRead = (block: number) => Promise<BlockMovements>;
+
+/**
+ * The adapter: a {@link SnapshotSpotCheck} that derives a block's movement list from what this
+ * device read, and compares it against what the document claims.
+ *
+ * ## Why this exists at all
+ *
+ * The same finding that produced `chainRowCheck` one module over, in its snapshot form: §8.4's
+ * spot re-derivation is a named 14 TH-50 mitigation, `SnapshotSpotCheck` was injected, and every
+ * caller in the repository was a test closure. Nothing turned chain state into a `SpotVerdict`,
+ * so the mitigation could not have reached a chain and no suite could have noticed — the gated
+ * property is that a **forged snapshot produces** a disagreement, not that the importer behaves
+ * given one.
+ *
+ * ## What it derives, and what it refuses to guess
+ *
+ * The reader supplies observations; this derives the **list**. Three rules, each of which the
+ * obvious implementation gets wrong in a way that reads as correct:
+ *
+ * 1. **Chain order is imposed here**, by sorting on `(extrinsicIndex, eventIndex)`. A reader that
+ *    returns events in the order a decoder happened to walk them would otherwise make an honest
+ *    document look reordered — and the comparison is order-sensitive because the replay is.
+ * 2. **Two observations at one position throw.** They cannot both be true, no tie-break here can
+ *    be right, and `app/tools/snapshot` refuses the identical shape on the producing side.
+ * 3. **An observation about another block throws.** It is the client's own defect, and the
+ *    projection includes the block number, so silently comparing it would surface as a
+ *    disagreement blamed on the publisher.
+ *
+ * A throw aborts the pass, per {@link spotCheckSnapshot}'s rule: these are this device's failures,
+ * and a pass that swallowed them would report a smaller comparison than it attempted.
+ *
+ * The projection is the **shared** {@link projectOp}, so this and the two-snapshot diff compare
+ * the same thing against their two different oracles.
+ */
+export function chainSpotCheck(read: BlockMovementRead): SnapshotSpotCheck {
+  return async (claim: SpotClaim): Promise<SpotVerdict> => {
+    const result = await read(claim.block);
+    if (result.kind === 'out-of-reach') return { kind: 'out-of-reach' };
+    const seen = new Set<string>();
+    for (const movement of result.observed) {
+      if (!Number.isInteger(movement.extrinsicIndex) || movement.extrinsicIndex < 0) {
+        throw new RangeError(`an observed movement's extrinsic index must be a non-negative integer`);
+      }
+      if (!Number.isInteger(movement.eventIndex) || movement.eventIndex < 0) {
+        throw new RangeError(`an observed movement's event index must be a non-negative integer`);
+      }
+      if (movement.op.block !== claim.block) {
+        throw new RangeError(
+          `this device read a movement at block ${movement.op.block} while re-deriving block ` +
+            `${claim.block}; a movement carries the block it happened in and these disagree`,
+        );
+      }
+      const position = `${movement.extrinsicIndex}:${movement.eventIndex}`;
+      if (seen.has(position)) {
+        throw new RangeError(
+          `two movements were read at block ${claim.block} extrinsic ${movement.extrinsicIndex} ` +
+            `event ${movement.eventIndex}; one chain position holds one event and no tie-break ` +
+            'between them can be right',
+        );
+      }
+      seen.add(position);
+    }
+    const derived = [...result.observed]
+      .sort(
+        (left, right) =>
+          left.extrinsicIndex - right.extrinsicIndex || left.eventIndex - right.eventIndex,
+      )
+      .map((movement) => projectOp(movement.op));
+    const agrees =
+      derived.length === claim.movements.length &&
+      derived.every((movement, at) => movement === claim.movements[at]);
+    return agrees ? { kind: 'agrees' } : { kind: 'disagrees', derived };
+  };
 }
 
 // ------------------------------------------------------------------ the two-snapshot diff

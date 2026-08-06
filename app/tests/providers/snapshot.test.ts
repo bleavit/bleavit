@@ -169,10 +169,15 @@ test('a wrong pin is rejected, and the file is named as hashing to something els
   assert.equal(verdict.refusal.code, 'FE-PROV-003');
 });
 
-test('a non-canonical file is rejected even when it parses to the pinned document', () => {
-  // This is the case a consumer that parsed first would admit: the object is identical, so the
-  // pin over the reconstruction matches, and only the *bytes* differ. §8.2 asks for byte-
-  // identical reproduction, so the bytes are the claim.
+test('a non-canonical file fails the canonical screen AND its own pin', () => {
+  // This is the case a consumer that parsed first would admit: the object is identical and only
+  // the *bytes* differ. §8.2 asks for byte-identical reproduction, so the bytes are the claim.
+  //
+  // Both screens fire, and the second one is the repair of a real defect: the pin was taken over
+  // the **re-serialization** of what was parsed, so this file — which the publisher never shipped
+  // — hashed to the publisher's pin and passed. The message was false in the same move ("the file
+  // hashes to …" named a hash the file does not have), which is exactly the string a user
+  // compares against the publisher's page.
   const document = validDocument();
   const pin = sha256(snapshotPreimage(document));
   const prettyPrinted = JSON.stringify(document, null, 2);
@@ -180,7 +185,34 @@ test('a non-canonical file is rejected even when it parses to the pinned documen
   const verdict = admitSnapshot(prettyPrinted, { expectedPin: pin, binding: { ...BINDING } }, sha256);
   assert.equal(verdict.kind, 'rejected');
   if (verdict.kind !== 'rejected') return;
-  assert.deepEqual(screens(verdict.findings), ['canonical']);
+  assert.deepEqual(screens(verdict.findings), ['canonical', 'pin']);
+  const reported = /the file hashes to ([0-9a-f]+)/.exec(
+    verdict.findings.find((finding) => finding.screen === 'pin')?.why ?? '',
+  );
+  assert.ok(reported !== null);
+  assert.equal(
+    reported[1],
+    sha256(preimageOfSerialized(prettyPrinted)),
+    'the reported hash is the hash of THIS file, not of a document reconstructed from it',
+  );
+});
+
+test('a trailing newline is not the canonical file, and only the length check sees it', () => {
+  // The case the streamed comparison would otherwise wave through: `JSON.parse` ignores trailing
+  // whitespace, so this parses to the identical document and every emitted piece matches the text
+  // it is compared against. What catches it is that the walk must end exactly at the end of the
+  // file — a text the canonical form is a strict **prefix** of is not that canonical form, and a
+  // trailing newline is what any editor adds.
+  const document = validDocument();
+  const withNewline = `${serializeSnapshot(document)}\n`;
+  const verdict = admitSnapshot(
+    withNewline,
+    { expectedPin: sha256(snapshotPreimage(document)), binding: { ...BINDING } },
+    sha256,
+  );
+  assert.equal(verdict.kind, 'rejected');
+  if (verdict.kind !== 'rejected') return;
+  assert.ok(screens(verdict.findings).includes('canonical'));
 });
 
 test('a producer annotation is rejected as non-canonical rather than silently tolerated', () => {

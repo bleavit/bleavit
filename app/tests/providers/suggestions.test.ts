@@ -21,8 +21,11 @@ import { dirname, resolve } from 'node:path';
 import {
   SUGGESTED_PROVIDERS,
   acceptSuggestion,
+  afterProbe,
+  canServeReads,
   defaultProviders,
   disclosureFor,
+  fleetState,
   probeDue,
 } from '@bleavit/providers';
 import type { ProviderSuggestion } from '@bleavit/providers';
@@ -100,14 +103,40 @@ test('accepting returns the provider and the disclosure together', () => {
   const accepted = acceptSuggestion(EXAMPLE);
   assert.equal(accepted.provider.id, EXAMPLE.id);
   assert.equal(accepted.provider.kind, EXAMPLE.kind);
-  assert.equal(accepted.provider.health.kind, 'healthy');
+  assert.equal(accepted.provider.health.kind, 'unprobed');
   assert.equal(accepted.disclosure, disclosureFor(EXAMPLE));
 });
 
-test('an accepted provider is due a health probe immediately — §8.3\'s "on enable"', () => {
+test('an accepted provider CANNOT be read from until a probe answers — §8.3\'s "on enable"', () => {
+  // It returned `healthy` until 2026-08-06, which is §8.3's probe-on-enable implemented as a
+  // comment: nothing had asked the endpoint anything, and every read taken before the scheduler's
+  // first tick came from a source the client had described to itself as healthy on no evidence.
+  // `probeDue(null, now)` is not the control it looks like — it says a probe is *due*, and
+  // nothing stops a caller reading first.
   const accepted = acceptSuggestion(EXAMPLE);
-  assert.equal(accepted.provider.health.kind, 'healthy');
+  assert.equal(accepted.provider.health.kind, 'unprobed');
+  assert.equal(canServeReads(accepted.provider), false);
   assert.equal(probeDue(null, 1_700_000_000_000), true);
+
+  // And the ladder starts from it in both directions, so `unprobed` is a state and not a dead end.
+  const answered = afterProbe(accepted.provider, { kind: 'responded', latencyMs: 5 });
+  assert.equal(answered.health.kind, 'healthy');
+  assert.equal(canServeReads(answered), true);
+  const silent = afterProbe(accepted.provider, { kind: 'failed', why: 'timeout' });
+  assert.equal(silent.health.kind, 'failing');
+  assert.equal(canServeReads(silent), false, 'a failing source serves nothing either');
+});
+
+test('the fleet counts an unprobed source as enabled and NOT as serving', () => {
+  // The same claim one layer up: a settings screen driven by "enabled minus disabled" would
+  // report a source that has never answered anything as one that is serving reads.
+  const accepted = acceptSuggestion(EXAMPLE).provider;
+  const state = fleetState([accepted]);
+  assert.equal(state.kind, 'serving');
+  if (state.kind !== 'serving') return;
+  assert.equal(state.enabled, 1);
+  assert.equal(state.serving, 0);
+  assert.equal(state.unprobed, 1);
 });
 
 test('the disclosure names the operator, the endpoint, and what they learn', () => {

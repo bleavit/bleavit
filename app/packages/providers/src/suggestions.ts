@@ -105,17 +105,24 @@ export function disclosureFor(suggestion: ProviderSuggestion): string {
  * makes the disclosure a separate call somebody can forget, and a forgotten disclosure looks
  * exactly like a provider that was enabled correctly.
  *
- * The new provider starts `healthy` and is probed immediately: `probeDue(null, now)` is `true`,
- * which is §8.3's *"on enable"* half. It is not started in a `slow` or `failing` state — an
- * unprobed source has no observations at all, and inventing a pessimistic one is as wrong as
- * inventing an optimistic one.
+ * The new provider starts **`unprobed`**, which is a state that cannot serve a read
+ * ({@link canServeReads}) rather than one that merely says a probe is due. It started `healthy`
+ * until 2026-08-06, and that was §8.3's *"health probe on enable"* implemented as a comment: the
+ * source was described as healthy before anything asked it anything, so every read taken between
+ * the user's click and the scheduler's first tick came from an endpoint that might not exist.
+ * `probeDue(null, now)` answering `true` is not the control it looks like — it says a probe is
+ * *due*, and nothing stops a caller reading first.
+ *
+ * It is not started in a `slow` or `failing` state either: an unprobed source has no observations
+ * at all, and inventing a pessimistic one is as wrong as inventing an optimistic one. What
+ * `unprobed` says is exactly what is true — nobody has asked yet, so nothing may be read from it.
  */
 export function acceptSuggestion(suggestion: ProviderSuggestion): {
   readonly provider: Provider;
   readonly disclosure: string;
 } {
   return {
-    provider: { id: suggestion.id, kind: suggestion.kind, health: { kind: 'healthy' } },
+    provider: { id: suggestion.id, kind: suggestion.kind, health: { kind: 'unprobed' } },
     disclosure: disclosureFor(suggestion),
   };
 }
