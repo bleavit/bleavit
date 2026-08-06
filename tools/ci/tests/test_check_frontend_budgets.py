@@ -25,6 +25,7 @@ POV_BUDGETS = ROOT / "runtime" / "bleavit-runtime" / "src" / "pov_budgets.rs"
 SMOLDOT_GATE = ROOT / "app" / "tools" / "check-smoldot-budget.ts"
 PRIMITIVES = ROOT / "crates" / "futarchy-primitives" / "src" / "lib.rs"
 BUNDLE_GATE = ROOT / "app" / "tools" / "check-bundle-budget.ts"
+ARTIFACT_GATE = ROOT / "app" / "tools" / "check-artifact-budget.ts"
 
 
 def run() -> subprocess.CompletedProcess[str]:
@@ -303,6 +304,59 @@ class FrontendBudgets(unittest.TestCase):
             "pub const BLOCKS_PER_DAY: u32 = 14_400;",
             "pub const BLOCKS_PER_DAY: u32 = 7_200;",
             "kernel pins BLOCKS_PER_DAY = 7200",
+        )
+
+    # --- §9.4's lazy-artifact rows and their gate (F14) ------------------------------
+
+    def test_an_artifact_gate_enforcing_a_different_chain_spec_budget_fails(self) -> None:
+        self.assert_mutation_caught(
+            ARTIFACT_GATE,
+            "const CHAIN_SPEC_BUDGET_GZ_BYTES = 3.5e6;",
+            "const CHAIN_SPEC_BUDGET_GZ_BYTES = 3.5 * 1024 * 1024;",
+            "publishes chain specs as 3.5e+06",
+        )
+
+    def test_an_artifact_gate_enforcing_a_different_metadata_budget_fails(self) -> None:
+        self.assert_mutation_caught(
+            ARTIFACT_GATE,
+            "const METADATA_BUDGET_GZ_BYTES = 1.5e6;",
+            "const METADATA_BUDGET_GZ_BYTES = 2.0e6;",
+            "publishes release-shipped metadata as 1.5e+06",
+        )
+
+    def test_an_artifact_gate_admitting_more_blobs_than_the_cache_fails(self) -> None:
+        """§9.4 states it outright: the release cannot ship more blobs than the cache admits."""
+        self.assert_mutation_caught(
+            ARTIFACT_GATE,
+            "const METADATA_BLOB_COUNT_BOUND = 8;",
+            "const METADATA_BLOB_COUNT_BOUND = 16;",
+            "publishes metadata blob count as 8",
+        )
+
+    def test_a_drifted_measured_blob_size_fails(self) -> None:
+        """§9.3's blob figure is *measured*, and §9.4's metadata row is derived from it."""
+        self.assert_mutation_caught(
+            ARTIFACT_GATE,
+            "const MEASURED_BLOB_GZ_MB = 0.15;",
+            "const MEASURED_BLOB_GZ_MB = 0.14;",
+            "publishes measured blob size as 0.15",
+        )
+
+    def test_a_drifted_raw_blob_size_fails(self) -> None:
+        self.assert_mutation_caught(
+            ARTIFACT_GATE,
+            "const MEASURED_BLOB_RAW_BYTES = 469_581;",
+            "const MEASURED_BLOB_RAW_BYTES = 500_000;",
+            "publishes measured blob raw size as 469581",
+        )
+
+    def test_moving_the_published_metadata_cell_without_the_gate_fails(self) -> None:
+        """The binding is symmetric: the document may not drift away from the gate either."""
+        self.assert_mutation_caught(
+            FRONTEND,
+            "| Release-shipped fallback metadata (gz, lazy) | ≤ 1.5 MB combined",
+            "| Release-shipped fallback metadata (gz, lazy) | ≤ 2.5 MB combined",
+            "enforces 1.5e+06",
         )
 
     # --- anti-vacuity: a parse that finds nothing must fail, not pass ---------------

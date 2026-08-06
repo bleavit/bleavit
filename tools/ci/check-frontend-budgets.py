@@ -50,6 +50,7 @@ POV_BUDGETS = ROOT / "runtime" / "bleavit-runtime" / "src" / "pov_budgets.rs"
 SMOLDOT_GATE = ROOT / "app" / "tools" / "check-smoldot-budget.ts"
 PRIMITIVES = ROOT / "crates" / "futarchy-primitives" / "src" / "lib.rs"
 BUNDLE_GATE = ROOT / "app" / "tools" / "check-bundle-budget.ts"
+ARTIFACT_GATE = ROOT / "app" / "tools" / "check-artifact-budget.ts"
 
 #: 10 §9.1's effective per-row cost, and the one modelling assumption the documents
 #: state rather than derive. It is labelled as an assumption in §9.1 itself, so it is
@@ -93,6 +94,19 @@ def product(expression: str) -> float:
 def decimals(raw: str) -> int:
     cleaned = raw.replace(",", "")
     return len(cleaned.split(".")[1]) if "." in cleaned else 0
+
+
+def gate_constant(source: str, name: str, gate: str) -> float:
+    """The value of a `const NAME = <expression>;` in one of the `app/tools/` size gates.
+
+    The RHS is captured as an expression and **evaluated**, never matched literally: the
+    difference between `3.5e6` and `3.5 * 1024 * 1024` is exactly the MiB-for-MB defect
+    this binding exists to catch, and a pattern recognising only one spelling would report
+    the other as *"anchor missing"* rather than as the over-grant it is.
+    """
+    return product(
+        find(source, rf"const {name} = ([\d._eE+*\s]+);", f"{gate}'s {name}").group(1).replace("_", "")
+    )
 
 
 def agrees(printed: str, derived: float) -> bool:
@@ -612,6 +626,39 @@ def main() -> int:
             f"{desktop_blobs} blobs of {blob_mb} MB = {int(desktop_blobs) * blob_mb:g} MB"
         )
     checked += 1
+
+    # --- §9.4's two lazy-artifact rows and the gate that measures them ---------------
+    # Same binding as smoldot's and initial JS's, for the same reason: the gate must not
+    # carry its own copy of a published bound. §9.3's *measured* blob figures are bound
+    # too — a measurement nothing re-takes is a number that drifts while every derivation
+    # from it stays internally consistent, which is how 0.14 MB survived beside a
+    # 146,946 B file (F14).
+    artifact = ARTIFACT_GATE.read_text(encoding="utf-8")
+    chain_spec_mb = float(
+        find(
+            nine,
+            r"\| Chain specs \(relay \+ para \+ Asset Hub, gz, lazy\) \| ≤ ([\d.]+) MB combined",
+            "§9.4's chain-spec budget",
+        ).group(1)
+    )
+    blob_raw_bytes = number(
+        find(nine, r"the committed ([\d,]+) B `metadata\.scale`", "§9.3's committed blob size").group(1)
+    )
+    for label, published, constant, gate_name in (
+        ("chain specs", chain_spec_mb * 1e6, "CHAIN_SPEC_BUDGET_GZ_BYTES", "§9.4"),
+        ("release-shipped metadata", bundle * 1e6, "METADATA_BUDGET_GZ_BYTES", "§9.4"),
+        ("metadata blob count", float(desktop_blobs), "METADATA_BLOB_COUNT_BOUND", "§9.3"),
+        ("measured blob size", blob_mb, "MEASURED_BLOB_GZ_MB", "§9.3"),
+        ("measured blob raw size", blob_raw_bytes, "MEASURED_BLOB_RAW_BYTES", "§9.3"),
+    ):
+        enforced = gate_constant(artifact, constant, "the artifact gate")
+        if enforced != published:
+            raise Fail(
+                f"{gate_name} publishes {label} as {published:g}, but "
+                f"`app/tools/check-artifact-budget.ts` enforces {enforced:g} via {constant}. "
+                "§9 states MB = 10⁶ and KB = 10³, and a measured figure has exactly one home."
+            )
+        checked += 1
 
     if checked < 20:
         raise Fail(f"only {checked} cells were checked; the parse is too shallow to be a gate")
