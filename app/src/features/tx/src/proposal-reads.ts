@@ -43,8 +43,7 @@
  * site.
  */
 
-import type { Finalized, FinalizedBlockRef, StorageItem } from '@bleavit/chain-client';
-import type { Verified } from '@bleavit/shared-types';
+import { derive, type Finalized, type FinalizedBlockRef, type StorageItem } from '@bleavit/chain-client';
 import type { DecisionStats, ProposalSummary, ProposalView } from './proposals.js';
 
 /** Same shape the shell's reads use: a decode failure is data, not an exception. */
@@ -262,17 +261,6 @@ export async function readProposals(
   decoders: ProposalDecoders,
   args: ProposalArgs,
 ): Promise<ProposalsRead> {
-  const at = reader.at;
-  const finalized = <T,>(value: T): Verified<T> => ({
-    value,
-    status: {
-      kind: 'verified-finalized',
-      chain: at.chain,
-      blockHash: at.blockHash,
-      blockNumber: at.blockNumber,
-    },
-  });
-
   const raw = await reader.crossCheckedCall({
     api: PROPOSAL_READS.summaries,
     storagePrefix: PROPOSAL_READS.proposals,
@@ -309,11 +297,15 @@ export async function readProposals(
     };
   }
 
+  // Every summary leaf descends from `raw` through `derive`, which carries that call's own pin
+  // (10 §2.2's "computed client-side purely from such values"). The local stamping helper this
+  // replaced took any value and returned a `verified-finalized` badge, so it was the call site
+  // rather than the type that decided whether the badge was true (V-200).
   const summaries: ProposalSummary[] = decoded.value.map((record) => ({
-    id: finalized(record.id),
-    title: finalized(record.title),
-    klass: finalized(record.klass),
-    state: finalized(record.state),
+    id: derive(raw, () => record.id),
+    title: derive(raw, () => record.title),
+    klass: derive(raw, () => record.klass),
+    state: derive(raw, () => record.state),
   }));
 
   // The second read: `decision_stats(pid)` for every proposal whose state makes the
@@ -329,12 +321,17 @@ export async function readProposals(
 
     if (STATS_WORTH_ASKING.has(summary.state.value)) {
       const label = `${PROPOSAL_READS.decisionStats}(${summary.id.value})`;
-      let raw: string | undefined;
+      // The answer is kept whole rather than unwrapped, because each statistic is derived from
+      // **this** call's pin and not from the summary read's. The two are the same block for any
+      // reader that honours its own `at`, and that is exactly why taking the nearer pin would
+      // never look wrong: a reader that answered the second call at another block would badge
+      // the statistics with a block they were not read at, and nothing on screen would say so.
+      let statsRead: Finalized<string> | undefined;
       try {
-        raw = (await reader.call(
+        statsRead = await reader.call(
           `FutarchyApi_${PROPOSAL_READS.decisionStats}`,
           args.decisionStats(summary.id.value),
-        )).value;
+        );
       } catch (error) {
         // A failed call is not a `None`. Collapsing the two would render "no statistics
         // yet" for a decided proposal whose read failed — a confident statement about
@@ -346,13 +343,15 @@ export async function readProposals(
         });
       }
 
-      if (raw !== undefined) {
-        const stated = decoders.decisionStats(raw);
-        if (!stated.ok) undecodable.push({ label, rawHex: raw, reason: stated.reason });
+      if (statsRead !== undefined) {
+        const answer = statsRead;
+        const stated = decoders.decisionStats(answer.value);
+        if (!stated.ok) undecodable.push({ label, rawHex: answer.value, reason: stated.reason });
         else if (stated.value !== undefined) {
+          const record = stated.value;
           stats = {
-            outcome: finalized(stated.value.outcome),
-            upliftPpm: finalized(stated.value.upliftPpm),
+            outcome: derive(answer, () => record.outcome),
+            upliftPpm: derive(answer, () => record.upliftPpm),
           };
         }
       }

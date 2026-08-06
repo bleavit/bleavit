@@ -15,7 +15,7 @@
     "depcruise": "depcruise packages src src-tauri tools/desktop --config .dependency-cruiser.mjs",
     "test:firewall": "node tools/run-suite.ts \"tests/firewall/*.test.{js,ts}\"",
     "test:protocol": "node tools/run-suite.ts \"tests/protocol/*.test.{js,ts}\"",
-    "test": "pnpm run check:types && pnpm run test:firewall && pnpm run test:ui && pnpm run test:screens && pnpm run test:providers && pnpm run test:snapshot-tool && pnpm run test:platform && pnpm run test:protocol && pnpm run test:mock-runtime && pnpm run test:chain-client && pnpm run test:descriptors && pnpm run test:tx && pnpm run test:verify && pnpm run test:local-index && pnpm run test:analysis && pnpm run test:intents && pnpm run test:contexts && pnpm run schemas:check && pnpm run skills:check && pnpm run test:receipts && pnpm run test:llm-handoff && pnpm run test:release && pnpm run check:handoff-network && pnpm run check:handoff-network:witness && pnpm run check:handoff-emitted && pnpm run check:above-fold && pnpm run check:handoff-emitted:witness && pnpm run check:chain-literals && pnpm run check:chain-literals:witness && pnpm run check:render-provenance && pnpm run check:render-provenance:witness && pnpm run check:no-html-sinks && pnpm run check:no-html-sinks:witness && pnpm run check:casts && pnpm run check:casts:witness && pnpm run surface:check && pnpm run foreign:check && pnpm run check:budget && pnpm run depcruise:witness && pnpm run check:smoldot-surface && pnpm run check:smoldot-surface:witness && pnpm run test:budgets",
+    "test": "pnpm run check:types && pnpm run test:firewall && pnpm run test:ui && pnpm run test:screens && pnpm run test:providers && pnpm run test:snapshot-tool && pnpm run test:platform && pnpm run test:protocol && pnpm run test:mock-runtime && pnpm run test:chain-client && pnpm run test:descriptors && pnpm run test:tx && pnpm run test:verify && pnpm run test:local-index && pnpm run test:analysis && pnpm run test:intents && pnpm run test:contexts && pnpm run schemas:check && pnpm run skills:check && pnpm run test:receipts && pnpm run test:llm-handoff && pnpm run test:release && pnpm run check:handoff-network && pnpm run check:handoff-network:witness && pnpm run check:handoff-emitted && pnpm run check:above-fold && pnpm run check:handoff-emitted:witness && pnpm run check:chain-literals && pnpm run check:chain-literals:witness && pnpm run check:render-provenance && pnpm run check:render-provenance:witness && pnpm run check:no-html-sinks && pnpm run check:no-html-sinks:witness && pnpm run check:casts && pnpm run check:casts:witness && pnpm run surface:check && pnpm run foreign:check && pnpm run check:budget && pnpm run depcruise:witness && pnpm run check:smoldot-surface && pnpm run check:smoldot-surface:witness && pnpm run test:budgets && pnpm run check:provenance-mints && pnpm run check:provenance-mints:witness",
     "depcruise:witness": "depcruise tests/depcruise-witness --config tests/depcruise-witness/.dependency-cruiser.mjs --output-type err && (echo 'WITNESS DID NOT FIRE — the rule set is vacuous' && exit 1) || echo 'witness fired: rules are live'",
     "check:casts": "node tools/check-finalized-casts.ts",
     "check:casts:witness": "node tools/check-finalized-casts.ts --witness",
@@ -70,7 +70,9 @@
     "test:budgets": "node tools/run-suite.ts \"tests/budgets/*.test.{js,ts}\"",
     "check:artifact-budget:witness": "node tools/check-artifact-budget.ts --witness",
     "check:render-budget": "node tools/render-budget/check.ts",
-    "check:render-budget:witness": "node tools/render-budget/check.ts --witness"
+    "check:render-budget:witness": "node tools/render-budget/check.ts --witness",
+    "check:provenance-mints": "node tools/check-provenance-mints.ts",
+    "check:provenance-mints:witness": "node tools/check-provenance-mints.ts --witness"
   },
   "devDependencies": {
     "@polkadot-api/substrate-bindings": "0.20.3",

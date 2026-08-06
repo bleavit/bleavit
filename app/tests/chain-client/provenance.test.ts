@@ -45,6 +45,41 @@ function finalizedOn(chain: `0x${string}`, value: number, blockHash = BLOCK, blo
   return admitted;
 }
 
+/* ---------------------------------------------------------------------------- derive */
+
+test('derive carries the READ’s pin, not one the caller could name', () => {
+  // The whole of why this exists. Every reader in `src/` used to write its own
+  // `finalized(value)` helper closing over a `FinalizedBlockRef`, which took any value at all
+  // and returned a `verified-finalized` badge — so whether the badge was true was decided at
+  // the call site rather than by the type. `derive` cannot be reached without a read, and the
+  // pin it attaches is that read's own.
+  const read = finalizedOn(CHAIN_A, 100, BLOCK, 42);
+  const out = derive(read, (value) => value * 2);
+  assert.equal(out.value, 200);
+  assert.equal(out.status.chain, CHAIN_A);
+  assert.equal(out.status.blockHash, BLOCK);
+  assert.equal(out.status.blockNumber, 42);
+});
+
+test('derive grants nothing: it has no way in without an existing read', () => {
+  // Stated as a property of the signature rather than as a runtime check, because that is
+  // where it lives. `finalize(value, pin)` takes two caller-supplied arguments and so labels
+  // anything; `derive(read, compute)` takes a `Finalized<A>`, and a caller holding no read
+  // has nothing to pass. The observable half is that the pin is never an argument — so a
+  // derived value cannot be attributed to a block the input was not read at.
+  const read = finalizedOn(CHAIN_A, 7, BLOCK, 42);
+  const other = derive(read, () => 'anything at all');
+  assert.deepEqual({ ...other.status }, { ...read.status });
+});
+
+test('derive composes without drifting off the pin', () => {
+  const read = finalizedOn(CHAIN_B, 3, BLOCK, 9);
+  const twice = derive(derive(read, (n) => n + 1), (n) => n * 10);
+  assert.equal(twice.value, 40);
+  assert.equal(twice.status.chain, CHAIN_B);
+  assert.equal(twice.status.blockNumber, 9);
+});
+
 /* ------------------------------------------------------------------------------ meet */
 
 test('meet combines two reads from the same chain at the same block', () => {

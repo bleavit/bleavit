@@ -31,25 +31,27 @@ import { Outlet, screenFor } from './routes.js';
 import { implementedScreens } from './composition.js';
 
 /**
- * What the shell shows before anything has been read.
+ * What the shell shows before anything has been read: nothing, said out loud.
  *
- * Every field is `stale-cache`-free and `provider`-free by construction: there is nothing
- * to be stale about yet. `verified-best` is the honest status for a value the client has
- * not obtained — except there is no such value, so the header renders zeros badged as
- * *unread*. Modelled as `external-proposal`? No: nothing external proposed them. They are
- * simply absent, and the header renders them as an unfinished read at block 0, which is
- * what `verified-best` at height 0 says.
+ * This used to build a sentinel — `{ kind: 'verified-best', chain: '0x', blockHash: '0x',
+ * blockNumber: 0 }` — and hang `0`, `'connecting…'` and `0` off it, with a comment arguing
+ * that `verified-best` at height 0 "says" an unfinished read. It does not. INV-FE-9 defines
+ * `verified-best` as *"unfinalized/best-head data"* and 10 §2.1 lists it as a light-client
+ * read that may still reorg; nothing had been read here at all, on any chain, so the status
+ * was a false statement and the zeros were values the client invented. That it was inert —
+ * `combineStatus` refuses the empty chain id — made it harmless downstream without making it
+ * true on screen, and the screen is where a badge is read.
+ *
+ * The repair is that the model now admits absence, so the pre-read state has a way to be
+ * itself: every field is `undefined` and `EpochHeader` renders a sentence rather than a
+ * number. `phaseFlags` was already `undefined` here, which is what makes the sudo banner show
+ * during sync — the other three now say the same thing about themselves.
  */
 function initialChainState(): ShellChainState {
-  // A pre-read sentinel, not an observation: no chain, no block, nothing read yet. The
-  // empty chain id is deliberate and is why `combineStatus` refuses to derive anything
-  // from it — a placeholder that carried the real chain would combine happily with a real
-  // read and claim block 0 of it.
-  const unread = { kind: 'verified-best', chain: '0x', blockHash: '0x', blockNumber: 0 } as const;
   return {
-    epoch: { value: 0, status: unread },
-    phaseLabel: { value: 'connecting…', status: unread },
-    finalizedHeight: { value: 0, status: unread },
+    epoch: undefined,
+    phaseLabel: undefined,
+    finalizedHeight: undefined,
     // Unread, not "sudo absent". This is what makes the banner show during sync.
     phaseFlags: undefined,
   };

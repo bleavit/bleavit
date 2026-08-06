@@ -23,12 +23,18 @@
 // Callers outside this package obtain `Finalized<T>` by making a read. Suites obtain one
 // through `@bleavit/chain-client/testing`, which production code is barred from importing.
 //
-// `derive` IS re-exported, and the difference from `finalize` is the whole reason it can be:
-// it takes a `Finalized<A>` and returns a `Finalized<B>` computed from it, so a caller must
-// already hold a read and cannot label anything it did not read. `meet(a, a, …)` was that
-// function under another name, so this widens nothing. What it removes is the incentive that
-// produced V-182 — a reader hand-writing a `verified-finalized` status object because the
-// unary case had no sanctioned spelling, which is the same brand-less mint one layer out.
+// `derive` IS re-exported, and the distinction from `finalize` is the whole of why. `finalize`
+// takes a value and a pin, both supplied by the caller, so it labels anything. `derive` takes a
+// `Finalized<A>` — a read that already happened — and attaches *that read's* pin, so a caller
+// with nothing to pass in gets nothing. It is the second clause of 10 §2.2 ("computed
+// client-side purely from such values") made callable, and it exists so the honest thing is
+// expressible: before it, every reader in `src/` wrote its own local stamping helper, and each
+// of those helpers relabelled whatever it was handed.
+//
+// It widens nothing. `meet(a, a, …)` was already this function under another name, and `meet`
+// was already exported. What it removes is the incentive that produced V-182 and V-200 — a
+// reader hand-writing a `verified-finalized` status object because the unary case had no
+// sanctioned spelling, which is the same brand-less mint one layer out.
 export type { Finalized, FinalizedBlockRef } from './provenance.js';
 export { derive, meet, hasFinalizedStatus, readmitFromLeader } from './provenance.js';
 

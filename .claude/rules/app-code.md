@@ -42,6 +42,30 @@ Practical consequences:
    refuse outright rather than claiming a block neither describes. Render the refusal with
    `<Derived>`; a missing figure must look missing, since rendering nothing is how "we
    cannot say" becomes indistinguishable from zero.
+
+   **A fourth control covers construction, and it exists because the brand is not what the
+   user sees.** `ProvenanceBadge` switches on `status.kind`, and `Verified<T>` carries no
+   brand by design — so a `VerificationStatus` written out longhand is a complete provenance
+   claim that compiles, renders, and passes all three controls above, each for its own
+   structural reason (see `check:provenance-mints` in the gate list below). **Never write a
+   status; carry one** — `derive(read, compute)` from `@bleavit/chain-client` for a value
+   computed from a read, `combine`/`combine2` for several, `externalProposal` for an imported
+   request, and a caller's `Verified<T>` passed through unchanged. `derive` is exported where
+   `finalize` is withheld precisely because it grants nothing: it takes the `Finalized<A>` a
+   read produced and attaches *that* read's pin, so a caller holding no read has nothing to
+   pass in.
+
+   **A value no read produced has no status, and the honest rendering is absence.** The six
+   statuses all describe an observation of some strength; *"the client could not establish
+   this"* is not a weak observation but the lack of one, and 10 §2.2 states plainly that
+   `verified-finalized` goes *"only to values read through smoldot with storage proofs
+   checked, or computed client-side purely from such values"*. So a decode failure yields an
+   **absent** field plus its raw bytes in an `undecodable` row (INV-FE-12), never a
+   substituted `0` wearing a badge — and never a *"it is reported in a sibling array, so the
+   number is fine"* argument, because INV-FE-9 attaches the label to **the datum** and a
+   renderer showing the field without the array shows an invented number as a chain answer.
+   Preconditions fail closed on the absence, which is the same safe direction the substituted
+   zero produced, without the false claim.
 3. **Package firewall (INV-FE-3, 10 §10).** Respect the dependency-cruiser boundaries:
    `signing` and `transaction-builder` never import `providers`/`local-index`;
    nothing above `chain-client` bypasses it; `src/features/tx/**` never imports
@@ -250,6 +274,8 @@ this file loads whenever a session touches `app/**`, which is when they apply.
 · **`pnpm run test:firewall`** — the 10 §10.2 negative-compilation corpus, the only suite that tests the firewall *rejects* rather than that the app works, with an anti-vacuity positive control
 
 · **`pnpm run check:casts`** — the 10 §2.1 assertion gate, since the brand stops object literals but cannot stop `as Finalized<T>`
+
+· **`pnpm run check:provenance-mints`** (+ `:witness`, V-200) — the 10 §2.1/§2.2 **construction** gate: a `VerificationStatus` may be built only in `packages/shared-types/src/provenance.ts`, `packages/chain-client/src/provenance.ts` and `chain-client/src/reads.ts` (`providerRead`, the never-promote disclaimer). It is the complement of the two gates above rather than a third spelling of them, and the reason is measured: a local helper writing `status: { kind: 'verified-finalized', chain: at.chain, … }` longhand was copied into four modules over seventeen call sites, six of which badged something no read produced, and **all three incumbent controls were green on every one** — `check:casts` matches `as Finalized<…>` and there is no assertion, `check:render-provenance` rule B matches a `status` initializer that is a `.status` *access* and this one is written out field by field, and the depcruise rule matches a `/testing` import this shape never needs. The badge on screen is read off `status.kind` and `Verified<T>` deliberately carries **no brand**, so writing that discriminant is a complete provenance claim with nothing behind it. The rule matches the **discriminant position** of a closed union, which is what makes it complete (there is no other way to build a member) and what keeps it silent on `.kind` comparisons, `switch` arms, `local-index`'s same-spelled `BodyProvenance` tags and the type declarations themselves — so it needs no exemption for any of them. Identifiers are constant-folded and shorthand is resolved, because naming the literal is what a developer does when a gate complains; a status parsed out of a runtime string is **not** covered and the gate says so, since reading string bodies is the tokenizer hole three gates here have had to remove. Elsewhere, **carry** the status: `derive(read, compute)` for a value computed from one read (`chain-client` exports it and `finalize` stays withheld — `derive` grants nothing, because a caller with no read has nothing to pass), `combine`/`combine2` for several, `externalProposal` for an imported request, a caller's own `Verified<T>` passed through — and for a value no read produced, **there is no status, so it is absent**. `tests/` is deliberately unscanned: a suite must be able to write a `Verified<T>` fixture, and a gate firing on thirty of them gets switched off. Witness: one firing per declared line across **all six** statuses, plus negative controls that must stay silent — a witness proving only `verified-finalized` leaves the other five mintable, and `verified-best` on a pre-read sentinel was one of the six real findings
 
 · **`pnpm run test:protocol`** — the 04 §5 / 15 §4.8 market-math differential, which reads `reference-model/fixtures/vectors.json` **in place** rather than a copy (04 §5's single-generator rule) and asserts 04 §4's four *distinct* error bounds separately, since the loosest would hide a violation of the tightest. It fails closed if the corpus is missing **or if its exact integers lose precision on load** — the raw 64.64 values run past 2⁵³ and `JSON.parse` corrupts them silently (V-74), so any future JS/TS consumer of that corpus must load through the same discipline. It also binds the client to **`crates/market-core/fixtures/chain-quote-agreement.json`** — written by the runtime's own `quote()` and checked on the Rust side (`cargo test -p market-core quote_agreement`; regenerate with `BLEAVIT_WRITE_QUOTE_FIXTURE=1`) — because the reference corpus certifies the *mathematics* and says nothing about which rounding applies in which order or which failure fires first. Both defects that gate was built from passed all 1,286 corpus rows. Neither CI job needs the other's toolchain; whichever side moved is the side that goes red
 

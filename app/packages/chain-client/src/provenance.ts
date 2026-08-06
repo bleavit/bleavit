@@ -77,20 +77,40 @@ export function finalize<T>(value: T, at: FinalizedBlockRef): Finalized<T> {
 }
 
 /**
- * The unary case of {@link meet}: one finalized read, decoded or projected.
+ * Carry a read's own pin onto a value computed from it — 10 §2.2's second clause.
  *
- * 10 §2.2 assigns `verified-finalized` to values read through smoldot with storage
- * proofs checked, **or computed client-side purely from such values**. `meet` served
- * that second clause for two reads and nothing served it for one, so a reader needing a
- * `Finalized<boolean>` out of a `Finalized<readonly StorageItem[]>` had no sanctioned
- * path at all. `market-reads.ts` hand-built a `verified-finalized` status object
- * instead: brand-less, structurally a `Verified<T>`, and asserting finality for values
- * it had never read.
+ * `verified-finalized` is assigned *"only to values read through smoldot with storage proofs
+ * checked, **or computed client-side purely from such values**"*. This is that second clause,
+ * and it exists because the obvious way to write it was to stamp the pin on afterwards:
  *
- * This grants nothing the barrel did not already export. `meet(a, a, (v) => f(v))` is
- * exactly this function, and both need a `Finalized<A>` to start from — which only a
- * read produces. `finalize` stays withheld for the reason `index.ts` gives: it mints
- * from a value and a pin the caller supplies, and there is no read anywhere in that.
+ * ```ts
+ * const finalized = <T,>(value: T): Verified<T> => ({
+ *   value,
+ *   status: { kind: 'verified-finalized', chain: at.chain, blockHash: at.blockHash, ... },
+ * });
+ * ```
+ *
+ * A helper of that shape takes **any** value and hands back a `verified-finalized` badge, so
+ * whether the badge is true is decided by what the caller passes — which is the property the
+ * type was supposed to carry. Every such helper in this client had at least one call site
+ * where the answer was no: a fallback manufactured on a decode-failure path, a caller-supplied
+ * id, a payload unwrapped out of somebody else's `Verified<T>`.
+ *
+ * `derive` grants nothing. It cannot be called without a `Finalized<A>` — a read that already
+ * happened — and the pin it attaches is that read's own, never one the caller names. So the
+ * only values it can label are values a light-client read is upstream of, which is exactly
+ * what the clause permits. A value with no read behind it has nothing to pass in.
+ *
+ * It is deliberately **not** variadic. Two reads at two blocks describe no single block, and
+ * `meet` already refuses that case with its reason stated; a fold over N reads would have to
+ * either repeat that refusal or quietly pick a pin.
+ *
+ * It is the unary case of {@link meet} and grants nothing the barrel did not already export:
+ * `meet(a, a, (v) => f(v))` is exactly this function, and both need a `Finalized<A>` to start
+ * from. The unary case simply had no sanctioned spelling, so a reader needing a
+ * `Finalized<boolean>` out of a `Finalized<readonly StorageItem[]>` had no path at all — and
+ * `market-reads.ts` hand-built a `verified-finalized` status object instead: brand-less,
+ * structurally a `Verified<T>`, and asserting finality for values it had never read (V-182).
  *
  * `compute` receives `A` rather than the whole `Finalized<A>`, for the reason
  * `DatumProps.render` does: a projection that could see the pin could ignore its input

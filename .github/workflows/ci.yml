@@ -750,6 +750,25 @@ jobs:
         working-directory: app
         run: pnpm run check:render-provenance && pnpm run check:render-provenance:witness
 
+      - name: No VerificationStatus constructed outside the modules that own it (10 §2.1, §2.2)
+        # The construction gate, and it is the complement of the two above rather than a
+        # third spelling of them. `check:casts` matches `as Finalized<...>`; the render gate
+        # matches an object literal whose `status` initializer is a `.status` access. A status
+        # written out field by field is neither — it is not an assertion, it produces only a
+        # `Verified<T>`, and it compiles. All three controls were green over a helper copied
+        # into four modules, six of whose call sites badged something no read produced.
+        #
+        # The badge on screen is read off `status.kind` and `Verified<T>` carries no brand, so
+        # writing that discriminant is a complete provenance claim. `kind` is the discriminant
+        # of a closed union, which is what makes a rule over that one position complete —
+        # and what keeps it silent on comparisons, `switch` arms and type declarations.
+        #
+        # The witness leg is not optional: it requires a firing per declared line across all
+        # six statuses, and requires the negative controls to stay silent, because a gate that
+        # can only catch `verified-finalized` leaves the other five mintable.
+        working-directory: app
+        run: pnpm run check:provenance-mints && pnpm run check:provenance-mints:witness
+
       - name: No markup or code sinks anywhere in app source (11 §11.8.1)
         # Evidence is bytes an adversary chose, displayed inside the console operated by the
         # system's most privileged actors; 10 §13.2's imported documents are the same shape
