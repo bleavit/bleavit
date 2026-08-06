@@ -712,6 +712,21 @@ jobs:
         working-directory: app
         run: pnpm run signers:audit
 
+      - name: Pinned PAPI's issued methods vs pinned smoldot's dispatch table (FE-P2)
+        # The client's whole read path is chainHead_v1_* over a light client, and both
+        # ends of that wire live in node_modules: PAPI chooses the method names, smoldot
+        # answers them. No suite here can see a mismatch — tests/chain-client replays
+        # recorded transcripts, which by construction answer whatever was recorded — so a
+        # bump on either side would first fail in a browser. Both sides are derived, not
+        # listed: the issued set from PAPI's own methods.js, the served set from smoldot's
+        # shipped wasm.
+        working-directory: app
+        run: pnpm run check:smoldot-surface
+
+      - name: ...and the witness, because a checker that cannot fail reports success
+        working-directory: app
+        run: pnpm run check:smoldot-surface:witness
+
   environments:
     name: Environment definitions
     runs-on: ubuntu-latest
