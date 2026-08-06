@@ -537,7 +537,7 @@ export function ClaimStream({
  *
  * The panel took two `Verified<bigint>`s and classified one against the other. The second
  * one does not exist: `T_ins` is a treasury-internal counter that no frozen surface
- * publishes (SQ-604), so the only thing a caller could have passed was a figure it made up.
+ * publishes (SQ-616), so the only thing a caller could have passed was a figure it made up.
  * A classification against a made-up target is worse than no classification, because the
  * screen's whole job here is to stop the balance reading as income and it does that by
  * telling the reader where the balance *should* be.

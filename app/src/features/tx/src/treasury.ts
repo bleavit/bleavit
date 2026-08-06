@@ -167,7 +167,7 @@ export function claimBlocks(context: ClaimContext): readonly TreasuryBlock[] {
  * requires every treasury consumer to bind `nav()` rather than raw state. So the only way a
  * caller could have satisfied the old signature was by constructing the figure itself, and
  * a classification against a self-supplied target is a classification against nothing
- * (SQ-604).
+ * (SQ-616).
  *
  * The repair is the shape `TriggerState` and `ChallengeWindow` already use: an explicit
  * `unestablished` arm, so *"we could not obtain the target"* is a value a screen must
@@ -184,7 +184,7 @@ export const INSURANCE_TARGET_UNREADABLE =
   'The chain publishes the INSURANCE balance but not the liability it is sized against. ' +
   '`T_ins` is a treasury-internal counter (08 §1.2) and the contract freezes no surface ' +
   'carrying it, so this client can show what the account holds and cannot say whether that ' +
-  'is above or below what it owes (SQ-604).';
+  'is above or below what it owes (SQ-616).';
 
 /** Where `INSURANCE` stands against its derived target — never a bare balance. */
 export type InsuranceStanding =

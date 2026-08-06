@@ -2537,7 +2537,7 @@ test('INSURANCE is classified against its target, never shown as a bare trend', 
 });
 
 test('an unobtainable T_ins is its own arm, never rendered as "at target"', () => {
-  // SQ-604: `T_ins` is a treasury-internal counter (08 §1.2) and no frozen surface carries
+  // SQ-616: `T_ins` is a treasury-internal counter (08 §1.2) and no frozen surface carries
   // it — `NavView` publishes `insurance` and nothing beside it. The old signature demanded
   // a `Verified<bigint>` target, so the only way to satisfy it was to invent one, and an
   // invented zero classifies an empty reserve as *exactly sized*.
@@ -2546,7 +2546,7 @@ test('an unobtainable T_ins is its own arm, never rendered as "at target"', () =
     reason: INSURANCE_TARGET_UNREADABLE,
   });
   assert.equal(stated(standing).kind, 'unestablished');
-  assert.match(INSURANCE_TARGET_UNREADABLE, /SQ-604/);
+  assert.match(INSURANCE_TARGET_UNREADABLE, /SQ-616/);
   // It still carries the balance's own provenance — the block is knowable, the comparison
   // is not, and collapsing the two would withhold more than is actually missing.
   assert.equal(standing.kind === 'stated' && standing.datum.status.kind, 'verified-finalized');
@@ -2753,7 +2753,7 @@ test('a blocked approval lists EVERY reason, not the first', () => {
   );
   // The fourth heading is the gate's own: 02 §7.4 freezes guardian membership and allowances
   // and **not** the pending-action list, so O-3 carries a blocking unreadable obligation
-  // (SQ-602) that travels with every render of this control. It is here rather than filtered
+  // (SQ-616) that travels with every render of this control. It is here rather than filtered
   // out because a console that dropped it would present a complete verdict for a row whose
   // central read has no contract surface.
   //
@@ -3022,11 +3022,11 @@ test('the FE-P10 outlook precedes the submit control, because it decides whether
   );
   // The control stays disabled and the reason is neither the artifact nor `applicable_at`:
   // 02 freezes neither `ExecutionGuard.PendingUpgrade` nor `ParachainSystem.AuthorizedUpgrade`
-  // (SQ-601), so the row's own precondition cannot be read at B′ and INV-FE-12 closes it.
+  // (SQ-615), so the row's own precondition cannot be read at B′ and INV-FE-12 closes it.
   // Steps 1–3 still run — §11.8.4's fallback says verification ships regardless — which is
   // exactly what this render shows.
   assert.ok(buttonDisabled(html, 'Submit the upgrade'), html);
-  assert.match(html, /SQ-601/);
+  assert.match(html, /SQ-615/);
   assert.ok(!/No artifact has been verified/.test(html), 'the artifact half must have succeeded');
 });
 
@@ -3207,11 +3207,11 @@ test('the approve flow renders every call in the batch, decoded', () => {
   assert.ok(!/aria-hidden="true"/.test(nth(list, 1, 'capture')), `the batch list is aria-hidden: ${nth(list, 0, 'capture')}`);
   assert.ok(!/display:\s*none/.test(nth(list, 1, 'capture')), `the batch list is display:none: ${nth(list, 0, 'capture')}`);
   // The control stays disabled, and the reason is **not** the batch: O-3's pending-action
-  // read has no frozen surface (SQ-602), so INV-FE-12 closes it. Asserted on the reason
+  // read has no frozen surface (SQ-616), so INV-FE-12 closes it. Asserted on the reason
   // rather than on the boolean, because "disabled" alone would pass if the batch check had
   // silently started refusing decoded calls.
   assert.ok(buttonDisabled(html, 'Approve'), html);
-  assert.match(html, /SQ-602/);
+  assert.match(html, /SQ-616/);
   assert.ok(!/Empty batch|Undecodable call/.test(html), `the batch itself must not block: ${html}`);
 });
 
@@ -4163,12 +4163,12 @@ test('every row whose central read 02 does not freeze is CLOSED, with its id nam
   // dependent surface with a named reason. These four rows are the whole reason F17 files
   // spec questions rather than shipping a green console over reads that do not exist.
   const closed: Record<string, string> = {
-    'guardian.approve_action': 'SQ-602',
-    'guardian.propose_action': 'SQ-602',
-    'futarchy_treasury.claim_stream': 'SQ-603',
-    'system.apply_authorized_upgrade': 'SQ-601',
-    'registry.file': 'SQ-607',
-    'registry.challenge': 'SQ-607',
+    'guardian.approve_action': 'SQ-616',
+    'guardian.propose_action': 'SQ-616',
+    'futarchy_treasury.claim_stream': 'SQ-615',
+    'system.apply_authorized_upgrade': 'SQ-615',
+    'registry.file': 'SQ-619',
+    'registry.challenge': 'SQ-619',
   };
   for (const [call, sq] of Object.entries(closed)) {
     const row = OPERATOR_SURFACE_ROWS[call as keyof typeof OPERATOR_SURFACE_ROWS];
@@ -4202,7 +4202,7 @@ test('a blocking unreadable obligation closes the control even with a passing ga
   // unproven capability is absent, so the row is closed with its spec question named.
   const blocked = operatorGate('futarchy_treasury.claim_stream', readySession('O-5'), []);
   assert.equal(blocked.state, 'blocked', 'a row with no lawful source opened its control');
-  assert.match(nth(blocked.blocks, 0, 'block').detail, /SQ-603/);
+  assert.match(nth(blocked.blocks, 0, 'block').detail, /SQ-615/);
   assert.match(nth(blocked.blocks, 0, 'block').detail, /control is closed rather than offered/);
   // Anti-vacuity: a row with no blocking obligation opens on the same session shape, so the
   // refusal above is the obligation's and not a gate that never opens for anything.
@@ -4440,7 +4440,7 @@ test('the tracker screen states the consequence first, and never hides an unread
 // ------------------------------------- §11.8.2's power-specific forms (F17)
 
 test('each power renders its OWN arguments, and the empty one says so', () => {
-  // SQ-609: one call, five argument sets. `suspend_on_gate` takes none, so a generic form
+  // SQ-621: one call, five argument sets. `suspend_on_gate` takes none, so a generic form
   // renders an empty one — which reads as a form that failed to load, on the screen whose
   // next click is a privileged signature.
   assert.deepEqual(POWER_FIELDS.suspend_on_gate, []);

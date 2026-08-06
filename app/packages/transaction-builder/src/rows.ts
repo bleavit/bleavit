@@ -935,7 +935,7 @@ const UNREADABLE: Partial<Readonly<Record<RowId, readonly UnreadableObligation[]
       '§11.8.2 calls the guardian pending-action items "frozen in 02", and 02 §7.4 names ' +
         'only membership and allowances. Neither `Guardian.PendingActions` nor its approval ' +
         'set is in the manifest, so S15’s central read has no contract surface.',
-      'SQ-602',
+      'SQ-616',
       'blocking',
     ),
   ],
@@ -946,7 +946,7 @@ const UNREADABLE: Partial<Readonly<Record<RowId, readonly UnreadableObligation[]
       'The five triggers §11.8.2 names read five different frozen items, but which trigger ' +
         'a playbook requires is a property of the playbook registration, which 02 does not ' +
         'freeze. `TriggerState.unread` carries the same refusal at the model layer.',
-      'SQ-602',
+      'SQ-616',
       'blocking',
     ),
   ],
@@ -958,7 +958,7 @@ const UNREADABLE: Partial<Readonly<Record<RowId, readonly UnreadableObligation[]
         'every treasury consumer MUST bind `nav()` rather than raw state — while `nav()` ' +
         'publishes only the `stream_remainders` aggregate. Per-stream reads have no lawful ' +
         'source, so the claimable amount §11.8.3 requires computed client-side has no inputs.',
-      'SQ-603',
+      'SQ-615',
       'blocking',
     ),
   ],
@@ -970,7 +970,7 @@ const UNREADABLE: Partial<Readonly<Record<RowId, readonly UnreadableObligation[]
         'frozen surface. §11.8.4 step 4 also forbids recomputing `applicable_at` from ' +
         '`authorized_at + DescriptorLeadTime`, so the constant this release *can* read is ' +
         'not a substitute (SQ-552).',
-      'SQ-601',
+      'SQ-615',
       'blocking',
     ),
   ],
@@ -980,7 +980,7 @@ const UNREADABLE: Partial<Readonly<Record<RowId, readonly UnreadableObligation[]
       'the filing bond amount, and that the registry bounds are not exceeded',
       '07 §7 stores both per instance and 02 §7 freezes no registry storage — only the ' +
         'events. The bond is value-scaled, so it cannot be carried as a constant either.',
-      'SQ-607',
+      'SQ-619',
       'blocking',
     ),
   ],
@@ -991,7 +991,7 @@ const UNREADABLE: Partial<Readonly<Record<RowId, readonly UnreadableObligation[]
       'Registry filings, their windows, watchtower acknowledgements and slash outcomes are ' +
         'all required renders in §11.8.6 with only the *events* frozen in 02 §6. An event ' +
         'stream is not one of §11.4 rule 2’s three precondition sources.',
-      'SQ-607',
+      'SQ-619',
       'blocking',
     ),
   ],

@@ -396,7 +396,7 @@ export function ratificationCopy(state: ActionRatification): string {
  * all five. That reads as five equivalent buttons when the powers take entirely different
  * arguments — `suspend_on_gate` takes none at all, while `activate_playbook` takes four.
  *
- * **This is one dispatchable, not five** (SQ-609, resolved by reading the runtime rather
+ * **This is one dispatchable, not five** (SQ-621, resolved by reading the runtime rather
  * than the sentence): `guardian.propose_action(power, justification_hash)` takes a
  * `GuardianPower` **enum** whose variants carry the fields below. Five call shapes would be
  * five extrinsics with five indices; the pallet has one. So a "form" here selects a variant

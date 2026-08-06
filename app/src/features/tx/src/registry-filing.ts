@@ -242,7 +242,7 @@ export interface FilingBlock {
  * `challenge_filing(epoch, filing_id, evidence_hash)` requires one, so a client following
  * the row alone cannot encode the call at all. It is blocked on rather than defaulted,
  * because there is no hash that means *no evidence*; the disagreement between the two
- * documents is filed as SQ-605 rather than settled here.
+ * documents is filed as SQ-617 rather than settled here.
  */
 export interface ChallengeFilingInputs {
   readonly kind: FilingKind;
