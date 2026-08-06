@@ -3,7 +3,7 @@
   "binding": {
     "genesisHash": "0x91b171bb158e2d3848fa23a9f1c25182fb8e20313b2c1eb49219da7a70ce90c3",
     "specVersion": 2,
-    "contractVersion": 27
+    "contractVersion": 28
   },
   "action": {
     "kind": "transfer_to_address",
@@ -13,5 +13,5 @@
   "limits": {
     "maxCost": "26000000"
   },
-  "digest": "2e32f2e5692ed9af0673aa0cac88c2c009365ed9915e7405986d1f5824f22770"
+  "digest": "222f61cfb60e702423c7c4bd56fcd134026552f17dcb8de86574342d3714a60a"
 }

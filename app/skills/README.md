@@ -72,8 +72,17 @@ counting the family as covered — both are tested where they live, in
 `app/tests/intents` and `app/tests/contexts`.
 
 Every example is judged against a fixed context, published so a reader can reproduce a
-verdict: genesis `0x91b171bb…ce90c3`, `spec_version` 2, contract version 27, chain height
+verdict: genesis `0x91b171bb…ce90c3`, `spec_version` 2, contract version 28, chain height
 1,000,000.
+
+The two version numbers are **read from the release**, not typed into the generator, and
+this sentence is checked against them. `admitIntent` compares the binding by exact equality,
+so a corpus left behind at the previous contract version stops meaning what its filenames
+say — every `admitted--` document is refused with `FE-HANDOFF-005`, and most of the
+`refused-` ones return `-005` instead of the code they publish, because the binding
+comparison runs before the expiry, closed-shape and limit checks. The genesis hash is not
+read live and stays a documentation stand-in: no example here is a request a real client
+would admit, which is what keeps a published example from being a ready-to-sign one.
 
 ## Editing
 

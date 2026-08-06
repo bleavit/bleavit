@@ -3,7 +3,7 @@
   "binding": {
     "genesisHash": "0x91b171bb158e2d3848fa23a9f1c25182fb8e20313b2c1eb49219da7a70ce90c3",
     "specVersion": 2,
-    "contractVersion": 27
+    "contractVersion": 28
   },
   "action": {
     "kind": "prepare_pass_position",
@@ -15,5 +15,5 @@
   },
   "producedBy": "an external analysis tool",
   "rationale": "see the chat",
-  "digest": "4895adf7affe2c1cf3469311a67fea779144960245abf46e4cd8ea427afb738c"
+  "digest": "5172c7b0b4f181af6e1e2605c041cc47fb6b9cf5c195931a60669d4c952bffd4"
 }
