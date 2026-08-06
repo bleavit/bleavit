@@ -265,3 +265,16 @@ export {
   type VoidRecovery,
   type VoidResidual,
 } from './void-recovery.js';
+export {
+  mayPrepareTrade,
+  perbillToBps,
+  tradeBlocks,
+  type BookIdentity,
+  type BookKind,
+  type FeeReadings,
+  type ProposalState,
+  type QuoteAgreement,
+  type TradableState,
+  type TradeBlock,
+  type TradeInputs,
+} from './trade-ticket.js';
