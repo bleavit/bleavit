@@ -124,6 +124,45 @@ export function externalProposal<T>(value: T): Verified<T> {
   return { value, status: { kind: 'external-proposal' } };
 }
 
+/** The `provider` member of {@link VerificationStatus}, named so a signature can return it. */
+export type ProviderStatus = Extract<VerificationStatus, { kind: 'provider' }>;
+
+/**
+ * The `provider` status — 10 §2.1, §2.2; INV-FE-15.
+ *
+ * Constructing this is unrestricted, for the same reason `externalProposal` above is
+ * unrestricted and `chain-client`'s `providerRead` is allowlisted by `check:provenance-mints`:
+ * **a `provider` status claims nothing.** It is the label that says a value was *not* verified
+ * by this client, so writing one grants a caller no authority it did not have. 10 §2.2 gives it
+ * no promotion path at all, and the transaction path takes `Finalized<T>`, whose brand lives in
+ * `chain-client` and cannot be reached from here. Every other status is an assertion about an
+ * observation, which is why every other status is minted behind a read.
+ *
+ * It lives here rather than beside `providerRead` because of the package graph, not by
+ * preference. `packages/providers` is the client's one INV-FE-15 badge site (`mint.ts`), and
+ * 10 §10.1 forbids it importing `chain-client` — the whole point of that edge being absent is
+ * that a provider package must not be able to open a chain connection or name `Finalized<T>`.
+ * So the sanctioned constructor had to exist in a package `providers` may depend on, and
+ * `shared-types` is the only one. Widening `check:provenance-mints`' allowlist to a third
+ * owning module was the alternative and is the weaker claim: the gate's value is that the list
+ * is short, and one constructor with two call sites is easier to audit than three modules that
+ * may each write a status longhand.
+ *
+ * **It cannot mint any other status.** `kind` is written here and is not a parameter, and the
+ * return type is the `provider` member alone rather than the union, so a caller cannot reach
+ * `verified-finalized` through it by any argument.
+ *
+ * `sampled` has no default. It is the difference between *"a source we spot-check"* and
+ * *"this row's history was compared against the chain"*, so a caller that forgets it gets a
+ * type error rather than the weaker claim silently. The provider id is the caller's own fact
+ * and is not validated here; `mint.ts` refuses an empty one at its own boundary, where the
+ * refusal can say why (a row that renders as *from a provider* and cannot say which is the
+ * half of "origin to the pixel" a user acts on).
+ */
+export function provider(providerId: string, sampled: boolean): ProviderStatus {
+  return { kind: 'provider', providerId, sampled };
+}
+
 /** True for every status that is NOT a light-client-verified finalized read. */
 export function isUnverified(status: VerificationStatus): boolean {
   return status.kind !== 'verified-finalized';
