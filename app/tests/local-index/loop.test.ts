@@ -51,6 +51,9 @@ const scan = (
   number,
   hash: blockHash(number),
   specVersion: 3,
+  // 10 §9.2's buckets are aligned to the block's own instant, so the fixture derives one from
+  // the block rather than reading a clock: 6 s blocks, which is 02 §9's block time.
+  blockTimestampMs: number * 6_000,
   extrinsicCount: count,
   events: watched
     ? [
@@ -232,6 +235,7 @@ test('a scan with NO declared count still ingests — and the body becomes the a
     number: 200,
     hash: blockHash(200),
     specVersion: 3,
+    blockTimestampMs: 1200000,
     events: [
       { phase: { kind: 'apply-extrinsic', index: 1 }, pallet: 'Balances', name: 'Transfer', accounts: ['alice'] },
     ],
@@ -250,6 +254,7 @@ test('an index beyond the FETCHED body is refused even with no declared count', 
     number: 201,
     hash: blockHash(201),
     specVersion: 3,
+    blockTimestampMs: 1206000,
     events: [
       { phase: { kind: 'apply-extrinsic', index: 7 }, pallet: 'Balances', name: 'Transfer', accounts: ['alice'] },
     ],
@@ -274,6 +279,7 @@ test('the index guard is >=, not > — index N against N extrinsics is out of ra
     number: 202,
     hash: blockHash(202),
     specVersion: 3,
+    blockTimestampMs: 1212000,
     events: [
       { phase: { kind: 'apply-extrinsic', index: 2 }, pallet: 'Balances', name: 'Transfer', accounts: ['alice'] },
     ],
@@ -289,6 +295,7 @@ test('the index guard is >=, not > — index N against N extrinsics is out of ra
     number: 203,
     hash: blockHash(203),
     specVersion: 3,
+    blockTimestampMs: 1218000,
     events: [
       { phase: { kind: 'apply-extrinsic', index: 1 }, pallet: 'Balances', name: 'Transfer', accounts: ['alice'] },
     ],

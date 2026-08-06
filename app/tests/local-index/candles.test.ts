@@ -16,15 +16,19 @@ import assert from 'node:assert/strict';
 import {
   CandleError,
   DEGRADATION_LADDER,
+  SCAN_AGGREGATE_RESOLUTION,
   bucketSeconds,
   bucketStart,
+  candleCoversBlock,
   downsample,
   foldCandles,
   holesIn,
+  mergeCandle,
   nextResolution,
   priceSample,
   rollUp,
   sourceKeyOf,
+  tradeCandles,
 } from '@bleavit/local-index';
 // `selfRange` is test-only on purpose — see packages/local-index/src/testing.ts.
 import type { Candle, PriceSample, Resolution } from '@bleavit/local-index';
@@ -304,4 +308,129 @@ test('an unknown or unattributed origin is refused on a chart row too', () => {
     () => foldCandles([asSample({ ...sample(10, 100, 1), origin: 'rpc' })], 'candles1h'),
     CandleError,
   );
+});
+
+test('10 §9.1 folds a block’s Traded fills into ONE bar per book, in chain order', () => {
+  // §9.1's ruling has two halves and this is the one nothing implemented: *"Chain-wide `Traded`
+  // **is consumed into the candle aggregates as it is scanned** and never stored row-by-row"*.
+  // Only the second half was built (the retention filter), so §9.2's candle-depth tables
+  // described a tier with no producer and the whole trade stream — 1,339,200 rows/day at the
+  // chain-permitted ceiling — was scanned, filtered out and forgotten.
+  const bars = tradeCandles({
+    blockNumber: 500,
+    blockTimestampMs: 7_200_000,
+    resolution: SCAN_AGGREGATE_RESOLUTION,
+    origin: 'self',
+    fills: [
+      // Deliberately not in price order, and deliberately not sorted by event index either: the
+      // fold must take open and close from **chain order**, which is the event index inside one
+      // block. An inverted bar is not obviously wrong on a chart — it is a plausible bar
+      // pointing the other way.
+      { bookId: '7', price1e9: 500_000_000n, eventIndex: 2 },
+      { bookId: '7', price1e9: 900_000_000n, eventIndex: 0 },
+      { bookId: '7', price1e9: 100_000_000n, eventIndex: 1 },
+      { bookId: '9', price1e9: 300_000_000n, eventIndex: 3 },
+    ],
+  });
+  assert.equal(bars.length, 2, 'two books shared one bar, which describes no market that exists');
+  const seven = bars.find((bar) => bar.bookId === '7');
+  assert.ok(seven);
+  assert.equal(seven.open1e9, 900_000_000n, 'the bar opened on a fill that was not the block’s first');
+  assert.equal(seven.close1e9, 500_000_000n, 'the bar closed on a fill that was not the block’s last');
+  assert.equal(seven.high1e9, 900_000_000n);
+  assert.equal(seven.low1e9, 100_000_000n);
+  assert.equal(seven.samples, 3);
+  assert.equal(seven.fromBlock, 500);
+  assert.equal(seven.toBlock, 500);
+  // The bucket is the block's own hour, epoch-aligned — two clients must agree on the boundary.
+  assert.equal(seven.openAt, 7_200);
+  assert.equal(seven.resolution, 'candles1h');
+  assert.equal(seven.origin, 'self');
+  assert.equal(seven.sourceKey, sourceKeyOf({ origin: 'self' }));
+});
+
+test('the aggregate is written at the ladder’s FINEST rung, never coarser', () => {
+  // §9.1 names no table and §9.2's ladder is `raw → candles1h → candles4h → candles1d`, so the
+  // aggregate can only occupy the finest candle rung: writing it coarser would destroy resolution
+  // the client held at the moment it held it, which is the one thing the ladder's order exists to
+  // avoid. Pinned as a value because the remaining freedom is SQ-762 and a ruling will move it.
+  assert.equal(SCAN_AGGREGATE_RESOLUTION, 'candles1h');
+  assert.equal(nth(DEGRADATION_LADDER, 1, 'rung'), SCAN_AGGREGATE_RESOLUTION);
+});
+
+test('a fill carrying no event index is refused — order is what decides open and close', () => {
+  assert.throws(
+    () =>
+      tradeCandles({
+        blockNumber: 1,
+        blockTimestampMs: 6_000,
+        resolution: 'candles1h',
+        origin: 'self',
+        fills: [{ bookId: '7', price1e9: 1n, eventIndex: -1 }],
+      }),
+    CandleError,
+  );
+  // A device clock cannot reach the bucket key: the argument is named for what it must be.
+  assert.throws(
+    () =>
+      tradeCandles({
+        blockNumber: 1,
+        blockTimestampMs: -1,
+        resolution: 'candles1h',
+        origin: 'self',
+        fills: [],
+      }),
+    CandleError,
+  );
+});
+
+test('mergeCandle ROLLS INTO the stored bar rather than replacing it (§9.2 obligation 2)', () => {
+  // §9.2: *"Degradation is applied in whole, closed buckets. Folding part of a bucket now and the
+  // rest later writes two coarse rows under one bucket key, the second replacing the first, so
+  // the chart shows a bar describing part of an hour labelled as the hour."* Folding whole
+  // buckets makes that true within one pass; a backfill chunk landing older samples for an
+  // already-folded hour arrives in a later pass, and a bare `put` writes over the earlier bar.
+  // Four observations in one hour, delivered as two folds: blocks 200..210 first (the forward
+  // run) and blocks 100..110 afterwards (§6.4's newest-first backfill catching up).
+  const later = nth(foldCandles([sample(100, 500, 200), sample(200, 700, 210)], 'candles1h'), 0, 'candle');
+  const earlier = nth(foldCandles([sample(10, 300, 100), sample(20, 900, 110)], 'candles1h'), 0, 'candle');
+  const merged = mergeCandle(later, earlier);
+
+  // Open comes from the bar spanning the lower blocks and close from the higher, whichever was
+  // written first — the stored bar has no other record of order, because the raw rows are gone.
+  assert.equal(merged.open1e9, 300n, 'the merged bar opens on the later chunk');
+  assert.equal(merged.close1e9, 700n, 'the merged bar closes on the earlier chunk');
+  assert.equal(merged.high1e9, 900n);
+  assert.equal(merged.low1e9, 300n);
+  assert.equal(merged.samples, 4, 'the merged bar lost samples, so it understates the hour');
+  assert.equal(merged.fromBlock, 100);
+  assert.equal(merged.toBlock, 210);
+  assert.equal(merged.openAt, later.openAt);
+
+  // A merge is a read-modify-write of ONE stored row, so the two must share its primary key.
+  const otherBook = nth(foldCandles([sample(10, 1, 5, 'book-2')], 'candles1h'), 0, 'candle');
+  assert.throws(() => mergeCandle(later, otherBook), CandleError);
+  const coarser = nth(rollUp([later], 'candles4h'), 0, 'candle');
+  assert.throws(() => mergeCandle(later, coarser), CandleError);
+});
+
+test('candleCoversBlock is what keeps a replayed block from being counted twice', () => {
+  // A candle is an accumulator, so it has no deterministic primary key to lean on the way an
+  // event row does: re-folding block N would add its fills a second time. §6.5 requires ingest
+  // writes to be idempotent under replay, and the stored bar's own span is the only record of
+  // which blocks it already summarises.
+  const bar = nth(
+    tradeCandles({
+      blockNumber: 500,
+      blockTimestampMs: 7_200_000,
+      resolution: 'candles1h',
+      origin: 'self',
+      fills: [{ bookId: '7', price1e9: 1n, eventIndex: 0 }],
+    }),
+    0,
+    'bar',
+  );
+  assert.equal(candleCoversBlock(bar, 500), true);
+  assert.equal(candleCoversBlock(bar, 499), false);
+  assert.equal(candleCoversBlock(bar, 501), false);
 });

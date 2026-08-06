@@ -38,11 +38,15 @@ import {
   TX_PATH_TABLES,
   evictMetadataToBudget,
   laddersAgree,
+  measureDepth,
   mergeDownsampled,
   nextResolution,
+  pendingDecoderCount,
+  rawEventId,
   readMetadataBlob,
+  readPendingRawEvicted,
 } from '@bleavit/local-index';
-import type { PriceSample, RowSizes, SettledProposal } from '@bleavit/local-index';
+import type { PriceSample, QuotaShares, RowSizes, SettledProposal } from '@bleavit/local-index';
 import { selfRange } from '@bleavit/local-index/testing';
 import { nth } from './nth.ts';
 
@@ -207,7 +211,10 @@ test('raw samples degrade into candles1h, and the label is written with the dele
   const labels = await readDownsampled(db);
   assert.ok(labels.length >= 1, 'the evicted range carries no resolution label — a silent splice');
   assert.equal(nth(labels, 0, 'label').resolution, 'candles1h');
-  assert.notEqual(nth(labels, 0, 'label').resolution, 'raw');
+  // The label covers the blocks whose raw rows went, rather than an arbitrary span: a label that
+  // named the wrong blocks would leave the evicted ones unlabelled, which is the silent splice.
+  assert.equal(nth(labels, 0, 'label').fromBlock, 1);
+  assert.equal(nth(labels, 0, 'label').toBlock, 2);
   const coverage = await readCoverage(db);
   assert.deepEqual(coverage.holes, [], 'an evicted range was rendered as a hole');
   await db.delete();
@@ -233,7 +240,7 @@ test('the ladder walks §9.2’s order and stops at the floor rather than throwi
   const db = await freshDb();
   // Enough closed hourly buckets that the candle share is exceeded too, so the run has to go
   // past the first rung. `candles1d` has no successor, and §9.2 justifies that arithmetically:
-  // a daily row costs `books × 120 B/day` even at max load.
+  // a daily row costs `books × 120 B/day` ≈ 19.1 KB/day even at the 159-book maximum.
   const samples: PriceSample[] = [];
   for (let i = 0; i < 6; i += 1) samples.push(sample(i * HOUR + 10, i + 1, 100 + i));
   await db.priceSamples.bulkPut(samples);
@@ -257,10 +264,13 @@ test('the ladder walks §9.2’s order and stops at the floor rather than throwi
     const [next] = nth(rungs, i, 'rung').split('->');
     assert.ok(rank(next ?? '') >= rank(prev ?? ''), `the ladder went backwards: ${rungs.join(', ')}`);
   }
-  // Running out of rungs is a **reported outcome**, not a throw: §9.2 states plainly that deep
-  // the raw tier is genuinely thin against a fully-subscribed hosted partition, so a quota
-  // manager that threw here would turn a budgeted state into a crash on the busiest chain.
-  assert.equal(typeof report.exhausted, 'boolean');
+  // Running out of rungs is a **reported outcome**, not a throw: §9.2 states plainly that the
+  // raw tier is genuinely thin against a fully-subscribed hosted partition, so a quota manager
+  // that threw here would turn a budgeted state into a crash on the busiest chain. Asserted as
+  // the value it must take — every sample here costs 100 MB against a 60 MB candle share, so the
+  // ladder reaches its floor still over budget. `typeof … === 'boolean'` passed for any run.
+  assert.equal(report.exhausted, true, 'a run that hit the floor still over budget reported healthy');
+  assert.equal(await db.candles1d.count() > 0, true, 'the ladder never reached the floor');
   await db.delete();
 });
 
@@ -381,7 +391,7 @@ test('EVICTION NEVER TOUCHES TX-PATH TABLES (15 §4.8)', async () => {
     { id: '0000000001:00000', blockNumber: 1, extrinsicIndex: 0, account: 'alice', call: 'Market.buy', origin: 'self' },
     { id: '0000000002:00000', blockNumber: 2, extrinsicIndex: 0, account: 'alice', call: 'Market.sell', origin: 'self' },
   ]);
-  await db.snapshotsImported.put({ id: 's-1', providerId: 'acme', importedAt: 1, fromBlock: 1, toBlock: 2 });
+  await db.snapshotsImported.put({ id: 's-1', origin: 'snapshot', providerId: 'acme', importedAt: 1, fromBlock: 1, toBlock: 2 });
   const coverageBefore = { ranges: [selfRange(1, 9, 1, edgeAt(9))], holes: [] };
   await writeCoverage(db, coverageBefore);
 
@@ -433,7 +443,7 @@ test('EVICTION NEVER TOUCHES TX-PATH TABLES (15 §4.8)', async () => {
 test('measured usage is per §9.2 share, and metadata is measured rather than modelled', async () => {
   const db = await freshDb();
   await db.priceSamples.bulkPut([sample(10, 1, 100)]);
-  await db.metadataCache.put({ specVersion: 3, bytes: 12_345, lastUsedAt: 1, blob: new Uint8Array(1) });
+  await db.metadataCache.put({ specVersion: 3, bytes: 12_345, lastUsedAt: 1, blob: new Uint8Array(1), origin: 'self' as const });
   const usage = await measureUsage(db, SIZES);
   assert.equal(usage.rawSampleBytes, SIZES.priceSample);
   // `metadataCache` rows carry their real byte count, so this share is the one figure here that
@@ -609,8 +619,8 @@ test('the metadata cache records a use, so its LRU order is not insertion order 
   // exactly the blob the deepest rows need and the rows that cannot be re-decoded any other way.
   const db = await freshDb();
   await db.metadataCache.bulkPut([
-    { specVersion: 1, bytes: 400, lastUsedAt: 1, blob: new Uint8Array([1]) },
-    { specVersion: 2, bytes: 400, lastUsedAt: 2, blob: new Uint8Array([2]) },
+    { specVersion: 1, bytes: 400, lastUsedAt: 1, blob: new Uint8Array([1]), origin: 'self' as const },
+    { specVersion: 2, bytes: 400, lastUsedAt: 2, blob: new Uint8Array([2]), origin: 'self' as const },
   ]);
   const blob = await readMetadataBlob(db, 1, 500);
   assert.deepEqual(blob?.blob, new Uint8Array([1]));
@@ -631,11 +641,12 @@ test('a delete that removes nothing ENDS the pass rather than folding the same b
   // the `priceSamples` key, `bulkDelete` matched nothing, the share never fell, and the ladder
   // folded one bucket until the process was killed).
   //
-  // §9.2 states that running out of room is *"a reported outcome"* — deep raw history "is not
-  // achievable within the caps" at max load — so an unbounded loop is not an admissible failure
-  // mode for it, and a retention pass that never returns takes the tab with it. Every other
-  // termination condition in that loop is a property of *other* code; this is the one that is
-  // a property of the loop.
+  // §9.2 states that running out of room is a reported outcome — against a fully-subscribed
+  // hosted partition the raw tier is genuinely thin (~7 days desktop, ~2 days mobile) — so an
+  // unbounded loop is not an admissible failure mode for it, and a retention pass that never
+  // returns takes the tab with it. Every other termination condition in that loop is a property
+  // of *other* code; this is the one that is a property of the loop. (The blanket "not
+  // achievable within the caps" this comment used to quote was withdrawn as false by SQ-557.)
   // A DBCore middleware that swallows deletes — the seam Dexie publishes for exactly this.
   // Installed **before** `open()`: middleware added afterwards does not reach the already-built
   // stack, and the first version of this test silently deleted normally and proved nothing.
@@ -679,5 +690,313 @@ test('a delete that removes nothing ENDS the pass rather than folding the same b
     report.steps.filter((s) => s.kind === 'downsample').length <= 2,
     'the ladder retried a rung that was making no progress',
   );
+  await db.delete();
+});
+
+test('a bucket folded in TWO passes accumulates rather than being written over', async () => {
+  // §9.2 obligation 2's named failure, and folding whole buckets does not close it: whole-bucket
+  // folding holds *within* a pass, and a backfill chunk landing older samples for an
+  // already-folded hour arrives in a **later** one. A bare `bulkPut` then writes a bar over the
+  // earlier bar — "a bar describing part of an hour, rendered as the hour" — with the coverage
+  // still claiming those blocks and the downsampled label still saying nothing is missing.
+  const db = await freshDb();
+  const budget = platformBudget('mobile');
+  await db.priceSamples.bulkPut([sample(100, 200, 500), sample(200, 210, 700)]);
+  await applyQuota(db, { budget, sizes: SIZES, now: 10 * HOUR, pinnedSpecVersions: [3] });
+  const first = nth(await db.candles1h.toArray(), 0, 'candle');
+  assert.equal(first.samples, 2);
+
+  // The backfill catches up: two older observations inside the SAME hour.
+  await db.priceSamples.bulkPut([sample(10, 100, 300), sample(20, 110, 900)]);
+  await applyQuota(db, { budget, sizes: SIZES, now: 10 * HOUR, pinnedSpecVersions: [3] });
+
+  const bars = await db.candles1h.toArray();
+  assert.equal(bars.length, 1, 'the second fold wrote a second row instead of rolling in');
+  const bar = nth(bars, 0, 'candle');
+  assert.equal(bar.samples, 4, 'the second fold replaced the first bar — an hour of history gone');
+  assert.equal(bar.open1e9, 300n, 'the bar no longer opens on the hour’s first observation');
+  assert.equal(bar.close1e9, 700n, 'the bar no longer closes on the hour’s last');
+  assert.equal(bar.high1e9, 900n);
+  assert.equal(bar.low1e9, 300n);
+  assert.equal(bar.fromBlock, 100);
+  assert.equal(bar.toBlock, 210);
+  await db.delete();
+});
+
+test('a bucket that frees nothing SKIPS ITSELF rather than abandoning the rung', async () => {
+  // The progress guard has two jobs and an earlier version confused them. It must stop the loop
+  // retrying a bucket that freed nothing — otherwise a delete matching nothing folds one bucket
+  // forever and takes the tab with it. It must NOT stop the rung, because a bucket can freely
+  // free nothing: rolling up a bucket holding a single candle writes one row for one row, and a
+  // guard that gave up there would report `exhausted` while later buckets holding four rows
+  // apiece were still foldable and still over budget.
+  const db = await freshDb();
+  // Hour 0 holds one hourly candle (folds 1 → 1, freeing nothing); hours 4..7 hold four, which
+  // roll into one 4 h bar and free three rows.
+  const hours: PriceSample[] = [sample(10, 1, 100)];
+  for (let h = 4; h < 8; h += 1) hours.push(sample(h * HOUR + 10, 10 * h, 100 + h));
+  await db.priceSamples.bulkPut(hours);
+  const budget = platformBudget('mobile');
+  await applyQuota(db, { budget, sizes: SIZES, now: 24 * HOUR, pinnedSpecVersions: [3] });
+  assert.equal(await db.candles1h.count(), 5, 'the raw rung did not fold every closed hour');
+
+  const report = await applyQuota(db, {
+    budget,
+    // Five hourly rows are over the 15 MB mobile candle share; two 4 h rows are under it.
+    sizes: { ...SIZES, candle: 4 * 1000 * 1000 },
+    now: 24 * HOUR,
+    pinnedSpecVersions: [3],
+  });
+  // The 00:00 bucket is folded first and frees nothing (one candle in, one out). The rung must
+  // still reach the 04:00 bucket, whose four hours roll into one bar and free three rows.
+  const rolled = report.steps.filter((s) => s.kind === 'downsample' && s.from === 'candles1h');
+  assert.equal(rolled.length, 2, 'the rung stopped at the bucket that freed nothing');
+  assert.deepEqual(
+    rolled.map((s) => (s.kind === 'downsample' ? s.bucketOpenAt : -1)),
+    [0, 4 * HOUR],
+    'the cursor did not advance past the bucket that freed nothing, or skipped one it never tried',
+  );
+  assert.equal(await db.candles4h.count(), 2);
+  assert.equal(report.exhausted, false, 'a database the ladder could still relieve reported exhausted');
+  await db.delete();
+});
+
+test('the ladder reads ONE BUCKET per pass, not the whole table (§9.2 at its own scale)', async () => {
+  // The quota manager could not run at the scale it enforces: `degradeOldestBucket`
+  // re-materialised the whole table per bucket, so a pass cost rows × buckets — at the desktop
+  // raw share that is ~1.5 M rows re-read thousands of times. The suite was structurally blind to
+  // it because `SIZES.priceSample` is set so a handful of rows exceeds the share.
+  //
+  // Measured through Dexie's own DBCore seam, which is what makes this an assertion about work
+  // done rather than about wall-clock on this machine.
+  const db = new LocalIndex(GENESIS);
+  let rowsRead = 0;
+  db.use({
+    stack: 'dbcore',
+    name: 'count-rows-read',
+    create: (down) => ({
+      ...down,
+      table: (name: string) => {
+        const table = down.table(name);
+        return {
+          ...table,
+          query: async (req: Parameters<typeof table.query>[0]) => {
+            const answer = await table.query(req);
+            if (name === 'priceSamples') rowsRead += answer.result.length;
+            return answer;
+          },
+        };
+      },
+    }),
+  });
+  await db.delete();
+  await db.open();
+
+  // A realistic row size with a scaled-down share, because inserting the 1.5 M rows a real
+  // desktop share admits is not a test — the property under test is how the work scales.
+  const BUCKETS = 40;
+  const PER_BUCKET = 5;
+  const rows: PriceSample[] = [];
+  for (let b = 0; b < BUCKETS; b += 1) {
+    for (let i = 0; i < PER_BUCKET; i += 1) {
+      // Distinct blocks, because `priceSamples` is keyed `[bookId+sourceKey+blockNumber]`: a
+      // fixture repeating a block per bucket stores one row and measures nothing.
+      rows.push(sample(b * HOUR + i * 60 + 1, b * 100 + i, 100 + i));
+    }
+  }
+  await db.priceSamples.bulkPut(rows);
+  const sizes: RowSizes = { priceSample: 120, candle: 120, event: 120, archiveRow: 120 };
+  // A share of five rows, so all but the last bucket folds and the pass is a full one.
+  const budget = { ...platformBudget('desktop'), rawSampleBytes: 600, candleBytes: 12_000_000 };
+
+  rowsRead = 0;
+  const report = await applyQuota(db, { budget, sizes, now: 1_000 * HOUR, pinnedSpecVersions: [3] });
+  assert.ok(report.steps.length >= BUCKETS - 1, 'the pass folded almost nothing, so it proves nothing');
+  assert.equal(await db.priceSamples.count() <= PER_BUCKET, true);
+
+  // One bucket per pass reads about `PER_BUCKET + 1` rows; the whole-table version read all 200
+  // once per bucket, which is 8,000. The bound below is an order of magnitude under that and an
+  // order of magnitude over the bounded reading, so it fails on the defect and not on noise.
+  assert.ok(
+    rowsRead < BUCKETS * PER_BUCKET * 4,
+    `the ladder materialised ${rowsRead} sample rows for ${BUCKETS} buckets of ${PER_BUCKET}; ` +
+      'a whole-table read per bucket is what this bound exists to fail on',
+  );
+  await db.delete();
+});
+
+test('§9.2’s measured-and-current depth is REPORTED, per tier, with the measured rate', async () => {
+  // §9.2 makes this a MUST: *"Raw depth is the tier that moves with hosted occupancy, so a client
+  // MUST present it as measured-and-current rather than as a promise"*. `QuotaReport` carried no
+  // field a surface could present, so the only available figure was §9.2's planning table — a
+  // promise nobody made, since `svc.max_live` is a governance row that moves under the client.
+  const db = await freshDb();
+  const sizes: RowSizes = { priceSample: 120, candle: 120, event: 120, archiveRow: 120 };
+  // Two days of observations, four a day: a measured rate of exactly 4 rows/day.
+  const rows: PriceSample[] = [];
+  for (let day = 0; day < 3; day += 1) {
+    for (let i = 0; i < 4; i += 1) {
+      rows.push(sample(day * 24 * HOUR + i * 6 * HOUR, day * 10 + i, 100));
+    }
+  }
+  rows.pop();
+  await db.priceSamples.bulkPut(rows);
+
+  const budget = { ...platformBudget('desktop'), rawSampleBytes: 120_000 };
+  const depth = await measureDepth(db, budget, sizes, 100 * HOUR);
+  const raw = nth(depth.tiers, 0, 'tier');
+  assert.equal(raw.tier, 'raw');
+  assert.equal(raw.rows, 11);
+  assert.equal(raw.oldest, 0);
+  assert.equal(raw.newest, 2 * 24 * HOUR + 12 * HOUR);
+  assert.equal(raw.heldDays, 2.5, 'the held depth is not measured from the rows themselves');
+  assert.ok(raw.rowsPerDay !== undefined);
+  assert.equal(raw.rowsPerDay, 11 / 2.5);
+  // The budgeted depth follows from the measured rate and the share — §9.2's "computed from the
+  // measured ingest rate; there is no fixed '90 days' promise", as a number.
+  assert.equal(Math.round((raw.budgetedDays ?? 0) * 100) / 100, 227.27);
+
+  // An unmeasurable rate is ABSENT, never zero and never a default: a tier holding one row has
+  // no span to divide by, and a rate invented there reports a budgeted depth of infinity.
+  const empty = nth(depth.tiers, 1, 'tier');
+  assert.equal(empty.tier, 'candles1h');
+  assert.equal(empty.rows, 0);
+  assert.equal(empty.oldest, undefined);
+  assert.equal(empty.rowsPerDay, undefined);
+  assert.equal(empty.budgetedDays, undefined);
+
+  // Every ladder rung is reported, so a surface cannot present one tier as though it were the set.
+  assert.deepEqual(depth.tiers.map((tier) => tier.tier), [...DEGRADATION_LADDER]);
+
+  // ...and a pass reports the depth it LEAVES the user in, not the one it found them in.
+  const report = await applyQuota(db, { budget, sizes, now: 100 * HOUR, pinnedSpecVersions: [3] });
+  assert.equal(report.depth.measuredAt, 100 * HOUR);
+  assert.equal(nth(report.depth.tiers, 0, 'tier').rows, await db.priceSamples.count());
+  await db.delete();
+});
+
+test('compaction REFUSES a proposal whose events do not share the summary’s provenance', async () => {
+  // §9.2 obligation 3: *"Provenance is never degraded on the way … the ladder degrades resolution
+  // and may not relabel a source to do it."* `proposalsArchive` is keyed by proposal alone (§7),
+  // so one settled proposal gets one summary — and the summary's origin was whatever the caller
+  // supplied, with nothing comparing it against the rows it replaces. A proposal spanning a
+  // self-ingested range and an operator-backfilled one therefore collapsed into a single row
+  // rendering under one badge.
+  const db = await freshDb();
+  await db.events.bulkPut([
+    { id: '1:0', blockNumber: 1, pallet: 'Epoch', name: 'ProposalSettled', decoded: true as const, origin: 'self' as const },
+    {
+      id: '2:0',
+      blockNumber: 2,
+      pallet: 'Epoch',
+      name: 'ProposalSettled',
+      decoded: true as const,
+      origin: 'operator' as const,
+      providerId: 'op-1',
+    },
+  ]);
+  const proposal: SettledProposal = {
+    proposalId: 'p-mixed',
+    settledAt: 99,
+    fromBlock: 1,
+    toBlock: 2,
+    summary: 'settled: PASS',
+    eventIds: ['1:0', '2:0'],
+    provenance: { origin: 'self' },
+  };
+  await assert.rejects(() => compactSettledEvents(db, proposal), /one summary cannot carry two origins/);
+  assert.equal(await db.events.count(), 2, 'the refused compaction deleted the events anyway');
+  assert.equal(await db.proposalsArchive.count(), 0);
+
+  // The single-provenance case still compacts, so this is not a refusal that stops the ladder.
+  assert.equal(
+    await compactSettledEvents(db, { ...proposal, eventIds: ['1:0'], toBlock: 1 }),
+    1,
+  );
+  // ...and a summary claiming a provenance none of its events carries is refused too — the same
+  // mislabelling, arriving from a caller that named one source for rows from another.
+  await assert.rejects(
+    () =>
+      compactSettledEvents(db, {
+        ...proposal,
+        eventIds: ['2:0'],
+        fromBlock: 2,
+        provenance: { origin: 'indexer', providerId: 'acme' },
+      }),
+    /relabelling a source/,
+  );
+  await db.delete();
+});
+
+test('§9.2’s shares are USER-ADJUSTABLE locally, and an incoherent table is refused', async () => {
+  // §9.2 writes them as *"fixed internal shares (user-adjustable locally)"*, and the parenthesis
+  // had no path: `QUOTA_SHARES` was frozen and `platformBudget` took no argument, so half the
+  // sentence was published and half was not.
+  const adjusted: QuotaShares = {
+    rawSamples: 0.3,
+    candles: 0.5,
+    eventsAndArchive: 0.15,
+    metadata: 0.05,
+  };
+  const budget = platformBudget('desktop', adjusted);
+  assert.equal(budget.rawSampleBytes, 0.3 * 300 * 1000 * 1000);
+  assert.equal(budget.candleBytes, 0.5 * 300 * 1000 * 1000);
+  assert.deepEqual(budget.shares, adjusted);
+  // The default is unchanged and is still §9.2's published table.
+  assert.deepEqual(platformBudget('desktop').shares, QUOTA_SHARES);
+
+  // A table that does not sum to the cap either strands budget or over-commits it, and neither
+  // is visible from any single row — so it is refused rather than normalised.
+  assert.throws(() => platformBudget('desktop', { ...adjusted, candles: 0.6 }));
+  assert.throws(() => platformBudget('desktop', { ...adjusted, rawSamples: 0.2 }));
+  assert.equal(quotaSharesAgree({ ...adjusted, metadata: 0 }), false, 'a zero share makes a tier weightless');
+
+  // What a local preference cannot do is raise the metadata cache past §9.3's own bound — the
+  // `min` still applies, so adjustability reaches the share and not the section that bounds it.
+  const greedy = platformBudget('desktop', {
+    rawSamples: 0.3,
+    candles: 0.3,
+    eventsAndArchive: 0.2,
+    metadata: 0.2,
+  });
+  assert.equal(greedy.metadataBytes, METADATA_BOUND.desktop.bytes);
+  await Promise.resolve();
+});
+
+test('the pending-decode blobs are bounded by the EVENTS share, and the pass says so', async () => {
+  // §6.5 requires an undecodable block's `System.Events` value to be kept raw; §9.1 forbids
+  // retaining chain-wide event data, and one such blob is exactly that — a whole block's events
+  // regardless of the watched set, on the path that is the *expected* state of any backfill
+  // across a runtime upgrade. `compactSettledEvents` cannot reach these rows and the chart ladder
+  // has no rung for them, so the quota pass is where the bound has to be.
+  const db = await freshDb();
+  for (const block of [10, 20, 30]) {
+    await db.events.put({
+      id: rawEventId(block),
+      blockNumber: block,
+      pendingBlock: block,
+      pallet: '(pending decoder)',
+      name: '(era metadata unavailable)',
+      decoded: false as const,
+      raw: new Uint8Array(1_000_000),
+      origin: 'self' as const,
+    });
+  }
+  // A share that admits one blob and a row size small enough that the modelled overhead is not
+  // what binds — the blobs are measured, so the share sees them growing.
+  const budget = { ...platformBudget('desktop'), eventBytes: 1_500_000 };
+  const sizes: RowSizes = { priceSample: 120, candle: 120, event: 120, archiveRow: 120 };
+  const report = await applyQuota(db, { budget, sizes, now: 100 * HOUR, pinnedSpecVersions: [3] });
+
+  const step = report.steps.find((s) => s.kind === 'evict-pending-raw');
+  assert.ok(step, 'the raw blobs grew past their share with no rung able to reach them');
+  assert.deepEqual(step.kind === 'evict-pending-raw' ? [...step.blocks] : [], [10, 20]);
+  assert.equal(await pendingDecoderCount(db), 1);
+  assert.ok(report.after.eventBytes <= budget.eventBytes);
+
+  // Labelled in the same transaction as the delete: an unlabelled drop is a silent splice.
+  const record = await readPendingRawEvicted(db);
+  assert.ok(record, 'the eviction left nothing that could explain what the user lost');
+  assert.equal(record.blocks, 2);
   await db.delete();
 });

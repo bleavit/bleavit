@@ -51,6 +51,9 @@ const at = (number: number, specVersion = 3) => ({
   number,
   hash: `0x${number.toString(16).padStart(64, '0')}`,
   specVersion,
+  // The block's own timestamp — 10 §9.2's candle buckets are aligned to it, and a device
+  // clock would align them exactly and meaninglessly.
+  timestampMs: number * 6_000,
 });
 
 /** Generic-format (prefix 42) addresses — deliberately NOT this chain's rendering. */
@@ -292,4 +295,79 @@ test('the scan carries §6.3’s edge facts from the HEADER, not from what it de
   const scan = scanner.scan(at(777, 5), eventsHex);
   assert.equal(scan.hash, at(777).hash);
   assert.equal(scan.specVersion, 5);
+});
+
+test('a Market.Traded event is decoded into 10 §9.1’s fill, through the runtime’s own codec', () => {
+  // The scan-time aggregate's input, and the decode has to live here for the same reason
+  // `accounts` does: `local-index` may not import the chain SDK, so a field of a decoded event
+  // reaches it as a value or not at all.
+  //
+  // Encoded through the runtime's own `System.Events` codec rather than hand-built, because the
+  // property under test is *what this runtime emits*: a hand-built record would prove only that
+  // the scanner reads the shape the test author had in mind.
+  const eventsHex = encodeEvents([
+    {
+      phase: { type: 'ApplyExtrinsic', value: 0 },
+      event: {
+        type: 'Market',
+        value: {
+          type: 'Traded',
+          value: {
+            market: 7n,
+            who: ALICE,
+            side: { type: 'BuyLong' },
+            amount: 1_000_000n,
+            cost: 500_000n,
+            p_after: 612_345_678n,
+          },
+        },
+      },
+    },
+  ]);
+  const scan = scanner.scan(at(1_234), eventsHex);
+  const event = scan.events[0];
+  assert.ok(event?.trade, '02 §5’s Traded event reached the index with no p_after to fold');
+  // 02 §2 makes `MarketId` a u64, whose values run past 2^53 — a number would round two adjacent
+  // books onto one chart key, so the id leaves as a canonical decimal string.
+  assert.equal(event.trade.bookId, '7');
+  assert.equal(typeof event.trade.bookId, 'string');
+
+  // **Asserted past 2^53, because a small id proves nothing**: `String(Number(7n))` and
+  // `7n.toString()` are the same string, so a fixture in the low integers passes whichever way
+  // the conversion is written. Above the safe range the two disagree, and the disagreement is a
+  // chart key shared by two books whose prices are then one series.
+  const big = (1n << 53n) + 1n;
+  const bigScan = scanner.scan(at(1_236), encodeEvents([
+    {
+      phase: { type: 'ApplyExtrinsic', value: 0 },
+      event: {
+        type: 'Market',
+        value: {
+          type: 'Traded',
+          value: {
+            market: big,
+            who: ALICE,
+            side: { type: 'BuyLong' },
+            amount: 1n,
+            cost: 1n,
+            p_after: 1n,
+          },
+        },
+      },
+    },
+  ]));
+  assert.equal(bigScan.events[0]?.trade?.bookId, big.toString());
+  assert.notEqual(bigScan.events[0]?.trade?.bookId, String(Number(big)));
+  assert.equal(event.trade.price1e9, 612_345_678n);
+  assert.equal(event.trade.eventIndex, 0);
+
+  // The block's own timestamp reaches the scan, because 10 §9.2's buckets are aligned to it.
+  assert.equal(scan.blockTimestampMs, 1_234 * 6_000);
+
+  // ...and nothing else carries a fill: `local-index` refuses a payload on any other event,
+  // because a number that is not `p_after` in a price series is a price the chain never had.
+  const plain = scanner.scan(at(1_235), encodeEvents([
+    { phase: { type: 'ApplyExtrinsic', value: 0 }, event: transfer(ALICE, BOB) },
+  ]));
+  assert.equal(plain.events[0]?.trade, undefined);
 });

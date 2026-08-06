@@ -42,6 +42,7 @@ const block = (events: readonly IndexedEvent[], extrinsicCount = 4): FinalizedBl
   // a hash computed from what was ingested would agree with itself by construction.
   hash: `0x${'ab'.repeat(32)}`,
   specVersion: 3,
+  blockTimestampMs: 600_000,
   extrinsicCount,
   events,
 });

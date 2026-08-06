@@ -20,6 +20,8 @@ import {
   CoverageError,
   EMPTY_COVERAGE,
   addRange,
+  asSharedCoverageRange,
+  boundarySet,
   holesIn,
   invalidateRange,
   isVerifiedAt,
@@ -375,4 +377,26 @@ test('a range from another chain is refused where the caller can still act', () 
   assert.throws(() => addRange(mine, foreign), CoverageError);
   // An empty set has no chain yet, so the first range establishes it rather than being refused.
   assert.doesNotThrow(() => addRange(EMPTY_COVERAGE, foreign));
+});
+
+test('this module’s CoverageRange really is a NARROWING of the published shape', () => {
+  // Two `CoverageRange` types exist and they carry different fields: 10 §6.3 declares one with
+  // `ingestedAt` and a `RangeEdge`, while `@bleavit/shared-types` carries only the span and the
+  // provenance — because the render layer may not import this package (10 §10.1) and a badge
+  // needs nothing else. Nothing checked that the narrower shape stayed a *narrowing*, so a field
+  // renamed on one side would have been found by whichever consumer read it next, and for
+  // `origin` that means a badge silently unable to say who supplied a line.
+  //
+  // `asSharedCoverageRange` is an ordinary assignment, so the compiler is the checker and a
+  // divergence fails the **build**. This asserts the runtime half: the fields a badge reads
+  // survive the narrowing with their values intact. Whether §6.3 should publish one shape is
+  // SQ-765.
+  const range = providerRange('indexer', 'acme', 10, 20, 5, edgeAt(20));
+  const shared = asSharedCoverageRange(range);
+  assert.equal(shared.fromBlock, 10);
+  assert.equal(shared.toBlock, 20);
+  assert.equal(shared.origin, 'indexer');
+  assert.equal(shared.providerId, 'acme');
+  // The badge computes its boundary set from the shared shape alone, so the two must agree.
+  assert.deepEqual([...boundarySet([range])], ['indexer:acme']);
 });

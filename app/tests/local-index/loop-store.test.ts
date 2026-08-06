@@ -69,6 +69,8 @@ const scan = (
   number,
   hash: blockHash(number),
   specVersion: 3,
+  // The block's own instant — 10 §9.2 aligns candle buckets to it, at 02 §9's 6 s block time.
+  blockTimestampMs: number * 6_000,
   extrinsicCount: count,
   events: watched
     ? [{ phase: { kind: 'apply-extrinsic', index: 1 }, pallet: 'Balances', name: 'Transfer', accounts: ['alice'] }]
@@ -151,6 +153,7 @@ test('a failed row write leaves NO coverage behind — the transaction rolls bot
       ],
       // The block's own event, retained because the scan's watched fixture names `alice`.
       retainedEvents: scan(20, { watched: true }).events.map((event, index) => ({ event, index })),
+      tradeAggregates: [],
       headerSource: SELF,
       coverageAfter: {
         ranges: [
@@ -396,6 +399,7 @@ test('a row whose stated body provenance does not follow from its header is refu
         },
       ],
       retainedEvents: [],
+      tradeAggregates: [],
       headerSource: OPERATOR,
       coverageAfter: EMPTY_COVERAGE,
     }),
@@ -461,8 +465,23 @@ test('the index retains WATCHED-ACCOUNT events only (10 §9.1)', async () => {
   const mixed: FinalizedBlockScan = {
     ...scan(300),
     events: [
-      { phase: { kind: 'apply-extrinsic', index: 0 }, pallet: 'Market', name: 'Traded', accounts: ['mallory'] },
-      { phase: { kind: 'apply-extrinsic', index: 1 }, pallet: 'Market', name: 'Traded', accounts: ['alice'] },
+      // Both fills carry 02 §5's payload, because 10 §9.1 folds them into the aggregates whether
+      // or not they name a watched account — the retention rule and the aggregation rule apply
+      // to the same events and disagree about them on purpose.
+      {
+        phase: { kind: 'apply-extrinsic', index: 0 },
+        pallet: 'Market',
+        name: 'Traded',
+        accounts: ['mallory'],
+        trade: { bookId: '7', price1e9: 400_000_000n, eventIndex: 0 },
+      },
+      {
+        phase: { kind: 'apply-extrinsic', index: 1 },
+        pallet: 'Market',
+        name: 'Traded',
+        accounts: ['alice'],
+        trade: { bookId: '7', price1e9: 600_000_000n, eventIndex: 1 },
+      },
       { phase: { kind: 'apply-extrinsic', index: 1 }, pallet: 'System', name: 'ExtrinsicSuccess', accounts: [] },
     ],
   };
@@ -482,5 +501,186 @@ test('the index retains WATCHED-ACCOUNT events only (10 §9.1)', async () => {
   // with `mallory` watched too retains both, under stable ids.
   await runIngest(EMPTY_COVERAGE, [mixed], new Set(['alice', 'mallory']), SELF, ports(db));
   assert.deepEqual((await db.events.orderBy('id').toArray()).map((e) => e.id), ['300:0', '300:1']);
+  db.close();
+});
+
+/** A scan carrying 02 §5 `Traded` fills — the input 10 §9.1's aggregation folds. */
+const traded = (
+  number: number,
+  fills: readonly { bookId: string; price1e9: bigint }[],
+  account = 'mallory',
+): FinalizedBlockScan => ({
+  ...scan(number),
+  events: fills.map((fill, index) => ({
+    phase: { kind: 'apply-extrinsic' as const, index },
+    pallet: 'Market',
+    name: 'Traded',
+    accounts: [account],
+    trade: { ...fill, eventIndex: index },
+  })),
+});
+
+test('a scanned block’s Traded fills are FOLDED into candles1h, chain-wide (10 §9.1)', async () => {
+  // The half of §9.1's ruling that was missing. The branch implemented *"never stored
+  // row-by-row"* and neither the aggregation nor the bounded windowed read, so nothing anywhere
+  // wrote a candle row and §9.2's candle-depth tables described a tier with no producer.
+  //
+  // **Chain-wide** is the load-bearing word: `mallory` is not watched, so nothing about these
+  // fills is retained as an event row — and the bar is what makes discarding them honest rather
+  // than lossy.
+  const db = await freshDb();
+  const run = await runIngest(
+    EMPTY_COVERAGE,
+    [
+      traded(600, [
+        { bookId: '7', price1e9: 400_000_000n },
+        { bookId: '7', price1e9: 600_000_000n },
+      ]),
+    ],
+    WATCHED,
+    SELF,
+    ports(db),
+  );
+  assert.equal(run.tradesFolded, 2);
+  assert.equal(await db.events.count(), 0, 'a stranger’s trade was retained as a row');
+
+  const candles = await db.candles1h.toArray();
+  assert.equal(candles.length, 1, 'the scan-time aggregation wrote nothing');
+  const bar = nth(candles, 0, 'candle');
+  assert.equal(bar.bookId, '7');
+  assert.equal(bar.open1e9, 400_000_000n);
+  assert.equal(bar.close1e9, 600_000_000n);
+  assert.equal(bar.samples, 2);
+  assert.equal(bar.origin, 'self', 'the bar took its provenance from something other than the header');
+  db.close();
+});
+
+test('a later block MERGES into the bucket, and a replayed one does not double count', async () => {
+  // Two properties in one run, because they are two halves of the same write. A bare `put` would
+  // make each block's bar replace the bucket's, so an hour would only ever describe its last
+  // block; and an accumulator has no deterministic primary key to lean on, so a replay — which
+  // §6.5 requires to be idempotent — would add the same fills again.
+  const db = await freshDb();
+  const blocks = [
+    traded(700, [{ bookId: '7', price1e9: 100_000_000n }]),
+    traded(701, [{ bookId: '7', price1e9: 900_000_000n }]),
+  ];
+  await runIngest(EMPTY_COVERAGE, blocks, WATCHED, SELF, ports(db));
+  const merged = nth(await db.candles1h.toArray(), 0, 'candle');
+  assert.equal(merged.samples, 2, 'the second block replaced the bucket instead of rolling into it');
+  assert.equal(merged.open1e9, 100_000_000n);
+  assert.equal(merged.close1e9, 900_000_000n);
+  assert.equal(merged.fromBlock, 700);
+  assert.equal(merged.toBlock, 701);
+
+  const replayed = await runIngest(await readCoverage(db), blocks, WATCHED, SELF, ports(db));
+  assert.equal(replayed.tradesFolded, 2, 'the replay did not re-scan, so it proves nothing');
+  const after = nth(await db.candles1h.toArray(), 0, 'candle');
+  assert.equal(after.samples, 2, 'a replayed block was folded into the bar a second time');
+  assert.equal(await db.candles1h.count(), 1);
+  db.close();
+});
+
+test('the aggregate takes the HEADER’s provenance, so two sources are two bars', async () => {
+  // §7 keys a chart row by its source, and §9.2 obligation 3 forbids relabelling one on the way.
+  // A bar folded behind an operator header is operator data whatever the fold did.
+  const db = await freshDb();
+  const fills = [{ bookId: '7', price1e9: 500_000_000n }];
+  await runIngest(EMPTY_COVERAGE, [traded(800, fills)], WATCHED, SELF, ports(db));
+  await runIngest(EMPTY_COVERAGE, [traded(801, fills)], WATCHED, OPERATOR, ports(db));
+  const bars = await db.candles1h.toArray();
+  assert.equal(bars.length, 2, 'two sources collapsed into one stored bar');
+  assert.deepEqual(bars.map((bar) => bar.origin).sort(), ['operator', 'self']);
+  assert.equal(bars.find((bar) => bar.origin === 'operator')?.providerId, 'op-1');
+  db.close();
+});
+
+test('the Traded↔payload binding is checked in BOTH directions', async () => {
+  // A `Traded` event with no payload drops a fill from the bar with nothing reporting it, and on
+  // a chart a missing input is indistinguishable from a quiet market. A payload on any other
+  // event folds a number that is not `p_after` into a price series.
+  const db = await freshDb();
+  const missing: FinalizedBlockScan = {
+    ...scan(900),
+    events: [{ phase: { kind: 'apply-extrinsic', index: 0 }, pallet: 'Market', name: 'Traded', accounts: [] }],
+  };
+  const stopped = await runIngest(EMPTY_COVERAGE, [missing], WATCHED, SELF, ports(db));
+  assert.ok(stopped.stoppedAt, 'a Traded event with no fill was folded as though the block were quiet');
+  assert.match(stopped.stoppedAt.message, /carries no fill/);
+
+  const impostor: FinalizedBlockScan = {
+    ...scan(901),
+    events: [
+      {
+        phase: { kind: 'apply-extrinsic', index: 0 },
+        pallet: 'Market',
+        name: 'Observed',
+        accounts: [],
+        trade: { bookId: '7', price1e9: 1n, eventIndex: 0 },
+      },
+    ],
+  };
+  const refused = await runIngest(EMPTY_COVERAGE, [impostor], WATCHED, SELF, ports(db));
+  assert.ok(refused.stoppedAt, 'a non-Traded event supplied a price and it was folded');
+  assert.match(refused.stoppedAt.message, /02 §5 gives p_after to Traded alone/);
+  assert.equal(await db.candles1h.count(), 0);
+  db.close();
+});
+
+test('a pending-decode block’s raw row is RETIRED when the block later decodes', async () => {
+  // The major. `${block}:raw` was written and never removed: re-ingesting with the era's metadata
+  // wrote the decoded rows under `${block}:${index}` and left the raw row behind, so §6.5's
+  // "N events pending decoder" count could only ever rise and the block's events were stored
+  // twice. The comment directly above the write claimed the opposite.
+  const db = await freshDb();
+  const pending: FinalizedBlockScan = {
+    ...scan(1_000),
+    events: [],
+    pendingDecode: { raw: new Uint8Array([9, 9, 9]), reason: 'no metadata for spec_version 2' },
+  };
+  await runIngest(EMPTY_COVERAGE, [pending], WATCHED, SELF, ports(db));
+  assert.equal(await pendingDecoderCount(db), 1);
+  assert.ok(await db.events.get('1000:raw'), 'the raw blob was not stored at all');
+
+  // The same block, now decodable, carrying one watched event.
+  const decoded: FinalizedBlockScan = {
+    ...scan(1_000),
+    events: [
+      { phase: { kind: 'apply-extrinsic', index: 0 }, pallet: 'Balances', name: 'Transfer', accounts: ['alice'] },
+    ],
+  };
+  await runIngest(await readCoverage(db), [decoded], WATCHED, SELF, ports(db));
+  assert.equal(
+    await pendingDecoderCount(db),
+    0,
+    '§6.5’s "N events pending decoder" never falls, so the surface can only ever report more',
+  );
+  assert.equal(await db.events.get('1000:raw'), undefined, 'the raw blob outlived its own decoding');
+  assert.equal(await db.events.count(), 1, 'the block’s events are stored twice');
+  db.close();
+});
+
+test('a retained event whose scan index does not match the scan is REFUSED', async () => {
+  // The writer already performed this check for a row's provenance and not for an event's index,
+  // although the index becomes the row's primary key: numbering the retained list instead of the
+  // scan makes the id a function of which accounts were watched, so adding an account renumbers
+  // every earlier row and the replay writes a second copy of history beside the first.
+  const db = await freshDb();
+  const write = storeWriter(db, decodeRow, encodeEvent);
+  const block = scan(1_100, { watched: true });
+  await assert.rejects(
+    write({
+      blockNumber: 1_100,
+      scan: block,
+      rows: [],
+      // Index 4 names nothing in a one-event scan.
+      retainedEvents: [{ event: nth(block.events, 0, 'event'), index: 4 }],
+      tradeAggregates: [],
+      headerSource: SELF,
+      coverageAfter: EMPTY_COVERAGE,
+    }),
+    /replay-idempotent/,
+  );
+  assert.equal(await db.events.count(), 0);
   db.close();
 });
