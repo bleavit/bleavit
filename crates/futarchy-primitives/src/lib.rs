@@ -9,7 +9,7 @@ use core::convert::TryFrom;
 use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 
-pub const INTEGRATION_CONTRACT_VERSION: u32 = 27;
+pub const INTEGRATION_CONTRACT_VERSION: u32 = 28;
 
 pub type Balance = u128;
 pub type ProposalId = u64;
@@ -1942,7 +1942,31 @@ mod tests {
         // the signer might have no delegation for at all. Like v24 and v26, the
         // item already exists in the runtime — the bump records that the *contract*
         // grew an obligation, so this constant is the only thing that moves.
-        assert_eq!(INTEGRATION_CONTRACT_VERSION, 27);
+        //
+        // v28 freezes the six operator surfaces 11 §11.8 mandates and 02 named
+        // nowhere: `ExecutionGuard.PendingUpgrade` and `System.AuthorizedUpgrade`
+        // (§11.8.4 steps 1 and 4), `Guardian.PendingActions` and
+        // `Guardian.Approvals` (§11.8.2), and the two registry instances'
+        // `Filings`/`ClosedAt`/`AckRecords` (§11.8.6) — ten manifest rows, because
+        // `pallet-registry` is instantiated twice and the two allocators share no
+        // id space. Same shape as v24, v26 and v27: every item already exists in
+        // the runtime, so this constant is the only thing that moves.
+        //
+        // Two measurements came out of it, and both were defects rather than
+        // confirmations. 11 §11.8.4 step 1 says the authorized code hash is read
+        // "from `parachain-system` storage"; `ParachainSystem` carries no such item
+        // in this runtime's metadata, and the authorize/apply pair lives in
+        // `frame_system` on the pinned SDK line — the V-169 defect class, a client
+        // read bound to a pallet that cannot answer it. And §11.8.4 spells
+        // `PendingUpgrade { hash, authorized_at, applicable_at }` where the stored
+        // type carries a fourth field, `target_spec_version`. Both are corrected in
+        // doc 11 by this change.
+        //
+        // This is the same residual method gap 02 §7.6 already records against its
+        // own v24 sweep: an inverse gate that matches `Pallet.Item` pairs cannot see
+        // an obligation stated in prose that never spells the item. Doc 11 now
+        // spells all six, so `check-client-surface-obligations.py` can see them.
+        assert_eq!(INTEGRATION_CONTRACT_VERSION, 28);
     }
 
     #[test]
