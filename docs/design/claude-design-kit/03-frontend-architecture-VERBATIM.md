@@ -1,25 +1,17 @@
 > **DERIVED COPY for design-tool context — DO NOT EDIT.**
 > Verbatim copy of `docs/architecture/10-frontend-architecture.md` (the source of truth),
-<<<<<<< HEAD
-> regenerated 2026-08-06, picking up §9's re-derived resource budgets (SQ-557): the
-> sustained observing count is 31 trading books rather than `MaxLiveMarkets` = 196, the
-> retention-depth tables move with it, the mandatory `Traded` half of 02 §5's ingest set
-> is modelled for the first time, and §9.3's metadata cap no longer exceeds its own
-> §9.2 share — on top of §3.1's `SyncDegraded` peer-count note (SQ-597), the D-21
-> handoff (§13), the `app/` re-rooting and merged package list (§10.1), the §10.2
-> firewall restatement and its negative-compilation corpus, and the branded
-> `Finalized<T>` with the `external-proposal` provenance status (§2.1). If this copy and
-> the source ever differ, the source wins.
-=======
-> regenerated 2026-08-06, picking up §6.3's `RangeEdge`/`CoveredResult<T>`, §7's chart-row
-> origin and per-source keys, §9.2's three degradation obligations and §2.1's `chain` field
-> (F8, R-1) — on top of §3.1's normative note on where the `SyncDegraded`
-> peer count comes from and what the client must do when it cannot be read (SQ-597) —
-> on top of the D-21 handoff (§13), the `app/` re-rooting and merged package list
-> (§10.1), the §10.2 firewall restatement and its negative-compilation corpus, and the
-> branded `Finalized<T>` with the `external-proposal` provenance status (§2.1). If this
-> copy and the source ever differ, the source wins.
->>>>>>> e3be4be2 (spec(10): §6.3/§7/§9.2/§2.1 — four sentences that had nothing to implement (F8, R-1))
+> regenerated 2026-08-06, picking up two amendments that landed together. §9's resource
+> budgets are re-derived (SQ-557): the sustained observing count is 31 trading books rather
+> than `MaxLiveMarkets` = 196, the retention-depth tables move with it, the mandatory
+> `Traded` half of 02 §5's ingest set is modelled for the first time, and §9.3's metadata cap
+> no longer exceeds its own §9.2 share. F8's R-1 pass adds §6.3's `RangeEdge`/
+> `CoveredResult<T>`, §7's chart-row origin and per-source keys, §9.2's three degradation
+> obligations and §2.1's `chain` field. Both sit on top of §3.1's normative note on where the
+> `SyncDegraded` peer count comes from and what the client must do when it cannot be read
+> (SQ-597), the D-21 handoff (§13), the `app/` re-rooting and merged package list (§10.1),
+> the §10.2 firewall restatement and its negative-compilation corpus, and the branded
+> `Finalized<T>` with the `external-proposal` provenance status (§2.1). If this copy and the
+> source ever differ, the source wins.
 
 # 10 — Frontend Architecture
 
