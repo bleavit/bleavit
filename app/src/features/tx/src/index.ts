@@ -99,6 +99,13 @@ export {
   type WithdrawReadParams,
 } from './funding-reads.js';
 export {
+  fundingDecoders,
+  fundingKeys,
+  type FundingChain,
+  type FundingChains,
+  type FundingKeyInputs,
+} from './funding-composition.js';
+export {
   UpgradeHashMismatchError,
   isApplicable,
   submissionOutlook,

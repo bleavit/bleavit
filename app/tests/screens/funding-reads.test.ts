@@ -64,9 +64,28 @@ const KEYS: FundingKeys = {
   localFreeUsdc: (who) => `local:usdc:${who}`,
 };
 
+/**
+ * A USDC decoder that says WHICH chain's decoder it is.
+ *
+ * The two are separate members of `FundingDecoders` precisely so one chain's bytes cannot go
+ * through the other chain's codec — but a symmetric stub makes that split untestable: swap
+ * the two in `funding-reads.ts` and every assertion still passes. So each stub refuses the
+ * other leg's marker prefix, which turns the swap into a decode failure a test can see.
+ */
+const usdcDecoder =
+  (leg: 'ah' | 'local') =>
+  (raw: string): ReturnType<FundingDecoders['assetHubUsdc']> => {
+    if (raw.startsWith('bad')) return { ok: false, reason: 'not an account record' };
+    const [marker, amount] = raw.split(':');
+    if (marker !== leg) {
+      return { ok: false, reason: `the ${leg} decoder was handed a "${String(marker)}" value` };
+    }
+    return { ok: true, value: { balance: BigInt(amount ?? '0') } };
+  };
+
 const DECODERS: FundingDecoders = {
-  assetAccount: (raw) =>
-    raw.startsWith('bad') ? { ok: false, reason: 'not an account record' } : { ok: true, value: { balance: BigInt(raw) } },
+  assetHubUsdc: usdcDecoder('ah'),
+  localFreeUsdc: usdcDecoder('local'),
   systemAccount: (raw) =>
     raw.startsWith('bad')
       ? { ok: false, reason: 'not a system account' }
@@ -87,7 +106,7 @@ const PARAMS = {
 
 type Values = Readonly<Record<string, string>>;
 
-const AH_VALUES: Values = { [`ah:assets:1337:${WHO}`]: '5000000', [`ah:system:${WHO}`]: 'viable' };
+const AH_VALUES: Values = { [`ah:assets:1337:${WHO}`]: 'ah:5000000', [`ah:system:${WHO}`]: 'viable' };
 const LOCAL_VALUES: Values = { 'local:flags': '0' };
 
 const pair = (ah: Values = AH_VALUES, local: Values = LOCAL_VALUES) =>
@@ -237,7 +256,7 @@ test('assetHubReady needs the compat verdict AND a viable account — each alone
     ['both good', AH_VALUES, true, true],
     ['compat false', AH_VALUES, false, false],
     ['account not viable', { ...AH_VALUES, [`ah:system:${WHO}`]: 'dead' }, true, false],
-    ['account absent', { [`ah:assets:1337:${WHO}`]: '5000000' }, true, false],
+    ['account absent', { [`ah:assets:1337:${WHO}`]: 'ah:5000000' }, true, false],
     ['account undecodable', { ...AH_VALUES, [`ah:system:${WHO}`]: 'bad' }, true, false],
   ] as const;
 
@@ -263,7 +282,7 @@ test('withdraw reads on the LOCAL reader only — Asset Hub is not in its scope'
   // it. The signature carries that rule: there is no Asset Hub reader to pass, so no future
   // edit can couple the two without changing this call and meeting §11.9.2 on the way past.
   const { inputs } = await readWithdrawInputs(
-    reader(LOCAL_CHAIN, { [`local:usdc:${WHO}`]: '900000' }, 7),
+    reader(LOCAL_CHAIN, { [`local:usdc:${WHO}`]: 'local:900000' }, 7),
     KEYS,
     DECODERS,
     { who: WHO, amount: 1n, localFee: 1n, minBalance: 10_000n, ledgerFrozen: false, destinationViable: undefined },

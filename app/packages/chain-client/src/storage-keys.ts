@@ -54,6 +54,7 @@
 
 import { Blake2128Concat, Identity, Twox64Concat, Twox128 } from '@polkadot-api/substrate-bindings';
 import type { HexString } from '@bleavit/shared-types';
+import { type ChainMetadata, type StorageHasher, storageHashers } from './metadata.js';
 
 const encoder = new TextEncoder();
 
@@ -64,32 +65,13 @@ function hex(bytes: Uint8Array): string {
 }
 
 /**
- * The hashers the 02 §7 read surface actually uses.
+ * One key argument: the hasher metadata declares for it, and its SCALE encoding.
  *
- * Deliberately not every hasher FRAME defines. An unused name here would be untested
- * surface — and the failure mode of a storage hasher is silence, so untested is not a
- * risk this module can carry. A metadata-driven caller meeting anything else gets a
- * refusal from {@link storageKey} rather than a guess.
- *
- * **`Identity` was missing from the first version, and the way it was missing is the
- * point.** It was omitted after checking which hashers *this repository's pallets*
- * declare — `Blake2_128Concat` and `Twox64Concat`, and nothing else. But the read
- * surface is not this repository's pallets: counting hashers in the shipped
- * `metadata.scale` gives 130 `Blake2128Concat`, 50 `Twox64Concat` and **4 `Identity`**,
- * three of them in `pallet_preimage` — and `Preimage.StatusFor` and
- * `Preimage.PreimageFor` are frozen 02 §7.6 reads backing 11 §11.5's P-10 preconditions
- * (*"the payload preimage is noted with a matching hash and length"*, *"pinned and cannot
- * be reaped"*). A client that cannot key them cannot mirror two dispatch checks. So: ask
- * the artifact, not the source tree.
- *
- * Note the spelling. Metadata tags it `Blake2128Concat`; FRAME and the Rust fixture spell
- * it `Blake2_128Concat`. A metadata-driven caller must map, and the two differ by exactly
- * one underscore — which is why {@link storageKey} refuses an unknown name loudly instead
- * of falling back.
+ * {@link StorageHasher} is declared in `metadata.ts` rather than here, and the move was a
+ * `no-circular` violation rather than a preference: metadata is where the hasher set is
+ * *derived* from, so a type declared here and imported there put the two modules in a cycle.
+ * It stays exported from `@bleavit/chain-client` through the barrel.
  */
-export type StorageHasher = 'Blake2_128Concat' | 'Twox64Concat' | 'Identity';
-
-/** One key argument: the hasher metadata declares for it, and its SCALE encoding. */
 export interface StorageKeyArg {
   readonly hasher: StorageHasher;
   readonly encoded: Uint8Array;
@@ -158,4 +140,144 @@ export function storageKey(
     out += hex(hasher(key.encoded));
   }
   return out as HexString;
+}
+
+/**
+ * One storage item's key construction, bound to a chain.
+ *
+ * `arity` is exported because a caller that holds the wrong number of key values has made
+ * the double-map-vs-tuple-key mistake, and it should be able to say so before building
+ * anything.
+ */
+export interface StorageKeyBuilder {
+  readonly pallet: string;
+  readonly item: string;
+  readonly arity: number;
+  readonly hashers: readonly StorageHasher[];
+  /** The 32-byte prefix: the whole key for a plain item, the map prefix otherwise. */
+  readonly prefix: HexString;
+  /** The full key for one entry. `values` must have exactly `arity` elements. */
+  key(values: readonly unknown[]): HexString;
+}
+
+/** A storage entry as PAPI's `getTypedCodecs` returns it, as far as this module needs. */
+interface TypedStorageEntry {
+  readonly args: { readonly inner: readonly { enc(value: unknown): Uint8Array }[] };
+}
+
+export class KeyArityError extends Error {
+  constructor(pallet: string, item: string, expected: number, actual: number) {
+    super(
+      `"${pallet}.${item}" is keyed by ${expected} hashed position(s) and was given ` +
+        `${actual}. This is the double-map-versus-tuple-key mistake: doc 02 writes both ` +
+        '`Welfare.Snapshots` and `ConditionalLedger.Positions` as `(A, B) -> V`, but the ' +
+        'first hashes ONE encoded tuple and the second hashes TWO values separately. Both ' +
+        'produce a well-formed key, and the wrong one returns no value.',
+    );
+    this.name = 'KeyArityError';
+  }
+}
+
+export class KeyCodecUnavailableError extends Error {
+  constructor(pallet: string, item: string, detail: string) {
+    super(
+      `cannot obtain per-position key codecs for "${pallet}.${item}" from the pinned ` +
+        `polkadot-api: ${detail}. Refusing rather than falling back to a prefix, which the ` +
+        "node answers with the whole map. If polkadot-api was bumped, this client's " +
+        'key-building surface moved with it and the runtime storage-key fixture will say so.',
+    );
+    this.name = 'KeyCodecUnavailableError';
+  }
+}
+
+/**
+ * Build one storage item's keys from a chain's own codecs and its own metadata.
+ *
+ * ## The two sources, and why both are needed
+ *
+ * Neither artifact answers the question alone. **Metadata** carries the hashers and nothing
+ * that can encode a value; **the descriptors** carry codecs and no hasher. So this takes
+ * both, and — the part that makes it safe rather than merely convenient — **requires them
+ * to agree on the key arity** before building anything.
+ *
+ * ## `args.inner` is a measured internal, not a documented export
+ *
+ * `getTypedCodecs(…).query.P.I.args` is a codec over the whole key tuple; its `enc` produces
+ * one buffer, which is the right pre-image for a single map over a tuple key and the wrong
+ * one for a double map. Its **`inner`** property is an array of one codec per hashed
+ * position, which is what this needs — and it is a `@polkadot-api/substrate-bindings`
+ * internal with no compatibility promise.
+ *
+ * That was measured before being relied on, over the whole read surface rather than a spot
+ * check: across **739** storage items on the two pinned chains (379 Bleavit, 360 Asset Hub
+ * Paseo), `args.inner.length` equals the metadata hasher count every time — including
+ * `Welfare.Snapshots`, the tuple-key case, where it is 1 and not 2. And on all 11 entries of
+ * `runtime/bleavit-runtime/fixtures/storage-keys.json`, `inner[i]` re-encodes the pre-image
+ * the **runtime itself** published, byte for byte.
+ *
+ * The arity cross-check below is what keeps that measurement honest over time: if a PAPI
+ * bump reshapes `inner`, this refuses instead of silently building short keys. `app/tests/
+ * chain-client/storage-keys.test.ts` fails on the same commit, against the Rust oracle.
+ */
+export function storageKeyBuilder(
+  codecs: { readonly query: unknown },
+  metadata: ChainMetadata,
+  pallet: string,
+  item: string,
+): StorageKeyBuilder {
+  // `storageHashers` throws on an absent item, which must happen before the codec lookup:
+  // PAPI's `query` is a Proxy that throws its own, less specific error for the same cause.
+  const hashers = storageHashers(metadata, pallet, item);
+
+  let entry: unknown;
+  try {
+    entry = (codecs.query as Record<string, Record<string, unknown>>)[pallet]?.[item];
+  } catch (error) {
+    throw new KeyCodecUnavailableError(pallet, item, String(error));
+  }
+  const inner: unknown = (entry as { args?: { inner?: unknown } } | undefined)?.args?.inner;
+  if (!Array.isArray(inner)) {
+    throw new KeyCodecUnavailableError(pallet, item, '`args.inner` is not an array');
+  }
+  if (inner.length !== hashers.length) {
+    // The two artifacts disagree. Neither is presumed right — one of them no longer
+    // describes this chain, and building a key from either would be a guess.
+    throw new KeyArityError(pallet, item, hashers.length, inner.length);
+  }
+  const codecList = inner as TypedStorageEntry['args']['inner'];
+  for (const [position, codec] of codecList.entries()) {
+    if (typeof codec?.enc !== 'function') {
+      throw new KeyCodecUnavailableError(pallet, item, `position ${position} has no \`enc\``);
+    }
+  }
+
+  const prefix = storagePrefix(pallet, item);
+  return {
+    pallet,
+    item,
+    arity: hashers.length,
+    hashers,
+    prefix,
+    key(values) {
+      if (values.length !== hashers.length) {
+        throw new KeyArityError(pallet, item, hashers.length, values.length);
+      }
+      const args: StorageKeyArg[] = [];
+      for (const [position, hasher] of hashers.entries()) {
+        try {
+          args.push({ hasher, encoded: codecList[position]!.enc(values[position]) });
+        } catch (error) {
+          // PAPI's own messages are accurate and contextless — an SS58 address that fails
+          // its checksum reports `Invalid checksum` with no hint of which read it was for.
+          // Naming the surface and the position is the difference between a diagnosable
+          // failure and one that looks like a library bug.
+          throw new Error(
+            `key position ${position} of "${pallet}.${item}" could not be encoded: ` +
+              `${String(error)}`,
+          );
+        }
+      }
+      return storageKey(pallet, item, args);
+    },
+  };
 }
