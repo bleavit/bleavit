@@ -176,6 +176,19 @@ export function planImport(
   };
 }
 
+/**
+ * What the client says when the user answers the preview with *no*.
+ *
+ * Fixed copy, here rather than at the import entry point, and deliberately **not** a
+ * `FE-PROV-*` refusal: §10.4's family is the error taxonomy, and a user declining an offer is
+ * not an error. Labelling it `FE-PROV-003` — *"this snapshot was rejected"* — would tell
+ * somebody their file is bad when what happened is that they kept their own data.
+ */
+export const EVICTION_DECLINED =
+  'Nothing was imported and nothing was deleted. The snapshot needed room that your local ' +
+  'history is using, and you chose to keep the history. You can import it later, or free room ' +
+  'first — the file is unchanged either way.';
+
 /** Fixed copy for the preview. Names what is lost, because that is the decision being made. */
 export function previewCopy(plan: ImportPlan): string {
   if (plan.infeasible) {

@@ -46,36 +46,30 @@
  * presented as, a proof of anything the provider served.
  */
 
-import { effectiveCoverage, shouldAutoDisable, type Provider, type SampleResult } from './health.js';
-import { providerRefusal, type ProviderRefusal } from './refusals.js';
+import {
+  LADDER,
+  afterSampling,
+  effectiveCoverage,
+  shouldAutoDisable,
+  type LadderThresholds,
+  type Provider,
+  type SampleResult,
+} from './health.js';
+import { probeFailureReason, providerRefusal, type ProviderRefusal } from './refusals.js';
 
 // ------------------------------------------------------------------ release constants
 
 /**
- * §8.3's ladder thresholds and probe interval.
+ * 10 §8.4 / 14 TH-49's rate: one sampled row per this many pages.
  *
- * **Release constants, not chain constants** (10 §8.3): a governance vote does not change how
- * fast a third-party HTTP endpoint answers, and there is no chain surface to read them from,
- * so 10 §5.4's no-literal rule does not reach them. They are a value here for the same reason
- * the import quotas are — and they are named, so a caller can pass a different set rather than
- * a call site inventing one.
+ * Stated **normatively** by §8.4 (*"1-in-16-page row re-verification"*) and depended on by
+ * TH-49's residual-risk arithmetic, which is why the production entry points below take no
+ * rate argument at all. They took one, with this as its default, and that is a control a
+ * caller can switch off by passing a number: at `pagesPerRow = 1e6` every import forms one
+ * stratum, one row is compared, and every round still reports `clean`. The loosened form
+ * exists — the selection logic has to be testable at other rates — and lives behind
+ * `@bleavit/providers/testing`, which production code is forbidden to import.
  */
-export interface LadderThresholds {
-  /** Above this, a *response* is `slow`. Slow never disables on its own (§8.3). */
-  readonly slowAboveMs: number;
-  /** Consecutive failures at which the provider auto-disables (`FE-PROV-001`). */
-  readonly disableAfter: number;
-  /** §8.3: "on enable + every 10 min". */
-  readonly probeEveryMs: number;
-}
-
-export const LADDER: LadderThresholds = Object.freeze({
-  slowAboveMs: 2_000,
-  disableAfter: 3,
-  probeEveryMs: 10 * 60 * 1_000,
-});
-
-/** 10 §8.4 / 14 TH-49's rate: one sampled row per this many pages. */
 export const PAGES_PER_SAMPLED_ROW = 16;
 
 // ------------------------------------------------------------------ the health ladder
@@ -146,17 +140,36 @@ export function afterProbe(
       health: {
         kind: 'disabled',
         by: 'auto',
-        reason:
-          `This source failed to respond ${consecutive} times in a row (${outcome.why}). It is ` +
-          'switched off; the app falls back to what it can read for itself. Nothing you were ' +
-          'shown depended on it.',
+        reason: probeFailureReason(consecutive, outcome.why),
       },
     };
   }
   return { ...provider, health: { kind: 'failing', consecutiveFailures: consecutive } };
 }
 
-/** `FE-PROV-001` for a provider the ladder just auto-disabled. */
+/**
+ * `FE-PROV-001` for a provider the ladder just auto-disabled.
+ *
+ * ## Only the second of §8.4's two arms emits, and that narrowing is deliberate
+ *
+ * §8.4's table reads *"A provider fails its §8.3 health probe — **unreachable**, or `Failing`
+ * after consecutive errors"*, and this function serves the second arm alone. The first is not
+ * forgotten; the two halves of §8 disagree about it and the conservative reading is in force
+ * until they are reconciled (PLAN.md · *Spec questions*, SQ-601).
+ *
+ * The disagreement, stated exactly: §8.3 makes `Failing` count **consecutive** failures
+ * precisely so *"one timeout in a healthy series cannot ratchet the ladder"*, and a code that
+ * emitted on the first unreachable probe would raise a user-visible refusal for every
+ * transient timeout — which is the ratchet in a different costume, and the fastest way to
+ * teach somebody to ignore this family. Emitting only at disable leaves the first arm with no
+ * call site, which is the finding this note answers rather than hides.
+ *
+ * What covers the user-visible half meanwhile is `fleetState`: a provider that is merely
+ * unreachable is still `failing` and still counted as enabled, and the moment none of them is
+ * serving, `all-down` carries this same code with §8.3's incomplete-history explainer. So the
+ * situation the first arm describes is reported — as a statement about the fleet, which is
+ * what a user can act on, rather than as one alarm per timeout.
+ */
 export function livenessRefusal(provider: Provider): ProviderRefusal | undefined {
   if (provider.health.kind !== 'disabled' || provider.health.by !== 'auto') return undefined;
   return providerRefusal('FE-PROV-001', provider.health.reason);
@@ -210,10 +223,23 @@ export interface SampleSelection {
  * producing an `undefined` row, which would surface as a crash in the loop that is supposed to
  * be watching the provider.
  */
-export function selectSample(
+export function selectSample(pages: readonly ProviderPage[], random: () => number): SampleSelection {
+  return selectSampleAtRate(pages, random, PAGES_PER_SAMPLED_ROW);
+}
+
+/**
+ * {@link selectSample} at a caller-chosen rate. **Not exported from the package barrel.**
+ *
+ * §8.4 states the 1-in-16 rate normatively and 14 TH-49's residual-risk argument is computed
+ * from it, so a production caller does not get to choose: this is reachable only through
+ * `@bleavit/providers/testing`, which the `no-loosened-sampling-rate-in-production`
+ * dependency-cruiser rule forbids production code from importing — the same shape
+ * `@bleavit/local-index/testing` already uses for `selfRange`.
+ */
+export function selectSampleAtRate(
   pages: readonly ProviderPage[],
   random: () => number,
-  pagesPerRow: number = PAGES_PER_SAMPLED_ROW,
+  pagesPerRow: number,
 ): SampleSelection {
   if (!Number.isInteger(pagesPerRow) || pagesPerRow < 1) {
     throw new RangeError(`pagesPerRow must be a positive integer, got ${pagesPerRow}`);
@@ -270,6 +296,65 @@ export type RowVerdict =
  */
 export type RowCheck = (row: SampledRow) => Promise<RowVerdict>;
 
+/**
+ * What a chain read can answer about one referenced object.
+ *
+ * Three outcomes, not two, and the third is the one a boolean loses: §8.4 re-verifies *"where
+ * the referenced object still exists, or against the self-ingested overlap window"*, so
+ * *"absent"* and *"I cannot see that far"* are different facts and only one of them is about the
+ * provider. Collapsed into `undefined` they become the same, and a provider serving rows from
+ * beyond the pinned window reads as a provider serving rows about objects that were deleted.
+ */
+export type ChainReadResult =
+  | { readonly kind: 'value'; readonly hex: string }
+  /** The key has no value at the read block — §8.4's "no longer exists". */
+  | { readonly kind: 'absent' }
+  /** Outside light-client-reachable depth and outside the self-ingested window. */
+  | { readonly kind: 'beyond-reach' };
+
+/** Read one storage key. Injected, because this package may not open a chain connection. */
+export type ChainRead = (key: string) => Promise<ChainReadResult>;
+
+/**
+ * The adapter: a {@link RowCheck} that re-reads the referenced key and compares.
+ *
+ * ## Why this exists at all
+ *
+ * 15 §4.8 makes *"lying indexer ⇒ sampler auto-disable"* a per-PR gate, and until 2026-08-06
+ * every test of this loop supplied a synthetic `RowCheck` closure. What that certified is that
+ * the ladder behaves **given verdicts** — which is worth having and is not the gated property.
+ * The gated property is that a lying indexer *produces* them, and no code turned a served row
+ * into a verdict, so nothing in the repository could have been wrong in the way the gate names.
+ *
+ * ## What a row is, here
+ *
+ * `ProviderRow.reference` is a storage key and `claimed` is the value the provider says is
+ * under it. Both are opaque hex to this module — it never decodes either, and it must not: a
+ * comparison that decoded would need the runtime's metadata, which is a chain surface this
+ * package cannot reach, and a decoder that guessed would turn an encoding difference into a
+ * mismatch and disable an honest source.
+ *
+ * Hex is compared **case-insensitively**. `0xAB` and `0xab` are one value, and disabling a
+ * provider over the case of a nibble would be this loop lying about a lie.
+ *
+ * ## It never converts a read failure into evidence
+ *
+ * `beyond-reach` and `absent` are `unverifiable`, which counts neither way (see
+ * {@link effectiveCoverage}); a thrown read propagates and {@link runSamplingRound} records it
+ * as `check-failed`. Nothing here can produce `match` without an actual comparison, which is the
+ * only property that makes a clean round mean anything.
+ */
+export function chainRowCheck(read: ChainRead): RowCheck {
+  return async (row: SampledRow): Promise<RowVerdict> => {
+    const result = await read(row.row.reference);
+    if (result.kind === 'beyond-reach') return { kind: 'unverifiable', why: 'beyond-reach' };
+    if (result.kind === 'absent') return { kind: 'unverifiable', why: 'object-gone' };
+    const derived = result.hex.toLowerCase();
+    if (row.row.claimed.toLowerCase() === derived) return { kind: 'match' };
+    return { kind: 'mismatch', expected: derived };
+  };
+}
+
 export interface RowMismatch {
   readonly row: SampledRow;
   readonly expected: string;
@@ -325,10 +410,23 @@ export async function runSamplingRound(
   pages: readonly ProviderPage[],
   check: RowCheck,
   random: () => number,
-  pagesPerRow: number = PAGES_PER_SAMPLED_ROW,
+): Promise<SamplingRound> {
+  return runSamplingRoundAtRate(provider, pages, check, random, PAGES_PER_SAMPLED_ROW);
+}
+
+/**
+ * {@link runSamplingRound} at a caller-chosen rate. **Not exported from the package barrel** —
+ * see {@link selectSampleAtRate} for why the production entry point has no rate argument.
+ */
+export async function runSamplingRoundAtRate(
+  provider: Provider,
+  pages: readonly ProviderPage[],
+  check: RowCheck,
+  random: () => number,
+  pagesPerRow: number,
 ): Promise<SamplingRound> {
   if (provider.health.kind === 'disabled') throw new ProviderDisabledError(provider.id);
-  const selection = selectSample(pages, random, pagesPerRow);
+  const selection = selectSampleAtRate(pages, random, pagesPerRow);
   const mismatches: RowMismatch[] = [];
   let unverifiable = 0;
   for (const row of selection.rows) {
@@ -355,17 +453,10 @@ export async function runSamplingRound(
       )
       .join('; ');
     return {
-      provider: {
-        ...provider,
-        health: {
-          kind: 'disabled',
-          by: 'auto',
-          reason:
-            `${mismatches.length} of ${result.rowsChecked} spot-checked rows did not match what ` +
-            'this device read from the chain. The source is switched off; nothing it supplied ' +
-            'was ever treated as verified.',
-        },
-      },
+      // Through `afterSampling`, not beside it. Both sites built this disabled state
+      // independently and each held its own copy of the reason; `refusals.ts` is the one
+      // home for the sentence and this is the one home for the transition.
+      provider: afterSampling(provider, result),
       outcome: 'mismatch',
       result,
       selection,
