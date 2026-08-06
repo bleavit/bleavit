@@ -288,6 +288,36 @@ this file loads whenever a session touches `app/**`, which is when they apply.
 
 · **`pnpm run test:snapshot-tool`** (F9) — `app/tools/snapshot`, the **producer** half of the format `test:providers` consumes, and it lives at `app/tools/` because 10 §10.1 says so in as many words (the repository root already has a `tools/release/` for chain-release tooling). Two properties carry the suite and neither is the happy path. **Byte-identical reproduction is proven by shuffling, not asserted**: the same history handed in with its arrays reversed and its movements out of sequence must yield the same file and the same pin, because two readers of one chain will not enumerate vaults, accounts or events in the same order and if that reached the file each producer's snapshots would look corrupt to the other's users. **The balance sheet is a differential against chain state, not a restatement of the fold** — `ArchiveExport.balances` is read at `range.toBlock` independently of the movements, and the driver refuses to publish when they disagree. A producer that folded its own ops would agree with itself by construction and §8.4's derived-row screen could never fail on anything it emitted, while the failure that actually happens to a snapshot tool is an **incomplete op set** (a variant not decoded, a range answered short), which is perfectly self-consistent and invisible to a self-fold. Three more refusals, each a case where the obvious implementation publishes something wrong: **coverage is what the reader *observed***, never the requested span — a reader that fails part-way and reports the request anyway publishes a document claiming history it never saw, which passes every screen because the movements it does carry are consistent, a forgery produced by accident; **two movements at one chain position refuse** rather than being tie-broken, since the replay is order-sensitive and no tie-break here can be right; and a **JSON number amount is refused at the input boundary**, because `BigInt` accepts a `number` and an amount past 2⁵³ would fold as its rounded value with nothing thrown (V-74). The last step of every build runs the **client's own `admitSnapshot`** over the bytes it just produced with the pin it just computed, so the tool cannot ship a document that fails at the user — including for reasons the driver does not know about, which is why it runs the real consumer rather than a checklist of what the consumer was believed to check. The **archive-node adapter is deliberately absent** and named as such: writing it by assumption is what R-2 forbids, and the client's own `chain-client` offers no archive path at all (smoldot serves `chainHead` only, 10 §4.2). The tool is its own **workspace package** so `@bleavit/providers` resolves under `tools/snapshot/node_modules` — declaring it at the app root instead hoists it and turns `tests/firewall/fixtures/forbidden-package-edge.ts` from TS2307 into TS2305, voiding the fixture whose whole proof is that the package is *unresolvable* there
 
+· **`pnpm run test:platform`** and **`pnpm run check:embedded-tree`** (+ `:witness`, F22) — the desktop
+channel. `platform` is the fail-closed capability lattice of rule 10 made structural: there is no boolean,
+`absent` **carries the sentence the surface renders** (an empty one throws), the record is **total** so a
+forgotten capability is a type error rather than an `undefined` that reads as *probably fine*, and `meet`
+keeps **both** reasons — a user told one reason fixes it and meets the next. It imports **no host SDK**, and
+that is a decision: the permission 10 §10.1 grants would force host code into the web bundle or a second
+build path, and the second is what F22 forbids, so the host arrives as an injected `HostBridge`. The
+consequence is that `only-platform-touches-host-sdks` has **no real edge anywhere in the tree** and the
+depcruise witness is its entire liveness proof — both spellings, since `EXTERNAL` takes an alternation and a
+typo in either arm leaves half the rule dead. The **embedded-tree assertion** is the milestone's point: a
+downloaded shell is covered by 12 §1's promises only if the tree it embeds *is* the published tree, so it is
+compared against `release.json.perFileHashes` — the attested `dist/`, never the Arweave path manifest —
+through `packages/verify`'s own `runSelfCheck`, at build time and again inside the binary **before it creates
+a window** (exit `70`, no flag that downgrades it, no repair path; INV-FE-8's *"surfaced, never repaired"*
+with the stronger option a shell has). Two implementations of one comparison agree only if something makes
+them, so both read **`crates/embedded-tree/fixtures/self-check-cases.json` in place**, and it publishes file
+**content** rather than digests — a corpus of digests would never exercise either side's hash function.
+**The gate's first version was vacuous and it was measured, not suspected:** `assertPublishable` compares
+digests too and **throws on the first disagreement**, so running it first made `runSelfCheck` unreachable and
+the witness stayed green with the self-check replaced by a hardcoded clean verdict. The self-check therefore
+runs **first**, 12 §1.2's gate runs only over a tree that already matched, and the witness requires an
+**enumerated finding of the right kind** — a throw is a witness *failure*, because it means the wrong leg
+decided. Two shell-configuration facts are gated and both were read off the pinned Tauri sources rather than
+assumed: a configured **CSP re-serialises every embedded HTML file** at build time, so `index.html` inside
+the binary would no longer be the file the release signed (12 §5.1 already delivers the release's own
+meta-CSP), and `frontendDist` accepts a **URL**, which is application code arriving over the network. The
+Rust half is a separate CI job (`desktop-shell`) because it needs a toolchain and webkit2gtk; `crates/embedded-tree`
+is deliberately **pure** so the comparison that decides whether the shell may start is testable on a machine
+with no GUI toolkit
+
 ## What lives here (moved from AGENTS.md · Repository layout, 2026-08-06)
 
 Kept out of the always-loaded `AGENTS.md` because it only matters under `app/`;
