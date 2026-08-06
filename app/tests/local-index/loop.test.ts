@@ -40,11 +40,17 @@ const SELF: HeaderSource = { origin: 'self' };
 const OPERATOR: HeaderSource = { origin: 'operator', providerId: 'op-1' };
 
 
+const GENESIS = `0x${'a1'.repeat(32)}`;
+/** §6.3's hash-at-edge, varying with the block so an edge comparison can actually fail. */
+const blockHash = (n: number): string => `0x${n.toString(16).padStart(64, '0')}`;
+
 const scan = (
   number: number,
   { count = 2, watched = false }: { count?: number | undefined; watched?: boolean } = {},
 ): FinalizedBlockScan => ({
   number,
+  hash: blockHash(number),
+  specVersion: 3,
   extrinsicCount: count,
   events: watched
     ? [
@@ -62,6 +68,10 @@ const ports = (over: Partial<LoopPorts> = {}): LoopPorts => ({
   fetchBodies: async () => [new Uint8Array([0]), new Uint8Array([1])],
   write: async () => {},
   now: () => 1_000,
+  genesisHash: GENESIS,
+  // *Cannot say* is the default, and it is the fail-safe answer: a client that cannot reach
+  // the chain keeps every range rather than emptying the index whenever the network is poor.
+  observeEdge: () => undefined,
   ...over,
 });
 
@@ -220,6 +230,8 @@ test('a scan with NO declared count still ingests — and the body becomes the a
   // a count, so `bodies.length !== undefined` (always true) was never evaluated.
   const noCount: FinalizedBlockScan = {
     number: 200,
+    hash: blockHash(200),
+    specVersion: 3,
     events: [
       { phase: { kind: 'apply-extrinsic', index: 1 }, pallet: 'Balances', name: 'Transfer', accounts: ['alice'] },
     ],
@@ -236,6 +248,8 @@ test('an index beyond the FETCHED body is refused even with no declared count', 
   // making the count optional would have deleted the control rather than relocated it.
   const noCount: FinalizedBlockScan = {
     number: 201,
+    hash: blockHash(201),
+    specVersion: 3,
     events: [
       { phase: { kind: 'apply-extrinsic', index: 7 }, pallet: 'Balances', name: 'Transfer', accounts: ['alice'] },
     ],
@@ -258,6 +272,8 @@ test('the index guard is >=, not > — index N against N extrinsics is out of ra
   // throwing.
   const atBoundary: FinalizedBlockScan = {
     number: 202,
+    hash: blockHash(202),
+    specVersion: 3,
     events: [
       { phase: { kind: 'apply-extrinsic', index: 2 }, pallet: 'Balances', name: 'Transfer', accounts: ['alice'] },
     ],
@@ -271,6 +287,8 @@ test('the index guard is >=, not > — index N against N extrinsics is out of ra
   // way — which would silently drop the last extrinsic of every block.
   const lastValid: FinalizedBlockScan = {
     number: 203,
+    hash: blockHash(203),
+    specVersion: 3,
     events: [
       { phase: { kind: 'apply-extrinsic', index: 1 }, pallet: 'Balances', name: 'Transfer', accounts: ['alice'] },
     ],

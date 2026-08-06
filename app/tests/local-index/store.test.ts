@@ -19,21 +19,40 @@ import assert from 'node:assert/strict';
 import 'fake-indexeddb/auto';
 
 import {
+  ChainTagError,
   LocalIndex,
+  priceSample,
   SCHEMA_V1,
   StoreError,
   databaseName,
   evictMetadataToBudget,
   readCoverage,
+  readCoverageRepair,
   rebuild,
   writeCoverage,
 } from '@bleavit/local-index';
+import type { CoverageRange } from '@bleavit/local-index';
 // `selfRange` is test-only on purpose — see packages/local-index/src/testing.ts.
 import { selfRange } from '@bleavit/local-index/testing';
 import { nth } from './nth.ts';
 
 const PASEO = `0x${'a1'.repeat(32)}`;
 const POLKADOT = `0x${'b2'.repeat(32)}`;
+
+/** §6.3's per-range edge facts, on this database's chain. */
+const edgeAt = (toBlock: number, genesisHash = PASEO) => ({
+  genesisHash,
+  hash: `0x${toBlock.toString(16).padStart(64, '0')}`,
+  specVersion: 3,
+});
+
+/**
+ * A range as an untyped caller supplies it — a record rehydrated from IndexedDB, which is the
+ * path `assertCanonical`'s own comment calls *"exactly the untrusted path INV-FE-7 assumes gets
+ * corrupted"*. `as unknown as` is banned across `app/`, so this is one assertion through one
+ * documented helper.
+ */
+const asRange = (record: Record<string, unknown>): CoverageRange => record as CoverageRange;
 
 test('the database name is a function of the chain, not a constant', () => {
   // The whole cross-chain-contamination defence is this string.
@@ -43,9 +62,13 @@ test('the database name is a function of the chain, not a constant', () => {
 
 test('a genesis hash is required and validated — there is no default chain', () => {
   // A caller that does not know which chain it is indexing has nothing to index.
-  assert.throws(() => databaseName(''), StoreError);
-  assert.throws(() => databaseName('0xdeadbeef'), StoreError);
-  assert.throws(() => databaseName(PASEO.toUpperCase()), StoreError);
+  // Through `chainTag`, which the `fut-ingest` lock name shares: the two were deriving the
+  // same suffix by different rules and only one of them validated, so an empty string produced
+  // the database refusal on one side and the lock name `fut-ingest@` on the other — one global
+  // lock across every chain, from the function whose whole purpose is one writer *per chain*.
+  assert.throws(() => databaseName(''), ChainTagError);
+  assert.throws(() => databaseName('0xdeadbeef'), ChainTagError);
+  assert.throws(() => databaseName(PASEO.toUpperCase()), ChainTagError);
   assert.equal(databaseName.length, 1);
 });
 
@@ -108,7 +131,7 @@ test('coverage round-trips, and a fresh database reads as empty rather than unde
   const db = new LocalIndex(PASEO);
   await db.open();
   assert.deepEqual(await readCoverage(db), { ranges: [], holes: [] });
-  const coverage = { ranges: [selfRange(10, 20, 1)], holes: [] };
+  const coverage = { ranges: [selfRange(10, 20, 1, edgeAt(20))], holes: [] };
   await writeCoverage(db, coverage);
   const read = await readCoverage(db);
   assert.equal(read.ranges.length, 1);
@@ -127,12 +150,108 @@ test('the metadata cache evicts least-recently-used until it fits, and says what
     { specVersion: 2, bytes: 400, lastUsedAt: 30, blob: new Uint8Array(1) },
     { specVersion: 3, bytes: 400, lastUsedAt: 20, blob: new Uint8Array(1) },
   ]);
-  const evicted = await evictMetadataToBudget(db, 900);
+  const evicted = await evictMetadataToBudget(db, { maxBlobs: 8, maxBytes: 900, pinned: [] });
   assert.deepEqual(evicted, [1], 'the least recently used went first');
   assert.equal(await db.metadataCache.count(), 2);
   // A budget that fits everything evicts nothing.
-  assert.deepEqual(await evictMetadataToBudget(db, 10_000), []);
-  assert.rejects(() => evictMetadataToBudget(db, -1), StoreError);
+  assert.deepEqual(await evictMetadataToBudget(db, { maxBlobs: 8, maxBytes: 10_000, pinned: [] }), []);
+  await assert.rejects(() => evictMetadataToBudget(db, { maxBlobs: 8, maxBytes: -1, pinned: [] }), StoreError);
+  await db.delete();
+});
+
+test('§9.3’s blob COUNT is a bound too, not only its byte budget', async () => {
+  // The section states three obligations and an earlier draft enforced one. A byte budget alone
+  // lets an unbounded number of small blobs accumulate — which is the shape a metadata cache
+  // actually grows in, since a compressed blob is ~0.1 MB against a 16 MB budget.
+  const db = new LocalIndex(PASEO);
+  await db.open();
+  await db.metadataCache.clear();
+  await db.metadataCache.bulkPut(
+    [1, 2, 3, 4, 5].map((specVersion) => ({
+      specVersion,
+      bytes: 10,
+      lastUsedAt: specVersion,
+      blob: new Uint8Array(1),
+    })),
+  );
+  const evicted = await evictMetadataToBudget(db, { maxBlobs: 3, maxBytes: 10_000, pinned: [] });
+  assert.deepEqual(evicted, [1, 2], 'the count cap freed nothing — bytes alone were under budget');
+  assert.equal(await db.metadataCache.count(), 3);
+  await db.delete();
+});
+
+test('the pinned runtimes are never evicted, and a budget they do not fit is REFUSED', async () => {
+  // §9.3: "the current and next-authorized runtime's metadata are pinned non-evictable". LRU
+  // with no pin set evicts exactly them, because they are the blobs whose era is *current* and
+  // therefore the ones an old-era decode has not touched — turning the live era into "pending
+  // decoder" rows in order to save six megabytes.
+  const db = new LocalIndex(PASEO);
+  await db.open();
+  await db.metadataCache.clear();
+  await db.metadataCache.bulkPut([
+    { specVersion: 1, bytes: 400, lastUsedAt: 1, blob: new Uint8Array(1) },
+    { specVersion: 2, bytes: 400, lastUsedAt: 2, blob: new Uint8Array(1) },
+    { specVersion: 3, bytes: 400, lastUsedAt: 3, blob: new Uint8Array(1) },
+  ]);
+  // Blob 1 is the least recently used AND pinned: the next-oldest goes instead.
+  const evicted = await evictMetadataToBudget(db, { maxBlobs: 8, maxBytes: 900, pinned: [1] });
+  assert.deepEqual(evicted, [2], 'a pinned runtime’s metadata was evicted');
+  assert.ok(await db.metadataCache.get(1), 'the pin did not hold');
+
+  // A budget the pinned set alone exceeds is a release-configuration error — more pinned
+  // runtimes than the platform admits. Silently dropping a pin would report success while doing
+  // the one thing §9.3 forbids.
+  await assert.rejects(
+    () => evictMetadataToBudget(db, { maxBlobs: 8, maxBytes: 100, pinned: [1, 3] }),
+    StoreError,
+  );
+  await assert.rejects(
+    () => evictMetadataToBudget(db, { maxBlobs: 1, maxBytes: 10_000, pinned: [1, 3] }),
+    StoreError,
+  );
+  await db.delete();
+});
+
+test('coverage is validated on the READ path too, and a bad range is dropped not thrown', async () => {
+  // The major this closes. `addRange` checked everything it was handed and the value came back
+  // out of IndexedDB **unchecked** into `isVerifiedAt`, which asks only whether some range's
+  // origin is `self`. A `{ origin: 'self', fromBlock: 0, toBlock: 4294967295 }` left by a
+  // partial write therefore reported the entire chain as light-client verified.
+  //
+  // It drops rather than throws because §6.3 says corruption of one range invalidates **that
+  // range, not the index** — throwing on rehydration is the whole-index answer to a one-range
+  // fault, a full resync the user pays for.
+  const db = new LocalIndex(PASEO);
+  await db.open();
+  await db.meta.put({
+    key: 'coverage',
+    coverage: {
+      ranges: [
+        selfRange(10, 20, 1, edgeAt(20)),
+        asRange({ fromBlock: 30, toBlock: 40, origin: 'operator', ingestedAt: 1, edge: edgeAt(40) }),
+      ],
+      holes: [],
+    },
+  });
+  const { coverage, dropped } = await readCoverageRepair(db);
+  assert.equal(coverage.ranges.length, 1, 'the unattributed operator range survived the read');
+  assert.equal(dropped.length, 1, 'the drop was silent — nothing could explain the shrink');
+  assert.match(dropped[0]?.reason ?? '', /providerId/);
+  await db.delete();
+});
+
+test('writeCoverage validates too, because it bypasses addRange entirely', async () => {
+  // It is barrel-exported, so every guarantee `assertCanonical` maintains is a guarantee about
+  // values that went through `addRange` — and one `writeCoverage(db, anything)` puts a value in
+  // the store that never did.
+  const db = new LocalIndex(PASEO);
+  await db.open();
+  const dropped = await writeCoverage(db, {
+    ranges: [asRange({ fromBlock: 10, toBlock: 1, origin: 'self', ingestedAt: 1, edge: edgeAt(1) })],
+    holes: [],
+  });
+  assert.equal(dropped.length, 1);
+  assert.deepEqual(await readCoverage(db), { ranges: [], holes: [] });
   await db.delete();
 });
 
@@ -154,5 +273,33 @@ test('FE-IDX-001 needs a reason, because a silent rebuild looks like a first run
   const record = await rebuild(db, { reason: 'FE-IDX-001: coverage failed its own invariant', at: 1 });
   assert.match(record.reason, /FE-IDX-001/);
   assert.equal(await db.txHistory.count(), 0, 'the rebuilt database is empty');
+  await db.delete();
+});
+
+test('the DECLARED keys are what §7 needs, and two sources really are two rows', async () => {
+  // Asserted on `SCHEMA_V1` itself and then against a live IndexedDB, because the property is a
+  // **primary-key** property: an in-memory check that two `sourceKey` strings differ passes
+  // perfectly while the table is keyed `[bookId+blockNumber]` and silently stores one row.
+  assert.equal(SCHEMA_V1['priceSamples']?.startsWith('[bookId+sourceKey+blockNumber]'), true);
+  for (const table of ['candles1h', 'candles4h', 'candles1d']) {
+    assert.equal(SCHEMA_V1[table]?.startsWith('[bookId+sourceKey+openAt]'), true, table);
+  }
+
+  const db = new LocalIndex(PASEO);
+  await db.delete();
+  await db.open();
+  const common = { bookId: 'book-1', blockNumber: 7, blockTimestampMs: 7_000 };
+  await db.priceSamples.bulkPut([
+    priceSample({ ...common, price1e9: 100n, origin: 'self' }),
+    priceSample({ ...common, price1e9: 900n, origin: 'indexer', providerId: 'acme' }),
+  ]);
+  const rows = await db.priceSamples.toArray();
+  assert.equal(rows.length, 2, 'two sources at one block collapsed into one row');
+  assert.deepEqual(rows.map((r) => r.price1e9).sort(), [100n, 900n]);
+  // ...and each is reachable by its own declared key, so a delete cannot silently miss.
+  const mine = rows.find((r) => r.origin === 'self');
+  assert.ok(mine);
+  await db.priceSamples.delete([mine.bookId, mine.sourceKey, mine.blockNumber]);
+  assert.equal(await db.priceSamples.count(), 1, 'a delete by the declared key matched nothing');
   await db.delete();
 });

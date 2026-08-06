@@ -22,7 +22,9 @@ import {
   foldCandles,
   holesIn,
   nextResolution,
+  priceSample,
   rollUp,
+  sourceKeyOf,
 } from '@bleavit/local-index';
 // `selfRange` is test-only on purpose — see packages/local-index/src/testing.ts.
 import type { Candle, PriceSample, Resolution } from '@bleavit/local-index';
@@ -30,12 +32,39 @@ import { selfRange } from '@bleavit/local-index/testing';
 import { nth } from './nth.ts';
 
 const HOUR = 3_600;
-const sample = (at: number, price: number, blockNumber: number, bookId = 'book-1'): PriceSample => ({
-  bookId,
-  at,
-  price1e9: BigInt(price),
-  blockNumber,
-});
+const EDGE = {
+  genesisHash: `0x${'a1'.repeat(32)}`,
+  hash: `0x${'b2'.repeat(32)}`,
+  specVersion: 3,
+};
+
+/**
+ * A light-client-ingested observation.
+ *
+ * Minted through `priceSample` rather than written as a literal, and that is the point of the
+ * mint: `at` is derived from the **block's** timestamp, so a caller reaching for the device
+ * clock has to write the word `blockTimestampMs`. `at: Date.now() / 1000` was invisible in
+ * review and put two clients' identical trade into two different hours.
+ */
+const sample = (at: number, price: number, blockNumber: number, bookId = 'book-1'): PriceSample =>
+  priceSample({ bookId, blockNumber, blockTimestampMs: at * 1000, price1e9: BigInt(price), origin: 'self' });
+
+/** The same observation as an opt-in indexer supplied it. */
+const fromIndexer = (
+  at: number,
+  price: number,
+  blockNumber: number,
+  providerId = 'acme',
+  bookId = 'book-1',
+): PriceSample =>
+  priceSample({
+    bookId,
+    blockNumber,
+    blockTimestampMs: at * 1000,
+    price1e9: BigInt(price),
+    origin: 'indexer',
+    providerId,
+  });
 
 test('the ladder is §9.2’s order, and the order is the guarantee', () => {
   // A ladder applied out of order frees the same bytes and destroys more resolution than it
@@ -133,7 +162,7 @@ test('an evicted range is downsampled — not a hole, and not a silent splice', 
   // Three distinct misinformations, and this is the one §9.2 spells out. A hole says nobody
   // ingested these blocks, which is false and (per §6.3) invites a provider refetch that
   // could add no detail. A silent splice draws the coarse line as if nothing changed.
-  const range = downsample(1_000, 2_000, 'candles1h');
+  const range = downsample(1_000, 2_000, 'candles1h', 42);
   assert.equal(range.resolution, 'candles1h');
   assert.notEqual(range.resolution, 'raw');
   assert.match(range.reason, /not a gap/);
@@ -141,15 +170,17 @@ test('an evicted range is downsampled — not a hole, and not a silent splice', 
   // every component that forgot to read it.
   assert.ok(!('origin' in range), 'a downsampled range is not a coverage range');
   // And the blocks stay covered — `holesIn` over the same span reports nothing missing.
-  const coverage = [selfRange(1_000, 2_000, 1)];
+  const coverage = [selfRange(1_000, 2_000, 1, EDGE)];
   assert.deepEqual(holesIn(coverage, { fromBlock: 1_000, toBlock: 2_000 }), []);
 });
 
 test('a malformed range or timestamp is refused rather than summarised', () => {
-  assert.throws(() => downsample(2_000, 1_000, 'candles1h'), CandleError);
-  assert.throws(() => downsample(1.5, 2_000, 'candles1h'), CandleError);
-  assert.throws(() => foldCandles([sample(1.5, 100, 1)], 'candles1h'), CandleError);
-  assert.throws(() => foldCandles([sample(10, 100, -1)], 'candles1h'), CandleError);
+  assert.throws(() => downsample(2_000, 1_000, 'candles1h', 42), CandleError);
+  assert.throws(() => downsample(1.5, 2_000, 'candles1h', 42), CandleError);
+  assert.throws(() => priceSample({ bookId: 'b', blockNumber: 1, blockTimestampMs: 1.5, price1e9: 1n, origin: 'self' }), CandleError);
+  assert.throws(() => priceSample({ bookId: 'b', blockNumber: -1, blockTimestampMs: 1_000, price1e9: 1n, origin: 'self' }), CandleError);
+  assert.throws(() => foldCandles([{ ...sample(10, 100, 1), at: 1.5 }], 'candles1h'), CandleError);
+  assert.throws(() => foldCandles([{ ...sample(10, 100, 1), blockNumber: -1 }], 'candles1h'), CandleError);
   assert.throws(() => bucketStart(-1, 'candles1h'), CandleError);
 });
 
@@ -158,4 +189,119 @@ test('folding nothing produces nothing, without inventing an empty candle', () =
   // was never observed.
   assert.deepEqual(foldCandles([], 'candles1h'), []);
   assert.deepEqual(rollUp([], 'candles1d'), []);
+});
+
+
+test('a sample’s instant comes from the block, and the mint says so in its own signature', () => {
+  // `bucketStart` aligns buckets to the epoch so two clients agree on boundaries, and that is
+  // only true when the instant is a fact about the chain. `blockTimestampMs` is the whole
+  // control: it is not stronger than a comment by type, it is stronger by being unmissable at
+  // every call site — and it takes milliseconds, which is the unit `pallet_timestamp` carries.
+  const s = priceSample({
+    bookId: 'book-1',
+    blockNumber: 7,
+    blockTimestampMs: 3_600_500,
+    price1e9: 100n,
+    origin: 'self',
+  });
+  assert.equal(s.at, 3_600, 'milliseconds were not converted to the Unix seconds `at` declares');
+  assert.equal(bucketStart(s.at, 'candles1h'), 3_600);
+  assert.throws(
+    () => priceSample({ bookId: 'b', blockNumber: 1, blockTimestampMs: -1, price1e9: 1n, origin: 'self' }),
+    CandleError,
+  );
+});
+
+test('samples of different provenance NEVER fold into one candle (10 §2.3, INV-FE-15)', () => {
+  // The blocker this closes. A candle carries one origin, so folding a light-client
+  // observation together with an indexer's yields a bar whose label is wrong in one direction
+  // or the other: `self` promotes the indexer's number to verified — which §2.2 gives no path
+  // for — and a provider label demotes an observation this client made itself. That is exactly
+  // the choice §6.3's no-splice rule refuses for ranges, arriving one layer down where the
+  // boundary is a bar on a chart rather than a range in a list.
+  const candles = foldCandles(
+    [sample(10, 100, 1), fromIndexer(20, 900, 2), sample(30, 300, 3)],
+    'candles1h',
+  );
+  assert.equal(candles.length, 2, 'two sources were summarised into one bar');
+  const mine = candles.find((c) => c.origin === 'self');
+  const theirs = candles.find((c) => c.origin === 'indexer');
+  assert.ok(mine && theirs, 'a provenance disappeared from the fold');
+  assert.equal(mine.samples, 2);
+  assert.equal(mine.high1e9, 300n, 'the indexer’s 900 leaked into the verified bar');
+  assert.equal(theirs.samples, 1);
+  assert.equal(theirs.providerId, 'acme', 'INV-FE-15 requires the origin to reach the pixel');
+});
+
+test('two providers are two sources, and one candle each', () => {
+  // Same origin is not the same provenance: two indexers are two parties, and one lying does
+  // not implicate the other. Merging them makes that undiagnosable in the chart layer.
+  const candles = foldCandles([fromIndexer(10, 100, 1, 'a'), fromIndexer(20, 900, 2, 'b')], 'candles1h');
+  assert.equal(candles.length, 2);
+  assert.deepEqual(candles.map((c) => c.providerId).sort(), ['a', 'b']);
+});
+
+test('roll-up never merges provenance either — the ladder degrades resolution, not origin', () => {
+  const hours = foldCandles(
+    [sample(10, 100, 1), sample(HOUR + 10, 200, 2), fromIndexer(2 * HOUR + 10, 900, 3)],
+    'candles1h',
+  );
+  const days = rollUp(hours, 'candles1d');
+  assert.equal(days.length, 2, 'a verified hour and a provider hour were rolled into one day');
+  assert.deepEqual(days.map((c) => c.origin).sort(), ['indexer', 'self']);
+  const verified = days.find((c) => c.origin === 'self');
+  assert.ok(verified);
+  assert.equal(verified.high1e9, 200n, 'the provider’s 900 leaked into the verified day');
+});
+
+test('the stored key carries the provenance, or two sources overwrite each other', () => {
+  // `foldCandles` refuses to merge across provenance in memory. A table keyed `[bookId+openAt]`
+  // then takes the two candles it produced and stores one on top of the other — the label
+  // survives and the number under it becomes whichever row was written last. So the key is part
+  // of the row.
+  const candles = foldCandles([sample(10, 100, 1), fromIndexer(20, 900, 2)], 'candles1h');
+  const keys = candles.map((c) => `${c.bookId}|${c.sourceKey}|${c.openAt}`);
+  assert.equal(new Set(keys).size, 2, 'two sources collide on one primary key');
+  assert.equal(sourceKeyOf({ origin: 'self' }), JSON.stringify(['self', null]));
+  assert.equal(
+    sourceKeyOf({ origin: 'indexer', providerId: 'acme' }),
+    JSON.stringify(['indexer', 'acme']),
+  );
+});
+
+test('a row whose key disagrees with its origin is refused', () => {
+  // The rehydration case: a record out of IndexedDB carrying an indexer's key and a `self`
+  // origin would be stored beside the source it claims not to be.
+  const forged = { ...sample(10, 100, 1), sourceKey: sourceKeyOf({ origin: 'indexer', providerId: 'acme' }) };
+  assert.throws(() => foldCandles([forged], 'candles1h'), CandleError);
+});
+
+/**
+ * A row as an *untyped* caller supplies it — rehydrated from IndexedDB, or handed over by an
+ * imported snapshot. Every use is a refusal test: the union cannot express these values, which
+ * is the compile-time control working, and the single assertion is what lets the suite ask
+ * whether the runtime half is there too. `as unknown as` is banned across `app/`, so this is
+ * one assertion through one documented helper rather than a double one per call site.
+ */
+interface LooseSample {
+  readonly bookId: string;
+  readonly at: number;
+  readonly price1e9: bigint;
+  readonly blockNumber: number;
+  readonly sourceKey: string;
+  /** Widened from the union, which is what lets an unknown origin be constructed at all. */
+  readonly origin: string;
+  readonly providerId?: string | undefined;
+}
+const asSample = (record: LooseSample): PriceSample => record as PriceSample;
+
+test('an unknown or unattributed origin is refused on a chart row too', () => {
+  assert.throws(
+    () => foldCandles([asSample({ ...sample(10, 100, 1), origin: 'indexer' })], 'candles1h'),
+    CandleError,
+  );
+  assert.throws(
+    () => foldCandles([asSample({ ...sample(10, 100, 1), origin: 'rpc' })], 'candles1h'),
+    CandleError,
+  );
 });

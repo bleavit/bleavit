@@ -39,6 +39,20 @@ const metadata = loadMetadata(
 const codecs = await loadCodecs(bleavit);
 const scanner = blockScanner(codecs, eventAccountReader(metadata));
 
+/**
+ * The header facts every scan carries — 10 §6.3's hash-at-edge and spec-version-at-edge.
+ *
+ * They enter the index here because this is where a block becomes a scan, and they are **read
+ * from the header** rather than derived: an edge check against a hash the client computed from
+ * its own rows would agree with itself by construction, which is the vacuous-check shape this
+ * client keeps finding.
+ */
+const at = (number: number, specVersion = 3) => ({
+  number,
+  hash: `0x${number.toString(16).padStart(64, '0')}`,
+  specVersion,
+});
+
 /** Generic-format (prefix 42) addresses — deliberately NOT this chain's rendering. */
 const ALICE = '5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY';
 const BOB = '5FHneW46xGXgs5mUiveU4sbTyGBzmstUspZC92UhjJM694ty';
@@ -102,7 +116,7 @@ test('a block that cannot be decoded REFUSES — it never scans to an empty bloc
   // recorded as ingested, and the user's transaction is gone from their history with nothing
   // anywhere reporting a problem.
   assert.throws(
-    () => scanner.scan(100, '0xdeadbeef'),
+    () => scanner.scan(at(100), '0xdeadbeef'),
     (error) => {
       assert.ok(error instanceof BlockScanError);
       assert.equal(error.blockNumber, 100);
@@ -112,7 +126,7 @@ test('a block that cannot be decoded REFUSES — it never scans to an empty bloc
   );
 
   // Not vacuous: a well-formed blob at the same call site scans.
-  const scan = scanner.scan(100, encodeEvents([{ phase: { type: 'ApplyExtrinsic', value: 0 }, event: transfer(ALICE, BOB) }]));
+  const scan = scanner.scan(at(100), encodeEvents([{ phase: { type: 'ApplyExtrinsic', value: 0 }, event: transfer(ALICE, BOB) }]));
   assert.equal(scan.events.length, 1);
 });
 
@@ -141,7 +155,7 @@ test('an unrecognised phase refuses, because every available default is wrong', 
   // rule 2 bans `as unknown as` across `app/`, and this is the shape that makes it needless.
   const stubbed = blockScanner(stub, eventAccountReader(metadata));
   assert.throws(
-    () => stubbed.scan(7, '0x00'),
+    () => stubbed.scan(at(7), '0x00'),
     (error) => {
       assert.ok(error instanceof BlockScanError);
       assert.match(error.message, /unrecognised phase "SomethingNew"/);
@@ -169,7 +183,7 @@ test('an ApplyExtrinsic phase with a non-index value refuses rather than being c
   // No cast: `ChainCodecs.query` is `unknown` precisely so a stub is assignable — app-code
   // rule 2 bans `as unknown as` across `app/`, and this is the shape that makes it needless.
   const stubbed = blockScanner(stub, eventAccountReader(metadata));
-  assert.throws(() => stubbed.scan(7, '0x00'), /ApplyExtrinsic with a non-index value/);
+  assert.throws(() => stubbed.scan(at(7), '0x00'), /ApplyExtrinsic with a non-index value/);
 });
 
 test('the scan feeds `needsBodyFetch`, and the accounts match a set built the same way', () => {
@@ -183,7 +197,7 @@ test('the scan feeds `needsBodyFetch`, and the accounts match a set built the sa
     { phase: { type: 'ApplyExtrinsic', value: 1 }, event: transfer(ALICE, BOB) },
     { phase: { type: 'ApplyExtrinsic', value: 1 }, event: success() },
   ]);
-  const scan = scanner.scan(512, eventsHex);
+  const scan = scanner.scan(at(512), eventsHex);
   assert.equal(scan.number, 512);
   assert.deepEqual(
     scan.events.map((event) => `${event.pallet}.${event.name}`),
@@ -208,7 +222,7 @@ test('a block of pure inherents attributes nobody — §6.5 costs nothing on alm
   // emitted for EVERY extrinsic in EVERY block, so treating it as attribution would fetch a
   // body per block on a light client, on a phone, while every "does it find my transactions"
   // test stayed green.
-  const scan = scanner.scan(1, recordedEventsValue());
+  const scan = scanner.scan(at(1), recordedEventsValue());
   assert.deepEqual(
     scan.events.map((event) => `${event.pallet}.${event.name}`),
     ['System.ExtrinsicSuccess', 'System.ExtrinsicSuccess'],
@@ -224,8 +238,8 @@ test('`extrinsicCount` is passed through and never derived from the events (SQ-5
   const eventsHex = encodeEvents([
     { phase: { type: 'ApplyExtrinsic', value: 4 }, event: transfer(ALICE, BOB) },
   ]);
-  assert.equal(scanner.scan(9, eventsHex).extrinsicCount, undefined);
-  assert.equal(scanner.scan(9, eventsHex, 12).extrinsicCount, 12);
+  assert.equal(scanner.scan(at(9), eventsHex).extrinsicCount, undefined);
+  assert.equal(scanner.scan(at(9), eventsHex, 12).extrinsicCount, 12);
 
   // Asserted by absence too, comments stripped first — a raw scan reports the prose that
   // explains the rule as the rule being broken.
@@ -243,4 +257,39 @@ test('the scanner does not fetch — it is handed the value read at the block it
   // takes the raw value; there is no transport in this module's signature at all.
   const source = readFileSync(join(APP, 'src/features/analysis/src/block-scan.ts'), 'utf8');
   assert.ok(!source.includes('await'), 'the scanner is synchronous — nothing here can fetch');
+});
+
+test('§6.5’s two decode failures get two answers — one refuses, one stores raw', () => {
+  // The split. An unreadable `System.Events` blob **throws** (asserted above): an empty `events`
+  // array is a well-formed answer meaning "no event in this block names anyone", so degrading to
+  // it fetches no body, records the block as ingested, and drops the user's transaction from
+  // their history with nothing reporting a problem.
+  //
+  // An unavailable **era metadata** is not that. The bytes are intact and simply not decodable
+  // yet, and §6.5's answer is to store them raw, keep going, and count them — refusing there
+  // stops the whole run at the first block from an older runtime, which is every backfill across
+  // an upgrade. The caller reaches this arm when it has no codecs for the block's spec_version at
+  // all, which is why it cannot be decided inside `scan`: a scanner bound to one runtime's
+  // codecs has nothing to test.
+  const pending = scanner.pendingScan(at(4_000, 2), '0x010203', 'no metadata blob for spec_version 2');
+  assert.deepEqual(pending.events, [], 'a pending-decode scan must carry no half-decoded events');
+  assert.deepEqual(pending.pendingDecode?.raw, new Uint8Array([1, 2, 3]));
+  assert.match(pending.pendingDecode?.reason ?? '', /spec_version 2/);
+  assert.equal(pending.specVersion, 2);
+  assert.equal(pending.hash, at(4_000).hash);
+
+  // A reason is required: §6.5 surfaces this as "N events pending decoder", and a row with no
+  // reason cannot be explained to the user whose history is incomplete because of it.
+  assert.throws(() => scanner.pendingScan(at(4_000, 2), '0x01', '  '), BlockScanError);
+  // ...and the bytes must be bytes, or the raw row can never be decoded when the metadata lands.
+  assert.throws(() => scanner.pendingScan(at(4_000, 2), '0xzz', 'why'), BlockScanError);
+});
+
+test('the scan carries §6.3’s edge facts from the HEADER, not from what it decoded', () => {
+  // The edge check exists to notice a reorg past the coverage edge. A hash the client computed
+  // from its own rows would agree with itself by construction — the vacuous-check shape.
+  const eventsHex = recordedEventsValue();
+  const scan = scanner.scan(at(777, 5), eventsHex);
+  assert.equal(scan.hash, at(777).hash);
+  assert.equal(scan.specVersion, 5);
 });
