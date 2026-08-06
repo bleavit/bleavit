@@ -1,0 +1,136 @@
+{
+  "_note": "The F22 differential corpus, read IN PLACE by crates/embedded-tree's tests and by app/tests/platform/embedded-tree.test.ts. It publishes file CONTENT rather than digests on purpose: a corpus of digests would never exercise either side's hash function, and the two implementations agreeing on a comparison they both skipped is not agreement. Each side hashes `tree` itself and must reproduce `perFileHashes`.",
+  "cases": [
+    {
+      "name": "clean \u2014 every pinned file present and identical",
+      "why": "The negative control. Without it the corpus proves only that everything is rejected.",
+      "perFileHashes": {
+        "index.html": "358d3841352a66d7bab833065360881ebdea1b87a3087d3ed852035d15c2c910",
+        "assets/app.js": "f615240bdf4b9ae589da60e1a702728dc65b34ae174ed23a9f07e61732232ec5"
+      },
+      "tree": {
+        "index.html": "<!doctype html><title>Bleavit</title>\n",
+        "assets/app.js": "export const app = 1;\n"
+      },
+      "expected": [],
+      "expectedVerified": 2
+    },
+    {
+      "name": "changed \u2014 one file's bytes differ from its pin",
+      "why": "The tamper everybody thinks of. The other two are the ones that ship.",
+      "perFileHashes": {
+        "index.html": "358d3841352a66d7bab833065360881ebdea1b87a3087d3ed852035d15c2c910",
+        "assets/app.js": "f615240bdf4b9ae589da60e1a702728dc65b34ae174ed23a9f07e61732232ec5"
+      },
+      "tree": {
+        "index.html": "<!doctype html><title>Bleavit</title><script>steal()</script>\n",
+        "assets/app.js": "export const app = 1;\n"
+      },
+      "expected": [
+        {
+          "kind": "changed",
+          "path": "index.html"
+        }
+      ],
+      "expectedVerified": 1
+    },
+    {
+      "name": "missing \u2014 a pinned file is not in the build",
+      "why": "A build that dropped a file still runs, and fails at the user on the path that needed it.",
+      "perFileHashes": {
+        "index.html": "358d3841352a66d7bab833065360881ebdea1b87a3087d3ed852035d15c2c910",
+        "assets/app.js": "f615240bdf4b9ae589da60e1a702728dc65b34ae174ed23a9f07e61732232ec5"
+      },
+      "tree": {
+        "index.html": "<!doctype html><title>Bleavit</title>\n"
+      },
+      "expected": [
+        {
+          "kind": "missing",
+          "path": "assets/app.js"
+        }
+      ],
+      "expectedVerified": 1
+    },
+    {
+      "name": "unexpected \u2014 a file nobody signed is in the build",
+      "why": "The direction a manifest-driven loop cannot see: everything the manifest lists is in order, and a payload sits beside it.",
+      "perFileHashes": {
+        "index.html": "358d3841352a66d7bab833065360881ebdea1b87a3087d3ed852035d15c2c910",
+        "assets/app.js": "f615240bdf4b9ae589da60e1a702728dc65b34ae174ed23a9f07e61732232ec5"
+      },
+      "tree": {
+        "index.html": "<!doctype html><title>Bleavit</title>\n",
+        "assets/app.js": "export const app = 1;\n",
+        "assets/payload.js": "globalThis.exfiltrate = 1;\n"
+      },
+      "expected": [
+        {
+          "kind": "unexpected",
+          "path": "assets/payload.js"
+        }
+      ],
+      "expectedVerified": 2
+    },
+    {
+      "name": "all three at once, counted separately",
+      "why": "A report that collapsed to one finding would still pass each single-direction case above.",
+      "perFileHashes": {
+        "index.html": "358d3841352a66d7bab833065360881ebdea1b87a3087d3ed852035d15c2c910",
+        "assets/app.js": "f615240bdf4b9ae589da60e1a702728dc65b34ae174ed23a9f07e61732232ec5",
+        "skills/bleavit-analysis/SKILL.md": "830ead7d5a0c4921cc4689b80921044e16b8e2f9839dce35e31663fa92bbf2f9"
+      },
+      "tree": {
+        "index.html": "<!doctype html><title>Bleavit</title><script>steal()</script>\n",
+        "skills/bleavit-analysis/SKILL.md": "# Bleavit analysis\n",
+        "assets/payload.js": "globalThis.exfiltrate = 1;\n"
+      },
+      "expected": [
+        {
+          "kind": "changed",
+          "path": "index.html"
+        },
+        {
+          "kind": "missing",
+          "path": "assets/app.js"
+        },
+        {
+          "kind": "unexpected",
+          "path": "assets/payload.js"
+        }
+      ],
+      "expectedVerified": 1
+    },
+    {
+      "name": "rooted asset keys meet release-relative pins",
+      "why": "Tauri's AssetKey is rooted (`/index.html`) and release.json is not. If only one side normalised, every file here would be reported as BOTH missing and unexpected \u2014 fail-closed, and useless.",
+      "perFileHashes": {
+        "index.html": "358d3841352a66d7bab833065360881ebdea1b87a3087d3ed852035d15c2c910",
+        "assets/app.js": "f615240bdf4b9ae589da60e1a702728dc65b34ae174ed23a9f07e61732232ec5"
+      },
+      "tree": {
+        "/index.html": "<!doctype html><title>Bleavit</title>\n",
+        "/assets/app.js": "export const app = 1;\n"
+      },
+      "expected": [],
+      "expectedVerified": 2
+    },
+    {
+      "name": "a same-length near miss is not a match",
+      "why": "Two files of identical length and one differing byte. A length or size comparison passes this; a digest comparison does not.",
+      "perFileHashes": {
+        "assets/app.js": "f615240bdf4b9ae589da60e1a702728dc65b34ae174ed23a9f07e61732232ec5"
+      },
+      "tree": {
+        "assets/app.js": "export const app = 2;\n"
+      },
+      "expected": [
+        {
+          "kind": "changed",
+          "path": "assets/app.js"
+        }
+      ],
+      "expectedVerified": 0
+    }
+  ]
+}

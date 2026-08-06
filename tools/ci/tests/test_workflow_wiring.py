@@ -35,7 +35,13 @@ ROOT = pathlib.Path(__file__).resolve().parents[3]
 WORKFLOWS = ROOT / ".github" / "workflows"
 
 # Jobs whose tooling lives in a subdirectory, and the directory it lives in.
-SUBDIRECTORY_JOBS = {"app": "app"}
+#
+# `desktop-shell` (F22) is here for the same reason `app` is, and it is the case that shows
+# why the map is a map: it is a *Rust* job, and its two pnpm steps exist only to produce the
+# attested release tree the shell embeds. A `pnpm install` from the repository root there
+# would fail exactly as it did on the `app` job — and, worse, would take corepack's newest
+# pnpm rather than the pin, because the pin lives in `app/package.json`.
+SUBDIRECTORY_JOBS = {"app": "app", "desktop-shell": "app"}
 
 _REGENERATOR = (
     "a `--write` regenerator; its `:check` counterpart is the gate. Running a "

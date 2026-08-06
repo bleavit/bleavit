@@ -58,7 +58,14 @@
     "tools/release/**/*.ts",
     "tools/snapshot/**/*.ts",
     "tools/verify-release/**/*.ts",
-    "tests/snapshot/**/*.ts"
+    "tests/snapshot/**/*.ts",
+    // F22. `tools/desktop/` decides whether the desktop shell may embed a tree at all, so it
+    // belongs on the checked side of the boundary for the same reason `tools/release/` does.
+    // `tests/platform/` is where the two deliberate restatements in `packages/platform` are
+    // bound to the shapes they restate — a compile-time claim, and therefore worth nothing
+    // unless this project compiles it.
+    "tests/platform/**/*.ts",
+    "tools/desktop/**/*.ts"
   ],
   // `tests/descriptors/types/*-witness.ts` joins the same class as the firewall fixtures:
   // it is an anti-vacuity control that MUST fail `tsc`, and `compat.test.ts` compiles it

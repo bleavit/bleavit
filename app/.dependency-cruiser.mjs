@@ -21,7 +21,7 @@
  * dynamic `import()` Node 22.18 type-strips. What remains here is the rule list, which is
  * data.
  */
-const { CHAIN_SDK_PACKAGES, EXTERNAL, WORKSPACE_SUBPATH, POLKADOT_API_NON_SIGNER } = await import('./tools/depcruise-external.ts');
+const { CHAIN_SDK_PACKAGES, EXTERNAL, HOST_SDK_PACKAGES, WORKSPACE_SUBPATH, POLKADOT_API_NON_SIGNER } = await import('./tools/depcruise-external.ts');
 const { HANDOFF_PATH, NON_LOCAL_DEPENDENCY_TYPES } = await import('./tools/handoff-packages.ts');
 
 export default {
@@ -80,9 +80,15 @@ export default {
       severity: 'error',
       comment:
         '10 §10.1: `platform` is the only package permitted to import a native or host ' +
-        'SDK. Concrete adapters are injected, so a tx surface cannot reach one.',
+        'SDK. Concrete adapters are injected, so a tx surface cannot reach one. F22 ' +
+        'declines the permission entirely — the desktop shell reaches its host in Rust, ' +
+        'so no JavaScript in this tree imports either package — which means this rule has ' +
+        'no real edge to catch and is proven live only by ' +
+        '`tests/depcruise-witness/forbidden-external.ts`. The cruise path was widened to ' +
+        '`src-tauri` and `tools/desktop` with the same milestone: a rule that cannot see ' +
+        'the one directory whose whole job is talking to a host is a rule about nothing.',
       from: { pathNot: '^packages/platform' },
-      to: { path: EXTERNAL('@tauri-apps|@parity/product-sdk') },
+      to: { path: EXTERNAL(HOST_SDK_PACKAGES) },
     },
     {
       name: 'only-chain-client-opens-a-chain-connection',

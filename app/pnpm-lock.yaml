@@ -448,6 +448,18 @@ importers:
         specifier: workspace:*
         version: link:../../packages/mock-runtime
 
+  tests/platform:
+    dependencies:
+      '@bleavit/llm-handoff':
+        specifier: workspace:*
+        version: link:../../packages/llm-handoff
+      '@bleavit/platform':
+        specifier: workspace:*
+        version: link:../../packages/platform
+      '@bleavit/verify':
+        specifier: workspace:*
+        version: link:../../packages/verify
+
   tests/protocol:
     dependencies:
       '@bleavit/protocol':
@@ -584,6 +596,12 @@ importers:
         version: 19.2.8(react@19.2.8)
 
   tests/verify:
+    dependencies:
+      '@bleavit/verify':
+        specifier: workspace:*
+        version: link:../../packages/verify
+
+  tools/desktop:
     dependencies:
       '@bleavit/verify':
         specifier: workspace:*

@@ -1,0 +1,29 @@
+# The client's own cargo workspace (10 §10.1; app-code rule 15).
+#
+# Excluded from the repository root workspace on purpose, and the root `Cargo.toml` records
+# the reason: the Tauri stack and its desktop target triples must never reach the runtime
+# workspace's `=`-exact `polkadot-stable2606` pins. The separation is only real if it is also
+# a separate lockfile, which this workspace has.
+#
+# Two members, and the split is the design rather than tidiness:
+#
+# - `crates/embedded-tree` is **pure**: no Tauri, no system libraries, no window. It holds the
+#   comparison that decides whether the shell may start, so it can be tested — and gated in
+#   CI — on any machine, including one with no webkit2gtk. A comparison that could only run
+#   where a GUI toolkit is installed is one that gets tested where the GUI is, which is
+#   nowhere.
+# - `src-tauri` is the shell: it embeds the tree, calls that comparison before it creates a
+#   window, and does nothing else of consequence.
+[workspace]
+resolver = "2"
+members = ["crates/embedded-tree", "src-tauri"]
+
+[workspace.package]
+edition = "2021"
+license = "GPL-3.0"
+repository = "https://github.com/bleavit/bleavit"
+
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"

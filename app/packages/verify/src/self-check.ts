@@ -28,6 +28,20 @@
 
 import type { ReleaseIdentity, Sha256Hex } from './identity.js';
 
+/**
+ * The one field of a release identity this comparison reads.
+ *
+ * Stated as a `Pick` rather than taking the whole record, because the two callers that are
+ * not the browser genuinely do not have the rest: F22's desktop shell compares a tree it is
+ * about to embed against a per-commit build's document, which legitimately carries no
+ * Arweave address and unresolved readiness blockers (`parseReleaseDocument` refuses both,
+ * correctly, for reasons that have nothing to do with whether the map describes the tree).
+ * Widening the parameter is safe in the direction that matters: `ReleaseIdentity` still
+ * requires every INV-FE-11 pin, and this only says which one the comparison consults —
+ * fabricating six blank pins to satisfy a signature is how a type stops meaning anything.
+ */
+export type PinnedFiles = Pick<ReleaseIdentity, 'perFileHashes'>;
+
 export type SelfCheckFindingKind = 'changed' | 'missing' | 'unexpected';
 
 export interface SelfCheckFinding {
@@ -82,7 +96,7 @@ function ownKeysOnly(source: Readonly<Record<string, Sha256Hex>>): Map<string, S
 }
 
 export function runSelfCheck(
-  identity: ReleaseIdentity,
+  identity: PinnedFiles,
   servedInput: Readonly<Record<string, Sha256Hex>>,
 ): SelfCheckResult {
   // Refuse an uncheckable release here rather than trusting every caller to remember:
@@ -150,7 +164,7 @@ export function runSelfCheck(
  * nothing — the vacuous green this repository keeps rediscovering. A release that pins no
  * files is a broken release record, so it is refused here rather than reported as verified.
  */
-export function assertCheckable(identity: ReleaseIdentity): void {
+export function assertCheckable(identity: PinnedFiles): void {
   if (Object.keys(identity.perFileHashes).length === 0) {
     throw new Error(
       'this release record pins no file hashes, so a self-check over it would verify ' +

@@ -55,3 +55,13 @@ import 'node:http';
 // use one, is exactly what makes that rule stop firing. Both matchers must catch these.
 import '@polkadot-api/ws-provider';
 import '@polkadot-api/sm-provider';
+
+// The HOST-SDK matcher (`only-platform-touches-host-sdks`, 10 §10.1). F22 declined the
+// permission that rule grants — `packages/platform` imports no `@tauri-apps/*` at all, so
+// the desktop shell can embed the published `dist/` byte for byte rather than a
+// desktop-specific rebuild — and a forbidden rule with nothing anywhere in the tree to
+// catch is exactly the shape that goes vacuous unwatched. Both spellings the rule names are
+// witnessed, because `EXTERNAL` takes an alternation and a typo in either arm leaves half
+// the rule dead while the other half keeps this witness green.
+import '@tauri-apps/api';
+import '@parity/product-sdk';

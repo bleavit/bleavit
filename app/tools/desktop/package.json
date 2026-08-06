@@ -1,0 +1,9 @@
+{
+  "name": "@bleavit/desktop-tools",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@bleavit/verify": "workspace:*"
+  }
+}

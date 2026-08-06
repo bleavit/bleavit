@@ -210,6 +210,15 @@ Practical consequences:
     Vite 8, Dexie 4, Tauri 2.x. Do not bump majors without a PLAN.md decision-log
     entry. `app/` is its own pnpm workspace and its own cargo workspace (excluded from
     the root one); never let its dependency tree reach the runtime pins.
+
+    **The Tauri entry is the loose one, and it is stated here rather than glossed**
+    (corrected 2026-08-06, F22): 01 §9's frontend-stack list enumerates exact versions
+    and **names no Tauri version at all**; 10 §10.1 says "the Tauri stack" without one.
+    So "Tauri 2.x" above is this file's own reading, not a quotation. `src-tauri`
+    therefore pins `=`-exactly in `Cargo.toml` — `tauri-codegen` decides *what bytes get
+    embedded*, so a minor bump changes the artefact F22 attests and must be a reviewed
+    diff rather than a resolver decision. Whether the Tauri stack belongs inside 01 §9's
+    exact-pin regime is an open question for the doc set (PLAN.md · F22 residuals).
 16. **The release tree is derived, and its inputs are what you edit (F11, 12 §1/§5).**
     `app/dist/` and `app/release-out/` are build output. The committed inputs are
     `app/tools/release/sources/`: where each `connect-src` class comes from, the
@@ -287,6 +296,45 @@ this file loads whenever a session touches `app/**`, which is when they apply.
 · **`pnpm run test:providers`** (F9) — 10 §8's optional-acceleration layer, and the **forged-snapshot corpus 15 §4.8 asks for, rejected per class**. The never-promote rule needs no test here (`Finalized<T>` is unnameable outside `chain-client`, so this package cannot produce one whatever it does); what F9 owns is what the client *says* about a provider. `SnapshotFinding` therefore names its screens rather than returning a boolean — a corpus proving only *"bad snapshots are rejected"* cannot tell you which screen was load-bearing when one regresses, and a screen that has stopped firing is invisible under a fully green run. **The corpus deliberately contains a document that is admitted**: a self-consistent deep forgery, which 10 §8.4 and 14 TH-50 both state plainly is *not* detected, so a corpus made only of rejections would be evidence for a guarantee the mechanism declines to make. The format lives in **one module the producer and the consumer share** — they must agree on *which bytes are hashed* or the pin is decoration, and a second serializer fails every pin from that producer, which a user reads as a corrupt download; it reuses `handoff-envelope`'s canonical JSON under a distinct domain tag, since 10 §13.1 already gives this repository exactly one answer to *which bytes*. Four things it pins that the obvious implementation gets wrong, all silently: `admitSnapshot` takes the **file text**, not a parsed object, because §8.2's *"reproducible byte-identically by anyone"* is a claim about **bytes** and a consumer that parsed first would accept two different files for one history — at which point a content pin no longer addresses content; the conservation replay checks **at every step**, since a forger who drives an account negative and back ends in a state a final-state check waves through; it deliberately does **not** assert I-1's cross-branch equality, which stops holding at the first `redeem` and would flag every settled vault as forged; and the hash function is a **required argument**, because an optional one is a pin that defaults off — the `admitIntent` defect again. Amounts are decimal **strings** (`u128` base units run past 2⁵³, and a rounded JSON number then fails the document's own replay for reasons that look like forgery — V-74's shape), and composite map keys are `JSON.stringify` tuples rather than joined strings, since any separator can occur inside an account label and two holdings colliding on one key silently become one row in the screen whose whole job is to notice a missing one. **Canonical form reaches the arrays too** (added while writing the producer, which is where it surfaced): canonical JSON sorts object *keys* and leaves array order exactly as given, so `vaults`, each vault's `branches` and `balances` had two legal spellings apiece and two honest producers would have published two pins for one history — the promise in §8.2 is *byte-identical reproduction by anyone*, and the way anybody finds out it is false is a user being told a correct snapshot is corrupt. `coverage` is **maximally merged** for the same reason, since `checkCoverage` permitted 10..11 beside 12..13 *and* 10..13. `ops` is deliberately **exempt** and that is not laxity: its order is the chain's, which is semantic — the replay is order-sensitive, so sorting would let an invalid history be reordered into a valid-looking one
 
 · **`pnpm run test:snapshot-tool`** (F9) — `app/tools/snapshot`, the **producer** half of the format `test:providers` consumes, and it lives at `app/tools/` because 10 §10.1 says so in as many words (the repository root already has a `tools/release/` for chain-release tooling). Two properties carry the suite and neither is the happy path. **Byte-identical reproduction is proven by shuffling, not asserted**: the same history handed in with its arrays reversed and its movements out of sequence must yield the same file and the same pin, because two readers of one chain will not enumerate vaults, accounts or events in the same order and if that reached the file each producer's snapshots would look corrupt to the other's users. **The balance sheet is a differential against chain state, not a restatement of the fold** — `ArchiveExport.balances` is read at `range.toBlock` independently of the movements, and the driver refuses to publish when they disagree. A producer that folded its own ops would agree with itself by construction and §8.4's derived-row screen could never fail on anything it emitted, while the failure that actually happens to a snapshot tool is an **incomplete op set** (a variant not decoded, a range answered short), which is perfectly self-consistent and invisible to a self-fold. Three more refusals, each a case where the obvious implementation publishes something wrong: **coverage is what the reader *observed***, never the requested span — a reader that fails part-way and reports the request anyway publishes a document claiming history it never saw, which passes every screen because the movements it does carry are consistent, a forgery produced by accident; **two movements at one chain position refuse** rather than being tie-broken, since the replay is order-sensitive and no tie-break here can be right; and a **JSON number amount is refused at the input boundary**, because `BigInt` accepts a `number` and an amount past 2⁵³ would fold as its rounded value with nothing thrown (V-74). The last step of every build runs the **client's own `admitSnapshot`** over the bytes it just produced with the pin it just computed, so the tool cannot ship a document that fails at the user — including for reasons the driver does not know about, which is why it runs the real consumer rather than a checklist of what the consumer was believed to check. The **archive-node adapter is deliberately absent** and named as such: writing it by assumption is what R-2 forbids, and the client's own `chain-client` offers no archive path at all (smoldot serves `chainHead` only, 10 §4.2). The tool is its own **workspace package** so `@bleavit/providers` resolves under `tools/snapshot/node_modules` — declaring it at the app root instead hoists it and turns `tests/firewall/fixtures/forbidden-package-edge.ts` from TS2307 into TS2305, voiding the fixture whose whole proof is that the package is *unresolvable* there
+
+· **`pnpm run test:platform`** and **`pnpm run check:embedded-tree`** (+ `:witness`, F22) — the desktop
+channel. `platform` is the fail-closed capability lattice of rule 10 made structural: there is no boolean,
+`absent` **carries the sentence the surface renders** (an empty one throws), the record is **total** so a
+forgotten capability is a type error rather than an `undefined` that reads as *probably fine*, and `meet`
+keeps **both** reasons — a user told one reason fixes it and meets the next. **A capability that has
+evidence is *derived* from it, never written beside it** (added after review, PR #252): `desktopPlatform`
+deliberately returns on a reported divergence, since INV-FE-8 surfaces and never repairs and a thrown
+adapter is a divergence nobody can render — and the literal `proven()` next to that branch enabled every
+`embedded-tree-attestation` surface in the one state the host said the tree had failed. It is now a total
+`switch` over the attestation arm, so the two cannot disagree and a new arm fails to compile. The same
+review found its two siblings in the same function: the desktop channel's `external-navigation` was the web
+adapter's argument about *browsers* copied to a shell that grants no such permission, and a
+`reported-verified` report over **zero pinned files** was believed, which is the empty-findings refusal's
+exact mirror. It imports **no host SDK**, and
+that is a decision: the permission 10 §10.1 grants would force host code into the web bundle or a second
+build path, and the second is what F22 forbids, so the host arrives as an injected `HostBridge`. The
+consequence is that `only-platform-touches-host-sdks` has **no real edge anywhere in the tree** and the
+depcruise witness is its entire liveness proof — both spellings, since `EXTERNAL` takes an alternation and a
+typo in either arm leaves half the rule dead. The **embedded-tree assertion** is the milestone's point: a
+downloaded shell is covered by 12 §1's promises only if the tree it embeds *is* the published tree, so it is
+compared against `release.json.perFileHashes` — the attested `dist/`, never the Arweave path manifest —
+through `packages/verify`'s own `runSelfCheck`, at build time and again inside the binary **before it creates
+a window** (exit `70`, no flag that downgrades it, no repair path; INV-FE-8's *"surfaced, never repaired"*
+with the stronger option a shell has). Two implementations of one comparison agree only if something makes
+them, so both read **`crates/embedded-tree/fixtures/self-check-cases.json` in place**, and it publishes file
+**content** rather than digests — a corpus of digests would never exercise either side's hash function.
+**The gate's first version was vacuous and it was measured, not suspected:** `assertPublishable` compares
+digests too and **throws on the first disagreement**, so running it first made `runSelfCheck` unreachable and
+the witness stayed green with the self-check replaced by a hardcoded clean verdict. The self-check therefore
+runs **first**, 12 §1.2's gate runs only over a tree that already matched, and the witness requires an
+**enumerated finding of the right kind** — a throw is a witness *failure*, because it means the wrong leg
+decided. Two shell-configuration facts are gated and both were read off the pinned Tauri sources rather than
+assumed: a configured **CSP re-serialises every embedded HTML file** at build time, so `index.html` inside
+the binary would no longer be the file the release signed (12 §5.1 already delivers the release's own
+meta-CSP), and `frontendDist` accepts a **URL**, which is application code arriving over the network. The
+Rust half is a separate CI job (`desktop-shell`) because it needs a toolchain and webkit2gtk; `crates/embedded-tree`
+is deliberately **pure** so the comparison that decides whether the shell may start is testable on a machine
+with no GUI toolkit
 
 ## What lives here (moved from AGENTS.md · Repository layout, 2026-08-06)
 

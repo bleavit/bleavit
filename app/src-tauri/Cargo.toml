@@ -1,0 +1,33 @@
+[package]
+name = "bleavit-desktop"
+version = "0.0.0"
+description = "Bleavit desktop shell — direct download, embedded asset tree attested at startup"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+# Pinned `=`-exactly rather than by caret range, the way the root workspace pins its SDK
+# family. The reason is specific to this crate rather than stylistic: `tauri-codegen` decides
+# **what bytes end up embedded** — it is the code that would parse and re-serialise every HTML
+# asset if a CSP were configured — so a minor bump is a change to the artefact this milestone
+# attests, and it must be a diff somebody reviewed rather than a resolver decision. 01 §9 pins
+# the frontend stack exactly and names Tauri only as "2.x"; the narrower pin is this
+# repository's habit applied to the looser statement, not a contradiction of it.
+[build-dependencies]
+tauri-build = "=2.6.3"
+
+[dependencies]
+bleavit-embedded-tree = { path = "../crates/embedded-tree" }
+tauri = "=2.11.5"
+
+[features]
+# `custom-protocol` is a **security property here, not a build convenience**, so it is a
+# default rather than something the packaging step remembers to pass. Without it Tauri's
+# `is_dev()` is true and the shell expects a development server — application code arriving
+# over the network, which is the one thing a direct-download channel exists to not do.
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
+[lints.rust]
+unsafe_code = "forbid"

@@ -66,4 +66,10 @@ app/**/*.tsbuildinfo
 app/release-out/
 app/**/release-out/
 app/src-tauri/target/
+# F22: `tauri_build::build()` writes the capability/ACL JSON schemas here on every build.
+# They are derived from the plugin set and the toolchain version, so committing them would put
+# a churning generated artifact in the tree that nothing reads and nothing gates. `app/Cargo.lock`
+# is deliberately NOT ignored, for the reason `app/pnpm-lock.yaml` is not: INV-FE-10's
+# reproducible-build promise is a promise about a recipe.
+app/src-tauri/gen/
 app/native/**/build/
