@@ -7,6 +7,21 @@
  * discipline of 11 §11.4 is that the client makes it **first**, so a user is not
  * charged a fee for a transaction that was never going to succeed.
  *
+ * ## The inputs are `Finalized<T>`, and that is the row nobody can forget
+ *
+ * 11 §11.4 rule 4 is one sentence — *"provider/local-index data never satisfies any
+ * precondition"* — and a `Verified<T>` parameter makes it a review obligation repeated
+ * at every call site. A `provider` read is a perfectly well-formed `Verified<T>`, so a
+ * ticket assembled from an operator snapshot would return an empty block list and read
+ * as *every precondition passed*. `Finalized<T>` is constructible only inside
+ * `@bleavit/chain-client` (10 §2.1), so here the wrong input does not typecheck. That
+ * is the same control `transaction-builder`'s `evaluate` uses, for the same reason.
+ *
+ * The type carries the block but cannot compare two of them, so **one pin across every
+ * leaf is a row**. §11.4 pins a single B′ per gate: rows read at two blocks are each
+ * true and their conjunction describes a state that never existed, which is exactly
+ * what nothing on screen distinguishes from a state that did.
+ *
  * ## Three rows carry real safety content and the rest are bookkeeping
  *
  * 1. **The two fee representations must agree.** 02 §9 rule 4 publishes the trade
@@ -24,20 +39,37 @@
  *    certifies that it lands on the same base unit. A tolerance would admit a
  *    disagreement the port is built not to have, and the direction that matters is
  *    the unsafe one: a quote a base unit under the chain's charge hands the user a
- *    transaction that reverts (04 §6.1 step 4).
+ *    transaction that reverts (04 §6.1 step 4). Both published fields are compared,
+ *    not their sum: a chain `cost`/`fee` of `(100, 3)` against a client `(101, 2)`
+ *    agrees on a buy's total and disagrees on a sell's net.
  * 3. **The owning proposal must be in `Trading` or `Extended`, and nothing else.**
  *    P-1 says *"— **only**"*, because D-8 cut forecast trading: books close at
  *    branch resolution and never reopen. A `Resolved` book that still answered
  *    quotes would be a screen selling a claim that cannot be created.
  *
+ * ## A buy and a sell are not one row set, and the difference is money
+ *
+ * P-1 states two of its rows per direction, and a ticket that carried no direction
+ * could implement neither. **The slippage recheck** — *"recheck `max_cost`/`min_proceeds`
+ * still satisfiable"* — compares the refreshed quote against the ceiling or floor this
+ * ticket will encode, which the runtime enforces at 04 §6.1 step 4. Without it every
+ * other row passes on a buy drafted at `max_cost = 1,002,000` whose refreshed charge is
+ * `1,003,000`, and the signed call comes back `SlippageExceeded`. **The balance row**
+ * reads *"user USDC balance (buy) / position balance (sell)"*: a sell delivers `amount`
+ * position units and receives USDC, so comparing the seller's holdings against the
+ * quoted proceeds admits a user who holds less than they are selling whenever the
+ * proceeds happen to be smaller.
+ *
  * ## What this module does not do
  *
  * It computes no quote and reads no chain. Both quotes arrive as arguments — the
  * chain's and the client's — because a module that recomputed one of them could
- * not be the thing that compares them. And it names no fee rate, no minimum and no
- * maximum: every one is a chain read supplied by the caller, so a client that
- * forgot to read one gets a type error rather than a launch value baked into a
- * precondition (app-code rule 7).
+ * not be the thing that compares them. The one figure it derives is 04 §6.1's own
+ * combination of the two fields `QuoteView` already publishes (02 §4): `cost + fee`
+ * debited on a buy, `cost − fee` credited on a sell. And it names no fee rate, no
+ * minimum and no maximum: every one is a chain read supplied by the caller, so a
+ * client that forgot to read one gets a type error rather than a launch value baked
+ * into a precondition (app-code rule 7).
  *
  * ## Hosted books relax nothing
  *
@@ -47,11 +79,12 @@
  * branched on. A row that softened for hosted books would be the relaxation the
  * rule forbids.
  *
- * @see docs/architecture/11-frontend-workflows.md §11.5, §11.2a
+ * @see docs/architecture/11-frontend-workflows.md §11.5, §11.4, §11.2a
  * @see docs/architecture/04-markets-and-pricing.md §6.1, §8.3, §8.4
+ * @see docs/architecture/02-integration-contract.md §4 (`QuoteView`)
  */
 
-import type { Verified } from '@bleavit/shared-types';
+import type { Finalized } from '@bleavit/chain-client';
 
 import type { LedgerDomain } from './ledger-domain.js';
 
@@ -92,44 +125,80 @@ export interface BookIdentity {
 /** The two published forms of the trade fee (02 §9 rule 4). */
 export interface FeeReadings {
   /** `Market::Fee`, in basis points, from the constants API. */
-  readonly metadataBps: Verified<bigint>;
+  readonly metadataBps: Finalized<bigint>;
   /** Raw `params(mkt.fee)`, a `Perbill` inner scalar. */
-  readonly paramsPerbill: Verified<bigint>;
+  readonly paramsPerbill: Finalized<bigint>;
+}
+
+/**
+ * `QuoteView`'s two monetary fields (02 §4), kept apart because 04 §6.1 combines
+ * them differently per direction and because a sum hides a disagreement in either.
+ */
+export interface QuoteFigures {
+  /** USDC the wrapper charges (buy) or pays (sell), excluding the fee. */
+  readonly cost: bigint;
+  /** USDC fee at the current `mkt.fee`. */
+  readonly fee: bigint;
 }
 
 /** The chain's own quote and the client's recompute of the same trade. */
 export interface QuoteAgreement {
-  /** `quote()`'s charge in base units, at B′. */
-  readonly chargeFromChain: Verified<bigint>;
-  /** `packages/protocol`'s charge for the same book state and amount. */
-  readonly chargeFromClient: bigint;
+  /** `quote()`'s `QuoteView` figures at B′ — one runtime-API read, so one pin. */
+  readonly fromChain: Finalized<QuoteFigures>;
+  /** `packages/protocol`'s figures for the same book state, amount and side. */
+  readonly fromClient: QuoteFigures;
 }
+
+/**
+ * The direction and the slippage limit this ticket will encode (04 §6.1).
+ *
+ * A union rather than a direction plus two optional limits: a buy has no
+ * `min_proceeds` and a sell has no `max_cost`, and a shape that admitted both would
+ * let a ticket be built with neither — a signed trade carrying no slippage bound at
+ * all, which is what 11 §11.14's *"never widens a limit"* rule exists to prevent on
+ * the import path.
+ */
+export type TradeOrder =
+  | {
+      readonly direction: 'buy';
+      /** `cost + fee ≤ max_cost` is the runtime's own check (04 §6.1 step 4). */
+      readonly maxCost: bigint;
+    }
+  | {
+      readonly direction: 'sell';
+      /** `min_proceeds` bounds the USDC-equivalent **net** the seller receives. */
+      readonly minProceeds: bigint;
+    };
+
+export type TradeDirection = TradeOrder['direction'];
 
 export interface TradeInputs {
   readonly book: BookIdentity;
+  /** What is being signed: the side, and the ceiling or floor it encodes. */
+  readonly order: TradeOrder;
   /** Absent for a Baseline book, which has no owning proposal (04 §6.1). */
-  readonly proposalState?: Verified<ProposalState>;
+  readonly proposalState?: Finalized<ProposalState>;
   /** `Market.Markets[id].phase` — a book stops quoting when it is not open. */
-  readonly marketOpen: Verified<boolean>;
+  readonly marketOpen: Finalized<boolean>;
   readonly fee: FeeReadings;
   readonly quote: QuoteAgreement;
   /** The trade size in base units, as the user entered it. */
   readonly amount: bigint;
   /** `MinTrade` / `MaxTrade` from the constants API — chain reads, never defaults. */
-  readonly minTrade: Verified<bigint>;
-  readonly maxTrade: Verified<bigint>;
+  readonly minTrade: Finalized<bigint>;
+  readonly maxTrade: Finalized<bigint>;
   /** Spendable balance on the side being traded: USDC on a buy, positions on a sell. */
-  readonly spendable: Verified<bigint>;
+  readonly spendable: Finalized<bigint>;
   /** `Constitution.PhaseFlags`'s trading-enabled bit. */
-  readonly tradingEnabled: Verified<boolean>;
+  readonly tradingEnabled: Finalized<boolean>;
   /** PB-LEDGER-FREEZE (06 §6.3) — a freeze blocks every ledger-touching call. */
-  readonly ledgerFrozen: Verified<boolean>;
+  readonly ledgerFrozen: Finalized<boolean>;
   /** P-2 only: `BaselineMarketOf(epoch)` resolved to a live book. */
-  readonly baselineBookPresent?: Verified<boolean>;
+  readonly baselineBookPresent?: Finalized<boolean>;
   /** P-2 only: the epoch trading window, incl. any pair still in `Extended`. */
-  readonly baselineWindowOpen?: Verified<boolean>;
+  readonly baselineWindowOpen?: Finalized<boolean>;
   /** P-2 only: `BaselineVaults(epoch)` still open (03). */
-  readonly baselineVaultOpen?: Verified<boolean>;
+  readonly baselineVaultOpen?: Finalized<boolean>;
 }
 
 /** `Perbill → basis points`, floored — the 02 §9 rule 4 projection. */
@@ -138,7 +207,41 @@ export function perbillToBps(perbill: bigint): bigint {
   return perbill / 100_000n;
 }
 
+/**
+ * What this order moves in USDC: the total debited on a buy, the net credited on a
+ * sell (04 §6.1 — the fee is added to the buyer's cost and withheld from the
+ * seller's proceeds).
+ *
+ * Exported because the same figure is the headline on the confirm screen and the
+ * one the slippage bound is compared against, and two derivations of it would be
+ * two chances to combine the fields the wrong way round.
+ */
+export function orderTotal(direction: TradeDirection, quote: QuoteFigures): bigint {
+  return direction === 'buy' ? quote.cost + quote.fee : quote.cost - quote.fee;
+}
+
 const TRADABLE: readonly ProposalState[] = Object.freeze(['Trading', 'Extended']);
+
+/** Every finalized read this ticket was assembled from, labelled for the pin row. */
+function pinnedLeaves(inputs: TradeInputs): readonly (readonly [string, Finalized<unknown>])[] {
+  const optional = ([label, read]: readonly [string, Finalized<unknown> | undefined]) =>
+    read === undefined ? [] : [[label, read] as const];
+  return [
+    ...optional(['the proposal state', inputs.proposalState]),
+    ['the market phase', inputs.marketOpen],
+    ['Market::Fee', inputs.fee.metadataBps],
+    ['params(mkt.fee)', inputs.fee.paramsPerbill],
+    ['quote()', inputs.quote.fromChain],
+    ['MinTrade', inputs.minTrade],
+    ['MaxTrade', inputs.maxTrade],
+    ['the spendable balance', inputs.spendable],
+    ['PhaseFlags', inputs.tradingEnabled],
+    ['the ledger freeze', inputs.ledgerFrozen],
+    ...optional(['BaselineMarketOf(epoch)', inputs.baselineBookPresent]),
+    ...optional(['the epoch trading window', inputs.baselineWindowOpen]),
+    ...optional(['BaselineVaults(epoch)', inputs.baselineVaultOpen]),
+  ];
+}
 
 /**
  * Every §11.5 P-1/P-2 row that refuses this ticket, in the order a screen shows
@@ -151,6 +254,24 @@ const TRADABLE: readonly ProposalState[] = Object.freeze(['Trading', 'Extended']
  */
 export function tradeBlocks(inputs: TradeInputs): readonly TradeBlock[] {
   const blocks: TradeBlock[] = [];
+
+  // §11.4: one B′ per gate. Every leaf is finalized by its type, so what remains
+  // checkable is whether they are the *same* finalized block — a ticket assembled
+  // from two of them is a set of individually true rows about no state at all.
+  const byPin = new Map<string, string[]>();
+  for (const [label, read] of pinnedLeaves(inputs)) {
+    const pin = `${read.status.chain} block ${read.status.blockNumber} (${read.status.blockHash})`;
+    byPin.set(pin, [...(byPin.get(pin) ?? []), label]);
+  }
+  if (byPin.size > 1) {
+    const spread = [...byPin].map(([pin, labels]) => `${labels.join(', ')} at ${pin}`).join('; ');
+    blocks.push({
+      check: 'ticket pin',
+      detail:
+        `this ticket mixes blocks — ${spread}. Every precondition is read at one B′ ` +
+        '(11 §11.4), and rows from two blocks describe a state that never existed',
+    });
+  }
 
   // P-1: the owning proposal, and *only* Trading/Extended (D-8 cut forecast
   // trading, so a Resolved book that still quoted would sell an uncreatable claim).
@@ -191,14 +312,41 @@ export function tradeBlocks(inputs: TradeInputs): readonly TradeBlock[] {
   }
 
   // P-1: FE-CHAIN-005. Exact, because the port reproduces the runtime's integer
-  // path and `chain-quote-agreement.json` certifies the same base unit.
-  if (inputs.quote.chargeFromChain.value !== inputs.quote.chargeFromClient) {
+  // path and `chain-quote-agreement.json` certifies the same base unit. Compared
+  // field by field: one sum can hide two offsetting differences, and which of them
+  // matters depends on the direction.
+  const chainQuote = inputs.quote.fromChain.value;
+  const clientQuote = inputs.quote.fromClient;
+  if (chainQuote.cost !== clientQuote.cost || chainQuote.fee !== clientQuote.fee) {
     blocks.push({
       check: 'P-1 quote agreement',
       code: 'FE-CHAIN-005',
       detail:
-        `quote() charges ${inputs.quote.chargeFromChain.value} base units and the client recomputes ` +
-        `${inputs.quote.chargeFromClient}; trading is blocked until they agree`,
+        `quote() reports cost ${chainQuote.cost} and fee ${chainQuote.fee} base units, and the ` +
+        `client recomputes cost ${clientQuote.cost} and fee ${clientQuote.fee}; trading is ` +
+        'blocked until they agree',
+    });
+  }
+
+  // P-1: "recheck max_cost/min_proceeds still satisfiable". The refreshed quote is
+  // compared against the bound this ticket will encode, which is the same test the
+  // runtime makes at 04 §6.1 step 4 — after the user has paid a transaction fee.
+  const total = orderTotal(inputs.order.direction, chainQuote);
+  if (inputs.order.direction === 'buy') {
+    if (total > inputs.order.maxCost) {
+      blocks.push({
+        check: 'P-1 slippage bound',
+        detail:
+          `the refreshed charge is ${total} base units and this ticket encodes max_cost ` +
+          `${inputs.order.maxCost}; the runtime refuses a buy whose cost plus fee exceeds it`,
+      });
+    }
+  } else if (total < inputs.order.minProceeds) {
+    blocks.push({
+      check: 'P-1 slippage bound',
+      detail:
+        `the refreshed net proceeds are ${total} base units and this ticket encodes min_proceeds ` +
+        `${inputs.order.minProceeds}; the runtime refuses a sale that pays less`,
     });
   }
 
@@ -216,15 +364,26 @@ export function tradeBlocks(inputs: TradeInputs): readonly TradeBlock[] {
     });
   }
 
-  // P-1: the balance is checked against the **charge**, not the amount — on a buy
-  // those differ by the fee, and checking the amount passes a trade the runtime
-  // refuses for want of the last few base units.
-  if (inputs.spendable.value < inputs.quote.chargeFromChain.value) {
+  // P-1 reads "user USDC balance (buy) / position balance (sell)", and the two are
+  // different quantities in different assets. On a buy the balance is checked
+  // against the **charge**, not the amount, because those differ by the fee and
+  // checking the amount passes a trade the runtime refuses for want of the last few
+  // base units. On a sell the seller delivers positions and receives USDC, so the
+  // holdings are checked against the amount: comparing them against the proceeds
+  // passes a user who holds less than they are selling whenever the sale pays less
+  // than they hold.
+  if (inputs.order.direction === 'buy') {
+    if (inputs.spendable.value < total) {
+      blocks.push({
+        check: 'P-1 USDC balance',
+        detail: `the charge is ${total} base units and ${inputs.spendable.value} is available`,
+      });
+    }
+  } else if (inputs.spendable.value < inputs.amount) {
     blocks.push({
-      check: 'P-1 balance',
+      check: 'P-1 position balance',
       detail:
-        `the charge is ${inputs.quote.chargeFromChain.value} base units and ` +
-        `${inputs.spendable.value} is available`,
+        `this sale delivers ${inputs.amount} position units and ${inputs.spendable.value} is held`,
     });
   }
 
@@ -243,7 +402,7 @@ export function tradeBlocks(inputs: TradeInputs): readonly TradeBlock[] {
     // blocks trading, and §11.5's reaped-book paragraph forbids rendering a
     // missing book's fail-closed zero as a market price.
     const row = (
-      value: Verified<boolean> | undefined,
+      value: Finalized<boolean> | undefined,
       check: string,
       absent: string,
       unmet: string,

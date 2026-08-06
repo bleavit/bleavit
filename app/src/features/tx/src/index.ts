@@ -267,6 +267,7 @@ export {
 } from './void-recovery.js';
 export {
   mayPrepareTrade,
+  orderTotal,
   perbillToBps,
   tradeBlocks,
   type BookIdentity,
@@ -274,7 +275,10 @@ export {
   type FeeReadings,
   type ProposalState,
   type QuoteAgreement,
+  type QuoteFigures,
   type TradableState,
   type TradeBlock,
+  type TradeDirection,
   type TradeInputs,
+  type TradeOrder,
 } from './trade-ticket.js';
