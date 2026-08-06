@@ -1,5 +1,5 @@
 /**
- * GENERATED — do not edit. Source: `tools/release/surface-manifest.json` (contract v27).
+ * GENERATED — do not edit. Source: `tools/release/surface-manifest.json` (contract v28).
  * Regenerate: `pnpm -C app run surface:generate`; verified by `pnpm -C app run surface:check`.
  *
  * 10 §5.2's `CRITICAL_SURFACE`: every runtime API, storage item, constant and event the
@@ -29,7 +29,7 @@ export interface CriticalSurfaceEntry {
   readonly citation: string;
 }
 
-export const INTEGRATION_CONTRACT_VERSION = 27;
+export const INTEGRATION_CONTRACT_VERSION = 28;
 
 /** Manifest entries with no metadata surface to probe (raw fixed-layout key, chain properties). */
 export const UNPROBED_MANIFEST_ENTRIES = 2;
@@ -284,20 +284,29 @@ export type SurfaceId =
   | "storage.execution_guard.hard_gate_breach"
   | "storage.execution_guard.held_resources"
   | "storage.execution_guard.migration_halt"
+  | "storage.execution_guard.pending_upgrade"
   | "storage.execution_guard.queue"
   | "storage.execution_guard.ratifications"
   | "storage.foreign_assets.account"
   | "storage.guardian.allowances"
+  | "storage.guardian.approvals"
   | "storage.guardian.members"
+  | "storage.guardian.pending_actions"
   | "storage.identity.parachain_id"
   | "storage.identity.usdc_asset"
   | "storage.identity.usdc_metadata"
+  | "storage.incident_registry.ack_records"
+  | "storage.incident_registry.closed_at"
+  | "storage.incident_registry.filings"
   | "storage.ledger.baseline_vaults"
   | "storage.ledger.position_totals"
   | "storage.ledger.positions"
   | "storage.ledger.vaults"
   | "storage.market.baseline_market_of"
   | "storage.market.markets"
+  | "storage.milestone_registry.ack_records"
+  | "storage.milestone_registry.closed_at"
+  | "storage.milestone_registry.filings"
   | "storage.multisig.multisigs"
   | "storage.oracle.component_values"
   | "storage.oracle.reporters"
@@ -319,6 +328,7 @@ export type SurfaceId =
   | "storage.service_ledger.positions"
   | "storage.service_ledger.vaults"
   | "storage.system.account"
+  | "storage.system.authorized_upgrade"
   | "storage.system.events"
   | "storage.welfare.gate_breach_flags"
   | "storage.welfare.metric_specs"
@@ -564,20 +574,29 @@ export const CRITICAL_SURFACE: readonly CriticalSurfaceEntry[] = [
   { id: "storage.execution_guard.hard_gate_breach", compatGroup: "query", pallet: "ExecutionGuard", member: "HardGateBreach", required: true, citation: "02 §7.8" },
   { id: "storage.execution_guard.held_resources", compatGroup: "query", pallet: "ExecutionGuard", member: "HeldResources", required: true, citation: "02 §7.8" },
   { id: "storage.execution_guard.migration_halt", compatGroup: "query", pallet: "ExecutionGuard", member: "MigrationHalt", required: true, citation: "02 §7.8" },
+  { id: "storage.execution_guard.pending_upgrade", compatGroup: "query", pallet: "ExecutionGuard", member: "PendingUpgrade", required: true, citation: "02 §7.4 execution-guard pending upgrade; 11 §11.8.4 step 1/step 4" },
   { id: "storage.execution_guard.queue", compatGroup: "query", pallet: "ExecutionGuard", member: "Queue", required: true, citation: "02 §7.4" },
   { id: "storage.execution_guard.ratifications", compatGroup: "query", pallet: "ExecutionGuard", member: "Ratifications", required: true, citation: "02 §7.4" },
   { id: "storage.foreign_assets.account", compatGroup: "query", pallet: "ForeignAssets", member: "Account", required: true, citation: "02 §7.4; 02 §8" },
   { id: "storage.guardian.allowances", compatGroup: "query", pallet: "Guardian", member: "Allowances", required: true, citation: "02 §7.4 guardian allowances" },
+  { id: "storage.guardian.approvals", compatGroup: "query", pallet: "Guardian", member: "Approvals", required: true, citation: "02 §7.4 guardian approvals; 11 §11.8.2 row 3" },
   { id: "storage.guardian.members", compatGroup: "query", pallet: "Guardian", member: "Members", required: true, citation: "02 §7.4 guardian membership" },
+  { id: "storage.guardian.pending_actions", compatGroup: "query", pallet: "Guardian", member: "PendingActions", required: true, citation: "02 §7.4 guardian pending actions; 11 §11.8.2 row 1" },
   { id: "storage.identity.parachain_id", compatGroup: "query", pallet: "ParachainInfo", member: "ParachainId", required: true, citation: "02 §8" },
   { id: "storage.identity.usdc_asset", compatGroup: "query", pallet: "ForeignAssets", member: "Asset", required: true, citation: "02 §8" },
   { id: "storage.identity.usdc_metadata", compatGroup: "query", pallet: "ForeignAssets", member: "Metadata", required: true, citation: "02 §8" },
+  { id: "storage.incident_registry.ack_records", compatGroup: "query", pallet: "IncidentRegistry", member: "AckRecords", required: true, citation: "02 §7.4 watchtower acknowledgments; 11 §11.8.6" },
+  { id: "storage.incident_registry.closed_at", compatGroup: "query", pallet: "IncidentRegistry", member: "ClosedAt", required: true, citation: "02 §7.4 registry closure; 11 §11.8.6" },
+  { id: "storage.incident_registry.filings", compatGroup: "query", pallet: "IncidentRegistry", member: "Filings", required: true, citation: "02 §7.4 registry filings; 11 §11.8.6" },
   { id: "storage.ledger.baseline_vaults", compatGroup: "query", pallet: "ConditionalLedger", member: "BaselineVaults", required: true, citation: "02 §7.4" },
   { id: "storage.ledger.position_totals", compatGroup: "query", pallet: "ConditionalLedger", member: "PositionTotals", required: true, citation: "02 §7.4" },
   { id: "storage.ledger.positions", compatGroup: "query", pallet: "ConditionalLedger", member: "Positions", required: true, citation: "02 §7.4" },
   { id: "storage.ledger.vaults", compatGroup: "query", pallet: "ConditionalLedger", member: "Vaults", required: true, citation: "02 §7.4" },
   { id: "storage.market.baseline_market_of", compatGroup: "query", pallet: "Market", member: "BaselineMarketOf", required: true, citation: "02 §7.4" },
   { id: "storage.market.markets", compatGroup: "query", pallet: "Market", member: "Markets", required: true, citation: "02 §7.4" },
+  { id: "storage.milestone_registry.ack_records", compatGroup: "query", pallet: "MilestoneRegistry", member: "AckRecords", required: true, citation: "02 §7.4 watchtower acknowledgments; 11 §11.8.6" },
+  { id: "storage.milestone_registry.closed_at", compatGroup: "query", pallet: "MilestoneRegistry", member: "ClosedAt", required: true, citation: "02 §7.4 registry closure; 11 §11.8.6" },
+  { id: "storage.milestone_registry.filings", compatGroup: "query", pallet: "MilestoneRegistry", member: "Filings", required: true, citation: "02 §7.4 registry filings; 11 §11.8.6" },
   { id: "storage.multisig.multisigs", compatGroup: "query", pallet: "Multisig", member: "Multisigs", required: true, citation: "02 §7.6" },
   { id: "storage.oracle.component_values", compatGroup: "query", pallet: "Oracle", member: "ComponentValues", required: true, citation: "02 §7.2" },
   { id: "storage.oracle.reporters", compatGroup: "query", pallet: "Oracle", member: "Reporters", required: true, citation: "02 §7.2" },
@@ -599,6 +618,7 @@ export const CRITICAL_SURFACE: readonly CriticalSurfaceEntry[] = [
   { id: "storage.service_ledger.positions", compatGroup: "query", pallet: "ServiceLedger", member: "Positions", required: true, citation: "02 §7.1; 02 §7.4" },
   { id: "storage.service_ledger.vaults", compatGroup: "query", pallet: "ServiceLedger", member: "Vaults", required: true, citation: "02 §7.1; 02 §7.4" },
   { id: "storage.system.account", compatGroup: "query", pallet: "System", member: "Account", required: true, citation: "02 §7.4" },
+  { id: "storage.system.authorized_upgrade", compatGroup: "query", pallet: "System", member: "AuthorizedUpgrade", required: true, citation: "02 §7.6; 11 §11.8.4 step 1" },
   { id: "storage.system.events", compatGroup: "query", pallet: "System", member: "Events", required: true, citation: "02 §7.6" },
   { id: "storage.welfare.gate_breach_flags", compatGroup: "query", pallet: "Welfare", member: "GateBreachFlags", required: true, citation: "02 §7.4" },
   { id: "storage.welfare.metric_specs", compatGroup: "query", pallet: "Welfare", member: "MetricSpecs", required: true, citation: "02 §7.4" },
