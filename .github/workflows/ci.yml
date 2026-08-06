@@ -590,7 +590,7 @@ jobs:
         working-directory: app
         run: pnpm run check:types
 
-      - name: smoldot artifact budget (10 §9.3, FE-P4)
+      - name: smoldot artifact budget (10 §9.4, FE-P4)
         # A budget nothing measures is a sentence, and the one certain thing about a
         # dependency's compressed size is that it changes. Fails closed if the pinned
         # package's layout moved, so a version bump cannot measure nothing and pass.

@@ -407,6 +407,12 @@ Import quotas (≤ 400 MB uncompressed, ≤ 4 M rows, streamed, eviction preview
 
 ## 9. Resource budgets — recomputed honestly
 
+**Units, stated once because one cell read the other way is a silent 5 % grant:** MB means
+**10⁶ bytes** throughout §9, and KB 10³. §9.2's depth tables are only reproducible under that
+reading, and `tools/ci/check-frontend-budgets.py` re-derives them under it; §9.4's size
+budgets use the same convention, and `app/tools/check-smoldot-budget.ts` — which measured its
+budget as MiB until 2026-08-06 — is bound to its published cell by that gate.
+
 ### 9.1 Load model (F-medium: growth arithmetic)
 
 The reviewed growth table assumed ~20 live books; the revision that replaced it used **196**, and 196 is the wrong bound (SQ-557). `MaxLiveMarkets = 196` counts books **without a durable terminal latch** — a book that closed at d18 keeps its slot until its vault settles at e+3 — while [04](04-markets-and-pricing.md) §2 admits trading and observation **only** while the owning proposal is `Trading`/`Extended`. Live-but-closed books provably emit nothing, and the separately retained **2,240** `MaxStoredMarkets` rows emit nothing either. The set that emits is one epoch's trading books, and the Trade phase (`[5/21, 18/21)`, [13](13-parameters.md) §3.1) does not overlap the next epoch's, so the sustained observing count is exactly

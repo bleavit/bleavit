@@ -18,6 +18,7 @@ CHECKER = ROOT / "tools" / "ci" / "check-frontend-budgets.py"
 FRONTEND = ROOT / "docs" / "architecture" / "10-frontend-architecture.md"
 PARAMS = ROOT / "docs" / "architecture" / "13-parameters.md"
 POV_BUDGETS = ROOT / "runtime" / "bleavit-runtime" / "src" / "pov_budgets.rs"
+SMOLDOT_GATE = ROOT / "app" / "tools" / "check-smoldot-budget.ts"
 
 
 def run() -> subprocess.CompletedProcess[str]:
@@ -151,6 +152,15 @@ class FrontendBudgets(unittest.TestCase):
             "| Release-shipped fallback metadata (gz, lazy) | ≤ 1.5 MB",
             "| Release-shipped fallback metadata (gz, lazy) | ≤ 0.5 MB",
             "budgets 0.5 MB for release-shipped metadata",
+        )
+
+    def test_a_mib_reading_of_the_smoldot_budget_fails(self) -> None:
+        """The gate held its own copy of §9.4's bound and read MB as MiB until 2026-08-06."""
+        self.assert_mutation_caught(
+            SMOLDOT_GATE,
+            "const BUDGET_GZ_BYTES = 3.5e6;",
+            "const BUDGET_GZ_BYTES = 3.5 * 1024 * 1024;",
+            "grants ~5 % the document does not",
         )
 
     def test_a_stale_depth_cell_fails(self) -> None:

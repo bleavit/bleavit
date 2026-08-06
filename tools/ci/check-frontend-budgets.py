@@ -36,6 +36,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[2]
 PARAMS = ROOT / "docs" / "architecture" / "13-parameters.md"
 FRONTEND = ROOT / "docs" / "architecture" / "10-frontend-architecture.md"
 POV_BUDGETS = ROOT / "runtime" / "bleavit-runtime" / "src" / "pov_budgets.rs"
+SMOLDOT_GATE = ROOT / "app" / "tools" / "check-smoldot-budget.ts"
 
 #: 10 §9.1's effective per-row cost, and the one modelling assumption the documents
 #: state rather than derive. It is labelled as an assumption in §9.1 itself, so it is
@@ -66,6 +67,14 @@ def find(text: str, pattern: str, what: str) -> re.Match[str]:
 
 def number(raw: str) -> float:
     return float(raw.replace(",", "").replace(" ", ""))
+
+
+def product(expression: str) -> float:
+    """Evaluate a `a * b * c` literal product, so both `3.5e6` and `3.5 * 1024 * 1024` read."""
+    value = 1.0
+    for factor in expression.split("*"):
+        value *= float(factor.strip())
+    return value
 
 
 def decimals(raw: str) -> int:
@@ -360,6 +369,28 @@ def main() -> int:
                 f"{share:g} MB — a bound above its own share cannot bind"
             )
         checked += 1
+
+    # §9.4's smoldot cell and the gate that enforces it. The gate held its own copy of
+    # the bound and read it as MiB, which quietly granted 5 % more than §9 allots — the
+    # same closed loop one file over, and the reason this binding exists at all.
+    smoldot_mb = float(
+        find(nine, r"\| smoldot WASM \(worker, lazy\) \| ≤ ([\d.]+) MB gz", "§9.4's smoldot budget").group(1)
+    )
+    gate = SMOLDOT_GATE.read_text(encoding="utf-8")
+    # The RHS is captured as an expression and evaluated, not matched literally: the
+    # difference between `3.5e6` and `3.5 * 1024 * 1024` is exactly the defect, so a
+    # pattern that only recognised one spelling would report the other as "anchor
+    # missing" rather than as the 5 % over-grant it is.
+    gate_bytes = product(
+        find(gate, r"const BUDGET_GZ_BYTES = ([\d.eE+*\s]+);", "the smoldot gate's budget constant").group(1)
+    )
+    if gate_bytes != smoldot_mb * 1e6:
+        raise Fail(
+            f"§9.4 budgets smoldot at {smoldot_mb} MB gz = {smoldot_mb * 1e6:.0f} B, but "
+            f"`app/tools/check-smoldot-budget.ts` enforces {gate_bytes:.0f} B. §9 states MB = 10⁶; "
+            "a MiB reading of this cell grants ~5 % the document does not."
+        )
+    checked += 1
 
     blob_mb = float(find(nine, r"\*\*measured ([\d.]+) MB gz\*\*", "§9.3's measured blob size").group(1))
     bundle = float(

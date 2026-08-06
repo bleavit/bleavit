@@ -1,15 +1,15 @@
 #!/usr/bin/env node
 /**
- * The 10 §9.3 smoldot artifact budget, measured rather than asserted (FE-P4, V-88).
+ * The 10 §9.4 smoldot artifact budget, measured rather than asserted (FE-P4, V-88).
  *
- * §9.3 budgets *"smoldot WASM (worker, lazy) ≤ 3.5 MB gz"* and tagged the figure
+ * §9.4 budgets *"smoldot WASM (worker, lazy) ≤ 3.5 MB gz"* and tagged the figure
  * `[VERIFY artifact size — FE-P4]`. It is now measured — 2.23 MiB gz for `smoldot@3.3.2` —
  * and this gate keeps it measured, because a budget nothing checks is a sentence, and the
  * one thing certain about a dependency's compressed size is that it changes.
  *
  * What it measures, and why that shape: smoldot ships its bytecode as **JavaScript modules
  * carrying zlib-compressed, base64-encoded string literals**, not as a `.wasm` file. So
- * the transferred bytes are those modules gzipped — which is what §9.3's "MB gz" means and
+ * the transferred bytes are those modules gzipped — which is what §9.4's "MB gz" means and
  * what a static gateway actually serves.
  *
  * **Fails closed.** If the expected files are not where the pinned version puts them, this
@@ -25,8 +25,15 @@ import { dirname, join, resolve } from 'node:path';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const APP = resolve(HERE, '..');
 
-/** 10 §9.3, the transferred-size budget for the lazily loaded light client. */
-const BUDGET_GZ_BYTES = 3.5 * 1024 * 1024;
+/**
+ * 10 §9.4, the transferred-size budget for the lazily loaded light client.
+ *
+ * Decimal MB (10^6), which is §9's stated convention throughout — §9.2's depth tables are
+ * only reproducible under it, and reading this one cell as MiB would silently grant 5 % more
+ * budget than the document allots. `tools/ci/check-frontend-budgets.py` binds this constant
+ * to the published cell so the two cannot drift apart again.
+ */
+const BUDGET_GZ_BYTES = 3.5e6;
 
 function smoldotBytecodeDir() {
   const store = join(APP, 'node_modules', '.pnpm');
@@ -65,11 +72,11 @@ const gz = gzipSync(blob, { level: 9 }).length;
 const mib = (n: number): string => `${(n / 1024 / 1024).toFixed(2)} MiB`;
 
 console.log(`smoldot ${version}: ${files.length} bytecode module(s), ${mib(blob.length)} raw -> ${mib(gz)} gz`);
-console.log(`10 §9.3 budget: ${mib(BUDGET_GZ_BYTES)} gz`);
+console.log(`10 §9.4 budget: ${mib(BUDGET_GZ_BYTES)} gz`);
 
 if (gz > BUDGET_GZ_BYTES) {
   console.error(
-    `FAIL over the 10 §9.3 budget by ${mib(gz - BUDGET_GZ_BYTES)}. This is not a lint: the light ` +
+    `FAIL over the 10 §9.4 budget by ${mib(gz - BUDGET_GZ_BYTES)}. This is not a lint: the light ` +
       'client is the only path to a verified read (INV-FE-1), so its transfer size is what a user ' +
       'on a poor connection pays before the app can do anything at all.',
   );
