@@ -67,7 +67,7 @@
     // bound to the shapes they restate — a compile-time claim, and therefore worth nothing
     // unless this project compiles it.
     "tests/platform/**/*.ts",
-    "tools/desktop/**/*.ts"
+    "tools/desktop/**/*.ts",
     // Shared test helpers. Included explicitly rather than left to be pulled in by whichever
     // suite happens to import them first: a helper nobody type-checks is where an untyped
     // assertion hides, and this one is the only assertion four packages share.

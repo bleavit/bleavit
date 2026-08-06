@@ -804,6 +804,34 @@ jobs:
           # "bundle-size CI gate" since the reviewed design while no such gate
           # existed. Same step for the same reason as the line above.
           pnpm run check:bundle-budget
+          # 10 §9.4's two lazy-artifact size rows. The metadata half weighs the
+          # committed per-spec_version blobs an FE-P5 fallback would carry, against
+          # both §9.4's combined size and §9.3's blob count, and re-measures §9.3's
+          # own published blob figures. The chain-spec half weighs `dist/chain-specs/`
+          # — the EMITTED tree, which is why it lives in this step and not beside the
+          # source-tree gates: a declared source path is what the release is built
+          # from and a browser fetches none of it, so a release could pin a hash,
+          # name a file, be weighed and ship no chain spec at all. Declaration and
+          # emission are now bound in both directions, and every pinned role must be
+          # matched by an emitted file by SHA-256 — the comparison the client makes
+          # at boot. No spec is declared today, so that half additionally requires
+          # the readiness blocker to stand and the emitted tree to carry none either.
+          # The witness leg refuses a release for each of those bindings and admits a
+          # consistent one, so it cannot be satisfied by a checker that refuses
+          # everything.
+          pnpm run check:artifact-budget
+          pnpm run check:artifact-budget:witness
+          # 10 §9.4's first-meaningful-render row — Lighthouse over the tree the
+          # first line emitted, on §9.4's own reference hardware. Same step for
+          # the same reason. Chrome comes from the runner image (Google Chrome is
+          # preinstalled on ubuntu-24.04, verified against the image manifest,
+          # V-180); the gate FAILS rather than skipping when it cannot start one,
+          # because a skipped measurement is an unenforced budget. The witness is one
+          # further run against a 1 ms threshold that MUST be refused — the only thing
+          # that distinguishes a gate which measured and passed from one that stopped
+          # comparing, since both print the same green line.
+          pnpm run check:render-budget
+          pnpm run check:render-budget:witness
           # F22, in the same step and for the same reason. The desktop shell embeds
           # `dist/` and the assertion is that what it embeds IS the attested tree, so
           # this reads the tree the two lines above just produced, against the
@@ -836,34 +864,6 @@ jobs:
         # two declarations drifting quietly.
         working-directory: app
         run: pnpm run test:platform
-          # 10 §9.4's two lazy-artifact size rows. The metadata half weighs the
-          # committed per-spec_version blobs an FE-P5 fallback would carry, against
-          # both §9.4's combined size and §9.3's blob count, and re-measures §9.3's
-          # own published blob figures. The chain-spec half weighs `dist/chain-specs/`
-          # — the EMITTED tree, which is why it lives in this step and not beside the
-          # source-tree gates: a declared source path is what the release is built
-          # from and a browser fetches none of it, so a release could pin a hash,
-          # name a file, be weighed and ship no chain spec at all. Declaration and
-          # emission are now bound in both directions, and every pinned role must be
-          # matched by an emitted file by SHA-256 — the comparison the client makes
-          # at boot. No spec is declared today, so that half additionally requires
-          # the readiness blocker to stand and the emitted tree to carry none either.
-          # The witness leg refuses a release for each of those bindings and admits a
-          # consistent one, so it cannot be satisfied by a checker that refuses
-          # everything.
-          pnpm run check:artifact-budget
-          pnpm run check:artifact-budget:witness
-          # 10 §9.4's first-meaningful-render row — Lighthouse over the tree the
-          # first line emitted, on §9.4's own reference hardware. Same step for
-          # the same reason. Chrome comes from the runner image (Google Chrome is
-          # preinstalled on ubuntu-24.04, verified against the image manifest,
-          # V-180); the gate FAILS rather than skipping when it cannot start one,
-          # because a skipped measurement is an unenforced budget. The witness is one
-          # further run against a 1 ms threshold that MUST be refused — the only thing
-          # that distinguishes a gate which measured and passed from one that stopped
-          # comparing, since both print the same green line.
-          pnpm run check:render-budget
-          pnpm run check:render-budget:witness
 
       - name: Release suite (12 §1, §5.2–§5.3; F11/F13)
         working-directory: app
