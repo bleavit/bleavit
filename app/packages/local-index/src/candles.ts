@@ -30,7 +30,8 @@
  * more resolution than it had to.
  *
  * `candles1d` is the floor and has no next rung, which §9.2 justifies arithmetically rather
- * than by fiat: at max load a daily row costs `books × 120 B/day` ≈ 23.5 KB/day, so depth
+ * than by fiat: a daily row costs `books × 120 B/day` ≈ 19.1 KB/day even at the 159-book
+ * maximum (SQ-557's corrected count), so depth
  * there is effectively unbounded and there is nothing further to degrade *to*. A caller
  * asking what comes after it gets `undefined` rather than an exception, because "there is
  * nothing left to give up" is an answer the quota manager needs, not an error.

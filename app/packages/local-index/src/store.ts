@@ -336,13 +336,14 @@ export async function writeDownsampled(
  *
  * The section states three obligations and an earlier draft enforced one:
  *
- * > bounded at **≤ 8 blobs / ≤ 16 MB desktop, ≤ 3 blobs / ≤ 6 MB mobile**, LRU-evicted; the
+ * > bounded at **≤ 8 blobs / ≤ 15 MB desktop, ≤ 3 blobs / ≤ 3.75 MB mobile**, LRU-evicted; the
  * > current and next-authorized runtime's metadata are pinned non-evictable.
  *
  * A byte budget alone lets an unbounded number of small blobs accumulate, and — the sharper
  * failure — LRU with no pin set evicts **the current runtime's metadata**, which §9.3 declares
  * non-evictable. That blob is the one every live decode uses, so evicting it turns the whole
- * current era into "pending decoder" rows in order to save six megabytes.
+ * current era into "pending decoder" rows in order to save a few megabytes — and at the measured
+ * 0.14 MB per blob it is the **count** limit that binds, not the bytes.
  *
  * A budget whose pinned set alone does not fit is **refused**, not satisfied by evicting a
  * pin. That state is a release-configuration error — more pinned runtimes than the platform
@@ -356,7 +357,7 @@ export async function writeDownsampled(
 export interface MetadataBudget {
   /** §9.3's blob-count cap: 8 desktop, 3 mobile. */
   readonly maxBlobs: number;
-  /** §9.3's byte cap: 16 MB desktop, 6 MB mobile. */
+  /** §9.3's byte cap: 15 MB desktop, 3.75 MB mobile — §9.2's metadata share exactly (SQ-557). */
   readonly maxBytes: number;
   /** Spec versions that may never be evicted: the current and next-authorized runtimes. */
   readonly pinned: readonly number[];

@@ -92,9 +92,10 @@ const fromIndexer = (at: number, block: number, price: number, providerId = 'acm
   });
 
 test('§9.2’s caps and shares are the published cells, and the shares are checked against them', () => {
-  // The caps are published **in §9.2's own text**. The section additionally cites "normative
-  // values: 13-parameters.md" and that citation does not resolve — doc 13 carries no
-  // storage-quota row (SQ-557, open) — so §9.2 is the only home and these are it.
+  // The caps are published **in §9.2's own text**, which since SQ-557's ruling says so outright:
+  // they are "client-local values owned by this section", because a browser storage quota is not
+  // a chain parameter and doc 13 is the chain registry. The `13-parameters.md` citation this line
+  // used to carry pointed at a document with no such row and has been removed.
   assert.equal(STORAGE_CAP_BYTES.desktop, 300 * 1000 * 1000);
   assert.equal(STORAGE_CAP_BYTES.mobile, 75 * 1000 * 1000);
 
@@ -120,23 +121,30 @@ test('§9.2’s caps and shares are the published cells, and the shares are chec
   assert.equal(mobile.candleBytes, 15 * 1000 * 1000);
 });
 
-test('the metadata budget is the TIGHTER of §9.2’s share and §9.3’s own bound', () => {
-  // §9.2 gives metadata 5% — 15 MB desktop, 3.75 MB mobile — while §9.3 bounds the same cache
-  // at 16 MB / 6 MB. Both cannot hold, and the contradiction is unruled (SQ-557). R-2 forbids
-  // resolving that by assumption, so the minimum is taken: a bound below both published bounds
-  // violates neither, and the error direction is a slightly smaller cache rather than a budget
-  // one section forbids.
-  // Measured: §9.2's share is the tighter bound on **both** platforms — 15 MB against §9.3's
-  // 16 MB on desktop, 3.75 MB against 6 MB on mobile — which is SQ-557's finding stated as an
-  // assertion rather than as prose.
-  assert.equal(platformBudget('desktop').metadataBytes, 15 * 1000 * 1000);
-  assert.ok(platformBudget('desktop').metadataBytes < METADATA_BOUND.desktop.bytes);
-  assert.equal(platformBudget('mobile').metadataBytes, 3.75 * 1000 * 1000);
-  assert.ok(platformBudget('mobile').metadataBytes < METADATA_BOUND.mobile.bytes);
-  assert.equal(platformBudget('mobile').metadataBytes, QUOTA_SHARES.metadata * STORAGE_CAP_BYTES.mobile);
-  // §9.3's blob COUNT has no §9.2 counterpart, so it passes through unchanged.
+test('§9.3’s byte bound IS §9.2’s metadata share, and the count is what binds', () => {
+  // **This test asserted the opposite until SQ-557 was ruled**, and that is worth stating: it
+  // pinned `metadataBytes < METADATA_BOUND.bytes` — the *contradiction* — as though it were a
+  // property. §9.3 published 16 MB / 6 MB against a 15 MB / 3.75 MB share, which exceeded its
+  // own share in both cases and is a bound that cannot bind; the ruling cut §9.3 to the share.
+  // A test that pins a defect passes for exactly as long as the defect lives, which is the
+  // pattern this repository keeps finding in its own suites.
+  assert.equal(METADATA_BOUND.desktop.bytes, 15 * 1000 * 1000);
+  assert.equal(METADATA_BOUND.mobile.bytes, 3.75 * 1000 * 1000);
+  assert.equal(platformBudget('desktop').metadataBytes, METADATA_BOUND.desktop.bytes);
+  assert.equal(platformBudget('mobile').metadataBytes, METADATA_BOUND.mobile.bytes);
+  assert.equal(
+    platformBudget('mobile').metadataBytes,
+    QUOTA_SHARES.metadata * STORAGE_CAP_BYTES.mobile,
+    'the §9.3 bound and the §9.2 share have drifted apart again',
+  );
+  // The `min` is kept even though the two agree: they are two independently editable numbers in
+  // two sections, and the tighter one is the only safe composition.
+  assert.equal(platformBudget('desktop').metadataBytes, Math.min(15 * 1000 * 1000, METADATA_BOUND.desktop.bytes));
+  // At the measured 0.14 MB gz blob the COUNT limit is what actually binds: eight blobs are
+  // ~1.1 MB against a 15 MB budget.
   assert.equal(platformBudget('desktop').metadataBlobs, 8);
   assert.equal(platformBudget('mobile').metadataBlobs, 3);
+  assert.ok(8 * 0.14 * 1000 * 1000 < platformBudget('desktop').metadataBytes);
 });
 
 test('there is no default platform — a client that cannot say takes the phone’s cap by mistake', () => {
@@ -250,8 +258,8 @@ test('the ladder walks §9.2’s order and stops at the floor rather than throwi
     assert.ok(rank(next ?? '') >= rank(prev ?? ''), `the ladder went backwards: ${rungs.join(', ')}`);
   }
   // Running out of rungs is a **reported outcome**, not a throw: §9.2 states plainly that deep
-  // raw-resolution history is not achievable within the caps at maximum load, so a quota manager
-  // that threw here would turn the section's honest admission into a crash on the busiest chain.
+  // the raw tier is genuinely thin against a fully-subscribed hosted partition, so a quota
+  // manager that threw here would turn a budgeted state into a crash on the busiest chain.
   assert.equal(typeof report.exhausted, 'boolean');
   await db.delete();
 });
@@ -485,9 +493,9 @@ test('candle→candle degradation folds a WHOLE target bucket, or the second wri
 });
 
 test('the ladder REPORTS exhaustion rather than looping when a rung stops making progress', async () => {
-  // §9.2 states plainly that deep raw-resolution history is not achievable within the caps at
-  // maximum load — so running out of room is *"a reported outcome"* and an unbounded loop is not
-  // an admissible failure mode for it. Every other termination condition here is a property of
+  // Running out of room is a budgeted, expected state under §9.2 — thin against a
+  // fully-subscribed hosted partition (~7 days desktop, ~2 days mobile) — so it is reported, and
+  // an unbounded loop is not an admissible failure mode for a reported state. Every other termination condition here is a property of
   // *other* code (the delete really removing rows, the measurement really shrinking); when one
   // of those is wrong the loop folds the same bucket forever and takes the tab with it.
   const db = await freshDb();

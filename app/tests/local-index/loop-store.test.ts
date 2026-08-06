@@ -115,7 +115,9 @@ test('a run persists rows, events and coverage, and coverage survives a reopen',
   assert.equal(run.stoppedAt, undefined);
 
   assert.equal(await db.txHistory.count(), 1, 'only the watched block produced a row');
-  assert.equal(await db.events.count(), 3);
+  // **One event, not three.** 10 §9.1 rules that the index retains only events attributing to a
+  // watched account; blocks 10 and 12 carry a `System.CodeUpdated` naming nobody.
+  assert.equal(await db.events.count(), 1);
 
   // The durable half: what a restart would read back.
   const resumed = await readCoverage(db);
@@ -147,6 +149,8 @@ test('a failed row write leaves NO coverage behind — the transaction rolls bot
           body: new Uint8Array(),
         }),
       ],
+      // The block's own event, retained because the scan's watched fixture names `alice`.
+      retainedEvents: scan(20, { watched: true }).events.map((event, index) => ({ event, index })),
       headerSource: SELF,
       coverageAfter: {
         ranges: [
@@ -238,7 +242,7 @@ test('replaying the same blocks is idempotent, so a re-ingest after a crash is f
   const first = await runIngest(EMPTY_COVERAGE, blocks, WATCHED, SELF, ports(db));
   const second = await runIngest(first.coverage, blocks, WATCHED, SELF, ports(db));
   assert.equal(await db.txHistory.count(), 1);
-  assert.equal(await db.events.count(), 2);
+  assert.equal(await db.events.count(), 1, 'block 40 names nobody watched and is not retained');
   assert.equal(isVerifiedAt(second.coverage, 41), true);
   db.close();
 });
@@ -391,6 +395,7 @@ test('a row whose stated body provenance does not follow from its header is refu
           body: new Uint8Array([1]),
         },
       ],
+      retainedEvents: [],
       headerSource: OPERATOR,
       coverageAfter: EMPTY_COVERAGE,
     }),
@@ -442,5 +447,40 @@ test('the loop runs §6.3’s edge checks before its first block, not after', as
   assert.equal(run.invalidated.length, 1, 'the stale range survived the resume');
   assert.equal(isVerifiedAt(run.coverage, 200), false, 'a disowned block is still reported verified');
   assert.equal(isVerifiedAt(run.coverage, 201), true, 'the new block was not ingested');
+  db.close();
+});
+
+
+test('the index retains WATCHED-ACCOUNT events only (10 §9.1)', async () => {
+  // Ruled by SQ-557 and measured rather than asserted: at the chain-permitted `Traded` ceiling
+  // the 15 % events share holds ~6.7 h desktop / ~1.7 h mobile of chain-wide rows, so an index
+  // that stored every event would spend its whole share inside a working day and then evict the
+  // user's own history to keep storing strangers' trades. §9.2: *"a chain-wide trade tape is a
+  // bounded windowed read, never a retained table."*
+  const db = await freshDb();
+  const mixed: FinalizedBlockScan = {
+    ...scan(300),
+    events: [
+      { phase: { kind: 'apply-extrinsic', index: 0 }, pallet: 'Market', name: 'Traded', accounts: ['mallory'] },
+      { phase: { kind: 'apply-extrinsic', index: 1 }, pallet: 'Market', name: 'Traded', accounts: ['alice'] },
+      { phase: { kind: 'apply-extrinsic', index: 1 }, pallet: 'System', name: 'ExtrinsicSuccess', accounts: [] },
+    ],
+  };
+  await runIngest(EMPTY_COVERAGE, [mixed], WATCHED, SELF, ports(db));
+
+  const stored = await db.events.toArray();
+  assert.equal(stored.length, 1, 'a stranger’s trade or a correlation event was retained');
+  assert.equal(nth(stored, 0, 'event').pallet, 'Market');
+
+  // **The id keeps the index the event had in the SCAN**, not its position in the retained list.
+  // Numbering the retained list would make the row id a function of which accounts were watched
+  // at the time, so adding an account renumbers every earlier row and a replay writes a second
+  // copy of history beside the first.
+  assert.equal(nth(stored, 0, 'event').id, '300:1');
+
+  // And the rule really is about the *account*, not about the block: re-ingesting the same block
+  // with `mallory` watched too retains both, under stable ids.
+  await runIngest(EMPTY_COVERAGE, [mixed], new Set(['alice', 'mallory']), SELF, ports(db));
+  assert.deepEqual((await db.events.orderBy('id').toArray()).map((e) => e.id), ['300:0', '300:1']);
   db.close();
 });

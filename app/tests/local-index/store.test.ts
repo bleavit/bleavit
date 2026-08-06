@@ -162,7 +162,8 @@ test('the metadata cache evicts least-recently-used until it fits, and says what
 test('§9.3’s blob COUNT is a bound too, not only its byte budget', async () => {
   // The section states three obligations and an earlier draft enforced one. A byte budget alone
   // lets an unbounded number of small blobs accumulate — which is the shape a metadata cache
-  // actually grows in, since a compressed blob is ~0.1 MB against a 16 MB budget.
+  // actually grows in, since a compressed blob is a measured 0.14 MB gz against a 15 MB budget —
+  // which is why §9.3's COUNT limit is the one that binds and the byte limit is headroom.
   const db = new LocalIndex(PASEO);
   await db.open();
   await db.metadataCache.clear();

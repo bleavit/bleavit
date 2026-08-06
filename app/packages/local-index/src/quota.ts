@@ -26,23 +26,24 @@
  *
  * ## Where the caps come from, and the citation that does not resolve
  *
- * The two figures are published **in §9.2's own text**, and the section additionally cites
- * *"normative values: 13-parameters.md"* — a citation that **does not resolve**: doc 13 carries
- * no storage-quota row (SQ-557, open). So §9.2's own cells are the only published home, and
- * they are anchored here as named constants carrying the section reference, the shape
- * `tools/check-smoldot-budget.ts` uses for the §9.3 transfer budget. They are **release**
- * constants rather than chain constants — no governance track moves how much storage a browser
- * grants a page — which is the same classification 10 §8.3 states outright for the provider
- * health thresholds, so 10 §5.4's no-literal rule does not reach them.
+ * The two figures are published **in §9.2's own text**, which since SQ-557's ruling says so
+ * explicitly: they are *"client-local values owned by this section"*, because a browser storage
+ * quota is not a chain parameter and doc 13 is the chain registry. The `13-parameters.md`
+ * citation this line used to carry pointed at a document with no such row and has been removed.
+ * They are anchored here as named constants carrying the section reference — the shape
+ * `tools/check-smoldot-budget.ts` uses for the §9.3 transfer budget — and they are **release**
+ * constants rather than chain constants, the same classification 10 §8.3 states outright for the
+ * provider health thresholds, so 10 §5.4's no-literal rule does not reach them.
  *
- * ## The metadata share and §9.3 disagree, and the tighter bound wins
+ * ## The metadata bound is §9.2's share, and `min` is what keeps it that way
  *
- * §9.2 gives metadata 5% (15 MB desktop, 3.75 MB mobile). §9.3 bounds the same cache at 16 MB
- * desktop / 6 MB mobile. **Both cannot hold**, and the contradiction is unruled (SQ-557 again).
- * R-2 forbids resolving a `[VERIFY]`-shaped question by assumption, so this module takes the
- * **minimum** of the two rather than picking a winner: a bound below both published bounds
- * violates neither, and the error direction is a cache slightly smaller than one section
- * permits rather than a budget one section forbids.
+ * §9.2 gives metadata 5 % (15 MB desktop, 3.75 MB mobile) and §9.3 now bounds the same cache at
+ * exactly those figures. It did not always: §9.3 published 16 MB / 6 MB, which **exceeded its
+ * own share in both cases** — a bound that cannot bind — and SQ-557 cut it. The `min` below is
+ * kept even though the two now agree, because they are two independently editable numbers in two
+ * sections and the tighter one is the only safe composition: an error here is a cache slightly
+ * smaller than one section permits rather than a budget the other forbids. At the measured blob
+ * size (0.14 MB gz) the **count** limit is what actually binds and the byte limit is headroom.
  */
 
 import {
@@ -91,8 +92,8 @@ export const STORAGE_CAP_BYTES: Readonly<Record<Platform, number>> = Object.free
 /** §9.3's own metadata bounds, which the effective metadata budget is capped by. */
 export const METADATA_BOUND: Readonly<Record<Platform, { blobs: number; bytes: number }>> =
   Object.freeze({
-    desktop: Object.freeze({ blobs: 8, bytes: 16 * 1000 * 1000 }),
-    mobile: Object.freeze({ blobs: 3, bytes: 6 * 1000 * 1000 }),
+    desktop: Object.freeze({ blobs: 8, bytes: 15 * 1000 * 1000 }),
+    mobile: Object.freeze({ blobs: 3, bytes: 3.75 * 1000 * 1000 }),
   });
 
 /**
@@ -299,10 +300,13 @@ export interface QuotaReport {
   /**
    * True when every rung has been applied and the budget is still exceeded.
    *
-   * §9.2 is explicit that this state exists — *"at maximum chain load, deep raw-resolution
-   * history in the browser is **not achievable** within the caps — stated plainly"* — so it is
-   * a reported outcome rather than a throw. A quota manager that threw here would turn the
-   * section's honest admission into a crash on the busiest chain.
+   * §9.2 is explicit that this state exists, and since SQ-557's ruling it is explicit about
+   * *when*: against the primary slate the caps are generous (~54 days of raw desktop samples),
+   * while *"against a fully-subscribed hosted partition the raw tier is genuinely thin: ~7 days
+   * desktop, ~2 days mobile"*. The earlier blanket *"not achievable within the caps"* is
+   * **withdrawn as false** — it followed from a book count the chain cannot reach. Either way
+   * this is a reported outcome rather than a throw: a quota manager that threw would turn a
+   * budgeted, expected state into a crash on the busiest chain.
    */
   readonly exhausted: boolean;
 }
@@ -368,9 +372,10 @@ export async function applyQuota(db: LocalIndex, options: QuotaOptions): Promise
       // *other* code — the delete really removing rows, the measurement really shrinking. When
       // one of those is wrong the loop above folds the same bucket forever: the coarse row is
       // rewritten, the delete removes nothing, the share is unchanged, and the rung is retried.
-      // §9.2 states plainly that running out of room is *"a reported outcome"* (deep raw history
-      // "is not achievable within the caps"), so an unbounded loop is not an admissible failure
-      // mode for it — and a retention pass that never returns takes the tab with it.
+      // Running out of room is a budgeted, expected state under §9.2 (thin against a
+      // fully-subscribed hosted partition), so it is reported — and an unbounded loop is not an
+      // admissible failure mode for a reported state. A retention pass that never returns takes
+      // the tab with it.
       const usageAfter = await measureUsage(db, sizes);
       const removed = step.kind === 'downsample' ? step.rowsRemoved : 0;
       if (removed === 0 || usageAfter[USAGE_FIELD[over]] >= usageBefore[USAGE_FIELD[over]]) {

@@ -82,10 +82,45 @@ export interface AttributedRow {
   readonly body: Uint8Array;
 }
 
+/** One event the index retains, carrying **the index it had in the scan** (§6.5's stable key). */
+export interface RetainedEvent {
+  readonly event: FinalizedBlockScan['events'][number];
+  /**
+   * Position in `scan.events`, not in the retained list.
+   *
+   * The stored row's id is `${block}:${index}` and §6.5 requires ingest writes to be idempotent
+   * under replay. Numbering the retained list instead would make the id a function of *which
+   * accounts were watched at the time*, so adding an account would renumber every earlier row
+   * and the replay would write a second copy of history beside the first.
+   */
+  readonly index: number;
+}
+
 export interface BlockWrite {
   readonly blockNumber: number;
   readonly scan: FinalizedBlockScan;
   readonly rows: readonly AttributedRow[];
+  /**
+   * The events this block contributes to the index — **only those naming a watched account**.
+   *
+   * 10 §9.1 rules it and §9.2 measures why: *"the local index retains **only events attributing
+   * to the user's watched accounts**, which is §6.5's existing rule — 'worst-case overhead is
+   * proportional to the user's own activity, not chain activity' — applied to storage as well as
+   * to body fetches. Chain-wide `Traded` is consumed into the candle aggregates as it is scanned
+   * and never stored row-by-row; a chain-wide trade tape is a bounded windowed read, never a
+   * retained table."*
+   *
+   * The number behind the rule: at the chain-permitted `Traded` ceiling the 15 % events share
+   * holds about **6.7 h desktop / 1.7 h mobile** of chain-wide rows, so an index that stored
+   * every event would spend its entire share inside a working day and then start evicting the
+   * user's own history in order to keep storing strangers' trades. Measured against the user's
+   * own activity the same share is decades.
+   *
+   * Computed by the loop rather than by the writer because the watched set is the loop's
+   * argument; a writer that re-derived it would be a second copy of the rule with nothing
+   * forcing the two to agree.
+   */
+  readonly retainedEvents: readonly RetainedEvent[];
   /**
    * The header this block was ingested behind — **the origin, verbatim, not a re-derivation**.
    *
@@ -248,7 +283,21 @@ export async function ingestBlock(
   // after it resolves. The distinction is the whole of rule 1: computing early is fine,
   // handing back advanced coverage from a failed write is not — a throw here leaves the
   // caller's coverage exactly as it was.
-  await ports.write({ blockNumber: scan.number, scan, rows, headerSource, coverageAfter: next });
+  // §9.1's retention rule, applied where the watched set lives. Correlation events
+  // (`ExtrinsicSuccess`/`Failed`) carry no account and are excluded by the same test that
+  // excludes strangers' trades — which is right: §6.5 calls them correlation, not attribution.
+  const retainedEvents = scan.events
+    .map((event, index) => ({ event, index }))
+    .filter(({ event }) => event.accounts.some((account) => watched.has(account)));
+
+  await ports.write({
+    blockNumber: scan.number,
+    scan,
+    rows,
+    retainedEvents,
+    headerSource,
+    coverageAfter: next,
+  });
 
   return {
     coverage: next,

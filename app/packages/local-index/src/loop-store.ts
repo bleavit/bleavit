@@ -100,7 +100,13 @@ export function storeWriter(
     // origin from — so a row and the range that claims its block cannot disagree.
     const provenance = stamp(write.headerSource);
 
-    const events: StoredEvent[] = write.scan.events.map((event, index) => ({
+    // **Only the events 10 §9.1 permits retaining**, and the loop decided which. Storing every
+    // event was measured wrong rather than merely wasteful: at the chain-permitted `Traded`
+    // ceiling the 15 % events share holds ~6.7 h desktop / ~1.7 h mobile of chain-wide rows, so
+    // the index would fill its share within a working day and then evict the user's own history
+    // to keep storing strangers' trades. §9.2: *"a chain-wide trade tape is a bounded windowed
+    // read, never a retained table."*
+    const events: StoredEvent[] = write.retainedEvents.map(({ event, index }) => ({
       id: `${write.blockNumber}:${index}`,
       blockNumber: write.blockNumber,
       ...encodeEvent(write, event, index),
