@@ -875,6 +875,218 @@ test('§9.2’s measured-and-current depth is REPORTED, per tier, with the measu
   await db.delete();
 });
 
+test('§9.2’s depth is read from the INDEX, so a tier past V8’s spread limit still measures', async () => {
+  // The retention pass crashed exactly when the database was largest. `measureDepth` computed each
+  // tier's extremes with `Math.min(...instants)` / `Math.max(...instants)` over **every row of the
+  // tier**, and V8 refuses a spread above roughly 125,390 arguments — measured here: 125,000 is
+  // fine, 130,000 throws `RangeError: Maximum call stack size exceeded`. `applyQuota` calls
+  // `measureDepth` on every pass, so the whole retention pass threw once any tier passed that
+  // size. `candles1h` grows 159 books × 24 h = 3,816 rows/day at the registry maximum, arriving in
+  // about 33 days — roughly a quarter of §9.2's own published 131-day desktop candle depth, and
+  // before the 500,000-row candle share triggers any relief. On mobile the 125,000-row share and
+  // the crash arrive together.
+  //
+  // The suite was structurally blind to it in the same way it had been blind to the whole-table
+  // read: the DBCore seam test resets its counter before `applyQuota`, and `measureDepth` runs
+  // when the fixture table is nearly empty. So this fixture is a real tier past the limit.
+  const db = await freshDb();
+  const N = 130_000;
+  const CHUNK = 10_000;
+  for (let base = 0; base < N; base += CHUNK) {
+    const rows: PriceSample[] = [];
+    for (let i = 0; i < CHUNK; i += 1) rows.push(sample(base + i, base + i, 100));
+    await db.priceSamples.bulkPut(rows);
+  }
+  assert.equal(await db.priceSamples.count(), N);
+
+  const sizes: RowSizes = { priceSample: 120, candle: 120, event: 120, archiveRow: 120 };
+  const depth = await measureDepth(db, platformBudget('desktop'), sizes, 1_000 * HOUR);
+  const raw = nth(depth.tiers, 0, 'tier');
+  assert.equal(raw.rows, N);
+  assert.equal(raw.oldest, 0, 'the oldest instant is not the first entry of the ordered index');
+  assert.equal(raw.newest, N - 1, 'the newest instant is not the last entry of the ordered index');
+  assert.ok(raw.rowsPerDay !== undefined && raw.rowsPerDay > 0);
+
+  // ...and the whole pass survives it, which is the property the crash actually took down. The
+  // budget here is over the raw share, so the ladder runs rather than short-circuiting.
+  const report = await applyQuota(db, {
+    budget: platformBudget('desktop'),
+    sizes,
+    now: 1_000 * HOUR,
+    pinnedSpecVersions: [3],
+  });
+  assert.equal(report.depth.tiers.length, 4);
+  assert.deepEqual([...report.refusals], []);
+  await db.delete();
+});
+
+test('a rung that REFUSES does not abandon the rungs after it', async () => {
+  // §9.2 orders the ladder and the order **is** the guarantee — which cuts both ways. Three
+  // ordinary-data refusals threw straight out of `applyQuota`: `evictMetadataToBudget`'s pinned-set
+  // refusal is step 1, so the whole chart ladder was skipped; `compactSettledEvents`' provenance
+  // refusal is step 3, so the §6.5 raw-blob bound in step 4 never ran. The result is unbounded
+  // growth in the one tier §9.1 forbids retaining, under a pass that reported nothing at all.
+  //
+  // The refusals themselves are right. Ending the pass is not.
+  const db = await freshDb();
+  const sizes: RowSizes = { priceSample: 120, candle: 120, event: 120, archiveRow: 120 };
+
+  // Step 1 refuses: two pinned blobs against a one-blob budget is a release configuration that
+  // does not fit its own platform bound, and §9.3 forbids resolving it by evicting a pin.
+  await db.metadataCache.bulkPut([
+    { specVersion: 3, bytes: 100, lastUsedAt: 1, blob: new Uint8Array(1), origin: 'self' },
+    { specVersion: 4, bytes: 100, lastUsedAt: 2, blob: new Uint8Array(1), origin: 'self' },
+  ]);
+
+  // Step 2 has work: four closed hours of samples, over a one-row raw share.
+  await db.priceSamples.bulkPut([
+    sample(10, 1, 100),
+    sample(20, 2, 200),
+    sample(HOUR + 10, 3, 300),
+    sample(2 * HOUR + 10, 4, 400),
+  ]);
+
+  // Step 3 refuses: a settled proposal spanning two provenances cannot become one summary.
+  await db.events.bulkPut([
+    { id: '1:0', blockNumber: 1, pallet: 'Epoch', name: 'ProposalSettled', decoded: true as const, origin: 'self' as const },
+    {
+      id: '2:0',
+      blockNumber: 2,
+      pallet: 'Epoch',
+      name: 'ProposalSettled',
+      decoded: true as const,
+      origin: 'operator' as const,
+      providerId: 'op-1',
+    },
+    { id: '3:0', blockNumber: 3, pallet: 'Epoch', name: 'ProposalSettled', decoded: true as const, origin: 'self' as const },
+  ]);
+
+  // Step 4 has work: three raw blobs over the events share.
+  for (const block of [10, 20, 30]) {
+    await db.events.put({
+      id: rawEventId(block),
+      blockNumber: block,
+      pendingBlock: block,
+      pallet: '(pending decoder)',
+      name: '(era metadata unavailable)',
+      decoded: false as const,
+      raw: new Uint8Array(1_000_000),
+      origin: 'self' as const,
+    });
+  }
+
+  const settled: SettledProposal[] = [
+    {
+      proposalId: 'p-mixed',
+      settledAt: 99,
+      fromBlock: 1,
+      toBlock: 2,
+      summary: 'settled: PASS',
+      eventIds: ['1:0', '2:0'],
+      provenance: { origin: 'self' },
+    },
+    // The proposal AFTER the refusal — a refusal in one unit of work must not cost the next one
+    // its depth either.
+    {
+      proposalId: 'p-clean',
+      settledAt: 99,
+      fromBlock: 3,
+      toBlock: 3,
+      summary: 'settled: FAIL',
+      eventIds: ['3:0'],
+      provenance: { origin: 'self' },
+    },
+  ];
+
+  const report = await applyQuota(db, {
+    budget: { ...platformBudget('desktop'), rawSampleBytes: 120, eventBytes: 1_500_000, metadataBlobs: 1 },
+    sizes,
+    now: 100 * HOUR,
+    pinnedSpecVersions: [3, 4],
+    settled,
+  });
+
+  // Every rung reported, in §9.2's order — the refusals in their place in the sequence rather
+  // than as an exception that erased everything after them.
+  assert.deepEqual(
+    report.refusals.map((r) => [r.rung, r.at]),
+    [
+      ['evict-metadata', 'metadata'],
+      ['compact-events', 'p-mixed'],
+    ],
+    'a refusal was swallowed, or one fired that should not have',
+  );
+  assert.match(nth(report.refusals, 0, 'refusal').reason, /pinned metadata alone/);
+  assert.match(nth(report.refusals, 1, 'refusal').reason, /one summary cannot carry two origins/);
+
+  // Step 2 ran despite step 1 refusing.
+  assert.ok(
+    report.steps.some((s) => s.kind === 'downsample'),
+    'the metadata refusal skipped the whole chart ladder',
+  );
+  // Step 3's second proposal ran despite its first refusing.
+  assert.ok(
+    report.steps.some((s) => s.kind === 'compact-events' && s.proposalId === 'p-clean'),
+    'one refused proposal cost every later proposal its compaction',
+  );
+  // Step 4 ran despite step 3 refusing — the §9.1 bound on the tier that must never grow.
+  const bound = report.steps.find((s) => s.kind === 'evict-pending-raw');
+  assert.ok(bound, 'the compaction refusal skipped the §6.5 raw-blob bound entirely');
+  assert.deepEqual(bound.kind === 'evict-pending-raw' ? [...bound.blocks] : [], [10, 20]);
+
+  // Nothing the refusals touched was destroyed: refusing costs depth, which §9.2 permits.
+  assert.equal(await db.metadataCache.count(), 2, 'a pinned blob was evicted by the refused rung');
+  assert.equal(await db.events.get('1:0') !== undefined, true, 'the refused compaction deleted its events anyway');
+  await db.delete();
+});
+
+test('a raw row the sparse index cannot reach refuses the BOUND, not the whole pass', async () => {
+  // The third refusal, and the one that used to arrive first. `measureUsage` is the very first
+  // call in `applyQuota` and it read the pending set through the sparse `pendingBlock` index, so
+  // a single unreachable raw row threw before any rung ran: no chart ladder, no compaction, no
+  // §6.5 bound, and no report — the index then grows without limit under a pass that said nothing.
+  //
+  // The division the repair draws: **eviction** needs the set enumerable *and oldest-first*, which
+  // only the index gives, so it must refuse — an under-covering bound is worse than none.
+  // **Measurement** needs neither, so it scans, which is the route that cannot miss. The refusal
+  // survives exactly where it changes an outcome.
+  const db = await freshDb();
+  const sizes: RowSizes = { priceSample: 120, candle: 120, event: 120, archiveRow: 120 };
+  await db.events.put({
+    id: rawEventId(41),
+    blockNumber: 41,
+    pallet: '(pending decoder)',
+    name: '(era metadata unavailable)',
+    decoded: false,
+    raw: new Uint8Array(4_096),
+    origin: 'self',
+    // No `pendingBlock` — the shape a writer that forgot the field produces.
+  } as Parameters<typeof db.events.put>[0]);
+  await db.priceSamples.bulkPut([sample(10, 1, 100), sample(20, 2, 200), sample(HOUR + 10, 3, 300)]);
+
+  const report = await applyQuota(db, {
+    budget: { ...platformBudget('desktop'), rawSampleBytes: 120 },
+    sizes,
+    now: 100 * HOUR,
+    pinnedSpecVersions: [3],
+  });
+
+  // Refused, named, and last — not first and not fatal.
+  assert.deepEqual(
+    report.refusals.map((r) => [r.rung, r.at]),
+    [['evict-pending-raw', 'pending-raw']],
+  );
+  assert.match(nth(report.refusals, 0, 'refusal').reason, /cannot be reached by the 10 §9.1 bound/);
+  // The chart ladder still ran — it shares no share with the events tier and never did.
+  assert.ok(report.steps.some((s) => s.kind === 'downsample'), 'the pending-raw refusal skipped the chart ladder');
+  // And the blob is still WEIGHED, so the share that is supposed to bound it can see it growing.
+  // A measurement that quietly omitted the unreachable row would understate, which is the unsafe
+  // direction: the events share would read as healthy while the tier §9.1 forbids kept growing.
+  assert.equal(report.before.eventBytes, 4_096 + sizes.event);
+  assert.equal(await pendingDecoderCount(db), 1, 'the refused bound deleted the row anyway');
+  await db.delete();
+});
+
 test('compaction REFUSES a proposal whose events do not share the summary’s provenance', async () => {
   // §9.2 obligation 3: *"Provenance is never degraded on the way … the ladder degrades resolution
   // and may not relabel a source to do it."* `proposalsArchive` is keyed by proposal alone (§7),

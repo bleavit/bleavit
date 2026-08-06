@@ -36,7 +36,7 @@
  * cannot read back is a migration you cannot review.
  */
 
-import Dexie, { type Table } from 'dexie';
+import Dexie, { type Table, type Transaction } from 'dexie';
 
 import { chainTag } from './chain-tag.js';
 import {
@@ -191,7 +191,8 @@ export type MetadataBlob = {
 export type MetaRow =
   | { readonly key: 'coverage'; readonly coverage: CoverageRef }
   | { readonly key: 'downsampled'; readonly ranges: readonly DownsampledRange[] }
-  | { readonly key: 'pendingRawEvicted'; readonly record: PendingRawEvictionRecord };
+  | { readonly key: 'pendingRawEvicted'; readonly record: PendingRawEvictionRecord }
+  | { readonly key: 'chartDiscard'; readonly record: ChartDiscardRecord };
 
 /**
  * What the client discarded when §6.5's raw blobs were bounded — the label without which the
@@ -217,6 +218,57 @@ export interface PendingRawEvictionRecord {
   readonly at: number;
   /** Rendered, not logged. */
   readonly reason: string;
+}
+
+/**
+ * What a schema migration discarded — the label without which the drop is a silent splice.
+ *
+ * The v1 → v3 upgrade **empties** `priceSamples` and the three candle tables, and that loss is
+ * permitted: INV-FE-7 makes browser-local storage a non-authoritative cache whose loss is *"a
+ * performance and convenience event only"*, §9.2 classifies chart resolution as the tier the
+ * ladder degrades first, and the alternative is worse — IndexedDB fixes a key path at creation
+ * and Dexie refuses to change one in place, so declaring the corrected keys under `version(1)`
+ * makes an existing database **fail to open**, which is the one outcome INV-FE-7 says the client
+ * must survive.
+ *
+ * **Performing it silently is not permitted, and that is a separable fault.** `meta.coverage`
+ * carries through the upgrade unchanged, so afterwards `coveredSamples` answers a covered span
+ * with an empty array and a table states *"complete within [ranges]"* over nothing. INV-FE-15
+ * requires everything unverified to be *"either absent **with an explanation** or present and
+ * labeled — gaps are first-class and visible, never silently spliced"*, and §9.2 states the
+ * identical rule for this exact operation: *"an evicted range becomes a labelled 'downsampled'
+ * range, not a hole, and never a silent splice"*. One `meta.put` inside the upgrade transaction
+ * separates the loss from the false claim, which is why the drop stays and this record exists.
+ *
+ * Its precedent is `PendingRawEvictionRecord` above, and it is deliberately the same shape: a
+ * summary written in the transaction that performs the disposal, read back by the boot path.
+ */
+export interface ChartDiscardRecord {
+  /** The schema the database was at, and the one it reached. */
+  readonly fromSchema: number;
+  readonly toSchema: number;
+  /** The tables emptied — `REKEYED_TABLES`, named rather than described. */
+  readonly tables: readonly string[];
+  /** How many rows went, counted before the drop. */
+  readonly rows: number;
+  /**
+   * The block envelope `meta.coverage` still claims, and over which the chart tiers are now
+   * empty. That is the span the record has to name: it is exactly where the surviving coverage
+   * and the surviving rows disagree. `undefined` when nothing was covered.
+   */
+  readonly fromBlock: number | undefined;
+  readonly toBlock: number | undefined;
+  readonly at: number;
+  /**
+   * A **technical** statement, for the boot report and an expert panel.
+   *
+   * Deliberately not user-facing copy. `FE-IDX-002` has no definition yet (SQ-604 asks for one)
+   * and a migration discard is a distinct failure class from the per-range invalidation that row
+   * names — so the machine-readable record ships now and the fixed user copy binds when SQ-604
+   * rules. 10 §9.4 requires fixed copy per error code, which is precisely what may not be
+   * invented here.
+   */
+  readonly detail: string;
 }
 
 /**
@@ -326,10 +378,111 @@ export class LocalIndex extends Dexie {
     // disposable (INV-FE-7), the ladder's own tables are the ones re-keyed, and coverage,
     // `txHistory`, `events` and the metadata cache all carry through untouched — so what a user
     // loses is chart depth that re-accumulates, not history that cannot be recovered.
+    //
+    // **Each version records what it does**, which is the half the first draft left out. The
+    // drop is permitted; performing it silently is not (see `ChartDiscardRecord`), and the
+    // `pendingBlock` index version 3 declares is sparse — so a version-1 raw row carries no such
+    // field, is invisible to the index, and makes `pendingRawRows` refuse **permanently**. The
+    // upgraders are where both are repaired, because both are properties of the data that
+    // crossed the boundary rather than of anything a later caller can supply.
     this.version(1).stores({ ...SCHEMA_V1 });
-    this.version(2).stores(Object.fromEntries(REKEYED_TABLES.map((table) => [table, null])));
-    this.version(3).stores({ ...SCHEMA_V3 });
+    this.version(2)
+      .stores(Object.fromEntries(REKEYED_TABLES.map((table) => [table, null])))
+      .upgrade(recordChartDiscard);
+    this.version(3).stores({ ...SCHEMA_V3 }).upgrade(backfillPendingBlock);
   }
+}
+
+/**
+ * Record the chart rows this version is about to drop — **in the transaction that drops them**.
+ *
+ * It runs on `version(2)`, the version that deletes the four tables, and it can still read them:
+ * Dexie restores a version's deleted tables into the upgrade transaction's schema
+ * (`upgradeSchema[table] = oldSchema[table]` for every `diff.del`) and queues
+ * `deleteRemovedTables` as a **separate step after** the content upgrade. So this is the last
+ * moment the rows can be counted, and it is inside the same `versionchange` transaction as the
+ * delete — which is §9.2 obligation 1 applied to a migration: a label written afterwards is
+ * absent for exactly as long as it takes a tab to close mid-upgrade.
+ *
+ * A count of zero writes nothing. A fresh database has empty tables, and a record announcing
+ * that nothing was lost is noise a boot report would have to learn to ignore.
+ */
+async function recordChartDiscard(tx: Transaction): Promise<void> {
+  let rows = 0;
+  for (const table of REKEYED_TABLES) rows += await tx.table(table).count();
+  if (rows === 0) return;
+  const span = coverageEnvelope(await tx.table('meta').get('coverage'));
+  const record: ChartDiscardRecord = {
+    fromSchema: 1,
+    toSchema: 3,
+    tables: [...REKEYED_TABLES],
+    rows,
+    fromBlock: span?.fromBlock,
+    toBlock: span?.toBlock,
+    at: Date.now(),
+    detail:
+      'the chart tables were re-keyed (priceSamples gained sourceKey and lost the device clock; ' +
+      'the candle tables gained sourceKey) and IndexedDB cannot change a key path in place, so ' +
+      'their rows were dropped on upgrade. Coverage, txHistory, events and the metadata cache ' +
+      'carried through: the blocks are still covered, and the chart tiers over them are empty ' +
+      'until they re-accumulate.',
+  };
+  await tx.table('meta').put({ key: 'chartDiscard', record });
+}
+
+/**
+ * Give every raw row the `pendingBlock` the sparse index needs — the version that declares the
+ * index is the version that has to populate it.
+ *
+ * A version-1 `${block}:raw` row predates the field, so `orderBy('pendingBlock')` cannot see it
+ * while `pendingDecoderCount`'s full scan can. `pendingRawRows` compares the two and refuses on a
+ * disagreement — correctly, because a bound that silently does not cover everything is worse than
+ * no bound — and the disagreement is **permanent** without this: nothing else ever writes the
+ * field onto an existing row, `measureUsage` is the first call in `applyQuota`, and a raw row is
+ * *"the expected state of any backfill across a runtime upgrade"* (§6.5). So one upgraded
+ * database refused every retention pass it would ever run.
+ *
+ * `filter` before `modify` so only the rows that need it are written; the scan is unavoidable
+ * because `decoded` is a boolean and therefore not an IndexedDB key (see `pendingDecoderCount`),
+ * which is the whole reason `pendingBlock` exists.
+ */
+async function backfillPendingBlock(tx: Transaction): Promise<void> {
+  type RawRow = { readonly decoded: boolean; readonly blockNumber: number; pendingBlock?: number };
+  await tx
+    .table<RawRow>('events')
+    .filter((event) => event.decoded === false && event.pendingBlock === undefined)
+    .modify((event) => {
+      event.pendingBlock = event.blockNumber;
+    });
+}
+
+/**
+ * The block envelope of a stored coverage value, read defensively.
+ *
+ * The argument comes straight out of IndexedDB during an upgrade, which is *"exactly the
+ * untrusted path INV-FE-7 assumes gets corrupted"* — and `sanitizeCoverage` is not available
+ * here, because it needs the genesis hash and would drop rather than summarise. A malformed
+ * range contributes nothing rather than making the whole record unwritable: the point of the
+ * record is that the drop is announced, and an unparseable span is a reason to say *"we cannot
+ * name the span"*, never a reason to say nothing at all.
+ */
+function coverageEnvelope(
+  row: unknown,
+): { readonly fromBlock: number; readonly toBlock: number } | undefined {
+  const coverage = (row as { coverage?: unknown } | undefined)?.coverage;
+  const ranges = (coverage as { ranges?: unknown } | undefined)?.ranges;
+  if (!Array.isArray(ranges)) return undefined;
+  let fromBlock: number | undefined;
+  let toBlock: number | undefined;
+  for (const range of ranges) {
+    const from = (range as { fromBlock?: unknown }).fromBlock;
+    const to = (range as { toBlock?: unknown }).toBlock;
+    if (typeof from !== 'number' || typeof to !== 'number') continue;
+    if (fromBlock === undefined || from < fromBlock) fromBlock = from;
+    if (toBlock === undefined || to > toBlock) toBlock = to;
+  }
+  if (fromBlock === undefined || toBlock === undefined) return undefined;
+  return { fromBlock, toBlock };
 }
 
 /**
@@ -578,6 +731,13 @@ export async function readPendingRawEvicted(
   return row.record;
 }
 
+/** What a schema migration discarded, or `undefined` when no migration has dropped anything. */
+export async function readChartDiscard(db: LocalIndex): Promise<ChartDiscardRecord | undefined> {
+  const row = await db.meta.get('chartDiscard');
+  if (row === undefined || row.key !== 'chartDiscard') return undefined;
+  return row.record;
+}
+
 /**
  * The raw pending-decode blobs, oldest first, and their measured bytes.
  *
@@ -606,6 +766,34 @@ export async function pendingRawRows(
 }
 
 /**
+ * The measured bytes of §6.5's raw blobs, by a route that **cannot refuse**.
+ *
+ * The same quantity `pendingRawRows` reports, read by the full scan `pendingDecoderCount` already
+ * uses rather than through the sparse `pendingBlock` index — so it needs no cross-check and has
+ * no disagreement to fail on.
+ *
+ * The split is deliberate and it is where the fail-closed refusal belongs. **Eviction** needs the
+ * set enumerable *and oldest-first*, which only the index gives, so `pendingRawRows` must refuse
+ * when the index is short: a bound that silently does not cover everything is worse than no
+ * bound. **Measurement** needs neither property, and a measurement that refuses takes the whole
+ * retention pass with it — `measureUsage` is the first call in `applyQuota` — so the ladder never
+ * runs, nothing is freed, and nothing is reported. Refusing where the refusal changes an outcome
+ * and scanning where it would only silence the pass is the honest division.
+ *
+ * Streams through `each` rather than materialising: the set this bounds is measured in tens of
+ * megabytes by construction.
+ */
+export async function pendingRawBytes(db: LocalIndex): Promise<number> {
+  let bytes = 0;
+  await db.events
+    .filter((event) => event.decoded === false)
+    .each((event) => {
+      bytes += event.raw?.byteLength ?? 0;
+    });
+  return bytes;
+}
+
+/**
  * Bound §6.5's raw blob set — oldest first, labelled, in one transaction.
  *
  * §9.1 rules that the index retains only events attributing to watched accounts, and *"a
@@ -624,6 +812,43 @@ export async function pendingRawRows(
  * written afterwards it is absent for as long as it takes a tab to close mid-eviction, which is
  * the silent splice §9.2 forbids in the chart tier for exactly the same reason.
  */
+/**
+ * The block envelope an eviction record carries, **folded rather than spread**.
+ *
+ * `Math.min(...blocks)` reads well and is a crash: V8 refuses a spread above roughly 125,390
+ * arguments (measured on this project's pinned `node` — 125,000 is fine, 130,000 throws
+ * `RangeError: Maximum call stack size exceeded`), and the argument count here is the number of
+ * blobs the bound is discarding. §9.2's 15 % events share is 45 MB on desktop, which admits on
+ * the order of 225,000 of §6.5's small raw blobs — so the spread form fails **exactly when the
+ * eviction matters most**, and a retention pass that throws frees nothing at all.
+ *
+ * Exported because the failure only appears above a size no ordinary fixture reaches, and a
+ * property that cannot be exercised is one the suite is structurally blind to — which is how the
+ * spread survived the round that added the eviction. The suite folds 130,000 blocks through this
+ * function directly.
+ *
+ * Throws on nothing to fold **and** no previous record, which is reachable: it is a caller asking
+ * for the envelope of an empty eviction, and there is no honest answer to return.
+ */
+export function evictionEnvelope(
+  previous: PendingRawEvictionRecord | undefined,
+  blocks: readonly number[],
+): { readonly oldestBlock: number; readonly newestBlock: number } {
+  let oldestBlock = previous?.oldestBlock;
+  let newestBlock = previous?.newestBlock;
+  for (const block of blocks) {
+    if (oldestBlock === undefined || block < oldestBlock) oldestBlock = block;
+    if (newestBlock === undefined || block > newestBlock) newestBlock = block;
+  }
+  if (oldestBlock === undefined || newestBlock === undefined) {
+    throw new StoreError(
+      'an eviction envelope needs at least one discarded block or a previous record; an empty ' +
+        'one has no span to name, and naming a wrong span is what the record exists to prevent.',
+    );
+  }
+  return { oldestBlock, newestBlock };
+}
+
 export async function evictPendingRawToBound(
   db: LocalIndex,
   maxBytes: number,
@@ -645,11 +870,12 @@ export async function evictPendingRawToBound(
   const freed = doomed.reduce((sum, row) => sum + (row.raw?.byteLength ?? 0), 0);
   const previous = await readPendingRawEvicted(db);
   const blocks = doomed.map((row) => row.blockNumber);
+  const envelope = evictionEnvelope(previous, blocks);
   const record: PendingRawEvictionRecord = {
     blocks: (previous?.blocks ?? 0) + doomed.length,
     bytes: (previous?.bytes ?? 0) + freed,
-    oldestBlock: Math.min(previous?.oldestBlock ?? blocks[0]!, ...blocks),
-    newestBlock: Math.max(previous?.newestBlock ?? blocks[0]!, ...blocks),
+    oldestBlock: envelope.oldestBlock,
+    newestBlock: envelope.newestBlock,
     at,
     reason:
       'the raw events of these blocks could not be decoded (their era metadata was unavailable) ' +

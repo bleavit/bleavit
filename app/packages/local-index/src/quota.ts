@@ -67,7 +67,7 @@ import {
   candleTableFor,
   evictMetadataToBudget,
   evictPendingRawToBound,
-  pendingRawRows,
+  pendingRawBytes,
   readDownsampled,
   writeDownsampled,
   type CandleKey,
@@ -226,12 +226,16 @@ function assertSizes(sizes: RowSizes): void {
 /** Measure what is stored, per §9.2 share. */
 export async function measureUsage(db: LocalIndex, sizes: RowSizes): Promise<Usage> {
   assertSizes(sizes);
-  const [rawSampleBytes, candleBytes, events, archive, pending, blobs] = await Promise.all([
+  const [rawSampleBytes, candleBytes, events, archive, pendingBytes, blobs] = await Promise.all([
     shareBytes(db, 'rawSamples', sizes),
     shareBytes(db, 'candles', sizes),
     db.events.count(),
     db.proposalsArchive.count(),
-    pendingRawRows(db),
+    // `pendingRawBytes`, not `pendingRawRows`: the same quantity by a route with no index to
+    // disagree with, because a *measurement* that refuses stops the whole pass — this is the
+    // first call in `applyQuota` — while the refusal belongs to the eviction that needs the
+    // index. See `pendingRawBytes` for the division and why it is the fail-closed one.
+    pendingRawBytes(db),
     db.metadataCache.toArray(),
   ]);
   // §6.5's raw blobs are **measured**, like `metadataCache` and unlike everything else here.
@@ -239,7 +243,7 @@ export async function measureUsage(db: LocalIndex, sizes: RowSizes): Promise<Usa
   // single row this schema can hold — as though it were one decoded event, so the share that is
   // supposed to bound them cannot see them growing. The row overhead is still modelled; only
   // the blob is weighed.
-  const eventBytes = events * sizes.event + pending.bytes + archive * sizes.archiveRow;
+  const eventBytes = events * sizes.event + pendingBytes + archive * sizes.archiveRow;
   const metadataBytes = blobs.reduce((sum, blob) => sum + blob.bytes, 0);
   return {
     rawSampleBytes,
@@ -324,7 +328,36 @@ export type QuotaStep =
     }
   | { readonly kind: 'evict-metadata'; readonly specVersions: readonly number[] }
   /** §9.1's bound on §6.5's raw blobs — see `evictPendingRawToBound`. */
-  | { readonly kind: 'evict-pending-raw'; readonly blocks: readonly number[] };
+  | { readonly kind: 'evict-pending-raw'; readonly blocks: readonly number[] }
+  /**
+   * A rung that refused, reported **in its place in the sequence** rather than thrown.
+   *
+   * §9.2 orders the ladder and the order *is* the guarantee, which cuts both ways: a refusal in
+   * one rung is not a licence to skip the ones after it. Three ordinary-data conditions used to
+   * throw out of `applyQuota` — a pinned metadata set larger than its own budget, a settled
+   * proposal whose events span two provenances, a raw row the sparse index cannot reach — and
+   * each abandoned every later rung, so the §6.5 raw-blob bound never ran and the index grew
+   * without limit under a pass that reported nothing.
+   *
+   * The refusals themselves are right; ending the pass is not. Each is caught where it happens
+   * and lands here, so the sequence a surface renders states what was degraded **and** what
+   * could not be.
+   */
+  | {
+      readonly kind: 'refused';
+      readonly rung: QuotaRung;
+      /** The unit of work that refused — a source resolution, a proposal id, or the rung. */
+      readonly at: string;
+      readonly reason: string;
+    };
+
+/** The rungs of §9.2's pass, named so a refusal can say which one it belongs to. */
+export type QuotaRung =
+  | 'measure'
+  | 'evict-metadata'
+  | 'downsample'
+  | 'compact-events'
+  | 'evict-pending-raw';
 
 /**
  * A proposal §9.2 permits compacting: *"`events` for settled+reaped proposals → compacted into
@@ -423,6 +456,21 @@ export interface DepthReport {
 /**
  * Measure current depth per tier — callable without running a retention pass, because the
  * surface that has to present it renders far more often than the quota manager runs.
+ *
+ * **Read from the indexes, never from the rows**, and that sentence is a crash fix rather than a
+ * refinement. The first version materialised every row of every tier and took `Math.min(...)` /
+ * `Math.max(...)` over the result: V8 refuses a spread above roughly 125,390 arguments, so the
+ * function threw `RangeError: Maximum call stack size exceeded` once any tier passed that size —
+ * and `applyQuota` calls it on every pass, so the whole retention pass threw with it. `candles1h`
+ * grows 159 books × 24 h = 3,816 rows/day at the registry maximum, reaching it in about 33 days,
+ * roughly a quarter of §9.2's own published 131-day desktop candle depth and long before the
+ * 500,000-row candle share triggers any relief. On mobile the 125,000-row share and the crash
+ * arrive together.
+ *
+ * The unbounded read was a defect on its own terms even without the throw — this function's own
+ * note says the surface calling it *"renders far more often than the quota manager runs"*.
+ * `at` and `openAt` are both declared indexes, so the extremes are the first and last entries of
+ * an ordered index: measured here, 1 ms against 4.25 s for the whole-table form at 130,000 rows.
  */
 export async function measureDepth(
   db: LocalIndex,
@@ -432,11 +480,17 @@ export async function measureDepth(
 ): Promise<DepthReport> {
   assertSizes(sizes);
   if (!Number.isInteger(now) || now < 0) throw new QuotaError(`${now} is not a Unix second`);
-  const samples = await db.priceSamples.orderBy('at').toArray();
   const tiers: TierDepth[] = [
     tierDepth(
       'raw',
-      samples.map((row) => row.at),
+      await tierExtent<PriceSample>(
+        {
+          count: () => db.priceSamples.count(),
+          first: () => db.priceSamples.orderBy('at').first(),
+          last: () => db.priceSamples.orderBy('at').last(),
+        },
+        (row) => row.at,
+      ),
       sizes.priceSample,
       budget.rawSampleBytes,
     ),
@@ -444,11 +498,18 @@ export async function measureDepth(
   // The three candle tables share one §9.2 budget line, so each is reported against the share it
   // actually competes for rather than against a quarter of it invented here.
   for (const resolution of ['candles1h', 'candles4h', 'candles1d'] as const) {
-    const rows = await db.table<Candle>(candleTableFor(resolution)).orderBy('openAt').toArray();
+    const table = db.table<Candle>(candleTableFor(resolution));
     tiers.push(
       tierDepth(
         resolution,
-        rows.map((row) => row.openAt),
+        await tierExtent<Candle>(
+          {
+            count: () => table.count(),
+            first: () => table.orderBy('openAt').first(),
+            last: () => table.orderBy('openAt').last(),
+          },
+          (row) => row.openAt,
+        ),
         sizes.candle,
         budget.candleBytes,
       ),
@@ -457,15 +518,44 @@ export async function measureDepth(
   return { measuredAt: now, tiers };
 }
 
+/** A tier's size and its two extreme instants. Three index reads, whatever the tier holds. */
+interface TierExtent {
+  readonly rows: number;
+  readonly oldest: number | undefined;
+  readonly newest: number | undefined;
+}
+
+/**
+ * The extent of one tier, read through the ordered index the extremes are the ends of.
+ *
+ * A structural `read` object rather than a `Table`, the same shape `oldestClosedBucket` takes:
+ * the two tiers order by different fields (`at` and `openAt`) declared on differently-typed
+ * tables, and threading the index name through a generic `Table` type buys nothing the call site
+ * does not already state plainly.
+ */
+async function tierExtent<T>(
+  read: {
+    readonly count: () => Promise<number>;
+    readonly first: () => Promise<T | undefined>;
+    readonly last: () => Promise<T | undefined>;
+  },
+  instant: (row: T) => number,
+): Promise<TierExtent> {
+  const [rows, first, last] = await Promise.all([read.count(), read.first(), read.last()]);
+  return {
+    rows,
+    oldest: first === undefined ? undefined : instant(first),
+    newest: last === undefined ? undefined : instant(last),
+  };
+}
+
 function tierDepth(
   tier: Resolution,
-  instants: readonly number[],
+  extent: TierExtent,
   rowBytes: number,
   share: number,
 ): TierDepth {
-  const rows = instants.length;
-  const oldest = rows === 0 ? undefined : Math.min(...instants);
-  const newest = rows === 0 ? undefined : Math.max(...instants);
+  const { rows, oldest, newest } = extent;
   const spanSeconds = oldest === undefined || newest === undefined ? 0 : newest - oldest;
   const heldDays = spanSeconds / DAY_SECONDS;
   const rowsPerDay = heldDays > 0 ? rows / heldDays : undefined;
@@ -492,6 +582,15 @@ export interface QuotaReport {
    * in, not the one they were in before it ran.
    */
   readonly depth: DepthReport;
+  /**
+   * The rungs that refused, in order — the `refused` steps, kept as their own list so a caller
+   * can ask *"did anything refuse?"* without filtering a heterogeneous sequence.
+   *
+   * Derived from `steps` rather than accumulated beside it: two lists maintained in parallel are
+   * two chances to report a refusal in one and not the other, and this one exists precisely so a
+   * refusal cannot go unreported.
+   */
+  readonly refusals: readonly Extract<QuotaStep, { kind: 'refused' }>[];
   /**
    * True when every rung has been applied and the budget is still exceeded.
    *
@@ -524,22 +623,38 @@ export const TX_PATH_TABLES: readonly string[] = Object.freeze(['txHistory', 'sn
  * `downsampled` label. That is not tidiness: §9.2 requires the evicted range to become a
  * labelled downsampled range *"and never a silent splice"*, and a label written in a second
  * transaction is absent for exactly as long as it takes a tab to close.
+ *
+ * **Each rung is caught separately, and that is the section's order taken seriously.** A rung
+ * that refuses is reported as a `refused` step and the pass continues down the ladder: the order
+ * is a guarantee about what is degraded *first*, not a licence to skip everything after the first
+ * thing that says no. Left uncaught, a pinned metadata set larger than its budget skipped the
+ * whole chart ladder, and one mixed-provenance proposal skipped the §6.5 raw-blob bound — so the
+ * one tier §9.1 forbids retaining grew without limit under a pass that reported nothing at all.
  */
 export async function applyQuota(db: LocalIndex, options: QuotaOptions): Promise<QuotaReport> {
   const { budget, sizes, now, pinnedSpecVersions } = options;
   assertSizes(sizes);
   if (!Number.isInteger(now) || now < 0) throw new QuotaError(`${now} is not a Unix second`);
-  const before = await measureUsage(db, sizes);
   const steps: QuotaStep[] = [];
+  const refuse = (rung: QuotaRung, at: string, error: unknown): void => {
+    steps.push({ kind: 'refused', rung, at, reason: reasonOf(error) });
+  };
+  const before = await measureUsage(db, sizes);
 
   // 1. Metadata — §9.3's own bound, tightened to §9.2's share (module note). Independent of the
   // chart ladder and of the event share, so its position here changes nothing it destroys.
-  const evicted = await evictMetadataToBudget(db, {
-    maxBlobs: budget.metadataBlobs,
-    maxBytes: Math.floor(budget.metadataBytes),
-    pinned: pinnedSpecVersions,
-  });
-  if (evicted.length > 0) steps.push({ kind: 'evict-metadata', specVersions: evicted });
+  try {
+    const evicted = await evictMetadataToBudget(db, {
+      maxBlobs: budget.metadataBlobs,
+      maxBytes: Math.floor(budget.metadataBytes),
+      pinned: pinnedSpecVersions,
+    });
+    if (evicted.length > 0) steps.push({ kind: 'evict-metadata', specVersions: evicted });
+  } catch (error) {
+    // §9.3's pinned set does not fit its own platform budget — a release-configuration fault the
+    // chart ladder can do nothing about and must not be stopped by.
+    refuse('evict-metadata', 'metadata', error);
+  }
 
   // 2. The chart ladder. `labels` accumulates across rungs so a range degraded twice keeps the
   // coarser label rather than two rows claiming two resolutions for one span.
@@ -556,28 +671,34 @@ export async function applyQuota(db: LocalIndex, options: QuotaOptions): Promise
     // every pass starts strictly after it, so the loop cannot retry a bucket it has already
     // failed on and cannot skip one it has not tried.
     let after: number | undefined;
-    for (;;) {
-      // Only the share this rung can relieve, read from the database each pass. Degrading
-      // candles because the *sample* share is over would destroy resolution without freeing a
-      // byte of the share that is full.
-      const held = await shareBytes(db, share, sizes);
-      if (held <= budgetForShare) break;
-      const step = await degradeOldestBucket(db, rung, target, now, after, (range) => {
-        labels = mergeDownsampled(labels, range);
-        return labels;
-      });
-      if (step === undefined) break;
-      steps.push(step);
-      // **The progress guard, and what it must not do is abandon the rung.** Every other
-      // termination condition here is a property of *other* code — the delete really removing
-      // rows, the measurement really shrinking — and when one of those is wrong the loop folds
-      // one bucket forever, which takes the tab with it. But a bucket can also legitimately free
-      // nothing: rolling up a bucket holding a single candle writes one row for one row, and a
-      // guard that stopped there would report `exhausted` while later buckets holding four
-      // rows apiece were still foldable and still over budget. So a bucket that freed nothing
-      // advances the cursor past **itself** rather than ending the rung, and the rung ends only
-      // when nothing is eligible or the share is under budget.
-      if ((await shareBytes(db, share, sizes)) >= held) after = step.bucketOpenAt;
+    try {
+      for (;;) {
+        // Only the share this rung can relieve, read from the database each pass. Degrading
+        // candles because the *sample* share is over would destroy resolution without freeing a
+        // byte of the share that is full.
+        const held = await shareBytes(db, share, sizes);
+        if (held <= budgetForShare) break;
+        const step = await degradeOldestBucket(db, rung, target, now, after, (range) => {
+          labels = mergeDownsampled(labels, range);
+          return labels;
+        });
+        if (step === undefined) break;
+        steps.push(step);
+        // **The progress guard, and what it must not do is abandon the rung.** Every other
+        // termination condition here is a property of *other* code — the delete really removing
+        // rows, the measurement really shrinking — and when one of those is wrong the loop folds
+        // one bucket forever, which takes the tab with it. But a bucket can also legitimately free
+        // nothing: rolling up a bucket holding a single candle writes one row for one row, and a
+        // guard that stopped there would report `exhausted` while later buckets holding four
+        // rows apiece were still foldable and still over budget. So a bucket that freed nothing
+        // advances the cursor past **itself** rather than ending the rung, and the rung ends only
+        // when nothing is eligible or the share is under budget.
+        if ((await shareBytes(db, share, sizes)) >= held) after = step.bucketOpenAt;
+      }
+    } catch (error) {
+      // One rung, one refusal. The coarser rungs below still run: a `candles1h` fold that cannot
+      // proceed says nothing about whether `candles4h` can be rolled into `candles1d`.
+      refuse('downsample', rung, error);
     }
     rung = target;
   }
@@ -588,9 +709,16 @@ export async function applyQuota(db: LocalIndex, options: QuotaOptions): Promise
   // way; what changes is whether the reported sequence is the section's.
   for (const proposal of options.settled ?? []) {
     if ((await eventShareBytes(db, sizes)) <= budget.eventBytes) break;
-    const compacted = await compactSettledEvents(db, proposal);
-    if (compacted === 0) continue;
-    steps.push({ kind: 'compact-events', proposalId: proposal.proposalId, eventsCompacted: compacted });
+    try {
+      const compacted = await compactSettledEvents(db, proposal);
+      if (compacted === 0) continue;
+      steps.push({ kind: 'compact-events', proposalId: proposal.proposalId, eventsCompacted: compacted });
+    } catch (error) {
+      // Per proposal, not per loop: a mixed-provenance proposal is refused and the next settled
+      // proposal is still compacted. The refusal costs that proposal's depth, which §9.2 permits;
+      // costing every later proposal's depth as well is not something it permits anywhere.
+      refuse('compact-events', proposal.proposalId, error);
+    }
   }
 
   // 4. §6.5's raw blobs, bounded last because they are the only event rows the ladder can free
@@ -599,13 +727,20 @@ export async function applyQuota(db: LocalIndex, options: QuotaOptions): Promise
   // summary that says what they were, while a discarded blob is gone. The budget is what the
   // events share has **left** after everything else in it, so the bound is §9.2's own 15 % and
   // not a number invented here.
-  const eventOverhead = (await eventShareBytes(db, sizes)) - (await pendingRawRows(db)).bytes;
-  const evictedRaw = await evictPendingRawToBound(
-    db,
-    Math.max(0, budget.eventBytes - eventOverhead),
-    now,
-  );
-  if (evictedRaw.length > 0) steps.push({ kind: 'evict-pending-raw', blocks: evictedRaw });
+  try {
+    const eventOverhead = (await eventShareBytes(db, sizes)) - (await pendingRawBytes(db));
+    const evictedRaw = await evictPendingRawToBound(
+      db,
+      Math.max(0, budget.eventBytes - eventOverhead),
+      now,
+    );
+    if (evictedRaw.length > 0) steps.push({ kind: 'evict-pending-raw', blocks: evictedRaw });
+  } catch (error) {
+    // `pendingRawRows` refuses when the sparse index cannot reach the whole pending set. That
+    // refusal is right — an under-covering bound is worse than none — and it is the last rung, so
+    // the only thing left to protect is the report itself.
+    refuse('evict-pending-raw', 'pending-raw', error);
+  }
 
   return {
     before,
@@ -613,8 +748,14 @@ export async function applyQuota(db: LocalIndex, options: QuotaOptions): Promise
     steps,
     downsampled: labels,
     depth: await measureDepth(db, budget, sizes, now),
+    refusals: steps.filter((step): step is Extract<QuotaStep, { kind: 'refused' }> => step.kind === 'refused'),
     exhausted: !(await budgetHolds(db, budget, sizes)),
   };
+}
+
+/** A caught refusal as the report states it — the message, never a stringified `[object Object]`. */
+function reasonOf(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 /** A provenance as an error message names it — one spelling, so two messages cannot disagree. */
@@ -629,12 +770,12 @@ function shareOf(rung: Resolution): 'rawSamples' | 'candles' {
 
 /** The events share as `measureUsage` computes it — decoded rows, raw blobs and the archive. */
 async function eventShareBytes(db: LocalIndex, sizes: RowSizes): Promise<number> {
-  const [events, archive, pending] = await Promise.all([
+  const [events, archive, pendingBytes] = await Promise.all([
     db.events.count(),
     db.proposalsArchive.count(),
-    pendingRawRows(db),
+    pendingRawBytes(db),
   ]);
-  return events * sizes.event + pending.bytes + archive * sizes.archiveRow;
+  return events * sizes.event + pendingBytes + archive * sizes.archiveRow;
 }
 
 /**

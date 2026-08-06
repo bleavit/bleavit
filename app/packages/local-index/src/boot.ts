@@ -36,7 +36,16 @@ import {
   type DroppedRange,
   type RangeEdgeFacts,
 } from './coverage.js';
-import { pendingDecoderCount, readCoverageRepair, writeCoverage, type LocalIndex } from './store.js';
+import {
+  pendingDecoderCount,
+  readChartDiscard,
+  readCoverageRepair,
+  readPendingRawEvicted,
+  writeCoverage,
+  type ChartDiscardRecord,
+  type LocalIndex,
+  type PendingRawEvictionRecord,
+} from './store.js';
 
 /**
  * What the boot check found, in the shape a surface can render.
@@ -56,6 +65,23 @@ export interface IndexBootReport {
   readonly unchecked: readonly CoverageRange[];
   /** §6.5's raw rows awaiting an era's metadata (FE-P5). */
   readonly pendingDecoder: number;
+  /**
+   * What §9.1's bound on §6.5's raw blobs has discarded, or `undefined`.
+   *
+   * The record was written precisely so the disposal is visible and this report omitted it, which
+   * left the label with a producer and no reader — the same shape as a checker with no call site.
+   */
+  readonly pendingRawEvicted: PendingRawEvictionRecord | undefined;
+  /**
+   * Chart rows a schema migration dropped, or `undefined`.
+   *
+   * The loss is permitted (INV-FE-7, §9.2's degradable tier) and performing it silently is not:
+   * `meta.coverage` carries through the upgrade, so without this the tables state *"complete
+   * within [ranges]"* over an empty tier — the silent splice INV-FE-15 and §9.2 both forbid, and
+   * the boot path is where the client gets to say so. The fixed user-facing copy belongs to
+   * `FE-IDX-002` and is not invented here (SQ-604).
+   */
+  readonly chartDiscard: ChartDiscardRecord | undefined;
 }
 
 /**
@@ -87,5 +113,7 @@ export async function checkIndexAtBoot(
     invalidated: verified.invalidated,
     unchecked: verified.unchecked,
     pendingDecoder: await pendingDecoderCount(db),
+    pendingRawEvicted: await readPendingRawEvicted(db),
+    chartDiscard: await readChartDiscard(db),
   };
 }

@@ -26,11 +26,17 @@ import {
   SCHEMA_V1,
   SCHEMA_V3,
   StoreError,
+  applyQuota,
+  checkIndexAtBoot,
   databaseName,
   evictMetadataToBudget,
   evictPendingRawToBound,
+  evictionEnvelope,
   pendingDecoderCount,
+  pendingRawBytes,
   pendingRawRows,
+  platformBudget,
+  readChartDiscard,
   readCoverage,
   readCoverageRepair,
   readPendingRawEvicted,
@@ -343,7 +349,21 @@ test('a database created under SCHEMA_V1 UPGRADES rather than failing to open', 
     origin: 'self',
   });
   await legacy.table('priceSamples').put({ bookId: 'book-1', at: 10, blockNumber: 5, price1e9: 1n, origin: 'self' });
-  await legacy.table('meta').put({ key: 'coverage', coverage: { ranges: [], holes: [] } });
+  await legacy.table('candles1h').put({
+    bookId: 'book-1',
+    openAt: 0,
+    fromBlock: 3,
+    toBlock: 5,
+    open1e9: 1n,
+    high1e9: 1n,
+    low1e9: 1n,
+    close1e9: 1n,
+    samples: 1,
+    origin: 'self',
+  });
+  await legacy
+    .table('meta')
+    .put({ key: 'coverage', coverage: { ranges: [selfRange(1, 9, 1, edgeAt(9, genesis))], holes: [] } });
   legacy.close();
 
   const db = new LocalIndex(genesis);
@@ -352,13 +372,41 @@ test('a database created under SCHEMA_V1 UPGRADES rather than failing to open', 
 
   // What survives is what the ladder does not own: history the user signed, and coverage.
   assert.equal(await db.txHistory.count(), 1, 'the upgrade dropped the user’s own transaction history');
-  assert.deepEqual(await readCoverage(db), { ranges: [], holes: [] });
+  assert.equal(nth((await readCoverage(db)).ranges, 0, 'range').toBlock, 9);
 
   // What is dropped is exactly the re-keyed set, and it is bounded: chart depth re-accumulates,
   // which §9.2's ladder already treats as the degradable tier.
   for (const table of REKEYED_TABLES) {
     assert.equal(await db.table(table).count(), 0, `${table} kept rows under a key path it no longer uses`);
   }
+
+  // **And the drop is RECORDED.** The loss itself is permitted — INV-FE-7 makes this storage a
+  // non-authoritative cache whose loss is "a performance and convenience event only", and the
+  // alternative is a database that fails to open, which is the one outcome INV-FE-7 says the
+  // client must survive. Performing it silently is not: `meta.coverage` carries through
+  // unchanged, so afterwards `coveredSamples` answers a covered span with an empty array and the
+  // tables state "complete within [ranges]" over nothing. INV-FE-15 requires everything
+  // unverified to be "either absent **with an explanation** or present and labeled — gaps are
+  // first-class and visible, never silently spliced", and §9.2 states the identical rule for this
+  // exact operation. The untrue claim is separable from the loss, and one `meta.put` inside the
+  // upgrade transaction separates them.
+  const discard = await readChartDiscard(db);
+  assert.ok(discard, 'the migration emptied the chart tables and left nothing saying so');
+  assert.equal(discard.rows, 2, 'the record does not count the rows that were actually dropped');
+  assert.deepEqual([...discard.tables], [...REKEYED_TABLES]);
+  assert.equal(discard.fromSchema, 1);
+  assert.equal(discard.toSchema, 3);
+  // The span named is the one `meta.coverage` still claims — exactly where the surviving coverage
+  // and the surviving rows now disagree.
+  assert.equal(discard.fromBlock, 1);
+  assert.equal(discard.toBlock, 9);
+  assert.ok(discard.at > 0);
+  assert.match(discard.detail, /the blocks are still covered/);
+
+  // ...and the boot path surfaces it, because a record with a producer and no reader is the same
+  // shape as a checker with no call site — which is the defect this whole repair round began on.
+  const report = await checkIndexAtBoot(db, () => undefined);
+  assert.deepEqual(report.chartDiscard, discard);
 
   // The corrected key really is in force afterwards — the property the migration exists for.
   const common = { bookId: 'book-1', blockNumber: 7, blockTimestampMs: 7_000 };
@@ -367,6 +415,106 @@ test('a database created under SCHEMA_V1 UPGRADES rather than failing to open', 
     priceSample({ ...common, price1e9: 900n, origin: 'indexer', providerId: 'acme' }),
   ]);
   assert.equal(await db.priceSamples.count(), 2, 'the upgraded table still collapses two sources into one row');
+  await db.delete();
+});
+
+test('an upgrade that dropped NOTHING records nothing — the zero case, not just a fresh database', async () => {
+  // The other half of the record's contract, and the case that has to be exercised deliberately:
+  // a user who upgrades having never charted anything must not be told they lost chart data. A
+  // boot report a user learns to ignore is one that cannot report the loss that does happen.
+  //
+  // A fresh database alone does not prove the guard — measured, and worth writing down: Dexie
+  // does not run a version's `upgrade` when it creates the database from nothing, so removing the
+  // `rows === 0` return leaves a fresh-database assertion perfectly green. The real version-1
+  // database below, with its chart tables empty, is what runs the upgrader and reaches the guard.
+  const fresh = new LocalIndex(`0x${'d5'.repeat(32)}`);
+  await fresh.delete();
+  await fresh.open();
+  assert.equal(await readChartDiscard(fresh), undefined);
+  assert.equal((await checkIndexAtBoot(fresh, () => undefined)).chartDiscard, undefined);
+  await fresh.delete();
+
+  const genesis = `0x${'d7'.repeat(32)}`;
+  const legacy = legacyIndexV1(genesis);
+  await legacy.delete();
+  await legacy.open();
+  // Everything the migration keeps, and nothing it drops.
+  await legacy.table('txHistory').put({
+    id: '0000000005:00000',
+    blockNumber: 5,
+    extrinsicIndex: 0,
+    account: '0xalice',
+    call: 'market.buy',
+    origin: 'self',
+  });
+  await legacy
+    .table('meta')
+    .put({ key: 'coverage', coverage: { ranges: [selfRange(1, 9, 1, edgeAt(9, genesis))], holes: [] } });
+  legacy.close();
+
+  const upgraded = new LocalIndex(genesis);
+  await upgraded.open();
+  assert.equal(upgraded.verno, 3);
+  assert.equal(await upgraded.txHistory.count(), 1, 'the fixture did not exercise the upgrade at all');
+  assert.equal(
+    await readChartDiscard(upgraded),
+    undefined,
+    'the upgrade announced a chart loss over four tables that held nothing',
+  );
+  await upgraded.delete();
+});
+
+test('the upgrade BACKFILLS pendingBlock, or the sparse index refuses every pass forever', async () => {
+  // A version-1 `${block}:raw` row predates `pendingBlock`, so `orderBy('pendingBlock')` cannot
+  // see it while `pendingDecoderCount`'s full scan can — and `pendingRawRows` refuses on that
+  // disagreement, correctly, because a bound that silently does not cover everything is worse
+  // than no bound. What made it a defect is that the disagreement is **permanent**: nothing else
+  // ever writes the field onto an existing row, and §6.5 calls a raw row "the expected state of
+  // any backfill across a runtime upgrade". So one upgraded database refused every retention pass
+  // it would ever run, and `measureUsage` is the first call in `applyQuota` — the whole pass, on
+  // line one.
+  const genesis = `0x${'d6'.repeat(32)}`;
+  const legacy = legacyIndexV1(genesis);
+  await legacy.delete();
+  await legacy.open();
+  await legacy.table('events').put({
+    id: rawEventId(12),
+    blockNumber: 12,
+    pallet: '(pending decoder)',
+    name: '(era metadata unavailable)',
+    decoded: false,
+    raw: new Uint8Array(64),
+    origin: 'self',
+  });
+  // A decoded row must NOT gain the field: `pendingBlock` is what makes the index sparse, and a
+  // backfill that stamped every event would make `orderBy('pendingBlock')` enumerate the whole
+  // events table — the bound would then evict decoded history to relieve the raw blobs.
+  await legacy.table('events').put({
+    id: '12:0',
+    blockNumber: 12,
+    pallet: 'Market',
+    name: 'Traded',
+    decoded: true,
+    origin: 'self',
+  });
+  legacy.close();
+
+  const db = new LocalIndex(genesis);
+  await db.open();
+  const measured = await pendingRawRows(db);
+  assert.equal(measured.rows.length, 1, 'the sparse index still cannot see the upgraded raw row');
+  assert.equal(nth(measured.rows, 0, 'raw row').blockNumber, 12);
+  assert.equal(measured.bytes, 64);
+  assert.equal(await pendingRawBytes(db), 64, 'the scan and the index disagree on the same bytes');
+
+  // The whole retention pass runs, which is the property the refusal was taking down with it.
+  const report = await applyQuota(db, {
+    budget: platformBudget('desktop'),
+    sizes: { priceSample: 120, candle: 120, event: 120, archiveRow: 120 },
+    now: 100_000,
+    pinnedSpecVersions: [3],
+  });
+  assert.deepEqual([...report.refusals], [], 'the pass refused a rung it should have completed');
   await db.delete();
 });
 
@@ -451,6 +599,43 @@ test('§6.5’s raw blobs are BOUNDED, oldest first, and the eviction is labelle
   assert.equal(record.newestBlock, 20);
   assert.match(record.reason, /can no longer be recovered locally/);
   await db.delete();
+});
+
+test('the eviction envelope FOLDS 130,000 blocks — a spread throws at exactly this size', () => {
+  // `Math.min(...blocks)` reads well and is a crash. V8 refuses a spread above roughly 125,390
+  // arguments — measured on this project's pinned node: 125,000 is fine, 130,000 throws
+  // `RangeError: Maximum call stack size exceeded` — and the argument count here is the number of
+  // blobs the bound is discarding. §9.2's 15 % events share is 45 MB on desktop, which admits on
+  // the order of 225,000 of §6.5's small raw blobs, so the spread form failed **exactly when the
+  // eviction mattered most** and a retention pass that throws frees nothing at all.
+  //
+  // Exercised directly rather than through `evictPendingRawToBound`, and the reason is stated
+  // rather than implied: reaching the argument count through the store means inserting and then
+  // deleting ~130,000 rows in `fake-indexeddb`, which is a minute of suite time to reach an
+  // arithmetic property. The integration is covered at ordinary sizes by the test below; this is
+  // the one size no fixture reaches, and a property that cannot be exercised is one the suite is
+  // structurally blind to — which is how the spread survived the round that added the eviction.
+  const blocks: number[] = [];
+  for (let i = 0; i < 130_000; i += 1) blocks.push(200_000 - i);
+  assert.throws(() => Math.min(...blocks), RangeError, 'V8 no longer refuses this spread, so the bound below proves nothing');
+
+  assert.deepEqual(evictionEnvelope(undefined, blocks), { oldestBlock: 70_001, newestBlock: 200_000 });
+
+  // A previous record widens the envelope in both directions rather than replacing it: the record
+  // is cumulative, so it has to describe every block ever discarded and not the last batch.
+  const previous = {
+    blocks: 1,
+    bytes: 1,
+    oldestBlock: 5,
+    newestBlock: 300_000,
+    at: 1,
+    reason: 'earlier',
+  };
+  assert.deepEqual(evictionEnvelope(previous, blocks), { oldestBlock: 5, newestBlock: 300_000 });
+
+  // Nothing to fold and no previous record has no honest answer, so it refuses rather than
+  // inventing one. Reachable, not decorative: it is a caller asking for an empty eviction's span.
+  assert.throws(() => evictionEnvelope(undefined, []), StoreError);
 });
 
 test('a raw row the sparse index cannot see FAILS the bound rather than shrinking it', async () => {
