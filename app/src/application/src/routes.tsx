@@ -70,8 +70,8 @@ const HANDOFF = '@bleavit/features-handoff';
 
 export const PENDING_SCREENS: Readonly<Record<string, PendingScreen>> = Object.freeze({
   S2: { state: 'built-unwired', milestone: 'F7', component: `${TX}#ProposalDetail`, waitingOn: 'a live transport for its reader' },
-  S3: { state: 'not-built', milestone: 'F7b', component: `${TX}#MarketTrade` },
-  S4: { state: 'not-built', milestone: 'F7b', component: `${TX}#Positions` },
+  S3: { state: 'built-unwired', milestone: 'F7b', component: `${TX}#MarketTrade`, waitingOn: 'a live transport for its reader' },
+  S4: { state: 'built-unwired', milestone: 'F7b', component: `${TX}#Positions`, waitingOn: 'a live transport for its two-domain reader' },
   S5: { state: 'built-unwired', milestone: 'F7b', component: `${TX}#SubmitProposal`, waitingOn: 'a live transport for its reader, and a chain surface for the per-funder intake rate limit' },
   S6: { state: 'built-unwired', milestone: 'F7b', component: `${TX}#ExecutionQueue`, waitingOn: 'a live transport for its reader and a signer session' },
   S7: { state: 'built-unwired', milestone: 'F7b', component: `${TX}#WelfareDashboard`, waitingOn: 'a live transport for its reader' },
@@ -91,7 +91,7 @@ export const PENDING_SCREENS: Readonly<Record<string, PendingScreen>> = Object.f
   S17: { state: 'built-unwired', milestone: 'F17', component: `${TX}#UpgradeCrank`, waitingOn: 'a live transport and the FE-P10 outcome' },
   S18: { state: 'built-unwired', milestone: 'F17', component: `${TX}#SnapshotCrank`, waitingOn: 'a live transport and a signer session' },
   S19: { state: 'built-unwired', milestone: 'F17', component: `${TX}#RegistryFiling`, waitingOn: 'a live transport and a signer session' },
-  S20: { state: 'not-built', milestone: 'F7b', component: `${TX}#Balances` },
+  S20: { state: 'built-unwired', milestone: 'F7b', component: `${TX}#Balances`, waitingOn: 'a live transport for its reader' },
   S21: { state: 'built-unwired', milestone: 'F7', component: `${HANDOFF}#ShareContext`, waitingOn: 'the capsule export flow being wired to it' },
   S22: { state: 'built-unwired', milestone: 'F7', component: `${HANDOFF}#ImportReview`, waitingOn: 'the import and clamp flow being wired to it' },
 });
