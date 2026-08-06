@@ -7,6 +7,17 @@ as queryable false findings: 196 is not the sustained observing-book flow,
 their shares, the measured blob is outside the stated range, the shipped-blob
 bundle row is absent, and one doc-13 value citation does not resolve. Generated
 weights and blob sizes are kept in explicit implementation-evidence accessors.
+
+**SQ-557 was ruled on 2026-08-06 and doc 10 §9 was rewritten.** The findings that
+read the *live* document — the bundle-budget row and the normative citations —
+now assert the repaired state, each paired with an anti-vacuity case proving the
+check can still go red; the constants above them remain a snapshot of the cells
+as published when the question was filed, which is what makes the finding
+records readable after the fact.  The load model itself moved again in the same
+session: the repair counted the primary partition only, and hosted books emit
+the same events on a duty cycle of 1.  That correction lives in
+`tools/ci/check-frontend-budgets.py`, which derives §9 from doc 13 and the
+runtime rather than from any snapshot here.
 """
 
 import unittest
@@ -324,15 +335,30 @@ class TestQuotaAndMetadata(unittest.TestCase):
                     PINNED_METADATA_BLOBS * self.measurement.gzip_bytes,
                 )
 
-    def test_sq_557_release_shipped_metadata_has_no_bundle_budget_row(self):
-        """SQ-557. §9.3 mandates release-shipped fallback blobs.
+    def test_sq_557_release_shipped_metadata_now_has_a_bundle_budget_row(self):
+        """SQ-557, ruled 2026-08-06: §9.4 gained the row §9.3 always implied.
 
-        Section 9.4 gates bundle artifacts but contains no row for those blobs.
-        The measured blob makes the omission smaller than the prose suggests;
-        it does not make an unbudgeted release artifact a budgeted one.
+        §9.3 mandates release-shipped fallback blobs and §9.4 gated every other
+        bundle artifact without a row for them, so the one release artifact
+        whose size §9.3 bounds was the one nothing measured.  The finding is now
+        green because the row exists, not because the check was relaxed — the
+        row-label extraction is unchanged and the assertion below still requires
+        a metadata row to be present by name.
         """
         doc10 = (REPO_ROOT / DOC_10).read_text(encoding="utf-8")
         finding = metadata_bundle_budget_finding(doc10)
+        self.assertTrue(finding.ok, f"§9.4 rows: {finding.actual}")
+        self.assertTrue(any("metadata" in row.lower() for row in finding.actual))
+
+    def test_a_budget_table_that_loses_the_metadata_row_is_detected_again(self):
+        """Anti-vacuity: the finding must still fire, or it stopped being a check."""
+        doc10 = (REPO_ROOT / DOC_10).read_text(encoding="utf-8")
+        stripped = "\n".join(
+            line
+            for line in doc10.splitlines()
+            if not line.startswith("| Release-shipped fallback metadata")
+        )
+        finding = metadata_bundle_budget_finding(stripped)
         self.assertFalse(finding.ok)
         self.assertFalse(any("metadata" in row.lower() for row in finding.actual))
 
@@ -340,27 +366,39 @@ class TestQuotaAndMetadata(unittest.TestCase):
 class TestNormativeCitations(unittest.TestCase):
     """Every doc-10 `normative value(s): 13-parameters.md` citation, parsed."""
 
-    def test_sq_557_six_of_seven_citations_resolve_and_the_quota_caps_do_not(self):
-        """SQ-557. 10 §9.2's cap citation has no normative home in doc 13.
+    def test_sq_557_every_normative_citation_now_resolves(self):
+        """SQ-557, ruled 2026-08-06: doc 10 no longer cites doc 13 for a value it lacks.
 
-        The resolver checks every citation, so this is not a grep special-cased
-        to the known bad line. The stale cap values remain source data only.
+        §9.2's *"Hard caps"* line carried a `normative values: 13-parameters.md`
+        citation pointing at a document with no such row — a browser storage
+        quota is not a chain parameter, and every other §9 budget value has
+        always been owned by §9 itself.  The repair removed the citation rather
+        than inventing a registry row, so the remaining citations are the ones
+        that were always genuine.
+
+        The resolver still checks *every* citation in doc 10, not a list of
+        known-good ones, so this asserts a property rather than a snapshot.
         """
         findings = repo_normative_citation_findings(REPO_ROOT)
-        self.assertEqual(len(findings), 7)
-        self.assertEqual(sum(f.ok for f in findings), 6)
+        self.assertGreater(len(findings), 0, "the resolver found no citations to check")
         dangling = [f for f in findings if not f.ok]
-        self.assertEqual(len(dangling), 1)
-        self.assertIn("Hard caps", dangling[0].claim)
+        self.assertEqual(dangling, [], f"dangling citations: {[f.claim for f in dangling]}")
 
-    def test_the_resolver_turns_green_when_the_normative_home_gains_the_values(self):
-        # Anti-vacuity: do not pin the defect to itself. A doc-13 correction
-        # resolves the existing citation without changing code or expected ids.
+    def test_a_citation_whose_value_leaves_doc_13_is_detected(self):
+        """Anti-vacuity: an all-green resolver must still be able to go red.
+
+        Mutating doc 10's cited value (rather than deleting a doc-13 row) keeps
+        the mutation surgical: no other citation's numeric atoms move, so
+        exactly one finding may flip.
+        """
         doc10 = (REPO_ROOT / DOC_10).read_text(encoding="utf-8")
         doc13 = (REPO_ROOT / DOC_13).read_text(encoding="utf-8")
-        repaired = doc13 + "\n| Frontend IndexedDB caps | 300 MB desktop / 75 MB mobile |\n"
-        findings = normative_citation_findings(doc10, repaired)
-        self.assertTrue(all(f.ok for f in findings))
+        self.assertIn("= 43,200 blocks = 72 h", doc10)
+        broken = doc10.replace("= 43,200 blocks = 72 h", "= 43,201 blocks = 72 h", 1)
+        findings = normative_citation_findings(broken, doc13)
+        dangling = [f for f in findings if not f.ok]
+        self.assertEqual(len(dangling), 1, f"expected exactly one dangling, got {len(dangling)}")
+        self.assertIn("43,201", dangling[0].claim)
 
 
 if __name__ == "__main__":

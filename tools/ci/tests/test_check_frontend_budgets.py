@@ -5,6 +5,10 @@ or the runtime's pinned ceiling — and requires the gate to fail with a message
 names what broke. A gate that failed identically for every mutation would be no more
 useful than one that never failed at all, and the defect this gate exists for (SQ-557)
 survived precisely because a published number had nothing recomputing it.
+
+The hosted-partition cases exist because the *repair* for SQ-557 reintroduced the same
+shape one layer down: it counted the primary partition correctly and counted the hosted
+one not at all. Those mutations are the ones that would have caught it.
 """
 
 from __future__ import annotations
@@ -28,12 +32,15 @@ def run() -> subprocess.CompletedProcess[str]:
 
 
 class FrontendBudgets(unittest.TestCase):
-    def assert_mutation_caught(
-        self, path: pathlib.Path, old: str, new: str, expect: str
+    def assert_mutations_caught(
+        self, path: pathlib.Path, edits: list[tuple[str, str]], expect: str
     ) -> None:
         original = path.read_text(encoding="utf-8")
-        self.assertIn(old, original, f"anchor missing: {old[:70]!r}")
-        path.write_text(original.replace(old, new, 1), encoding="utf-8")
+        mutated = original
+        for old, new in edits:
+            self.assertIn(old, mutated, f"anchor missing: {old[:70]!r}")
+            mutated = mutated.replace(old, new, 1)
+        path.write_text(mutated, encoding="utf-8")
         try:
             result = run()
             output = result.stdout + result.stderr
@@ -43,11 +50,16 @@ class FrontendBudgets(unittest.TestCase):
         finally:
             path.write_text(original, encoding="utf-8")
 
+    def assert_mutation_caught(
+        self, path: pathlib.Path, old: str, new: str, expect: str
+    ) -> None:
+        self.assert_mutations_caught(path, [(old, new)], expect)
+
     def test_the_documents_and_the_runtime_agree_as_shipped(self) -> None:
         result = run()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("70 fills/block", result.stdout)
-        self.assertIn("31 trading books", result.stdout)
+        self.assertIn("93 fills/block = 70 primary + 23 external", result.stdout)
+        self.assertIn("159 trading books = 31 primary + 128 hosted", result.stdout)
 
     # --- the load model itself ------------------------------------------------------
 
@@ -55,24 +67,24 @@ class FrontendBudgets(unittest.TestCase):
         """The original defect: §9.1 published a book count nothing derived."""
         self.assert_mutation_caught(
             FRONTEND,
-            "trading books = epoch.slots·6 + 1 = 31",
-            "trading books = epoch.slots·6 + 1 = 196",
+            "primary trading books = epoch.slots·6 + 1 = 31",
+            "primary trading books = epoch.slots·6 + 1 = 196",
             "§9.1 states 196 trading books",
         )
 
     def test_a_slate_row_whose_books_do_not_follow_from_13_fails(self) -> None:
         self.assert_mutation_caught(
             FRONTEND,
-            "| 3 of 5 | 19 | ~16.9 k | ~2.0 MB |",
-            "| 3 of 5 | 20 | ~16.9 k | ~2.0 MB |",
+            "| Primary, 3 of 5 slots | 19 | ~16.9 k | ~2.0 MB |",
+            "| Primary, 3 of 5 slots | 20 | ~16.9 k | ~2.0 MB |",
             "publishes 20 trading books",
         )
 
     def test_a_stale_row_rate_fails(self) -> None:
         self.assert_mutation_caught(
             FRONTEND,
-            "| **5 of 5 — max sustained** | **31** | **~27.6 k** | **~3.3 MB** |",
-            "| **5 of 5 — max sustained** | **31** | **~17.8 k** | **~3.3 MB** |",
+            "| Primary, 5 of 5 slots — max | 31 | ~27.6 k | ~3.3 MB |",
+            "| Primary, 5 of 5 slots — max | 31 | ~17.8 k | ~3.3 MB |",
             "rows/day",
         )
 
@@ -94,29 +106,115 @@ class FrontendBudgets(unittest.TestCase):
             "slate",
         )
 
+    # --- the hosted partition, which the SQ-557 repair omitted -----------------------
+
+    def test_a_hosted_row_whose_books_do_not_follow_from_svc_max_live_fails(self) -> None:
+        self.assert_mutation_caught(
+            FRONTEND,
+            "| + hosted at `svc.max_live` = 16 (provisional) | 63 |",
+            "| + hosted at `svc.max_live` = 16 (provisional) | 71 |",
+            "publishes 71 trading books",
+        )
+
+    def test_dropping_the_registry_maximum_population_fails(self) -> None:
+        """The client is budgeted against what governance can reach, not today's value."""
+        self.assert_mutation_caught(
+            FRONTEND,
+            "| **+ hosted at `svc.max_live` = 64 (registry max)** | **159** | **~212.0 k** | **~25.4 MB** |\n",
+            "",
+            "hosted row(s)",
+        )
+
+    def test_hosted_books_counted_at_the_primary_duty_cycle_fail(self) -> None:
+        """A hosted book trades while its question is Open, so its duty is 1, not 13/21."""
+        self.assert_mutation_caught(
+            FRONTEND,
+            "| **+ hosted at `svc.max_live` = 64 (registry max)** | **159** | **~212.0 k** | **~25.4 MB** |",
+            "| **+ hosted at `svc.max_live` = 64 (registry max)** | **159** | **~141.7 k** | **~25.4 MB** |",
+            "rows/day",
+        )
+
+    def test_a_book_ceiling_disagreeing_with_svc_max_live_fails(self) -> None:
+        """13 §4 states `MaxLiveExternalMarkets` as `2·64`; the pair cannot drift apart."""
+        self.assert_mutation_caught(
+            PARAMS,
+            "not to appetite | 1 | 64 | ×2 | 2 | PARAM |",
+            "not to appetite | 1 | 32 | ×2 | 2 | PARAM |",
+            "cannot disagree",
+        )
+
+    def test_a_hosted_window_shorter_than_an_epoch_fails(self) -> None:
+        """§9.1's duty-of-1 argument rests on the window reaching a full epoch."""
+        self.assert_mutation_caught(
+            PARAMS,
+            "| `svc.max_window` | u32 | blocks | 302,400 (= `epoch.length`) |",
+            "| `svc.max_window` | u32 | blocks | 151,200 (= `epoch.length`) |",
+            "duty-cycle argument does not survive",
+        )
+
+    def test_a_depth_table_that_drops_the_hosted_columns_fails(self) -> None:
+        self.assert_mutation_caught(
+            FRONTEND,
+            "| Primary max (31 books) | + hosted, provisional (63 books) | + hosted, registry max (159 books) |\n|---|---|---|---|---|\n| Desktop | ~240 days | ~54 days | ~20 days | **~7.1 days** |",
+            "| Primary max (31 books) |\n|---|---|\n| Desktop | ~240 days | ~54 days |",
+            "Four are required",
+        )
+
     # --- the event stream, which §9.1 previously omitted ----------------------------
 
     def test_a_ceiling_that_disagrees_with_the_runtime_fails(self) -> None:
         self.assert_mutation_caught(
             FRONTEND,
-            "**70 fills per block**",
+            "**93 fills per block**",
             "**36 fills per block**",
-            "the runtime pins 70",
+            "the runtime pins 93",
+        )
+
+    def test_a_ceiling_counting_only_the_primary_partition_fails(self) -> None:
+        """Exactly the defect Codex found: 70 is the primary reservation, not the block."""
+        self.assert_mutations_caught(
+            FRONTEND,
+            [
+                ("**93 fills per block**", "**70 fills per block**"),
+                ("**70 primary + 23 external = 93**", "**70 primary + 0 external = 70**"),
+            ],
+            "the runtime pins 93",
+        )
+
+    def test_a_split_that_disagrees_with_the_runtime_fails(self) -> None:
+        self.assert_mutation_caught(
+            FRONTEND,
+            "**70 primary + 23 external = 93**",
+            "**47 primary + 46 external = 93**",
+            "the runtime pins 70 + 23 = 93",
+        )
+
+    def test_runtime_partition_pins_that_do_not_sum_fail(self) -> None:
+        self.assert_mutation_caught(
+            POV_BUDGETS,
+            "const MAX_TRADED_EVENTS_PER_BLOCK_EXTERNAL: u64 = 23;",
+            "const MAX_TRADED_EVENTS_PER_BLOCK_EXTERNAL: u64 = 20;",
+            "do not sum to its block pin",
         )
 
     def test_moving_the_runtime_pin_moves_the_document(self) -> None:
         """The binding is three-way: the pin is not doc 10's to choose."""
-        self.assert_mutation_caught(
+        self.assert_mutations_caught(
             POV_BUDGETS,
-            "const MAX_TRADED_EVENTS_PER_BLOCK: u64 = 70;",
-            "const MAX_TRADED_EVENTS_PER_BLOCK: u64 = 64;",
-            "the runtime pins 64",
+            [
+                ("const MAX_TRADED_EVENTS_PER_BLOCK: u64 = 93;", "const MAX_TRADED_EVENTS_PER_BLOCK: u64 = 87;"),
+                (
+                    "const MAX_TRADED_EVENTS_PER_BLOCK_PRIMARY: u64 = 70;",
+                    "const MAX_TRADED_EVENTS_PER_BLOCK_PRIMARY: u64 = 64;",
+                ),
+            ],
+            "the runtime pins 87",
         )
 
     def test_a_stale_traded_row_rate_fails(self) -> None:
         self.assert_mutation_caught(
             FRONTEND,
-            "**1,008,000 `Traded` rows/day",
+            "**1,339,200 `Traded` rows/day",
             "**1,036,800 `Traded` rows/day",
             "`Traded` rows/day",
         )
@@ -124,7 +222,7 @@ class FrontendBudgets(unittest.TestCase):
     def test_a_stale_event_share_exhaustion_figure_fails(self) -> None:
         self.assert_mutation_caught(
             FRONTEND,
-            "~**8.9 h** desktop",
+            "~**6.7 h** desktop",
             "~**17.4 h** desktop",
             "events share holds 17.4 h",
         )
@@ -185,8 +283,8 @@ class FrontendBudgets(unittest.TestCase):
     def test_a_stale_depth_cell_fails(self) -> None:
         self.assert_mutation_caught(
             FRONTEND,
-            "| Desktop | ~240 days | **~54 days** |",
-            "| Desktop | ~240 days | **~8.5 days** |",
+            "| Desktop | ~240 days | ~54 days | ~20 days | **~7.1 days** |",
+            "| Desktop | ~240 days | ~54 days | ~20 days | **~8.5 days** |",
             "cell publishes 8.5 days",
         )
 
@@ -220,9 +318,18 @@ class FrontendBudgets(unittest.TestCase):
     def test_a_deleted_load_table_is_an_error_not_a_pass(self) -> None:
         self.assert_mutation_caught(
             FRONTEND,
-            "| Slate (`epoch.slots` occupied) | Trading books |",
-            "| Slate (`epoch.slots` occupied) | Trading book counts |",
+            "| Population | Trading books |",
+            "| Population | Trading book counts |",
             "zero data rows",
+        )
+
+    def test_an_unparseable_load_row_is_an_error_not_a_skip(self) -> None:
+        """A row shape the gate does not recognise must fail, never quietly pass."""
+        self.assert_mutation_caught(
+            FRONTEND,
+            "| Primary, 1 of 5 slots | 7 |",
+            "| A quiet week | 7 |",
+            "cannot parse",
         )
 
 

@@ -4,17 +4,28 @@
 Doc 10 §9 publishes a load model, two retention-depth tables, a metadata bound and a
 bundle budget. Every one of those numbers is a *derived* value, and until now nothing
 re-derived any of them — which is how §9.1 came to size the browser against **196**
-concurrently-observing books when the chain can never have more than **31**, and how
+concurrently-observing books when the primary partition can never exceed **31**, and how
 §9.3's metadata cap came to exceed the §9.2 share it is drawn from (SQ-557).
+
+**The repair then made the mirror-image mistake, which is why this gate now counts two
+partitions rather than one.** Correcting 196 → 31 fixed the primary count and modelled
+*only* the primary count, while the canonical client demonstrably serves hosted books
+(11 §11.2a) that emit the same `Traded`/`Observed` events (02 §5, no domain filter) on a
+**duty cycle of 1** rather than the Trade phase's 13/21. Every population, rate and depth
+below is therefore derived per partition and summed — and a §9.1 table row this gate
+cannot parse, or a §9.2 depth table with fewer than four columns, is a failure rather
+than a silently-skipped cell.
 
 The point of this gate is that it carries **no answers of its own**. It reads:
 
-* `13-parameters.md` §1 for `epoch.length`, `epoch.slots` and `mkt.obs_interval`;
+* `13-parameters.md` §1 for `epoch.length`, `epoch.slots`, `mkt.obs_interval`,
+  `svc.max_live` (both its default *and* its registry maximum) and `svc.max_window`;
 * `13-parameters.md` §3.1 for the Trade-phase fraction;
-* `13-parameters.md` §4/§5 for `MaxLiveProposals`, `MaxSettlingCohorts`, the frozen
-  vault envelope and the `epoch.slots·6 + 1` book formula;
-* the runtime's own pinned `MAX_TRADED_EVENTS_PER_BLOCK`, which
-  `pov_budgets::traded_event_ceiling_per_block_pinned_for_frontend_budgets` proves
+* `13-parameters.md` §4/§5 for `MaxLiveProposals`, `MaxSettlingCohorts`,
+  `MaxLiveExternalMarkets`, the frozen vault envelope and the `epoch.slots·6 + 1` book
+  formula;
+* the runtime's own pinned `MAX_TRADED_EVENTS_PER_BLOCK` and its two partition shares,
+  which `pov_budgets::traded_event_ceiling_per_block_pinned_for_frontend_budgets` proves
   against the live block budget and `buy`'s dispatched weight;
 
 then derives §9's cells and compares them with what doc 10 prints. A checker holding its
@@ -97,14 +108,32 @@ def agrees(printed: str, derived: float) -> bool:
 # --------------------------------------------------------------------- doc 13 inputs
 
 
+#: The `type` column of a 13 §1 registry row. Used to tell that table apart from §4's
+#: re-read-semantics table, which repeats the same keys with prose in the same position —
+#: matching on the key alone silently reads `epoch.slots`'s amendment note as its default.
+REGISTRY_TYPES = re.compile(r"^(u8|u16|u32|u64|u128|bool|Perbill|Permill|Fixed\w*|Balance|\w+Id)$")
+
+
+def registry_row(text: str, key: str) -> list[str]:
+    """A 13 §1 registry row split into cells: key, type, unit, default, min, max, …
+
+    The key cell may carry a parenthetical (`epoch.slots` is `` `epoch.slots` (N_active) ``),
+    so the match is permissive there and disambiguated by the type column instead.
+    """
+    for line in re.findall(rf"^\| `{re.escape(key)}`[^|\n]*\|.*$", text, re.MULTILINE):
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        if len(cells) > 5 and REGISTRY_TYPES.match(cells[1]):
+            return cells
+    raise Fail(
+        f"cannot locate 13 §1's `{key}` registry row: no line matches the key with a type "
+        "column. Either the row moved out of §1 or its shape changed; either way its value "
+        "is no longer derivable and doc 10 §9 cannot be checked against it."
+    )
+
+
 def registry_default(text: str, key: str) -> str:
     """The `default` cell of a 13 §1 registry row."""
-    row = find(
-        text,
-        rf"^\| `{re.escape(key)}`[^|\n]*\|([^|\n]*\|){{2}}([^|\n]+)\|",
-        f"13 §1's `{key}` row",
-    )
-    return row.group(2).strip()
+    return registry_row(text, key)[3]
 
 
 def parameters() -> dict[str, object]:
@@ -153,6 +182,29 @@ def parameters() -> dict[str, object]:
         raise Fail("13 §4's `MaxSettlingCohorts` parsed as zero; the slate cap is underivable")
     max_slots = (vault_envelope - live_proposals) // settling
 
+    # The hosted partition. `svc.max_live` is a §1 PARAM row, so *both* its default and
+    # its registry maximum are load-bearing: the client is budgeted against the maximum
+    # a governance amendment can reach, not against today's provisional. Its `[VERIFY]`
+    # default cell prints the value in prose, so the number is read out of the cell
+    # rather than assumed to be the whole cell.
+    svc_row = registry_row(text, "svc.max_live")
+    svc_default = int(find(svc_row[3], r"(\d+)", "13 §1's `svc.max_live` default").group(1))
+    svc_max = int(find(svc_row[5], r"(\d+)", "13 §1's `svc.max_live` maximum").group(1))
+    svc_window = number(registry_default(text, "svc.max_window").split()[0])
+
+    external_books_max = int(
+        find(text, r"^\| `MaxLiveExternalMarkets` \| \*\*(\d+)\*\*", "13 §4's `MaxLiveExternalMarkets` row").group(1)
+    )
+    # 13 §4 states the ceiling as `2·64` — two books per question at `svc.max_live`'s hard
+    # maximum. Cross-checked rather than trusted, because §9.1's hosted column is derived
+    # from `2·svc.max_live` and a silent divergence would make that column unfalsifiable.
+    if external_books_max != 2 * svc_max:
+        raise Fail(
+            f"13 §4 caps `MaxLiveExternalMarkets` at {external_books_max} but 13 §1 caps "
+            f"`svc.max_live` at {svc_max}, i.e. {2 * svc_max} books. §9.1's hosted population "
+            "is derived from the pair, so they cannot disagree."
+        )
+
     return {
         "epoch_length": epoch_length,
         "epoch_days": epoch_days,
@@ -162,24 +214,43 @@ def parameters() -> dict[str, object]:
         "books_per_slot": books_per_slot,
         "baseline_books": baseline_books,
         "max_slots": max_slots,
+        "svc_default": svc_default,
+        "svc_max": svc_max,
+        "svc_window": svc_window,
+        "external_books_max": external_books_max,
     }
 
 
-def traded_ceiling() -> int:
-    """The runtime's pinned per-block `Traded` ceiling.
+def traded_ceiling() -> tuple[int, int, int]:
+    """The runtime's pinned per-block `Traded` ceiling, and its two partition shares.
 
     Read from the Rust source rather than restated, so the three-way binding holds: the
-    runtime test proves this literal against the live block budget and `buy`'s dispatched
-    weight, and this gate proves doc 10 against the same literal. Neither side is the
+    runtime test proves these literals against the live block budget and `buy`'s dispatched
+    weight, and this gate proves doc 10 against the same literals. Neither side is the
     source of truth on its own.
+
+    The split is read too, not just the total. The first version of this pin was the
+    primary reservation alone — a third short — and a gate that only ever saw one number
+    could not have told the difference.
     """
     source = POV_BUDGETS.read_text(encoding="utf-8")
-    match = find(
-        source,
-        r"const MAX_TRADED_EVENTS_PER_BLOCK: u64 = (\d+);",
-        "the runtime's pinned `MAX_TRADED_EVENTS_PER_BLOCK`",
-    )
-    return int(match.group(1))
+
+    def pinned(suffix: str) -> int:
+        return int(
+            find(
+                source,
+                rf"const MAX_TRADED_EVENTS_PER_BLOCK{suffix}: u64 = (\d+);",
+                f"the runtime's pinned `MAX_TRADED_EVENTS_PER_BLOCK{suffix}`",
+            ).group(1)
+        )
+
+    total, primary, external = pinned(""), pinned("_PRIMARY"), pinned("_EXTERNAL")
+    if primary + external != total:
+        raise Fail(
+            f"the runtime's partition pins do not sum to its block pin "
+            f"({primary} + {external} != {total}); doc 10 §9.1 publishes them as a sum"
+        )
+    return total, primary, external
 
 
 # --------------------------------------------------------------------- doc 10 tables
@@ -250,56 +321,132 @@ def main() -> int:
         )
     checked += 1
     obs_per_book_day = blocks_per_day / int(p["obs_interval"]) * p["trade_fraction"]
+    # A hosted book trades for as long as its question is `Open` (16 §7.6) rather than
+    # inside a Trade phase, so its duty is 1 and the Trade fraction does not apply. That
+    # asymmetry is the whole reason the two partitions cannot share one rate.
+    hosted_per_book_day = blocks_per_day / int(p["obs_interval"])
 
     def books(slots: int) -> int:
         return slots * int(p["books_per_slot"]) + int(p["baseline_books"])
 
     max_books = books(int(p["max_slots"]))
 
-    # --- §9.1's slate lattice -------------------------------------------------------
+    def rows_per_day(total_books: int) -> Fraction:
+        """Sample rows/day for a population, splitting it at the primary maximum.
+
+        Populations above `max_books` are primary-saturated plus hosted, which is how
+        §9.1's table is built; deriving it from the count alone keeps the two tables in
+        §9.1 and §9.2 sharing one model instead of two that can drift apart.
+        """
+        if total_books <= max_books:
+            return total_books * obs_per_book_day
+        return max_books * obs_per_book_day + (total_books - max_books) * hosted_per_book_day
+
+    # §9.1's "one full epoch" claim about the hosted window, checked rather than repeated.
+    if p["svc_window"] != p["epoch_length"]:
+        raise Fail(
+            f"§9.1 states the hosted window reaches one full epoch, but 13 §1 sets "
+            f"`svc.max_window` = {p['svc_window']:.0f} against `epoch.length` = "
+            f"{p['epoch_length']:.0f}; the duty-cycle argument does not survive that."
+        )
+    checked += 1
+
+    # --- §9.1's population table ----------------------------------------------------
+    # Two row shapes: primary slates ("3 of 5 slots") and hosted populations
+    # ("`svc.max_live` = 64"). Anything else is an unparsed row, not a passing one.
+    seen_hosted = 0
     for cells in table_rows(nine, "Trading books", "§9.1's load table"):
-        slate = find(cells[0], r"(\d+) of (\d+)", "a §9.1 slate label")
-        slots, of = (int(g) for g in slate.groups())
-        if of != int(p["max_slots"]):
+        slate = re.search(r"(\d+) of (\d+) slots", cells[0])
+        hosted = re.search(r"`svc\.max_live` = (\d+)", cells[0])
+        if slate is not None:
+            slots, of = (int(g) for g in slate.groups())
+            if of != int(p["max_slots"]):
+                raise Fail(
+                    f"§9.1 prints the slate as '{slots} of {of}' but 13 §5 item 2's envelope "
+                    f"({p['max_slots']} slots) is what caps it"
+                )
+            expected = books(slots)
+            label = f"{slots}-slot"
+        elif hosted is not None:
+            live = int(hosted.group(1))
+            if live not in (p["svc_default"], p["svc_max"]):
+                raise Fail(
+                    f"§9.1's hosted row is sized at `svc.max_live` = {live}, which is neither "
+                    f"13 §1's default ({p['svc_default']}) nor its maximum ({p['svc_max']})"
+                )
+            expected = max_books + 2 * live
+            seen_hosted += 1
+            label = f"hosted@{live}"
+        else:
             raise Fail(
-                f"§9.1 prints the slate as '{slots} of {of}' but 13 §5 item 2's envelope "
-                f"({p['max_slots']} slots) is what caps it"
+                f"§9.1's load table has a row this gate cannot parse: {cells[0]!r}. A row that "
+                "is neither a primary slate nor a hosted population is an unchecked cell."
             )
+
         printed_books = number(re.sub(r"[^\d]", "", cells[1]))
-        if printed_books != books(slots):
+        if printed_books != expected:
             raise Fail(
-                f"§9.1's {slots}-slot row publishes {printed_books:.0f} trading books; "
-                f"13 §5's formula gives {books(slots)}"
+                f"§9.1's {label} row publishes {printed_books:.0f} trading books; derived {expected}"
             )
-        rows_day = books(slots) * obs_per_book_day
+        rows_day = rows_per_day(expected)
         printed_rows = find(cells[2], r"([\d.,]+)\s*k", "a §9.1 rows/day cell").group(1)
         if not agrees(printed_rows, float(rows_day) / 1000):
             raise Fail(
-                f"§9.1's {slots}-slot row publishes {printed_rows} k rows/day; derived "
+                f"§9.1's {label} row publishes {printed_rows} k rows/day; derived "
                 f"{float(rows_day) / 1000:.4f} k"
             )
         printed_bytes = find(cells[3], r"([\d.,]+)\s*MB", "a §9.1 bytes/day cell").group(1)
         if not agrees(printed_bytes, float(rows_day) * row_bytes / 1e6):
             raise Fail(
-                f"§9.1's {slots}-slot row publishes {printed_bytes} MB/day; derived "
+                f"§9.1's {label} row publishes {printed_bytes} MB/day; derived "
                 f"{float(rows_day) * row_bytes / 1e6:.4f} MB"
             )
         checked += 3
 
-    # --- §9.1's book count and `Traded` ceiling -------------------------------------
+    if seen_hosted < 2:
+        raise Fail(
+            f"§9.1's load table carries {seen_hosted} hosted row(s). Both the provisional and "
+            "the registry-maximum populations must be published: the client is budgeted against "
+            "the second, and dropping it is exactly how the hosted partition went uncounted."
+        )
+
+    # --- §9.1's per-book rates, book count and `Traded` ceiling ----------------------
+    for what, derived, pattern in (
+        ("primary", obs_per_book_day, r"= \*\*([\d.,]+)\*\* rows/day and a hosted book"),
+        ("hosted", hosted_per_book_day, r"a hosted book `[\d,/]+` = \*\*([\d.,]+)\*\*"),
+    ):
+        printed = find(nine, pattern, f"§9.1's per-book {what} sample rate").group(1)
+        if not agrees(printed, float(derived)):
+            raise Fail(
+                f"§9.1 publishes {printed} sample rows/book/day for a {what} book; derived "
+                f"{float(derived):.4f}"
+            )
+        checked += 1
+
     stated_books = int(
-        find(nine, r"trading books = epoch\.slots·\d+ \+ \d+ = (\d+)", "§9.1's book count").group(1)
+        find(nine, r"primary trading books = epoch\.slots·\d+ \+ \d+ = (\d+)", "§9.1's book count").group(1)
     )
     if stated_books != max_books:
         raise Fail(f"§9.1 states {stated_books} trading books; 13 §5's formula gives {max_books}")
 
-    ceiling = traded_ceiling()
+    ceiling, ceiling_primary, ceiling_external = traded_ceiling()
     stated_ceiling = int(find(nine, r"\*\*(\d+) fills per block\*\*", "§9.1's fill ceiling").group(1))
     if stated_ceiling != ceiling:
         raise Fail(
             f"§9.1 states {stated_ceiling} fills per block; the runtime pins {ceiling}. "
             "The pin is the measured one — re-derive §9's event budget from it."
         )
+    split = find(
+        nine,
+        r"\*\*(\d+) primary \+ (\d+) external = (\d+)\*\*",
+        "§9.1's partition split for the fill ceiling",
+    )
+    if [int(g) for g in split.groups()] != [ceiling_primary, ceiling_external, ceiling]:
+        raise Fail(
+            f"§9.1 publishes the fill ceiling as {split.group(1)} + {split.group(2)} = "
+            f"{split.group(3)}; the runtime pins {ceiling_primary} + {ceiling_external} = {ceiling}"
+        )
+    checked += 1
     traded_per_day = ceiling * blocks_per_day
     printed_traded = find(nine, r"\*\*([\d,]+) `Traded` rows/day", "§9.1's Traded row rate").group(1)
     if number(printed_traded) != float(traded_per_day):
@@ -329,17 +476,29 @@ def main() -> int:
         rows = table_rows(nine, table, f"§9.2's {label} depth table")
         header = find(nine, rf"\|[^|\n]*{re.escape(table)}[^|\n]*\|([^\n]*)", f"§9.2's {label} header")
         counts = [int(m) for m in re.findall(r"\((\d+) books\)", header.group(1))]
-        if len(counts) != 2:
-            raise Fail(f"§9.2's {label} table no longer names two book counts in its header")
+        if len(counts) < 4:
+            raise Fail(
+                f"§9.2's {label} table names {len(counts)} book count(s) in its header. Four are "
+                "required — quietest, primary max, and the hosted partition at both its "
+                "provisional and its registry maximum — because the hosted column is the one "
+                "that dominates the depth and the one this section previously omitted."
+            )
         slate_books[label] = counts
         for cells in rows:
             device = cells[0].lower()
             cap = desktop_cap if "desktop" in device else mobile_cap
             if "desktop" not in device and "mobile" not in device:
                 raise Fail(f"§9.2's {label} table has an unrecognised device row {cells[0]!r}")
-            for count, printed in zip(counts, cells[1:3]):
+            if len(cells) < 1 + len(counts):
+                raise Fail(
+                    f"§9.2's {label} {device} row has {len(cells) - 1} depth cell(s) against "
+                    f"{len(counts)} header column(s); a column is going unchecked"
+                )
+            for count, printed in zip(counts, cells[1 : 1 + len(counts)]):
+                # Raw samples follow the population's own duty mix; candles are time-bucketed,
+                # so a book costs 24 rows/day whatever its trading window.
                 per_day = (
-                    count * float(obs_per_book_day) * row_bytes
+                    float(rows_per_day(count)) * row_bytes
                     if label == "raw"
                     else count * 24 * row_bytes
                 )
@@ -353,10 +512,13 @@ def main() -> int:
                 checked += 1
     if slate_books["raw"] != slate_books["c1h"]:
         raise Fail("§9.2's two depth tables are sized against different slates")
-    if max(slate_books["raw"]) != max_books:
+    full_population = max_books + int(p["external_books_max"])
+    if max(slate_books["raw"]) != full_population:
         raise Fail(
-            f"§9.2's depth tables top out at {max(slate_books['raw'])} books; the maximum slate "
-            f"is {max_books}"
+            f"§9.2's depth tables top out at {max(slate_books['raw'])} books; the reachable "
+            f"maximum is {full_population} — {max_books} primary plus "
+            f"{int(p['external_books_max'])} hosted at `svc.max_live`'s registry ceiling. "
+            "Budgeting against the primary partition alone is what SQ-557's repair missed."
         )
 
     events_per_day = float(traded_per_day) * row_bytes
@@ -455,7 +617,9 @@ def main() -> int:
         raise Fail(f"only {checked} cells were checked; the parse is too shallow to be a gate")
     print(
         f"OK doc 10 §9: {checked} published cells re-derived from 13 §1/§3.1/§4/§5 and the "
-        f"runtime's pinned ceiling ({ceiling} fills/block, {max_books} trading books)"
+        f"runtime's pinned ceiling ({ceiling} fills/block = {ceiling_primary} primary + "
+        f"{ceiling_external} external; {full_population} trading books = {max_books} primary + "
+        f"{int(p['external_books_max'])} hosted)"
     )
     return 0
 
