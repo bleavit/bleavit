@@ -55,7 +55,9 @@
     // reads it would put the type boundary on the wrong side of the artefact.
     "tools/*.ts",
     "tools/release/**/*.ts",
-    "tools/verify-release/**/*.ts"
+    "tools/snapshot/**/*.ts",
+    "tools/verify-release/**/*.ts",
+    "tests/snapshot/**/*.ts"
   ],
   // `tests/descriptors/types/*-witness.ts` joins the same class as the firewall fixtures:
   // it is an anti-vacuity control that MUST fail `tsc`, and `compat.test.ts` compiles it

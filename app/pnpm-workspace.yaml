@@ -12,6 +12,12 @@ packages:
   # here rather than a root devDependency, for the reason stated above: the root is
   # reachable from every package by the parent-directory walk.
   - 'tools/verify-release'
+  # `tools/snapshot` (10 §8.2/§10.1) is a member for the same reason, and it is the
+  # case that proves the comment above: declaring `@bleavit/providers` at the root
+  # instead makes it resolvable from `tests/firewall`, where
+  # `forbidden-package-edge.ts` proves 10 §10.1's CI-fatal edge by being
+  # UNRESOLVABLE — the fixture went from TS2307 to TS2305 (V-167).
+  - 'tools/snapshot'
   - 'tests/firewall'
   - 'tests/depcruise-witness'
   - 'tests/protocol'
@@ -29,3 +35,4 @@ packages:
   - 'tests/ui'
   - 'tests/screens'
   - 'tests/providers'
+  - 'tests/snapshot'

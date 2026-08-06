@@ -22,6 +22,7 @@ import {
   PROVIDER_REFUSAL_CODES,
   SNAPSHOT_FORMAT,
   admitSnapshot,
+  deriveBalances,
   diffSnapshots,
   parseSnapshot,
   serializeSnapshot,
@@ -48,7 +49,7 @@ function validDocument(): SnapshotDocument {
     binding: { ...BINDING },
     range: { fromBlock: 10, toBlock: 13 },
     coverage: [{ fromBlock: 10, toBlock: 13 }],
-    vaults: [{ vault: 'v1', branches: ['PASS', 'FAIL'] }],
+    vaults: [{ vault: 'v1', branches: ['FAIL', 'PASS'] }],
     ops: [
       { kind: 'split', block: 10, vault: 'v1', account: 'alice', amount: '1000' },
       { kind: 'split', block: 11, vault: 'v1', account: 'bob', amount: '500' },
@@ -56,8 +57,8 @@ function validDocument(): SnapshotDocument {
       { kind: 'redeem', block: 13, vault: 'v1', account: 'bob', branch: 'PASS', amount: '500' },
     ],
     balances: [
-      { vault: 'v1', account: 'alice', branch: 'PASS', amount: '800' },
       { vault: 'v1', account: 'alice', branch: 'FAIL', amount: '800' },
+      { vault: 'v1', account: 'alice', branch: 'PASS', amount: '800' },
       { vault: 'v1', account: 'bob', branch: 'FAIL', amount: '500' },
     ],
   };
@@ -479,6 +480,111 @@ test('a document that fails several classes reports all of them, not the first',
   assert.ok(fired.includes('derived-rows'));
 });
 
+// ------------------------------------------------------- canonical ARRAY order (10 §8.2)
+
+test('canonical: an out-of-order vaults array is refused', () => {
+  // Canonical JSON sorts object *keys* and leaves array order exactly as given, so without a
+  // rule here two honest producers emit two files — and two pins — for one history. The
+  // published property is byte-identical reproduction *by anyone*; the way anybody would find
+  // out it was false is a user being told a correct snapshot is corrupt.
+  const document = validDocument();
+  rejectedBy(
+    {
+      ...document,
+      vaults: [
+        { vault: 'v2', branches: ['FAIL', 'PASS'] },
+        { vault: 'v1', branches: ['FAIL', 'PASS'] },
+      ],
+    },
+    'canonical',
+  );
+});
+
+test('canonical: an out-of-order branches list is refused', () => {
+  rejectedBy(
+    { ...validDocument(), vaults: [{ vault: 'v1', branches: ['PASS', 'FAIL'] }] },
+    'canonical',
+  );
+});
+
+test('canonical: an out-of-order balances array is refused', () => {
+  const document = validDocument();
+  rejectedBy({ ...document, balances: [...document.balances].reverse() }, 'canonical');
+});
+
+test('canonical: a repeated vault is named as a repeat, not just as disorder', () => {
+  const document = validDocument();
+  const verdict = admit({
+    ...document,
+    vaults: [
+      { vault: 'v1', branches: ['FAIL', 'PASS'] },
+      { vault: 'v1', branches: ['FAIL', 'PASS'] },
+    ],
+  });
+  assert.equal(verdict.kind, 'rejected');
+  if (verdict.kind !== 'rejected') return;
+  assert.ok(verdict.findings.some((f) => f.screen === 'canonical' && /appears twice/.test(f.why)));
+});
+
+test('canonical: adjacent coverage ranges must be written as one', () => {
+  // `checkCoverage` permits 10..11 beside 12..13 *and* permits 10..13, so one covered set had
+  // two legal spellings — the same divergence as an unsorted array, reached through a rule
+  // that was about truthfulness rather than form.
+  rejectedBy(
+    {
+      ...validDocument(),
+      coverage: [
+        { fromBlock: 10, toBlock: 11 },
+        { fromBlock: 12, toBlock: 13 },
+      ],
+    },
+    'canonical',
+  );
+});
+
+test('a genuine hole in coverage is still fine — only ADJACENT ranges must merge', () => {
+  // The anti-vacuity control for the rule above: 10 §6.3 makes holes first-class, and a rule
+  // that merged across one would erase exactly the information coverage exists to carry.
+  const verdict = admit({
+    ...validDocument(),
+    range: { fromBlock: 10, toBlock: 13 },
+    coverage: [
+      { fromBlock: 10, toBlock: 10 },
+      { fromBlock: 12, toBlock: 13 },
+    ],
+    ops: [
+      { kind: 'split', block: 10, vault: 'v1', account: 'alice', amount: '1000' },
+      { kind: 'merge', block: 12, vault: 'v1', account: 'alice', amount: '200' },
+    ],
+    balances: [
+      { vault: 'v1', account: 'alice', branch: 'FAIL', amount: '800' },
+      { vault: 'v1', account: 'alice', branch: 'PASS', amount: '800' },
+    ],
+  });
+  assert.equal(verdict.kind, 'admitted');
+});
+
+test('deriveBalances is the fold the consumer replays, in the order the format requires', () => {
+  // The producer folds through this function precisely so its differential against chain state
+  // is a comparison with what the *client* will compute. A producer-local fold would compare
+  // the chain against an algorithm no client runs.
+  const document = validDocument();
+  assert.deepEqual(deriveBalances(document.vaults, document.ops), document.balances);
+});
+
+test('deriveBalances omits a zero holding rather than stating it', () => {
+  // A row saying zero and no row at all must not both be legal, or two honest producers
+  // disagree on every position that was ever fully merged out.
+  const rows = deriveBalances(
+    [{ vault: 'v1', branches: ['FAIL', 'PASS'] }],
+    [
+      { kind: 'split', block: 1, vault: 'v1', account: 'alice', amount: '10' },
+      { kind: 'merge', block: 2, vault: 'v1', account: 'alice', amount: '10' },
+    ],
+  );
+  assert.deepEqual(rows, []);
+});
+
 // ------------------------------------------------------------------ THE ADMITTED FORGERY
 
 test('a self-consistent deep forgery is ADMITTED — 10 §8.4 and 14 TH-50 say so', () => {
@@ -497,14 +603,14 @@ test('a self-consistent deep forgery is ADMITTED — 10 §8.4 and 14 TH-50 say s
     binding: { ...BINDING },
     range: { fromBlock: 1, toBlock: 100 },
     coverage: [{ fromBlock: 1, toBlock: 100 }],
-    vaults: [{ vault: 'never-existed', branches: ['PASS', 'FAIL'] }],
+    vaults: [{ vault: 'never-existed', branches: ['FAIL', 'PASS'] }],
     ops: [
       { kind: 'split', block: 1, vault: 'never-existed', account: 'ghost', amount: '100000000000000000001' },
       { kind: 'merge', block: 50, vault: 'never-existed', account: 'ghost', amount: '30000000000000000000' },
     ],
     balances: [
-      { vault: 'never-existed', account: 'ghost', branch: 'PASS', amount: '70000000000000000001' },
       { vault: 'never-existed', account: 'ghost', branch: 'FAIL', amount: '70000000000000000001' },
+      { vault: 'never-existed', account: 'ghost', branch: 'PASS', amount: '70000000000000000001' },
     ],
   };
   assert.equal(admit(forgery).kind, 'admitted');

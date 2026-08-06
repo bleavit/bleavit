@@ -1,0 +1,13 @@
+{
+  "name": "@bleavit/snapshot-tool-suite",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@bleavit/handoff-envelope": "workspace:*",
+    "@bleavit/providers": "workspace:*"
+  }
+}

@@ -39,7 +39,7 @@
  * mechanism declines to make ([14](14-threat-model.md) TH-50).
  */
 
-import { canonicalJson, digestPreimage, equalBinding } from '@bleavit/handoff-envelope';
+import { byCodePoint, canonicalJson, digestPreimage, equalBinding } from '@bleavit/handoff-envelope';
 import type { ChainBinding } from '@bleavit/handoff-envelope';
 
 import { providerRefusal } from './refusals.js';
@@ -140,8 +140,22 @@ export type SnapshotVerdict =
 
 const DECIMAL = /^(0|[1-9][0-9]*)$/;
 
+/**
+ * Whether a value is an amount in this format's wire form.
+ *
+ * Exported because the **producer** needs the same test at its own input boundary and needs it
+ * to be the same test. `BigInt` is quietly permissive in both directions that matter here: it
+ * accepts a `number`, so a JSON amount past 2^53 folds as its rounded value with nothing
+ * thrown (V-74), and it accepts `"007"`, which folds correctly and then makes the finished
+ * document fail its own `parseSnapshot`. A second copy of this rule in the tool would drift
+ * from this one exactly when the format grew.
+ */
+export function isCanonicalAmount(raw: unknown): raw is string {
+  return typeof raw === 'string' && DECIMAL.test(raw);
+}
+
 function amount(raw: unknown, where: string): bigint {
-  if (typeof raw !== 'string' || !DECIMAL.test(raw)) {
+  if (!isCanonicalAmount(raw)) {
     throw new MalformedSnapshot(
       `${where}: an amount must be a canonical decimal string, got ${JSON.stringify(raw)}. ` +
         'Base units run past 2^53, so a JSON number here would be rounded on load and the ' +
@@ -561,6 +575,117 @@ function checkDerivedRows(document: SnapshotDocument, replay: Replay): readonly 
   return findings;
 }
 
+/**
+ * §8.2's canonical form, for the arrays — the half canonical JSON cannot supply.
+ *
+ * `canonicalJson` sorts object **keys** and leaves array order exactly as given, so a document
+ * whose `vaults` or `balances` arrive in one order from one producer and another order from a
+ * second producer serializes to two different files describing one history. Both pass every
+ * other screen. Both hash to a different pin. The published property — *"reproducible
+ * byte-identically by anyone"* — is then simply false, and the way anyone would find out is a
+ * user being told a correct snapshot is corrupt.
+ *
+ * So the order is a rule, and being a rule it is **checked** rather than documented: a rule two
+ * producers must follow and nobody verifies is a rule they will diverge on.
+ *
+ * **`ops` is deliberately exempt.** Its order is the *chain's* — block, then extrinsic, then
+ * event — which is semantic rather than presentational: the conservation replay checks
+ * non-negativity at every step, so a merge before its split is a different (and invalid)
+ * history than the same two the other way round. Sorting ops would destroy that and would let
+ * an invalid history be reordered into a valid-looking one. Two honest producers reading one
+ * chain already agree on it, which is what determinism requires; a producer that cannot supply
+ * chain order cannot supply a snapshot.
+ */
+function checkCanonicalOrder(document: SnapshotDocument): readonly SnapshotFinding[] {
+  const findings: SnapshotFinding[] = [];
+  const ordered = (label: string, keys: readonly string[]): void => {
+    for (let i = 1; i < keys.length; i += 1) {
+      const previous = keys[i - 1] as string;
+      const current = keys[i] as string;
+      const order = byCodePoint(previous, current);
+      if (order === 0) {
+        findings.push({ screen: 'canonical', why: `${label}: "${current}" appears twice` });
+      } else if (order > 0) {
+        findings.push({
+          screen: 'canonical',
+          why:
+            `${label}: "${current}" follows "${previous}", but this array is ordered by code ` +
+            'point. Canonical JSON sorts keys and not array members, so two producers emitting ' +
+            'one history in two orders would emit two files and two pins (10 §8.2)',
+        });
+      }
+    }
+  };
+  ordered(
+    'vaults',
+    document.vaults.map((vault) => vault.vault),
+  );
+  for (const vault of document.vaults) ordered(`vaults["${vault.vault}"].branches`, vault.branches);
+  ordered(
+    'balances',
+    document.balances.map((row) => canonicalJson([row.vault, row.account, row.branch])),
+  );
+  // Coverage is **maximally merged**: `checkCoverage` permits [1,10] beside [11,20] and also
+  // permits [1,20], so without this rule one covered set has two legal spellings and two
+  // honest producers emit two pins for one history — the same divergence as an unsorted array,
+  // reached through a rule that was about truthfulness rather than form.
+  for (let i = 1; i < document.coverage.length; i += 1) {
+    const previous = document.coverage[i - 1] as SnapshotRange;
+    const current = document.coverage[i] as SnapshotRange;
+    if (current.fromBlock === previous.toBlock + 1) {
+      findings.push({
+        screen: 'canonical',
+        why:
+          `coverage: ${previous.fromBlock}..${previous.toBlock} and ${current.fromBlock}..` +
+          `${current.toBlock} are adjacent and must be written as one range ` +
+          `${previous.fromBlock}..${current.toBlock}; a covered set has one spelling`,
+      });
+    }
+  }
+  return findings;
+}
+
+/**
+ * The fold, as the producer must perform it and the consumer replays it.
+ *
+ * Exported so `app/tools/snapshot` derives `balances` through **this** code rather than its
+ * own: the producer's whole cross-check is that an independent read of chain state agrees with
+ * the fold the *consumer* will run, and a producer that folded its own way would be comparing
+ * the chain against an algorithm no client uses. Same single-generator discipline as the
+ * serializer above, one layer up.
+ *
+ * Returns rows in the canonical order {@link checkCanonicalOrder} requires, so a producer
+ * cannot emit a document that its own consumer rejects on ordering.
+ */
+export function deriveBalances(
+  vaults: readonly SnapshotVault[],
+  ops: readonly SnapshotOp[],
+): readonly SnapshotBalance[] {
+  const replay = replayConservation({
+    format: SNAPSHOT_FORMAT,
+    binding: { genesisHash: '', specVersion: 0, contractVersion: 0 },
+    range: { fromBlock: 0, toBlock: 0 },
+    coverage: [],
+    vaults,
+    ops,
+    balances: [],
+  });
+  const rows: SnapshotBalance[] = [];
+  for (const [vault, byAccount] of replay.holdings) {
+    for (const [account, byBranch] of byAccount) {
+      for (const [branch, held] of byBranch) {
+        if (held !== 0n) rows.push({ vault, account, branch, amount: held.toString() });
+      }
+    }
+  }
+  return rows.sort((left, right) =>
+    byCodePoint(
+      canonicalJson([left.vault, left.account, left.branch]),
+      canonicalJson([right.vault, right.account, right.branch]),
+    ),
+  );
+}
+
 /** A hash over the pre-image. Injected — see {@link admitSnapshot}. */
 export type Sha256 = (preimage: Uint8Array) => string;
 
@@ -639,6 +764,7 @@ export function admitSnapshot(text: string, admission: SnapshotAdmission, sha256
         `${admission.binding.contractVersion}`,
     });
   }
+  findings.push(...checkCanonicalOrder(document));
   findings.push(...checkCoverage(document));
   const replay = replayConservation(document);
   findings.push(...replay.findings);
