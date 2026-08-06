@@ -760,13 +760,26 @@ function checkDerivedRows(document: SnapshotDocument, replay: Replay): readonly 
  * So the order is a rule, and being a rule it is **checked** rather than documented: a rule two
  * producers must follow and nobody verifies is a rule they will diverge on.
  *
- * **`ops` is deliberately exempt.** Its order is the *chain's* — block, then extrinsic, then
- * event — which is semantic rather than presentational: the conservation replay checks
- * non-negativity at every step, so a merge before its split is a different (and invalid)
- * history than the same two the other way round. Sorting ops would destroy that and would let
- * an invalid history be reordered into a valid-looking one. Two honest producers reading one
- * chain already agree on it, which is what determinism requires; a producer that cannot supply
- * chain order cannot supply a snapshot.
+ * **`ops` may not be sorted, and that is not the same as leaving it unchecked** — a distinction
+ * an earlier version of this comment collapsed, and the collapse was a defect. Its order is the
+ * *chain's* — block, then extrinsic, then event — which is semantic: the conservation replay
+ * checks non-negativity at every step, so a merge before its split is a different, invalid
+ * history rather than the same one written differently. Sorting would destroy that and would
+ * let an invalid history be reordered into a valid-looking one.
+ *
+ * But §8.2 says *"Consumers check these on import"* of all three rules, and leaving this one
+ * unchecked has a measured consequence: a document whose `ops` run block 13, 10, 12 is admitted,
+ * the same history in block order is admitted, the two pins differ, and `diffSnapshots` of the
+ * pair reports `disagree` with `FE-PROV-004` — which is exactly the failure this paragraph
+ * exists to prevent, and it makes §8.2's *"reproducible byte-identically by anyone"* false for
+ * any producer that is not this repository's own tool.
+ *
+ * So the **block-level consequence is checked** — `ops` must be non-decreasing in `block` — which
+ * refuses the divergence without reordering anything. The finer half of chain order, extrinsic
+ * then event, is **not checkable against this format**: `SnapshotOp` carries no
+ * `extrinsicIndex` or `eventIndex`, though the producer computes both and discards them. A
+ * consumer therefore cannot check the rule as §8.2 states it, which is a format question rather
+ * than a code one (see the spec-question row) and is why this check is the block half alone.
  */
 function checkCanonicalOrder(document: SnapshotDocument): readonly SnapshotFinding[] {
   const findings: SnapshotFinding[] = [];
@@ -811,6 +824,23 @@ function checkCanonicalOrder(document: SnapshotDocument): readonly SnapshotFindi
           `coverage: ${previous.fromBlock}..${previous.toBlock} and ${current.fromBlock}..` +
           `${current.toBlock} are adjacent and must be written as one range ` +
           `${previous.fromBlock}..${current.toBlock}; a covered set has one spelling`,
+      });
+    }
+  }
+  // §8.2's third rule, in the half this format can express. Not a sort: a document that is
+  // out of block order is refused, never rewritten, so an invalid history cannot be reordered
+  // into a valid-looking one.
+  for (let i = 1; i < document.ops.length; i += 1) {
+    const previous = document.ops[i - 1] as SnapshotOp;
+    const current = document.ops[i] as SnapshotOp;
+    if (current.block < previous.block) {
+      findings.push({
+        screen: 'canonical',
+        why:
+          `ops: entry ${i} is at block ${current.block} and follows block ${previous.block}. ` +
+          'The movement list is in chain order (10 §8.2), so one history has one spelling; two ' +
+          'orders would be two files and two pins, and every honest cross-check of the pair ' +
+          'would raise FE-PROV-004',
       });
     }
   }

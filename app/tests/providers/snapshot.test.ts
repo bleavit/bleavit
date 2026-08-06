@@ -30,7 +30,7 @@ import {
   serializeSnapshot,
   snapshotPreimage,
 } from '@bleavit/providers';
-import type { SnapshotDocument, SnapshotFinding } from '@bleavit/providers';
+import type { SnapshotDocument, SnapshotFinding, SnapshotOp } from '@bleavit/providers';
 
 const sha256 = (preimage: Uint8Array): string =>
   createHash('sha256').update(preimage).digest('hex');
@@ -577,6 +577,39 @@ test('canonical: adjacent coverage ranges must be written as one', () => {
       ],
     },
     'canonical',
+  );
+});
+
+test('canonical: an out-of-block-order movement list is refused (10 §8.2 rule 3)', () => {
+  // The rule this file exempted until the R-6 re-review measured what the exemption cost.
+  // §8.2 says consumers check all three canonical-form rules; two were checked and the
+  // movement list was not, so ONE history had TWO admitted spellings and therefore two pins —
+  // and `diffSnapshots` of that pair reports `disagree` with `FE-PROV-004`, which is precisely
+  // the failure §8.2's paragraph exists to prevent.
+  //
+  // The check is the block half only, and it refuses rather than reorders: sorting `ops` would
+  // let an invalid history be rearranged into a valid-looking one, because the conservation
+  // replay is order-sensitive by design.
+  //
+  // The two swapped movements are independent splits for different accounts, so the
+  // conservation replay still passes and `canonical` is the screen under test rather than a
+  // second one firing first.
+  const document = validDocument();
+  const [first, second, ...rest] = document.ops as readonly [SnapshotOp, SnapshotOp, ...SnapshotOp[]];
+  rejectedBy({ ...document, ops: [second, first, ...rest] }, 'canonical');
+});
+
+test('canonical: repeated blocks in the movement list are still fine — the rule is NON-DECREASING', () => {
+  // The anti-vacuity control. Several movements in one block is ordinary, and a rule written
+  // as strictly increasing would refuse every real snapshot while looking like this one.
+  const document = validDocument();
+  const [first] = document.ops as readonly [SnapshotOp, ...SnapshotOp[]];
+  const sameBlock = { kind: 'split', block: 10, vault: 'v1', account: 'carol', amount: '0' } as const;
+  const verdict = admit({ ...document, ops: [first, sameBlock, ...document.ops.slice(1)] });
+  assert.ok(
+    verdict.kind !== 'rejected' ||
+      !verdict.findings.some((f) => f.screen === 'canonical' && /chain order/.test(f.why)),
+    'two movements in one block must not be read as disorder',
   );
 });
 
