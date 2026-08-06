@@ -19,7 +19,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { meet, readmitFromLeader } from '@bleavit/chain-client';
+import { derive, meet, readmitFromLeader } from '@bleavit/chain-client';
 import type { Verified } from '@bleavit/shared-types';
 
 const CHAIN_A = `0x${'ce'.repeat(32)}` as `0x${string}`;
@@ -71,6 +71,38 @@ test('meet still refuses two blocks on one chain — the older check is not repl
     (a, b) => a + b,
   );
   assert.equal(combined, undefined);
+});
+
+/* ---------------------------------------------------------------------------- derive */
+
+test('derive projects one read and keeps its pin exactly', () => {
+  // 10 §2.2's second clause — "computed client-side purely from such values". The pin is
+  // carried over rather than re-taken from anywhere, so a decoded leaf is true at the same
+  // block as the bytes it was decoded from.
+  const read = finalizedOn(CHAIN_A, 21);
+  const doubled = derive(read, (value) => value * 2);
+  assert.equal(doubled.value, 42);
+  assert.deepEqual(doubled.status, read.status);
+});
+
+test('derive is meet’s unary case, so it can grant nothing meet did not', () => {
+  // Stated as an equality rather than as a comment, because the whole argument for
+  // exporting `derive` from the barrel is that this identity holds: both need a
+  // `Finalized<A>` to start from, which only a read produces.
+  const read = finalizedOn(CHAIN_A, 21);
+  const viaMeet = meet(read, read, (a) => a * 2);
+  assert.ok(viaMeet);
+  assert.deepEqual(derive(read, (value) => value * 2), viaMeet);
+});
+
+test('derive chains, so a decode and a projection of it stay one pin', () => {
+  // The shape `market-reads.ts` uses: bytes → decoded → the one field a row reads. A
+  // second pin appearing anywhere along that chain is the defect V-176 was.
+  const decoded = derive(finalizedOn(CHAIN_A, 30), (value) => ({ bps: BigInt(value) }));
+  const projected = derive(decoded, (figures) => figures.bps);
+  assert.equal(projected.value, 30n);
+  assert.equal(projected.status.blockHash, BLOCK);
+  assert.equal(projected.status.chain, CHAIN_A);
 });
 
 /* ------------------------------------------------------------ readmitFromLeader (§4.4) */

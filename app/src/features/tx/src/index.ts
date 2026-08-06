@@ -341,13 +341,17 @@ export {
 export {
   BOOK_DOMAIN_COPY,
   MarketTrade,
+  QUOTE_COPY,
   QUOTE_DISAGREEMENT_RECOVERY,
+  QUOTE_FEE_LABEL,
   REAPED_BOOK_COPY,
   type MarketTradeScreen,
+  type QuoteBreakdown,
 } from './market-trade.js';
 export {
   LEDGER_FROZEN_BIT,
   MARKET_READS,
+  MixedPinError,
   ledgerFrozen,
   readMarketTrade,
   tradingEnabled,

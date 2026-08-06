@@ -28,9 +28,13 @@ import {
   LEDGER_FROZEN_BIT,
   MARKET_READS,
   MarketTrade,
+  MixedPinError,
+  QUOTE_COPY,
   QUOTE_DISAGREEMENT_RECOVERY,
+  QUOTE_FEE_LABEL,
   REAPED_BOOK_COPY,
   ledgerFrozen,
+  orderTotal,
   readMarketTrade,
   tradeBlocks,
   tradingEnabled,
@@ -61,9 +65,22 @@ import {
 const CHAIN: HexString = `0x${'ce'.repeat(32)}`;
 const BLOCK: HexString = `0x${'11'.repeat(32)}`;
 const AT = { chain: CHAIN, blockHash: BLOCK, blockNumber: 42 };
+/** A second finalized block, for the readings a caller may bring from the wrong one. */
+const LATER = { chain: CHAIN, blockHash: `0x${'22'.repeat(32)}` as HexString, blockNumber: 43 };
 
-function verified<T>(value: T): Verified<T> {
-  return { value, status: { kind: 'verified-finalized', ...AT } };
+/**
+ * A finalized reading at the reader's pin, as the composition root supplies one.
+ *
+ * `finalize` from `@bleavit/chain-client/testing` and not a hand-written status object:
+ * production code cannot name it (`no-finalized-minting-outside-chain-client`), and a
+ * fixture that hand-built one would be a fixture that could not tell whether the module
+ * under test had stopped needing the brand.
+ */
+const at = <T,>(value: T): Finalized<T> => finalize(value, AT);
+
+/** A `provider` reading — what a caller must NOT be able to launder into a precondition. */
+function providerRead<T>(value: T): Verified<T> {
+  return { value, status: { kind: 'provider', providerId: 'operator-1', sampled: false } };
 }
 
 /* --------------------------------------------------------------- the chain's own constants */
@@ -204,9 +221,10 @@ const DECODERS: MarketDecoders = {
   },
   quote: (raw) => {
     if (raw.startsWith('bad')) return { ok: false, reason: 'not a QuoteView' };
-    const [marker, charge] = raw.split(':');
+    // Two fields, decoded separately, because 02 §4 publishes two — see the cost/fee tests.
+    const [marker, cost, fee] = raw.split(':');
     if (marker !== 'quote') return { ok: false, reason: `the quote decoder was handed "${raw}"` };
-    return { ok: true, value: { charge: BigInt(charge ?? '0') } };
+    return { ok: true, value: { cost: BigInt(cost ?? '0'), fee: BigInt(fee ?? '0') } };
   },
   phaseFlags: (raw) =>
     raw.startsWith('bad') ? { ok: false, reason: 'not a u32' } : { ok: true, value: Number(raw) },
@@ -218,7 +236,12 @@ interface CallLog {
 }
 
 const B = 100_000_000_000n;
-const CHARGE = 5_015_000n;
+/** 02 §4's two fields, not their sum — the whole point of the pair below. */
+const COST = 5_000_000n;
+const FEE = 15_000n;
+const QUOTE = { cost: COST, fee: FEE } as const;
+/** `cost + fee` on a buy, and the amount `max_cost` must cover (04 §6.1 step 4). */
+const BUY_TOTAL = COST + FEE;
 
 function reader(
   values: Readonly<Record<string, string>>,
@@ -242,22 +265,41 @@ function reader(
 const LIVE_BOOK = { 'key:markets:7': `book:open:0:0:${B}`, 'key:phase-flags': '0' } as const;
 
 const DECISION: MarketReadParams = {
-  bookId: 7n,
+  bookId: at(7n),
   book: { kind: 'decision', domain: 'primary' },
-  proposalState: verified('Trading'),
+  // Drafted at exactly the refreshed charge, so the bound is satisfiable and every
+  // slippage test moves one side of it deliberately.
+  order: { direction: 'buy', maxCost: BUY_TOTAL },
+  proposalState: at('Trading'),
   amount: 5_000_000n,
   quoteArgsHex: '0xdeadbeef',
-  clientCharge: CHARGE,
-  feeMetadataBps: verified(FEE_BPS),
-  feeParamsPerbill: verified(FEE_BPS * 100_000n),
-  bounds: verified(BOUNDS),
-  spendable: verified(1_000_000_000n),
+  clientQuote: QUOTE,
+  feeMetadataBps: at(FEE_BPS),
+  feeParamsPerbill: at(FEE_BPS * 100_000n),
+  bounds: at(BOUNDS),
+  spendable: at(1_000_000_000n),
 };
+
+/** The same ticket, sold: the seller delivers positions and receives `cost − fee`. */
+const SELL: MarketReadParams = {
+  ...DECISION,
+  order: { direction: 'sell', minProceeds: COST - FEE },
+};
+
+const BASELINE: MarketReadParams = (() => {
+  const { proposalState: _unused, ...rest } = DECISION;
+  return {
+    ...rest,
+    bookId: at(9n),
+    book: { kind: 'baseline', domain: 'primary' },
+    epoch: at(4),
+  };
+})();
 
 async function readTicket(
   values: Readonly<Record<string, string>> = LIVE_BOOK,
   params: MarketReadParams = DECISION,
-  quoteResult = `quote:${CHARGE}`,
+  quoteResult = `quote:${COST}:${FEE}`,
 ): Promise<{ read: MarketTradeRead; log: CallLog }> {
   const log: CallLog = { calls: [], storage: [] };
   const read = await readMarketTrade(reader(values, quoteResult, log), KEYS, DECODERS, params);
@@ -303,16 +345,7 @@ test('MaxTrade is DERIVED from this book’s b and the chain ratio, never a cons
 });
 
 test('an absent Baseline mapping AND an absent book is reaped, and carries no book at all', async () => {
-  const { read } = await readTicket(
-    { 'key:phase-flags': '0' },
-    {
-      ...DECISION,
-      bookId: 9n,
-      book: { kind: 'baseline', domain: 'primary' },
-      proposalState: undefined,
-      epoch: 4,
-    },
-  );
+  const { read } = await readTicket({ 'key:phase-flags': '0' }, BASELINE);
   assert.equal(read.kind, 'screen');
   if (read.kind !== 'screen') return;
   assert.equal(read.screen.kind, 'reaped');
@@ -323,16 +356,7 @@ test('an absent Baseline mapping AND an absent book is reaped, and carries no bo
 });
 
 test('a reaped read never reaches quote(), so no zero quote can be produced to render', async () => {
-  const { log } = await readTicket(
-    { 'key:phase-flags': '0' },
-    {
-      ...DECISION,
-      bookId: 9n,
-      book: { kind: 'baseline', domain: 'primary' },
-      proposalState: undefined,
-      epoch: 4,
-    },
-  );
+  const { log } = await readTicket({ 'key:phase-flags': '0' }, BASELINE);
   assert.deepEqual(log.calls, [], 'a reaped book was priced');
 });
 
@@ -340,13 +364,7 @@ test('every other mapping/book combination is CORRUPT, not reaped', async () => 
   // §11.5: "A present mapping with an absent or mismatched book is corrupt chain state and
   // triggers the compatibility hard block." Reap removes both atomically, so each of these
   // states is unreachable from a completed reap and must not wear the reaped label.
-  const baseline: MarketReadParams = {
-    ...DECISION,
-    bookId: 9n,
-    book: { kind: 'baseline', domain: 'primary' },
-    proposalState: undefined,
-    epoch: 4,
-  };
+  const baseline = BASELINE;
   const cases: readonly [string, Readonly<Record<string, string>>][] = [
     ['mapping absent, book present', { 'key:markets:9': `book:open:0:0:${B}`, 'key:phase-flags': '0' }],
     ['mapping present, book absent', { 'key:baseline-of:4': 'maps-to:9', 'key:phase-flags': '0' }],
@@ -370,11 +388,8 @@ test('every other mapping/book combination is CORRUPT, not reaped', async () => 
 test('a Baseline ticket with no epoch refuses instead of reading nothing', async () => {
   // Without the epoch there is no mapping to consult, so "reaped" and "live" are the same
   // read. Answering either way would be a guess about a book that pays out.
-  const { read } = await readTicket(LIVE_BOOK, {
-    ...DECISION,
-    book: { kind: 'baseline', domain: 'primary' },
-    proposalState: undefined,
-  });
+  const { epoch: _absent, ...noEpoch } = BASELINE;
+  const { read } = await readTicket(LIVE_BOOK, noEpoch);
   assert.equal(read.kind, 'corrupt');
 });
 
@@ -402,10 +417,10 @@ test('an unreadable PhaseFlags fails CLOSED — frozen, not enabled', async () =
 test('an undecodable quote charges zero, which cannot agree with a real recompute', async () => {
   // The dangerous alternative is a ticket that passes on a figure nobody read. Zero is not a
   // price here — it is a value that cannot equal the client's non-zero recompute, so
-  // FE-CHAIN-005 fires and the ticket blocks.
+  // FE-CHAIN-005 fires and the ticket blocks. Both fields go to zero, not just the total.
   const { read } = await readTicket(LIVE_BOOK, DECISION, 'bad');
   const { inputs } = tradable(read);
-  assert.equal(inputs.quote.chargeFromChain.value, 0n);
+  assert.deepEqual(inputs.quote.fromChain.value, { cost: 0n, fee: 0n });
   assert.ok(tradeBlocks(inputs).some((block) => block.code === 'FE-CHAIN-005'));
   assert.equal(read.kind === 'screen' ? read.undecodable.length : 0, 1);
 });
@@ -414,18 +429,127 @@ test('every figure carries the reader’s one pin', async () => {
   const { read } = await readTicket();
   const screen = tradable(read);
   const leaves = [
-    screen.bookId,
     screen.inputs.marketOpen,
-    screen.inputs.quote.chargeFromChain,
+    screen.inputs.quote.fromChain,
+    screen.inputs.minTrade,
     screen.inputs.maxTrade,
     screen.inputs.tradingEnabled,
+    screen.inputs.ledgerFrozen,
+    screen.quote.fromChain.cost,
+    screen.quote.fromChain.fee,
+    screen.quote.fromChain.total,
   ];
   for (const leaf of leaves) {
     assert.equal(leaf.status.kind, 'verified-finalized');
     assert.ok('blockHash' in leaf.status && leaf.status.blockHash === BLOCK);
   }
   // The client's own recompute is `Combined`, because it is derived from more than one read.
-  assert.equal(screen.clientCharge.kind, 'stated');
+  assert.equal(screen.quote.fromClient.total.kind, 'stated');
+  assert.equal(screen.bookId.kind, 'stated');
+});
+
+/* ------------------------------------------------- what the leaves are, and where they came from */
+
+test('the S3 reader mints no provenance of its own — every leaf descends from a read', () => {
+  // V-176. A local `finalized` helper wrapped any value in a hand-written
+  // `verified-finalized` status: brand-less, structurally a `Verified<T>`, and applied to
+  // nine values — two caller-supplied inputs the chain was never asked about, and two more
+  // the payload of caller-supplied `Verified<T>`s whose own status it discarded. Neither
+  // `check:casts` nor the render gate can see that shape (the first looks for an assertion,
+  // the second for a `.status` access), so what covers it is this assertion over the source.
+  const source = txSource('market-reads.ts');
+  assert.doesNotMatch(
+    source,
+    /kind:\s*'verified-finalized'/,
+    'market-reads.ts constructs a verification status of its own',
+  );
+  assert.doesNotMatch(source, /\bas\s+Finalized</, 'market-reads.ts asserts the brand');
+  // And the sanctioned derivations really are what it uses, or the two assertions above
+  // hold over a module that has stopped producing finalized leaves altogether.
+  assert.match(source, /\bderive\(/);
+  assert.match(source, /\bmeet\(/);
+});
+
+test('a caller-supplied reading from another block is refused, not combined', async () => {
+  // §11.4 pins one B′ per gate. A `MinTrade` read at B′+1 stamped with B′'s pin is a row
+  // that is true of a state nobody observed, and no badge on the screen can express that.
+  //
+  // Both kinds of leaf are exercised deliberately. `bounds` is *combined* with the book
+  // read, so `meet` refuses it whatever this module checks; `spendable` is passed straight
+  // through and nothing downstream would notice — which is what the up-front check covers.
+  for (const patch of [
+    { bounds: finalize(BOUNDS, LATER) },
+    { spendable: finalize(1_000_000_000n, LATER) },
+    { feeMetadataBps: finalize(FEE_BPS, LATER) },
+  ]) {
+    await assert.rejects(
+      readTicket(LIVE_BOOK, { ...DECISION, ...patch }),
+      (error: unknown) => error instanceof MixedPinError,
+      Object.keys(patch)[0],
+    );
+  }
+  // Both directions of the same rule: the reader's own pin passes.
+  await assert.doesNotReject(readTicket(LIVE_BOOK, DECISION));
+});
+
+test('the book id and the epoch render under the CALLER’s provenance, never re-stamped', async () => {
+  // Neither is a read this module makes: a decision book's id comes from a proposal record
+  // and a Baseline epoch from cohort history (§11.5's own sentence). The helper that used to
+  // stamp both with the reader's pin turned a provider-served id into a verified one, which
+  // is INV-FE-1's promotion performed by a formatting convenience.
+  const { read } = await readTicket(LIVE_BOOK, { ...DECISION, bookId: providerRead(7n) });
+  const screen = tradable(read);
+  assert.equal(screen.bookId.kind, 'stated');
+  if (screen.bookId.kind !== 'stated') return;
+  assert.equal(screen.bookId.datum.status.kind, 'provider');
+  assert.equal(screen.bookId.datum.value, '7');
+
+  const { read: reaped } = await readTicket(
+    { 'key:phase-flags': '0' },
+    { ...BASELINE, epoch: providerRead(4) },
+  );
+  assert.equal(reaped.kind, 'screen');
+  if (reaped.kind !== 'screen' || reaped.screen.kind !== 'reaped') return;
+  assert.equal(reaped.screen.epoch.status.kind, 'provider');
+});
+
+test('cost and fee are read APART, so a pair that agrees on the total still blocks', async () => {
+  // 02 §4 publishes two fields and 04 §6.1 combines them differently per direction. A chain
+  // answer of (cost 5,001,000, fee 14,000) and a client answer of (5,000,000, 15,000) agree
+  // on a buy's total to the base unit and disagree on a sell's net by 2,000. A reader that
+  // decoded one summed charge could not produce this test at all.
+  const chain = { cost: COST + 1_000n, fee: FEE - 1_000n };
+  assert.equal(orderTotal('buy', chain), orderTotal('buy', QUOTE), 'the fixture must agree');
+  assert.notEqual(orderTotal('sell', chain), orderTotal('sell', QUOTE));
+
+  const { read } = await readTicket(LIVE_BOOK, DECISION, `quote:${chain.cost}:${chain.fee}`);
+  const { inputs } = tradable(read);
+  assert.deepEqual(inputs.quote.fromChain.value, chain);
+  const disagreement = tradeBlocks(inputs).find((block) => block.code === 'FE-CHAIN-005');
+  assert.ok(disagreement !== undefined, 'a quote disagreeing field-by-field was admitted');
+});
+
+test('the direction is threaded from the caller — a sell is not evaluated as a buy', async () => {
+  // The slippage row compares the refreshed quote against the bound this ticket encodes, and
+  // the two directions bound opposite sides. A defaulted direction would read a sale's floor
+  // as a purchase's ceiling and pass every ticket whose net happened to be small.
+  const { read: buy } = await readTicket();
+  assert.equal(tradable(buy).inputs.order.direction, 'buy');
+  assert.deepEqual([...tradeBlocks(tradable(buy).inputs)], []);
+
+  const { read: sell } = await readTicket(LIVE_BOOK, SELL);
+  assert.equal(tradable(sell).inputs.order.direction, 'sell');
+  assert.deepEqual([...tradeBlocks(tradable(sell).inputs)], []);
+
+  // A floor one base unit above the net refuses, and the same figures as a buy do not.
+  const { read: tooHigh } = await readTicket(LIVE_BOOK, {
+    ...SELL,
+    order: { direction: 'sell', minProceeds: COST - FEE + 1n },
+  });
+  assert.deepEqual(
+    tradeBlocks(tradable(tooHigh).inputs).map((block) => block.check),
+    ['P-1 slippage bound'],
+  );
 });
 
 /* ------------------------------------------------------------------------------ the render */
@@ -439,16 +563,7 @@ function markupOf(screen: MarketTradeScreen): string {
 }
 
 test('the reaped arm renders no price, no symbol and no trade control', async () => {
-  const { read } = await readTicket(
-    { 'key:phase-flags': '0' },
-    {
-      ...DECISION,
-      bookId: 9n,
-      book: { kind: 'baseline', domain: 'primary' },
-      proposalState: undefined,
-      epoch: 4,
-    },
-  );
+  const { read } = await readTicket({ 'key:phase-flags': '0' }, BASELINE);
   assert.equal(read.kind, 'screen');
   if (read.kind !== 'screen') return;
   const html = markupOf(read.screen);
@@ -483,16 +598,53 @@ test('the tradable arm labels the domain the DATUM established, not the call sit
 test('both quotes render, as two figures — never one averaged number', async () => {
   const { read } = await readTicket();
   const html = markupOf(tradable(read));
-  assert.ok(html.includes('What the chain says this costs'), html);
-  assert.ok(html.includes('What this client recomputes'), html);
-  // 5,015,000 base units at six decimals, twice: the chain's and the client's.
+  assert.ok(html.includes(QUOTE_COPY.buy.chain), html);
+  assert.ok(html.includes(QUOTE_COPY.buy.client), html);
+  // 5.015000 = cost + fee at six decimals, twice: the chain's total and the client's.
   assert.equal([...html.matchAll(/5\.015000 USDC/g)].length, 2);
+});
+
+test('02 §4’s two fields render APART on both sides, with 04 §6.1’s combination', async () => {
+  // The old screen rendered one `Amount` per side. Two offsetting differences sum to the
+  // same number, so a user comparing one figure per side would see agreement for a pair
+  // that blocks the ticket — and on a sale the fee moves the payout the other way.
+  const { read } = await readTicket();
+  const html = markupOf(tradable(read));
+  for (const label of [QUOTE_COPY.buy.cost, QUOTE_FEE_LABEL, QUOTE_COPY.buy.total]) {
+    assert.equal(
+      [...html.matchAll(new RegExp(`>${label}<`, 'g'))].length,
+      2,
+      `${label} did not render once per side`,
+    );
+  }
+  // The figures themselves, each twice — cost, fee and the buy's total, all distinct.
+  assert.equal([...html.matchAll(/5\.000000 USDC/g)].length, 2, 'the cost is missing');
+  assert.equal([...html.matchAll(/0\.015000 USDC/g)].length, 2, 'the fee is missing');
+  assert.equal([...html.matchAll(/5\.015000 USDC/g)].length, 2, 'the total is missing');
+});
+
+test('a sale renders 04 §6.1’s OTHER combination, and says so in the labels', async () => {
+  // `cost + fee` on a buy, `cost − fee` on a sell. One label set would be wrong for
+  // whichever direction it was not written for, and "total debited" over a payout is a
+  // sentence that reverses the sign of the trade in the user's head.
+  const { read } = await readTicket(LIVE_BOOK, SELL);
+  const html = markupOf(tradable(read));
+  assert.ok(html.includes(QUOTE_COPY.sell.chain), html);
+  assert.ok(html.includes(QUOTE_COPY.sell.cost), 'the sell-side cost label is missing');
+  assert.ok(html.includes(QUOTE_COPY.sell.total), 'the sell-side net label is missing');
+  assert.equal(html.includes(QUOTE_COPY.buy.total), false, 'a sale rendered a buy’s total');
+  // 4.985000 = cost − fee, and the buy's 5.015000 must not appear anywhere on a sale.
+  assert.equal([...html.matchAll(/4\.985000 USDC/g)].length, 2);
+  assert.equal(html.includes('5.015000 USDC'), false, 'a sale rendered cost + fee');
 });
 
 test('FE-CHAIN-005 renders as a refusal with a recovery, and disables the control', async () => {
   // E6: blocked, not warned about. A red notice among the others would lose the one thing
   // that is different about this failure — that the user has nothing to retry.
-  const { read } = await readTicket(LIVE_BOOK, { ...DECISION, clientCharge: CHARGE + 1n });
+  const { read } = await readTicket(LIVE_BOOK, {
+    ...DECISION,
+    clientQuote: { cost: COST, fee: FEE + 1n },
+  });
   const html = markupOf(tradable(read));
   assert.ok(html.includes('data-code="FE-CHAIN-005"'), html);
   assert.ok(html.includes(QUOTE_DISAGREEMENT_RECOVERY), 'the refusal carries no recovery');
@@ -506,7 +658,7 @@ test('every failing row renders, not the first — a user with three problems se
   // §11.4 rule 5's discipline. Stopping at the first shows one obstacle per signing attempt.
   const { read } = await readTicket(
     { 'key:markets:7': `book:closed:0:0:${B}`, 'key:phase-flags': String(LEDGER_FROZEN_BIT) },
-    { ...DECISION, amount: MIN_TRADE - 1n, spendable: verified(0n) },
+    { ...DECISION, amount: MIN_TRADE - 1n, spendable: at(0n) },
   );
   const { inputs } = tradable(read);
   const blocks = tradeBlocks(inputs);

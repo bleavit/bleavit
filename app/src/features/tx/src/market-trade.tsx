@@ -26,6 +26,16 @@
  * from a frozen copy record keyed by the domain the *model* established (rule 1's bit test),
  * not from anything this component works out.
  *
+ * ## 2a. The quote is two figures on each side, never one
+ *
+ * 02 §4 publishes `cost` and `fee` as separate fields and 04 §6.1 combines them differently
+ * per direction — `cost + fee` debited on a buy, `cost − fee` credited on a sell. A chain
+ * answer of `(100, 3)` and a client answer of `(101, 2)` agree on a buy's total and disagree
+ * on a sell's net, so a screen showing one combined figure per side would show two agreeing
+ * numbers for a disagreement that blocks the ticket. Both fields render on both sides, with
+ * the direction's own combination beneath them — six figures, and the combination is the one
+ * `max_cost`/`min_proceeds` is compared against.
+ *
  * ## 3. `FE-CHAIN-005` blocks, it does not warn
  *
  * E6: *"trading is **blocked**, not warned about, because the disagreement means one of the
@@ -52,7 +62,6 @@ import {
   Count,
   Derived,
   Field,
-  Identifier,
   Notice,
   Panel,
   Refusal,
@@ -62,7 +71,24 @@ import {
 import type { Combined, Verified } from '@bleavit/shared-types';
 
 import type { LedgerDomain } from './ledger-domain.js';
-import { tradeBlocks, type TradeInputs } from './trade-ticket.js';
+import { tradeBlocks, type TradeDirection, type TradeInputs } from './trade-ticket.js';
+
+/**
+ * One side of the E6 comparison, itemized as 02 §4 publishes it.
+ *
+ * Generic in the wrapper because the two sides carry different provenance kinds and must:
+ * the chain's figures are one runtime-API read, and the client's are derived from the book
+ * state and the fee rate, which `Combined` refuses to state at all if those were read at
+ * two blocks.
+ */
+export interface QuoteBreakdown<T> {
+  /** `QuoteView.cost` — charged on a buy, paid on a sell, before the fee either way. */
+  readonly cost: T;
+  /** `QuoteView.fee` at the current `mkt.fee`. */
+  readonly fee: T;
+  /** 04 §6.1's combination for this direction, and what the slippage bound is compared to. */
+  readonly total: T;
+}
 
 /**
  * What this screen can be showing.
@@ -74,16 +100,27 @@ import { tradeBlocks, type TradeInputs } from './trade-ticket.js';
 export type MarketTradeScreen =
   | {
       readonly kind: 'tradable';
-      readonly bookId: Verified<string>;
+      /**
+       * The traded book's id, under the provenance it was resolved with.
+       *
+       * `Combined` rather than `Verified` because the read layer restates it through
+       * `combine` rather than re-stamping it: a decision book's id comes from a proposal
+       * record and a Baseline book's from cohort history, and neither becomes a
+       * finalized read by being handed to this screen.
+       */
+      readonly bookId: Combined<string>;
       readonly inputs: TradeInputs;
       /**
-       * The client's own recompute, beside the chain's (E6).
+       * Both quotes, itemized (E6).
        *
-       * `Combined` rather than `Verified`, because it is derived from the book state — two
-       * reads at two blocks make it true of neither, and `Derived` renders that refusal
-       * rather than a number.
+       * The client's side is `Combined` because it is derived from more than one read —
+       * two reads at two blocks make it true of neither, and `Derived` renders that
+       * refusal rather than a number.
        */
-      readonly clientCharge: Combined<bigint>;
+      readonly quote: {
+        readonly fromChain: QuoteBreakdown<Verified<bigint>>;
+        readonly fromClient: QuoteBreakdown<Combined<bigint>>;
+      };
     }
   | {
       /** §11.5's reaped-book rule. No book, no quote, no price — see the module note. */
@@ -123,6 +160,38 @@ export const REAPED_BOOK_COPY =
   'on chain, so there is no price to show and nothing here can be traded. Positions already ' +
   'held redeem from the vault, which is unaffected.';
 
+/**
+ * The quote labels, per direction — 02 §4's two fields and 04 §6.1's combination of them.
+ *
+ * Keyed by direction rather than written once, because the same two numbers mean opposite
+ * things on the two sides: `cost` is what the buyer pays and what the seller is paid, and
+ * the fee is *added* to one and *withheld* from the other. One set of labels would be
+ * wrong for whichever direction it was not written for, and a mislabelled fee on a sale
+ * reads as a larger payout than the chain will make.
+ */
+export const QUOTE_COPY: Readonly<
+  Record<
+    TradeDirection,
+    { readonly chain: string; readonly client: string; readonly cost: string; readonly total: string }
+  >
+> = Object.freeze({
+  buy: {
+    chain: 'What the chain says this costs',
+    client: 'What this client recomputes',
+    cost: 'cost before fee',
+    total: 'total debited',
+  },
+  sell: {
+    chain: 'What the chain says this pays',
+    client: 'What this client recomputes',
+    cost: 'proceeds before fee',
+    total: 'net credited',
+  },
+});
+
+/** The fee label, which is the one term that reads the same on both sides. */
+export const QUOTE_FEE_LABEL = 'fee';
+
 /** E6's recovery for `FE-CHAIN-005`: there is none client-side, and saying so is the point. */
 export const QUOTE_DISAGREEMENT_RECOVERY =
   'There is nothing to retry. The chain’s own quote and this client’s recompute of the same ' +
@@ -159,28 +228,48 @@ export function MarketTrade({
     );
   }
 
-  const { inputs, clientCharge } = screen;
+  const { inputs, quote } = screen;
   const blocks = tradeBlocks(inputs);
   const quoteDisagreement = blocks.find((block) => block.code === FE_CHAIN_005);
   const otherBlocks = blocks.filter((block) => block.code !== FE_CHAIN_005);
   const domain = BOOK_DOMAIN_COPY[inputs.book.domain];
   const render = (value: bigint): string => `${formatBaseUnits(value, decimals)} ${symbol}`;
+  const copy = QUOTE_COPY[inputs.order.direction];
 
   return (
-    <Panel title="Trade" subject={<Identifier datum={screen.bookId} />} tone="advanced">
+    <Panel
+      title="Trade"
+      subject={<Derived combined={screen.bookId} render={(id) => id} />}
+      tone="advanced"
+    >
       {/* §11.2a rule 1: the domain is stated wherever the book is rendered, and it came
           from the bit test on the id rather than from which call fetched it. */}
       <Notice severity="info" heading={domain.label}>
         {domain.note}
       </Notice>
 
-      {/* E6: the client's own recomputed quote beside the chain's. Two figures, two
-          provenances, never one averaged number. */}
-      <Field label="What the chain says this costs">
-        <Amount datum={inputs.quote.chargeFromChain} decimals={decimals} symbol={symbol} />
+      {/* E6: the client's own recomputed quote beside the chain's — and 02 §4's two fields
+          kept apart on both sides, because their sum agrees on a buy for a pair that
+          disagrees on a sell (see the module note). */}
+      <Field label={copy.chain}>
+        <Amount datum={quote.fromChain.cost} name={copy.cost} decimals={decimals} symbol={symbol} />
+        <Amount
+          datum={quote.fromChain.fee}
+          name={QUOTE_FEE_LABEL}
+          decimals={decimals}
+          symbol={symbol}
+        />
+        <Amount
+          datum={quote.fromChain.total}
+          name={copy.total}
+          decimals={decimals}
+          symbol={symbol}
+        />
       </Field>
-      <Field label="What this client recomputes">
-        <Derived combined={clientCharge} render={render} />
+      <Field label={copy.client}>
+        <Derived combined={quote.fromClient.cost} name={copy.cost} render={render} />
+        <Derived combined={quote.fromClient.fee} name={QUOTE_FEE_LABEL} render={render} />
+        <Derived combined={quote.fromClient.total} name={copy.total} render={render} />
       </Field>
 
       {quoteDisagreement === undefined ? null : (
