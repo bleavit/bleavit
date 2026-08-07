@@ -174,7 +174,9 @@ test('the gateway blocker binds 12 §5.1’s floor of three, not merely a non-em
   assert.deepEqual(declare(gw(GATEWAY_FLOOR)), [], 'three independent gateways clear the floor');
   // The message states the floor rather than only the shortfall, because the operator reading
   // it has to know how many to seat, and membership is theirs to choose (12 §5.1).
-  assert.match(declare(gw(1))[0], new RegExp(`floor of ${GATEWAY_FLOOR}`));
+  const [shortfall] = declare(gw(1));
+  assert.ok(shortfall !== undefined, 'one gateway must produce a blocker to read');
+  assert.match(shortfall, new RegExp(`floor of ${GATEWAY_FLOOR}`));
 });
 
 test('a declared chain spec that is not present is a blocker, not a silent omission', () => {
