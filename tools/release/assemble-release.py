@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import shutil
@@ -524,10 +525,28 @@ def validate_fixture_binding(
     return errors
 
 
-def validate_supply_chain_summary(summary: dict[str, Any]) -> list[str]:
+def audited_workspace_names(root: Path) -> set[str]:
+    """The workspace names the supply-chain gate is required to have audited.
+
+    Read from `tools/ci/audited-workspaces.toml` rather than listed here, so a
+    fifth cargo workspace becomes a release-blocking gap the moment it is
+    classified — without anyone remembering to edit this file too. That file is
+    itself gated against the repository by `tools/ci/check-audited-workspaces.py`.
+    """
+    checker = root / "tools/ci/check-audited-workspaces.py"
+    spec = importlib.util.spec_from_file_location("check_audited_workspaces", checker)
+    if spec is None or spec.loader is None:
+        raise OSError(f"cannot load {checker}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    rows = module.load_workspaces(root / "tools/ci/audited-workspaces.toml")
+    return {row["name"] for row in rows}
+
+
+def validate_supply_chain_summary(summary: dict[str, Any], expected_workspaces: set[str]) -> list[str]:
     errors: list[str] = []
-    if summary.get("schema") != "bleavit.supply-chain.v2":
-        errors.append("supply-chain summary schema must be bleavit.supply-chain.v2")
+    if summary.get("schema") != "bleavit.supply-chain.v3":
+        errors.append("supply-chain summary schema must be bleavit.supply-chain.v3")
     ignored = summary.get("ignored_advisory_ids")
     if not isinstance(ignored, list) or any(
         not isinstance(item, str) or not item.startswith("RUSTSEC-") for item in ignored
@@ -544,13 +563,39 @@ def validate_supply_chain_summary(summary: dict[str, Any]) -> list[str]:
         for row in waived
     ):
         errors.append("waived_ghsa_only must be an array of {id, package, version} objects")
+    # v3: the gate audits every committed cargo lockfile, not just the two the
+    # v2 shape could name. A summary covering a subset would disclose accepted
+    # risk on some workspaces and stay silent on the rest, which is the exact
+    # failure SQ-135's disclosure property exists to prevent — and is what a
+    # release would have carried while `app/` and `fuzz/` went unaudited.
     workspaces = summary.get("workspaces")
-    if not isinstance(workspaces, dict) or set(workspaces) != {"root", "keeper"}:
-        errors.append("workspaces must contain exactly root and keeper")
+    if not isinstance(workspaces, dict) or set(workspaces) != expected_workspaces:
+        errors.append(
+            "workspaces must contain exactly " + ", ".join(sorted(expected_workspaces))
+        )
     else:
+        union: set[str] = set()
         for name, row in workspaces.items():
             if not isinstance(row, dict) or not isinstance(row.get("allowed_warning_count"), int) or row["allowed_warning_count"] < 0:
                 errors.append(f"workspaces.{name}.allowed_warning_count must be non-negative")
+                continue
+            per_workspace = row.get("ignored_advisory_ids")
+            if not isinstance(per_workspace, list) or any(
+                not isinstance(item, str) or not item.startswith("RUSTSEC-") for item in per_workspace
+            ):
+                errors.append(f"workspaces.{name}.ignored_advisory_ids must be an array of RustSec IDs")
+                continue
+            union.update(per_workspace)
+        # The top-level list is the release's disclosure. Deriving it from the
+        # per-workspace lists is the producer's job, so checking it here is what
+        # makes the disclosure a property rather than a convention: an exception
+        # granted in one workspace can never be omitted from what the release
+        # publishes.
+        if not errors and isinstance(ignored, list) and union - set(ignored):
+            errors.append(
+                "ignored_advisory_ids omits per-workspace ignores: "
+                + ", ".join(sorted(union - set(ignored)))
+            )
     return errors
 
 
@@ -990,7 +1035,9 @@ def main() -> int:
     if args.supply_chain_summary.is_file():
         try:
             supply_chain_summary = load_json(args.supply_chain_summary)
-            for error in validate_supply_chain_summary(supply_chain_summary):
+            for error in validate_supply_chain_summary(
+                supply_chain_summary, audited_workspace_names(root)
+            ):
                 add_gap(gaps, "supply_chain.summary", "B8", error)
             candidates.append(Candidate("supply-chain-summary", args.supply_chain_summary, str(args.supply_chain_summary)))
         except (OSError, ValueError, json.JSONDecodeError) as error:

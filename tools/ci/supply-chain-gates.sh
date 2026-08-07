@@ -19,6 +19,16 @@ if [[ ! -x "$auditor" ]] || [[ "$($auditor --version 2>/dev/null || true)" != "$
   cargo install cargo-audit --version 0.22.2 --locked --root target/tools
 fi
 
+# The audited set is DERIVED, never restated here. tools/ci/audited-workspaces.toml
+# classifies every committed cargo lockfile, and this checker fails when the
+# repository holds one the manifest does not (or the manifest holds one git does
+# not track). The gate used to name `Cargo.lock` and `keeper/Cargo.lock` inline;
+# `app/Cargo.lock` and `fuzz/Cargo.lock` arrived later and went unaudited behind a
+# green job, because nothing compared the gate's list against the repository.
+workspaces_manifest="${BLEAVIT_AUDITED_WORKSPACES:-$repo_root/tools/ci/audited-workspaces.toml}"
+workspace_rows=$(python3 "$repo_root/tools/ci/check-audited-workspaces.py" \
+  --manifest "$workspaces_manifest" --repo-root "$repo_root" --print)
+
 assert_lockfile() {
   local lockfile=$1
   if [[ ! -f "$lockfile" ]]; then
@@ -31,25 +41,66 @@ assert_lockfile() {
   fi
 }
 
-assert_lockfile Cargo.lock
-cargo metadata --locked --no-deps --format-version=1 >/dev/null
+# Leg 1 — the committed-lockfile assertion (15 §4.5, TH-34).
+#
+# Every workspace resolves under ONE toolchain: the one the repository root
+# selects. This leg asserts that a committed lockfile is complete and current for
+# its manifests, which is a cargo resolution property rather than a compilation
+# one, so running all four under the same cargo makes the four results
+# comparable. It also keeps the leg cheap. The fuzz workspace pins its own
+# nightly (`fuzz/rust-toolchain.toml`) for libFuzzer, and without this override
+# rustup would download a full nightly toolchain here — including inside the
+# Python-only CI job that runs `tools/release/tests` — for a check that never
+# compiles anything. Measured equivalent: `cargo metadata --locked` on
+# `fuzz/Cargo.lock` succeeds identically under the pinned nightly and under the
+# root's stable channel. Compilation of that workspace stays on its own nightly,
+# where `tools/ci/fuzz-gates.sh` owns it.
+#
+# If rustup is absent the override is skipped and each workspace falls back to
+# whatever cargo the environment provides, which is the behavior before this
+# leg grew past two workspaces.
+metadata_toolchain=$(rustup show active-toolchain 2>/dev/null | head -1 | awk '{print $1}' || true)
+while IFS=$'\t' read -r ws_name ws_dir ws_lockfile; do
+  assert_lockfile "$ws_lockfile"
+  (
+    cd "$repo_root/$ws_dir"
+    if [[ -n "$metadata_toolchain" ]]; then
+      export RUSTUP_TOOLCHAIN="$metadata_toolchain"
+    fi
+    cargo metadata --locked --no-deps --format-version=1 >/dev/null
+  )
+done <<<"$workspace_rows"
 
-assert_lockfile keeper/Cargo.lock
-(
-  cd keeper
-  cargo metadata --locked --no-deps --format-version=1 >/dev/null
-)
+# Leg 2 — RustSec, via the pinned cargo-audit.
+#
+# cargo-audit reads .cargo/audit.toml from its current working directory, so every
+# workspace is audited FROM ITS OWN ROOT. That is doc 15 §4.5 clause 4
+# (blast-radius containment) and not a convenience: a single run started here
+# would apply the root workspace's annotated stable2606 exception set to all four
+# lockfiles, and one workspace's pin-forced exception would then mask another
+# workspace's real vulnerability. Only the root owns an exception file; the other
+# three audit with none, which each run re-proves by reporting `settings.ignore`
+# in the summary below.
+#
+# The first workspace refreshes the advisory database and the rest reuse it: the
+# database is a process-wide clone under ~/.cargo/advisory-db, so re-fetching it
+# per workspace would only add latency and flakiness.
+audit_fetch_done=0
+while IFS=$'\t' read -r ws_name ws_dir ws_lockfile; do
+  echo "== cargo-audit: $ws_name ($ws_lockfile)"
+  (
+    cd "$repo_root/$ws_dir"
+    if [[ $audit_fetch_done -eq 0 ]]; then
+      "$auditor" audit
+    else
+      "$auditor" audit --no-fetch
+    fi
+  )
+  audit_fetch_done=1
+done <<<"$workspace_rows"
 
-# cargo-audit reads .cargo/audit.toml from its current working directory. The
-# root SDK/node closure uses the annotated stable2606 exceptions; keeper is a
-# separate workspace and is intentionally audited from its own clean root so
-# none of those exceptions can mask a future keeper vulnerability.
-"$auditor" audit
-(
-  cd keeper
-  "$auditor" audit --no-fetch
-)
-
+# Leg 3 — the GHSA-only complement.
+#
 # cargo-audit only sees what RustSec carries. For crates.io the GitHub Advisory
 # Database is a strict superset — an advisory can have no RUSTSEC id at all, and
 # the leg above is then blind to it rather than merely silent (yamux
@@ -79,36 +130,53 @@ else
     mv "$osv.tmp" "$osv"
   fi
 fi
+ghsa_args=()
+while IFS=$'\t' read -r ws_name ws_dir ws_lockfile; do
+  ghsa_args+=(--lockfile "$repo_root/$ws_lockfile")
+done <<<"$workspace_rows"
 python3 "$repo_root/tools/ci/check-ghsa-only.py" \
   --scanner "$osv" \
   --waivers "${BLEAVIT_GHSA_WAIVERS:-$repo_root/tools/ci/ghsa-waivers.toml}" \
-  --lockfile "$repo_root/Cargo.lock" \
-  --lockfile "$repo_root/keeper/Cargo.lock"
+  "${ghsa_args[@]}"
 
 if [[ -n "$summary_out" ]]; then
   summary_tmp=$(mktemp -d)
   trap 'rm -rf "$summary_tmp"' EXIT
-  "$auditor" audit --json --no-fetch >"$summary_tmp/root.json"
-  (
-    cd keeper
-    "$auditor" audit --json --no-fetch >"$summary_tmp/keeper.json"
-  )
-  python3 - "$summary_out" "$summary_tmp/root.json" "$summary_tmp/keeper.json" \
+  summary_args=()
+  while IFS=$'\t' read -r ws_name ws_dir ws_lockfile; do
+    (
+      cd "$repo_root/$ws_dir"
+      "$auditor" audit --json --no-fetch >"$summary_tmp/$ws_name.json"
+    )
+    summary_args+=("$ws_name=$summary_tmp/$ws_name.json")
+  done <<<"$workspace_rows"
+  python3 - "$summary_out" \
     "${BLEAVIT_GHSA_WAIVERS:-$repo_root/tools/ci/ghsa-waivers.toml}" \
-    "$repo_root/tools/ci/check-ghsa-only.py" <<'PY'
+    "$repo_root/tools/ci/check-ghsa-only.py" \
+    "${summary_args[@]}" <<'PY'
 import importlib.util
 import json
 import sys
 from pathlib import Path
 
-output, root_report, keeper_report, ghsa_waivers, checker_path = map(Path, sys.argv[1:])
+output = Path(sys.argv[1])
+ghsa_waivers = Path(sys.argv[2])
+checker_path = Path(sys.argv[3])
+reports = [argument.split("=", 1) for argument in sys.argv[4:]]
 
 
 def load(path):
-    value = json.loads(path.read_text(encoding="utf-8"))
+    value = json.loads(Path(path).read_text(encoding="utf-8"))
     if not isinstance(value, dict):
         raise SystemExit(f"cargo-audit report is not an object: {path}")
     return value
+
+
+def ignored_ids(report, name):
+    ignored = report.get("settings", {}).get("ignore", [])
+    if not isinstance(ignored, list) or any(not isinstance(item, str) for item in ignored):
+        raise SystemExit(f"cargo-audit settings.ignore is not a string array for {name}")
+    return sorted(ignored)
 
 
 def warning_summary(report):
@@ -126,15 +194,22 @@ def warning_summary(report):
     }
 
 
-root = load(root_report)
-keeper = load(keeper_report)
-ignored = root.get("settings", {}).get("ignore", [])
-if not isinstance(ignored, list) or any(not isinstance(item, str) for item in ignored):
-    raise SystemExit("cargo-audit settings.ignore is not a string array")
-# SQ-135's disclosed-waiver property is "the FULL waived-ID list in every
-# release manifest". Since the GHSA-only leg carries its own waivers, listing
-# only the RustSec ignores would understate what the release is shipping
-# accepted risk on. Schema v2 adds them; the assembler validates both lists.
+# SQ-135's disclosed-waiver property is "the FULL waived-ID list in every release
+# manifest". v2 read the RustSec ignore list from the root workspace alone and
+# named exactly two workspaces, so extending the gate to four would have quietly
+# reduced it to a partial disclosure. v3 therefore reports each workspace's own
+# ignore list AND the union across all of them, and the release assembler checks
+# that the union really is one: a per-workspace exception missing from the
+# top-level list is a release understating the risk it accepted.
+workspaces = {}
+union = set()
+for name, path in reports:
+    report = load(path)
+    row = warning_summary(report)
+    row["ignored_advisory_ids"] = ignored_ids(report, name)
+    union.update(row["ignored_advisory_ids"])
+    workspaces[name] = row
+
 spec = importlib.util.spec_from_file_location("check_ghsa_only", checker_path)
 checker = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(checker)
@@ -144,13 +219,10 @@ waived_ghsa_only = [
 ]
 
 summary = {
-    "schema": "bleavit.supply-chain.v2",
-    "ignored_advisory_ids": sorted(ignored),
+    "schema": "bleavit.supply-chain.v3",
+    "ignored_advisory_ids": sorted(union),
     "waived_ghsa_only": waived_ghsa_only,
-    "workspaces": {
-        "root": warning_summary(root),
-        "keeper": warning_summary(keeper),
-    },
+    "workspaces": workspaces,
 }
 output.parent.mkdir(parents=True, exist_ok=True)
 output.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")

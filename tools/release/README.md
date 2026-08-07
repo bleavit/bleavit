@@ -319,8 +319,12 @@ overrides and the checker requires the full ≥10⁷-point corpus. A local
 `--supply-chain-result passed` is an assertion that
 `tools/ci/supply-chain-gates.sh` was run successfully; the workflow supplies it
 only after that release-blocking job is green. Its summary discloses the exact
-annotated RustSec ignores and counts allowed informational warnings in the root
-and keeper workspaces; the assembler embeds it under `supply_chain.summary`.
+annotated RustSec ignores and counts allowed informational warnings for **every**
+committed cargo workspace — the set declared in `tools/ci/audited-workspaces.toml`,
+which is checked against the repository so a new lockfile cannot go unaudited. The
+assembler embeds it under `supply_chain.summary` and rejects a summary whose
+workspace set does not match that manifest, or whose top-level ignore list omits an
+ignore some workspace applied.
 
 Offline tooling checks are:
 
