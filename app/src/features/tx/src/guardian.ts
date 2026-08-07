@@ -82,6 +82,21 @@ export interface PendingAction {
   readonly threshold: Verified<number>;
   readonly expiresAt: Verified<number>;
   /**
+   * Whether this action has already executed — `guardian_core`'s own `dispatched` flag.
+   *
+   * **Required, and it was absent until 2026-08-07.** §11.8.2's approve row declares the
+   * precondition *"the action is pending and has not expired"*, and only the second half was
+   * evaluated. The runtime keeps a dispatched action **in `PendingActions` for the whole review
+   * window** (`guardian-core/src/lib.rs:655-656`) so a veto can still reach it, and refuses a
+   * second approval with `AlreadyDispatched` (`:480`). So the client was offering the system's
+   * most privileged signature on an action the runtime would reject, and listing it under
+   * *"Actions awaiting approval"* when it was awaiting nothing.
+   *
+   * That is 11 §11.5's P-11 rule inverted — a client must not invite an action the runtime
+   * refuses, for the same reason it must not refuse one the runtime accepts.
+   */
+  readonly dispatched: Verified<boolean>;
+  /**
    * The exact batch this action would execute. Required — an action with no batch field
    * could be approved without one ever being shown, which is the failure §11.8.2's
    * "never summarized away" names.
@@ -116,6 +131,20 @@ export function approvalBlocks(context: ApprovalContext): readonly GuardianBlock
     blocks.push({
       check: 'Membership',
       detail: 'This account is not a guardian, so it cannot approve guardian actions.',
+    });
+  }
+  if (context.action.dispatched.value) {
+    // §11.8.2's approve row says "the action is **pending** and has not expired", and only the
+    // second half was checked until 2026-08-07. `guardian_core` keeps a dispatched action in
+    // `PendingActions` for the review window so a veto can still reach it, and `approve_action`
+    // returns `AlreadyDispatched`. Offering the button was inviting a refusal on the one surface
+    // where a wasted signature is most expensive.
+    blocks.push({
+      check: 'Already dispatched',
+      detail:
+        'This action has already executed. It stays listed while the review window is open so ' +
+        'it can still be vetoed, but it cannot be approved again — the chain would reject the ' +
+        'attempt.',
     });
   }
   if (context.now.value > context.action.expiresAt.value) {

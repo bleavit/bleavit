@@ -32,6 +32,7 @@ import {
   DataTable,
   Derived,
   Field,
+  Datum,
   Identifier,
   Notice,
   Panel,
@@ -104,7 +105,11 @@ export function PendingActions({
   return (
     <Panel title="Pending guardian actions">
       <DataTable
-        caption="Actions awaiting approval, with how many signatures each still needs"
+        // Not "Actions awaiting approval". `guardian_core` keeps a **dispatched** action in
+        // `PendingActions` for the whole review window so a veto can still reach it, so this
+        // list is not uniformly awaiting anything — the caption said it was until 2026-08-07,
+        // and the Status column below is what tells the two apart.
+        caption="Proposed guardian actions, with each one's status and how many signatures it still needs"
         headers={[
           'Action',
           'Power',
@@ -113,6 +118,7 @@ export function PendingActions({
           'Approvals',
           'Required',
           'Expires',
+          'Status',
         ]}
         rows={actions.map((action) => ({
           key: action.actionId.value,
@@ -145,6 +151,14 @@ export function PendingActions({
             <Count datum={action.approvals} key={`a-${action.actionId.value}`} />,
             <Count datum={action.threshold} key={`t-${action.actionId.value}`} />,
             <Count datum={action.expiresAt} key={`e-${action.actionId.value}`} />,
+            // The column the caption used to imply. A dispatched action stays listed for the
+            // review window and cannot be approved again (`AlreadyDispatched`), so a reader who
+            // acts on this list needs the difference stated rather than inferred from a count.
+            <Datum
+              key={`s-${action.actionId.value}`}
+              datum={action.dispatched}
+              render={(done) => (done ? 'dispatched — reviewable, not approvable' : 'pending')}
+            />,
           ],
         }))}
       />

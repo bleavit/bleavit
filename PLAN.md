@@ -44,33 +44,56 @@ Legend: ⬜ pending · 🔨 in progress · ✅ done · ⛔ blocked · 🅿 defer
 > this milestone's own `balances` ruling is **not expressible** with the current sampler types,
 > because `ChainRead` takes a key and no block. It is recorded, not coded around.
 >
-> **PARKED:** seven rows cannot close by any amount of work in this session, and each is parked on
-> what it actually waits for. **F1** waits on a device lab and a running testnet, per the gate list
-> above. **F11** waits on SQ-940 plus ten `release.json` readiness blockers (no seated bootnode
-> operator, no gateway set, no production keys). **F13** waits on the key ceremony and a
-> two-environment byte-identical run. **F15** waits on roles being seated. **F18** waits on
-> committed chain-spec bytes — `chainSpecs: []` with both hashes null, so nothing can call
-> `startLightClient`.
+> **PARKED:** — **audited 2026-08-07 and largely WRONG. The corrected list is below.**
 >
-> **F14 and F17 both rode into `main` with #261 and are deliberately NOT ✅**, which is the one
-> judgement in this block a next session is most likely to want to overturn, so here is the
-> reasoning. R-6 needs *both* conjuncts, and each of these has the gate conjunct and not the review
-> conjunct — neither row records a spec review that returned no blocker, unlike the six flipped
-> today. **F14** additionally has real work left, and it is blocked rather than pending: its own
-> notes name an *"IndexedDB growth"* row whose quota manager was said to have no module, and that
-> half is now **stale** — `packages/local-index/src/quota.ts` ships `measureUsage`, `applyQuota`,
-> `measureDepth` and the four-rung ladder. What is **not** stale is the rest of the sentence: §9.2's
-> auto-tuner has to run over a *measured* ingest rate, and that rate is `[VERIFY achieved rate —
-> FE-P4]` in `backfill.ts`, so the tuner cannot be written without the device lab that FE-P4 names.
-> Three further §9.4 rows (memory desktop, memory mobile, mobile CPU) want the same lab.
-> **F17** is held by **FE-P10**, and only on the upgrade tier's *submission path* — whether smoldot
-> can carry a 4 MiB extrinsic, which V-97 established needs an instrumented testnet submission.
+> This block claimed seven Track F rows *"cannot close by any amount of work"*. An audit of every
+> claim, run because a Stop hook refused to accept the assertion twice in one day, found that the
+> park was written on top of **a finished commit nobody proposed**. `7dcb9a81` on
+> `track-f/f1-prototype-gates` resolves **eight of F1's twelve prototype gates**, and
+> `gh pr list --state all` shows no pull request was ever opened for it. It is now **PR #266**.
 >
-> Every one of the seven needs a credential, a device, a testnet, or a person to be appointed.
-> **F24 is not among them**, and the correction is recorded above — it is PR #265, with CI running.
+> **The tell was in this file.** `main` cited **SQ-940** four times and carried **zero rows** for
+> it — the same for SQ-941, V-300, V-301, V-303 and V-306. Earlier squash merges kept the prose
+> and dropped the table rows, and this block was then written on the stale F1 row. So the
+> statement *"SQ-940 blocks launch"* was repeated for a row not in the repository.
 >
-> Open questions raised today that a next session should not re-derive: SQ-860, SQ-880,
-> SQ-900/901, SQ-920–922, SQ-940/941, SQ-960–965, SQ-980/981.
+> **What the three audits established, per row:**
+>
+> - **F1** — *buildable, now in flight.* PR #266. Its content retires the FE-P10 claim that held
+>   F17: `apply_authorized_upgrade` is `DispatchClass::Operational`, so the ceiling is 5,242,880 B
+>   against a ~1.89 MB image, and smoldot's 1 MiB notification cap is inbound-only.
+> - **F14** — *its blocker sentence was false on both halves.* Its first-ever R-6 review returned
+>   **0 blockers**. §9.2's auto-tuner does **not** need the device lab: `[VERIFY — FE-P4]` sits on
+>   §6.4's *backfill throughput*, a different quantity, and the measured-rate computation already
+>   exists from the database (`quota.ts:586,596`). Three majors are buildable, one of them large —
+>   **the quota manager has no production caller**, so §9.2's 300 MB/75 MB caps are not held on a
+>   running client at all.
+> - **F17** — *not held by FE-P10.* Its first-ever R-6 review returned **2 blockers**, both fixed
+>   here, plus five majors. Its four "closed" controls are **decidable**, not blocked: SQ-730 is
+>   doc-truing that moves no surface, and SQ-598/601/602/731 need a `FutarchyApi` addition, which
+>   R-1 delegates outright — the precedent is contract v28 in this branch's own base.
+> - **F11** — the readiness blockers number **13**, not ten (`pnpm -C app release:check`). Seven
+>   are external; **three are decidable** under R-1 and **three are buildable** — the Asset Hub
+>   descriptor set still says *"blocked on SQ-587"*, and SQ-587 was ruled on 2026-08-04.
+> - **F13** — half buildable. Both `release:build` runs already happen on independent runners
+>   (`ci.yml:816`, `:952`); no artifact is uploaded, so nothing compares them. The compare step is
+>   the missing part, not the second environment.
+> - **F15** — buildable. `deploy/ops-handbook/README.md` has no §6.3 and no §6.4 section, and both
+>   are role-keyed procedure writable with every holder still `VACANT`.
+> - **F18** — decidable, then buildable. A chain-spec generator exists
+>   (`tools/deploy/generate-chain-specs.sh`) with a `dev`/`local` validator profile, and no spec
+>   sentence requires production provenance for a pin. The ruling is whether a dev pin channel may
+>   exist beside the production one.
+>
+> **What is genuinely external, and it is a much shorter list than seven milestones:** the key
+> ceremony and its ≥2 attestations, the bootnode operator programme, genesis and paraId, hardware
+> wallets for the Ledger leg, the ar.io custody commitment (the *only* part of SQ-940 that is
+> the user's — the platform facts are not), and four device-lab rows in 10 §9.4 (memory mobile,
+> mobile CPU, ingest throughput, sync latency) plus FE-P10's memory and liveness halves.
+>
+> **The lesson, since this is the second false park in one day:** a park is a claim about the
+> world and it decays. Re-test it before repeating it, and never state it about a whole milestone
+> when the evidence is about one named half.
 
 
 > ### ⇨ CURRENT (2026-08-07, latest) — **F23/F25's R-6 review: one range answered two ways, and the guard that was supposed to notice had been scoped around the drift a second time**

@@ -2578,7 +2578,7 @@ const CALL = (pallet = 'Constitution', call = 'set_param'): ApprovedCall => ({
 const ACTION = (over: Partial<PendingAction> = {}): PendingAction => ({
   actionId: finalized('a1'), power: finalized('activate_playbook'), target: finalized('PB-LEDGER-FREEZE'),
   justificationHash: finalized('0xjh'), approvals: finalized(3),
-  threshold: finalized(5), expiresAt: finalized(9_000),
+  threshold: finalized(5), expiresAt: finalized(9_000), dispatched: finalized(false),
   // §11.8.2 requires the exact batch; an action without one cannot be built.
   calls: [CALL()], ...over,
 });
@@ -2609,6 +2609,33 @@ test('approving twice is its own refusal, not "not eligible"', () => {
   assert.equal(blocks.length, 1);
   assert.equal(nth(blocks, 0, 'block').check, 'Already approved');
   assert.match(nth(blocks, 0, 'block').detail, /does not add to the count/);
+});
+
+test('a DISPATCHED action cannot be approved — 11 §11.8.2\'s "pending" half', () => {
+  // The blocker an R-6 review found on 2026-08-07. §11.8.2's approve row declares "the action is
+  // pending and has not expired", and only the second half was evaluated. `guardian_core` keeps a
+  // dispatched action in `PendingActions` for the whole review window so a veto can still reach it
+  // (`crates/guardian-core/src/lib.rs:655-656`), and `approve_action` refuses one with
+  // `AlreadyDispatched` (`:480`). So the client offered the system's most privileged signature on
+  // an action the chain would reject — 11 §11.5's P-11 rule inverted.
+  const blocks = approvalBlocks({
+    action: ACTION({ dispatched: finalized(true) }), justification: JUSTIFICATION(),
+    callerIsMember: true, callerHasApproved: false, now: finalized(100),
+  } satisfies ApprovalContext);
+  assert.deepEqual(blocks.map((b) => b.check), ['Already dispatched']);
+  assert.match(nth(blocks, 0, 'block').detail, /already executed/);
+  // It must not read as expiry or as a lost race: the action ran, and the listing is deliberate.
+  assert.match(nth(blocks, 0, 'block').detail, /still be vetoed/);
+
+  // The control: the same action un-dispatched blocks nothing, so this is not a check that
+  // fires on everything.
+  assert.deepEqual(
+    approvalBlocks({
+      action: ACTION({ dispatched: finalized(false) }), justification: JUSTIFICATION(),
+      callerIsMember: true, callerHasApproved: false, now: finalized(100),
+    } satisfies ApprovalContext),
+    [],
+  );
 });
 
 test('every approval blocker is reported together', () => {
@@ -2967,6 +2994,7 @@ const ACTION_ROW = (): PendingAction => ({
   power: finalized('activate_playbook'),
   target: finalized('cohort-42'),
   justificationHash: finalized('0xjust'),
+  dispatched: finalized(false),
   approvals: finalized(2),
   threshold: finalized(5),
   expiresAt: finalized(9_000),
