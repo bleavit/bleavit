@@ -1,0 +1,10 @@
+{
+  "name": "@bleavit/reference-indexer",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@bleavit/handoff-envelope": "workspace:*",
+    "@bleavit/providers": "workspace:*"
+  }
+}

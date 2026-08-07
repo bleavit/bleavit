@@ -10,6 +10,7 @@
 // An `export *` would silently re-admit them the moment anyone reformatted this file, which is
 // exactly why the list is explicit despite being longer. Same discipline, and the same reason,
 // as `@bleavit/local-index`'s barrel.
+export * from './endpoint.js';
 export * from './health.js';
 export * from './import.js';
 export * from './import-quota.js';
@@ -17,6 +18,40 @@ export * from './mint.js';
 export * from './refusals.js';
 export * from './snapshot.js';
 export * from './suggestions.js';
+
+// §8.5.3's probe driver (F24). Named rather than `export *` for the reason above: `HttpGet` is a
+// transport type, and a barrel that re-exported every future transport by wildcard would
+// eventually hand one consumer two of them under one name.
+export { probe, runProbeRound } from './probe.js';
+export type {
+  HttpGet,
+  ProbeResponse,
+  ProbeRound,
+  ProbeRoundResult,
+  ProbeTarget,
+} from './probe.js';
+
+// §8.5.2's range reader (F24). Named for the same reason: `IndexerGet` is the second transport
+// type in this package, and the two are deliberately assignable rather than merged while both
+// halves of F24 are in flight — see `indexer.ts`.
+export {
+  NEXT_CURSOR_HEADER,
+  coverageHoles,
+  ladderEffect,
+  mergeCoverage,
+  readChain,
+  readRange,
+  samplingPages,
+} from './indexer.js';
+export type {
+  ChainAnswer,
+  IndexerGet,
+  IndexerPage,
+  IndexerResponse,
+  IndexerSource,
+  RangeOutcome,
+  RangeRead,
+} from './indexer.js';
 
 export {
   PAGES_PER_SAMPLED_ROW,

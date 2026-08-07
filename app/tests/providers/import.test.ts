@@ -525,7 +525,7 @@ test('a SWITCHED-OFF source cannot supply rows, and is refused before a byte is 
   const document = validDocument();
   const off: Provider = {
     ...PUBLISHER,
-    health: { kind: 'disabled', by: 'auto', reason: 'a re-derived block did not match' },
+    health: { kind: 'disabled', by: 'auto', cause: 'mismatch', reason: 'a re-derived block did not match' },
   };
   let chunks = 0;
   async function* counted(): AsyncIterable<SnapshotChunk> {

@@ -40,41 +40,45 @@
  * know about, which is the point of running the real consumer rather than a checklist of what
  * the consumer was believed to check.
  *
- * ## What is deliberately absent, and the actual reason
+ * ## Where the archive-node adapter is, and what was ruled
  *
- * The **archive-node adapter**. This driver is pure over an injected {@link ArchiveExport}, and
- * the code that turns an archive node's responses into one is not written here.
+ * It is in `archive-read.ts` beside this file. This driver stays pure over an injected
+ * {@link ArchiveExport} — that is what lets the suites shuffle one and compare bytes — and the
+ * reader that produces one from a node is now written, because 10 §8.5.1 names the interface.
  *
- * An earlier version of this note gave 10 §4.2 as the reason — *smoldot serves `chainHead`
- * only, with no `archive_*`*. That is true and it is **not** the reason: §4.2 constrains the
- * light client running inside the browser, and this is a Node command-line tool that never
- * loads smoldot, has no §4.2 to obey, and is free to open an ordinary RPC connection to an
- * archive node. Citing it made the park look like a constraint when it is a gap.
+ * This note used to say the adapter was absent because **no document named the interface**, and
+ * listed four unspecified things. §8.5.1 rules on all four, and the rulings are worth having
+ * here because each one decides something this file then relies on:
  *
- * The operative reason is that **no document names the interface**. 10 §8.2 says a snapshot is
- * *"reproducible byte-identically by anyone from `tools/snapshot` against an archive node"*, and
- * that promise is to independent producers — so which reads a second producer must perform, in
- * what order, is exactly the part that has to be written down before it is implemented. Four
- * things are unspecified and none of them is a detail:
+ *  1. **Which read interface.** The **`archive_v1_*` group** of the Polkadot JSON-RPC interface
+ *     specification, and nothing else. Derived rather than chosen: the in-browser client
+ *     already speaks that specification's `chainHead_v1_*` sibling, so both readers share one
+ *     storage model and one key-type vocabulary. The legacy `state_*`/`chain_*` pair carries no
+ *     versioned contract, and reproduce-by-anyone is a promise made to second producers.
+ *  2. **At which endpoint.** Nowhere — a snapshot is addressed by **chain and block**, never by
+ *     endpoint. Identity is `archive_v1_genesisHash` and the range is pinned by
+ *     `archive_v1_hashByHeight`, so any archive node of that chain answers identically and the
+ *     document records no URL. There is no endpoint field, which is why there is no convention.
+ *  3. **What pagination looks like**, and therefore what `observed` may claim. `storageDone` is
+ *     *"always generated after all storage events have been generated"* and the specification
+ *     says nothing about early termination, caps or discarded items — so it is a **server's
+ *     claim, not a completeness proof**. A conforming reader continues each iteration with
+ *     `paginationStartKey` until a continuation yields no key it has not already seen, and
+ *     records a span in `observed` only when every read covering it concluded. That is what
+ *     makes the `observed` this file refuses to overstate something a reader can honestly fill.
+ *  4. **Which historical metadata policy applies.** The producing runtime's own metadata, from
+ *     `archive_v1_call` at each block being decoded. `[VERIFY — FE-P5]` does **not** reach this
+ *     tool: it asks whether the *light client* can retrieve metadata at depth, and it is open
+ *     because 10 §4.2 limits that client to `chainHead_v1_*`, whereas an archive node retains
+ *     historical state by definition. A block that cannot be decoded is **refused**, never
+ *     emitted raw — §6.5's "pending decoder" row is a client accommodation, and a producer
+ *     emitting one would publish an op set it already knows is incomplete.
  *
- *  1. **Which read interface.** `archive_v1_*`, the legacy `state_*`/`chain_*` pair, or a
- *     Subsquid/Subsquare-style index. They differ in what a range query even means.
- *  2. **At which endpoint**, and how a producer names it — a snapshot's whole value is that two
- *     unrelated people can produce it, which needs an addressing convention, not a flag.
- *  3. **What pagination looks like**, which decides what `observed` can honestly claim. This
- *     file already refuses an export whose `observed` overstates what a reader saw; the reader
- *     cannot report that faithfully without knowing how the interface signals a short answer.
- *  4. **Which historical metadata policy applies.** Decoding events at depth needs the
- *     *producing* runtime's metadata (10 §6.5), whose retrievability at depth is 10's own open
- *     `[VERIFY — FE-P5]`. A reader that guessed would silently mis-decode exactly the old
- *     history a snapshot exists to carry.
- *
- * Answering any of those by assumption is what R-2 forbids, and getting one wrong produces
- * documents that pass every screen in `@bleavit/providers` while describing a history that did
- * not happen. So it is filed as PLAN.md · *Spec questions* SQ-612 rather than approximated. The
- * CLI beside this file reads an export produced elsewhere, so an operator with a reader in the
- * documented shape can produce a pinned snapshot today — and the differential below is what
- * catches such a reader when it is incomplete.
+ * The two files stay split, and not out of habit. `archive-read.ts` performs every read and
+ * interprets none of them; this file interprets and publishes and reads nothing. The CLI beside
+ * them still accepts an export produced elsewhere, so a second producer with its own reader
+ * remains a first-class case — and the differential below is what catches any such reader when
+ * it is incomplete.
  */
 
 import {

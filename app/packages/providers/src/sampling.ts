@@ -53,10 +53,16 @@ import {
   effectiveCoverage,
   shouldAutoDisable,
   type LadderThresholds,
+  type AutoDisableCause,
   type Provider,
   type SampleResult,
 } from './health.js';
-import { probeFailureReason, providerRefusal, type ProviderRefusal } from './refusals.js';
+import {
+  probeFailureReason,
+  providerRefusal,
+  type ProviderRefusal,
+  type ProviderRefusalCode,
+} from './refusals.js';
 
 // ------------------------------------------------------------------ release constants
 
@@ -75,9 +81,33 @@ export const PAGES_PER_SAMPLED_ROW = 16;
 
 // ------------------------------------------------------------------ the health ladder
 
+/**
+ * What one probe found.
+ *
+ * `disqualified` is a third arm rather than a flavour of `failed`, and the distinction is a
+ * safety property rather than taxonomy — 10 §8.5.3, added 2026-08-07 after an R-6 review
+ * reproduced the composition below against the shipped code.
+ *
+ * `failed` is a **liveness** observation: the endpoint did not answer. §8.3 handles those with a
+ * consecutive counter precisely so one timeout cannot ratchet the ladder, and `failing` therefore
+ * still serves. `disqualified` is a **correctness** finding: the endpoint answered, promptly and
+ * well-formed, and the answer proves it cannot serve this client at all — today, a binding for
+ * another chain.
+ *
+ * Routing the second through the first inverts the control. A source sits in `unprobed`, which
+ * {@link canServeReads} refuses. It answers about another chain. Through `failed` it becomes
+ * `failing`, which serves — so **proving it is on the wrong chain gains it read eligibility it
+ * did not have before it answered.** That is the exact opposite of what the probe is for, and no
+ * test caught it because each function was right on its own: `afterProbe` correctly declines to
+ * ratchet on one failure, and `canServeReads` correctly lets `failing` serve.
+ *
+ * §8.3 already has the right precedent one clause away — *"auto-disable on sampling mismatch"* is
+ * immediate, with no counter, because a correctness finding is not a flaky network.
+ */
 export type ProbeOutcome =
   | { readonly kind: 'responded'; readonly latencyMs: number }
-  | { readonly kind: 'failed'; readonly why: string };
+  | { readonly kind: 'failed'; readonly why: string }
+  | { readonly kind: 'disqualified'; readonly why: string };
 
 /**
  * Whether a provider is due a health probe.
@@ -124,28 +154,60 @@ export function afterProbe(
   thresholds: LadderThresholds = LADDER,
 ): Provider {
   if (provider.health.kind === 'disabled') return provider;
-  if (outcome.kind === 'responded') {
-    return {
-      ...provider,
-      health:
-        outcome.latencyMs > thresholds.slowAboveMs
-          ? { kind: 'slow', observedMs: outcome.latencyMs }
-          : { kind: 'healthy' },
-    };
+
+  // An exhaustive `switch` rather than two `if`s and a fall-through. The R-6 re-review of
+  // 2026-08-07 pointed out that the counter WAS the fall-through, so a fourth `ProbeOutcome`
+  // arm carrying a `why` field would compile and be counted silently as a liveness failure —
+  // landing the source in `failing`. Comments claimed a guarantee the shape did not provide.
+  // `canServeReads` two files over uses `never` for exactly this reason.
+  switch (outcome.kind) {
+    // A correctness finding disables at once, with no counter — see `ProbeOutcome`.
+    case 'disqualified':
+      return {
+        ...provider,
+        health: { kind: 'disabled', by: 'auto', cause: 'disqualified', reason: outcome.why },
+      };
+
+    case 'responded':
+      return {
+        ...provider,
+        health:
+          outcome.latencyMs > thresholds.slowAboveMs
+            ? { kind: 'slow', observedMs: outcome.latencyMs }
+            : { kind: 'healthy' },
+      };
+
+    case 'failed': {
+      const consecutive =
+        (provider.health.kind === 'failing' ? provider.health.consecutiveFailures : 0) + 1;
+      if (consecutive >= thresholds.disableAfter) {
+        return {
+          ...provider,
+          health: {
+            kind: 'disabled',
+            by: 'auto',
+            cause: 'liveness',
+            reason: probeFailureReason(consecutive, outcome.why),
+          },
+        };
+      }
+      // `everAnswered` carries §8.3's "healthy series" across the transition. It is true only
+      // if this source has previously answered — either it is answering-then-failing now
+      // (`healthy`/`slow` before), or it was already `failing` with a series behind it. From
+      // `unprobed` it is false, and `canServeReads` then withholds reads: a source whose first
+      // probe timed out must not gain by silence what it did not have by not being asked.
+      const everAnswered =
+        provider.health.kind === 'healthy' ||
+        provider.health.kind === 'slow' ||
+        (provider.health.kind === 'failing' && provider.health.everAnswered);
+      return { ...provider, health: { kind: 'failing', consecutiveFailures: consecutive, everAnswered } };
+    }
+
+    default: {
+      const unhandled: never = outcome;
+      return unhandled;
+    }
   }
-  const consecutive =
-    (provider.health.kind === 'failing' ? provider.health.consecutiveFailures : 0) + 1;
-  if (consecutive >= thresholds.disableAfter) {
-    return {
-      ...provider,
-      health: {
-        kind: 'disabled',
-        by: 'auto',
-        reason: probeFailureReason(consecutive, outcome.why),
-      },
-    };
-  }
-  return { ...provider, health: { kind: 'failing', consecutiveFailures: consecutive } };
 }
 
 /**
@@ -182,8 +244,26 @@ export function afterProbe(
  */
 export function livenessRefusal(provider: Provider): ProviderRefusal | undefined {
   if (provider.health.kind !== 'disabled' || provider.health.by !== 'auto') return undefined;
-  return providerRefusal('FE-PROV-001', provider.health.reason);
+  return providerRefusal(CODE_FOR_CAUSE[provider.health.cause], provider.health.reason);
 }
+
+/**
+ * Which `FE-PROV-*` code names each automatic disable — the whole mapping, in one place.
+ *
+ * It was the constant `FE-PROV-001` until 2026-08-07, which told a user *"An optional data source
+ * is not responding"* about a source that had answered promptly and been switched off for **what
+ * the answer said**. A sampling mismatch is §8.4's own `FE-PROV-002` in as many words. A wrong-chain
+ * disqualification takes the same code, and the fit is exact rather than a nearest match: §8.4
+ * scopes `FE-PROV-002` to *"any mismatch against chain state"*, its fixed message is *"gave an
+ * answer that did not match the chain"*, and a genesis hash for another network is precisely that.
+ * The detection differs — probe rather than sampling round — and §9.4 fixes copy per **code**, not
+ * per mechanism, so a fifth code would give the user a second sentence saying the same thing.
+ */
+const CODE_FOR_CAUSE: Readonly<Record<AutoDisableCause, ProviderRefusalCode>> = Object.freeze({
+  liveness: 'FE-PROV-001',
+  mismatch: 'FE-PROV-002',
+  disqualified: 'FE-PROV-002',
+});
 
 // ------------------------------------------------------------------ selection
 
@@ -195,7 +275,20 @@ export interface ProviderRow {
    * construct one.
    */
   readonly reference: string;
-  /** What the provider claims, canonically rendered so a comparison is a string equality. */
+  /**
+   * The **encoded** value a chain read returns under {@link reference} — never §8.2's decimal.
+   *
+   * This said *"canonically rendered so a comparison is a string equality"* until 2026-08-07, and
+   * that phrase produced the defect it was meant to prevent: `samplingPages` read it, rendered
+   * §8.2's canonical **decimal** amount, and handed it to {@link chainRowCheck}, which compares
+   * against `ChainReadResult.hex` as opaque hex and declines to decode because decoding needs
+   * runtime metadata this package may not reach. Composed, every honest row mismatched — and
+   * §8.4's *"any mismatch"* rule auto-disables the operator that served it. Both functions were
+   * right about their own half; the contract between them named the wrong representation.
+   *
+   * "Canonical" was the trap: §8.2 has a canonical form and the chain has an encoding, and they
+   * are different strings for the same quantity. This field is the chain's.
+   */
   readonly claimed: string;
 }
 
@@ -414,9 +507,15 @@ export interface SampledRound {
  *   user's own decision with an automatic one, or record a clean verdict about a source that
  *   served nothing.
  * - **`unprobed`** — nothing has answered yet, so the pages handed to this round did not come
- *   from a source this client has established is serving. A caller that *did* fetch them holds
- *   the outcome of that fetch and advances the ladder with {@link afterProbe} first; that is
- *   §8.3's *"probe on enable"* made structural rather than scheduled.
+ *   from a source this client has established is serving. The fix is a **probe**, which is §8.3's
+ *   *"probe on enable"* made structural rather than scheduled.
+ *
+ * That second bullet instructed a caller to *"advance the ladder with `afterProbe` from the
+ * request that fetched them"* until 2026-08-07, and the instruction was the one thing 10 §8.5.2
+ * forbids: **a liveness failure never reaches the ladder from a read.** A ladder that ratchets on
+ * data reads disables faster for a user who reads more, which is not the liveness signal §8.3
+ * describes. Correctness findings still reach it, but through `indexer.ts`'s `ladderEffect`, which
+ * is the one place that knows which read outcomes are correctness findings and which are not.
  */
 export class ProviderCannotServeError extends Error {
   constructor(provider: Provider) {
@@ -427,9 +526,8 @@ export class ProviderCannotServeError extends Error {
             'was shown.'
         : `provider ${provider.id} is ${provider.health.kind}: nothing has answered for it yet, ` +
             'so it is serving no reads and these pages did not come from a source this client ' +
-            'has established is live. Advance the ladder with `afterProbe` from the request that ' +
-            'fetched them before sampling — a round over an unprobed source is a verdict about ' +
-            'data nobody was shown.',
+            'has established is live. Probe it — `probe`, then `afterProbe` — before sampling. ' +
+            'A round over an unprobed source is a verdict about data nobody was shown.',
     );
     this.name = 'ProviderCannotServeError';
   }

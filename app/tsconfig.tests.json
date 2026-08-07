@@ -59,6 +59,7 @@
     "tools/release/**/*.ts",
     "tools/render-budget/**/*.ts",
     "tools/snapshot/**/*.ts",
+    "optional/indexer/**/*.ts",
     "tools/verify-release/**/*.ts",
     "tests/snapshot/**/*.ts",
     // F22. `tools/desktop/` decides whether the desktop shell may embed a tree at all, so it

@@ -102,7 +102,11 @@ const COPY: Readonly<Record<ProviderRefusalCode, CodeCopy>> = Object.freeze({
       'once is worth replacing rather than retrying.',
   },
   'FE-PROV-003': {
-    message: 'This snapshot was rejected and nothing was imported.',
+    // Names the ARTIFACT generically, because 10 §8.5.2 routes a rejected live `/range` page into
+    // this same code and a page is not a snapshot and is never imported. It read "This snapshot
+    // was rejected and nothing was imported" until 2026-08-07, which was false copy for half the
+    // failures that reach it.
+    message: 'A document from this source was rejected, and nothing from it was stored.',
     // Deliberately cause-neutral. An earlier version ended with "check that the file
     // downloaded completely, and compare its content hash" — true for a truncated file and
     // wrong for the other two causes, and a user who acts on it downloads a snapshot of the
@@ -110,9 +114,9 @@ const COPY: Readonly<Record<ProviderRefusalCode, CodeCopy>> = Object.freeze({
     // one §8.4 attaches to this code; what differs is the remediation, and that is a fixed
     // sentence per cause carried in the expert detail (see the module note).
     recovery:
-      'Nothing local was deleted — the eviction preview runs before the import, so a rejected ' +
-      'snapshot costs you nothing. The detail below names which check failed and what to do ' +
-      'about that particular failure.',
+      'Nothing local was deleted or replaced. A rejected snapshot costs you nothing, because the ' +
+      'eviction preview runs before the import; a rejected page was never stored. The detail ' +
+      'below names which check failed and what to do about that particular failure.',
   },
   'FE-PROV-004': {
     message: 'Two snapshots of the same period disagree with each other.',
@@ -218,7 +222,18 @@ export type SnapshotRejectionCause =
   /** The document describes a different chain (10 §7 gives one local database per chain). */
   | 'wrong-chain'
   /** Spot re-derivation inside light-client-reachable depth disagreed with the chain. */
-  | 'chain-disagreement';
+  | 'chain-disagreement'
+  /**
+   * A **live `/range` page** failed a screen a page owes — 10 §8.5.2.
+   *
+   * The fourth cause, added 2026-08-07 after an R-6 review. §8.5.2 routes a rejected page into
+   * `FE-PROV-003`, and every remedy above is written for a **file**: they tell the user to check
+   * that a download completed and to compare a hash against a publisher's page. A page has no
+   * download, no publisher and no quoted pin, so those sentences are false exactly where they are
+   * read — the defect that deleted the `incomplete-check` cause on 2026-08-06, arriving again from
+   * the other side.
+   */
+  | 'served-page';
 
 const REMEDY: Readonly<Record<SnapshotRejectionCause, string>> = Object.freeze({
   integrity:
@@ -236,6 +251,11 @@ const REMEDY: Readonly<Record<SnapshotRejectionCause, string>> = Object.freeze({
     'with the chain, which is what a forged snapshot looks like. Do not import it, and do not ' +
     'trust other files from the same publisher without comparing them against a second, ' +
     'unrelated one.',
+  'served-page':
+    'This came from a live index rather than from a file, so there is nothing to download again ' +
+    'and no published hash to compare it against. The operator served a page this device will ' +
+    'not accept. The blocks it covered stay marked as not observed, and another source can still ' +
+    'supply them.',
 });
 
 /** `FE-PROV-003`, with the fixed remediation for its cause leading the expert detail. */

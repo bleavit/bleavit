@@ -77,14 +77,64 @@ export type ProviderHealth =
   | { readonly kind: 'unprobed' }
   | { readonly kind: 'healthy' }
   | { readonly kind: 'slow'; readonly observedMs: number }
-  | { readonly kind: 'failing'; readonly consecutiveFailures: number }
+  | {
+      readonly kind: 'failing';
+      readonly consecutiveFailures: number;
+      /**
+       * Has this source ever answered a probe?
+       *
+       * Added 2026-08-07 by the R-6 re-review of F24, which found the wrong-chain blocker's
+       * shape surviving in the liveness arm. §8.3 lets `Failing` serve, and its stated reason
+       * is that *"one timeout in a **healthy series** cannot ratchet the ladder"*. A source
+       * whose very first probe timed out has no series: it went `unprobed` (serving nothing)
+       * → `failing` (serving), so **failing to answer bought it the eligibility that not
+       * being asked withheld** — the same non-monotonicity, with silence as the trigger.
+       *
+       * So the flag is not bookkeeping. It is the `healthy series` clause, made checkable, and
+       * {@link canServeReads} reads it rather than assuming it.
+       */
+      readonly everAnswered: boolean;
+    }
   | {
       readonly kind: 'disabled';
-      /** `auto` when the client disabled it; `user` when the user did. */
-      readonly by: 'auto' | 'user';
+      /** The user switched it off. No cause: the reason is their decision. */
+      readonly by: 'user';
+      /** Required. A source that vanishes unexplained reads as a broken app. */
+      readonly reason: string;
+    }
+  | {
+      readonly kind: 'disabled';
+      readonly by: 'auto';
+      /**
+       * Which control switched it off, and therefore which `FE-PROV-*` code names it.
+       *
+       * A **required** discriminant rather than a string a caller composes, added 2026-08-07 after
+       * an R-6 review. `livenessRefusal` returned `FE-PROV-001` — *"An optional data source is not
+       * responding"* — for every automatic disable, including a sampling mismatch and a wrong-chain
+       * disqualification. Both of those **answered**, promptly and completely, and were switched
+       * off for what the answer said. Telling the user the source is not responding sends them to
+       * check their network for a source that is working perfectly and lying.
+       *
+       * The mapping lives in {@link autoDisableRefusal} and nowhere else, so a fourth cause cannot
+       * be added without choosing its code.
+       */
+      readonly cause: AutoDisableCause;
       /** Required. A source that vanishes unexplained reads as a broken app. */
       readonly reason: string;
     };
+
+/**
+ * Why the client switched a source off by itself — 10 §8.3, §8.4, §8.5.3.
+ *
+ * Three, and they are three different facts about the operator rather than three severities.
+ */
+export type AutoDisableCause =
+  /** §8.3's ladder ran out: consecutive probe failures, and the endpoint stopped answering. */
+  | 'liveness'
+  /** §8.4 re-verified a served row against the chain and it disagreed. */
+  | 'mismatch'
+  /** §8.5.3: it answered, and the answer describes another chain. Terminal at the first one. */
+  | 'disqualified';
 
 export interface Provider {
   readonly id: string;
@@ -129,8 +179,14 @@ export function canServeReads(provider: Provider): boolean {
   switch (provider.health.kind) {
     case 'healthy':
     case 'slow':
-    case 'failing':
       return true;
+    // §8.3's clause is "one timeout in a **healthy series**", so `failing` serves only where
+    // there is a series. A source whose first probe timed out has none, and letting it serve
+    // would mean silence bought the eligibility that not being asked withheld — see
+    // `ProviderHealth`. This is the liveness twin of the wrong-chain blocker, and it was live
+    // in the shipped code until the R-6 re-review of 2026-08-07 reproduced it.
+    case 'failing':
+      return provider.health.everAnswered;
     case 'unprobed':
     case 'disabled':
       return false;
@@ -148,10 +204,16 @@ export function canServeReads(provider: Provider): boolean {
  * different questions and differ on exactly one state. A snapshot arrives **out of band**: the
  * user already holds the bytes, and what admits them is the content pin plus §8.4's screens plus
  * the chain re-derivation — none of which asks the endpoint anything. So *"has this source
- * answered a probe"* has no bearing on a file that is already here, and gating on it would refuse
- * every import from a freshly accepted suggestion, permanently, since nothing in this release
- * drives probes (see PLAN.md's F24 — §8.3's probe driver has no owner until the provider wire is
- * specified).
+ * answered a probe"* has no bearing on a file that is already here.
+ *
+ * **The second half of that argument was a scaffold, and F24 removed it (2026-08-07.)** This note
+ * used to add that gating on the probe would refuse every import *"permanently, since nothing in
+ * this release drives probes"* — true when written, and now false: `probe.ts` drives them, so the
+ * refusal would last one round trip rather than forever. Had only the reason been left standing,
+ * a later reader would have watched it collapse and concluded the gate was safe to add. It is
+ * not, and the reason that does not expire is 10 §8.5.3's: §8.3's ladder governs **reads a client
+ * issues to a provider**, and an out-of-band file is not one — there is nothing to ask, and a
+ * source supplied purely as a file has no endpoint to ask it of.
  *
  * `disabled` is different and is refused. `FE-PROV-002`'s fixed recovery tells the user the source
  * *"has been switched off"* and that re-enabling is theirs to do; minting fresh rows badged with
@@ -322,6 +384,7 @@ export function afterSampling(
       health: {
         kind: 'disabled',
         by: 'auto',
+        cause: 'mismatch',
         reason: samplingMismatchReason(result.mismatches, result.rowsChecked, subject),
       },
     };

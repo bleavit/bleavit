@@ -178,8 +178,8 @@ const HEALTHS: readonly ProviderHealth[] = [
   { kind: 'unprobed' },
   { kind: 'healthy' },
   { kind: 'slow', observedMs: 9_000 },
-  { kind: 'failing', consecutiveFailures: 2 },
-  { kind: 'disabled', by: 'auto', reason: 'a spot-checked row did not match' },
+  { kind: 'failing', consecutiveFailures: 2, everAnswered: true },
+  { kind: 'disabled', by: 'auto', cause: 'mismatch', reason: 'a spot-checked row did not match' },
   { kind: 'disabled', by: 'user', reason: 'switched off' },
 ];
 
@@ -238,7 +238,7 @@ test('`serving` is a PERMISSION, and a fleet answering nothing says so rather th
   const allFailing = [0, 1, 2].map((n) => ({
     id: `p${n}`,
     kind: 'indexer' as const,
-    health: { kind: 'failing' as const, consecutiveFailures: 2 },
+    health: { kind: 'failing' as const, consecutiveFailures: 2, everAnswered: true },
   }));
   const state = fleetState(allFailing);
   assert.equal(state.kind, 'serving', 'not all-down: all-down needs every source DISABLED');

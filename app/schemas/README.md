@@ -22,10 +22,14 @@ feed this tool, and obtain the same pin. An input format that exists only as a T
 in this repository is not a format somebody outside it can write against, so the
 reproduce-by-anyone claim would hold only for people who read the source.
 
-The tool's own archive-node adapter is deliberately unwritten (`PLAN.md` · *Spec questions*
-SQ-612 — no document names which read interface, endpoint, pagination or historical-metadata
-policy it binds to). Publishing the boundary it is missing is what lets an operator supply one
-today.
+The tool now ships an archive-node adapter of its own — `tools/snapshot/archive-read.ts`,
+written against
+[10 §8.5.1](../../docs/architecture/10-frontend-architecture.md), which ruled the four questions
+SQ-612 raised: the `archive_v1_*` group, no endpoint recorded in the document,
+`paginationStartKey` continued until a continuation adds nothing, and metadata from
+`archive_v1_call` at the block being decoded. Publishing the boundary keeps its point either
+way, and that point is the paragraph above: a second producer writes its own reader, feeds this
+format, and obtains the same pin.
 
 **Its `additionalProperties` are `true`, which is the opposite of `bleavit.intent.v1` and is
 deliberate.** An intent's `action` is *"precisely where an encoded call would be placed"* by a
