@@ -228,12 +228,26 @@ export const LADDER: LadderThresholds = Object.freeze({
  * to catch; it extracts it now, and also checks that 10 §2.3 and §8.4 spell it the same way.
  * They did not — §2.3 said *"discloses"* — and the contradiction was ruled in §2.3 under R-1 on
  * 2026-08-06 rather than picked silently here (PLAN.md · *Decision log*).
+ *
+ * **The cross-check names `snapshot producers`, and it read `sources` until 2026-08-07.** §8.4
+ * and 10 §2.3 both say *"two independent **snapshot producers**"*, and in this client's own
+ * vocabulary a *source* is any provider — `Provider.kind` is `snapshot | indexer` and the
+ * settings panel is headed *"Optional data sources"* — so the substituted noun offered a
+ * cross-check `FE-PROV-004` does not implement: that code fires on **two snapshots covering the
+ * same range**, and two live indexers produce nothing to diff. It is the one sentence here that
+ * tells a user what to *do* about the blind spot the sentence before it discloses, so a wider
+ * noun sends them to a control that does not exist. Caught the same way `labels` was and by the
+ * same gate hole: the clause table in `tests/providers/health.test.ts` paired §8.4's clause with
+ * the **substituted** rendering, so the pair agreed with the drift instead of failing on it. The
+ * pair is re-pointed, and `tests/analysis/provider-surface.test.ts` now also asserts the
+ * **constant → document** direction, which is the one a doc→doc extraction cannot see.
  */
 export const SAMPLING_GUARANTEE =
   'Spot-checking catches malformed data, internally inconsistent data, shallow forgeries ' +
   'and a source that has stopped responding. It does not detect a self-consistent forgery ' +
   'of history at a depth this device cannot reach on its own. The only cross-check for deep ' +
-  'history is comparing two independent sources, which this client supports and recommends.';
+  'history is comparing two independent snapshot producers, which this client supports and ' +
+  'recommends.';
 
 /** What a sampling round found. */
 export interface SampleResult {

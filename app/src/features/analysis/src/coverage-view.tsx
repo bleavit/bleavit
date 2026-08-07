@@ -38,46 +38,96 @@
  * {@link distinctSources} is what §6.3's sentence asks for. A count of holes is the number a
  * developer reaches for and it answers the wrong question: it says how much is missing and
  * nothing about who supplied what is present, and §2.3's mandatory labelling is about the
- * second half.
+ * second half. **Which sources those are is `boundarySet`'s answer**, not a second walk written
+ * here — see that function's own note.
+ *
+ * ## The edge column states a capability, and that is not a shortfall in the wording
+ *
+ * §6.3's `checked` arm means *all three checks **can** run*, and the verdict of a comparison
+ * lives in `CoverageVerification` — which `CoveredHistory` does not carry. So this surface can
+ * honestly say what an edge **records** and cannot say what the chain answered; saying the
+ * second would be inferring the `ok` verdict §6.3 forbids inferring. See {@link edgeNote} and
+ * {@link EDGE_IS_NOT_A_VERDICT}, and **SQ-980** for whether a history query must state it.
  *
  * @see docs/architecture/10-frontend-architecture.md §6.3, §9.2
  * @see docs/architecture/15-invariants-and-testing.md §2 — INV-FE-15
  */
 
 import { DataTable, type ReactNode } from '@bleavit/ui';
-import type { CoverageRange, CoveredHistory } from '@bleavit/local-index';
+import { boundarySet, type CoverageRange, type CoveredHistory } from '@bleavit/local-index';
 
 import { CoveredHistoryDisclosure } from './index-disclosure-view.js';
 
 /**
- * Who supplied the history in these ranges, each named once.
+ * A boundary token in words — the **only** place in this client where one becomes a sentence.
  *
  * A provider range is named by its **id**, because *"from a provider"* is not an origin a user
  * can act on (INV-FE-15's *"origin to the pixel"*). A `self` range has no id and needs none: it
  * is this device's own light client.
- *
- * Order is the order first seen, so the label a user reads is stable across renders of the same
- * coverage rather than depending on a sort nobody chose.
  */
-export function distinctSources(ranges: readonly CoverageRange[]): readonly string[] {
-  const seen: string[] = [];
-  for (const range of ranges) {
-    const name =
-      range.origin === 'self'
-        ? 'this device’s own light client'
-        : `${range.origin}: ${range.providerId}`;
-    if (!seen.includes(name)) seen.push(name);
-  }
-  return seen;
+function humanSource(token: string): string {
+  if (token === 'self') return 'this device’s own light client';
+  const separator = token.indexOf(':');
+  return separator < 0 ? token : `${token.slice(0, separator)}: ${token.slice(separator + 1)}`;
 }
 
-/** Why a range's two other integrity facts are absent, where the range says so (§6.3). */
+/**
+ * Who supplied the history in these ranges, each named once — §6.3's boundary set, rendered.
+ *
+ * **Which sources there are is `boundarySet`'s answer, not this module's.** This function used
+ * to walk the ranges itself and build first-seen names, so one §6.3 sentence had two
+ * implementations — `packages/local-index`'s `boundarySet` (which delegates in turn to
+ * `shared-types`, so the badge and the index agree) and this one — differing in order, in
+ * spelling and, first, on whatever case nobody tested. `coverage.ts` warns against exactly that
+ * immediately above its own delegation. So the set comes from there and only the **words** are
+ * decided here.
+ *
+ * Order is therefore `boundarySet`'s sort over the tokens rather than first-seen. Both are
+ * stable across renders of the same coverage, which is the property that mattered; what changed
+ * is that there is now one rule instead of two.
+ */
+export function distinctSources(ranges: readonly CoverageRange[]): readonly string[] {
+  return boundarySet(ranges).map(humanSource);
+}
+
+/**
+ * What a range's edge **records** — which is what it makes checkable, never what happened to it.
+ *
+ * §6.3 defines the `checked` arm as *"all three facts, all three checks **can** run"*: the arm
+ * says the two comparable facts were written down at `toBlock`, not that anything compared them.
+ * The verdict of an actual comparison lives in `CoverageVerification` (`ok` / `invalid` /
+ * `unchecked`), and **`CoveredHistory` does not carry one**.
+ *
+ * This branch read *"…and both are checked against the chain"* until 2026-08-07, which is an
+ * `ok` verdict inferred from an edge — the inference §6.3 forbids in as many words: *"An
+ * unverifiable edge yields unchecked, never ok"*, where `ok` *"states that a range was compared
+ * against the chain and agreed"*. It was worse than an over-claim in isolation, because nothing
+ * in this client pins a genesis yet, so every range in fact verdicts `unchecked` — and the same
+ * range read as *"Ranges this client could not check"* on F25's boot surface and as *checked
+ * against the chain* here. Whether a history query must instead carry its verdict, which would
+ * let this column say *was* rather than *can be*, is **SQ-980**; until that is ruled the honest
+ * column is the capability one, and {@link EDGE_IS_NOT_A_VERDICT} says so beside it.
+ */
 function edgeNote(range: CoverageRange): string {
   return range.edge.kind === 'checked'
-    ? 'this device read the block hash and runtime version at this range’s edge, and both are ' +
-        'checked against the chain'
-    : range.edge.why;
+    ? 'a genesis binding, the block hash and the runtime version at this range’s edge, so this ' +
+        'range can be compared against the chain'
+    : // §6.3: the `unverifiable` arm keeps the genesis binding — the check that still runs — and
+      // "names the reason the other two facts are absent, and a surface may render it".
+      `a genesis binding only — ${range.edge.why}`;
 }
+
+/**
+ * Stated beside the table, because *can be compared* and *was compared* are one word apart.
+ *
+ * A reader given a column of edge facts and no disclaimer will read it as a result — which is
+ * the reading §6.3 refuses (*"an `ok` verdict must never be inferred"*). The sentence is here
+ * rather than in the column header because a header is a label and this is a limit.
+ */
+export const EDGE_IS_NOT_A_VERDICT =
+  'The last column says what each range’s edge records, which is what could be compared. It is ' +
+  'not a result: a history answer carries no verdict, so nothing here says that a range agrees ' +
+  'with the chain.';
 
 function span(range: { readonly fromBlock: number; readonly toBlock: number }): string {
   return `#${range.fromBlock}–#${range.toBlock}`;
@@ -120,18 +170,23 @@ export function CoverageView<T>({
 
       <DataTable
         caption="Where each indexed period came from"
-        headers={['Blocks', 'Source', 'What was checked at its edge']}
+        headers={['Blocks', 'Source', 'What its edge records']}
         rows={covered.ranges.map((range) => ({
           key: `range-${range.fromBlock}-${range.toBlock}-${range.origin}`,
           cells: [
             span(range),
             // Never merged across a provenance boundary, so two adjacent ranges from two
-            // sources stay two rows here (§6.3's no-splice rule, rendered).
-            range.origin === 'self' ? 'this device' : `${range.origin}: ${range.providerId}`,
+            // sources stay two rows here (§6.3's no-splice rule, rendered). The label goes
+            // through the summary's own two functions rather than being spelled a third time:
+            // `boundarySet` over a single range yields exactly one token, so this is that token
+            // humanised, and one source cannot end up with two names on one screen.
+            distinctSources([range]).join(''),
             edgeNote(range),
           ],
         }))}
       />
+
+      <p className="coverage__edge-caveat">{EDGE_IS_NOT_A_VERDICT}</p>
     </div>
   );
 }

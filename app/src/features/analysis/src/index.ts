@@ -9,7 +9,7 @@ export {
 // F23 — the provider surface: 10 §8's mechanisms as screens. `providers` is in this unit's
 // reference set and in no other, which is why every one of these lives here rather than beside
 // a transaction screen.
-export { CoverageView, distinctSources } from './coverage-view.js';
+export { CoverageView, EDGE_IS_NOT_A_VERDICT, distinctSources } from './coverage-view.js';
 export {
   AWAITING_CHAIN_READ,
   CHAIN_DISAGREES,

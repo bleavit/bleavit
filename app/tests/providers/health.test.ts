@@ -91,7 +91,7 @@ test('the guarantee statement includes the half that is unflattering', () => {
   // claiming a guarantee the design explicitly declines to make.
   assert.match(SAMPLING_GUARANTEE, /malformed/);
   assert.match(SAMPLING_GUARANTEE, /does not detect a self-consistent forgery/);
-  assert.match(SAMPLING_GUARANTEE, /comparing two independent sources/);
+  assert.match(SAMPLING_GUARANTEE, /comparing two independent snapshot producers/);
 });
 
 test('the guarantee statement is bound to 10 §8.4\'s own sentence, clause by clause', () => {
@@ -117,9 +117,16 @@ test('the guarantee statement is bound to 10 §8.4\'s own sentence, clause by cl
       'They do not detect a self-consistent forgery of history at depths the light client cannot reach.',
       /does not detect a self-consistent forgery of history at a depth this device cannot reach/,
     ],
+    // Re-pointed 2026-08-07, and it is the **second** time this table was found scoped around
+    // the drift it exists to catch. The pair used to read the document's *"two independent
+    // snapshot producers"* against a rendering of *"two independent sources"* — so the clause
+    // was extracted, the pair passed, and the substituted noun survived every green run exactly
+    // as `labels` had. In this client's vocabulary a *source* is any provider (`Provider.kind`
+    // is `snapshot | indexer`), and `FE-PROV-004` diffs snapshots only, so the wider noun named
+    // a cross-check the client does not implement.
     [
       'The only available cross-check is diffing two independent snapshot producers',
-      /only cross-check for deep history is comparing two independent sources/,
+      /only cross-check for deep history is comparing two independent snapshot producers/,
     ],
     // Added 2026-08-06, and its absence was the whole finding: the shipped string rendered
     // *"supports and recommends"* as *"supports and labels"* — a third verb, belonging to a

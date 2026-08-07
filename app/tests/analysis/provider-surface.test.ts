@@ -26,6 +26,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -39,6 +40,7 @@ import {
   CoverageView,
   CoveredHistoryDisclosure,
   CrossCheckView,
+  EDGE_IS_NOT_A_VERDICT,
   EvictionPreview,
   FleetSummary,
   ImportOutcomeView,
@@ -58,15 +60,20 @@ import {
 import {
   SAMPLING_GUARANTEE,
   acceptSuggestion,
+  admitSnapshot,
   canServeReads,
   canSupplyPinnedImport,
   disclosureFor,
   fleetState,
+  mintSnapshotRows,
   planImport,
   previewCopy,
   providerRefusal,
+  serializeSnapshot,
+  snapshotPreimage,
   snapshotRefusal,
   spotCheckSnapshot,
+  type AdmittedSnapshot,
   type ImportOutcome,
   type MintedImport,
   type Provider,
@@ -75,7 +82,7 @@ import {
   type SnapshotSpotCheck,
   type SpotCheckReport,
 } from '@bleavit/providers';
-import { providerRange } from '@bleavit/local-index';
+import { boundarySet, providerRange } from '@bleavit/local-index';
 import { selfRange } from '@bleavit/local-index/testing';
 import type { ChartDiscardRecord, CoverageRange, CoveredHistory } from '@bleavit/local-index';
 import { badgeCopyFor } from '@bleavit/ui';
@@ -84,9 +91,6 @@ import { badgeCopyFor } from '@bleavit/ui';
 // value in production.
 import { finalize } from '@bleavit/chain-client/testing';
 import type { FinalizedBlockRef } from '@bleavit/chain-client';
-// The sanctioned `provider` constructor (10 §2.1) — the one status a value may carry that
-// claims nothing. Aliased because this file already binds `provider` to a `Provider` factory.
-import { provider as providerStatus } from '@bleavit/shared-types';
 import type { Verified } from '@bleavit/shared-types';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -121,6 +125,9 @@ const buttonDisabled = (markup: string, label: string): boolean => {
 // ------------------------------------------------------------------ documents and checkers
 
 const BINDING = { genesisHash: '0xabc', specVersion: 2, contractVersion: 28 } as const;
+
+const sha256 = (preimage: Uint8Array): string =>
+  createHash('sha256').update(preimage).digest('hex');
 
 /** A document that covers `coverage` and claims no movement anywhere in it. */
 function document(coverage: readonly { fromBlock: number; toBlock: number }[]): SnapshotDocument {
@@ -169,6 +176,66 @@ async function reports(): Promise<Readonly<Record<ReachReading, SpotCheckReport>
     // argument rather than by building a 512-block document.
     unfinished: await spotCheckSnapshot(document([{ fromBlock: 1, toBlock: 100 }]), ABOVE, 2),
   };
+}
+
+/**
+ * A document through the **real** admission screens, which is the only way to reach the mint.
+ *
+ * `AdmittedSnapshot` carries a brand `snapshot.ts` alone can name, so a plausible object literal
+ * is untypeable here — the same property `tests/providers` asserts with a `@ts-expect-error`.
+ */
+function admit(document: SnapshotDocument): AdmittedSnapshot {
+  const verdict = admitSnapshot(
+    serializeSnapshot(document),
+    { expectedPin: sha256(snapshotPreimage(document)), binding: { ...BINDING } },
+    sha256,
+  );
+  assert.equal(verdict.kind, 'admitted', JSON.stringify(verdict, null, 2));
+  if (verdict.kind !== 'admitted') throw new Error('unreachable: the verdict is not admitted');
+  return verdict;
+}
+
+/**
+ * The rows `mintSnapshotRows` writes for one situation, with the report that earned them.
+ *
+ * Both halves come back because the badge and the disclosure must be about the **same** pass:
+ * building the report here and the status by hand elsewhere is exactly how a badge assertion
+ * stops being about the mint. The report runs over `admitted.document` rather than the document
+ * literal, because the mint compares the two by reference.
+ */
+async function mintedFor(
+  coverage: readonly { fromBlock: number; toBlock: number }[],
+  check: SnapshotSpotCheck,
+  ceiling?: number,
+): Promise<{ readonly report: SpotCheckReport; readonly minted: MintedImport }> {
+  const admitted = admit(document(coverage));
+  const report = await spotCheckSnapshot(admitted.document, check, ceiling);
+  const minted = mintSnapshotRows(admitted, report, {
+    providerId: 'pub-1',
+    pin: sha256(snapshotPreimage(admitted.document)),
+    importedAt: 0,
+  });
+  return { report, minted };
+}
+
+/**
+ * The three situations §8.4 leaves indistinguishable at the badge, each minted for real.
+ *
+ * The provider id is the same across all three deliberately: it is the badge's *other* channel,
+ * so varying it would make the set size 3 for a reason that has nothing to do with the mint.
+ */
+async function collapsingCases(): Promise<
+  readonly { readonly report: SpotCheckReport; readonly minted: MintedImport }[]
+> {
+  const permanent = await mintedFor([{ fromBlock: 10, toBlock: 12 }], BELOW);
+  const transient = await mintedFor([{ fromBlock: 10, toBlock: 12 }], ABOVE);
+  const unfinished = await mintedFor([{ fromBlock: 1, toBlock: 100 }], ABOVE, 2);
+  // Named for their arms, and the arms are asserted, so a case that stopped producing the
+  // situation it is named for fails here rather than testing a different one silently.
+  assert.equal(permanent.report.reach, 'window-floor');
+  assert.equal(transient.report.reach, 'above-window-only');
+  assert.equal(unfinished.report.reach, 'ceiling');
+  return [permanent, transient, unfinished];
 }
 
 // ------------------------------------------------------------------ §8.4's `reach`, all four arms
@@ -255,26 +322,48 @@ test('the three situations the row badge cannot tell apart are told apart here',
   // the justification for admitting is that the limit is disclosed. This test is what stops that
   // justification being circular — the disclosure has a consumer, and the consumer separates all
   // three.
-  const built = await reports();
-  const collapsing = [
-    built['blind-spot-permanent'],
-    built['blind-spot-transient'],
-    built.unfinished,
-  ] as const;
+  //
+  // **The badge half is driven by `mintSnapshotRows` as of 2026-08-07, and the previous form
+  // could not fail.** It called `badgeCopyFor(providerStatus('pub-1', wouldBadgeSampled(report)))`
+  // three times with byte-identical arguments over a pure switch, so `badges.size` was 1
+  // unconditionally and the message *"the three no longer share one badge"* described a state
+  // the assertion could not reach: a third per-row channel would break that call site at
+  // **compile** time, not here. Now each status is the one the real mint stamped onto the real
+  // rows, so the assertion fails exactly when the mint starts distinguishing the three — which
+  // is the finding it claims to guard.
+  const cases = await collapsingCases();
 
-  // First: the collapse is real. Every one of the three compares nothing, so every one mints the
-  // same badge. If this stops holding the badge has gained a channel and this test should be
-  // re-pointed rather than deleted.
+  // First: the collapse is real. Every one of the three compares nothing, so the mint writes one
+  // status for all three. If this stops holding the badge has gained a channel and this test
+  // should be re-pointed rather than deleted.
   const badges = new Set<string>();
-  for (const report of collapsing) {
+  for (const { report, minted } of cases) {
     assert.equal(report.compared, 0, 'a fixture for the collapsing set compared something');
     assert.equal(wouldBadgeSampled(report), false);
-    const copy = badgeCopyFor(providerStatus('pub-1', wouldBadgeSampled(report)));
+    assert.equal(minted.status.kind, 'provider');
+    const copy = badgeCopyFor(minted.status);
     badges.add(`${copy.mark}||${copy.title}`);
+    // Every row carries that same status, so the badge is a fact about the import and not about
+    // whichever row a screen happened to render first.
+    for (const row of minted.balances) assert.deepEqual(row.status, minted.status);
   }
   assert.equal(badges.size, 1, 'the three no longer share one badge — re-point this test');
 
+  // Anti-vacuity for the assertion above: the badge really does have a second reading, so a set
+  // of size 1 is a measurement rather than a property of `badgeCopyFor`. This is the status the
+  // mint writes when a pass **did** compare, taken from the mint's own output on the one arm
+  // that produces it.
+  const compared = await mintedFor([{ fromBlock: 10, toBlock: 12 }], AGREES);
+  const comparedCopy = badgeCopyFor(compared.minted.status);
+  assert.equal(compared.report.reach, 'whole-document');
+  assert.equal(wouldBadgeSampled(compared.report), true);
+  assert.ok(
+    !badges.has(`${comparedCopy.mark}||${comparedCopy.title}`),
+    'a compared import badges exactly like one that compared nothing — the badge says nothing',
+  );
+
   // Second: the disclosure separates them, three ways, in the arm, the reading and the copy.
+  const collapsing = cases.map(({ report }) => report);
   const renderings = collapsing.map((report) => html(h(ReachDisclosure, { report })));
   assert.equal(new Set(collapsing.map((report) => report.reach)).size, 3);
   assert.equal(new Set(collapsing.map((report) => reachReading(report))).size, 3);
@@ -356,6 +445,29 @@ test('the guarantee reaches the pixel verbatim, and the constant is doc 10 §8.4
     'supports and recommends',
   ]) {
     assert.ok(bullet.includes(clause), `10 §8.4 no longer says "${clause}"`);
+  }
+
+  // **Constant → document**, added 2026-08-07 and the direction the loop above structurally
+  // cannot see. That loop proves the *document* still says what this suite expects and asserts
+  // nothing at all about the shipped string, so a noun substituted inside the constant passed
+  // it — which has now happened twice, `labels` for `recommends` and then `sources` for
+  // `snapshot producers`. Each phrase below must appear in **both** §8.4's bullet and
+  // `SAMPLING_GUARANTEE`, so a widening on either side fails here instead of at a user.
+  //
+  // `snapshot producers` is the load-bearing one: `Provider.kind` is `snapshot | indexer` and
+  // the settings panel is headed *"Optional data sources"*, so *"two independent sources"* named
+  // a cross-check `FE-PROV-004` does not implement — it fires on two snapshots covering one
+  // range, and two indexers produce nothing to diff.
+  for (const phrase of [
+    'two independent snapshot producers',
+    'self-consistent forgery',
+    'supports and recommends',
+  ]) {
+    assert.ok(bullet.includes(phrase), `10 §8.4 no longer says "${phrase}"`);
+    assert.ok(
+      SAMPLING_GUARANTEE.includes(phrase),
+      `the shipped copy substituted for §8.4’s "${phrase}": ${SAMPLING_GUARANTEE}`,
+    );
   }
 
   // Constant → pixel, on both surfaces §8.4's *"disclosed in the provider UI"* reaches.
@@ -681,6 +793,22 @@ test('a disagreement flags the pair and offers no control that picks a side', ()
 
 const EDGE = { kind: 'unverifiable', genesisHash: '0xabc', why: 'imported from a snapshot' } as const;
 
+/**
+ * §6.3's **other** arm, and the one no coverage fixture here had until 2026-08-07.
+ *
+ * Every fixture used `EDGE` — including on a `self` range, which is a combination §6.3 does not
+ * describe: the `unverifiable` arm is for *"a range minted from a provider"*, and a range this
+ * device's own ingest produced has all three facts by construction. The wrong fixture is what
+ * kept `edgeNote`'s `checked` branch unrendered by any test while it claimed the range had been
+ * compared against the chain.
+ */
+const SELF_EDGE = {
+  kind: 'checked',
+  genesisHash: '0xabc',
+  hash: `0x${'11'.repeat(32)}`,
+  specVersion: 2,
+} as const;
+
 function history(ranges: readonly CoverageRange[]): CoveredHistory<readonly string[]> {
   const holes =
     ranges.length === 0 ? [{ fromBlock: 1, toBlock: 100 }] : [{ fromBlock: 21, toBlock: 29 }];
@@ -696,19 +824,59 @@ test('a coverage summary names its distinct sources rather than counting gaps', 
     providerRange('snapshot', 'pub-1', 1, 20, 0, EDGE),
     providerRange('operator', 'op-1', 30, 40, 0, EDGE),
     providerRange('snapshot', 'pub-1', 50, 60, 0, EDGE),
-    selfRange(70, 80, 0, EDGE),
+    selfRange(70, 80, 0, SELF_EDGE),
   ];
+  // The order is `boundarySet`'s sort over its own tokens — `operator:op-1`, `self`,
+  // `snapshot:pub-1` — which is where the set is now decided (10 §6.3 has one boundary-set rule
+  // and this module used to carry a second implementation of it). Only the **words** are this
+  // module's, which is why `self` lands between the two provider names rather than last.
   assert.deepEqual(distinctSources(ranges), [
-    'snapshot: pub-1',
     'operator: op-1',
     'this device’s own light client',
+    'snapshot: pub-1',
   ]);
+  // Bound to the package's own answer rather than to a list written here, so the delegation is
+  // the assertion: a re-implemented walk that agreed on this fixture would not survive it.
+  assert.deepEqual(
+    distinctSources(ranges).length,
+    boundarySet(ranges).length,
+    'the rendered set is not the boundary set',
+  );
 
   const markup = html(h(CoverageView, { answer: history(ranges), caption: 'Price history' }));
   assert.match(markup, /data-sources="3"/);
   assert.ok(markup.includes('snapshot: pub-1') && markup.includes('operator: op-1'), markup);
   // Never merged across a provenance boundary: four ranges stay four rows.
   assert.match(markup, /data-ranges="4"/);
+});
+
+test('a `checked` edge says what it records, never that the range was compared', () => {
+  // **The blocker this test was written for.** §6.3 defines the `checked` arm as *"all three
+  // facts, all three checks **can** run"* — falsifiable, not compared — and the verdict of an
+  // actual comparison lives in `CoverageVerification`, which `CoveredHistory` does not carry.
+  // The column read *"…and both are checked against the chain"*, which is the `ok` verdict §6.3
+  // forbids inferring, and since nothing pins a genesis every range in fact verdicts
+  // `unchecked`: the same range read as *"Ranges this client could not check"* on F25's boot
+  // surface and as *checked against the chain* here.
+  const ranges = [selfRange(70, 80, 0, SELF_EDGE), providerRange('snapshot', 'pub-1', 1, 20, 0, EDGE)];
+  const markup = html(h(CoverageView, { answer: history(ranges), caption: 'Price history' }));
+
+  // What the arm permits, stated as a capability.
+  assert.ok(markup.includes('can be compared against the chain'), markup);
+  assert.ok(markup.includes('the block hash and the runtime version'), markup);
+  // …and never as a result. This is the assertion the wrong fixture hid: with every range
+  // carrying an `unverifiable` edge, no test rendered this branch at all.
+  assert.ok(
+    !/(is|are|was|were|been) (checked|compared) against the chain/.test(markup),
+    `the edge column claimed a comparison no field in this answer records:\n${markup}`,
+  );
+  assert.ok(markup.includes(EDGE_IS_NOT_A_VERDICT), markup);
+  assert.ok(markup.includes('What its edge records'), markup);
+
+  // The other arm keeps the genesis binding — §6.3's one check that still runs on a provider
+  // range — and names the reason the other two facts are absent.
+  assert.ok(markup.includes('a genesis binding only'), markup);
+  assert.ok(markup.includes('imported from a snapshot'), markup);
 });
 
 test('a hole is rendered as a gap with an explainer, never elided', () => {
