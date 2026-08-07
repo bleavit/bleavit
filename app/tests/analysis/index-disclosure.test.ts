@@ -57,7 +57,7 @@ import {
   type PendingRawEvictionRecord,
 } from '@bleavit/local-index';
 import { legacyIndexV1, selfRange } from '@bleavit/local-index/testing';
-import { releaseParaChain } from '@bleavit/application';
+import { releaseChainSpecs, releaseParaChain, releaseWorkerSource, startChainSession } from '@bleavit/application';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const APP = resolve(HERE, '../..');
@@ -737,17 +737,35 @@ test('the disclosure is rendered outside the outlet, so it is on every route', (
   );
 });
 
-test('nothing in this client starts a light client, which is what makes cannotObserve true', () => {
+test('nothing in this client starts a light client, which is what makes cannotObserve true', async () => {
   // `cannotObserve` answers *cannot say* for every range. That is the truth only while no chain
   // connection exists; the day one is started this assertion fails and the observer has to be
   // replaced by a real edge read rather than silently keeping its answer.
-  const callers = ['src/application/src/boot.tsx', 'src/features/analysis/src/index-boot.ts'];
-  for (const file of callers) {
-    assert.ok(
-      !/\bstartLightClient\s*\(/.test(withoutComments(appSource(file))),
-      `${file} starts a light client, so cannotObserve is no longer the honest observer`,
-    );
-  }
+  //
+  // **This used to scan two source files for `startLightClient(` and F18 made that vacuous.**
+  // The call moved to `chain-boot.ts`, and a scan pinned to the files that happened to be the
+  // call sites on the day it was written keeps passing while the property it defends stops
+  // holding — the staleness class this repository keeps finding in its own checkers. So the
+  // claim is now made against the **inputs this release actually supplies**: whatever module
+  // holds the call, `startChainSession` is what performs it, and with `releaseChainSpecs()`
+  // and `releaseWorkerSource()` it performs nothing. The day a pin lands, this fails.
+  const started: unknown[] = [];
+  const session = await startChainSession({
+    specs: releaseChainSpecs(),
+    worker: releaseWorkerSource(),
+    start: async (options) => {
+      started.push(options);
+      return { label: 'a light client this release must not have' };
+    },
+  });
+  assert.equal(session.kind, 'not-started', 'a light client was started, so cannotObserve lies');
+  assert.deepEqual(started, []);
+  // And the *only* production caller is the one that supplies those two, so there is no second
+  // path that could start one behind this assertion's back.
+  const callers = readdirSync(join(APP, 'src/application/src'))
+    .filter((name) => /\.tsx?$/.test(name))
+    .filter((name) => /\bstartLightClient\b/.test(withoutComments(appSource(`src/application/src/${name}`))));
+  assert.deepEqual(callers, ['chain-boot.ts'], 'a second module reaches startLightClient');
 });
 
 test('the local index is constructed in exactly one production module', () => {

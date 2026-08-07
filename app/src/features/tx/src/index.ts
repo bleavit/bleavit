@@ -77,12 +77,17 @@ export {
   type ClassLock,
 } from './vote-forms.js';
 export {
+  MixedBlockProgressError,
+  UnfinalizedProgressError,
+  WrongChainProgressError,
   depositBlocks,
+  depositProgress,
   destinationWarning,
   progressCopy,
   withdrawBlocks,
   xcmWarning,
   type DepositInputs,
+  type DepositObservations,
   type DepositProgress,
   type FundingBlock,
   type WithdrawInputs,

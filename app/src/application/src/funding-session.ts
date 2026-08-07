@@ -1,0 +1,219 @@
+/**
+ * S12/S13's wiring — 11 §11.9, 02 §7.7. F18's own composition root.
+ *
+ * `funding-reads.ts` holds the reads, `funding-composition.ts` the keys and decoders, and
+ * `chain-client` the two light-client connections. Nothing joined them, which is what F18's
+ * row means by *"the second light-client connection to Asset Hub, and only that"*: every
+ * piece existed and no module attached Asset Hub, opened a reader over it and paired it with
+ * the local one.
+ *
+ * ## The two legs are separate functions, and that is 02 §7.7 written into signatures
+ *
+ * §11.9.1 makes *"AH connection synced & descriptors compatible"* a precondition **row**, and
+ * 11 E17 requires the deposit flow *"blocked with diagnostics (never a blind 'send anyway')"*.
+ * §11.9.2 says the opposite about withdraw: it is a **local** `pallet_xcm` call over 02 §7.4
+ * reads, and *"without the AH connection the check degrades to a warning, never silently
+ * skipped"*.
+ *
+ * So {@link openWithdrawLeg} takes **no Asset Hub connector at all** — the argument is not in
+ * scope, exactly as `readWithdrawInputs` takes no Asset Hub reader. A future edit cannot
+ * couple the two without changing that signature and meeting §11.9.2 on the way past. The
+ * failure this shape forbids is the tempting one: a single `openFunding()` that connects both
+ * chains and returns both legs, which takes withdraw offline every time Asset Hub is slow and
+ * presents an Asset Hub outage to the user as *funding is down*.
+ *
+ * ## Release artifacts are not the connection, and only the connection is asymmetric
+ *
+ * Both legs are built from `FundingChains` — one chain's metadata and descriptors each, which
+ * are committed release data (`fixtures/chain-feed/`, `fixtures/foreign-chain-feed/`) and are
+ * present whether or not any chain is reachable. Building a key from Asset Hub's metadata
+ * costs nothing and reaches no network. What §11.9.2 makes asymmetric is the **live**
+ * connection, which is where this module enforces it.
+ *
+ * ## A same-chain reader pair is loud, not a blocked deposit
+ *
+ * `fundingReaders` throws `SameChainError` when the two readers share a chain identity, and
+ * this module lets that throw propagate rather than turning it into `blocked`. That is
+ * deliberate. `attachAssetHub` already refuses a bundle pinning our own genesis, so reaching
+ * it needs the *local* transport to be on Asset Hub — at which point every futarchy figure on
+ * every screen is already a foreign read under a local label, and a polite *"deposits are
+ * unavailable"* would hide a release nothing else in the client can detect. The one class of
+ * defect this repository keeps finding is a true statement about the wrong chain; it does not
+ * get a friendly message.
+ *
+ * ## What this module deliberately does not decide
+ *
+ * `assetHubCompatible` — 10 §5.2's **foreign** verdict — is not computed here and is not
+ * defaulted. `classifyForeign` needs a probe of every 02 §7.7 surface through a descriptor-
+ * bearing typed API, and nothing in this client constructs one yet (`light-client.ts` says so
+ * about `createClient` in as many words). R-2 forbids resolving that by assumption, so the
+ * verdict stays a required argument of `readDepositInputs` with no producer, and this module
+ * does not invent one. Attaching the chain is a different fact from its runtime being
+ * compatible, and reporting the first as the second is how a `restricted` Asset Hub would
+ * pass a precondition nobody evaluated.
+ */
+
+import type { AssetHubConnection, BundledChain, ChainHeadTransport } from '@bleavit/chain-client';
+import {
+  fundingDecoders,
+  fundingKeys,
+  fundingReaders,
+  type FundingChains,
+  type FundingDecoders,
+  type FundingKeys,
+  type FundingReader,
+  type FundingReaders,
+} from '@bleavit/features-tx';
+
+/**
+ * The per-release funding pins, injected — 02 §7.7, §8.
+ *
+ * Neither has a default and neither is a literal in this source. The asset index is 1337 and
+ * has been resolved twice (V-17, V-105), and it is *still* a parameter: §7.7 pins the Asset
+ * Hub of the relay each release targets, so a compiled-in value would be a release constant
+ * that stops tracking the release. The USDC `Location` is `unknown` for the reason
+ * `FundingKeyInputs` gives — the chain's own codec is the only authority on its shape, and a
+ * second declaration here would be one nothing can compare against the first.
+ */
+export interface FundingPins {
+  /** The Asset Hub bundle this release ships, pinned and hash-checked before `addChain`. */
+  readonly assetHub: BundledChain;
+  /** The USDC XCM `Location`, as this chain's `ForeignAssets` codec accepts it (02 §8). */
+  readonly usdcLocation: unknown;
+}
+
+/** Keys and decoders, built once per chain pair. Shared by both legs; neither is a connection. */
+export interface FundingArtifacts {
+  readonly keys: FundingKeys;
+  readonly decoders: FundingDecoders;
+}
+
+/**
+ * Build the four frozen surfaces' keys and decoders from the two chains' committed artifacts.
+ *
+ * Separated from the legs because it reaches no network and can fail for reasons that have
+ * nothing to do with either chain being up: `storageKeyBuilder` refuses when a chain's
+ * metadata and its descriptors disagree on a storage item's hasher count, and refuses an
+ * absent item outright. Both are packaging defects, and finding them while the app is wiring
+ * itself up beats finding them while a user is looking at a deposit screen.
+ */
+export function fundingArtifacts(chains: FundingChains, pins: FundingPins): FundingArtifacts {
+  return {
+    keys: fundingKeys({ ...chains, usdcLocation: pins.usdcLocation }),
+    decoders: fundingDecoders(chains),
+  };
+}
+
+/** Opening a reader at a transport's finalized head. Usually `FinalizedReader.open`. */
+export type OpenReader<T> = (transport: T) => Promise<FundingReader>;
+
+export interface WithdrawLegDeps<T extends ChainHeadTransport> {
+  /** **This chain only.** There is deliberately no Asset Hub field on this interface. */
+  readonly local: T;
+  readonly openReader: OpenReader<T>;
+  readonly artifacts: FundingArtifacts;
+}
+
+export interface DepositLegDeps<T extends ChainHeadTransport> extends WithdrawLegDeps<T> {
+  /** Usually `client.connectAssetHub`. Attaches the chain lazily, on entering the flow (E17). */
+  readonly connectAssetHub: (assetHub: BundledChain) => Promise<AssetHubConnection<T>>;
+  readonly pins: FundingPins;
+}
+
+/**
+ * S13's leg — the local reader, and nothing else.
+ *
+ * `blocked` here means the **local** chain could not be read, which is a different fact from
+ * every reason the deposit leg blocks. Sharing one reason string between the two would be the
+ * *funding is down* message §11.9.2 exists to prevent.
+ */
+export type WithdrawLeg =
+  | { readonly kind: 'ready'; readonly reader: FundingReader; readonly artifacts: FundingArtifacts }
+  | { readonly kind: 'blocked'; readonly reason: string };
+
+/**
+ * S12's leg — the branded reader pair, or the Asset Hub leg's own reason for refusing.
+ *
+ * `blocked` carries the reason the *Asset Hub* connection gave, unchanged: `attachAssetHub`
+ * and `assetHubConnector` already distinguish a wrong chain (terminal, retrying cannot help)
+ * from an unreachable one (retryable, E17's recovery action is *"retry AH sync"*), and
+ * rewriting either into a generic sentence would discard the distinction a user acts on.
+ */
+export type DepositLeg =
+  | { readonly kind: 'ready'; readonly readers: FundingReaders; readonly artifacts: FundingArtifacts }
+  | { readonly kind: 'blocked'; readonly reason: string };
+
+function because(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+export async function openWithdrawLeg<T extends ChainHeadTransport>(
+  deps: WithdrawLegDeps<T>,
+): Promise<WithdrawLeg> {
+  try {
+    return { kind: 'ready', reader: await deps.openReader(deps.local), artifacts: deps.artifacts };
+  } catch (error) {
+    return {
+      kind: 'blocked',
+      reason:
+        `This chain could not be read at a finalized block: ${because(error)}. Withdrawals are ` +
+        'unavailable until it can be; this is not an Asset Hub problem (11 §11.9.2).',
+    };
+  }
+}
+
+/**
+ * S12's leg — attach Asset Hub, open a reader over each chain, pair them.
+ *
+ * Order is load-bearing: **Asset Hub first**. It is the leg that can refuse, and refusing
+ * before the local reader is opened means a blocked deposit costs no local read and pins no
+ * local block. The reverse order would open a reader whose block is then held for however long
+ * the Asset Hub sync takes, and `FinalizedReader`'s pin is only readable while the transport
+ * still holds that block.
+ */
+export async function openDepositLeg<T extends ChainHeadTransport>(
+  deps: DepositLegDeps<T>,
+): Promise<DepositLeg> {
+  let connection: AssetHubConnection<T>;
+  try {
+    connection = await deps.connectAssetHub(deps.pins.assetHub);
+  } catch (error) {
+    // `assetHubConnector` never throws — every failure is an arm. A throw therefore means the
+    // connector was replaced or the attach path itself failed, and it must still not take down
+    // a screen for a leg that only blocks deposits.
+    return {
+      kind: 'blocked',
+      reason:
+        `The Asset Hub connection failed: ${because(error)}. Deposits are unavailable; nothing ` +
+        'else in the app is affected (02 §7.7).',
+    };
+  }
+  if (connection.kind !== 'attached') return { kind: 'blocked', reason: connection.reason };
+
+  let assetHub: FundingReader;
+  try {
+    assetHub = await deps.openReader(connection.transport);
+  } catch (error) {
+    return {
+      kind: 'blocked',
+      reason:
+        `Asset Hub could not be read at a finalized block: ${because(error)}. Deposits are ` +
+        'unavailable until it syncs; nothing else in the app is affected (11 E17).',
+    };
+  }
+
+  let local: FundingReader;
+  try {
+    local = await deps.openReader(deps.local);
+  } catch (error) {
+    return {
+      kind: 'blocked',
+      reason:
+        `This chain could not be read at a finalized block: ${because(error)}. The deposit ` +
+        'checks span both chains, so it is blocked rather than checked on one of them.',
+    };
+  }
+
+  // Throws `SameChainError` rather than blocking — see this module's header.
+  return { kind: 'ready', readers: fundingReaders(local, assetHub), artifacts: deps.artifacts };
+}

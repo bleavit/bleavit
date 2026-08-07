@@ -60,9 +60,12 @@ export type RangeObserver = (range: CoverageRange) => RangeEdgeFacts | undefined
  * convenient one — and the surface renders every such range in the `unchecked` list, which is
  * where a reader must find them.
  *
- * Nothing in this client calls `startLightClient`: no chain spec is bundled and no topology is
- * started (F18's artifact-blocked remainder). The suite asserts that too, so this observer
- * cannot outlive the condition that makes it true.
+ * No chain connection exists in this build. F18 gave `startLightClient` its caller, so the
+ * reason changed and the fact did not: `releaseChainSpecs()` is `unpinned` and
+ * `releaseWorkerSource()` is `unspawnable`, so `startChainSession` returns `not-started` and
+ * this client is the first of §6.3's three cases exactly. The suite asserts that against those
+ * two inputs rather than against a file that happens to hold the call, so this observer cannot
+ * outlive the condition that makes it true.
  */
 export const cannotObserve: RangeObserver = () => undefined;
 

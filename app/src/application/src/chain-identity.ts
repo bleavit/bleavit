@@ -29,6 +29,7 @@
  */
 
 import type { IndexChainIdentity, MetadataPins } from '@bleavit/features-analysis';
+import type { ChainSpecs, WorkerSource } from './chain-session.js';
 
 /**
  * The parachain identity this release pins, or the reason it pins none.
@@ -43,6 +44,70 @@ export function releaseParaChain(): IndexChainIdentity {
     reason:
       'this release pins no Bleavit parachain, because none has been launched yet. A local ' +
       'history store belongs to exactly one chain, so there is none to open.',
+  };
+}
+
+/**
+ * The chains this release may boot a light client against, or the reason it may boot none — F18.
+ *
+ * The same statement `releaseParaChain` makes, one layer down: that function answers *which
+ * chain does the local history belong to*, this one answers *which bytes may be handed to
+ * smoldot*. Both are `unpinned` for one reason — `release-sources.json` carries
+ * `chainSpecHashes` and `genesisHashes` as null, and `connectSrc.chainSpecs` as an empty list,
+ * so this build commits no chain-spec bytes for any chain.
+ *
+ * **This is where a development pin would be, and where it must never be** (ruled 2026-08-07).
+ * `tools/deploy/generate-chain-specs.sh` builds `bleavit-dev.json` and `bleavit-local.json`,
+ * and no rule requires production provenance of a pin. But a *release* pinned to `bleavit_dev`
+ * on `paseo-local` would pass `verifyBundledChainSpec`, pass the §3.1 genesis check, and report
+ * `verified` about a chain that is not Bleavit — the same failure the release source's own note
+ * describes for a null, with a non-null value, which is worse because nothing downstream fails.
+ * So a development pin is a **test fixture**: it is produced by
+ * `app/tools/dev-chain-pin.ts` from a spec a drill built, and it is injected into
+ * `startChainSession` by that drill's harness. It is never in a field a release reads, so no
+ * gate has to refuse it and no exemption has to expire.
+ *
+ * A function rather than a constant, for the reason the two below it are functions: it is a
+ * statement about *this build*, read at boot.
+ */
+export function releaseChainSpecs(): ChainSpecs {
+  return {
+    kind: 'unpinned',
+    reason:
+      'this release pins no chain-spec bytes for any chain, because no production chain has ' +
+      'been launched. There is nothing to hand a light client, so none is started.',
+  };
+}
+
+/**
+ * Where this build's smoldot `Worker` comes from, or the reason it has none — F18.
+ *
+ * 10 §3.1 already has the state and the code for a client that cannot spawn one:
+ * `WorkerFailed` / `FE-BOOT-002`, whose renderable surface is *"docs, settings, verification
+ * panel, cached dashboard"* — which is what this build renders. So this is a declared state
+ * rather than an omission, and it is written here beside the other two statements about this
+ * build rather than as a throw in a branch nobody reaches.
+ *
+ * **Both reasons are checkable claims, not an apology.** First, 10 §9.4 budgets the smoldot
+ * wasm as a **lazily fetched** artifact (*"smoldot WASM (worker, lazy) ≤ 3.5 MB gz"*), and
+ * `app/tools/check-artifact-budget.ts` weighs the emitted release tree; a worker entry point
+ * bundled eagerly would put an artifact in the signed tree that no release row declares.
+ * Second, the `new Worker(new URL(…), { type: 'module' })` spelling is a **bundler contract**
+ * — `light-client.ts` says so where it declines to hardcode it — and nothing in this
+ * repository can execute a browser worker, so choosing a spelling now would be resolving a
+ * mechanism by assumption with a failure mode (a worker URL that 404s at runtime) that no
+ * gate here can see. R-2 forbids exactly that. It becomes verifiable against a chain to boot
+ * against, which is the same condition {@link releaseChainSpecs} is waiting on.
+ *
+ * A drill harness supplies its own factory, so the path below the seam is executable without
+ * either of those being settled for the browser.
+ */
+export function releaseWorkerSource(): WorkerSource {
+  return {
+    kind: 'unspawnable',
+    reason:
+      'this build bundles no smoldot worker entry point. 10 §9.4 budgets the light client’s ' +
+      'wasm as a lazily fetched artifact, and this release has no chain to fetch it for.',
   };
 }
 
