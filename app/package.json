@@ -47,6 +47,7 @@
     "check:render-provenance:witness": "node tools/check-render-provenance.ts --witness",
     "release:build": "node tools/release/build.ts",
     "release:check": "node tools/release/build.ts --check",
+    "release:manifest": "node tools/release/repro-manifest.ts",
     "signers:audit": "node tools/verify-release/cli.ts signers audit",
     "test:llm-handoff": "node tools/run-suite.ts \"tests/llm-handoff/*.test.{js,ts}\"",
     "schemas:generate": "node tools/generate-schemas.ts --write",
