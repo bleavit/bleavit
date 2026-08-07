@@ -13,6 +13,7 @@ This directory sits under `app/` deliberately: the repository root already has a
 pnpm -C app run release:build              # build dist/ and run every gate over it
 pnpm -C app run release:check              # re-run the gates over an existing tree
 node tools/release/build.mjs --check --production   # additionally refuse while blockers stand
+pnpm -C app run release:manifest -- --environment <id>   # publish this environment's digests
 ```
 
 ## The order is the design
@@ -30,6 +31,38 @@ node tools/release/build.mjs --check --production   # additionally refuse while 
 before it is hashed. 7 is last because `release.json` pins the worker, which 6 rewrote. Get
 either backwards and the release ships a map that refuses its own files — fail-closed, but
 at the user, which is the wrong place.
+
+## The two-environment proof (12 §1.1, INV-FE-10; F13)
+
+12 §1.1 requires that **two independent CI environments produce an identical tree hash**.
+Both builds already happened — `ci.yml`'s `app` job and its `desktop-shell` job — and
+nothing compared them, because neither published anything a comparison could read.
+
+`repro-manifest.ts` is what each one publishes: a per-file SHA-256 map over `dist/` **and**
+the two `release-out/` files 12 §1.1 counts as output, a **tree digest** over that map, the
+source commit, the build-recipe digest, and the environment's own facts.
+`tools/ci/check-release-reproducibility.py` compares the two and names every differing path
+with both digests — a reproducibility gate that reports only "not identical" leaves the
+person who has to fix it with a whole tree to bisect.
+
+Three things about it are not obvious:
+
+- **The environment facts are recorded to be *different*.** A "two-environment" gate whose
+  two environments are one environment proves that a build is repeatable on one machine,
+  which is a weaker claim and looks identical in a green log. So the comparator requires at
+  least one *substantive* axis to differ, and `desktop-shell` checks out into its own path —
+  absolute build path depth is the axis 12 §1.1's own recorded measurement varied, and the
+  one this pipeline is most exposed to, since pnpm's virtual store lives inside the project.
+  The facts that differ between any two runners for uninteresting reasons (hostname, runner
+  name) are held apart where they cannot satisfy that requirement.
+- **The tree digest is `sha256(path \0 <file digest> \n …)` over sorted paths** — the framing
+  `buildRecipeDigest` already uses, so there is one convention here rather than two. It is
+  implemented twice, in TypeScript and in Python, and `app/fixtures/tree-digest-cases.json`
+  is read in place by both suites so the two cannot drift.
+- **What it does not prove.** Both jobs run the same runner image, the same Node pin and the
+  same pnpm pin, so this is evidence about the *build*, not about *builders*. 12 §1.4 gate 2
+  wants two attestations from different organizations, and CI is one organization holding no
+  keys (§1.4). That half is the key ceremony's, not this gate's.
 
 ## What is committed, and what is derived
 
@@ -59,6 +92,10 @@ commit — a release pipeline that only runs at a tag is one first debugged duri
   tag covers the exact two-pass flow against live gateway behaviour (12 §1.2). R-2 forbids
   resolving a `[VERIFY]` by assumption, so what is fixed here is the flow's arithmetic —
   which TXID goes where, which file may not be in which pass, and why `M′ ≠ M`.
-- **Signing, attestation and the two-environment byte-identical proof.** F13 (12 §1.3,
-  §2, INV-FE-10).
-- **The `verify-release` CLI.** F13; `packages/verify` already holds the comparison it runs.
+- **Signing and attestation.** F13 (12 §1.3, §2). Both need the key ceremony: CI holds no
+  minisign keys and no ANT controller shares by design (§1.4), so nothing here can sign, and
+  §1.4 gate 2's two attestations are two *organizations* rebuilding the tree — which is what
+  the two-environment gate above is evidence for and not a substitute for.
+- **The `verify-release compare` subcommand.** F13; it needs a published keyring and FE-P7's
+  gateway behaviour, and `packages/verify` already holds the comparison it will run. Its
+  `signers audit` and `diff-scope` halves are live.

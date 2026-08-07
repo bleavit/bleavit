@@ -41,7 +41,12 @@ WORKFLOWS = ROOT / ".github" / "workflows"
 # attested release tree the shell embeds. A `pnpm install` from the repository root there
 # would fail exactly as it did on the `app` job — and, worse, would take corepack's newest
 # pnpm rather than the pin, because the pin lives in `app/package.json`.
-SUBDIRECTORY_JOBS = {"app": "app", "desktop-shell": "app"}
+#
+# Its directory is `second-environment/app` and not `app` because it checks out into its own
+# path — 12 §1.1's stated difference between the two build environments (F13). That makes the
+# map earn its keep a second time: the two jobs run the same commands from two directories,
+# and a step copied from one job to the other now lands in the wrong one.
+SUBDIRECTORY_JOBS = {"app": "app", "desktop-shell": "second-environment/app"}
 
 _REGENERATOR = (
     "a `--write` regenerator; its `:check` counterpart is the gate. Running a "
@@ -220,6 +225,117 @@ class WorkflowWiring(unittest.TestCase):
                 f"app/tests/{directory.name} declares a `test` script but holds no "
                 "`*.test.js` or `*.test.ts` file, so running it proves nothing",
             )
+
+    def test_every_release_build_publishes_its_digests(self) -> None:
+        """12 §1.1's evidence, bound to the builds rather than listed beside them (F13).
+
+        Both `release:build` runs already happened on independent runners and **neither
+        published anything**, so nothing compared them and a divergence between the two
+        would have shipped. The binding is derived: whichever jobs run `release:build` are
+        the environments, so adding a third one without its manifest fails here rather than
+        silently leaving it out of the comparison.
+        """
+        jobs = load("ci.yml")["jobs"]
+        builders = {
+            name: job
+            for name, job in jobs.items()
+            if any("pnpm run release:build" in (step.get("run") or "") for step in job["steps"])
+        }
+        self.assertEqual(
+            sorted(builders),
+            ["app", "desktop-shell"],
+            "the set of jobs that build a release tree changed; every one of them is one of "
+            "12 §1.1's environments and must publish a manifest",
+        )
+        for name, job in builders.items():
+            with self.subTest(name):
+                commands = " ".join(step.get("run") or "" for step in job["steps"])
+                self.assertIn(
+                    "pnpm run release:manifest",
+                    commands,
+                    f"job {name} builds a release tree and publishes no digests, so nothing "
+                    "can compare it with the other environment",
+                )
+                uploads = [
+                    step
+                    for step in job["steps"]
+                    if str(step.get("uses", "")).startswith("actions/upload-artifact")
+                ]
+                self.assertEqual(
+                    len(uploads),
+                    1,
+                    f"job {name} must upload exactly one repro manifest",
+                )
+                self.assertEqual(
+                    uploads[0]["with"]["if-no-files-found"],
+                    "error",
+                    f"job {name} would upload nothing silently; the comparison job would then "
+                    "fail for a reason that names the wrong thing",
+                )
+
+    def test_the_two_environments_are_named_apart(self) -> None:
+        """One id twice is one environment, and the checker refuses it — but it would refuse
+        it *in CI*, having already spent two full builds getting there."""
+        jobs = load("ci.yml")["jobs"]
+        declared = re.findall(
+            r"pnpm run release:manifest -- --environment ([a-z0-9-]+)",
+            "\n".join(
+                step.get("run") or "" for job in jobs.values() for step in job["steps"]
+            ),
+        )
+        self.assertEqual(len(declared), 2, f"expected two build environments, found {declared}")
+        self.assertEqual(len(set(declared)), 2, f"both environments declare the id {declared[0]!r}")
+
+    def test_the_second_environment_really_is_a_second_one(self) -> None:
+        """The stated difference, asserted where deleting it is cheap enough to happen.
+
+        `check-release-reproducibility.py` fails when the two manifests agree on every
+        recorded axis, so removing the nested checkout turns the gate red rather than
+        quietly weakening it — but only after both builds have run. This says the same
+        thing in under a second.
+        """
+        jobs = load("ci.yml")["jobs"]
+        checkout_paths = {}
+        for name in ("app", "desktop-shell"):
+            for step in jobs[name]["steps"]:
+                if str(step.get("uses", "")).startswith("actions/checkout"):
+                    checkout_paths[name] = (step.get("with") or {}).get("path")
+        self.assertNotEqual(
+            checkout_paths["app"],
+            checkout_paths["desktop-shell"],
+            "both build environments check out to the same path, so they differ only in "
+            "which virtual machine ran them — a repeatability check wearing a "
+            "reproducibility check's name (12 §1.1)",
+        )
+
+    def test_the_comparison_job_consumes_both_manifests(self) -> None:
+        """A comparison that waited on one build, or downloaded one artifact, would pass
+        while proving half of what it claims."""
+        jobs = load("ci.yml")["jobs"]
+        comparison = jobs["release-reproducibility"]
+        self.assertEqual(sorted(comparison["needs"]), ["app", "desktop-shell"])
+        uploaded = {
+            step["with"]["name"]
+            for name in ("app", "desktop-shell")
+            for step in jobs[name]["steps"]
+            if str(step.get("uses", "")).startswith("actions/upload-artifact")
+        }
+        downloaded = {
+            step["with"]["name"]
+            for step in comparison["steps"]
+            if str(step.get("uses", "")).startswith("actions/download-artifact")
+        }
+        self.assertEqual(
+            uploaded,
+            downloaded,
+            "the comparison job does not download exactly the manifests the build jobs "
+            "publish; a renamed artifact fails the download rather than the comparison, "
+            "which is a red job that says nothing about reproducibility",
+        )
+        self.assertIn(
+            "tools/ci/check-release-reproducibility.py",
+            " ".join(step.get("run") or "" for step in comparison["steps"]),
+        )
 
     def test_concurrency_never_cancels_on_main(self) -> None:
         """R-12's rule: pushing to a branch supersedes its own run; `main` never does.

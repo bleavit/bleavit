@@ -1,0 +1,65 @@
+{
+  "note": "The 12 §1.1 tree-digest convention, as data. Read IN PLACE by `tools/ci/tests/test_check_release_reproducibility.py` and by `app/tests/release/repro-manifest.test.ts`, so the Python consumer and the TypeScript producer cannot drift apart about what a tree hash is. A divergence turns one of them red.",
+  "convention": "sha256 over `path \\0 <file sha256> \\n` for every path, sorted",
+  "cases": [
+    {
+      "name": "one file",
+      "why": "the smallest map that certifies anything",
+      "files": {
+        "dist/index.html": "1111111111111111111111111111111111111111111111111111111111111111"
+      },
+      "treeDigest": "956b2c77303e1cbe685d3bf176be99388722a490cb74d3546f907eaa3cc54e18"
+    },
+    {
+      "name": "a realistic release",
+      "why": "dist/ and release-out/ under one digest, as the manifest carries them",
+      "files": {
+        "dist/index.html": "1111111111111111111111111111111111111111111111111111111111111111",
+        "dist/assets/BxWYGzN8.js": "2222222222222222222222222222222222222222222222222222222222222222",
+        "release-out/release.json": "3333333333333333333333333333333333333333333333333333333333333333"
+      },
+      "treeDigest": "5f847af5be72e7dfc5c06bff72b2b22bdeee50ca033169edc6db5856a70fbce9"
+    },
+    {
+      "name": "insertion order does not matter",
+      "why": "the same three entries written in reverse; the digest sorts, so it must equal the case above",
+      "files": {
+        "release-out/release.json": "3333333333333333333333333333333333333333333333333333333333333333",
+        "dist/index.html": "1111111111111111111111111111111111111111111111111111111111111111",
+        "dist/assets/BxWYGzN8.js": "2222222222222222222222222222222222222222222222222222222222222222"
+      },
+      "treeDigest": "5f847af5be72e7dfc5c06bff72b2b22bdeee50ca033169edc6db5856a70fbce9"
+    },
+    {
+      "name": "a rename is not reproduced",
+      "why": "identical bytes under a different path — every file digest matches the case above and the tree digest MUST NOT",
+      "files": {
+        "dist/index.htm": "1111111111111111111111111111111111111111111111111111111111111111",
+        "dist/assets/BxWYGzN8.js": "2222222222222222222222222222222222222222222222222222222222222222",
+        "release-out/release.json": "3333333333333333333333333333333333333333333333333333333333333333"
+      },
+      "treeDigest": "042c50ca2fbe1e89c4fdb97b9fe82b784fe74c7f47372ac6356ad28df9fc7520"
+    }
+  ],
+  "refusals": [
+    {
+      "name": "an empty tree",
+      "why": "two builds that emitted nothing agree on the digest of nothing; that must never read as a reproduction",
+      "files": {}
+    },
+    {
+      "name": "a digest that is not one",
+      "why": "the map would not be what it claims and the digest would certify it anyway",
+      "files": {
+        "dist/index.html": "not-a-sha256"
+      }
+    },
+    {
+      "name": "a digest of the wrong length",
+      "why": "63 hex characters is a truncated sha256, which is a comparison that can never match",
+      "files": {
+        "dist/index.html": "111111111111111111111111111111111111111111111111111111111111111"
+      }
+    }
+  ]
+}

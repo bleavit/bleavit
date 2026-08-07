@@ -824,6 +824,14 @@ jobs:
           # Re-reads the tree the line above emitted, in the SAME step: `dist/`
           # exists only within it, so a separate step would scan nothing and pass.
           pnpm run release:check
+          # 12 §1.1's two-environment evidence, produced HERE and not later: the gates
+          # below this line read `dist/` and one of them (`check:render-budget`) drives a
+          # browser over it, so a manifest taken at the end of the block would describe a
+          # tree that had been through a different sequence of steps than the
+          # `desktop-shell` job's. Both jobs therefore hash the tree at the same point in
+          # its life — immediately after build and check — and the comparison is about the
+          # build rather than about which gates happened to run afterwards.
+          pnpm run release:manifest -- --environment app
           # 10 §9.4's initial-JS budget, whose enforcement column has named a
           # "bundle-size CI gate" since the reviewed design while no such gate
           # existed. Same step for the same reason as the line above.
@@ -873,6 +881,19 @@ jobs:
           # unreachable under a fully green run. It now requires each mutation to come
           # back as an ENUMERATED FINDING of the right kind, which a throw cannot satisfy.
           pnpm run check:embedded-tree:witness
+
+      - name: Publish this environment's release digests (12 §1.1, INV-FE-10; F13)
+        # One half of the two-environment evidence. The other half is the `desktop-shell`
+        # job, which builds the same release tree on its own runner from its own checkout,
+        # and `release-reproducibility` below compares them. `if-no-files-found: error`
+        # because an absent manifest would leave the comparison job with one input and no
+        # reason to think anything was missing.
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-repro-manifest-app
+          if-no-files-found: error
+          retention-days: 7
+          path: app/release-out/repro-manifest.json
 
       - name: Platform adapter and the capability lattice (F22, app-code rule 10; 10 §10.1)
         # The fail-closed lattice: an unproven capability is ABSENT and absence carries the
@@ -927,36 +948,77 @@ jobs:
   # *workspace*: `app/Cargo.toml` is excluded from the repository root one so the Tauri
   # dependency tree can never perturb the runtime's `=`-exact `polkadot-stable2606` pins
   # (app-code rule 15), and the `rust` job above therefore never compiles any of this.
+  #
+  # **It is also 12 §1.1's second build environment (F13)**, and that is not a coincidence
+  # of scheduling: this job already builds the release tree from its own checkout on its own
+  # runner because the shell cannot link without it, so the second independent build the
+  # specification requires already existed and only its evidence was missing.
   desktop-shell:
+    # The display name is deliberately unchanged even though the job's role grew: this
+    # string is what branch protection matches a required check against, and renaming it
+    # orphans the requirement silently — the same reason `benchmark-smoke` keeps an id that
+    # no longer describes what it does.
     name: Desktop shell (F22)
     runs-on: ubuntu-latest
     env:
       CARGO_INCREMENTAL: 0
     steps:
       - uses: actions/checkout@v7
+        with:
+          # **The stated difference between the two environments (12 §1.1).**
+          #
+          # GitHub gives both jobs the same runner image, the same Node pin and the same
+          # pnpm pin, so without this they would differ only in which virtual machine ran
+          # them — a repeatability check wearing a reproducibility check's name, and
+          # indistinguishable from the real thing in a green log.
+          #
+          # Absolute build path is the axis 12 §1.1's own recorded measurement varied
+          # ("two builds at different absolute path depths with separate stores"), and it
+          # is the one this pipeline is most exposed to: pnpm's virtual store lives inside
+          # the project, so every emitted relative path encodes the store layout, and
+          # `normalize.ts` fails the build by name if the absolute path leaks into a file.
+          # Separate stores hold by construction — two runners, no dependency cache.
+          #
+          # `release-reproducibility` below REQUIRES a difference like this one and fails
+          # when the two manifests agree on every recorded axis, so deleting this line
+          # turns the gate red rather than quietly weakening it.
+          path: second-environment
       - uses: actions/setup-node@v7
         with:
-          node-version-file: app/.nvmrc
+          node-version-file: second-environment/app/.nvmrc
       - name: Enable corepack (pnpm pin comes from packageManager)
-        working-directory: app
+        working-directory: second-environment/app
         run: corepack enable && corepack install
       - name: Install (frozen lockfile)
-        working-directory: app
+        working-directory: second-environment/app
         run: pnpm install --frozen-lockfile
       - name: Build the workspace project graph
         # `release:build` runs Vite over `src/application`, whose imports resolve through
         # each package's `dist/`. The `app` job gets those for free because it runs the
         # whole suite first; this job does not, and a missing `dist/` surfaces as
         # "Rolldown failed to resolve import" rather than as a missing build step.
-        working-directory: app
+        working-directory: second-environment/app
         run: pnpm run build
       - name: Build the attested release tree
         # Not a convenience. `src-tauri/build.rs` compiles `release-out/release.json` in and
         # panics with the command that produces it when it is absent, so **the desktop shell
         # cannot be built without the attested release tree** — which is the property the
         # milestone is about, expressed as a build dependency rather than a rule to remember.
-        working-directory: app
-        run: pnpm run release:build
+        #
+        # The manifest is taken in the same step and at the same point in the tree's life as
+        # the `app` job takes its own — immediately after the build — so the comparison is
+        # about the build and not about which gates ran over the tree afterwards.
+        working-directory: second-environment/app
+        run: |
+          pnpm run release:build
+          pnpm run release:manifest -- --environment desktop-shell
+      - name: Publish this environment's release digests (12 §1.1, INV-FE-10; F13)
+        uses: actions/upload-artifact@v7
+        with:
+          name: release-repro-manifest-desktop-shell
+          if-no-files-found: error
+          retention-days: 7
+          path: second-environment/app/release-out/repro-manifest.json
       - name: Install Tauri's Linux system libraries
         # webkit2gtk 4.1 + GTK3 + libsoup3 are what `tauri`/`wry` link against on Linux.
         # Pinned to the 4.1 line because Tauri 2 dropped 4.0 (01 §9 pins Tauri 2.x).
@@ -970,12 +1032,12 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: app
+          workspaces: second-environment/app
       - name: Formatting
-        working-directory: app
+        working-directory: second-environment/app
         run: cargo fmt --all -- --check
       - name: Clippy (warnings are errors)
-        working-directory: app
+        working-directory: second-environment/app
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: The startup assertion and its differential corpus
         # `crates/embedded-tree` is deliberately pure — no Tauri, no window, no system
@@ -984,17 +1046,17 @@ jobs:
         # `fixtures/self-check-cases.json`, read IN PLACE by these tests and by
         # `app/tests/platform/embedded-tree.test.ts`, so the two implementations of one
         # comparison cannot drift: a divergence turns one of them red.
-        working-directory: app
+        working-directory: second-environment/app
         run: cargo test --workspace --locked
       - name: The shell links, with the release tree embedded
-        working-directory: app
+        working-directory: second-environment/app
         run: cargo build --locked -p bleavit-desktop
       - name: ...and does not, without it
         # The negative control for the build dependency above. A gate that only ever sees
         # the release tree present cannot tell whether it is required; measured here by
         # removing it and requiring the build to fail. `mv` rather than `rm`, so a later
         # step on this runner still has the tree if one is ever added.
-        working-directory: app
+        working-directory: second-environment/app
         run: |
           set -euo pipefail
           mv release-out ../release-out.stashed
@@ -1011,6 +1073,44 @@ jobs:
           }
           rm -f build-without-release.log
           echo "the shell cannot be built without the attested release tree"
+
+  # F13 — 12 §1.1's two-environment byte-identical claim, made falsifiable.
+  #
+  # The two builds above are the two environments; this is the only step that ever compares
+  # them. Until it existed the property was half built and looked whole: both jobs ran
+  # `release:build` on independent runners, neither published anything, and a divergence
+  # between them would have shipped.
+  #
+  # No Node, no pnpm, no install, no build — two JSON files and a checker. The comparison
+  # consumes per-file digests, so publishing the trees themselves would move megabytes to
+  # derive kilobytes and would read as a binary diff on the day it fails, rather than as the
+  # list of paths that differ.
+  release-reproducibility:
+    name: Two-environment byte-identical release (12 §1.1, INV-FE-10)
+    runs-on: ubuntu-latest
+    needs: [app, desktop-shell]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-repro-manifest-app
+          path: repro/app
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-repro-manifest-desktop-shell
+          path: repro/desktop-shell
+      - name: Compare the two environments file by file
+        # Fails on any difference and names every differing path with both digests. It also
+        # refuses three cases a naive file-map diff would pass: the same environment twice,
+        # two different source commits, and a manifest whose declared tree digest does not
+        # describe its own file map.
+        run: |
+          python3 tools/ci/check-release-reproducibility.py \
+            repro/app/repro-manifest.json \
+            repro/desktop-shell/repro-manifest.json
 
   environments:
     name: Environment definitions

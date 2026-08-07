@@ -106,6 +106,54 @@ export function buildRecipeDigest(appRoot: string, inputs: readonly string[]): s
 }
 
 /**
+ * The **tree digest** — 12 §1.1's "identical tree hash", INV-FE-10's "byte-identical output
+ * whose tree hash equals the published release manifest" (F13).
+ *
+ * Neither section fixes an algorithm, so this one is *derived from the framing already in
+ * this file* rather than invented beside it: `buildRecipeDigest` above hashes
+ * `path \0 <file digest> \n` per sorted input, and this does the same over the per-file map.
+ * One framing for both means a reader who has understood one has understood the other, and
+ * a second implementation has one thing to reproduce.
+ *
+ * Three properties are load-bearing:
+ *
+ *  - **Sorted**, so the digest is a function of the tree and not of directory-read order —
+ *    the same reason `walkTree` sorts.
+ *  - **Path-committing**, so renaming a file changes the digest even though every byte in
+ *    the tree is unchanged. A digest over the file hashes alone would call a renamed tree
+ *    reproduced.
+ *  - **`\0` and `\n` framed**, so the serialization is injective *without borrowing that
+ *    property from the digests being 64 characters long. Bare concatenation is injective
+ *    only while every digest has the same length — true today, and a silent dependency on
+ *    a fact about SHA-256 rather than about this function. It is also the framing
+ *    `buildRecipeDigest` above already uses, so there is one convention here and not two.
+ *
+ * An empty map is refused rather than digested. Two builds that emitted nothing agree on the
+ * digest of nothing, and "the build produced no files" must never read as "the two
+ * environments reproduced each other". A malformed entry is refused for the same reason: the
+ * map would not be what it claims, and the digest would certify it anyway.
+ *
+ * `perFileHashes` restricts emitted paths to `[A-Za-z0-9._/-]`, which is why sorting agrees
+ * across languages here: over that alphabet JavaScript's UTF-16 code-unit order and Python's
+ * code-point order are the same order.
+ */
+export function treeDigest(files: Readonly<Record<string, string>>): string {
+  const paths = Object.keys(files).sort();
+  if (paths.length === 0) {
+    throw new ReleaseJsonError('a tree digest over zero files certifies nothing; refusing');
+  }
+  const hash = createHash('sha256');
+  for (const path of paths) {
+    const digest = files[path];
+    if (typeof digest !== 'string' || !/^[0-9a-f]{64}$/.test(digest)) {
+      throw new ReleaseJsonError(`${path} carries ${JSON.stringify(digest)}, which is not a sha256`);
+    }
+    hash.update(path).update('\0').update(digest).update('\n');
+  }
+  return hash.digest('hex');
+}
+
+/**
  * Descriptor metadata hashes and the served `spec_version` window, read from the committed
  * chain feed rather than restated.
  *
