@@ -72,14 +72,30 @@ Legend: ⬜ pending · 🔨 in progress · ✅ done · ⛔ blocked · 🅿 defer
 > custody, which is the opposite of what D-16 chose it for. Doc 12 §4.2's primary option is
 > withdrawn across 00, 10, 12 and 14; the replacement custody model is a values judgement.
 >
-> **PARKED:** five rows cannot close by any amount of work in this session, and each is parked on
-> what it actually waits for. **F1** waits on a device lab and a running testnet, per the gate
-> list above. **F11** waits on SQ-940 plus ten `release.json` readiness blockers
-> (no seated bootnode operator, no gateway set, no production keys). **F13** waits on the key
-> ceremony and a two-environment byte-identical run. **F15** waits on roles being seated. **F18**
-> waits on committed chain-spec bytes — `chainSpecs: []` with both hashes null, so nothing can
-> call `startLightClient`. Every one of those needs a credential, a device, or a person to be
-> appointed. **F24 is not among them any more**, and the correction is recorded above.
+> **PARKED:** seven rows cannot close by any amount of work in this session, and each is parked on
+> what it actually waits for. **F1** waits on a device lab and a running testnet, per the gate list
+> above. **F11** waits on SQ-940 plus ten `release.json` readiness blockers (no seated bootnode
+> operator, no gateway set, no production keys). **F13** waits on the key ceremony and a
+> two-environment byte-identical run. **F15** waits on roles being seated. **F18** waits on
+> committed chain-spec bytes — `chainSpecs: []` with both hashes null, so nothing can call
+> `startLightClient`.
+>
+> **F14 and F17 both rode into `main` with #261 and are deliberately NOT ✅**, which is the one
+> judgement in this block a next session is most likely to want to overturn, so here is the
+> reasoning. R-6 needs *both* conjuncts, and each of these has the gate conjunct and not the review
+> conjunct — neither row records a spec review that returned no blocker, unlike the six flipped
+> today. **F14** additionally has real work left, and it is blocked rather than pending: its own
+> notes name an *"IndexedDB growth"* row whose quota manager was said to have no module, and that
+> half is now **stale** — `packages/local-index/src/quota.ts` ships `measureUsage`, `applyQuota`,
+> `measureDepth` and the four-rung ladder. What is **not** stale is the rest of the sentence: §9.2's
+> auto-tuner has to run over a *measured* ingest rate, and that rate is `[VERIFY achieved rate —
+> FE-P4]` in `backfill.ts`, so the tuner cannot be written without the device lab that FE-P4 names.
+> Three further §9.4 rows (memory desktop, memory mobile, mobile CPU) want the same lab.
+> **F17** is held by **FE-P10**, and only on the upgrade tier's *submission path* — whether smoldot
+> can carry a 4 MiB extrinsic, which V-97 established needs an instrumented testnet submission.
+>
+> Every one of the seven needs a credential, a device, a testnet, or a person to be appointed.
+> **F24 is not among them**, and the correction is recorded above — it is PR #265, with CI running.
 >
 > Open questions raised today that a next session should not re-derive: SQ-860, SQ-880,
 > SQ-900/901, SQ-920–922, SQ-940/941, SQ-960–965, SQ-980/981.
