@@ -25,7 +25,7 @@
  * where it is absent this client takes the 75 MB cap and **says so on screen**, because §9.2's
  * ladder *"degrades depth, never correctness"* and a shallower history is the survivable error.
  * Whether §9.2 should state the classification, and whether its *"user-adjustable locally"*
- * clause reaches the cap as well as the shares, is SQ-994.
+ * clause reaches the cap as well as the shares, is SQ-1000.
  *
  * **2. The row sizes.** The package refuses a default because §9.1 publishes *"~120 B effective
  * per row (Dexie overhead included)"* as a **modelling assumption** and labels it as one, so a
@@ -80,7 +80,7 @@ import type { IndexChainIdentity } from './index-identity.js';
  * instead — `metadataCache` carries each blob's `bytes`, and §6.5's raw blobs are weighed by
  * `pendingRawBytes` — so nothing here models a byte count that could be read.
  *
- * `proposalsArchive` is the one row §9 gives no figure for at all (SQ-995): a summary is a
+ * `proposalsArchive` is the one row §9 gives no figure for at all (SQ-1001): a summary is a
  * string this client writes, and compaction replaces many event rows with one of these, so the
  * model has to be at most an event's or compaction would *raise* the measured share it is run
  * to lower. It is charged at the same published figure until §9 states one.
