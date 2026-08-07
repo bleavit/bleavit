@@ -1823,11 +1823,18 @@ Legend: ⬜ pending · 🔨 in progress · ✅ done · ⛔ blocked · 🅿 defer
 > blind-signs when a chain offers no metadata digest), `FE-P10`'s memory and liveness halves,
 > and `FE-P11`'s share matrix each need a **device lab or a live chain**. `FE-P7`'s four
 > platform halves need **ar.io credentials**, and its ruling needs the user (**SQ-940**).
-> `FE-P9` needs a **spec ruling, not infrastructure** (**SQ-941**): its D-Bulletin triggers are
-> defined only in a superseded document this repository does not contain, so no testnet run can
-> fire them. **What would unblock it:** a device lab or hosted browser matrix, a running testnet
-> with a collator, hardware wallets, ar.io credentials, and two user rulings. Analysis is
-> genuinely exhausted this time — but say so about a named half, never about a whole gate.
+> `FE-P9` is **externally blocked on infrastructure**, and this block said the opposite until
+> 2026-08-07. It read *"a spec ruling, not infrastructure … defined only in a superseded document
+> this repository does not contain"*. Both halves were false. `git show 6657f438:FRONTEND_PLAN.md`
+> prints §31, which defines T1–T4 verbatim, and `git merge-base --is-ancestor` confirms that commit
+> is in main's own ancestry — doc 00 **superseded** that file rather than deleting it, and a
+> superseded document is still readable. T1–T3 need a live Bulletin Chain, an authorization path
+> and a published price, so FE-P9 waits on the same class of thing its neighbours do. Only T4 is
+> ours, and it is tooling. **What would unblock the set:** a device lab or hosted browser matrix, a
+> running testnet with a collator, hardware wallets, ar.io credentials, and one user ruling
+> (**SQ-940**). Analysis is genuinely exhausted on the named halves above — but the lesson of this
+> paragraph is that *"exhausted"* is a claim about the world, so run the command that falsifies it
+> before writing it down, and never state it about a whole gate.
 >
 > **F18 opened, and its note was half wrong (V-151).** The S12/S13 screens it listed as remaining
 > are built, exported and tested; `routes.tsx` said so all along in a **machine-checked** field
