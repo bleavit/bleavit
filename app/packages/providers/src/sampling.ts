@@ -75,9 +75,33 @@ export const PAGES_PER_SAMPLED_ROW = 16;
 
 // ------------------------------------------------------------------ the health ladder
 
+/**
+ * What one probe found.
+ *
+ * `disqualified` is a third arm rather than a flavour of `failed`, and the distinction is a
+ * safety property rather than taxonomy — 10 §8.5.3, added 2026-08-07 after an R-6 review
+ * reproduced the composition below against the shipped code.
+ *
+ * `failed` is a **liveness** observation: the endpoint did not answer. §8.3 handles those with a
+ * consecutive counter precisely so one timeout cannot ratchet the ladder, and `failing` therefore
+ * still serves. `disqualified` is a **correctness** finding: the endpoint answered, promptly and
+ * well-formed, and the answer proves it cannot serve this client at all — today, a binding for
+ * another chain.
+ *
+ * Routing the second through the first inverts the control. A source sits in `unprobed`, which
+ * {@link canServeReads} refuses. It answers about another chain. Through `failed` it becomes
+ * `failing`, which serves — so **proving it is on the wrong chain gains it read eligibility it
+ * did not have before it answered.** That is the exact opposite of what the probe is for, and no
+ * test caught it because each function was right on its own: `afterProbe` correctly declines to
+ * ratchet on one failure, and `canServeReads` correctly lets `failing` serve.
+ *
+ * §8.3 already has the right precedent one clause away — *"auto-disable on sampling mismatch"* is
+ * immediate, with no counter, because a correctness finding is not a flaky network.
+ */
 export type ProbeOutcome =
   | { readonly kind: 'responded'; readonly latencyMs: number }
-  | { readonly kind: 'failed'; readonly why: string };
+  | { readonly kind: 'failed'; readonly why: string }
+  | { readonly kind: 'disqualified'; readonly why: string };
 
 /**
  * Whether a provider is due a health probe.
@@ -124,6 +148,11 @@ export function afterProbe(
   thresholds: LadderThresholds = LADDER,
 ): Provider {
   if (provider.health.kind === 'disabled') return provider;
+  // A correctness finding disables at once, with no counter — see `ProbeOutcome`. Placed before
+  // the `responded` arm so that adding a fourth arm later cannot fall through to the counter.
+  if (outcome.kind === 'disqualified') {
+    return { ...provider, health: { kind: 'disabled', by: 'auto', reason: outcome.why } };
+  }
   if (outcome.kind === 'responded') {
     return {
       ...provider,

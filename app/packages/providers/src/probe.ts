@@ -139,8 +139,15 @@ export async function probe(
     return { kind: 'failed', why: 'answered without a chain binding' };
   }
   if (genesis !== target.genesisHash) {
+    // `disqualified`, NOT `failed` — see `ProbeOutcome`, and 10 §8.5.3. This endpoint answered
+    // promptly and well-formed, and the answer proves it serves another chain. Routed through
+    // `failed` it became `failing`, which serves, so **answering gained it the read eligibility
+    // `unprobed` had withheld**. An R-6 review reproduced that against the built code on
+    // 2026-08-07. Every other chain-identity mismatch in the doc set is terminal — §3.1's
+    // `WrongChain` ("terminal, no override"), §6.3's range invalidation, §13.3's refusal — and
+    // this one is now terminal with them.
     return {
-      kind: 'failed',
+      kind: 'disqualified',
       why: `describes genesis ${genesis}; this client is on ${target.genesisHash}`,
     };
   }

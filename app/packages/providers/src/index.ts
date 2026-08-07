@@ -30,6 +30,27 @@ export type {
   ProbeTarget,
 } from './probe.js';
 
+// §8.5.2's range reader (F24). Named for the same reason: `IndexerGet` is the second transport
+// type in this package, and the two are deliberately assignable rather than merged while both
+// halves of F24 are in flight — see `indexer.ts`.
+export {
+  NEXT_CURSOR_HEADER,
+  coverageHoles,
+  mergeCoverage,
+  readChain,
+  readRange,
+  samplingPages,
+} from './indexer.js';
+export type {
+  ChainAnswer,
+  IndexerGet,
+  IndexerPage,
+  IndexerResponse,
+  IndexerSource,
+  RangeOutcome,
+  RangeRead,
+} from './indexer.js';
+
 export {
   PAGES_PER_SAMPLED_ROW,
   ProviderCannotServeError,

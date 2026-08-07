@@ -29,6 +29,11 @@ packages:
   # start a process would sit inside the reach of the packages 10 §10.1 keeps thin.
   # Confined here, `import 'lighthouse'` is unresolvable everywhere else in `app/`.
   - 'tools/render-budget'
+  # `optional/indexer` (10 §8.2/§8.5.2, F24) is a member for the same reason as `tools/snapshot`,
+  # and it is the reference implementation §8.2 names by path. It imports the canonical serializer
+  # from `@bleavit/providers` rather than writing its own, because a server with its own serializer
+  # agrees on the day it is written and diverges at the first field.
+  - 'optional/indexer'
   - 'tests/firewall'
   - 'tests/depcruise-witness'
   - 'tests/protocol'

@@ -5,7 +5,10 @@
  * decides **whether a request is sent at all**, and every assertion below is about a request that
  * must not happen or an answer that must not count:
  *
- *  - a prompt, well-formed answer about the *wrong chain* is a failure, not health;
+ *  - a prompt, well-formed answer about the *wrong chain* disables the source outright, and the
+ *    assertion that matters is at the **round** level rather than on the outcome kind: routing it
+ *    through `failed` made the source `failing`, which serves, so answering GAINED it eligibility
+ *    that not answering had withheld. An R-6 review found that against the shipped code;
  *  - a `disabled` source is never contacted, because the request is itself the §8.1 disclosure;
  *  - a source with no endpoint is never contacted, because §8.5.3 scopes the ladder to endpoints;
  *  - one dead endpoint does not stop the round for the others.
@@ -20,6 +23,7 @@ import assert from 'node:assert/strict';
 
 import {
   LADDER,
+  canServeReads,
   probe,
   runProbeRound,
   type HttpGet,
@@ -34,6 +38,7 @@ const OTHER_GENESIS = '0xe143f23803ac50e8f6f8e62695d1ce9e4e1d68aa36c1cd2cfd15340
 
 const ENDPOINT = 'https://indexer.example';
 const TARGET: ProbeTarget = { endpoint: ENDPOINT, genesisHash: GENESIS };
+const HEALTHY_P1: Provider = { id: 'p1', kind: 'indexer', health: { kind: 'healthy' } };
 
 function bindingBody(genesisHash = GENESIS): string {
   return JSON.stringify({ genesisHash, specVersion: 3, contractVersion: 28 });
@@ -90,16 +95,48 @@ test('the probe asks for /chain, and a trailing slash does not double it', async
 
 // ------------------------------------------------------- probe(): what looks like an answer
 
-test('a prompt, well-formed answer about ANOTHER CHAIN is a failure', async () => {
+test('a prompt, well-formed answer about ANOTHER CHAIN is DISQUALIFYING, not a failure', async () => {
   // The assertion this file exists for. By every network measure this endpoint is healthy: it
-  // answered 200, quickly, with a valid binding. It can never supply a usable row. Counting it
-  // as an answer parks it on the ladder in `healthy`, where it is indistinguishable from a source
-  // that works, and the failure then surfaces as rows that never arrive.
+  // answered 200, quickly, with a valid binding. It can never supply a usable row.
   const { get } = ok(OTHER_GENESIS);
   const outcome = await probe(TARGET, get, clockOf(0, 5));
-  assert.equal(outcome.kind, 'failed');
-  assert.match(outcome.kind === 'failed' ? outcome.why : '', /describes genesis 0xe143/);
-  assert.match(outcome.kind === 'failed' ? outcome.why : '', /this client is on 0x91b1/);
+  assert.equal(outcome.kind, 'disqualified');
+  const why = outcome.kind === 'disqualified' ? outcome.why : '';
+  assert.match(why, /describes genesis 0xe143/);
+  assert.match(why, /this client is on 0x91b1/);
+});
+
+test('a wrong-chain answer must not GAIN the source read eligibility (R-6 blocker, 2026-08-07)', async () => {
+  // This is the assertion whose absence let the defect ship. The first version routed a
+  // wrong-chain answer through `failed`, and every part was individually right: `afterProbe`
+  // declines to ratchet on one failure, so the source became `failing`, and `canServeReads`
+  // correctly lets `failing` serve (§8.3: "only `Disabled` stops reads"). Composed, a source
+  // that had just PROVED it serves another chain went from not-serving to serving.
+  //
+  // Asserting the outcome kind alone cannot see this — that test passed throughout. The
+  // property is about the round, so the assertion has to be about the round.
+  const before: Provider = { id: 'p1', kind: 'indexer', health: { kind: 'unprobed' } };
+  assert.equal(canServeReads(before), false, 'precondition: unprobed serves nothing');
+
+  const { get } = ok(OTHER_GENESIS);
+  const result = await runProbeRound(round([before]), get, 1_000, clockOf(0, 5));
+  const after = result.providers[0];
+
+  assert.ok(after !== undefined);
+  assert.equal(after.health.kind, 'disabled');
+  assert.equal(after.health.kind === 'disabled' ? after.health.by : '', 'auto');
+  assert.match(after.health.kind === 'disabled' ? after.health.reason : '', /describes genesis/);
+  assert.equal(canServeReads(after), false, 'answering about another chain must never gain eligibility');
+});
+
+test('a disqualifying answer disables at once — no consecutive counter (§8.3 precedent)', async () => {
+  // `failed` needs three rounds to disable. `disqualified` needs one, for the same reason
+  // "auto-disable on sampling mismatch" is uncounted: a correctness finding is not a flaky
+  // network, and counting it would let a wrong-chain source serve for two whole rounds.
+  assert.ok(LADDER.disableAfter > 1, 'precondition: liveness failures are counted, not immediate');
+  const { get } = ok(OTHER_GENESIS);
+  const result = await runProbeRound(round([HEALTHY_P1]), get, 10_000_000, clockOf(0, 5));
+  assert.equal(result.providers[0]?.health.kind, 'disabled');
 });
 
 test('a non-200, a non-JSON body and a JSON body that is not a binding are each failures', async () => {

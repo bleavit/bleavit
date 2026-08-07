@@ -148,10 +148,16 @@ export function canServeReads(provider: Provider): boolean {
  * different questions and differ on exactly one state. A snapshot arrives **out of band**: the
  * user already holds the bytes, and what admits them is the content pin plus §8.4's screens plus
  * the chain re-derivation — none of which asks the endpoint anything. So *"has this source
- * answered a probe"* has no bearing on a file that is already here, and gating on it would refuse
- * every import from a freshly accepted suggestion, permanently, since nothing in this release
- * drives probes (see PLAN.md's F24 — §8.3's probe driver has no owner until the provider wire is
- * specified).
+ * answered a probe"* has no bearing on a file that is already here.
+ *
+ * **The second half of that argument was a scaffold, and F24 removed it (2026-08-07.)** This note
+ * used to add that gating on the probe would refuse every import *"permanently, since nothing in
+ * this release drives probes"* — true when written, and now false: `probe.ts` drives them, so the
+ * refusal would last one round trip rather than forever. Had only the reason been left standing,
+ * a later reader would have watched it collapse and concluded the gate was safe to add. It is
+ * not, and the reason that does not expire is 10 §8.5.3's: §8.3's ladder governs **reads a client
+ * issues to a provider**, and an out-of-band file is not one — there is nothing to ask, and a
+ * source supplied purely as a file has no endpoint to ask it of.
  *
  * `disabled` is different and is refused. `FE-PROV-002`'s fixed recovery tells the user the source
  * *"has been switched off"* and that re-enabling is theirs to do; minting fresh rows badged with
