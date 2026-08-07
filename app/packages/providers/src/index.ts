@@ -36,6 +36,7 @@ export type {
 export {
   NEXT_CURSOR_HEADER,
   coverageHoles,
+  ladderEffect,
   mergeCoverage,
   readChain,
   readRange,

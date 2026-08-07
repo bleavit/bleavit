@@ -34,6 +34,7 @@ import {
   SNAPSHOT_FORMAT,
   admitSnapshot,
   coverageHoles,
+  ladderEffect,
   deriveBalances,
   mergeCoverage,
   preimageOfSerialized,
@@ -244,15 +245,18 @@ test('GET /chain: any status other than 200 is a failed read', async () => {
   }
 });
 
-test('GET /chain: a response from another chain is a failure, not an answer', async () => {
-  // §8.5.3: a source describing another chain can never serve a usable row, so counting it as
-  // healthy parks it on the ladder where it is indistinguishable from one that works.
+test('GET /chain: another chain DISQUALIFIES the source — it does not merely fail', async () => {
+  // §8.5.3: a source describing another chain can never serve a usable row. It asserted `failed`
+  // until 2026-08-07, and `failed` is the LIVENESS arm — counted, non-terminal, and `failing`
+  // serves. So the strongest correctness evidence available was landing on the ladder rung that
+  // still permits reads. `disqualified` is terminal and `ladderEffect` carries it there.
   const body = JSON.stringify({ ...BINDING, genesisHash: '0xbeef', coverage: [] });
   const answer = await readChain(transport([ok(body)]).source);
-  assert.equal(answer.kind, 'failed');
-  if (answer.kind !== 'failed') return;
+  assert.equal(answer.kind, 'disqualified');
+  if (answer.kind !== 'disqualified') return;
   assert.match(answer.why, /0xbeef/);
   assert.match(answer.why, /0xfeed/);
+  assert.deepEqual(ladderEffect(answer), { kind: 'disqualified', why: answer.why });
 });
 
 test('GET /chain: a body that is not a binding is a failed read', async () => {
@@ -417,7 +421,15 @@ test('any status other than 200 is a failed read', async () => {
   }
 });
 
-test('a page about another chain is a failed read', async () => {
+test('a page about another chain DISQUALIFIES, and reaches the ladder (R-6 re-review gap)', async () => {
+  // The control gap this closes was created by a fix. §8.5.2 correctly rules that a failed read
+  // does not advance §8.3's probe ladder — a ladder that ratchets on data reads disables faster
+  // for a user who reads more. But with the read path contributing NOTHING, a source that answers
+  // `GET /chain` and fails every `GET /range` could never be disabled by anything: probes keep
+  // succeeding, and sampling never runs because no rows arrive. A wrong-chain page is the same
+  // evidence §8.5.3 makes terminal, and it was being discarded for arriving on the read path.
+  //
+  // So: liveness never reaches the ladder from a read, correctness always does.
   const span = { fromBlock: 10, toBlock: 12 };
   const other: SnapshotDocument = {
     ...document(span, [span], [split(10, 'alice', '1000')]),
@@ -425,10 +437,21 @@ test('a page about another chain is a failed read', async () => {
   };
   const wire = transport([ok(serializeSnapshot(other))]);
   const read = await readRange(wire.source, span, sha256);
-  assert.equal(read.outcome.kind, 'failed');
-  if (read.outcome.kind !== 'failed') return;
+  assert.equal(read.outcome.kind, 'disqualified');
+  if (read.outcome.kind !== 'disqualified') return;
   assert.match(read.outcome.why, /0xbeef/);
   assert.deepEqual(read.holes, [span]);
+  assert.deepEqual(ladderEffect(read.outcome), { kind: 'disqualified', why: read.outcome.why });
+});
+
+test('an ordinary failed read stays OFF the ladder — §8.5.2, and the half that must not regress', async () => {
+  // The other side of the asymmetry. Without this, the fix above could drift into "any failed
+  // read disables", which is exactly the read-driven ratchet §8.5.2 removed.
+  const span = { fromBlock: 10, toBlock: 12 };
+  const wire = transport([{ status: 503, body: '', headers: {} }]);
+  const read = await readRange(wire.source, span, sha256);
+  assert.equal(read.outcome.kind, 'failed');
+  assert.equal(ladderEffect(read.outcome), null, 'a 503 is liveness — it must not touch the ladder');
 });
 
 test('a body that fails admitSnapshot is a failed read — per screen', async () => {

@@ -86,6 +86,7 @@
  * PLAN.md · *Spec questions* owns the ruling.
  */
 
+import type { ProbeOutcome } from './sampling.js';
 import { admitSnapshot, preimageOfSerialized } from './snapshot.js';
 import type { Sha256, SnapshotBalance, SnapshotDocument, SnapshotRange } from './snapshot.js';
 import type { ProviderPage } from './sampling.js';
@@ -259,6 +260,24 @@ function routeUrl(endpoint: string, route: string, query: string): string | null
   return `${endpoint.replace(/\/+$/, '')}/${route}${query}`;
 }
 
+/**
+ * The §8.3 ladder effect of a read-path outcome, or `null` for none.
+ *
+ * Exists so that no caller has to decide this for itself. §8.5.2 rules that a failed read does
+ * **not** advance the probe ladder, and §8.5.3 rules that a wrong-chain answer disables at once;
+ * a call site holding a `RangeOutcome` and a `Provider` could satisfy either rule and violate the
+ * other, and would have to know both to get it right. Feed the result to `afterProbe` when it is
+ * not `null`.
+ *
+ * The asymmetry is the point: **liveness never reaches the ladder from the read path, correctness
+ * always does.** Without the second half a source that answers `GET /chain` and fails every
+ * `GET /range` could not be disabled by anything at all — the gap an R-6 re-review found on
+ * 2026-08-07, created by the fix that removed read failures from the ladder.
+ */
+export function ladderEffect(outcome: RangeOutcome | ChainAnswer): ProbeOutcome | null {
+  return outcome.kind === 'disqualified' ? { kind: 'disqualified', why: outcome.why } : null;
+}
+
 /** What `GET /chain` answered, or why it did not answer. */
 export type ChainAnswer =
   | {
@@ -267,10 +286,16 @@ export type ChainAnswer =
       /** The coverage the operator says it currently serves, in §8.2's form. */
       readonly coverage: readonly SnapshotRange[];
     }
-  | { readonly kind: 'failed'; readonly why: string };
+  /** A liveness failure: the endpoint did not answer usefully. Counted, never terminal. */
+  | { readonly kind: 'failed'; readonly why: string }
+  /**
+   * A **correctness** finding: it answered, and the answer proves it cannot serve this client.
+   * Terminal — {@link ladderEffect} routes it to `disqualified`, which disables at once.
+   */
+  | { readonly kind: 'disqualified'; readonly why: string };
 
 /**
- * `GET /chain` — the compatibility check before any range read (§8.5.2).
+ * `GET /chain` — the served-coverage and binding read (§8.5.2).
  *
  * The **second** consumer of this route, not a duplicate of the first. §8.5.3's probe asks the same
  * question and keeps one bit of the answer (did it respond, how fast), because that is all the
@@ -323,7 +348,7 @@ export async function readChain(source: IndexerSource): Promise<ChainAnswer> {
   }
   if (genesisHash !== source.binding.genesisHash) {
     return {
-      kind: 'failed',
+      kind: 'disqualified',
       why: `describes genesis ${genesisHash}; this client is on ${source.binding.genesisHash}`,
     };
   }
@@ -366,7 +391,20 @@ export type RangeOutcome =
   /** The walk reached one page per block of the requested span. See {@link readRange}. */
   | { readonly kind: 'page-ceiling'; readonly pages: number }
   /** §8.5.2's only error contract: a non-`200`, or a body that is not a canonical §8.2 document. */
-  | { readonly kind: 'failed'; readonly why: string };
+  | { readonly kind: 'failed'; readonly why: string }
+  /**
+   * A page that proves the source cannot serve this client — today, a binding for another chain.
+   *
+   * Split out from `failed` on 2026-08-07 after an R-6 re-review found the control gap it closes.
+   * §8.5.2 rules that a failed read does **not** advance §8.3's probe ladder, which is right: a
+   * ladder that ratchets on data reads disables faster for a user who reads more. But with the
+   * read path contributing *nothing*, a source that answers `GET /chain` and fails every
+   * `GET /range` could never be disabled by anything — probes keep succeeding, sampling never
+   * runs because no rows arrive, and the wrong-chain evidence §8.5.3 makes terminal was being
+   * discarded because it arrived on the read path. Liveness stays off the ladder; correctness
+   * does not.
+   */
+  | { readonly kind: 'disqualified'; readonly why: string };
 
 /**
  * What a range read holds afterwards.
@@ -465,7 +503,15 @@ export async function readRange(
     const pin = sha256(preimageOfSerialized(response.body));
     const verdict = admitSnapshot(response.body, { expectedPin: pin, binding: source.binding }, sha256);
     if (verdict.kind === 'rejected') {
-      return done({ kind: 'failed', why: verdict.refusal.detail });
+      // A page describing ANOTHER CHAIN is a correctness finding, not a liveness one, and it must
+      // reach the ladder even though §8.5.2 keeps ordinary read failures off it. `admitSnapshot`
+      // already runs the same `binding` screen the import path runs, so the evidence is here — it
+      // was simply being flattened into a `why` string and discarded.
+      const wrongChain = verdict.findings.some((finding) => finding.screen === 'binding');
+      return done({
+        kind: wrongChain ? 'disqualified' : 'failed',
+        why: verdict.refusal.detail,
+      });
     }
     const { document } = verdict;
     if (document.range.fromBlock < requested.fromBlock || document.range.toBlock > requested.toBlock) {
