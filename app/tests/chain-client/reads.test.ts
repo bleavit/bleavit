@@ -162,9 +162,16 @@ test('there is no path from a provider read to Finalized<T> (10 §2.2)', () => {
 });
 
 test('the reader offers no archive-depth read (10 §4.2)', async () => {
-  // smoldot exposes the chainHead group only; there are no `archive_*` methods. A read
-  // API that offered depth would have to fall back to a provider to honour it, which is
-  // exactly the promotion path §2.2 deleted.
+  // There are no `archive_*` methods in smoldot@3.3.2 — that half of §4.2 is confirmed.
+  // The other half, "smoldot exposes the chainHead group only", was RETRACTED when FE-P5
+  // resolved (2026-08-07): the legacy group is present, and `state_getMetadata`/`state_call`
+  // accept any hash at unbounded depth. What actually bounds depth is hash acquisition — a
+  // light client cannot verify a full node's height→hash answer, so `chain_getBlockHash`
+  // returns null for every height but genesis and best.
+  //
+  // The assertion is unchanged and still correct on the corrected grounds: a read API that
+  // offered depth would have to fall back to a provider to honour it, which is exactly the
+  // promotion path §2.2 deleted.
   const r = await reader();
   const methods = Object.getOwnPropertyNames(Object.getPrototypeOf(r));
   assert.deepEqual(

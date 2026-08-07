@@ -35,6 +35,20 @@
  * picking one. INV-FE-2 requires a precondition to be evaluated at a single finalized
  * block, and a fee priced at B against a rate read at B−1 is exactly the composite that
  * requirement excludes — invisible in the arithmetic, and wrong on the confirm screen.
+ *
+ * **One reading is still not B′.** `meet` binds the two reads to each other and not to the
+ * block the gate pinned, so a consistent pair read at B−1 passed it. 11 §11.4 rule 2 requires
+ * an exact read at B′ and 10 §2.3 puts the fee headroom under that rule, so `estimateFee`
+ * takes `GatePassed` and refuses a read from any other block — the same discipline `nonceFor`
+ * has always applied, which is why the fee's lacking it was a gap rather than a choice.
+ *
+ * **The tip is refused, because `partial_fee` excludes it.** 10 §2.3 names that as one of the
+ * three ways to hold the right API and still get an unsourced number, and `FeeEstimate.headroom`
+ * is documented as *the* amount that must be free. A headroom that omitted the tip would
+ * understate by exactly the tip, and the account would come up short after the user had
+ * already signed. Whether headroom absorbs the tip or renders as its own line is not settled
+ * — 11 §11.3 and §11.5 are both silent — so the module refuses a tipped estimate
+ * (`FE-FEE-002`) rather than publishing a figure it cannot stand behind.
  */
 
 import { derive, meet, type Finalized } from '@bleavit/chain-client';
@@ -49,6 +63,28 @@ export class FeeRateUnusableError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'FeeRateUnusableError';
+  }
+}
+
+/**
+ * A tip was asked for, and this module cannot price one — 10 §9.4 `FE-FEE-002`.
+ *
+ * `TransactionPaymentApi_query_info`'s `partial_fee` **excludes the tip** (10 §2.3, which
+ * names it among the three ways to hold the right API and still get an unsourced number).
+ * So a headroom computed from `partial_fee` understates what the account must hold by
+ * exactly the tip, and the shortfall lands as a rejected transaction *after* the user has
+ * signed — the one point in the flow where consent has already been given.
+ *
+ * Whether headroom must absorb the tip or render as its own line is not this module's call:
+ * 11 §11.3 and §11.5 are both silent, and `FeeEstimate.headroom` is documented as *the*
+ * amount that must be free. Refusing is the only reading that cannot understate, so it is
+ * the one in force until that question is ruled.
+ */
+export class TipNotPriceableError extends Error {
+  readonly code = 'FE-FEE-002';
+  constructor(message: string) {
+    super(message);
+    this.name = 'TipNotPriceableError';
   }
 }
 
@@ -132,7 +168,14 @@ export interface FeeEstimate {
   readonly vit: bigint;
   readonly usdc: bigint;
   readonly selected: FeeAsset;
-  /** The amount that must be free in the selected asset. */
+  /**
+   * The amount that must be free in the selected asset.
+   *
+   * **Untipped, and structurally so.** `partial_fee` excludes the tip (10 §2.3), so this
+   * figure is complete only for a transaction carrying none — which `estimateFee` enforces
+   * by refusing any other (`FE-FEE-002`). It is not a floor a caller may add a tip to and
+   * still call headroom.
+   */
   readonly headroom: bigint;
   /** Shown in expert mode — 11 §11.5 requires the key and its bounds to be displayed. */
   readonly disclosure: string;
@@ -158,13 +201,46 @@ export interface FeeEstimate {
  * state, and INV-FE-2 evaluates every precondition at one finalized block. A caller that
  * gets `undefined` has no fee figure — which is the honest answer, and the same shape
  * `admitRate` already takes for an out-of-bounds rate.
+ *
+ * **And one reading is not B′.** `meet` enforces that the two reads agree with *each other*
+ * and says nothing about *which* block they agree on, so a consistent pair read at B−1 used
+ * to satisfy it. 11 §11.4 rule 2 requires every precondition row to be an exact read at B′,
+ * and the fee headroom is such a row — 10 §2.3 names it explicitly. `nonceFor` below already
+ * takes `GatePassed` for exactly this reason; the fee is the same obligation and had none of
+ * the enforcement. Hashes are compared rather than heights, because two blocks can share a
+ * height across a reorg and the gate pinned one of them.
+ *
+ * **A tip is refused, not absorbed (`FE-FEE-002`).** See `TipNotPriceableError`: `partial_fee`
+ * excludes it, so pricing one here would understate `headroom` by exactly the tip.
  */
 export function estimateFee(
+  passed: GatePassed,
   feeInVit: Finalized<bigint>,
   rate: Finalized<AdmittedRate>,
   selected: FeeAsset,
+  tip: bigint = 0n,
 ): Finalized<FeeEstimate> | undefined {
   if (feeInVit.value < 0n) throw new FeeRateUnusableError('a negative fee is not an estimate');
+  if (tip !== 0n) {
+    throw new TipNotPriceableError(
+      `a tip of ${tip} was requested, and partial_fee excludes the tip (10 §2.3), so the ` +
+        'headroom this returns would understate what the account must hold by exactly that ' +
+        'amount — and the shortfall would land as a rejection after signing. Whether headroom ' +
+        'absorbs the tip or renders as its own line is an open spec question (11 §11.3, §11.5)',
+    );
+  }
+  for (const [what, read] of [
+    ['fee', feeInVit],
+    ['rate', rate],
+  ] as const) {
+    if (read.status.blockHash !== passed.at.blockHash) {
+      throw new RangeError(
+        `the ${what} was read at ${read.status.blockHash} but the gate pinned ` +
+          `${passed.at.blockHash}; a fee priced against another block is not the exact read ` +
+          'at B′ that 11 §11.4 rule 2 requires',
+      );
+    }
+  }
   return meet(feeInVit, rate, (fee, admitted) => {
     const usdc = (fee * admitted.value + admitted.scale - 1n) / admitted.scale;
     return {

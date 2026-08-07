@@ -13,7 +13,7 @@
 // fee now (see `unsourced-fee-estimate.ts`), and a fixture failing for both reasons at once
 // would stop proving either — a corpus that cannot say which control fired is the vacuum
 // V-91 was about. So only the rate is fabricated here.
-import { estimateFee, type VitUsdcRate } from '@bleavit/transaction-builder';
+import { estimateFee, type GatePassed, type VitUsdcRate } from '@bleavit/transaction-builder';
 import { finalize } from '@bleavit/chain-client/testing';
 
 const PIN = {
@@ -24,4 +24,8 @@ const PIN = {
 
 const fabricated: VitUsdcRate = { value: 100_000n, reference: 1_000n, scale: 1n };
 
-export const estimate = estimateFee(finalize(1_000n, PIN), finalize(fabricated, PIN), 'USDC');
+// Declared rather than built, for the same reason the fee below is a genuine read: a forged
+// gate would emit its own TS2345 and this fixture would stop proving which control fired.
+declare const passed: GatePassed;
+
+export const estimate = estimateFee(passed, finalize(1_000n, PIN), finalize(fabricated, PIN), 'USDC');

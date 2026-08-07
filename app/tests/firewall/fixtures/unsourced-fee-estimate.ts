@@ -15,6 +15,7 @@
 // resolves to the finalized hash — so the figure *is* obtainable as `Finalized<bigint>` and
 // there is no longer any reason to accept one that is not.
 import { admitRate, estimateFee } from '@bleavit/transaction-builder';
+import type { GatePassed } from '@bleavit/transaction-builder';
 import { finalize } from '@bleavit/chain-client/testing';
 
 const PIN = {
@@ -25,5 +26,11 @@ const PIN = {
 
 const rate = admitRate(finalize({ value: 1_000_000n, reference: 1_000_000n, scale: 1_000_000n }, PIN));
 
+// `declare const`, not a cast and not a forged value. `GatePassed` carries a non-exported
+// `unique symbol`, so nothing outside the package can mint one — and a fixture that faked it
+// would emit a *second* TS2345, at which point this file would fail for two reasons and prove
+// neither. A declaration has a type and no value, so it contributes no diagnostic at all.
+declare const passed: GatePassed;
+
 // The rate is a genuine read. The fee is not — and that is the whole of what must fail.
-export const estimate = estimateFee(1_000n, rate, 'USDC');
+export const estimate = estimateFee(passed, 1_000n, rate, 'USDC');
