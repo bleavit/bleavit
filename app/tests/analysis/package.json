@@ -15,6 +15,10 @@
     "@bleavit/ui": "workspace:*",
     "@polkadot-api/descriptors": "workspace:*",
     "react": "19.2.8",
-    "react-dom": "19.2.8"
+    "react-dom": "19.2.8",
+    "@bleavit/application": "workspace:*"
+  },
+  "devDependencies": {
+    "fake-indexeddb": "6.2.5"
   }
 }

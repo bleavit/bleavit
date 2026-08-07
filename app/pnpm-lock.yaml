@@ -332,6 +332,9 @@ importers:
 
   tests/analysis:
     dependencies:
+      '@bleavit/application':
+        specifier: workspace:*
+        version: link:../../src/application
       '@bleavit/chain-client':
         specifier: workspace:*
         version: link:../../packages/chain-client
@@ -341,15 +344,6 @@ importers:
       '@bleavit/local-index':
         specifier: workspace:*
         version: link:../../packages/local-index
-      '@bleavit/providers':
-        specifier: workspace:*
-        version: link:../../packages/providers
-      '@bleavit/shared-types':
-        specifier: workspace:*
-        version: link:../../packages/shared-types
-      '@bleavit/ui':
-        specifier: workspace:*
-        version: link:../../packages/ui
       '@polkadot-api/descriptors':
         specifier: workspace:*
         version: link:../../packages/papi-descriptors
@@ -359,6 +353,10 @@ importers:
       react-dom:
         specifier: 19.2.8
         version: 19.2.8(react@19.2.8)
+    devDependencies:
+      fake-indexeddb:
+        specifier: 6.2.5
+        version: 6.2.5
 
   tests/chain-client:
     dependencies:
