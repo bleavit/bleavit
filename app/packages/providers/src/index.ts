@@ -10,6 +10,7 @@
 // An `export *` would silently re-admit them the moment anyone reformatted this file, which is
 // exactly why the list is explicit despite being longer. Same discipline, and the same reason,
 // as `@bleavit/local-index`'s barrel.
+export * from './endpoint.js';
 export * from './health.js';
 export * from './import.js';
 export * from './import-quota.js';

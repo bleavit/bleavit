@@ -86,6 +86,7 @@
  * PLAN.md · *Spec questions* owns the ruling.
  */
 
+import { providerUrl } from './endpoint.js';
 import type { ProbeOutcome } from './sampling.js';
 import { admitSnapshot, preimageOfSerialized } from './snapshot.js';
 import type { Sha256, SnapshotBalance, SnapshotDocument, SnapshotRange } from './snapshot.js';
@@ -257,7 +258,8 @@ function routeUrl(endpoint: string, route: string, query: string): string | null
     return null;
   }
   if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return null;
-  return `${endpoint.replace(/\/+$/, '')}/${route}${query}`;
+  const base = providerUrl(endpoint, route);
+  return base === null ? null : `${base}${query}`;
 }
 
 /**

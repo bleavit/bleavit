@@ -448,7 +448,7 @@ test('an ordinary failed read stays OFF the ladder — §8.5.2, and the half tha
   // The other side of the asymmetry. Without this, the fix above could drift into "any failed
   // read disables", which is exactly the read-driven ratchet §8.5.2 removed.
   const span = { fromBlock: 10, toBlock: 12 };
-  const wire = transport([{ status: 503, body: '', headers: {} }]);
+  const wire = transport([{ status: 503, body: '', cursor: null }]);
   const read = await readRange(wire.source, span, sha256);
   assert.equal(read.outcome.kind, 'failed');
   assert.equal(ladderEffect(read.outcome), null, 'a 503 is liveness — it must not touch the ladder');
@@ -496,7 +496,12 @@ test('a body that is not in canonical form is a failed read', async () => {
   const reindented = JSON.stringify(JSON.parse(canonical), null, 2);
   assert.notEqual(reindented, canonical, 'the fixture must actually differ or this proves nothing');
 
-  for (const body of [reindented, `${canonical} `, canonical.replace('{', '{ ')]) {
+  // Each body is DELIBERATELY non-canonical. `spaced` is built by concatenation rather than
+  // by a single-occurrence `.replace`, which reads as an attempted sanitizer and is not one —
+  // nothing here is trying to clean input, the point is to hand `admitSnapshot` bytes it must
+  // refuse.
+  const spaced = `${canonical.slice(0, 1)} ${canonical.slice(1)}`;
+  for (const body of [reindented, `${canonical} `, spaced]) {
     const wire = transport([ok(body)]);
     const read = await readRange(wire.source, span, sha256);
     assert.equal(read.outcome.kind, 'failed', JSON.stringify(body.slice(0, 40)));

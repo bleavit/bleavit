@@ -35,6 +35,7 @@
  * §8.4's screens, and there is nobody to ask.
  */
 
+import { providerUrl } from './endpoint.js';
 import { LADDER, type LadderThresholds, type Provider } from './health.js';
 import { afterProbe, probeDue, type ProbeOutcome } from './sampling.js';
 
@@ -59,26 +60,6 @@ export interface ProbeTarget {
   readonly genesisHash: string;
 }
 
-/**
- * Build the `/chain` URL, refusing a scheme that is not HTTP(S).
- *
- * Not invented policy: §8.5.2's interface is HTTP, so a `javascript:`, `data:` or `file:` endpoint
- * is not an indexer that this client failed to reach — it is a string that would make the probe a
- * vector into whatever the transport does with it. Refusing it here means the refusal happens
- * before the transport sees it, at the one place that knows what the URL is for.
- *
- * Returns `null` when the endpoint cannot be used, which the caller reports as a failed probe.
- */
-function chainUrl(endpoint: string): string | null {
-  let parsed: URL;
-  try {
-    parsed = new URL(endpoint);
-  } catch {
-    return null;
-  }
-  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return null;
-  return `${endpoint.replace(/\/+$/, '')}/chain`;
-}
 
 /** Whether a parsed body is §8.2's `binding` object. Shape only — the chain check is separate. */
 function bindingGenesis(body: unknown): string | null {
@@ -108,7 +89,7 @@ export async function probe(
   get: HttpGet,
   clock: () => number,
 ): Promise<ProbeOutcome> {
-  const url = chainUrl(target.endpoint);
+  const url = providerUrl(target.endpoint, 'chain');
   if (url === null) {
     return { kind: 'failed', why: `${target.endpoint} is not an http(s) endpoint` };
   }

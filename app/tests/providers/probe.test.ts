@@ -26,6 +26,7 @@ import {
   canServeReads,
   probe,
   runProbeRound,
+  withoutTrailingSlashes,
   type HttpGet,
   type Provider,
   type ProbeResponse,
@@ -306,8 +307,11 @@ test('one dead endpoint does not stop the round for the others', async () => {
     ['dead', { endpoint: 'https://dead.example', genesisHash: GENESIS }],
     ['live', TARGET],
   ]);
+  // Routed on the EXACT url rather than a prefix. A prefix test would pass here and is the
+  // classic URL-check bypass in production (`https://dead.example.attacker.test` starts with it),
+  // so the mock should not model the shape we would refuse in real code.
   const get: HttpGet = async (url) => {
-    if (url.startsWith('https://dead.example')) throw new Error('ETIMEDOUT');
+    if (url === 'https://dead.example/chain') throw new Error('ETIMEDOUT');
     return { status: 200, body: bindingBody() };
   };
 
@@ -353,4 +357,27 @@ test('a healthy probe does not resurrect an auto-disabled source, and does not e
 
   assert.deepEqual(seen, []);
   assert.deepEqual(result.providers[0], autoOff);
+});
+
+// ------------------------------------------------------------------ the endpoint builder
+
+test('trailing-slash trimming is linear — the ReDoS CodeQL found (high, 2026-08-07)', () => {
+  // Both this module and `indexer.ts` trimmed with `endpoint.replace(/\/+$/, '')`, which is
+  // polynomial: on a long run of slashes NOT at the end, the engine retries the run from every
+  // offset. Measured before the fix on the shipped build — 20k slashes 181 ms, 40k 730 ms,
+  // 80k 3,139 ms. Four times the work for twice the input.
+  //
+  // It was reachable, which is why the `high` was right: 10 §8.1 makes the endpoint a value the
+  // user pastes or accepts from a suggestion, so a source that never answers anything could
+  // freeze the tab that merely tried to build its URL.
+  //
+  // This test would take minutes under the old implementation and finishes instantly under the
+  // new one, so it fails by timing out rather than by asserting a duration — no flaky threshold.
+  const pathological = `https://x.example/${'/'.repeat(2_000_000)}a`;
+  assert.equal(withoutTrailingSlashes(pathological), pathological, 'nothing to trim here');
+
+  // And it still trims, which is the behaviour the regex was there for.
+  assert.equal(withoutTrailingSlashes('https://x.example///'), 'https://x.example');
+  assert.equal(withoutTrailingSlashes('https://x.example'), 'https://x.example');
+  assert.equal(withoutTrailingSlashes('/'.repeat(100_000)), '');
 });
