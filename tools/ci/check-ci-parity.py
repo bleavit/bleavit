@@ -101,6 +101,7 @@ STANDALONE_GATES: tuple[tuple[str, ...], ...] = (
 # being checked.
 SKIP: dict[str, str] = {
     "tools/ci/check-ghsa-only.py": "requires network access to the GitHub Advisory DB",
+    "tools/ci/check-npm-advisories.py": "requires network access to the GitHub Advisory DB",
 }
 
 # Call sites whose enclosing script already handles the missing state, keyed by

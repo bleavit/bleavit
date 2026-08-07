@@ -525,13 +525,13 @@ def validate_fixture_binding(
     return errors
 
 
-def audited_workspace_names(root: Path) -> set[str]:
-    """The workspace names the supply-chain gate is required to have audited.
+def audited_workspace_rows(root: Path) -> list[dict[str, str]]:
+    """Every row the supply-chain manifest declares, across all ecosystems.
 
     Read from `tools/ci/audited-workspaces.toml` rather than listed here, so a
-    fifth cargo workspace becomes a release-blocking gap the moment it is
-    classified — without anyone remembering to edit this file too. That file is
-    itself gated against the repository by `tools/ci/check-audited-workspaces.py`.
+    fifth workspace becomes a release-blocking gap the moment it is classified —
+    without anyone remembering to edit this file too. That file is itself gated
+    against the repository by `tools/ci/check-audited-workspaces.py`.
     """
     checker = root / "tools/ci/check-audited-workspaces.py"
     spec = importlib.util.spec_from_file_location("check_audited_workspaces", checker)
@@ -539,14 +539,32 @@ def audited_workspace_names(root: Path) -> set[str]:
         raise OSError(f"cannot load {checker}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    rows = module.load_workspaces(root / "tools/ci/audited-workspaces.toml")
-    return {row["name"] for row in rows}
+    return module.load_workspaces(root / "tools/ci/audited-workspaces.toml")
 
 
-def validate_supply_chain_summary(summary: dict[str, Any], expected_workspaces: set[str]) -> list[str]:
+def audited_workspace_names(root: Path) -> set[str]:
+    """The cargo workspace names the summary's `workspaces` block must cover.
+
+    Cargo only, because that block reports `cargo-audit` output and cargo-audit
+    never runs against an npm lockfile. The npm rows are disclosed separately,
+    under `npm_lockfiles`, and the same completeness rule applies to them there.
+    """
+    return {row["name"] for row in audited_workspace_rows(root) if row["ecosystem"] == "cargo"}
+
+
+def audited_npm_lockfiles(root: Path) -> set[str]:
+    """The npm lockfiles a release must have scanned (14 §3.6 TH-44)."""
+    return {row["lockfile"] for row in audited_workspace_rows(root) if row["ecosystem"] == "npm"}
+
+
+def validate_supply_chain_summary(
+    summary: dict[str, Any],
+    expected_workspaces: set[str],
+    expected_npm_lockfiles: set[str],
+) -> list[str]:
     errors: list[str] = []
-    if summary.get("schema") != "bleavit.supply-chain.v3":
-        errors.append("supply-chain summary schema must be bleavit.supply-chain.v3")
+    if summary.get("schema") != "bleavit.supply-chain.v4":
+        errors.append("supply-chain summary schema must be bleavit.supply-chain.v4")
     ignored = summary.get("ignored_advisory_ids")
     if not isinstance(ignored, list) or any(
         not isinstance(item, str) or not item.startswith("RUSTSEC-") for item in ignored
@@ -563,6 +581,37 @@ def validate_supply_chain_summary(summary: dict[str, Any], expected_workspaces: 
         for row in waived
     ):
         errors.append("waived_ghsa_only must be an array of {id, package, version} objects")
+    # v4: the same disclosure property, extended to the npm leg (SQ-985). An npm
+    # waiver is accepted risk in the dependency graph of the bundle a browser
+    # executes, which is 14 §3.6 TH-44's own subject, so a release that published
+    # only the cargo waivers would understate exactly the risk that row is about.
+    # `reaches_bundle` travels with each entry because a reader of the manifest
+    # cannot recover it and it is the fact that decides how much the entry matters.
+    waived_npm = summary.get("waived_npm")
+    if not isinstance(waived_npm, list) or any(
+        not isinstance(row, dict)
+        or set(row) != {"id", "package", "version", "reaches_bundle"}
+        or not all(isinstance(value, str) and value for value in row.values())
+        or row["reaches_bundle"] not in ("yes", "no")
+        for row in waived_npm
+    ):
+        errors.append(
+            "waived_npm must be an array of {id, package, version, reaches_bundle} objects "
+            "with reaches_bundle in (yes, no)"
+        )
+    elif any(row["reaches_bundle"] == "yes" for row in waived_npm):
+        # The checker refuses such a waiver at load time, so a summary carrying
+        # one means the summary was not produced by that checker. Blocking here
+        # keeps the release from trusting a hand-edited disclosure.
+        errors.append("waived_npm declares a waiver reaching the bundle, which cannot be waived")
+    # v4: the npm lockfiles a release scanned must be all of them, for the same
+    # reason the workspace set must be complete — a partial scan reports as a
+    # clean one.
+    scanned = summary.get("npm_lockfiles")
+    if not isinstance(scanned, list) or set(scanned) != expected_npm_lockfiles:
+        errors.append(
+            "npm_lockfiles must contain exactly " + ", ".join(sorted(expected_npm_lockfiles))
+        )
     # v3: the gate audits every committed cargo lockfile, not just the two the
     # v2 shape could name. A summary covering a subset would disclose accepted
     # risk on some workspaces and stay silent on the rest, which is the exact
@@ -1036,7 +1085,9 @@ def main() -> int:
         try:
             supply_chain_summary = load_json(args.supply_chain_summary)
             for error in validate_supply_chain_summary(
-                supply_chain_summary, audited_workspace_names(root)
+                supply_chain_summary,
+                audited_workspace_names(root),
+                audited_npm_lockfiles(root),
             ):
                 add_gap(gaps, "supply_chain.summary", "B8", error)
             candidates.append(Candidate("supply-chain-summary", args.supply_chain_summary, str(args.supply_chain_summary)))
