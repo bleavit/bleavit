@@ -20,6 +20,38 @@ Legend: ⬜ pending · 🔨 in progress · ✅ done · ⛔ blocked · 🅿 defer
 
 ## Current focus
 
+> **PARKED: 2026-08-07 — every buildable Track F item is built; the two remaining blockers are external.**
+>
+> Six milestones (F7b, F8, F9, F14, F22, F23) are code-complete and have passed R-6 spec
+> review. They are **not** ✅ because R-6 needs both conjuncts and the gate conjunct has no
+> evidence yet: `integration/track-f-v2` is running its 23 checks, and the GitHub runner queue
+> is still draining a six-hour Actions outage. **Nothing here needs more work — it needs that
+> queue.** To resume: confirm every check on PR #261 reports `conclusion == success`, merge,
+> then flip those six rows and close the ten superseded pull requests (#250, #252–#260) with a
+> pointer to #261.
+>
+> **F25** is one CI run behind the same line. **F1** has all eleven prototype gates resolved or
+> recorded with what would unblock each, and is held by **SQ-940** alone.
+>
+> **SQ-940 needs a ruling from the user and blocks launch.** Verified against primary sources,
+> not inferred: `ar-io/ar-io-ant-process` was archived 2026-06-09 — *"The AR.IO smart contracts
+> have migrated from AO to Solana"* — and an ANT authorizes by membership, returning on the
+> first matching controller, so a controller list is **1-of-m**. Adding controllers *widens*
+> custody, which is the opposite of what D-16 chose it for. Doc 12 §4.2's primary option is
+> withdrawn across 00, 10, 12 and 14; the replacement custody model is a values judgement.
+>
+> **Five rows cannot close by any amount of work in this session** and are parked on what each
+> actually waits for: **F11** on SQ-940 plus ten `release.json` readiness blockers (no seated
+> bootnode operator, no gateway set, no production keys); **F13** on the key ceremony and a
+> two-environment byte-identical run; **F15** on roles being seated; **F18** on committed
+> chain-spec bytes — `chainSpecs: []` with both hashes null, so nothing can call
+> `startLightClient`; **F24** on SQ-612, SQ-613 and SQ-771, where R-2 forbids inventing the
+> interface.
+>
+> Open questions raised today that a next session should not re-derive: SQ-860, SQ-880,
+> SQ-900/901, SQ-920–922, SQ-940/941, SQ-960–965, SQ-980/981.
+
+
 > ### ⇨ CURRENT (2026-08-07, latest) — **F23/F25's R-6 review: one range answered two ways, and the guard that was supposed to notice had been scoped around the drift a second time**
 >
 > **Branch `integration/track-f-v2`. Neither F23 nor F25 is marked ✅ by this work** — F23 moves
@@ -1730,21 +1762,25 @@ Legend: ⬜ pending · 🔨 in progress · ✅ done · ⛔ blocked · 🅿 defer
 > (V-150), which also produced a second normative rule the question had not asked for, and an
 > R-1 ruling on 02 §13 rule 2's scope (Decision log). Contract stays **v27**.
 >
-> **F1's remainder is genuinely external, so it is parked and the next milestone is F18.**
+> **F1's park was wrong, and the 2026-08-07 round disproved it in place.**
 >
-> **PARKED:** F1's eight remaining prototype gates each need a resource this environment does not
-> have — they are not analysis, and one has already been re-checked rather than believed.
-> `FE-P3` (Safari/Android leader-election matrix), `FE-P4`'s remainder (sync latency, per-instance
-> memory, the 20 blk/s ingest anchor, mobile CPU), `FE-P6`'s device half (whether a Ledger app
-> blind-signs when a chain offers no metadata digest), `FE-P9` (Bulletin mirror dry run),
-> `FE-P10` (multi-MB Wasm extrinsic through a real transaction pool) and `FE-P11`'s first half
-> (`navigator.share({ files })` across the browser/OS matrix) need a **device lab or a testnet
-> run**. `FE-P7` needs **ar.io testnet credentials and an ANT** — a credential only the user can
-> supply. `FE-P5` was attempted and recorded unanswerable from here (V-89): smoldot's JSON-RPC
-> dispatch lives inside the wasm, and its stated fallback already ships. **What would unblock
-> it:** a device lab or hosted browser matrix, a running testnet with a collator, and ar.io
-> testnet credentials. Until then F1 cannot close, and no further analysis moves it — the one
-> gate that *was* analysis (FE-P2) is now done, and FE-P8 before it.
+> **SUPERSEDED (2026-08-07).** This block claimed F1's eight remaining prototype gates "each
+> need a resource this environment does not have" and that "no further analysis moves it".
+> **Eight of the eleven moved without leaving this workstation.** Each gate's *Experiment*
+> column is a **plan** — "2-day spike against Paseo", "hardware test", "ar.io testnet dry run" —
+> and restating that plan as "needs hardware" quietly converted it into a blocker. In every case
+> the load-bearing half was already published and readable, in a lockfile-pinned tree or an
+> upstream source.
+>
+> Two of this block's own claims were false when written: **FE-P1 was recorded resolved and was
+> not** (two of six halves; all six now, V-301), and **FE-P5 was recorded unanswerable from here
+> and was answerable** from smoldot's Rust source at the pinned tag (V-303) — resolving it
+> corrected the spec. `FE-P7` is genuinely external, but not for the reason given: it needed no
+> credentials to find that the platform moved and the custody model is 1-of-m (SQ-940).
+>
+> The lesson worth carrying: a park is a claim about the world, and it decays. Re-test one
+> before trusting it.
+>
 >
 > **F18 opened, and its note was half wrong (V-151).** The S12/S13 screens it listed as remaining
 > are built, exported and tested; `routes.tsx` said so all along in a **machine-checked** field
