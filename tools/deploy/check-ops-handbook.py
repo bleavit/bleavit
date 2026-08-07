@@ -25,33 +25,30 @@ is what a launch gate needs to see and what 12 §6.5's phase entries are checked
 against. So a blank holder is an error, and ``VACANT`` is a legal value that
 ``--strict`` refuses.
 
-**§6.3 — the first-responder roster.** §6.3's *Ownership* paragraph states the
-rule and never applies it: *"an alert's owner is the owner of its §6.1 row"*,
-with protocol domains falling to the Monitoring coordinator. Applying it is the
-handbook's job, and the roster is therefore **derived rather than read**: each
-alert domain resolves to a runbook through §6.3's own tables, the runbook's
-``owner_role`` frontmatter names the responder, and §6.1 must name that role.
-The handbook must reproduce exactly what that chain produces. This is not a
+**§6.3 — the ownership roster.** §6.3's *Ownership* paragraph states the rule
+and never applies it: *"This table assigns runbooks, not owners: an alert's
+owner is the owner of its §6.1 row"*, with protocol domains falling to the
+Monitoring coordinator. Applying it is the handbook's job, and the roster is
+therefore **derived rather than read** — see ``check_roster`` for the derivation
+and for why the runbook column is deliberately not its source. This is not a
 restatement of ``check-runbooks.py``, which binds §6.3 to the runbook files;
 here the runbooks are an *input* and the handbook is the artifact under test.
 
 §6.3 also carries one obligation that only prose asserted until now: *"A runbook
 spanning §6.3 rows that map to different §6.1 rows takes its primary row's owner
-and MUST name the other row's owner in its escalation path — the Bootnodes /
-Served-state-window pair is the live instance of this."* The required pairs are
-derived by matching an alert domain against a §6.1 service of the same name,
-which finds that documented instance; a future pair whose two names differ is
-not derivable from the documents and must be declared in the handbook, where the
-partner is still checked against §6.1 and against the runbook's escalation text.
-That asymmetry is deliberate and is the checker's declared blind spot.
+and MUST name the other row's owner in its escalation path."* Those instances
+are derived too — a runbook whose owner differs from a domain's accountable
+owner is one by definition — and the MUST is tested against that runbook's own
+Escalation text.
 
 **§6.4 — the incident classes.** An incident class can be added to §6.4 with no
 alert row, no runbook section and no owner, and nothing else in the repository
 would notice: ``check-runbooks.py`` reads §6.4's heading only as a boundary
 marker. Each class must name an accountable role and a standing response, the
-response must resolve to a real runbook section, and the role must be that
-runbook's own owner. The procedure itself stays in the runbook — a handbook
-section that restates a runbook is worse than none.
+response must resolve to a real runbook section. Accountability comes from the
+§6.1 row that commits to the playbooks, never from the runbook that happens to
+hold the procedure. That procedure stays in the runbook — a handbook section
+that restates a runbook is worse than none.
 """
 
 from __future__ import annotations
@@ -77,8 +74,8 @@ INCIDENT_HEADING = "### 6.4 Incident response"
 # Both §6.3 tables reduce to this header once decoration and the parenthetical
 # of "Alert (example)" are stripped.
 ALERT_HEADER = ("Domain", "Key series", "Alert", "Runbook")
-ROSTER_HEADER = ("First responder", "Alert domains")
-ESCALATION_HEADER = ("Alert domain", "First responder", "Escalation partner")
+ROSTER_HEADER = ("Accountable owner", "Alert domains")
+CROSS_ROW_HEADER = ("Alert domain", "Accountable owner", "Runbook", "Runbook owner")
 INCIDENT_HEADER = ("Incident class", "Accountable role", "Standing response")
 
 RUNBOOK_ID_RE = re.compile(r"RB-[A-Z]+")
@@ -92,6 +89,7 @@ FRONTMATTER_OWNER_RE = re.compile(r"^owner_role:\s*(.+)$", re.MULTILINE)
 @dataclass(frozen=True)
 class ServiceRow:
     service: str
+    commitment: str
     owner_role: str
     funding_line: str
 
@@ -169,15 +167,22 @@ def parse_service_table(doc_text: str) -> list[ServiceRow]:
         cells = table_cells(line)
         if cells is None or len(cells) != 4:
             continue
-        service, _commitment, owner_role, funding_line = cells
+        service, commitment, owner_role, funding_line = cells
         if service in {"Service", ""} or set(service) <= set("-: "):
             continue
-        rows.append(ServiceRow(service, owner_role, funding_line))
+        rows.append(ServiceRow(service, commitment, owner_role, funding_line))
     if not rows:
         raise SystemExit(
             "parsed no service rows out of 12 §6.1; the table shape moved and this gate "
             "would have passed by comparing against nothing"
         )
+    seen: set[str] = set()
+    for row in rows:
+        # Two rows of the same name collapse into one key and the second silently
+        # wins, which would let a service change owner with no failure anywhere.
+        if row.service in seen:
+            raise SystemExit(f"12 §6.1 names the service {row.service!r} twice")
+        seen.add(row.service)
     return rows
 
 
@@ -383,6 +388,8 @@ def parse_handbook(text: str) -> list[Assignment]:
                 "left blank — an omitted holder reads as 'no such commitment' rather than "
                 "as 'this commitment has nobody accountable'."
             )
+        if any(existing.service == service for existing in assignments):
+            raise SystemExit(f"the handbook assigns {service!r} twice")
         assignments.append(
             Assignment(
                 service=service,
@@ -395,11 +402,11 @@ def parse_handbook(text: str) -> list[Assignment]:
 
 
 def parse_roster(text: str) -> tuple[dict[str, str], list[str]]:
-    """Read the handbook's first-responder roster as domain -> role."""
+    """Read the handbook's ownership roster as domain -> accountable owner."""
     section = handbook_section(
         text,
         "## Monitoring and alerting",
-        "12 §6.3's alerts would have no published first responder",
+        "12 §6.3's alerts would have no published owner",
     )
     roster: dict[str, str] = {}
     failures: list[str] = []
@@ -409,7 +416,7 @@ def parse_roster(text: str) -> tuple[dict[str, str], list[str]]:
     ):
         role, domain_cell = cells
         if not role:
-            failures.append("the roster has a row with no first responder")
+            failures.append("the roster has a row with no accountable owner")
             continue
         if role in seen_roles:
             failures.append(
@@ -423,27 +430,27 @@ def parse_roster(text: str) -> tuple[dict[str, str], list[str]]:
             if domain in roster:
                 failures.append(
                     f"the roster names the domain {domain!r} twice, under {roster[domain]!r} "
-                    f"and {role!r}; one domain has one first responder"
+                    f"and {role!r}; one domain has one accountable owner"
                 )
                 continue
             roster[domain] = role
     return roster, failures
 
 
-def parse_escalation_pairs(text: str) -> dict[str, tuple[str, str]]:
-    """Read the handbook's cross-row escalation table as domain -> (responder, partner)."""
+def parse_cross_rows(text: str) -> dict[str, tuple[str, str, str]]:
+    """Read the handbook's cross-row table as domain -> (owner, runbook, its owner)."""
     section = handbook_section(
         text,
         "## Monitoring and alerting",
         "12 §6.3's cross-row escalation rule would go unrecorded",
     )
-    pairs: dict[str, tuple[str, str]] = {}
+    rows: dict[str, tuple[str, str, str]] = {}
     for cells in handbook_table(
-        section, ESCALATION_HEADER, "no escalation partner would be declared"
+        section, CROSS_ROW_HEADER, "no cross-row instance would be declared"
     ):
-        domain, responder, partner = cells
-        pairs[domain] = (responder, partner)
-    return pairs
+        domain, owner, runbook_id, runbook_owner = cells
+        rows[domain] = (owner, runbook_id, runbook_owner)
+    return rows
 
 
 def parse_incidents(text: str) -> dict[str, tuple[str, str]]:
@@ -504,11 +511,27 @@ def check_services(
 
 def check_roster(
     alert_rows: list[AlertRow],
+    services: dict[str, ServiceRow],
     runbooks: dict[str, RunbookFacts],
     owner_roles: set[str],
     roster: dict[str, str],
 ) -> tuple[list[str], dict[str, str], dict[str, str]]:
-    """Derive domain -> first responder from doc 12 and the runbooks, then compare."""
+    """Derive domain -> accountable owner, the way 12 §6.3 states it.
+
+    §6.3's *Ownership* paragraph opens with *"This table assigns runbooks, not
+    owners: an alert's owner is the owner of its §6.1 row"*, so the runbook
+    column is deliberately **not** the source. Where an alert domain names a
+    §6.1 service, that row's owner is the answer. Where it does not, the runbook
+    that answers it supplies one — licensed by the same paragraph's closing
+    claim that the Bootnodes / Served-state-window pair is *the* live instance
+    of a runbook whose owner differs from the alert's §6.1 row, which asserts
+    there is no other divergence.
+
+    Deriving every domain from its runbook instead would invert the rule for
+    exactly that pair, and would let a runbook's `owner_role` — which
+    `check-runbooks.py` only binds to *some* §6.1 row pair — dictate an owner
+    §6.1 never gave it.
+    """
     failures: list[str] = []
     expected: dict[str, str] = {}
     runbook_by_domain: dict[str, str] = {}
@@ -516,18 +539,22 @@ def check_roster(
         if row.domain in expected:
             continue
         runbook_by_domain[row.domain] = row.runbook_id
+        service = services.get(row.domain)
+        if service is not None:
+            expected[row.domain] = service.owner_role
+            continue
         facts = runbooks.get(row.runbook_id)
         if facts is None:
             failures.append(
-                f"12 §6.3 binds the domain {row.domain!r} to {row.runbook_id}, and no "
-                "readable runbook of that id declares an owner role. An alert nobody "
-                "answers for is a commitment nobody owns."
+                f"12 §6.3 binds the domain {row.domain!r} to {row.runbook_id}, 12 §6.1 has "
+                "no row of that name, and no readable runbook of that id declares an owner "
+                "role. An alert nobody owns is a commitment nobody owns."
             )
             continue
         if facts.owner_role not in owner_roles:
             failures.append(
                 f"{row.runbook_id} answers to {facts.owner_role!r}, which 12 §6.1 does not "
-                "name as an owner role, so this gate cannot publish it as a first responder"
+                "name as an owner role, so this gate cannot publish it as an owner"
             )
             continue
         expected[row.domain] = facts.owner_role
@@ -536,14 +563,13 @@ def check_roster(
         rostered = roster.get(domain)
         if rostered is None:
             failures.append(
-                f"12 §6.3 alerts on {domain!r} and the handbook rosters no first responder "
-                f"for it. 12 §6.3 makes that {role!r}, through "
-                f"{runbook_by_domain[domain]}."
+                f"12 §6.3 alerts on {domain!r} and the handbook rosters no accountable "
+                f"owner for it. 12 §6.3 makes that {role!r}."
             )
         elif rostered != role:
             failures.append(
-                f"{domain}: 12 §6.3 binds it to {runbook_by_domain[domain]}, which answers "
-                f"to {role!r}; the handbook rosters {rostered!r}"
+                f"{domain}: 12 §6.3 makes the owner {role!r}, the handbook rosters "
+                f"{rostered!r}"
             )
 
     for domain, role in sorted(roster.items()):
@@ -555,83 +581,88 @@ def check_roster(
     return failures, expected, runbook_by_domain
 
 
-def check_escalation_pairs(
-    services: dict[str, ServiceRow],
+def check_cross_rows(
     expected_roles: dict[str, str],
     runbook_by_domain: dict[str, str],
     runbooks: dict[str, RunbookFacts],
-    owner_roles: set[str],
-    declared: dict[str, tuple[str, str]],
+    declared: dict[str, tuple[str, str, str]],
 ) -> list[str]:
-    """12 §6.3's cross-row rule: the other §6.1 row's owner is named in the escalation.
+    """12 §6.3's cross-row rule, derived for every domain rather than declared.
 
-    Required pairs are derived by name equality between an alert domain and a
-    §6.1 service, which finds the pair §6.3 itself calls the live instance. A
-    future pair whose two names differ is not derivable and must be declared;
-    the declaration is still checked against §6.1 and the runbook.
+    *"A runbook spanning §6.3 rows that map to different §6.1 rows takes its
+    primary row's owner and MUST name the other row's owner in its escalation
+    path."* A runbook whose `owner_role` differs from a domain's accountable
+    owner is exactly that case, so the instances fall out of the comparison and
+    the handbook cannot omit one by not declaring it. The MUST itself is then
+    tested against the runbook's own Escalation text.
     """
     failures: list[str] = []
-    required: dict[str, str] = {}
-    for domain, responder in expected_roles.items():
-        service = services.get(domain)
-        if service is not None and service.owner_role != responder:
-            required[domain] = service.owner_role
-
-    for domain, partner in sorted(required.items()):
-        if domain not in declared:
-            failures.append(
-                f"{domain}: 12 §6.1 owns the row of that name to {partner!r} while its "
-                f"runbook answers to {expected_roles[domain]!r}, and the handbook declares "
-                "no escalation partner. 12 §6.3 requires the other row's owner to be named."
-            )
-        elif declared[domain][1] != partner:
-            failures.append(
-                f"{domain}: 12 §6.1 owns the row of that name to {partner!r}, the handbook "
-                f"escalates to {declared[domain][1]!r}"
-            )
-
-    for domain, (responder, partner) in sorted(declared.items()):
-        expected_responder = expected_roles.get(domain)
-        if expected_responder is None:
-            failures.append(
-                f"the handbook declares an escalation partner for {domain!r}, which 12 §6.3 "
-                "does not alert on"
-            )
-            continue
-        if responder != expected_responder:
-            failures.append(
-                f"{domain}: the escalation table names {responder!r} as first responder, "
-                f"the roster derives {expected_responder!r}"
-            )
-        if partner not in owner_roles:
-            failures.append(
-                f"{domain}: the escalation partner {partner!r} is not a role 12 §6.1 names "
-                "as an owner"
-            )
-            continue
-        if partner == responder:
-            failures.append(
-                f"{domain}: the escalation partner is the first responder, which escalates "
-                "to nobody"
-            )
-            continue
+    required: dict[str, tuple[str, str, str]] = {}
+    for domain, owner in expected_roles.items():
         runbook_id = runbook_by_domain.get(domain)
         facts = runbooks.get(runbook_id) if runbook_id else None
-        if facts is None:
-            continue
-        if partner not in facts.escalation:
+        if facts is not None and facts.owner_role != owner:
+            required[domain] = (owner, runbook_id, facts.owner_role)
+
+    for domain, expected_row in sorted(required.items()):
+        if domain not in declared:
             failures.append(
-                f"{runbook_id}: its Escalation section does not name {partner!r}. 12 §6.3 "
+                f"{domain}: 12 §6.1 owns it to {expected_row[0]!r} while {expected_row[1]} "
+                f"answers to {expected_row[2]!r}, and the handbook records no cross-row "
+                "instance. 12 §6.3 requires the other row's owner to be named."
+            )
+        elif declared[domain] != expected_row:
+            failures.append(
+                f"{domain}: the cross-row instance is "
+                f"{' / '.join(expected_row)}, the handbook records "
+                f"{' / '.join(declared[domain])}"
+            )
+
+    for domain in sorted(declared):
+        if domain not in expected_roles:
+            failures.append(
+                f"the handbook records a cross-row instance for {domain!r}, which 12 §6.3 "
+                "does not alert on"
+            )
+        elif domain not in required:
+            failures.append(
+                f"the handbook records a cross-row instance for {domain!r}, whose runbook "
+                "answers to the same role 12 §6.1 owns it to. That is not a cross-row case."
+            )
+
+    for domain, (owner, runbook_id, _runbook_owner) in sorted(required.items()):
+        facts = runbooks[runbook_id]
+        if owner not in facts.escalation:
+            failures.append(
+                f"{runbook_id}: its Escalation section does not name {owner!r}. 12 §6.3 "
                 f"requires the runbook spanning {domain!r} to name that row's owner."
             )
     return failures
+
+
+def incident_playbook_owner(service_rows: list[ServiceRow]) -> str:
+    """The 12 §6.1 row that commits to the §6.4 playbooks names their owner.
+
+    §6.1's Release-operations row reads *"§1 ceremonies, key ceremonies (§2),
+    signer registry upkeep, incident playbooks (§6.4)"*, so accountability for
+    an incident class is fixed there rather than by whichever runbook happens to
+    hold the procedure. Anchored on that commitment phrase, so a row rename
+    cannot quietly move the accountability.
+    """
+    owners = [row for row in service_rows if "incident playbooks" in row.commitment]
+    if len(owners) != 1:
+        raise SystemExit(
+            f"{len(owners)} 12 §6.1 rows commit to the incident playbooks, expected 1; "
+            "without exactly one this gate cannot say who is accountable for a §6.4 class"
+        )
+    return owners[0].owner_role
 
 
 def check_incidents(
     classes: list[str],
     incidents: dict[str, tuple[str, str]],
     runbooks: dict[str, RunbookFacts],
-    owner_roles: set[str],
+    accountable: str,
 ) -> list[str]:
     failures: list[str] = []
     for incident_class in classes:
@@ -670,15 +701,10 @@ def check_incidents(
                 f"{incident_class}: {runbook_id} has no section {section!r}. A standing "
                 "response with no written procedure is a name, not a procedure."
             )
-        if role not in owner_roles:
+        if role != accountable:
             failures.append(
-                f"{incident_class}: the accountable role {role!r} is not a role 12 §6.1 "
-                "names as an owner"
-            )
-        elif role != facts.owner_role:
-            failures.append(
-                f"{incident_class}: the handbook makes {role!r} accountable, and "
-                f"{runbook_id} answers to {facts.owner_role!r}"
+                f"{incident_class}: 12 §6.1 puts the incident playbooks on {accountable!r}, "
+                f"the handbook makes {role!r} accountable"
             )
     return failures
 
@@ -700,18 +726,16 @@ def check(
     roster, roster_failures = parse_roster(handbook_text)
     failures.extend(roster_failures)
     roster_binding, expected_roles, runbook_by_domain = check_roster(
-        alert_rows, runbooks, owner_roles, roster
+        alert_rows, services, runbooks, owner_roles, roster
     )
     failures.extend(roster_binding)
 
     failures.extend(
-        check_escalation_pairs(
-            services,
+        check_cross_rows(
             expected_roles,
             runbook_by_domain,
             runbooks,
-            owner_roles,
-            parse_escalation_pairs(handbook_text),
+            parse_cross_rows(handbook_text),
         )
     )
 
@@ -720,7 +744,7 @@ def check(
             parse_incident_classes(doc_text),
             parse_incidents(handbook_text),
             runbooks,
-            owner_roles,
+            incident_playbook_owner(service_rows),
         )
     )
     return failures
@@ -736,8 +760,8 @@ def summarize(
     return (
         f"Ops handbook OK — {len(rows)} service commitments bound, "
         f"{len(assignments) - vacant} assigned, {vacant} declared vacant. "
-        f"{len(roster)} alert domains rostered across {len(set(roster.values()))} first "
-        f"responders, {len(parse_incident_classes(doc_text))} incident classes owned, "
+        f"{len(roster)} alert domains rostered across {len(set(roster.values()))} owners, "
+        f"{len(parse_incident_classes(doc_text))} incident classes owned, "
         f"{len(runbooks)} runbooks read."
     )
 

@@ -8,8 +8,8 @@ release train). Milestone **F15**.
 This is the *standing-operations* half of the operational layer. Its counterpart is
 [`deploy/runbooks/`](../runbooks/README.md), which holds the incident runbooks bound to
 doc 12 §6.3's alert tables — one is what you read when a page fires, this is what you read
-to know who is accountable and what they have committed to. The count is deliberately not
-restated here: it was 13 until D-20 added RB-SERVICE, and this sentence still said 13.
+to know who is accountable and what they have committed to. Their count lives in that index,
+not here.
 
 Two mechanical bindings keep it honest, and both are bidirectional:
 
@@ -93,60 +93,85 @@ Operational shape:
 The stack is [`deploy/monitoring/`](../monitoring/README.md) and the response to any one page
 is [`deploy/runbooks/`](../runbooks/README.md). Neither answers what this section answers.
 [12 §6.3](../../docs/architecture/12-release-and-operations.md) states the ownership rule and
-never applies it: an alert's owner is the owner of its 12 §6.1 row, and a protocol domain,
-having no dedicated program row, falls to the Monitoring coordinator as first responder. The
-roster is that rule applied to every alert domain.
+never applies it: *"This table assigns runbooks, not owners: an alert's owner is the owner of
+its §6.1 row"*, and a protocol domain, having no dedicated program row, falls to the
+Monitoring coordinator. The roster is that rule applied to every alert domain.
 
-| First responder | Alert domains (12 §6.3) |
+| Accountable owner | Alert domains (12 §6.3) |
 |---|---|
-| Bootnode program coordinator | Bootnodes, Served-state window |
+| Bootnode program coordinator | Bootnodes |
+| Infrastructure coordinator | Served-state window |
 | Keeper coordinator | Epoch progress, Keeper budget, Keepers, Relay finality, TWAP |
 | Monitoring coordinator | Collateralization, Guardian, Liquidity floors, Markets, Numerics, Proposal state, Storage, Treasury, XCM |
 | Oracle operations coordinator | Oracle |
 | Release operations lead | Descriptor lead time, Release integrity, ReleaseChannel, Upgrades |
 | Service operator | Client report push, External block-weight quota, Hosted service occupancy |
 
-One domain answers to a role that does not own the 12 §6.1 row of the same name. 12 §6.3
-calls that pair the live instance of its cross-row rule and requires the runbook to name the
-other row's owner in its escalation path. The checker reads that runbook and confirms it.
+**How each row above is obtained, and where the reading is a choice.** 12 §6.1 names a row of
+its own for some alert domains and not for others, and 12 §6.3 tabulates no mapping. Where a
+domain is itself a §6.1 row, that row's owner is the answer and the runbook does not override
+it. Where it is not, the answer comes from the owner of the runbook 12 §6.3 binds it to,
+because §6.3 closes by calling the Bootnodes and Served-state-window pair *the* live instance
+of a runbook owned by a role other than the alert's — which asserts there is no second
+divergence, and therefore that each remaining runbook already carries its domains' §6.1 owner.
+That reading is what makes the roster derivable at all. It is also not the only reading:
+§6.3's fallback sends a domain with no dedicated program row to the Monitoring coordinator,
+and applying that literally would move Epoch progress, TWAP, Relay finality and Upgrades away
+from the roles their runbooks name. The question is open rather than settled, and the roster
+records the reading actually in force instead of hiding the choice.
 
-| Alert domain | First responder | Escalation partner (12 §6.1 row owner) |
-|---|---|---|
-| Served-state window | Bootnode program coordinator | Infrastructure coordinator |
+The owner of a domain is not always the owner of the runbook that answers it. 12 §6.3 covers
+that case — the runbook takes its primary row's owner and **must** name the other row's owner
+in its escalation path — and calls the pair below the live instance of it. The instances are
+derived rather than declared, so one cannot be omitted by not writing it down, and the
+checker confirms the escalation text names the owner.
 
-Four standing obligations sit on the Monitoring coordinator and are **not** alert rows, so no
-runbook and no alerting rule carries them:
+| Alert domain | Accountable owner | Runbook | Runbook owner |
+|---|---|---|---|
+| Served-state window | Infrastructure coordinator | RB-BOOTNODE | Bootnode program coordinator |
 
-1. **Exporter health.** [12 §3.1](../../docs/architecture/12-release-and-operations.md) makes
-   an absent series the signal rather than a healthy zero, so the absence itself must be
-   caught — and that section places the catching on the §6.1 monitoring row rather than on a
-   §6.3 row. The checks are written out in
+Four obligations of 12 §6.3 are not alert rows, so none of them has a §6.3 trigger and none
+is reached by a page:
+
+1. **Exporter health**, which is the only one of the four that no runbook and no alerting
+   rule carries. [12 §3.1](../../docs/architecture/12-release-and-operations.md) makes an
+   absent series the signal rather than a healthy zero, so the absence itself must be caught,
+   and that section places the catching on the §6.1 monitoring row rather than on a §6.3 row.
+   The Monitoring coordinator owns it, and the checks are written out in
    [`deploy/monitoring/README.md`](../monitoring/README.md) under *Self-monitoring*.
-2. **Three exporter settings are supplied, never invented.** The operations refill margin in
+2. **Three exporter settings are supplied, never invented** — the operations refill margin in
    DOT plancks, the maximum age of an unchanged finalized Asset Hub head, and the pinned
-   canonical Asset Hub genesis hash are operator settings, not protocol parameters. The
-   Oracle operations coordinator owns the reserve line they measure (12 §6.1, Reserve-health
-   probe), and the exporter refuses to start without all three.
+   canonical Asset Hub genesis hash. 12 §6.3 requires each to be an operator setting rather
+   than a protocol parameter and does not say which role supplies it. This handbook puts that
+   on the Monitoring coordinator, who runs the exporter, while the Oracle operations
+   coordinator owns the reserve line the settings measure (12 §6.1, Reserve-health probe).
+   [`RB-XCM`](../runbooks/RB-XCM.md) carries the configuration detail, and the exporter
+   refuses to start without all three.
 3. **The relay-finality persistence window is open.** 1,800 s is the placeholder 12 §6.3
-   marks `[VERIFY]`. Re-derive it from observed healthy relay behaviour on the target relay
-   before production, amend that row with the measured value, and keep the figure equal in
-   the exporter and in the alerting rule.
+   marks `[VERIFY]`, and doc 12 owns the figure. The Monitoring coordinator re-derives it from
+   observed healthy relay behaviour on the target relay before production and amends that row
+   with the measured value, which is a specification change under rule R-1.
 4. **An early-warning margin is re-derived whenever the requirement it guards moves.** A
    margin set deliberately inside a protocol requirement, such as the TWAP row's 96 % sitting
-   above `dec.coverage`, is a monitoring choice this handbook's stack owns rather than a
-   restatement of [13](../../docs/architecture/13-parameters.md).
+   above `dec.coverage`, is a monitoring choice doc 12 owns rather than a restatement of
+   [13](../../docs/architecture/13-parameters.md), so amending it is likewise an R-1 change
+   and not a rule edit.
 
-Two domains cannot fire yet. Bootnodes and Served-state window are written against series no
-exporter emits until O3 ships the browser-dial and retention probes, so the Bootnode program
-coordinator reads those probes out of band until then. A quiet panel is not evidence of
-health.
+Two domains cannot fire yet: Bootnodes and Served-state window are written against series no
+exporter emits. The seam and its owning milestone are recorded once, in
+[`deploy/monitoring/README.md`](../monitoring/README.md), where the record expires
+mechanically. What governs the gap here is
+[12 §6.5](../../docs/architecture/12-release-and-operations.md): the monitoring stack
+including browser-dial probes is a Phase 2 entry blocker, so the gap closes before the public
+testnet or the phase does not open.
 
 Three readings are settled elsewhere and are not repeated here. Hosted service occupancy is
 the only row whose response is a values amendment rather than an operational action, and
 [`RB-SERVICE`](../runbooks/RB-SERVICE.md) owns that escalation. The keeper-inactivity blind
 spots are covered by the keeper's own liveness series and by the Relay-finality row, which
-12 §6.3 introduces for that purpose. Every alert threshold that restates a governance-amendable
-figure is evaluated against the live value, which the alerting rules already do.
+12 §6.3 introduces for that purpose. Every alert threshold that restates a
+governance-amendable figure is evaluated against the live value, which the alerting rules
+already do.
 
 ## Incident response (12 §6.4)
 
@@ -162,19 +187,23 @@ runbook section and no owner, and nothing else in the repository would notice.
 | ArNS-key loss | Release operations lead | [RB-RELEASE](../runbooks/RB-RELEASE.md) § ArNS-key loss |
 | Distribution mismatch | Release operations lead | [RB-RELEASE](../runbooks/RB-RELEASE.md) § Distribution mismatch |
 
-12 §6.1 puts incident playbooks on the Release operations lead, and every class above answers
-to that role. Only two of the four arrive as a page: the Release integrity row pages
-immediately, which is how a distribution mismatch and a hostile release reach a person. A
-wrong chain spec is refused by the bundle's pinned genesis and by
-`tools/deploy/validate-chain-spec.py` rather than detected by monitoring, and ArNS-key loss is
-discovered by the controller quorum itself. Two of the four therefore have no alerting path at
-all, and naming their owner here is the only thing that routes them.
+12 §6.1 puts incident playbooks on the Release operations lead, and the checker takes the
+accountable role from that row rather than from the runbook holding the procedure. Only two of
+the four classes arrive as a page. The Release integrity row pages immediately, which is how a
+distribution mismatch and the hostile release it is treated as reach a person. Wrong-chain-spec
+and ArNS-key loss have no alert row at all — one surfaces in the release gates, the other in
+the controller quorum — so naming their owner here is the only thing that routes them.
 
-The privileged actions in those paths stay separated. Accountability for an incident sits with
-one role, and executing the response does not. A repoint needs the ANT controller quorum, a
-re-signature needs the release signers, and 12 §2.2 keeps those two populations disjoint over
-natural persons. CI holds no minisign key and no controller share, so a compromised CI can
-block a release and can never ship one.
+One hostile-release shape reaches nobody through monitoring, and the handbook states it rather
+than implying the routing is complete. A repoint by the controller quorum itself, to a bundle
+that is validly signed, attested and served consistently by every gateway, is policy-bound
+rather than protocol-bound (12 §4.2). What catches it is the monitor's cross-check of
+`manifest_txid` against `ReleaseChannel` (12 §5.2), and what prevents it is the §2.2
+disjointness of controllers from release signers, not an alert.
+
+Accountability for an incident sits with one role, and executing the response does not. A
+repoint needs the ANT controller quorum and a re-signature needs the release signers, and
+12 §2.2 keeps those two populations disjoint over natural persons.
 
 ## ArNS and distribution (12 §4)
 
@@ -224,7 +253,7 @@ from a real separation, `release:build` names thirteen readiness blockers, and
 `validate-chain-spec.py` fails the bootnode manifests. The handbook exists now so that the
 list of what must be true is fixed before anyone is under pressure to declare it true.
 
-Two obligations above are open rather than vacant, which is a different state and is recorded
-as one. The relay-finality persistence window is still the `[VERIFY]` placeholder, and the
-bootnode and served-state alert series have no exporter behind them until O3 ships one.
-Neither waits on a person being named.
+Some of what is missing is open rather than vacant, which is a different state. The
+monitoring section names those obligations and who closes them. Neither kind waits on the
+other: an open obligation does not need a holder seated, and a seated holder does not close
+one.

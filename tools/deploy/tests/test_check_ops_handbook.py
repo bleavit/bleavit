@@ -35,7 +35,7 @@ DOC = """# Synthetic operations document
 | **WSS bootnodes** | Run them | Bootnode program coordinator | `ops.bootnodes` |
 | **Served-state window** | Retain state | Infrastructure coordinator | `ops.rpc_archive` |
 | **Monitoring & alerting** | Run the stack | Monitoring coordinator | `ops.monitoring` |
-| **Release operations** | Ship releases | Release operations lead | `ops.arweave` |
+| **Release operations** | Ship releases, incident playbooks (§6.4) | Release operations lead | `ops.arweave` |
 
 ### 6.2 Bootnode program
 
@@ -79,15 +79,16 @@ HANDBOOK = """# Synthetic ops handbook
 
 ## Monitoring and alerting (12 §6.3)
 
-| First responder | Alert domains (12 §6.3) |
+| Accountable owner | Alert domains (12 §6.3) |
 |---|---|
-| Bootnode program coordinator | Bootnodes, Served-state window |
+| Bootnode program coordinator | Bootnodes |
+| Infrastructure coordinator | Served-state window |
 | Monitoring coordinator | Collateralization, Markets |
 | Release operations lead | Release integrity |
 
-| Alert domain | First responder | Escalation partner (12 §6.1 row owner) |
-|---|---|---|
-| Served-state window | Bootnode program coordinator | Infrastructure coordinator |
+| Alert domain | Accountable owner | Runbook | Runbook owner |
+|---|---|---|---|
+| Served-state window | Infrastructure coordinator | RB-BOOT | Bootnode program coordinator |
 
 ## Incident response (12 §6.4)
 
@@ -100,6 +101,12 @@ HANDBOOK = """# Synthetic ops handbook
 
 Nothing is seated.
 """
+
+
+PAIR = (
+    "| Served-state window | Infrastructure coordinator | RB-BOOT "
+    "| Bootnode program coordinator |"
+)
 
 
 def facts(owner, escalation="Page nobody.", sections=("Escalation",)):
@@ -192,6 +199,27 @@ class ServiceBindingTest(unittest.TestCase):
             any("4 service(s) have no accountable person" in f for f in failures), failures
         )
 
+    def test_a_service_named_twice_stops_the_gate(self):
+        """Two rows of one name collapse into one key, and the second wins silently."""
+        doc = DOC.replace(
+            "| **Monitoring & alerting** | Run the stack | Monitoring coordinator | `ops.monitoring` |",
+            "| **Monitoring & alerting** | Run the stack | Monitoring coordinator | `ops.monitoring` |\n"
+            "| **Monitoring & alerting** | Run it again | Keeper coordinator | `ops.keepers` |",
+        )
+        with self.assertRaises(SystemExit) as caught:
+            run(doc=doc)
+        self.assertIn("names the service 'Monitoring & alerting' twice", str(caught.exception))
+
+    def test_a_handbook_service_assigned_twice_stops_the_gate(self):
+        handbook = HANDBOOK.replace(
+            "| Monitoring & alerting | Monitoring coordinator | ops.monitoring | VACANT |",
+            "| Monitoring & alerting | Monitoring coordinator | ops.monitoring | VACANT |\n"
+            "| Monitoring & alerting | Keeper coordinator | ops.keepers | VACANT |",
+        )
+        with self.assertRaises(SystemExit) as caught:
+            run(handbook=handbook)
+        self.assertIn("assigns 'Monitoring & alerting' twice", str(caught.exception))
+
     def test_missing_service_table_stops_the_gate(self):
         doc = DOC.replace("### 6.1 Owned-and-funded ops table (normative)", "### 6.1 Gone")
         with self.assertRaises(SystemExit) as caught:
@@ -204,7 +232,7 @@ class ServiceBindingTest(unittest.TestCase):
             "| **WSS bootnodes** | Run them | Bootnode program coordinator | `ops.bootnodes` |\n",
             "| **Served-state window** | Retain state | Infrastructure coordinator | `ops.rpc_archive` |\n",
             "| **Monitoring & alerting** | Run the stack | Monitoring coordinator | `ops.monitoring` |\n",
-            "| **Release operations** | Ship releases | Release operations lead | `ops.arweave` |\n",
+            "| **Release operations** | Ship releases, incident playbooks (§6.4) | Release operations lead | `ops.arweave` |\n",
         ):
             doc = doc.replace(row, "")
         with self.assertRaises(SystemExit) as caught:
@@ -213,7 +241,7 @@ class ServiceBindingTest(unittest.TestCase):
 
 
 class RosterBindingTest(unittest.TestCase):
-    """12 §6.3 — every alert domain has a first responder, and only real ones do."""
+    """12 §6.3 — every alert domain has an accountable owner, and only real ones do."""
 
     def test_dropped_domain_leaves_an_alert_nobody_answers_for(self):
         handbook = HANDBOOK.replace(
@@ -223,8 +251,8 @@ class RosterBindingTest(unittest.TestCase):
         failures = run(handbook=handbook)
         self.assertTrue(
             any(
-                "12 §6.3 alerts on 'Collateralization' and the handbook rosters no first "
-                "responder" in f
+                "12 §6.3 alerts on 'Collateralization' and the handbook rosters no "
+                "accountable owner" in f
                 for f in failures
             ),
             failures,
@@ -241,25 +269,45 @@ class RosterBindingTest(unittest.TestCase):
             failures,
         )
 
-    def test_wrong_first_responder_fires(self):
+    def test_wrong_owner_fires(self):
         handbook = HANDBOOK.replace(
             "| Monitoring coordinator | Collateralization, Markets |",
             "| Release operations lead | Collateralization, Markets |",
         )
         failures = run(handbook=handbook)
         self.assertTrue(
-            any("the handbook rosters 'Release operations lead'" in f for f in failures),
+            any(
+                "12 §6.3 makes the owner 'Monitoring coordinator', the handbook rosters "
+                "'Release operations lead'" in f
+                for f in failures
+            ),
             failures,
         )
 
-    def test_a_domain_cannot_have_two_first_responders(self):
+    def test_a_domain_named_by_6_1_takes_that_rows_owner(self):
+        """S1, not S3: the runbook's owner does not decide a §6.1-named domain."""
+        handbook = HANDBOOK.replace(
+            "| Infrastructure coordinator | Served-state window |",
+            "| Bootnode program coordinator | Bootnodes, Served-state window |",
+        ).replace("| Bootnode program coordinator | Bootnodes |\n", "")
+        failures = run(handbook=handbook)
+        self.assertTrue(
+            any(
+                "Served-state window: 12 §6.3 makes the owner 'Infrastructure "
+                "coordinator'" in f
+                for f in failures
+            ),
+            failures,
+        )
+
+    def test_a_domain_cannot_have_two_owners(self):
         handbook = HANDBOOK.replace(
             "| Release operations lead | Release integrity |",
             "| Release operations lead | Release integrity, Markets |",
         )
         failures = run(handbook=handbook)
         self.assertTrue(
-            any("one domain has one first responder" in f for f in failures), failures
+            any("one domain has one accountable owner" in f for f in failures), failures
         )
 
     def test_a_role_cannot_be_listed_twice(self):
@@ -312,7 +360,7 @@ class RosterBindingTest(unittest.TestCase):
             run(doc=doc)
         self.assertIn("unparsable 12 §6.3 alert row", str(caught.exception))
 
-    def test_a_domain_split_across_runbooks_has_no_single_responder(self):
+    def test_a_domain_split_across_runbooks_has_no_single_owner(self):
         doc = DOC.replace(
             "| Release integrity | compare | any mismatch | RB-REL (page immediately) |",
             "| Release integrity | compare | any mismatch | RB-REL (page immediately) |\n"
@@ -323,7 +371,7 @@ class RosterBindingTest(unittest.TestCase):
         self.assertIn("no single first responder", str(caught.exception))
 
     def test_missing_roster_table_stops_the_gate(self):
-        handbook = HANDBOOK.replace("| First responder | Alert domains (12 §6.3) |", "")
+        handbook = HANDBOOK.replace("| Accountable owner | Alert domains (12 §6.3) |", "")
         with self.assertRaises(SystemExit) as caught:
             run(handbook=handbook)
         self.assertIn("expected exactly 1", str(caught.exception))
@@ -332,16 +380,15 @@ class RosterBindingTest(unittest.TestCase):
         handbook = HANDBOOK.replace("## Monitoring and alerting (12 §6.3)", "## Gone")
         with self.assertRaises(SystemExit) as caught:
             run(handbook=handbook)
-        self.assertIn("no published first responder", str(caught.exception))
+        self.assertIn("no published owner", str(caught.exception))
 
 
-class EscalationBindingTest(unittest.TestCase):
+class CrossRowBindingTest(unittest.TestCase):
     """12 §6.3's cross-row rule: name the other §6.1 row's owner."""
 
-    def test_undeclared_required_pair_fires(self):
+    def test_undeclared_instance_fires(self):
         handbook = HANDBOOK.replace(
-            "| Served-state window | Bootnode program coordinator | Infrastructure coordinator |",
-            "| Bootnodes | Bootnode program coordinator | Infrastructure coordinator |",
+            PAIR, "| Bootnodes | Bootnode program coordinator | RB-BOOT | Bootnode program coordinator |"
         )
         failures = run(handbook=handbook)
         self.assertTrue(
@@ -351,40 +398,32 @@ class EscalationBindingTest(unittest.TestCase):
             failures,
         )
 
-    def test_wrong_partner_fires(self):
+    def test_wrong_instance_row_fires(self):
         handbook = HANDBOOK.replace(
-            "| Served-state window | Bootnode program coordinator | Infrastructure coordinator |",
-            "| Served-state window | Bootnode program coordinator | Monitoring coordinator |",
+            PAIR,
+            "| Served-state window | Infrastructure coordinator | RB-BOOT | Monitoring coordinator |",
         )
         failures = run(handbook=handbook)
         self.assertTrue(
             any(
-                "the handbook escalates to 'Monitoring coordinator'" in f for f in failures
+                "the handbook records Infrastructure coordinator / RB-BOOT / Monitoring "
+                "coordinator" in f
+                for f in failures
             ),
             failures,
         )
 
-    def test_partner_must_be_a_role_doc_12_names(self):
+    def test_a_non_instance_cannot_be_recorded(self):
         handbook = HANDBOOK.replace(
-            "| Served-state window | Bootnode program coordinator | Infrastructure coordinator |",
-            "| Served-state window | Bootnode program coordinator | Night porter |",
+            PAIR,
+            PAIR + "\n| Markets | Monitoring coordinator | RB-MON | Monitoring coordinator |",
         )
         failures = run(handbook=handbook)
         self.assertTrue(
-            any("is not a role 12 §6.1 names as an owner" in f for f in failures), failures
+            any("That is not a cross-row case." in f for f in failures), failures
         )
 
-    def test_partner_equal_to_responder_escalates_to_nobody(self):
-        handbook = HANDBOOK.replace(
-            "| Served-state window | Bootnode program coordinator | Infrastructure coordinator |",
-            "| Served-state window | Bootnode program coordinator | Bootnode program coordinator |",
-        )
-        failures = run(handbook=handbook)
-        self.assertTrue(
-            any("escalates to nobody" in f for f in failures), failures
-        )
-
-    def test_runbook_must_name_the_partner_in_its_escalation(self):
+    def test_runbook_must_name_the_owner_in_its_escalation(self):
         books = runbooks(
             {
                 "RB-BOOT": facts(
@@ -402,30 +441,18 @@ class EscalationBindingTest(unittest.TestCase):
             failures,
         )
 
-    def test_pair_for_an_unknown_domain_fires(self):
+    def test_instance_for_an_unknown_domain_fires(self):
         handbook = HANDBOOK.replace(
-            "| Served-state window | Bootnode program coordinator | Infrastructure coordinator |",
-            "| Served-state window | Bootnode program coordinator | Infrastructure coordinator |\n"
-            "| Sunspots | Monitoring coordinator | Infrastructure coordinator |",
+            PAIR,
+            PAIR + "\n| Sunspots | Monitoring coordinator | RB-MON | Monitoring coordinator |",
         )
         failures = run(handbook=handbook)
         self.assertTrue(
             any(
-                "declares an escalation partner for 'Sunspots', which 12 §6.3 does not "
+                "records a cross-row instance for 'Sunspots', which 12 §6.3 does not "
                 "alert on" in f
                 for f in failures
             ),
-            failures,
-        )
-
-    def test_pair_responder_must_match_the_roster(self):
-        handbook = HANDBOOK.replace(
-            "| Served-state window | Bootnode program coordinator | Infrastructure coordinator |",
-            "| Served-state window | Monitoring coordinator | Infrastructure coordinator |",
-        )
-        failures = run(handbook=handbook)
-        self.assertTrue(
-            any("the roster derives 'Bootnode program coordinator'" in f for f in failures),
             failures,
         )
 
@@ -471,25 +498,25 @@ class IncidentBindingTest(unittest.TestCase):
             any("has no section 'Hostile takeover'" in f for f in failures), failures
         )
 
-    def test_accountable_role_must_be_the_runbooks_owner(self):
+    def test_accountable_role_comes_from_the_6_1_playbook_row(self):
         handbook = HANDBOOK.replace(
             "| Hostile release | Release operations lead |",
             "| Hostile release | Monitoring coordinator |",
         )
         failures = run(handbook=handbook)
         self.assertTrue(
-            any("RB-REL answers to 'Release operations lead'" in f for f in failures),
+            any(
+                "12 §6.1 puts the incident playbooks on 'Release operations lead'" in f
+                for f in failures
+            ),
             failures,
         )
 
-    def test_accountable_role_must_be_a_role_doc_12_names(self):
-        handbook = HANDBOOK.replace(
-            "| Hostile release | Release operations lead |", "| Hostile release | Night porter |"
-        )
-        failures = run(handbook=handbook)
-        self.assertTrue(
-            any("is not a role 12 §6.1 names as an owner" in f for f in failures), failures
-        )
+    def test_no_6_1_row_owning_the_playbooks_stops_the_gate(self):
+        doc = DOC.replace("Ship releases, incident playbooks (§6.4)", "Ship releases")
+        with self.assertRaises(SystemExit) as caught:
+            run(doc=doc)
+        self.assertIn("commit to the incident playbooks", str(caught.exception))
 
     def test_malformed_response_cell_fires(self):
         handbook = HANDBOOK.replace("RB-REL § Hostile release", "ask the release lead")
