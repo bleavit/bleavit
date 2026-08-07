@@ -108,14 +108,23 @@ class AssembleReleaseTests(unittest.TestCase):
         self.supply_summary.write_text(
             json.dumps(
                 {
-                    "schema": "bleavit.supply-chain.v2",
+                    "schema": "bleavit.supply-chain.v3",
                     "ignored_advisory_ids": ["RUSTSEC-2026-0001"],
                     "waived_ghsa_only": [
                         {"id": "GHSA-vxx9-2994-q338", "package": "yamux", "version": "0.12.1"}
                     ],
+                    # v3 covers every committed cargo lockfile, not the two the v2
+                    # shape could name. The set is checked against
+                    # tools/ci/audited-workspaces.toml, so a fifth workspace makes
+                    # this fixture fail until the release really audits it.
                     "workspaces": {
-                        "root": {"allowed_warning_count": 2},
-                        "keeper": {"allowed_warning_count": 0},
+                        "root": {
+                            "allowed_warning_count": 2,
+                            "ignored_advisory_ids": ["RUSTSEC-2026-0001"],
+                        },
+                        "keeper": {"allowed_warning_count": 0, "ignored_advisory_ids": []},
+                        "app": {"allowed_warning_count": 17, "ignored_advisory_ids": []},
+                        "fuzz": {"allowed_warning_count": 5, "ignored_advisory_ids": []},
                     },
                 }
             ),

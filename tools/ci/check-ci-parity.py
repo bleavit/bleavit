@@ -71,6 +71,16 @@ STANDALONE_GATES: tuple[tuple[str, ...], ...] = (
     # source, so it is squarely in this checker's bug class: it passes trivially if the
     # committed artifact is absent from CI's checkout for any reason.
     ("python3", "tools/ci/check-chain-feed.py"),
+    # The supply-chain gate's coverage check. Listed here rather than discovered,
+    # because INVOCATION_RE below matches a literal `python3 tools/...` and
+    # supply-chain-gates.sh calls its checkers through `"$repo_root/tools/..."`.
+    # It belongs in this checker's bug class more than most: it derives the
+    # audited lockfile set from `git ls-files`, so it reads repository state
+    # directly, and a wrong answer here is silent under-coverage rather than a
+    # visible failure. Its sibling `check-ghsa-only.py` stays out on purpose —
+    # that one drives the pinned osv-scanner over the network, which the module
+    # docstring above excludes.
+    ("python3", "tools/ci/check-audited-workspaces.py"),
     ("python3", "tools/ci/check-doc-links.py"),
     # Reads doc 13, doc 10 and the runtime's pinned ceiling — three committed sources,
     # any of which going missing in CI's checkout would silently un-derive doc 10 §9.

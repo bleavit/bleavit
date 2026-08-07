@@ -1,0 +1,73 @@
+# Every committed cargo lockfile in this repository, and the workspace that owns it.
+#
+# `tools/ci/supply-chain-gates.sh` drives all three of its legs from this file: the
+# `cargo metadata --locked` committed-lockfile assertion, the `cargo-audit` RustSec run,
+# and the `tools/ci/check-ghsa-only.py` GHSA-complement run. The gate derives its work
+# list here instead of naming lockfiles inline.
+#
+# THIS FILE IS EXHAUSTIVE. `tools/ci/check-audited-workspaces.py` compares it against
+# `git ls-files -- '*Cargo.lock'` and fails on any difference in either direction. A new
+# cargo workspace therefore turns the supply-chain gate red until somebody classifies it
+# here, and a deleted one turns it red until somebody removes its row.
+#
+# That comparison exists because the gate used to name its lockfiles inline. It audited
+# `Cargo.lock` and `keeper/Cargo.lock`. `app/Cargo.lock` and `fuzz/Cargo.lock` arrived
+# later, nothing compared the gate's list against the repository, and both stayed
+# unaudited behind a green Supply-chain job for as long as they existed. A coverage hole
+# reports as silence rather than as absence, so the list is now derived and checked.
+#
+# Doc 15 §4.5 clause 4 (blast-radius containment) requires a workspace outside the pinned
+# SDK closure to be audited FROM ITS OWN ROOT. `cargo-audit` reads `.cargo/audit.toml`
+# from its working directory, so a single run started in the repository root would apply
+# the root's stable2606 exception set to all four lockfiles. Every leg below therefore
+# runs with its workspace directory as the working directory. Only the root workspace
+# owns an exception file, and the other three audit with none — measured, not assumed:
+# a `--json` run from each of `app`, `fuzz` and `keeper` reports `settings.ignore = []`.
+#
+# `audit_config` records that fact per row. A row that gains an exception file also gains
+# a reviewer obligation, because an exception written for one workspace must never excuse
+# another.
+
+[[workspace]]
+name = "root"
+directory = "."
+lockfile = "Cargo.lock"
+audit_config = ".cargo/audit.toml"
+ships = "the parachain runtime, the collator node, every pallet and the reference crates"
+# The only workspace inside the 01 §9 exact-pin regime, and therefore the only one whose
+# advisories can be pin-forced. Its annotated exception set lives in `.cargo/audit.toml`
+# and is re-triaged from scratch at every SDK train bump (15 §4.5 clause 3).
+
+[[workspace]]
+name = "keeper"
+directory = "keeper"
+lockfile = "keeper/Cargo.lock"
+audit_config = ""
+ships = "the off-chain keeper binary (01 §4.2)"
+# A separate cargo workspace by design: its subxt dependency tree must never perturb the
+# runtime workspace's `=`-exact stable2606 pins. Audited with no inherited exceptions,
+# which is the worked example doc 15 §4.5 clause 4 names.
+
+[[workspace]]
+name = "app"
+directory = "app"
+lockfile = "app/Cargo.lock"
+audit_config = ""
+ships = "the F22 Tauri desktop shell (`src-tauri`) and the pure `embedded-tree` crate"
+# Excluded from the root workspace so the Tauri stack and its desktop target triples stay
+# out of the runtime closure (10 §10.1; `app/Cargo.toml` states the reason). This lockfile
+# backs a user-facing binary, so its advisories reach an end user directly rather than an
+# operator. Added to the gate 2026-08-07 after it had shipped unaudited.
+
+[[workspace]]
+name = "fuzz"
+directory = "fuzz"
+lockfile = "fuzz/Cargo.lock"
+audit_config = ""
+ships = "the `bleavit-fuzz` cargo-fuzz targets (S2, N7, N8, N10)"
+# Pinned to its own nightly toolchain (`fuzz/rust-toolchain.toml`) so libFuzzer and
+# nightly can never perturb the pinned SDK line (15 §4.5). The gate resolves this
+# lockfile under the repository's default toolchain instead, for the reason the gate
+# script records at its leg 1. Nothing here ships to a user, and the workspace still
+# carries the same transitive crates the runtime does, so an advisory here is a real
+# signal about the tree even when the binary is a test harness. Added 2026-08-07.
