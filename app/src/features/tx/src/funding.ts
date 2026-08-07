@@ -185,6 +185,164 @@ export type DepositProgress =
       readonly creditedAmount: Verified<bigint>;
     };
 
+/**
+ * A progress observation that would put one chain's block under the other's label.
+ *
+ * The tracker's whole claim is *which chain saw what*, so a leaf read on the wrong one makes
+ * every arm of {@link DepositProgress} say something false: `sent-awaiting-arrival` would name
+ * a futarchy block as the Asset Hub extrinsic's, and `credited` would report *"this chain has
+ * seen the balance in its own finalized state"* about Asset Hub. That is
+ * `readDepositInputs(reader, reader, …)` at the tracker, and no badge can detect it — both
+ * reads are genuine, both carry `verified-finalized`, and both are true about the wrong chain.
+ */
+export class WrongChainProgressError extends Error {
+  constructor(leg: string, expected: string, actual: string | undefined) {
+    super(
+      `the ${leg} observation was read on chain ${String(actual)} while that leg follows ` +
+        `${expected}. A tracker built from it would attribute one chain's block to the other, ` +
+        'which is a true reading under a false label (11 §11.9.1).',
+    );
+    this.name = 'WrongChainProgressError';
+  }
+}
+
+/** An Asset Hub observation the `sent` copy would misdescribe. See {@link depositProgress}. */
+export class UnfinalizedProgressError extends Error {
+  constructor(status: string) {
+    super(
+      `the Asset Hub observation carries ${status}, and the tracker states "The Asset Hub side ` +
+        'is final" as a fact. A best-head inclusion can still reorg away, so it is not the ' +
+        'evidence that sentence claims (11 §11.9).',
+    );
+    this.name = 'UnfinalizedProgressError';
+  }
+}
+
+/** A credit whose two leaves describe different blocks — see {@link depositProgress}. */
+export class MixedBlockProgressError extends Error {
+  constructor(atBlock: string, amount: string) {
+    super(
+      `the credited block (${atBlock}) and the credited amount (${amount}) were read at ` +
+        'different blocks, so together they describe a state that never existed (INV-FE-2).',
+    );
+    this.name = 'MixedBlockProgressError';
+  }
+}
+
+/** What each leg observed. Both legs are optional; neither is inferred from the other. */
+export interface DepositObservations {
+  /**
+   * The deposit extrinsic's block on **Asset Hub**, or `undefined` for *not sent*.
+   *
+   * Absence is a real state rather than a missing input: before the user submits, there is no
+   * Asset Hub block, and `not-sent` is the honest rendering.
+   */
+  readonly assetHubBlock: Verified<number> | undefined;
+  /**
+   * The credit, observed on the **futarchy chain**, or `undefined` while it has not been.
+   *
+   * Both leaves come from the local reader at one block. They travel together rather than as
+   * two fields of `DepositObservations`, because a credited amount with no block, or a block
+   * with no amount, is not half an observation — it is one that was never made.
+   */
+  readonly credit:
+    | { readonly atBlock: Verified<number>; readonly amount: Verified<bigint> }
+    | undefined;
+  /** The genesis hash of the connection the local reads came from. */
+  readonly localChain: string;
+  /** The genesis hash of the Asset Hub connection. Refused when it equals `localChain`. */
+  readonly assetHubChain: string;
+}
+
+/** The chain a status names, or `undefined` for the four statuses that name none. */
+function chainOf(datum: Verified<unknown>): string | undefined {
+  return 'chain' in datum.status ? datum.status.chain : undefined;
+}
+
+/**
+ * Assemble the tracker's state from what each connection observed — 11 §11.9's arrival rule.
+ *
+ * > Arrival tracking: local finality on AH ≠ delivery. The tracker shows "sent — awaiting
+ * > arrival" until the **futarchy-chain** connection observes the balance credit in finalized
+ * > state.
+ *
+ * The union already makes `credited` unreachable from the Asset Hub leg alone — its
+ * `creditedAtLocalBlock` field has nothing to fill it from. What a *producer* can still get
+ * wrong is the identity of the leaf it fills it with, and that is what this function refuses:
+ *
+ * - **The two chains must differ.** Two readers on one chain is the defect `fundingReaders`
+ *   refuses at the read layer, and it reaches here through the same single-character slip.
+ * - **Each leaf must carry its own leg's chain.** An Asset Hub credit read would satisfy every
+ *   type in sight and render as *this chain has seen the balance in its own finalized state*.
+ * - **`credited` requires a `verified-finalized` local read.** A `verified-best` credit is not
+ *   a weaker credit, it is the *in-between* state §11.9 names — so it yields
+ *   `sent-awaiting-arrival`, which is exactly what the sentence above prescribes.
+ *
+ * The last rule is deliberately asymmetric: an unfinalized **Asset Hub** observation *throws*
+ * rather than degrading, because there is no arm whose copy it fits. `sent-awaiting-arrival`
+ * tells the user *"The Asset Hub side is final"*, and `not-sent` says *"Nothing has been sent
+ * yet"*; a best-head inclusion is neither, and picking one would make the tracker state a fact
+ * the read does not support.
+ */
+export function depositProgress(observations: DepositObservations): DepositProgress {
+  const { assetHubBlock, credit, localChain, assetHubChain } = observations;
+  if (localChain === assetHubChain) {
+    throw new WrongChainProgressError('Asset Hub', `a chain other than ${localChain}`, assetHubChain);
+  }
+
+  if (assetHubBlock === undefined) {
+    if (credit !== undefined) {
+      // Not `not-sent`: that would discard an observed credit and tell the user nothing has
+      // been sent while their funds are on this chain. `credited` cannot be built either —
+      // it has no Asset Hub block to name — so the observation is refused rather than rounded.
+      throw new Error(
+        'a credit was observed with no Asset Hub block. The credited state names the block the ' +
+          'deposit was sent in, and reporting "not sent" instead would deny a transfer this ' +
+          'chain has already seen (11 §11.9).',
+      );
+    }
+    return { kind: 'not-sent' };
+  }
+
+  if (chainOf(assetHubBlock) !== assetHubChain) {
+    throw new WrongChainProgressError('Asset Hub', assetHubChain, chainOf(assetHubBlock));
+  }
+  if (assetHubBlock.status.kind !== 'verified-finalized') {
+    throw new UnfinalizedProgressError(assetHubBlock.status.kind);
+  }
+
+  if (credit === undefined) return { kind: 'sent-awaiting-arrival', assetHubBlock };
+
+  for (const [label, leaf] of [
+    ['credited block', credit.atBlock],
+    ['credited amount', credit.amount],
+  ] as const) {
+    if (chainOf(leaf) !== localChain) {
+      throw new WrongChainProgressError(`local ${label}`, localChain, chainOf(leaf));
+    }
+  }
+  // Not yet final on this chain is not yet credited — §11.9's "until … in finalized state".
+  if (
+    credit.atBlock.status.kind !== 'verified-finalized' ||
+    credit.amount.status.kind !== 'verified-finalized'
+  ) {
+    return { kind: 'sent-awaiting-arrival', assetHubBlock };
+  }
+  if (credit.atBlock.status.blockHash !== credit.amount.status.blockHash) {
+    throw new MixedBlockProgressError(
+      credit.atBlock.status.blockHash,
+      credit.amount.status.blockHash,
+    );
+  }
+
+  return {
+    kind: 'credited',
+    assetHubBlock,
+    creditedAtLocalBlock: credit.atBlock,
+    creditedAmount: credit.amount,
+  };
+}
+
 /** In-bundle copy per stage. `sent-awaiting-arrival` is the one that must not overstate. */
 export function progressCopy(progress: DepositProgress): string {
   switch (progress.kind) {

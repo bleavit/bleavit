@@ -73,9 +73,11 @@ export const PENDING_SCREENS: Readonly<Record<string, PendingScreen>> = Object.f
   // decoders and call arguments now exist. What each is still waiting on is a **transport**,
   // and that is a release-artifact gap rather than a code one: `tools/release/sources/
   // release-sources.json` declares `chainSpecs: []` with both `chainSpecHashes` null, so this
-  // build commits no chain-spec bytes for any chain and nothing calls `startLightClient`.
-  // These entries therefore stay `built-unwired` — a composition root is not a runtime path,
-  // and moving a screen to wired on the strength of one would be a claim nothing can reach.
+  // build commits no chain-spec bytes for any chain and `releaseChainSpecs()` is `unpinned`.
+  // F18 gave `startLightClient` its caller (`startChainSession`), which is why that half of
+  // the sentence is gone; the pin it needs is still absent. These entries therefore stay
+  // `built-unwired` — a composition root is not a runtime path, and moving a screen to wired
+  // on the strength of one would be a claim nothing can reach.
   S2: { state: 'built-unwired', milestone: 'F7', component: `${TX}#ProposalDetail`, waitingOn: 'a live transport — its keys and decoders are built (F7b)' },
   S3: { state: 'built-unwired', milestone: 'F7b', component: `${TX}#MarketTrade`, waitingOn: 'a live transport — its keys, decoders and quote arguments are built' },
   S4: { state: 'built-unwired', milestone: 'F7b', component: `${TX}#Positions`, waitingOn: 'a live transport — its per-domain keys and decoders are built' },
@@ -86,12 +88,22 @@ export const PENDING_SCREENS: Readonly<Record<string, PendingScreen>> = Object.f
   S9: { state: 'built-unwired', milestone: 'F16', component: `${TX}#ReferendaList`, waitingOn: 'a live transport for its reader' },
   S10: { state: 'built-unwired', milestone: 'F16', component: `${TX}#VoteForm`, waitingOn: 'a live transport and a signer session' },
   S11: { state: 'built-unwired', milestone: 'F16', component: `${TX}#OracleResolutionBallot`, waitingOn: 'a live transport and a signer session' },
-  // The Asset Hub connection they were waiting on exists (F18, `assetHubConnector`). What
-  // is left is the same thing S2 and S9–S11 wait on — a reader over a live transport — with
-  // the wrinkle that deposit needs **two**, one per chain, and withdraw needs only the local
-  // one. That asymmetry is 02 §7.7's and is why the two are listed apart rather than together.
-  S12: { state: 'built-unwired', milestone: 'F18', component: `${TX}#DepositForm`, waitingOn: 'readers over live transports on both this chain and Asset Hub' },
-  S13: { state: 'built-unwired', milestone: 'F18', component: `${TX}#WithdrawForm`, waitingOn: 'a live transport for its reader' },
+  // F18 closed the wiring these two were waiting on: `openDepositLeg` attaches Asset Hub,
+  // opens a reader over each chain and pairs them, `openWithdrawLeg` takes no Asset Hub
+  // argument at all (02 §7.7's asymmetry, written into a signature), and `startChainSession`
+  // is the caller `startLightClient` never had. What is left is **not** code and is the same
+  // blocker every other row above carries — a chain to boot against: `release-sources.json`
+  // pins `chainSpecHashes` and `genesisHashes` null and declares `chainSpecs: []`, so
+  // `releaseChainSpecs()` is `unpinned` and nothing is handed to smoldot. A development pin
+  // exists for drills and is deliberately not a release pin (ruled 2026-08-07): a release
+  // pinned to `bleavit_dev` would verify successfully about a chain that is not Bleavit.
+  //
+  // They stay listed apart because their remainders differ even now. Deposit additionally
+  // needs 10 §5.2's **foreign** verdict, which `readDepositInputs` requires and nothing
+  // produces — `classifyForeign` needs a probe of every 02 §7.7 surface through a typed API,
+  // and no module constructs `createClient` yet. Withdraw needs none of that, by §11.9.2.
+  S12: { state: 'built-unwired', milestone: 'F18', component: `${TX}#DepositForm`, waitingOn: 'a pinned chain to boot against, and a producer for the Asset Hub compatibility verdict — its two-chain reader pair is wired (openDepositLeg)' },
+  S13: { state: 'built-unwired', milestone: 'F18', component: `${TX}#WithdrawForm`, waitingOn: 'a pinned chain to boot against — its reader is wired (openWithdrawLeg) and needs this chain alone' },
   S14: { state: 'built-unwired', milestone: 'F17', component: `${TX}#RegisterReporter`, waitingOn: 'a live transport and a signer session' },
   S15: { state: 'built-unwired', milestone: 'F17', component: `${TX}#PendingActions`, waitingOn: 'a live transport and a signer session' },
   S16: { state: 'built-unwired', milestone: 'F17', component: `${TX}#TreasuryStreams`, waitingOn: 'a live transport and a signer session' },

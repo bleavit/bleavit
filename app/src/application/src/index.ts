@@ -55,4 +55,25 @@ export {
   type DegradationRow,
 } from './degradation.js';
 export { implementedScreens, unaccountedScreens } from './composition.js';
-export { releaseMetadataPins, releaseParaChain } from './chain-identity.js';
+export { releaseChainSpecs, releaseMetadataPins, releaseParaChain, releaseWorkerSource } from './chain-identity.js';
+export {
+  UnusablePinError,
+  startChainSession,
+  type ChainSession,
+  type ChainSessionDeps,
+  type ChainSpecs,
+  type WorkerSource,
+} from './chain-session.js';
+export { connectChain } from './chain-boot.js';
+export {
+  fundingArtifacts,
+  openDepositLeg,
+  openWithdrawLeg,
+  type DepositLeg,
+  type DepositLegDeps,
+  type FundingArtifacts,
+  type FundingPins,
+  type OpenReader,
+  type WithdrawLeg,
+  type WithdrawLegDeps,
+} from './funding-session.js';

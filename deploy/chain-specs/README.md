@@ -72,3 +72,32 @@ definitions (milestone B7) live in `zombienet/` and `chopsticks/`, with their
 pinned tooling in `tools/env/` (`generate-relay-specs.sh` reuses this pipeline
 for the Bleavit drill spec). The ss58-registry submission artifact, which must
 land before Phase 2, is in `deploy/ss58/`.
+
+## Booting the canonical client against a dev spec (F18; ruled 2026-08-07)
+
+The frontend's `startChainSession` takes its chain pin by **injection**, so a
+drill harness may boot the client against `bleavit-dev.json`. Produce the pin
+with:
+
+```sh
+node app/tools/dev-chain-pin.ts \
+  --relay <relay-spec.json> --relay-genesis 0x… \
+  --para  deploy/chain-specs/out/bleavit-dev.json --para-genesis 0x… \
+  --out   <a scratch path>
+```
+
+Two rules govern it, and both are structural rather than remembered.
+
+**A dev pin may exist. It may never live in
+`app/tools/release/sources/release-sources.json`.** That file's `paraId`,
+`chainSpecHashes` and `genesisHashes` stay `null` until a production chain
+exists; a release pinned to `bleavit_dev` on `paseo-local` would pass the
+chain-spec hash check, pass the 10 §3.1 genesis check, and report `verified`
+about a chain that is not Bleavit. The tool refuses to write into the release
+sources, `app/dist/` or `app/release-out/`, and nothing dev-generated enters
+`dist/chain-specs/`.
+
+**The genesis hash is read from the chain, never computed from the file.** It is
+the hash of the genesis header, whose state root is the trie root of the genesis
+storage, so no function of the spec bytes produces it. Read it from the started
+node (`chainSpec_v1_genesisHash`) and pass it in; the tool refuses to guess one.
