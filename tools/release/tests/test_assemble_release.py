@@ -108,11 +108,24 @@ class AssembleReleaseTests(unittest.TestCase):
         self.supply_summary.write_text(
             json.dumps(
                 {
-                    "schema": "bleavit.supply-chain.v3",
+                    "schema": "bleavit.supply-chain.v4",
                     "ignored_advisory_ids": ["RUSTSEC-2026-0001"],
                     "waived_ghsa_only": [
                         {"id": "GHSA-vxx9-2994-q338", "package": "yamux", "version": "0.12.1"}
                     ],
+                    # v4 discloses the npm leg too (14 §3.6 TH-44; SQ-985). A
+                    # release that published only the cargo waivers would
+                    # understate accepted risk in the dependency graph of the
+                    # bundle a browser executes, which is that row's own subject.
+                    "waived_npm": [
+                        {
+                            "id": "GHSA-8988-4f7v-96qf",
+                            "package": "@opentelemetry/core",
+                            "version": "1.30.1",
+                            "reaches_bundle": "no",
+                        }
+                    ],
+                    "npm_lockfiles": ["app/pnpm-lock.yaml"],
                     # v3 covers every committed cargo lockfile, not the two the v2
                     # shape could name. The set is checked against
                     # tools/ci/audited-workspaces.toml, so a fifth workspace makes

@@ -20,14 +20,21 @@ enforces exactly the complement of cargo-audit's reach:
 A waiver that matches no finding also fails (stale-waiver leg): an exemption
 can never outlive the advisory that justified it — the limit-coverage registry
 discipline (SQ-155) applied to supply chain.
+
+SCOPE: cargo lockfiles only. The skip rule above is what makes this checker
+cargo-specific, and it is why `app/pnpm-lock.yaml` is NOT scanned here. RustSec
+covers crates.io and nothing else, so every npm finding would fall through the
+skip as "GHSA-only" and the gate would look correct — but for a false reason,
+with no cargo-audit behind it to gate what it skipped. npm lockfiles therefore
+get `tools/ci/check-npm-advisories.py`, whose rule is that nothing is skipped.
+The fail-closed scanner driver both share lives in `tools/ci/osv_scan.py`.
 """
 
 from __future__ import annotations
 
 import argparse
-import json
+import importlib.util
 import re
-import subprocess
 import sys
 from pathlib import Path
 
@@ -35,6 +42,29 @@ try:
     import tomllib
 except ModuleNotFoundError:  # Python 3.10 compatibility for the local quality gate.
     tomllib = None  # type: ignore[assignment]
+
+
+def _load_sibling(name: str):
+    """Import a sibling module by explicit path.
+
+    This file is executed as a script by the gate AND loaded by path from
+    `tools/ci/supply-chain-gates.sh` and from the test suites, so `tools/ci` is
+    not reliably on `sys.path`. Resolving from `__file__` works under all three.
+    """
+    spec = importlib.util.spec_from_file_location(
+        f"bleavit_{name}", Path(__file__).resolve().parent / f"{name}.py"
+    )
+    if spec is None or spec.loader is None:
+        raise OSError(f"cannot load sibling module {name}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+osv_scan = _load_sibling("osv_scan")
+# Re-exported so this module's public surface is unchanged by the move.
+SCAN_OK = osv_scan.SCAN_OK
+scan = osv_scan.scan
 
 
 def strip_comment(raw: str) -> str:
@@ -154,35 +184,6 @@ def rustsec_covered(vuln: dict, primaries: set[str]) -> bool:
     if vuln.get("id", "").startswith("RUSTSEC-"):
         return True
     return any(alias in primaries for alias in (vuln.get("aliases") or []))
-
-
-# osv-scanner v2 exit codes. 0 and 1 both mean "the lockfile was scanned" — 1
-# only adds "and something was found", which is this checker's input, not its
-# verdict. Every other code is a failure to scan (127 general error, 128 no
-# package sources), and MUST NOT be read as "nothing found": that would turn an
-# unreachable OSV API or a mistyped lockfile path into a silently green security
-# gate. Verified against v2.4.0: a vulnerable lockfile exits 1 with JSON; a
-# missing, empty, or package-less lockfile exits 127 with no stdout at all.
-SCAN_OK = frozenset({0, 1})
-
-
-def scan(scanner: str, lockfile: Path) -> dict:
-    proc = subprocess.run(
-        [scanner, "scan", "source", f"--lockfile={lockfile}", "--format=json"],
-        capture_output=True,
-        text=True,
-    )
-    if proc.returncode not in SCAN_OK:
-        sys.exit(
-            f"osv-scanner failed to scan {lockfile} (exit {proc.returncode}); refusing to\n"
-            f"treat a failed scan as a clean one:\n{proc.stderr.strip()[-2000:]}"
-        )
-    if not proc.stdout.strip():
-        sys.exit(f"osv-scanner produced no output for {lockfile}:\n{proc.stderr}")
-    try:
-        return json.loads(proc.stdout)
-    except json.JSONDecodeError as exc:
-        sys.exit(f"osv-scanner output for {lockfile} is not JSON ({exc}):\n{proc.stdout[:2000]}")
 
 
 def ghsa_only_findings(report: dict, lockfile: Path) -> list[dict]:

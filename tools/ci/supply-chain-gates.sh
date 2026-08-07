@@ -20,14 +20,23 @@ if [[ ! -x "$auditor" ]] || [[ "$($auditor --version 2>/dev/null || true)" != "$
 fi
 
 # The audited set is DERIVED, never restated here. tools/ci/audited-workspaces.toml
-# classifies every committed cargo lockfile, and this checker fails when the
-# repository holds one the manifest does not (or the manifest holds one git does
-# not track). The gate used to name `Cargo.lock` and `keeper/Cargo.lock` inline;
-# `app/Cargo.lock` and `fuzz/Cargo.lock` arrived later and went unaudited behind a
-# green job, because nothing compared the gate's list against the repository.
+# classifies every committed lockfile in every ecosystem, and this checker fails
+# when the repository holds one the manifest does not (or the manifest holds one
+# git does not track). The gate used to name `Cargo.lock` and `keeper/Cargo.lock`
+# inline; `app/Cargo.lock` and `fuzz/Cargo.lock` arrived later and went unaudited
+# behind a green job, because nothing compared the gate's list against the
+# repository. `app/pnpm-lock.yaml` was the same hole one ecosystem over and
+# outlived the cargo one, because a checker that only listed `*Cargo.lock` could
+# not have found it however carefully it compared (SQ-985).
+#
+# Rows are filtered by ecosystem HERE and never inside the checker's coverage
+# assertion, which always spans every row. Narrowing the work list must never
+# narrow what the repository is checked against.
 workspaces_manifest="${BLEAVIT_AUDITED_WORKSPACES:-$repo_root/tools/ci/audited-workspaces.toml}"
 workspace_rows=$(python3 "$repo_root/tools/ci/check-audited-workspaces.py" \
-  --manifest "$workspaces_manifest" --repo-root "$repo_root" --print)
+  --manifest "$workspaces_manifest" --repo-root "$repo_root" --print --ecosystem cargo)
+npm_rows=$(python3 "$repo_root/tools/ci/check-audited-workspaces.py" \
+  --manifest "$workspaces_manifest" --repo-root "$repo_root" --print --ecosystem npm)
 
 assert_lockfile() {
   local lockfile=$1
@@ -60,7 +69,7 @@ assert_lockfile() {
 # whatever cargo the environment provides, which is the behavior before this
 # leg grew past two workspaces.
 metadata_toolchain=$(rustup show active-toolchain 2>/dev/null | head -1 | awk '{print $1}' || true)
-while IFS=$'\t' read -r ws_name ws_dir ws_lockfile; do
+while IFS=$'\t' read -r ws_name ws_eco ws_dir ws_lockfile; do
   assert_lockfile "$ws_lockfile"
   (
     cd "$repo_root/$ws_dir"
@@ -86,7 +95,7 @@ done <<<"$workspace_rows"
 # database is a process-wide clone under ~/.cargo/advisory-db, so re-fetching it
 # per workspace would only add latency and flakiness.
 audit_fetch_done=0
-while IFS=$'\t' read -r ws_name ws_dir ws_lockfile; do
+while IFS=$'\t' read -r ws_name ws_eco ws_dir ws_lockfile; do
   echo "== cargo-audit: $ws_name ($ws_lockfile)"
   (
     cd "$repo_root/$ws_dir"
@@ -131,7 +140,7 @@ else
   fi
 fi
 ghsa_args=()
-while IFS=$'\t' read -r ws_name ws_dir ws_lockfile; do
+while IFS=$'\t' read -r ws_name ws_eco ws_dir ws_lockfile; do
   ghsa_args+=(--lockfile "$repo_root/$ws_lockfile")
 done <<<"$workspace_rows"
 python3 "$repo_root/tools/ci/check-ghsa-only.py" \
@@ -139,20 +148,60 @@ python3 "$repo_root/tools/ci/check-ghsa-only.py" \
   --waivers "${BLEAVIT_GHSA_WAIVERS:-$repo_root/tools/ci/ghsa-waivers.toml}" \
   "${ghsa_args[@]}"
 
+# Leg 4 — npm advisories (14 §3.6 TH-44).
+#
+# TH-44 lists "`npm audit`/OSV CI" among its mitigations and nothing implemented
+# it. `app/pnpm-lock.yaml` backs the bundle a browser executes and was outside
+# every supply-chain gate here (SQ-985). The same pinned osv-scanner serves it:
+# the scanner picks its ecosystem from the lockfile's own name, so one digest-
+# pinned binary covers both. `pnpm audit` is deliberately NOT used — it ships
+# whatever pnpm ships rather than a pinned digest, its findings come from npm's
+# own GHSA mirror which OSV already aggregates, and its ignore mechanism
+# (`pnpm.auditConfig.ignoreCves`) cannot expire the way a waiver file does.
+#
+# The verdict rule is stricter than leg 3's and has its own checker for that
+# reason: leg 3 skips what cargo-audit gates, and nothing gates what this leg
+# would skip. See tools/ci/check-npm-advisories.py.
+npm_args=()
+while IFS=$'\t' read -r ws_name ws_eco ws_dir ws_lockfile; do
+  [[ -n "$ws_lockfile" ]] || continue
+  assert_lockfile "$ws_lockfile"
+  npm_args+=(--lockfile "$repo_root/$ws_lockfile")
+done <<<"$npm_rows"
+if [[ ${#npm_args[@]} -eq 0 ]]; then
+  # An empty npm work list is a manifest defect, not a clean tree: this
+  # repository commits `app/pnpm-lock.yaml`, and a run that scanned no npm
+  # lockfile at all would print nothing and pass. Fail instead.
+  echo "no npm lockfile rows in $workspaces_manifest; refusing to report a clean npm leg" >&2
+  exit 1
+fi
+python3 "$repo_root/tools/ci/check-npm-advisories.py" \
+  --scanner "$osv" \
+  --waivers "${BLEAVIT_NPM_WAIVERS:-$repo_root/tools/ci/npm-advisory-waivers.toml}" \
+  "${npm_args[@]}"
+
 if [[ -n "$summary_out" ]]; then
   summary_tmp=$(mktemp -d)
   trap 'rm -rf "$summary_tmp"' EXIT
   summary_args=()
-  while IFS=$'\t' read -r ws_name ws_dir ws_lockfile; do
+  while IFS=$'\t' read -r ws_name ws_eco ws_dir ws_lockfile; do
     (
       cd "$repo_root/$ws_dir"
       "$auditor" audit --json --no-fetch >"$summary_tmp/$ws_name.json"
     )
     summary_args+=("$ws_name=$summary_tmp/$ws_name.json")
   done <<<"$workspace_rows"
+  npm_lockfiles=""
+  while IFS=$'\t' read -r ws_name ws_eco ws_dir ws_lockfile; do
+    [[ -n "$ws_lockfile" ]] || continue
+    npm_lockfiles+="$ws_lockfile"$'\n'
+  done <<<"$npm_rows"
   python3 - "$summary_out" \
     "${BLEAVIT_GHSA_WAIVERS:-$repo_root/tools/ci/ghsa-waivers.toml}" \
     "$repo_root/tools/ci/check-ghsa-only.py" \
+    "${BLEAVIT_NPM_WAIVERS:-$repo_root/tools/ci/npm-advisory-waivers.toml}" \
+    "$repo_root/tools/ci/check-npm-advisories.py" \
+    "$npm_lockfiles" \
     "${summary_args[@]}" <<'PY'
 import importlib.util
 import json
@@ -162,7 +211,10 @@ from pathlib import Path
 output = Path(sys.argv[1])
 ghsa_waivers = Path(sys.argv[2])
 checker_path = Path(sys.argv[3])
-reports = [argument.split("=", 1) for argument in sys.argv[4:]]
+npm_waivers = Path(sys.argv[4])
+npm_checker_path = Path(sys.argv[5])
+npm_lockfiles = sorted(line for line in sys.argv[6].splitlines() if line.strip())
+reports = [argument.split("=", 1) for argument in sys.argv[7:]]
 
 
 def load(path):
@@ -210,18 +262,42 @@ for name, path in reports:
     union.update(row["ignored_advisory_ids"])
     workspaces[name] = row
 
-spec = importlib.util.spec_from_file_location("check_ghsa_only", checker_path)
-checker = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(checker)
+def load_checker(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+checker = load_checker("check_ghsa_only", checker_path)
 waived_ghsa_only = [
     {"id": identifier, "package": package, "version": version}
     for identifier, package, version in sorted(checker.load_waivers(ghsa_waivers))
 ]
 
+# v4 extends the same disclosure property to the npm leg. v3's own comment records
+# why: extending the gate without extending the summary turns a full disclosure
+# into a partial one silently. An npm waiver is accepted risk in the bundle's own
+# dependency graph, so a release that publishes only the cargo waivers understates
+# exactly the risk 14 §3.6 TH-44 is about. `reaches_bundle` travels with the entry
+# because it is the fact a reader of the manifest needs and cannot recover.
+npm_checker = load_checker("check_npm_advisories", npm_checker_path)
+waived_npm = [
+    {
+        "id": row["id"],
+        "package": row["package"],
+        "version": row["version"],
+        "reaches_bundle": row["reaches_bundle"],
+    }
+    for _key, row in sorted(npm_checker.load_waivers(npm_waivers).items())
+]
+
 summary = {
-    "schema": "bleavit.supply-chain.v3",
+    "schema": "bleavit.supply-chain.v4",
     "ignored_advisory_ids": sorted(union),
     "waived_ghsa_only": waived_ghsa_only,
+    "waived_npm": waived_npm,
+    "npm_lockfiles": npm_lockfiles,
     "workspaces": workspaces,
 }
 output.parent.mkdir(parents=True, exist_ok=True)

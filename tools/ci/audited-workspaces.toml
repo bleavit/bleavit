@@ -1,14 +1,16 @@
-# Every committed cargo lockfile in this repository, and the workspace that owns it.
+# Every committed dependency lockfile in this repository, and the workspace that owns it.
 #
-# `tools/ci/supply-chain-gates.sh` drives all three of its legs from this file: the
+# `tools/ci/supply-chain-gates.sh` drives all four of its legs from this file: the
 # `cargo metadata --locked` committed-lockfile assertion, the `cargo-audit` RustSec run,
-# and the `tools/ci/check-ghsa-only.py` GHSA-complement run. The gate derives its work
-# list here instead of naming lockfiles inline.
+# the `tools/ci/check-ghsa-only.py` GHSA-complement run, and the
+# `tools/ci/check-npm-advisories.py` npm run. The gate derives its work list here
+# instead of naming lockfiles inline.
 #
 # THIS FILE IS EXHAUSTIVE. `tools/ci/check-audited-workspaces.py` compares it against
-# `git ls-files -- '*Cargo.lock'` and fails on any difference in either direction. A new
-# cargo workspace therefore turns the supply-chain gate red until somebody classifies it
-# here, and a deleted one turns it red until somebody removes its row.
+# `git ls-files` over every lockfile name it knows, in every ecosystem, and fails on any
+# difference in either direction. A new workspace therefore turns the supply-chain gate
+# red until somebody classifies it here, and a deleted one turns it red until somebody
+# removes its row.
 #
 # That comparison exists because the gate used to name its lockfiles inline. It audited
 # `Cargo.lock` and `keeper/Cargo.lock`. `app/Cargo.lock` and `fuzz/Cargo.lock` arrived
@@ -16,20 +18,33 @@
 # unaudited behind a green Supply-chain job for as long as they existed. A coverage hole
 # reports as silence rather than as absence, so the list is now derived and checked.
 #
+# `app/pnpm-lock.yaml` was the same hole one ecosystem over, and it lasted longer: the
+# gate knew only about cargo, so widening the cargo list could never have found it.
+# Discovery is therefore keyed on ecosystem, and adding one is what admits a new lockfile
+# name — `LOCKFILE_NAMES` in the checker is the single place that grows.
+#
+# ECOSYSTEM decides which legs a row receives:
+#
+#   cargo — all four cargo legs. `Cargo.lock`.
+#   npm   — the osv-scanner npm leg. `pnpm-lock.yaml`, `package-lock.json`,
+#           `npm-shrinkwrap.json`, `yarn.lock`, `bun.lock` or `bun.lockb`.
+#
 # Doc 15 §4.5 clause 4 (blast-radius containment) requires a workspace outside the pinned
 # SDK closure to be audited FROM ITS OWN ROOT. `cargo-audit` reads `.cargo/audit.toml`
 # from its working directory, so a single run started in the repository root would apply
-# the root's stable2606 exception set to all four lockfiles. Every leg below therefore
+# the root's stable2606 exception set to every cargo lockfile. Every cargo leg therefore
 # runs with its workspace directory as the working directory. Only the root workspace
 # owns an exception file, and the other three audit with none — measured, not assumed:
 # a `--json` run from each of `app`, `fuzz` and `keeper` reports `settings.ignore = []`.
 #
 # `audit_config` records that fact per row. A row that gains an exception file also gains
 # a reviewer obligation, because an exception written for one workspace must never excuse
-# another.
+# another. npm rows carry no exception file at all: their waivers live in
+# `tools/ci/npm-advisory-waivers.toml`, which is per-entry annotated and expires.
 
 [[workspace]]
 name = "root"
+ecosystem = "cargo"
 directory = "."
 lockfile = "Cargo.lock"
 audit_config = ".cargo/audit.toml"
@@ -40,6 +55,7 @@ ships = "the parachain runtime, the collator node, every pallet and the referenc
 
 [[workspace]]
 name = "keeper"
+ecosystem = "cargo"
 directory = "keeper"
 lockfile = "keeper/Cargo.lock"
 audit_config = ""
@@ -50,6 +66,7 @@ ships = "the off-chain keeper binary (01 §4.2)"
 
 [[workspace]]
 name = "app"
+ecosystem = "cargo"
 directory = "app"
 lockfile = "app/Cargo.lock"
 audit_config = ""
@@ -61,6 +78,7 @@ ships = "the F22 Tauri desktop shell (`src-tauri`) and the pure `embedded-tree` 
 
 [[workspace]]
 name = "fuzz"
+ecosystem = "cargo"
 directory = "fuzz"
 lockfile = "fuzz/Cargo.lock"
 audit_config = ""
@@ -71,3 +89,22 @@ ships = "the `bleavit-fuzz` cargo-fuzz targets (S2, N7, N8, N10)"
 # script records at its leg 1. Nothing here ships to a user, and the workspace still
 # carries the same transitive crates the runtime does, so an advisory here is a real
 # signal about the tree even when the binary is a test harness. Added 2026-08-07.
+
+[[workspace]]
+name = "app-npm"
+ecosystem = "npm"
+directory = "app"
+lockfile = "app/pnpm-lock.yaml"
+audit_config = ""
+ships = "the browser bundle every user loads (10 §10.1), plus the app's own build, test and measurement tooling"
+# The highest-consequence lockfile in the repository and the last one to be audited by
+# anything. 14 §3.6 TH-44 (*Frontend supply-chain compromise*) names "`npm audit`/OSV CI"
+# among its mitigations, so this is a spec-mandated control that had no implementation
+# until 2026-08-07 — found, like the cargo half, by GitHub's own push notice rather than
+# by a gate.
+#
+# One pnpm workspace holds all 50 projects, so ONE lockfile covers the shipped client
+# packages and the build tooling alike. That is why `reaches_bundle` is a required field
+# on every npm waiver: the lockfile itself cannot tell a browser dependency from a
+# dependency of the tool that measures the browser, and the whole triage turns on which
+# one a finding is.

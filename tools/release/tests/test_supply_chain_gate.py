@@ -15,13 +15,27 @@ GATE = REPO_ROOT / "tools/ci/supply-chain-gates.sh"
 WORKSPACES_MANIFEST = REPO_ROOT / "tools/ci/audited-workspaces.toml"
 
 
-def audited_workspace_names() -> set[str]:
+def audited_rows() -> list[dict]:
     checker = REPO_ROOT / "tools/ci/check-audited-workspaces.py"
     spec = importlib.util.spec_from_file_location("check_audited_workspaces", checker)
     module = importlib.util.module_from_spec(spec)
     sys.modules["check_audited_workspaces"] = module
     spec.loader.exec_module(module)
-    return {row["name"] for row in module.load_workspaces(WORKSPACES_MANIFEST)}
+    return module.load_workspaces(WORKSPACES_MANIFEST)
+
+
+def audited_workspace_names() -> set[str]:
+    """The CARGO workspace names only.
+
+    The summary's `workspaces` block reports cargo-audit output, and cargo-audit
+    never runs against an npm lockfile. The npm rows are disclosed under
+    `npm_lockfiles` instead, and the same completeness rule is asserted there.
+    """
+    return {row["name"] for row in audited_rows() if row["ecosystem"] == "cargo"}
+
+
+def audited_npm_lockfiles() -> set[str]:
+    return {row["lockfile"] for row in audited_rows() if row["ecosystem"] == "npm"}
 
 
 # The stub reports a different warning shape per workspace, keyed on the directory
@@ -46,13 +60,25 @@ if '--json' in sys.argv:
 raise SystemExit(0)
 """
 
-# Reporting no GHSA-only findings keeps the gate hermetic: this suite covers the
-# summary, and the GHSA-only leg has its own suite in tools/ci/tests/.
+# Reporting one waived finding per ecosystem keeps the gate hermetic: this suite
+# covers the summary, and each advisory leg has its own suite in tools/ci/tests/.
+#
+# The stub answers by ECOSYSTEM, keyed on the lockfile it was handed. That is not
+# decoration: the npm checker asserts `package.ecosystem == "npm"` precisely so a
+# misrouted lockfile fails loudly, so a stub that answered the same shape for both
+# would pass a gate whose routing was wrong.
 STUB_SCANNER = """#!/usr/bin/env python3
-import json
+import json, sys
+lockfile = next(a.split('=', 1)[1] for a in sys.argv if a.startswith('--lockfile='))
+if lockfile.endswith('pnpm-lock.yaml'):
+    package = {'name': 'demo-npm', 'version': '4.5.6', 'ecosystem': 'npm'}
+    finding = {'id': 'GHSA-test-npm0', 'aliases': [], 'summary': 'npm fixture'}
+else:
+    package = {'name': 'demo', 'version': '1.2.3', 'ecosystem': 'crates.io'}
+    finding = {'id': 'GHSA-test-0000', 'aliases': [], 'summary': 'fixture'}
 print(json.dumps({'results': [{'packages': [{
-    'package': {'name': 'demo', 'version': '1.2.3'},
-    'vulnerabilities': [{'id': 'GHSA-test-0000', 'aliases': [], 'summary': 'fixture'}],
+    'package': package,
+    'vulnerabilities': [finding],
 }]}]}))
 raise SystemExit(1)
 """
@@ -70,6 +96,18 @@ blocked_by = "fixture pin"
 clears_when = "never"
 """
 
+STUB_NPM_WAIVERS = """\
+[[waiver]]
+id = "GHSA-test-npm0"
+package = "demo-npm"
+version = "4.5.6"
+reaches_bundle = "no"
+reason = "fixture"
+blocked_by = "fixture pin"
+clears_when = "never"
+triaged = "2026-08-07"
+"""
+
 
 class SupplyChainSummaryTests(unittest.TestCase):
     def run_gate(self, root: Path) -> dict:
@@ -81,12 +119,15 @@ class SupplyChainSummaryTests(unittest.TestCase):
         scanner.chmod(0o755)
         waivers = root / "ghsa-waivers.toml"
         waivers.write_text(STUB_WAIVERS, encoding="utf-8")
+        npm_waivers = root / "npm-advisory-waivers.toml"
+        npm_waivers.write_text(STUB_NPM_WAIVERS, encoding="utf-8")
         summary = root / "summary.json"
 
         environment = dict(os.environ)
         environment["BLEAVIT_AUDITOR"] = str(auditor)
         environment["BLEAVIT_OSV_SCANNER"] = str(scanner)
         environment["BLEAVIT_GHSA_WAIVERS"] = str(waivers)
+        environment["BLEAVIT_NPM_WAIVERS"] = str(npm_waivers)
         completed = subprocess.run(
             [str(GATE), "--summary-out", str(summary)],
             cwd=REPO_ROOT,
@@ -110,10 +151,23 @@ class SupplyChainSummaryTests(unittest.TestCase):
         """
         with tempfile.TemporaryDirectory() as temporary:
             document = self.run_gate(Path(temporary))
-        self.assertEqual(document["schema"], "bleavit.supply-chain.v3")
+        self.assertEqual(document["schema"], "bleavit.supply-chain.v4")
         self.assertEqual(set(document["workspaces"]), audited_workspace_names())
         self.assertIn("app", document["workspaces"])
         self.assertIn("fuzz", document["workspaces"])
+
+    def test_summary_covers_every_audited_npm_lockfile(self) -> None:
+        """The same disclosure property, one ecosystem over (SQ-985).
+
+        `app/pnpm-lock.yaml` backs the bundle every user loads and was audited by
+        nothing until 2026-08-07. Binding the disclosed set to
+        tools/ci/audited-workspaces.toml means an npm lockfile can never be
+        scanned without also being named, nor named without being scanned.
+        """
+        with tempfile.TemporaryDirectory() as temporary:
+            document = self.run_gate(Path(temporary))
+        self.assertEqual(set(document["npm_lockfiles"]), audited_npm_lockfiles())
+        self.assertIn("app/pnpm-lock.yaml", document["npm_lockfiles"])
 
     def test_summary_discloses_ignores_and_warning_counts(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -124,6 +178,21 @@ class SupplyChainSummaryTests(unittest.TestCase):
         self.assertEqual(
             document["waived_ghsa_only"],
             [{"id": "GHSA-test-0000", "package": "demo", "version": "1.2.3"}],
+        )
+        # v4: the npm leg's waivers are accepted risk in the dependency graph of
+        # the bundle a browser executes (14 §3.6 TH-44), so they are disclosed on
+        # the same terms. `reaches_bundle` travels with the entry because a reader
+        # of the manifest cannot recover it.
+        self.assertEqual(
+            document["waived_npm"],
+            [
+                {
+                    "id": "GHSA-test-npm0",
+                    "package": "demo-npm",
+                    "version": "4.5.6",
+                    "reaches_bundle": "no",
+                }
+            ],
         )
         self.assertEqual(document["workspaces"]["root"]["allowed_warning_count"], 3)
         self.assertEqual(document["workspaces"]["keeper"]["allowed_warning_count"], 1)

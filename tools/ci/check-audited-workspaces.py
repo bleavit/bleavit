@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail when a committed cargo lockfile is not classified for the supply-chain gate.
+"""Fail when a committed lockfile is not classified for the supply-chain gate.
 
 `tools/ci/supply-chain-gates.sh` used to name its lockfiles inline. It audited
 `Cargo.lock` and `keeper/Cargo.lock`, and nothing ever compared that pair against
@@ -9,17 +9,26 @@ long as those workspaces existed. A gate that never looks reports silence rather
 than absence.
 
 This checker removes the class of defect rather than the instance. It reads
-`tools/ci/audited-workspaces.toml`, lists every committed cargo lockfile with
+`tools/ci/audited-workspaces.toml`, lists every committed lockfile with
 `git ls-files`, and fails on any difference in either direction:
 
   * a committed lockfile with no row — the fifth lockfile nobody wired up;
   * a row naming a lockfile git does not track — a stale row whose workspace was
     deleted or renamed, which would otherwise fail later and less clearly.
 
-`--print` emits one `name<TAB>directory<TAB>lockfile` row per workspace on stdout
-after the same check passes, so the gate script derives its work list from the
-manifest instead of restating it. The check always runs, so `--print` can never
-hand the gate a list it has not just verified.
+Discovery spans ECOSYSTEMS, not just cargo. `app/pnpm-lock.yaml` was the same
+coverage hole one ecosystem over and outlived the cargo one, because a checker
+that only ever listed `*Cargo.lock` could not have reported it however carefully
+it compared. `LOCKFILE_NAMES` below is the single place a new ecosystem is
+admitted, so a `package-lock.json` or a `yarn.lock` appearing anywhere in the
+repository fails this check until somebody classifies it.
+
+`--print` emits one `name<TAB>ecosystem<TAB>directory<TAB>lockfile` row per
+workspace on stdout after the same check passes, so the gate script derives its
+work list from the manifest instead of restating it. `--ecosystem` narrows that
+to one ecosystem's legs. The check always runs over ALL rows regardless of the
+filter, so `--print` can never hand the gate a list it has not just verified, and
+narrowing the output can never narrow the coverage assertion.
 """
 
 from __future__ import annotations
@@ -36,7 +45,28 @@ except ModuleNotFoundError:  # Python 3.10 compatibility for the local quality g
     tomllib = None  # type: ignore[assignment]
 
 
-REQUIRED_KEYS = {"name", "directory", "lockfile", "audit_config", "ships"}
+REQUIRED_KEYS = {"name", "ecosystem", "directory", "lockfile", "audit_config", "ships"}
+
+# The lockfile names each ecosystem's package manager writes, and therefore the
+# set `git ls-files` is asked about. A name missing here is a lockfile the gate
+# cannot notice, which is the failure mode this whole checker exists to remove —
+# so add the name when a tool is adopted, not when its first advisory lands.
+#
+# npm carries several because the ecosystem has several managers and a repository
+# can acquire a second one by accident (a stray `npm install` writes
+# `package-lock.json` beside a `pnpm-lock.yaml`). Listing them all means that
+# accident fails the gate instead of shipping a second unaudited dependency tree.
+LOCKFILE_NAMES = {
+    "cargo": ("Cargo.lock",),
+    "npm": (
+        "pnpm-lock.yaml",
+        "package-lock.json",
+        "npm-shrinkwrap.json",
+        "yarn.lock",
+        "bun.lock",
+        "bun.lockb",
+    ),
+}
 
 
 def strip_comment(raw: str) -> str:
@@ -128,35 +158,52 @@ def load_workspaces(path: Path) -> list[dict]:
                 f"{path}: workspace {row['name']} has unknown keys {sorted(unknown)}"
             )
         name, directory, lockfile = row["name"], row["directory"], row["lockfile"]
+        ecosystem = row["ecosystem"]
         if not name or not directory or not lockfile:
             raise SystemExit(f"{path}: workspace {name!r} has an empty name, directory or lockfile")
+        if ecosystem not in LOCKFILE_NAMES:
+            raise SystemExit(
+                f"{path}: workspace {name!r} declares unknown ecosystem {ecosystem!r}; "
+                f"known ecosystems are {sorted(LOCKFILE_NAMES)}"
+            )
         if name in seen_names:
             raise SystemExit(f"{path}: duplicate workspace name {name!r}")
         seen_names.add(name)
         if lockfile in seen_lockfiles:
             raise SystemExit(f"{path}: duplicate lockfile {lockfile!r}")
         seen_lockfiles.add(lockfile)
-        # The directory is where every leg runs, and the lockfile is what the GHSA
-        # leg scans. If they disagreed, the gate would audit one workspace while
-        # scanning another's dependencies and report both as covered.
-        expected = "Cargo.lock" if directory == "." else f"{directory}/Cargo.lock"
-        if lockfile != expected:
+        # The directory is where every leg runs, and the lockfile is what the
+        # scanning legs read. If they disagreed, the gate would audit one
+        # workspace while scanning another's dependencies and report both as
+        # covered. The ecosystem decides which basenames are legal, so a row
+        # cannot claim a `pnpm-lock.yaml` is cargo's and be handed to cargo legs.
+        expected = {
+            basename if directory == "." else f"{directory}/{basename}"
+            for basename in LOCKFILE_NAMES[ecosystem]
+        }
+        if lockfile not in expected:
             raise SystemExit(
                 f"{path}: workspace {name!r} declares lockfile {lockfile!r}, "
-                f"but directory {directory!r} owns {expected!r}"
+                f"but {ecosystem} directory {directory!r} owns one of "
+                f"{sorted(expected)}"
             )
     return rows
 
 
 def discover_lockfiles(repo_root: Path) -> list[str]:
-    """Every cargo lockfile git tracks, which is the set the gate owes coverage on.
+    """Every lockfile git tracks, which is the set the gate owes coverage on.
 
     `git ls-files` rather than a filesystem walk on purpose: an uncommitted
     lockfile is not something a release ships, and a filesystem walk would also
-    sweep vendored or build-output copies under `target/`.
+    sweep vendored or build-output copies under `target/` and `node_modules/`.
+
+    The patterns cover every ecosystem at once. Asking per ecosystem would let a
+    caller narrow discovery and narrow coverage with it, and coverage is the one
+    thing this checker must never let a caller narrow.
     """
+    patterns = [f"*{basename}" for names in LOCKFILE_NAMES.values() for basename in names]
     completed = subprocess.run(
-        ["git", "ls-files", "--", "*Cargo.lock"],
+        ["git", "ls-files", "--", *patterns],
         cwd=repo_root,
         capture_output=True,
         text=True,
@@ -166,7 +213,15 @@ def discover_lockfiles(repo_root: Path) -> list[str]:
             "git ls-files failed, so the audited-lockfile set cannot be established; "
             f"refusing to treat that as full coverage:\n{completed.stderr.strip()}"
         )
-    return sorted(line for line in completed.stdout.splitlines() if line.strip())
+    # `*yarn.lock` also matches `my-yarn.lock`, so the basename is re-checked
+    # rather than trusted: a pathspec is a convenience for narrowing the walk and
+    # is not the definition of what counts.
+    known = {basename for names in LOCKFILE_NAMES.values() for basename in names}
+    return sorted(
+        line
+        for line in completed.stdout.splitlines()
+        if line.strip() and Path(line).name in known
+    )
 
 
 def check(manifest: Path, repo_root: Path) -> tuple[list[dict], list[str]]:
@@ -204,7 +259,12 @@ def main() -> int:
         "--print",
         dest="print_rows",
         action="store_true",
-        help="emit name<TAB>directory<TAB>lockfile rows on stdout once the check passes",
+        help="emit name<TAB>ecosystem<TAB>directory<TAB>lockfile rows on stdout once the check passes",
+    )
+    parser.add_argument(
+        "--ecosystem",
+        choices=sorted(LOCKFILE_NAMES),
+        help="restrict --print to one ecosystem's rows; the coverage check still spans all of them",
     )
     args = parser.parse_args()
 
@@ -213,17 +273,17 @@ def main() -> int:
     # The report goes to stderr so `--print` keeps stdout machine-readable for the
     # gate script that consumes it.
     print(
-        f"audited cargo workspaces: {len(rows)} declared, "
+        f"audited workspaces: {len(rows)} declared, "
         f"{len(discover_lockfiles(args.repo_root))} lockfiles committed",
         file=sys.stderr,
     )
     for row in rows:
-        print(f"  {row['name']:8s} {row['lockfile']}", file=sys.stderr)
+        print(f"  {row['name']:8s} {row['ecosystem']:6s} {row['lockfile']}", file=sys.stderr)
 
     if errors:
         print(
             "\nFAIL: the supply-chain gate's lockfile coverage does not match the repository.\n"
-            "Every committed cargo lockfile must be classified in "
+            "Every committed lockfile must be classified in "
             "tools/ci/audited-workspaces.toml,\nbecause the gate audits exactly what that "
             "file declares and nothing else.",
             file=sys.stderr,
@@ -234,9 +294,11 @@ def main() -> int:
 
     if args.print_rows:
         for row in rows:
-            print(f"{row['name']}\t{row['directory']}\t{row['lockfile']}")
+            if args.ecosystem and row["ecosystem"] != args.ecosystem:
+                continue
+            print(f"{row['name']}\t{row['ecosystem']}\t{row['directory']}\t{row['lockfile']}")
     else:
-        print("\nOK: every committed cargo lockfile is classified and audited.", file=sys.stderr)
+        print("\nOK: every committed lockfile is classified and audited.", file=sys.stderr)
     return 0
 
 
