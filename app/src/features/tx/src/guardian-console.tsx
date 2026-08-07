@@ -55,8 +55,8 @@ import {
   type ApprovalContext,
   type GuardianPower,
   type PendingAction,
+  type ProposalTrigger,
   type ProposeInputs,
-  type TriggerState,
 } from './guardian.js';
 import { EvidencePanel } from './operator-consoles.js';
 import { operatorGate } from './operator-gate.js';
@@ -298,8 +298,15 @@ export function ProposeAction({
   readonly meter: AllowanceMeter;
   /** The power's own arguments and the justification hash — see `PowerArguments`. */
   readonly inputs: ProposeInputs;
-  /** Only `activate_playbook` has one; `undefined` for the other four powers. */
-  readonly trigger?: TriggerState | undefined;
+  /**
+   * What this caller states about the trigger. **Required**, and the other four powers say
+   * `{ kind: 'no-trigger-power' }` rather than omitting it.
+   *
+   * It was optional, and an omitted trigger on an `activate_playbook` form produced an empty
+   * block list and a `ready` control — a guardian signature offered on an emergency
+   * activation whose condition was never evaluated. See `ProposalTrigger`.
+   */
+  readonly trigger: ProposalTrigger;
   readonly session: TxSession;
   readonly onPropose: (window: GatePassed) => void;
 }): ReactNode {

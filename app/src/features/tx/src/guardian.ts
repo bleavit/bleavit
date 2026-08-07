@@ -43,11 +43,17 @@ export type GuardianPower =
  *
  * `unread` is a real state, not an absence: the read may have failed, and a client that
  * could not establish the trigger must not act as though it holds.
+ *
+ * **Every arm names the variant it describes**, and that field is what binds this union to
+ * `TRIGGER_READS`. Without it the table was a mirror of §11.8.2 that nothing derived from:
+ * a caller could report `active` for a variant no frozen surface answers and the client had
+ * no way to disagree. With it, `triggerRefusal` consults the table first, so *"this trigger
+ * has no read"* is decided by the mapping rather than asserted by whoever built the value.
  */
 export type TriggerState =
-  | { readonly kind: 'active'; readonly since: Verified<number> }
-  | { readonly kind: 'inactive' }
-  | { readonly kind: 'unread'; readonly reason: string }
+  | { readonly kind: 'active'; readonly trigger: PlaybookTrigger; readonly since: Verified<number> }
+  | { readonly kind: 'inactive'; readonly trigger: PlaybookTrigger }
+  | { readonly kind: 'unread'; readonly trigger: PlaybookTrigger; readonly reason: string }
   /**
    * No on-chain condition can set this trigger in this runtime.
    *
@@ -56,8 +62,30 @@ export type TriggerState =
    * never reports it active. Distinct from `inactive`, which means the condition is being
    * measured and does not hold, and from `unread`, which means retry: this one will not
    * become true, and an operator waiting for it should be told so.
+   *
+   * It carries **no reason field**: the sentence is derived from `TRIGGER_READS`, because a
+   * caller-supplied one is a claim about the runtime that the caller is also free to get
+   * wrong. A variant whose read list is empty is unavailable whatever arm it arrives in.
    */
-  | { readonly kind: 'unavailable'; readonly reason: string };
+  | { readonly kind: 'unavailable'; readonly trigger: PlaybookTrigger };
+
+/**
+ * What a caller states about a proposal's trigger — §11.8.2, and the fix for a 2026-08-07
+ * blocker.
+ *
+ * `activate_playbook` is the only power with a trigger. The other four say so **explicitly**
+ * with `no-trigger-power`, because the field used to be optional: omitting it on an
+ * `activate_playbook` proposal produced an empty block list and a `ready` control, which
+ * offered a 5-of-7 guardian signature on an emergency activation whose trigger was never
+ * evaluated. §11.8.2 forbids exactly that — an unreadable trigger is treated as an inactive
+ * one and the action is refused with the reason shown, never proposed on a check that did
+ * not run.
+ *
+ * An omission is therefore a compile error rather than a silent pass, which is the same
+ * device `RegistrationCheck.uncheckable` and `Combined<T>`'s `unestablished` arm use: the
+ * absence of an answer is a value somebody has to write down.
+ */
+export type ProposalTrigger = TriggerState | { readonly kind: 'no-trigger-power' };
 
 /**
  * One call inside a guardian action's enumerated batch.
@@ -207,9 +235,14 @@ export function approvalBlocks(context: ApprovalContext): readonly GuardianBlock
  * `unread` is treated exactly as `inactive`. Any other reading puts "we could not check"
  * on the same side as "we checked and it holds", on the one power whose entire
  * justification is that the trigger is live right now.
+ *
+ * Derived from `triggerRefusal` rather than switching on `kind` a second time: the two
+ * agreed by construction while both were hand-written switches, and *"may act"* and *"the
+ * sentence for why not"* drifting apart is a control that says one thing and does another.
+ * One decides; the other reports what it decided.
  */
 export function mayActivatePlaybook(trigger: TriggerState): boolean {
-  return trigger.kind === 'active';
+  return triggerRefusal(trigger) === undefined;
 }
 
 /**
@@ -226,6 +259,13 @@ export function mayActivatePlaybook(trigger: TriggerState): boolean {
  * `storage.constitution.phase_flags` under different bits (6 for `DeadMan`, 7 for
  * `ReserveHealth`). `GateBreach` needs `storage.epoch.epoch_of` alongside its flag map,
  * because `GateBreachFlags` is epoch-keyed and undecidable alone.
+ *
+ * **`triggerRefusal` reads this table, and that is what makes it a control rather than a
+ * comment.** Until 2026-08-07 nothing in `src/` consulted it — the mapping was mirrored from
+ * the specification, exported, and derived from by no code at all, so a caller reporting a
+ * variant `active` was simply believed. An empty read list now refuses the activation
+ * outright, which is the one case where believing the caller costs a 5-of-7 signature on a
+ * condition no frozen surface can report.
  */
 export const TRIGGER_READS: Readonly<Record<PlaybookTrigger, readonly SurfaceId[]>> =
   Object.freeze({
@@ -265,8 +305,18 @@ export const PLAYBOOK_TRIGGERS: Readonly<Record<PlaybookId, readonly PlaybookTri
     'PB-LEDGER-FREEZE': Object.freeze(['LedgerDrift'] as PlaybookTrigger[]),
   });
 
-/** Why a playbook is unavailable, in words a guardian can act on. */
+/**
+ * Why a playbook is unavailable, in words a guardian can act on.
+ *
+ * **`TRIGGER_READS` decides before the arm does**, and that ordering is the point. The table
+ * is §11.8.2's own mapping from variant to the frozen item that establishes it, so a variant
+ * whose list is empty is one no read can have established — and a caller reporting it
+ * `active` is reporting a check that could not have run. Deciding on the arm alone left the
+ * client believing whatever it was handed, on the action that costs a 5-of-7 signature.
+ */
 export function triggerRefusal(trigger: TriggerState): string | undefined {
+  const reads = TRIGGER_READS[trigger.trigger];
+  if (reads.length === 0) return DEPEG_TRIGGER_UNAVAILABLE;
   switch (trigger.kind) {
     case 'active':
       return undefined;
@@ -281,7 +331,15 @@ export function triggerRefusal(trigger: TriggerState): string | undefined {
         'not active: a condition this client could not establish is not one it will act on.'
       );
     case 'unavailable':
-      return trigger.reason;
+      // The table names a read for this variant, so *unavailable* is not something this
+      // release can say about it. Refused rather than believed: the caller has described a
+      // runtime this client can see is not the one it is talking to, and acting on the
+      // rest of the form would act on the same mistake.
+      return (
+        `This client reports the ${trigger.trigger} trigger as unavailable, and the ` +
+        `specification binds it to ${reads.join(', ')}. A trigger with a read behind it is ` +
+        'either active, inactive or unread, so this state cannot be acted on.'
+      );
   }
 }
 
@@ -621,9 +679,20 @@ export function proposeFormBlocks(inputs: ProposeInputs): readonly GuardianBlock
   return blocks;
 }
 
+/**
+ * Everything blocking `guardian.propose_action`, and the trigger argument is **required**.
+ *
+ * It was `TriggerState | undefined`, and an omitted trigger on an `activate_playbook`
+ * proposal produced an empty block list — so `operatorGate` returned `ready` and the console
+ * offered a 5-of-7 signature on an emergency activation whose trigger had never been
+ * evaluated. §11.8.2 is explicit that such an action is refused with the reason shown and
+ * *never proposed on a check that did not run*, and the previous shape had no way to tell an
+ * omission from a passed check. `ProposalTrigger` makes the omission a compile error and the
+ * *"no trigger applies"* claim an explicit value, checked in both directions below.
+ */
 export function proposalBlocks(
   meter: AllowanceMeter,
-  trigger: TriggerState | undefined,
+  trigger: ProposalTrigger,
 ): readonly GuardianBlock[] {
   const blocks: GuardianBlock[] = [];
   const remaining = allowanceRemaining(meter);
@@ -640,10 +709,33 @@ export function proposalBlocks(
       detail: `No ${meter.power} allowance remains in this window.`,
     });
   }
-  // Only `activate_playbook` has a trigger; passing one for another power is a caller
-  // error rather than a silent no-op, so it is checked when supplied.
-  if (trigger !== undefined && !mayActivatePlaybook(trigger)) {
-    blocks.push({ check: 'Trigger condition', detail: triggerRefusal(trigger) ?? '' });
+  const statesNoTrigger = trigger.kind === 'no-trigger-power';
+  if (meter.power === 'activate_playbook') {
+    if (statesNoTrigger) {
+      blocks.push({
+        check: 'Trigger condition',
+        detail:
+          'This activation states that no trigger applies, so the trigger was never ' +
+          'evaluated. A playbook is admissible only while its own on-chain condition is ' +
+          'verifiably active, and an action whose condition was not checked is refused ' +
+          'here rather than proposed on a check that did not run.',
+      });
+    } else {
+      const refusal = triggerRefusal(trigger);
+      if (refusal !== undefined) blocks.push({ check: 'Trigger condition', detail: refusal });
+    }
+  } else if (!statesNoTrigger) {
+    // The mirror, and it blocks for the same reason the first arm does. A trigger supplied
+    // for a power that has none means two forms have been confused; silently ignoring it
+    // proposes whichever action the rest of the form happens to describe.
+    blocks.push({
+      check: 'Trigger condition',
+      detail:
+        `A playbook trigger was supplied for ${meter.power}, and only activate_playbook ` +
+        'takes one. Two different proposal forms have been confused, so this is refused ' +
+        'rather than ignored — an ignored argument would leave whichever action the rest ' +
+        'of the form describes to be proposed.',
+    });
   }
   return blocks;
 }

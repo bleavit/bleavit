@@ -222,9 +222,35 @@ export function admitRegistryWindowEvent(
 
 // --------------------------------------------------------------- filing preconditions
 
+/**
+ * The MetricSpec versions live cohorts froze for this epoch — 11 §11.8.6's O-8 clause.
+ *
+ * Read from `Epoch.CohortSchedules[epoch].specs` (02 §7.1, frozen at contract v29). The set
+ * is what the cohort committed to, and a filing naming anything else is refused on chain.
+ *
+ * The `unread` arm is the same fail-closed device `BondQuoteState` and `TriggerState` use,
+ * and it is required for the same reason: an empty array and a read that did not land are
+ * different facts, and treating a failed read as *"no versions, so nothing matches"* would
+ * be right by accident while treating it as *"nothing to check"* would be the defect this
+ * clause exists to remove.
+ */
+export type FrozenSpecVersions =
+  | { readonly kind: 'read'; readonly versions: Verified<readonly number[]> }
+  | { readonly kind: 'unread'; readonly reason: string };
+
 export interface FilingInputs {
   readonly kind: FilingKind;
   readonly freeUsdc: Verified<bigint>;
+  /**
+   * `file`'s fifth argument, as the filer supplies it. A form value, not a chain read.
+   *
+   * Required rather than optional: `file(epoch, class, points, evidence_hash, spec_version)`
+   * takes it, so a filing without one cannot be encoded and *"absent"* is not a state the
+   * chain can be asked about.
+   */
+  readonly specVersion: number;
+  /** What the cohorts froze — see `FrozenSpecVersions`. */
+  readonly frozenSpecVersions: FrozenSpecVersions;
   /**
    * The chain's own answer for this filing's bond (contract v29, SQ-731).
    *
@@ -262,11 +288,12 @@ export interface FilingBlock {
  * already refuses it, and repeating the refusal here means a caller that consults only this
  * function reaches the same answer.
  *
- * What it adds is the evidence hash. §11.8.6's row does not list one and the runtime's
- * `challenge_filing(epoch, filing_id, evidence_hash)` requires one, so a client following
- * the row alone cannot encode the call at all. It is blocked on rather than defaulted,
- * because there is no hash that means *no evidence*; the disagreement between the two
- * documents is filed as SQ-617 rather than settled here.
+ * What it adds is the evidence hash. §11.8.6's row omitted one while the runtime's
+ * `challenge_filing(epoch, filing_id, evidence_hash)` requires it, so a client following the
+ * row alone could not encode the call at all. **That disagreement is settled** — SQ-617 was
+ * resolved in the contract-v29 batch and §11.8.6's O-9 row now carries the clause in its own
+ * text — so this is the row implemented, not a client working around a document. It is
+ * blocked on rather than defaulted, because there is no hash that means *no evidence*.
  */
 export interface ChallengeFilingInputs {
   readonly kind: FilingKind;
@@ -315,7 +342,12 @@ export const FILING_BOND_IS_A_QUOTE = BOND_QUOTE_IS_A_QUOTE;
 
 export function filingBlocks(inputs: FilingInputs): readonly FilingBlock[] {
   const blocks: FilingBlock[] = [];
-  const refusal = bondQuoteRefusal(inputs.filingBond);
+  // The arm comes from `inputs.kind`, the instance this filing is against — the two
+  // registries are separate pallet instances and each asks `bond_quote` its own question.
+  const refusal = bondQuoteRefusal(
+    inputs.filingBond,
+    inputs.kind === 'incident' ? 'incident-filing' : 'milestone-filing',
+  );
   if (refusal !== undefined) {
     blocks.push({ check: 'Bond amount', detail: refusal });
   } else if (!coversBond(inputs.filingBond, inputs.freeUsdc)) {
@@ -325,6 +357,28 @@ export function filingBlocks(inputs: FilingInputs): readonly FilingBlock[] {
         'Your free USDC does not cover the filing bond. The bond is value-scaled against the ' +
         'escrow of every cohort the claim can move, so it is read from chain state rather ' +
         'than fixed — a larger claim costs more to file.',
+    });
+  }
+  // §11.8.6's frozen-version clause (contract v29). It had **no predicate and no clause**
+  // until 2026-08-07: `clauseGroupsFor` reports an undeclared read as vacuously passed, so
+  // O-8 claimed complete coverage of a precondition nothing evaluated and a filer could be
+  // walked to a bonded signature the runtime refuses.
+  if (inputs.frozenSpecVersions.kind === 'unread') {
+    blocks.push({
+      check: 'MetricSpec version',
+      detail:
+        `This client could not read the versions the live cohorts froze for this epoch ` +
+        `(${inputs.frozenSpecVersions.reason}). A filing names one of them, and the chain ` +
+        'refuses any other — so the control stays closed rather than posting a bond on a ' +
+        'check that did not run.',
+    });
+  } else if (!inputs.frozenSpecVersions.versions.value.includes(inputs.specVersion)) {
+    blocks.push({
+      check: 'MetricSpec version',
+      detail:
+        `No live cohort in this epoch froze MetricSpec version ${inputs.specVersion}. A ` +
+        'filing is scored against the version its cohort committed to, so one naming any ' +
+        'other version is refused on chain and the bond is posted for nothing.',
     });
   }
   if (inputs.filingsUsed.value >= inputs.filingsBound.value) {

@@ -272,6 +272,7 @@ export type SurfaceId =
   | "storage.constitution.phase_flags"
   | "storage.conviction_voting.class_locks_for"
   | "storage.conviction_voting.voting_for"
+  | "storage.epoch.cohort_schedules"
   | "storage.epoch.cohorts"
   | "storage.epoch.epoch_of"
   | "storage.epoch.intake_queue"
@@ -566,6 +567,7 @@ export const CRITICAL_SURFACE: readonly CriticalSurfaceEntry[] = [
   { id: "storage.constitution.phase_flags", compatGroup: "query", pallet: "Constitution", member: "PhaseFlags", required: true, citation: "02 §7.3" },
   { id: "storage.conviction_voting.class_locks_for", compatGroup: "query", pallet: "ConvictionVoting", member: "ClassLocksFor", required: true, citation: "02 §7.6" },
   { id: "storage.conviction_voting.voting_for", compatGroup: "query", pallet: "ConvictionVoting", member: "VotingFor", required: true, citation: "02 §7.6" },
+  { id: "storage.epoch.cohort_schedules", compatGroup: "query", pallet: "Epoch", member: "CohortSchedules", required: true, citation: "02 §7.1; 11 §11.8.6" },
   { id: "storage.epoch.cohorts", compatGroup: "query", pallet: "Epoch", member: "Cohorts", required: true, citation: "02 §7.1" },
   { id: "storage.epoch.epoch_of", compatGroup: "query", pallet: "Epoch", member: "EpochOf", required: true, citation: "02 §7.1" },
   { id: "storage.epoch.intake_queue", compatGroup: "query", pallet: "Epoch", member: "IntakeQueue", required: true, citation: "02 §7.1" },

@@ -68,19 +68,66 @@ export const BOND_QUOTE_IS_A_QUOTE =
   'chain reads that escrow when the game is created — so the figure can move between now ' +
   'and then, and the chain’s reading is the one that binds.';
 
-export const BOND_QUOTE_UNDETERMINABLE =
-  'The chain cannot price this bond yet: the exposure it scales against is not determinable ' +
-  'until the aggregate is bound to a component (07 §7). The call itself would be refused ' +
-  'with `ExposureUnavailable`, so this control stays closed rather than asking you to commit ' +
-  'an amount nobody can state.';
+/**
+ * Which of 02 §4's `BondQuoteRequest` arms a refusal is about.
+ *
+ * Required at every call site, because the two arms answer `None` for **different reasons**
+ * and the copy is what a user acts on. One sentence served both until 2026-08-07 and it was
+ * the registry's: it named 07 §7's not-determinable aggregate and the `ExposureUnavailable`
+ * error, and `oracle.report` returns neither — that error belongs to `pallet-registry`. A
+ * reporter was shown another pallet's error name and told to wait for an aggregate that has
+ * nothing to do with their round.
+ */
+export type BondQuoteRequestKind = 'oracle-report' | 'incident-filing' | 'milestone-filing';
 
-/** Why the bond blocks, or `undefined` when it is quoted. */
-export function bondQuoteRefusal(state: BondQuoteState): string | undefined {
+/**
+ * Why the chain answered `None`, per request arm — 02 §3's third normative property.
+ *
+ * The **filing** arms are 07 §7's: `cohort_exposure(kind, epoch)` is not determinable until
+ * the aggregate is bound to a component, and `file` MUST then refuse with
+ * `ExposureUnavailable` (`pallets/registry/src/lib.rs:875-879`). The **oracle** arm is not
+ * that case at all: `report_bond_quote` folds the stake at risk and answers nothing when the
+ * live parameters cannot price a round-1 bond whose whole frozen doubling ladder is
+ * representable (`pallets/oracle/src/lib.rs:1183-1192`), which is a statement about
+ * parameters rather than about a missing aggregate.
+ */
+export const BOND_QUOTE_UNDETERMINABLE: Readonly<Record<BondQuoteRequestKind, string>> =
+  Object.freeze({
+    'oracle-report':
+      'The chain cannot price this report’s bond at this block: the live oracle parameters ' +
+      'do not yield a round-1 bond whose full escalation ladder it could hold. This is a ' +
+      'statement about the parameters, not about your account, and the amount is withheld ' +
+      'rather than floored — the floor is the least the bond can be and not the bond. This ' +
+      'control stays closed rather than asking you to commit an amount nobody can state.',
+    'incident-filing':
+      'The chain cannot price this filing’s bond yet: the exposure it scales against is not ' +
+      'determinable until the aggregate is bound to a component (07 §7). `file` itself would ' +
+      'be refused with `ExposureUnavailable`, so this control stays closed rather than asking ' +
+      'you to commit an amount nobody can state.',
+    'milestone-filing':
+      'The chain cannot price this filing’s bond yet: the exposure it scales against is not ' +
+      'determinable until the aggregate is bound to a component (07 §7). `file` itself would ' +
+      'be refused with `ExposureUnavailable`, so this control stays closed rather than asking ' +
+      'you to commit an amount nobody can state.',
+  });
+
+/**
+ * Why the bond blocks, or `undefined` when it is quoted.
+ *
+ * `request` is a **required** argument rather than a field on the state, because it is a
+ * property of the question the caller asked and every caller here is a row that knows which
+ * one it asked. An optional one would default to some arm, and the arm it defaulted to would
+ * be wrong for the other caller.
+ */
+export function bondQuoteRefusal(
+  state: BondQuoteState,
+  request: BondQuoteRequestKind,
+): string | undefined {
   switch (state.kind) {
     case 'quoted':
       return undefined;
     case 'undeterminable':
-      return BOND_QUOTE_UNDETERMINABLE;
+      return BOND_QUOTE_UNDETERMINABLE[request];
     case 'unread':
       return (
         `The bond this action will hold could not be read (${state.reason}). It is not ` +

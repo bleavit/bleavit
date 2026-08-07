@@ -87,6 +87,9 @@ const SURFACES: readonly (readonly [string, string, string])[] = [
   ['storage.constitution.release_channel.json', 'Constitution', 'ReleaseChannel'],
   ['storage.conviction_voting.class_locks_for.json', 'ConvictionVoting', 'ClassLocksFor'],
   ['storage.conviction_voting.voting_for.json', 'ConvictionVoting', 'VotingFor'],
+  // Contract v29: the frozen per-cohort MetricSpec bindings 11 §11.8.6's O-8 reads for its
+  // `spec_version` clause. A `Blake2_128Concat` map on `EpochId`, so a prefix read.
+  ['storage.epoch.cohort_schedules.json', 'Epoch', 'CohortSchedules'],
   ['storage.epoch.cohorts.json', 'Epoch', 'Cohorts'],
   ['storage.epoch.epoch_of.json', 'Epoch', 'EpochOf'],
   ['storage.epoch.intake_queue.json', 'Epoch', 'IntakeQueue'],
@@ -269,9 +272,10 @@ test('the corpus is 75 prefixes and exactly 2 full keys — measured, not assume
   // same one hasher on the same two key types it always was. The count is re-pinned rather
   // than relaxed: a number that moves whenever the corpus does asserts nothing.
   //
-  // 75 -> 77 at contract v29, which froze `Epoch.PendingOracleVoids` and
-  // `ConditionalLedger.LedgerDrifted` for 11 §11.8.2's trigger table (SQ-730). **Both land
-  // in the `prefixes` bucket, and one of them is not a prefix at all**: `LedgerDrifted` is a
+  // 75 -> 78 at contract v29, which froze `Epoch.PendingOracleVoids` and
+  // `ConditionalLedger.LedgerDrifted` for 11 §11.8.2's trigger table (SQ-730) and
+  // `Epoch.CohortSchedules` for §11.8.6's O-8 `spec_version` clause. **All three land in the
+  // `prefixes` bucket, and one of them is not a prefix at all**: `LedgerDrifted` is a
   // `StorageValue`, so it carries no hasher and no key, and its *complete* key is exactly
   // the 32-byte `twox128(pallet) ++ twox128(item)` this suite calls a prefix. The
   // classification below is by **length**, which cannot tell the two apart — so the
@@ -285,7 +289,7 @@ test('the corpus is 75 prefixes and exactly 2 full keys — measured, not assume
       else full.push({ file, key });
     }
   }
-  assert.equal(prefixes.length, 77, 'the number of recorded map-prefix reads changed');
+  assert.equal(prefixes.length, 78, 'the number of recorded map-prefix reads changed');
   assert.equal(full.length, 2, 'the number of recorded single-entry reads changed');
   assert.deepEqual(
     full.map((f) => f.file).sort(),

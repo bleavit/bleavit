@@ -170,6 +170,7 @@ export {
   type PlaybookId,
   type PlaybookTrigger,
   type PowerArguments,
+  type ProposalTrigger,
   type ProposeInputs,
   type RatificationEvent,
   type RatificationEventVariant,
@@ -289,6 +290,7 @@ export {
   type FilingBlock,
   type FilingInputs,
   type FilingKind,
+  type FrozenSpecVersions,
   type RawEvent,
   type RegistryInstances,
   type RegistryWindowEvent,
@@ -313,6 +315,7 @@ export {
   bondQuoteRefusal,
   coversBond,
   type BondQuote,
+  type BondQuoteRequestKind,
   type BondQuoteState,
 } from './bond-quote.js';
 export { DepositForm, DepositTracker, WithdrawForm } from './funding-screens.js';

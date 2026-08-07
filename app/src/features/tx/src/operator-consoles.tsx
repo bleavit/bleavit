@@ -598,16 +598,20 @@ export function ClaimStream({
 /**
  * `INSURANCE` — its standing, and the honest statement when there is none.
  *
- * The panel took two `Verified<bigint>`s and classified one against the other. The second
- * one does not exist: `T_ins` is a treasury-internal counter that no frozen surface
- * publishes (SQ-616), so the only thing a caller could have passed was a figure it made up.
- * A classification against a made-up target is worse than no classification, because the
- * screen's whole job here is to stop the balance reading as income and it does that by
- * telling the reader where the balance *should* be.
+ * The panel took two `Verified<bigint>`s and classified one against the other, and the
+ * second one had no producer: 08 §1.2's `T_ins` was a treasury-internal counter that no
+ * frozen surface published, so the only thing a caller could have passed was a figure it
+ * made up. A classification against a made-up target is worse than no classification,
+ * because the screen's whole job here is to stop the balance reading as income and it does
+ * that by telling the reader where the balance *should* be.
  *
- * So it now takes a `Combined<InsuranceStanding>` whose value may be `unestablished`, and
- * renders the refusal through `Derived` — the client says it cannot size the reserve, and
- * still says the one thing it knows for certain, that this is not income either way.
+ * **Contract v29 publishes it** as a trailing `NavView.insurance_target` (02 §4, SQ-602), so
+ * the target is now an ordinary `nav()` read. The panel still takes a
+ * `Combined<InsuranceStanding>` whose value may be `unestablished` and still renders that
+ * refusal through `Derived`, because a `nav()` that did not answer must not fall back to a
+ * comparison against zero — which renders as *this reserve is exactly sized* at the moment
+ * it holds nothing. The client says it cannot size the reserve, and still says the one thing
+ * it knows for certain, that this is not income either way.
  */
 export function InsurancePanel({
   standing,

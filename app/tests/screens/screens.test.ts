@@ -79,6 +79,8 @@ import {
   insuranceCopy,
   insuranceStanding,
   destinationWarning,
+  DEPEG_TRIGGER_UNAVAILABLE,
+  TRIGGER_READS,
   mayActivatePlaybook,
   proposalBlocks,
   triggerRefusal,
@@ -188,6 +190,7 @@ import type { FinalizedBlockRef } from '@bleavit/chain-client';
 // `finalize` is test-only on purpose — see packages/chain-client/src/testing.ts.
 import { finalize } from '@bleavit/chain-client/testing';
 import {
+  OPERATOR_ROWS,
   OPERATOR_SURFACE_ROWS,
   declaredCoverageIds,
   gate,
@@ -221,6 +224,7 @@ import type {
   ProposalsReader,
   RatificationView,
   PlaybookTrigger,
+  TriggerState,
   RawDecoded,
   RawEvent,
   RecomputeInputs,
@@ -1555,6 +1559,10 @@ const FILING = (over: Partial<FilingInputs> = {}): FilingInputs => ({
   filingBond: QUOTED(1_000_000n, 40_000_000n),
   filingsUsed: finalized(1),
   filingsBound: finalized(8),
+  // §11.8.6's frozen-version clause (contract v29): the version the filing names, and the
+  // set `Epoch.CohortSchedules[epoch].specs` says the live cohorts committed to.
+  specVersion: 3,
+  frozenSpecVersions: { kind: 'read', versions: finalized([2, 3]) },
   evidenceHash: '0xevidence',
   ...over,
 });
@@ -2685,16 +2693,41 @@ test('an unread trigger is treated exactly as an inactive one', () => {
   // E20: playbooks are admissible only under VERIFIED triggers. Collapsing "could not
   // check" into "checked and fine" is the fail-open reading, on the one power whose whole
   // justification is that the condition holds right now.
-  assert.equal(mayActivatePlaybook({ kind: 'active', since: finalized(1) }), true);
-  assert.equal(mayActivatePlaybook({ kind: 'inactive' }), false);
-  assert.equal(mayActivatePlaybook({ kind: 'unread', reason: 'the storage read failed' }), false);
+  assert.equal(mayActivatePlaybook({ kind: 'active', trigger: 'GateBreach', since: finalized(1) }), true);
+  assert.equal(mayActivatePlaybook({ kind: 'inactive', trigger: 'GateBreach' }), false);
+  assert.equal(
+    mayActivatePlaybook({ kind: 'unread', trigger: 'GateBreach', reason: 'the storage read failed' }),
+    false,
+  );
   // And the two refusals say different things, because the guardian's next step differs.
-  assert.match(copy(triggerRefusal({ kind: 'inactive' })), /the condition being absent/);
+  assert.match(copy(triggerRefusal({ kind: 'inactive', trigger: 'GateBreach' })), /the condition being absent/);
   assert.match(
-    copy(triggerRefusal({ kind: 'unread', reason: 'the storage read failed' })),
+    copy(triggerRefusal({ kind: 'unread', trigger: 'GateBreach', reason: 'the storage read failed' })),
     /could not establish/,
   );
-  assert.equal(triggerRefusal({ kind: 'active', since: finalized(1) }), undefined);
+  assert.equal(triggerRefusal({ kind: 'active', trigger: 'GateBreach', since: finalized(1) }), undefined);
+});
+
+test('the trigger verdict is DRIVEN by TRIGGER_READS, not by the caller’s arm (SQ-730)', () => {
+  // §11.8.2's table maps each variant to the frozen item that establishes it, and until
+  // 2026-08-07 nothing in `src/` derived from it: `mayActivatePlaybook` believed whatever
+  // arm it was handed. `DepegMedian` binds to NO read (06 §6.2 makes PB-DEPEG unavailable in
+  // v1), so an `active` claim about it is a claim about a check that could not have run.
+  assert.deepEqual(TRIGGER_READS.DepegMedian, []);
+  assert.equal(mayActivatePlaybook({ kind: 'active', trigger: 'DepegMedian', since: finalized(1) }), false);
+  assert.equal(
+    copy(triggerRefusal({ kind: 'active', trigger: 'DepegMedian', since: finalized(1) })),
+    DEPEG_TRIGGER_UNAVAILABLE,
+  );
+  // The mirror, so the table is load-bearing in both directions rather than a special case
+  // for one name: a variant the table DOES bind cannot be reported `unavailable`, because
+  // this release can read it and "will never become true" is not something it can say.
+  const bogus = copy(triggerRefusal({ kind: 'unavailable', trigger: 'LedgerDrift' }));
+  assert.match(bogus, /storage\.ledger\.ledger_drifted/);
+  assert.equal(mayActivatePlaybook({ kind: 'unavailable', trigger: 'LedgerDrift' }), false);
+  // Anti-vacuity: the same arm on a variant with a read is not simply refused for every
+  // input — `active` on `LedgerDrift` passes, so the refusals above are about the table.
+  assert.equal(mayActivatePlaybook({ kind: 'active', trigger: 'LedgerDrift', since: finalized(1) }), true);
 });
 
 test('approving twice is its own refusal, not "not eligible"', () => {
@@ -2793,7 +2826,7 @@ test('a power whose remaining allowance cannot be established is not offered', (
       used: finalized(0, 1_000_000),
       limit: { value: 5, status: { kind: 'verified-finalized', chain: TEST_CHAIN, blockHash: '0xbeef', blockNumber: 999_000 } },
     },
-    undefined,
+    { kind: 'no-trigger-power' },
   );
   assert.deepEqual(blocks.map((b) => b.check), ['Allowance']);
   assert.match(nth(blocks, 0, 'block').detail, /cannot establish/);
@@ -2809,18 +2842,77 @@ test('the unratified-action consequence names the guardian own bond', () => {
 
 test('a proposal is blocked by allowance and by trigger independently', () => {
   const meter: AllowanceMeter = { power: 'activate_playbook', used: finalized(0), limit: finalized(2) };
-  assert.deepEqual(proposalBlocks(meter, { kind: 'active', since: finalized(1) }), []);
+  const live: TriggerState = { kind: 'active', trigger: 'GateBreach', since: finalized(1) };
+  assert.deepEqual(proposalBlocks(meter, live), []);
   assert.deepEqual(
-    proposalBlocks({ ...meter, used: finalized(2) } satisfies AllowanceMeter, { kind: 'active', since: finalized(1) })
-      .map((b) => b.check),
+    proposalBlocks({ ...meter, used: finalized(2) } satisfies AllowanceMeter, live).map((b) => b.check),
     ['Allowance'],
   );
   assert.deepEqual(
-    proposalBlocks(meter, { kind: 'unread', reason: 'x' }).map((b) => b.check),
+    proposalBlocks(meter, { kind: 'unread', trigger: 'GateBreach', reason: 'x' }).map((b) => b.check),
     ['Trigger condition'],
   );
-  // A power with no trigger passes none, and is not blocked for lacking one.
-  assert.deepEqual(proposalBlocks({ ...meter, power: 'pause_intake' }, undefined), []);
+  // A power with no trigger states so, and is not blocked for saying it.
+  assert.deepEqual(proposalBlocks({ ...meter, power: 'pause_intake' }, { kind: 'no-trigger-power' }), []);
+});
+
+test('an activation whose trigger was never evaluated is REFUSED, not proposed (11 §11.8.2)', () => {
+  // The blocker an R-6 review found on 2026-08-07. `trigger` was optional, so
+  // `<ProposeAction meter={{power:'activate_playbook',…}} …/>` with it omitted produced an
+  // empty block list, `operatorGate` returned `ready`, and the console offered a 5-of-7
+  // signature on an emergency playbook activation whose condition nothing had checked.
+  // §11.8.2: "an unreadable trigger is treated exactly as an inactive one — the action is
+  // refused with the reason shown, never proposed on a check that did not run."
+  const meter: AllowanceMeter = { power: 'activate_playbook', used: finalized(0), limit: finalized(2) };
+  const blocks = proposalBlocks(meter, { kind: 'no-trigger-power' });
+  assert.notDeepEqual(blocks, [], 'an unevaluated trigger must not produce an empty block list');
+  assert.deepEqual(blocks.map((b) => b.check), ['Trigger condition']);
+  assert.match(nth(blocks, 0, 'block').detail, /never evaluated/);
+  assert.match(nth(blocks, 0, 'block').detail, /did not run/);
+
+  // The mirror: a trigger supplied for a power that has none means two forms have been
+  // confused, and ignoring it would propose whichever action the rest of the form describes.
+  const misplaced = proposalBlocks(
+    { ...meter, power: 'pause_intake' },
+    { kind: 'active', trigger: 'GateBreach', since: finalized(1) },
+  );
+  assert.deepEqual(misplaced.map((b) => b.check), ['Trigger condition']);
+  assert.match(nth(misplaced, 0, 'block').detail, /only activate_playbook/);
+});
+
+test('the propose control CANNOT reach ready on an unevaluated trigger', () => {
+  // The model refusal above, asserted where it matters: a refreshed session with a valid
+  // gate proof is exactly the state in which the button used to open. The screen is what an
+  // operator sees, so the property is asserted end to end rather than on the model alone.
+  const html = renderToStaticMarkup(
+    h(ProposeAction, {
+      meter: { power: 'activate_playbook', used: finalized(0), limit: finalized(3) },
+      inputs: {
+        args: { power: 'activate_playbook', id: 'PB-HALT-INTAKE', trigger: 'GateBreach', expiry: 9_000 },
+        justificationHash: '0xj',
+      },
+      trigger: { kind: 'no-trigger-power' },
+      session: readySession('O-4'),
+      onPropose: noSubmit,
+    }),
+  );
+  assert.ok(buttonDisabled(html, 'Propose'), html);
+  assert.match(html, /never evaluated/);
+  // Anti-vacuity: the same panel with a live trigger opens, so the refusal is about the
+  // trigger and not about some unrelated block this fixture happens to trip.
+  const live = renderToStaticMarkup(
+    h(ProposeAction, {
+      meter: { power: 'activate_playbook', used: finalized(0), limit: finalized(3) },
+      inputs: {
+        args: { power: 'activate_playbook', id: 'PB-HALT-INTAKE', trigger: 'GateBreach', expiry: 9_000 },
+        justificationHash: '0xj',
+      },
+      trigger: { kind: 'active', trigger: 'GateBreach', since: finalized(10) },
+      session: readySession('O-4'),
+      onPropose: noSubmit,
+    }),
+  );
+  assert.ok(!buttonDisabled(live, 'Propose'), live);
 });
 
 // ------------------------------------------------ S16 treasury streams (F17)
@@ -3325,6 +3417,7 @@ test('the unratified consequence renders BEFORE any propose action, unconditiona
     h(ProposeAction, {
       meter: { power: 'pause_intake', used: finalized(0), limit: finalized(3) },
       inputs: { args: { power: 'pause_intake', until: 5_000 }, justificationHash: '0xj' },
+      trigger: { kind: 'no-trigger-power' },
       session: readySession('O-4'),
       onPropose: noSubmit,
     }),
@@ -3345,6 +3438,7 @@ test('a propose panel offers nothing when the allowance cannot be established', 
         limit: { value: 3, status: { kind: 'verified-finalized', chain: TEST_CHAIN, blockHash: '0xbeef', blockNumber: 9 } },
       },
       inputs: { args: { power: 'pause_intake', until: 5_000 }, justificationHash: '0xj' },
+      trigger: { kind: 'no-trigger-power' },
       session: readySession('O-4'),
       onPropose: noSubmit,
     }),
@@ -4268,24 +4362,22 @@ test('acknowledgements admit with their watchtower, and a missing field refuses'
 });
 
 test('a filing is blocked by bond, bounds and evidence independently', () => {
-  const ok = filingBlocks({
-    kind: 'incident',
+  const ok = filingBlocks(FILING({
     freeUsdc: finalized(1_000n),
     filingBond: QUOTED(100n, 4_000n),
     filingsUsed: finalized(3),
     filingsBound: finalized(10),
     evidenceHash: '0xev',
-  });
+  }));
   assert.deepEqual(ok, []);
 
-  const all = filingBlocks({
-    kind: 'incident',
+  const all = filingBlocks(FILING({
     freeUsdc: finalized(10n),
     filingBond: QUOTED(100n, 4_000n),
     filingsUsed: finalized(10),
     filingsBound: finalized(10),
     evidenceHash: undefined,
-  });
+  }));
   assert.deepEqual(all.map((b) => b.check), ['Filing bond', 'Registry bounds', 'Evidence']);
   // The bond is value-scaled, so the copy says it is read rather than fixed — a client that
   // implied a constant would under-report after the first amendment.
@@ -4295,15 +4387,53 @@ test('a filing is blocked by bond, bounds and evidence independently', () => {
 
   // An EMPTY hash is not a hash. Checking only for `undefined` let `''` through, which is
   // what an unfilled form field actually produces — the mutation that survived first pass.
-  const empty = filingBlocks({
+  const empty = filingBlocks(FILING({
     kind: 'milestone',
     freeUsdc: finalized(1_000n),
     filingBond: QUOTED(100n, 4_000n),
     filingsUsed: finalized(0),
     filingsBound: finalized(10),
     evidenceHash: '',
-  });
+  }));
   assert.deepEqual(empty.map((b) => b.check), ['Evidence']);
+});
+
+test('O-8 refuses a spec_version no live cohort froze, and refuses an unread set', () => {
+  // The MAJOR an R-6 review found on 2026-08-07. §11.8.6's O-8 row requires `spec_version` to
+  // be among the versions live cohorts froze for `epoch`, and `FilingInputs` carried no
+  // version, `filingBlocks` had no predicate and the row declared no clause. A row whose read
+  // is undeclared is **vacuously satisfied** by `clauseGroupsFor`, so O-8 reported complete
+  // coverage of a check nothing performed and a filer could post a bond the runtime refuses.
+  // Contract v29 freezes `Epoch.CohortSchedules` (02 §7.1) and this is the check it enables.
+  assert.deepEqual(filingBlocks(FILING()), [], 'the clean fixture must name a frozen version');
+  const wrong = filingBlocks(FILING({ specVersion: 9 }));
+  assert.deepEqual(wrong.map((b) => b.check), ['MetricSpec version']);
+  assert.match(nth(wrong, 0, 'block').detail, /No live cohort in this epoch froze MetricSpec version 9/);
+
+  // An unread set fails closed and says which silence it is: waiting on a read and naming the
+  // wrong version are different remedies, and an empty array is a third fact again.
+  const unread = filingBlocks(
+    FILING({ frozenSpecVersions: { kind: 'unread', reason: 'the storage read failed' } }),
+  );
+  assert.deepEqual(unread.map((b) => b.check), ['MetricSpec version']);
+  assert.match(nth(unread, 0, 'block').detail, /could not read the versions/);
+  assert.match(nth(unread, 0, 'block').detail, /the storage read failed/);
+  assert.notEqual(nth(unread, 0, 'block').detail, nth(wrong, 0, 'block').detail);
+
+  // An epoch whose cohorts froze nothing refuses every version rather than admitting any —
+  // the empty set is data, and it is not the same value as a failed read.
+  const none = filingBlocks(FILING({ frozenSpecVersions: { kind: 'read', versions: finalized([]) } }));
+  assert.deepEqual(none.map((b) => b.check), ['MetricSpec version']);
+
+  // The row declares the clause, so the gate re-reads it at B′ rather than trusting this
+  // model alone — and it cites the item 02 §7.1 froze, never a two-map reassembly.
+  const specClause = OPERATOR_ROWS['O-8'].find((c) => c.key === 'frozen-spec-version');
+  assert.ok(specClause !== undefined, 'O-8 declares no frozen-spec-version clause');
+  assert.equal(specClause.surface, 'storage.epoch.cohort_schedules');
+  assert.ok(
+    !OPERATOR_ROWS['O-8'].some((c) => c.surface === 'storage.epoch.proposals'),
+    'the version clause must not be reassembled from per-proposal metric_spec reads',
+  );
 });
 
 test('the exact filing bond is what the headroom is checked against, to the base unit', () => {
@@ -4521,9 +4651,14 @@ test('both non-quoted arms block P-13 and O-8, in different sentences, with no f
     bondDetail(unread),
     'the two silences must not share one sentence — the remedies differ',
   );
-  assert.equal(bondDetail(undeterminable), BOND_QUOTE_UNDETERMINABLE);
-  assert.match(bondDetail(undeterminable), /not determinable/);
-  assert.match(bondDetail(undeterminable), /ExposureUnavailable/);
+  // **Per request arm, and P-13's is the oracle one.** One sentence served both rows until
+  // 2026-08-07 and it was the registry's: it named 07 §7's not-determinable aggregate and
+  // `ExposureUnavailable`, which is `pallet-registry`'s error and one `oracle.report` never
+  // returns. A reporter was shown another pallet's error name.
+  assert.equal(bondDetail(undeterminable), BOND_QUOTE_UNDETERMINABLE['oracle-report']);
+  assert.doesNotMatch(bondDetail(undeterminable), /ExposureUnavailable/);
+  assert.doesNotMatch(bondDetail(undeterminable), /aggregate is bound/);
+  assert.match(bondDetail(undeterminable), /live oracle parameters/);
   assert.match(bondDetail(unread), /could not be read/);
   assert.match(bondDetail(unread), /the state call timed out/, 'the read’s own reason must travel');
   for (const detail of [bondDetail(undeterminable), bondDetail(unread)]) {
@@ -4545,11 +4680,25 @@ test('both non-quoted arms block P-13 and O-8, in different sentences, with no f
     nth(filingUndeterminable, 0, 'block').detail,
     nth(filingUnread, 0, 'block').detail,
   );
-  // One module, so the two rows state the same refusal — checked rather than assumed,
-  // because a second copy of this sentence is how the two would drift.
-  assert.equal(nth(filingUndeterminable, 0, 'block').detail, bondDetail(undeterminable));
+  // One module and one `unread` sentence — the read failed the same way whichever question
+  // was asked, and a second copy of that sentence is how the two would drift.
   assert.equal(nth(filingUnread, 0, 'block').detail, bondDetail(unread));
-  assert.equal(bondQuoteRefusal(QUOTED(1n, 1n)), undefined, 'a quoted bond must not refuse');
+  // The `undeterminable` sentences are deliberately **not** shared: 07 §7's aggregate and
+  // `ExposureUnavailable` are the filing arms' answer, and the reporter's is about oracle
+  // parameters. Sharing one was the defect.
+  assert.notEqual(nth(filingUndeterminable, 0, 'block').detail, bondDetail(undeterminable));
+  assert.equal(nth(filingUndeterminable, 0, 'block').detail, BOND_QUOTE_UNDETERMINABLE['incident-filing']);
+  assert.match(nth(filingUndeterminable, 0, 'block').detail, /not determinable/);
+  assert.match(nth(filingUndeterminable, 0, 'block').detail, /ExposureUnavailable/);
+  assert.match(nth(filingUndeterminable, 0, 'block').detail, /stays closed/);
+  // …and the milestone instance gets its own arm rather than the incident one by default,
+  // because `filingBlocks` routes on the instance it was given.
+  const milestoneUndeterminable = filingBlocks(FILING({ kind: 'milestone', filingBond: UNDETERMINABLE }));
+  assert.equal(
+    nth(milestoneUndeterminable, 0, 'block').detail,
+    BOND_QUOTE_UNDETERMINABLE['milestone-filing'],
+  );
+  assert.equal(bondQuoteRefusal(QUOTED(1n, 1n), 'oracle-report'), undefined, 'a quoted bond must not refuse');
 });
 
 test('the report control OPENS on a quoted bond, and closes on an unpriced one', () => {
@@ -4583,7 +4732,7 @@ test('P-13 blocks on window, registry, a short stake and evidence — each indep
   const clauseBlocks = (over: Partial<ReportInputs>): readonly string[] =>
     reportBlocks(REPORT(over)).blocks.map((b) => b.check);
   assert.deepEqual(clauseBlocks({}), []);
-  assert.deepEqual(clauseBlocks({ roundOpen: finalized(false) }), ['Round open']);
+  assert.deepEqual(clauseBlocks({ roundOpen: finalized(false) }), ['Round state']);
   assert.deepEqual(clauseBlocks({ reportWindowOpen: finalized(false) }), ['Report window']);
   assert.deepEqual(clauseBlocks({ registered: finalized(false) }), ['Reporter registry']);
   // Registered but under-staked is its own state with its own remedy: a prior slash leaves
@@ -4997,6 +5146,15 @@ test('no operator control opens without a gate result the screen cannot mint', (
   // operator a condition failed sends them hunting a problem that does not exist. Since
   // contract v29 that is every row — the closed set is empty, and the test below is what
   // keeps that a *derived* fact rather than this list quietly becoming exhaustive.
+  //
+  // **"Every row" was not true of O-8 until 2026-08-07, and no gate here could see it.**
+  // §11.8.6 requires `spec_version` to be among the versions live cohorts froze for `epoch`,
+  // and that clause read nothing: `clauseGroupsFor` answers *"every declared read passed"*,
+  // which for an undeclared read is vacuously true, so O-8 reached `ready` with a
+  // precondition nothing had evaluated and this list called it readable end to end. The
+  // `Epoch.CohortSchedules` freeze (02 §7.1) is what made the claim true rather than
+  // unfalsifiable — the emptiness of the closed set is about `UNREADABLE`, and a row can be
+  // silently incomplete without appearing in it at all.
   for (const call of OPENABLE_CALLS) {
     const gated = operatorGate(call, preparedSession(OPERATOR_SURFACE_ROWS[call]), []);
     assert.equal(gated.state, 'not-refreshed', call);
@@ -5097,6 +5255,29 @@ test('an authentic window minted for OTHER bytes is refused, not honoured', () =
   assert.equal(gated.state, 'blocked', 'a proof for another preparation opened this control');
   assert.ok(gated.blocks.some((block) => block.check === 'Gate proof'), gated.blocks.map((b) => b.check).join(', '));
   // Anti-vacuity: the untampered session opens, so the refusal is the crossing's.
+  assert.equal(operatorGate('oracle.register_reporter', mine, []).state, 'ready');
+});
+
+test('the ROW check reads the window’s preparation, not whatever the session carries', () => {
+  // `operator-gate.ts`'s own note has always said the declaration check reads `window.prep`
+  // — the preparation the proof was minted for — and the code passed `session.prep`
+  // unconditionally until 2026-08-07. The two agreed only because a neighbouring refusal
+  // rejects a window minted for a different preparation, so the weaker read was covered by
+  // another check rather than by itself. `window.prep` is also the object `operatorSubmit`
+  // hands the submitter, so it is the one whose declared rows have to be this call's.
+  const mine = readySession('O-1');
+  const foreign = readySession('P-1');
+  const crossed = { ...mine, signingWindow: foreign.signingWindow } as TxSession;
+  const gated = operatorGate('oracle.register_reporter', crossed, []);
+  assert.equal(gated.state, 'blocked');
+  // Both fire: the proof names another preparation, AND that preparation declares a row this
+  // call is not. The second is the one the note claimed and the code did not check.
+  assert.deepEqual(
+    gated.blocks.map((block) => block.check).sort(),
+    ['Declared precondition row', 'Gate proof'],
+  );
+  assert.match(nth(gated.blocks, 0, 'block').detail, /P-1/);
+  // Anti-vacuity: the same session with its own window opens.
   assert.equal(operatorGate('oracle.register_reporter', mine, []).state, 'ready');
 });
 
@@ -5297,15 +5478,28 @@ test('a P-13 clause with no predicate throws rather than being skipped', () => {
   }
 });
 
-test('round open and report window are reported as SEPARATE blocks', () => {
-  // A counter-report on a live round: the round is open and the window has elapsed. One
-  // collapsed flag cannot say which half failed, and the two have different remedies.
+test('round state and report window are reported as SEPARATE blocks', () => {
+  // §11.5 writes them with a semicolon between them, and they have different remedies. One
+  // collapsed flag cannot say which half failed.
   const clauseBlocks = (over: Partial<ReportInputs>): readonly ReportBlock[] =>
     reportBlocks(REPORT(over)).blocks;
   const windowGone = clauseBlocks({ reportWindowOpen: finalized(false) });
   assert.deepEqual(windowGone.map((block) => block.check), ['Report window']);
-  assert.deepEqual(clauseBlocks({ roundOpen: finalized(false) }).map((b) => b.check), ['Round open']);
+  const roundState = clauseBlocks({ roundOpen: finalized(false) });
+  assert.deepEqual(roundState.map((b) => b.check), ['Round state']);
   assert.match(nth(windowGone, 0, 'block').detail, /round itself may still be open/);
+  // The round-state copy must NOT assert that the round has been closed or settled. It said
+  // exactly that until 2026-08-07, and `oracle_core::report` refuses when a round already
+  // **exists** (`AlreadyFinal`) — `report` opens round 1 and a counter-report is
+  // `oracle.challenge`. The specification writes "round open" and the runtime reads the
+  // other way, so the client names no state while the disagreement is open.
+  const detail = nth(roundState, 0, 'block').detail;
+  assert.doesNotMatch(detail, /closed or settled/);
+  assert.doesNotMatch(detail, /needs a live round/);
+  assert.match(detail, /does not name which state/);
+  // …and it points at the call that IS the counter-report, so the reader is not left to
+  // conclude that reporting again is the remedy.
+  assert.match(detail, /oracle\.challenge/);
 });
 
 // ------------------------------------- §11.8.1's stake-hold consequence (F17)
@@ -5665,6 +5859,7 @@ test('each power renders its OWN arguments, and the empty one says so', () => {
     h(ProposeAction, {
       meter: { power: 'suspend_on_gate', used: finalized(0), limit: finalized(3) },
       inputs: { args: { power: 'suspend_on_gate' }, justificationHash: '0xj' },
+      trigger: { kind: 'no-trigger-power' },
       session: readySession('O-4'), onPropose: noSubmit,
     }),
   );
@@ -5678,7 +5873,7 @@ test('each power renders its OWN arguments, and the empty one says so', () => {
         args: { power: 'activate_playbook', id: 'PB-HALT-INTAKE', trigger: 'GateBreach', expiry: 9_000 },
         justificationHash: '0xj',
       },
-      trigger: { kind: 'active', since: finalized(10) },
+      trigger: { kind: 'active', trigger: 'GateBreach', since: finalized(10) },
       session: readySession('O-4'), onPropose: noSubmit,
     }),
   );

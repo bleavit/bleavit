@@ -515,55 +515,52 @@ const P12: readonly PreconditionClause[] = [
  * stakes and round-bond collateral are held in `ForeignAssets` USDC custody. Reading
  * `System.Account` reported healthy headroom from a balance the bond never draws on.
  *
- * ## Two disagreeing answers shipped in one client, and this row held the wrong one
+ * ## The bond is a chain read, and the two answers that preceded it are history
  *
- * §11.5's P-13 text says the bond is `max(flat_floor, bps × cohort_escrow)` *"recomputed
- * and displayed"*, and this row declared exactly that: a clause reading a cohort escrow,
- * and a headroom clause against the recomputed amount. `oracle-reporting.ts` had already
- * concluded the opposite and shipped it — the bond is **structurally uncomputable** from
- * any surface 02 freezes, so the module states a floor and refuses to present it as the
- * amount. Nothing bound the two, so a bonded, slashable action carried two different
- * answers to *"what will this hold?"*, in one release.
+ * Contract v29 publishes `FutarchyApi.bond_quote(OracleReport { component, epoch })`, so
+ * this row reads the amount and displays it. Two earlier positions are recorded because
+ * each was shipped and each was wrong in a different direction, and a reader arriving at
+ * this file needs to know which one the code is in.
  *
- * The escrow clause was worse than redundant. It cited `storage.epoch.cohorts` as *"the
- * cohort escrow the bond scales against"*, and `CohortInfo { epoch, proposals, status }`
+ * **First**, §11.5's P-13 text said the bond was `max(flat_floor, bps × cohort_escrow)`
+ * *"recomputed and displayed"*, and this row declared exactly that. The escrow clause cited
+ * `storage.epoch.cohorts`, and `CohortInfo { epoch, proposals, status }`
  * (`pallets/epoch/src/lib.rs:602`) carries **no escrow field at all** — a clause reading a
- * map that cannot answer it, which typechecks because a `SurfaceId` says nothing about
- * what the item holds. It is deleted rather than re-pointed: 07 §6.1's `StakeAtRisk(c, m)`
- * sums escrow over every cohort whose frozen MetricSpec consumes the component, and
- * reassembling that from cohort membership would be a client *computation* where §11.4
- * rule 2 requires an exact read.
+ * map that cannot answer it, which typechecks because a `SurfaceId` says nothing about what
+ * the item holds. Meanwhile `oracle-reporting.ts` had concluded the opposite and shipped a
+ * floor, so one bonded, slashable action carried two different answers to *"what will this
+ * hold?"* in one release.
  *
- * What survives is what can be read: the floor parameter, and whether the balance covers
- * it. The rest is declared **unreadable** below, with SQ-598 as its citation, so the row
- * states the gap instead of implying an arithmetic nobody can perform.
+ * **Second**, the row fell back to the floor with the gap declared `stated`, which left the
+ * control open on a floor-only check. For any component with non-zero stake at risk the
+ * runtime holds strictly more than the floor, so an account passing that headroom check was
+ * either short at dispatch or had a larger sum taken than the screen showed.
  *
- * ## The floor is not sufficient, and the row now fails closed on it (2026-08-06)
- *
- * Declaring the gap `stated` left the control **open** on a floor-only check, and that is the
- * wrong direction on this row. For any component with non-zero stake at risk the runtime
- * holds `ceil(orc.bond_bps × StakeAtRisk / 10,000)`, which is strictly more than the floor —
- * so an account passing the local headroom check is either short at dispatch or has a larger
- * sum taken than the screen showed. Either way the user signed against a number the chain
- * does not use, on a slashable action.
- *
- * §11.5 already rules this exact case, one rule over: the redemption-fee rule 5 says
- * *"Unreadable ⇒ no figure, never a default … the net-payout figure is disabled with an
- * explanation and the transaction blocked"*, and it adds that the frontend MUST NOT mirror
- * the runtime's own fail-open read. A bond is the same kind of quantity — money the account
- * parts with, computed from chain-read values or not displayed at all — so the disposition is
- * `blocking` and `oracle.report` stays closed until 02 publishes `StakeAtRisk` (SQ-598).
- * SQ-620 stays open with it: P-13's text still says *"recomputed and displayed"*, and the
- * honest repair for that is the missing surface, not a doc edit blessing the floor.
+ * **Now** neither applies. `SQ-598` and `SQ-620` are both resolved by the surface rather than
+ * by a doc edit blessing the floor, the `blocking` obligation this row carried is retired,
+ * and no arithmetic remains in the client: 07 §6.1 states three separable normative details
+ * (the division rounds up, rounding resolves toward custody, the `max` applies after
+ * rounding) and a client applying them would own all three in the under-custody direction.
+ * A floor is still never a fallback — it is a lower bound on the bond, never the bond.
  *
  * ## *Round open* and *report window not elapsed* are two clauses
  *
- * They were one, and they are distinct for a **counter-report on a live round**: a round
- * still open whose report window has elapsed refuses the report, and one clause covering
- * both cannot say which half failed. §11.5 writes them with a semicolon between them.
+ * They are distinct, and one clause covering both cannot say which half failed. §11.5 writes
+ * them with a semicolon between them.
+ *
+ * **What §11.5 means by *round open* for `report` is an open question, and this row does not
+ * pick a reading (SQ-XXX, proposed 2026-08-07).** `oracle_core::report`
+ * (`crates/oracle-core/src/lib.rs:767-775`) refuses when a round for `(component, epoch,
+ * spec_version)` already **exists**, with `AlreadyFinal` — `report` opens round 1 and a
+ * counter-report is `oracle.challenge`, a different call on a different row. So the natural
+ * reading of *"round open"* — a live round admits the report — is the opposite of what the
+ * runtime does, and the client copy said so for both clauses until 2026-08-07. The
+ * requirement and its refusal are therefore written to state what the chain will do without
+ * naming which state is the failing one, because a client that guessed would teach a
+ * reporter the wrong remedy on a bonded action.
  */
 const P13: readonly PreconditionClause[] = [
-  clause('P-13', 'the round is open', 'storage.oracle.rounds', 'storage', 'chain', { key: 'round-open' }),
+  clause('P-13', 'the round state for this component and epoch admits this report', 'storage.oracle.rounds', 'storage', 'chain', { key: 'round-open' }),
   clause('P-13', 'the report window has not elapsed', 'storage.oracle.rounds', 'storage', 'chain', { key: 'report-window' }),
   clause('P-13', 'you are a registered reporter', 'storage.oracle.reporters', 'storage', 'acting', { key: 'registered' }),
   clause('P-13', 'your reporter stake is held in full', 'storage.oracle.reporters', 'storage', 'acting', { key: 'stake-held' }),
@@ -912,17 +909,26 @@ const O7: readonly PreconditionClause[] = [
 ];
 
 /**
- * O-8 — `registry.file_incident(...)` / `file_milestone(...)` (§11.8.6 row 1).
+ * O-8 — `IncidentRegistry.file(...)` / `MilestoneRegistry.file(...)` (§11.8.6 row 1).
  *
  * **Contract v28 froze `Filings`/`ClosedAt`/`AckRecords` for both instances** (02 §7.4,
  * SQ-619), so the occupancy bound §11.8.6 requires is a real read. The clause names the
- * instance's own `Filings` map because the two allocators share no filing-id space.
+ * instance's own `Filings` map because the two allocators share no filing-id space. **v29
+ * published the bond** through `api.bond_quote`, so the amount is read rather than floored
+ * and the `blocking` obligation this row carried under SQ-731 is retired.
  *
- * The **bond amount** is still not readable, and that is a different question from the one
- * v28 answered: 07 §7 scales the filing bond off `Exposure(kind, m)`, the same cohort-escrow
- * sum P-13's bond needs, and 02 publishes no view of it. It is declared `blocking` below
- * under SQ-731 for the reason P-13 is — money the account parts with is computed from
- * chain-read values or the transaction is blocked (§11.5's redemption-fee rule 5).
+ * **The frozen-version clause is v29's third addition, and until it existed this row was
+ * silent about a precondition it declares.** §11.8.6 requires `spec_version` to be among the
+ * versions live cohorts froze for `epoch`, and no clause read anything: `clauseGroupsFor`
+ * answers *"every declared read passed"*, which for an undeclared read is **vacuously true**,
+ * so the row reported complete coverage of a check nothing performed and a filer could be
+ * walked to a bonded signature the runtime refuses. `Epoch.CohortSchedules[epoch].specs`
+ * (02 §7.1, frozen at v29) is the item that answers it — a `BoundedVec<(ProposalId,
+ * MetricSpecVersion)>` of exactly the bindings the cohort froze. The near miss is not
+ * admissible: joining `Cohorts[epoch].proposals` to each proposal's `metric_spec` is a
+ * computation over two maps where §11.4 rule 2 requires an exact read, and it reads each
+ * proposal's *current* spec rather than the version its cohort froze — the same value only
+ * until a MetricSpec activation boundary, which is the case the clause exists for.
  */
 /**
  * Which registry instance a filing row reads — 11 §11.8.6, and the fix for a 2026-08-07 blocker.
@@ -962,6 +968,10 @@ const o8For = (instance: RegistryInstance): readonly PreconditionClause[] => [
   // 07 §7's not-determinable exposure, which blocks.
   clause('O-8', 'the bond this filing will hold, priced at B′', 'api.bond_quote', 'runtime-api', 'chain', { key: 'bond-quote' }),
   clause('O-8', 'your free USDC covers the filing bond', 'storage.foreign_assets.account', 'storage', 'acting', { key: 'bond-headroom' }),
+  // Contract v29 (02 §7.1). Instance-free like the bond quote: `CohortSchedules` is
+  // `pallet-epoch`'s, and the cohort froze one set of MetricSpec versions whichever registry
+  // a filing is against.
+  clause('O-8', 'the MetricSpec version this filing names is one the cohorts froze for this epoch', 'storage.epoch.cohort_schedules', 'storage', 'chain', { key: 'frozen-spec-version' }),
   ...feeHeadroom('O-8'),
 ];
 

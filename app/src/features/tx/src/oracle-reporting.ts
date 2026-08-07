@@ -180,11 +180,24 @@ interface P13Check {
 
 const P13_CHECKS: Readonly<Record<string, P13Check>> = Object.freeze({
   'round-open': {
-    check: 'Round open',
+    check: 'Round state',
     holds: (inputs) => inputs.roundOpen.value,
+    // **Deliberately conservative, and it names no state (SQ-XXX, proposed 2026-08-07).**
+    // The copy read *"A counter-report needs a live round; this one has been closed or
+    // settled"*, which inverts the runtime: `oracle_core::report` refuses when a round for
+    // `(component, epoch, spec_version)` already **exists** (`AlreadyFinal`,
+    // `crates/oracle-core/src/lib.rs:767-775`) — `report` opens round 1, and a
+    // counter-report is `oracle.challenge` on row P-14. 11 §11.5 writes this precondition as
+    // *"round open"*, so the specification and the runtime read opposite ways and the
+    // question is open. Until it is settled this says what the chain will do and does not
+    // name which state caused it, because naming the wrong one sends a reporter to the wrong
+    // remedy on a bonded action.
     detail:
-      'This round is no longer open, so nothing can be reported into it. A counter-report ' +
-      'needs a live round; this one has been closed or settled.',
+      'The chain will not accept this report for this component and epoch in their current ' +
+      'round state. This client does not name which state, because the specification and ' +
+      'the runtime describe this condition in opposite directions and the disagreement is ' +
+      'unresolved. Note that a counter-report is a different call — `oracle.challenge` — ' +
+      'and is checked on its own row.',
   },
   'report-window': {
     check: 'Report window',
@@ -274,7 +287,10 @@ export function reportBlocks(inputs: ReportInputs): ReportCheck {
     // The bond clause is the one whose reason is not fixed copy: `undeterminable` and
     // `unread` are different states with different remedies, and collapsing them would
     // tell a reporter to retry a read the chain answered correctly.
-    const refusal = first.check === 'Bond amount' ? bondQuoteRefusal(inputs.bondQuote) : undefined;
+    // `'oracle-report'` is written here rather than threaded through the inputs: P-13 is the
+    // report row, so the arm is a property of this function and not of what it was handed.
+    const refusal =
+      first.check === 'Bond amount' ? bondQuoteRefusal(inputs.bondQuote, 'oracle-report') : undefined;
     blocks.push({ check: first.check, detail: refusal ?? first.detail });
   }
   return { blocks, bondDisclosure: BOND_QUOTE_IS_A_QUOTE };

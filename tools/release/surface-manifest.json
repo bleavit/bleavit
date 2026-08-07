@@ -4197,6 +4197,22 @@
       }
     },
     {
+      "id": "storage.epoch.cohort_schedules",
+      "kind": "storage",
+      "pallet": "Epoch",
+      "item": "CohortSchedules",
+      "query": "prefix",
+      "required": true,
+      "citation": "02 §7.1; 11 §11.8.6",
+      "layout": {
+        "hashers": [
+          "Blake2_128Concat"
+        ],
+        "key": "u32",
+        "value": "pallet_epoch::pallet::CohortSchedule{epoch:u32,creation_epoch_length:u32,measurement_until:u32,settlement_epoch:u32,specs:bounded_collections::bounded_vec::BoundedVec(Vec<(u64,u16)>)}"
+      }
+    },
+    {
       "id": "storage.epoch.cohorts",
       "kind": "storage",
       "pallet": "Epoch",
