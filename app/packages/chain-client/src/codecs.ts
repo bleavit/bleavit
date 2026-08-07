@@ -59,8 +59,39 @@ export interface ChainCodecs {
   readonly query: unknown;
 }
 
+/**
+ * The runtime-API half of the same surface, declared apart from {@link ChainCodecs}.
+ *
+ * Two interfaces rather than one member added to the first, and the reason is the same one
+ * `storageKeyBuilder` gives for taking `{ readonly query: unknown }` inline: a function
+ * should name the part of the codec surface it actually reaches. A single widened interface
+ * would also make every existing two-line storage stub in the suites fail to typecheck for a
+ * property none of them touches, which is churn that teaches nothing.
+ *
+ * `apis` is `unknown` for {@link ChainCodecs}' reason exactly — the lookup below is by
+ * *string*, and PAPI's real type is a mapped type keyed by the runtime's own API and method
+ * names, so no static type relates the argument to the result. Asserting into a
+ * `Record<string, …>` would be a claim the compiler cannot check.
+ */
+export interface ChainApiCodecs {
+  readonly apis: unknown;
+}
+
 /** A storage item's value codec, as far as this module needs to know. */
 interface StorageCodec {
+  readonly value: { dec(input: string): unknown };
+}
+
+/**
+ * A runtime API's codec pair, as far as this module needs to know.
+ *
+ * The **arguments** and the **result** are separate codecs and both are needed, because both
+ * halves fail silently on their own. A wrong argument does not error — it asks about a
+ * different subject and receives a perfectly valid answer — and a result decoded by the
+ * wrong method's codec yields a plausible record from the right bytes.
+ */
+interface ApiCodec {
+  readonly args: { enc(values: readonly unknown[]): Uint8Array };
   readonly value: { dec(input: string): unknown };
 }
 
@@ -80,7 +111,7 @@ function isStorageCodec(candidate: unknown): candidate is StorageCodec {
  */
 export async function loadCodecs(
   descriptors: Parameters<typeof getTypedCodecs>[0],
-): Promise<ChainCodecs> {
+): Promise<ChainCodecs & ChainApiCodecs> {
   return getTypedCodecs(descriptors);
 }
 
@@ -147,4 +178,125 @@ export function storageDecoder<T>(
   item: string,
 ): (raw: string) => DecodeResult<T> {
   return (raw) => decodeStorage<T>(codecs, pallet, item, raw);
+}
+
+/**
+ * Look one runtime API's codec pair up, or say why it is not there.
+ *
+ * The lookup is inside the `try` for {@link decodeStorage}'s measured reason: PAPI's `apis`
+ * surface is a **Proxy that throws** on a name the runtime does not declare —
+ * `codecs.apis.NoSuchApi.foo` raises *"Runtime entry Runtime API(NoSuchApi.foo) not found"*
+ * rather than yielding `undefined`, so an `=== undefined` guard around it is dead code.
+ */
+function apiCodec(
+  codecs: ChainApiCodecs,
+  api: string,
+  method: string,
+): { readonly ok: true; readonly codec: ApiCodec } | { readonly ok: false; readonly reason: string } {
+  let candidate: unknown;
+  try {
+    candidate = (codecs.apis as Record<string, Record<string, unknown>>)[api]?.[method];
+  } catch (error) {
+    return {
+      ok: false,
+      reason: `this runtime has no runtime-API method "${api}.${method}" (${String(error)})`,
+    };
+  }
+  if (typeof candidate !== 'object' || candidate === null) {
+    return { ok: false, reason: `this runtime has no runtime-API method "${api}.${method}"` };
+  }
+  const value: unknown = (candidate as { value?: unknown }).value;
+  const args: unknown = (candidate as { args?: unknown }).args;
+  if (
+    typeof value !== 'object' ||
+    value === null ||
+    typeof (value as { dec?: unknown }).dec !== 'function' ||
+    typeof args !== 'object' ||
+    args === null ||
+    typeof (args as { enc?: unknown }).enc !== 'function'
+  ) {
+    return {
+      ok: false,
+      reason: `"${api}.${method}" does not expose the argument and result codecs this client builds against`,
+    };
+  }
+  return { ok: true, codec: candidate as ApiCodec };
+}
+
+/**
+ * Decode one runtime-API result, naming the method in any failure.
+ *
+ * The complement of {@link decodeStorage}, and it exists for the same reason: a screen that
+ * reads `quote()` or `account_positions()` receives an opaque hex string from
+ * `FinalizedReader`, and only the chain's own codecs can say what is in it. A decode failure
+ * is a **value** here too (INV-FE-12) — a thrown error would be caught somewhere above and
+ * turned into an empty list, which on a positions screen is *this account holds nothing*.
+ *
+ * The API and the method stay separate arguments rather than a dotted string, per
+ * {@link decodeStorage}: a name assembled by concatenation can silently mean something else.
+ */
+export function decodeApiResult<T>(
+  codecs: ChainApiCodecs,
+  api: string,
+  method: string,
+  raw: string,
+): DecodeResult<T> {
+  const found = apiCodec(codecs, api, method);
+  if (!found.ok) return { ok: false, reason: found.reason };
+  try {
+    return { ok: true, value: found.codec.value.dec(raw) as T };
+  } catch (error) {
+    // Measured: PAPI's result codecs throw `RangeError: Offset is outside the bounds of the
+    // DataView` on short bytes. The message reaches a user through `Undecodable`, beside the
+    // raw hex, so it is carried rather than replaced.
+    return { ok: false, reason: String(error) };
+  }
+}
+
+/** A decoder bound to one runtime-API method. The `apis` twin of {@link storageDecoder}. */
+export function apiDecoder<T>(
+  codecs: ChainApiCodecs,
+  api: string,
+  method: string,
+): (raw: string) => DecodeResult<T> {
+  return (raw) => decodeApiResult<T>(codecs, api, method, raw);
+}
+
+/**
+ * The SCALE encoding of one runtime-API method's arguments, as `0x` hex.
+ *
+ * Hex rather than the `Uint8Array` PAPI returns, because that is what
+ * `FinalizedReader.call`/`crossCheckedCall` take — and a conversion left at each call site is
+ * a conversion each call site can get wrong.
+ *
+ * **This throws rather than returning a result, and the asymmetry with the decoders above is
+ * deliberate.** A decode failure describes the chain: bytes arrived and could not be read,
+ * which is a state a screen renders. An encode failure describes *this client*: it was asked
+ * for the arguments of a call it is about to make and cannot build them, and there is nothing
+ * to render because no read has happened. Returning a result would invite a caller to fall
+ * back to `'0x'`, which is a **valid encoding of no arguments** — so a runtime API taking one
+ * would be asked about whatever the empty argument list decodes to and would answer.
+ */
+export function apiArgs(
+  codecs: ChainApiCodecs,
+  api: string,
+  method: string,
+): (values: readonly unknown[]) => string {
+  return (values) => {
+    const found = apiCodec(codecs, api, method);
+    if (!found.ok) throw new Error(found.reason);
+    let encoded: Uint8Array;
+    try {
+      encoded = found.codec.args.enc(values);
+    } catch (error) {
+      throw new Error(
+        `the arguments of "${api}.${method}" could not be encoded: ${String(error)}. This ` +
+          'client would otherwise ask the runtime a different question and receive a valid ' +
+          'answer to it.',
+      );
+    }
+    let out = '0x';
+    for (const byte of encoded) out += byte.toString(16).padStart(2, '0');
+    return out;
+  };
 }

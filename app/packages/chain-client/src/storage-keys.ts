@@ -110,6 +110,25 @@ const HASHERS: Readonly<Record<StorageHasher, (encoded: Uint8Array) => Uint8Arra
   });
 
 /**
+ * How many bytes a hasher puts **in front of** the key it concatenates.
+ *
+ * Measured from the hasher itself rather than tabulated: hashing the empty input yields the
+ * digest and nothing else, so its length *is* the offset at which the encoded key begins.
+ * A written-down table would be a second copy of a fact `HASHERS` already holds, and the two
+ * could disagree — at which point a key decoder would read a storage key from the wrong byte
+ * and produce a well-formed value for the wrong subject.
+ *
+ * All three hashers this client builds keys for are concat forms, so every key it can build
+ * is also a key it can take apart; `Identity` is the degenerate case and correctly answers 0.
+ * Anything else refuses here exactly as {@link storageKey} refuses it.
+ */
+export function concatDigestBytes(hasher: StorageHasher): number {
+  const digest = HASHERS[hasher];
+  if (digest === undefined) throw new UnsupportedHasherError(hasher);
+  return digest(new Uint8Array()).length;
+}
+
+/**
  * The 32-byte key of a plain storage item, or the prefix of a map.
  *
  * This is the key to pass to `transport.storage(…, 'value')` for a plain item and to

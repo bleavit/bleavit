@@ -153,13 +153,33 @@ export interface PositionWitnessEntry {
   readonly balance: bigint;
 }
 
-export interface PositionDecoders {
+/** One domain's two decoders: its own view, and its own storage prefix. */
+export interface DomainPositionDecoders {
   /** The API result — a `BoundedVec<PositionView, 64>` (02 §3). */
   readonly positions: (raw: string) => Decoded<readonly PositionRecord[]>;
   /** The `Positions` prefix, key **and** value, for the FE-P2 cross-check. */
   readonly positionEntries: (
     items: readonly StorageItem[],
   ) => Decoded<readonly PositionWitnessEntry[]>;
+}
+
+/**
+ * A decoder pair **per domain**, never one pair serving both.
+ *
+ * This was one flat pair until the composition root was written, and the shape was the defect
+ * `funding-composition.ts` records in its own note: a decoder is bound at construction time to
+ * one instance's codecs and one instance's key layout, so a single pair reading both
+ * `ConditionalLedger.Positions` and `ServiceLedger.Positions` works **by coincidence** —
+ * measured, the two instances declare the same types, so either decodes the other's bytes.
+ *
+ * Nothing gates that coincidence, and 02 §7.4 is explicit that the cross-check runs *"per
+ * domain against that domain's own prefix"*. A field added to one instance's `PositionView`
+ * ahead of `balance` would put a wrong balance on screen under a `verified-finalized` badge,
+ * in the domain the user is least able to check.
+ */
+export interface PositionDecoders {
+  readonly primary: DomainPositionDecoders;
+  readonly service: DomainPositionDecoders;
 }
 
 /**
@@ -228,6 +248,10 @@ async function readBook<D extends LedgerDomain>(
   // `positionSourceFor` precisely so neither can be selected without the other (10 §11).
   const source = positionSourceFor(domain as ChainLedgerDomain);
   const label = domain === 'service' ? POSITION_READS.service : POSITION_READS.primary;
+  // The decoder pair follows the domain, exactly as the pallet and the API name do. Selected
+  // here rather than passed in already-chosen, so a call site cannot pair one domain's view
+  // with the other's decoder (02 §7.4).
+  const domained = decoders[domain];
 
   const raw = await reader.crossCheckedCall({
     api: source.api,
@@ -235,7 +259,7 @@ async function readBook<D extends LedgerDomain>(
     argsHex: params.whoArgsHex,
   });
 
-  const decoded = decoders.positions(raw.value.result);
+  const decoded = domained.positions(raw.value.result);
   if (!decoded.ok) {
     undecodable.push({ label: label.api, rawHex: raw.value.result, reason: decoded.reason });
     return { domain, rows: [], total: combine(0n, []) };
@@ -244,7 +268,7 @@ async function readBook<D extends LedgerDomain>(
   // FE-P2's conservative default: the view is admitted only alongside the prefix it must
   // agree with. Both legs were read at this reader's one pin, so a disagreement is a real
   // disagreement rather than a race.
-  const witness = decoders.positionEntries(raw.value.witness);
+  const witness = domained.positionEntries(raw.value.witness);
   const mine: ReadonlyMap<string, bigint> = witness.ok
     ? new Map(
         witness.value

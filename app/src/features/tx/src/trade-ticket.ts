@@ -100,18 +100,32 @@ export interface TradeBlock {
 /** The lifecycle states a proposal's books may be traded in (P-1: these only). */
 export type TradableState = 'Trading' | 'Extended';
 
-/** Every proposal state the client can observe on the owning proposal. */
+/**
+ * Every proposal state the client can observe on the owning proposal — 02 §2's frozen enum.
+ *
+ * **Five of the ten names this union carried were not variants of it** — `Seeded`, `Deciding`,
+ * `Resolved`, `Withdrawn`, `Voided` — while `Screening`, `Queued`, `Suspended`, `Rerun`,
+ * `Executed`, `FailedExecuted`, `Measuring`, `Cancelled` and `Expired` were missing. P-1
+ * admits `Trading` and `Extended` and blocks everything else, so the effect on a ticket was
+ * the safe direction; the effect on a *reader* was not, because a decoder producing the
+ * runtime's own variant name could not type its result. `app/tests/screens` binds this union
+ * to doc 02's own `pub enum ProposalState` block so neither list can drift again.
+ */
 export type ProposalState =
   | TradableState
   | 'Submitted'
+  | 'Screening'
   | 'Qualified'
-  | 'Seeded'
-  | 'Deciding'
-  | 'Resolved'
-  | 'Settled'
+  | 'Queued'
+  | 'Suspended'
+  | 'Rerun'
   | 'Rejected'
-  | 'Withdrawn'
-  | 'Voided';
+  | 'Executed'
+  | 'FailedExecuted'
+  | 'Measuring'
+  | 'Settled'
+  | 'Cancelled'
+  | 'Expired';
 
 /** Which book this ticket trades. Baseline carries P-2's extra rows. */
 export type BookKind = 'decision' | 'gate' | 'baseline';

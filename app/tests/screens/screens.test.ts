@@ -163,6 +163,7 @@ import {
   ratificationFor,
   upgradeFeeHeadroom,
 } from '@bleavit/features-tx';
+import type { DecisionStats } from '@bleavit/features-tx';
 import {
   ClampProvenanceMismatchError,
   ImportRefused,
@@ -524,15 +525,51 @@ test('the shell offers no prop that could hide the banner', () => {
 
 // ------------------------------------------------------------------ S2
 
+/**
+ * A whole `DecisionStats` model, every leaf badged by the caller's `finalized`.
+ *
+ * A helper because 02 §4's view has fourteen fields, and a per-test literal is a place for
+ * one of them to be dropped without any assertion noticing.
+ */
+function decisionStats(overrides: Partial<DecisionStats> = {}): DecisionStats {
+  return {
+    twapAccept1e9: finalized(562_000_000n),
+    twapReject1e9: finalized(521_000_000n),
+    twapBaseline1e9: finalized(523_000_000n),
+    rEff1e9: finalized(521_000_000n),
+    trailingAccept1e9: finalized(562_000_000n),
+    trailingReject1e9: finalized(522_200_000n),
+    uplift1e9: finalized(41_000_000n),
+    coveragePct: finalized(97),
+    tradedVolume: finalized(1_000_000n),
+    vMinRequired: finalized(500_000n),
+    converged: finalized(true),
+    gates: {
+      present: true,
+      survivalAdopt1e9: finalized(11_000_000n),
+      survivalReject1e9: finalized(9_000_000n),
+      securityAdopt1e9: finalized(17_000_000n),
+      securityReject1e9: finalized(15_000_000n),
+    },
+    attackCostHat: finalized(9_000_000n),
+    inCapPrize: finalized(1_000_000n),
+    ...overrides,
+  };
+}
+
 test('a proposal still trading has nowhere to put decision statistics', () => {
   const summary = {
     id: finalized('42'),
-    title: finalized('Fund the thing'),
+    payloadHash: finalized(`0x${'ab'.repeat(32)}`),
     klass: finalized('TREASURY'),
     state: finalized('Trading'),
   };
   const html = renderToStaticMarkup(
-    h(ProposalDetail, { view: { stage: 'pre-decision', summary, reason: 'trading' } }),
+    h(ProposalDetail, {
+      view: { stage: 'pre-decision', summary, reason: 'trading' },
+      decimals: 6,
+      symbol: 'USDC',
+    }),
   );
   assert.ok(/No decision statistics yet/.test(html), html);
   assert.ok(!/uplift/i.test(html), `an uplift figure leaked into a trading proposal: ${html}`);
@@ -549,15 +586,22 @@ test('a decided proposal renders its statistics with a badge', () => {
         stage: 'decided',
         summary: {
           id: finalized('42'),
-          title: finalized('Fund the thing'),
+          payloadHash: finalized(`0x${'ab'.repeat(32)}`),
           klass: finalized('TREASURY'),
           state: finalized('Settled'),
         },
-        decisionStats: { outcome: finalized('PASS'), upliftPpm: finalized(12_500n) },
+        decisionStats: decisionStats(),
       },
+      decimals: 6,
+      symbol: 'USDC',
     }),
   );
-  assert.ok(/1\.2500 %/.test(html), html);
+  // The 1e9 grid, rendered on its own grid — `0.562000000`, not a percentage and not ppm.
+  assert.ok(html.includes('0.562000000'), html);
+  // The derived uplift, `twap_accept − r_eff`.
+  assert.ok(html.includes('0.041000000'), html);
+  // A balance is a balance: USDC base units at six decimals, with its symbol.
+  assert.ok(html.includes('1.000000 USDC'), html);
   assert.ok(html.includes('data-status="verified-finalized"'), html);
 });
 
@@ -1196,7 +1240,7 @@ test('the navigation highlight and the outlet agree on which screen is showing',
 test('no statistics render while a proposal is still trading', () => {
   const summary = {
     id: finalized('42'),
-    title: finalized('t'),
+    payloadHash: finalized(`0x${'ab'.repeat(32)}`),
     klass: finalized('TREASURY'),
     state: finalized('Trading'),
   };
@@ -1209,7 +1253,7 @@ test('no statistics render while a proposal is still trading', () => {
 
 test('an Extended proposal gets its own copy, not the generic one', () => {
   const summary: ProposalSummary = {
-    id: finalized('42'), title: finalized('t'), klass: finalized('P'), state: finalized('Extended'),
+    id: finalized('42'), payloadHash: finalized(`0x${'ab'.repeat(32)}`), klass: finalized('P'), state: finalized('Extended'),
   };
   const { view } = viewFor(summary, undefined);
   assert.equal(view.stage, 'pre-decision');
@@ -1221,9 +1265,9 @@ test('statistics arriving on an open market are refused and reported, not render
   // came from one pinned block, so it is a contradiction rather than a race, and only one
   // reading is safe to act on.
   const summary = {
-    id: finalized('42'), title: finalized('t'), klass: finalized('P'), state: finalized('Trading'),
+    id: finalized('42'), payloadHash: finalized(`0x${'ab'.repeat(32)}`), klass: finalized('P'), state: finalized('Trading'),
   };
-  const stats = { outcome: finalized('PASS'), upliftPpm: finalized(12_500n) };
+  const stats = decisionStats();
   const { view, anomaly } = viewFor(summary, stats);
   assert.equal(view.stage, 'pre-decision');
   assert.ok(anomaly, 'the contradiction was swallowed');
@@ -1235,10 +1279,10 @@ test('an unknown lifecycle state renders no statistics — fail closed, not fail
   // INV-FE-12. A denylist alone would admit a state from a runtime upgrade, or one a
   // plausible-but-wrong decode produced.
   const summary = {
-    id: finalized('42'), title: finalized('t'), klass: finalized('P'),
+    id: finalized('42'), payloadHash: finalized(`0x${'ab'.repeat(32)}`), klass: finalized('P'),
     state: finalized('SomeStateFromANewerRuntime'),
   };
-  const stats = { outcome: finalized('PASS'), upliftPpm: finalized(1n) };
+  const stats = decisionStats();
   const { view, anomaly } = viewFor(summary, stats);
   assert.equal(view.stage, 'pre-decision');
   assert.ok(anomaly, 'an unknown state let statistics through');
@@ -1248,13 +1292,13 @@ test('a sealed proposal does render its statistics', () => {
   // The anti-vacuity control: if this failed, every test above would pass for the trivial
   // reason that nothing ever renders statistics.
   const summary = {
-    id: finalized('42'), title: finalized('t'), klass: finalized('P'), state: finalized('Settled'),
+    id: finalized('42'), payloadHash: finalized(`0x${'ab'.repeat(32)}`), klass: finalized('P'), state: finalized('Settled'),
   };
-  const stats = { outcome: finalized('PASS'), upliftPpm: finalized(12_500n) };
+  const stats = decisionStats();
   const { view, anomaly } = viewFor(summary, stats);
   assert.equal(view.stage, 'decided');
   assert.equal(anomaly, undefined);
-  assert.equal(view.decisionStats.upliftPpm.value, 12_500n);
+  assert.equal(view.decisionStats.uplift1e9.value, 41_000_000n);
 });
 
 /**
@@ -1286,7 +1330,7 @@ test('the proposal list is cross-checked against its own storage prefix (FE-P2)'
     {
       proposals: (raw) => ({
         ok: true,
-        value: raw.map((hex, i) => ({ id: String(i), title: hex, klass: 'P', state: 'Settled' })),
+        value: raw.map((hex, i) => ({ id: String(i), payloadHash: hex, klass: 'P', state: 'Settled' })),
       }),
       decisionStats: () => ({ ok: true, value: undefined }),
     },
@@ -1317,7 +1361,7 @@ test('a prefix key with no value is reported, never silently dropped', async () 
     {
       proposals: (raw) => ({
         ok: true,
-        value: raw.map((hex, i) => ({ id: String(i), title: hex, klass: 'P', state: 'Settled' })),
+        value: raw.map((hex, i) => ({ id: String(i), payloadHash: hex, klass: 'P', state: 'Settled' })),
       }),
       decisionStats: () => ({ ok: true, value: undefined }),
     },
