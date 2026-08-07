@@ -559,7 +559,17 @@ function holdingsOf(replay: Replay, vault: string, account: string): Map<string,
  * is the part of the identity that survives settlement, and it is the part a forger has to
  * work to satisfy.
  */
-function replayConservation(document: SnapshotDocument): Replay {
+function replayConservation(document: SnapshotDocument, screens: ScreenSet = 'snapshot'): Replay {
+  // 10 §8.5.2 takes the REPLAY away from a page, and its argument reaches exactly one thing: the
+  // non-negativity requirement, which is meaningless from a zero start mid-history. It does not
+  // reach the two REFERENTIAL checks below — "does this document declare the vault it moves" and
+  // "does that vault have the branch this movement names" — which are pure self-checks an honest
+  // page over blocks 15..19 satisfies without difficulty. Dropping the replay whole would leave
+  // `ops`, the field layer-3 actually ingests, with no referential check at all, and §8.4's
+  // sampling is not a compensating control for it: sampling projects `balances` and never looks at
+  // a movement. So the fold and the declaration checks run for both callers; only the
+  // non-negativity findings are snapshot-only.
+  const nonNegativity = screens === 'snapshot';
   const replay: Replay = { supply: new Map(), holdings: new Map(), escrow: new Map(), findings: [] };
   const branchesOf = new Map(document.vaults.map((v) => [v.vault, v.branches]));
   for (const [i, op] of document.ops.entries()) {
@@ -598,7 +608,7 @@ function replayConservation(document: SnapshotDocument): Replay {
         continue;
       }
       const remaining = bump(held, op.branch, -value);
-      if (remaining < 0n) {
+      if (nonNegativity && remaining < 0n) {
         replay.findings.push({
           screen: 'conservation',
           why:
@@ -612,7 +622,7 @@ function replayConservation(document: SnapshotDocument): Replay {
     if (op.kind === 'merge') {
       for (const branch of branches) {
         const remaining = bump(held, branch, -value);
-        if (remaining < 0n) {
+        if (nonNegativity && remaining < 0n) {
           replay.findings.push({
             screen: 'conservation',
             why:
@@ -623,7 +633,7 @@ function replayConservation(document: SnapshotDocument): Replay {
         bump(supply, branch, -value);
       }
       const escrow = bump(replay.escrow, op.vault, -value);
-      if (escrow < 0n) {
+      if (nonNegativity && escrow < 0n) {
         replay.findings.push({
           screen: 'conservation',
           why: `ops[${i}] takes vault "${op.vault}" escrow negative (${escrow})`,
@@ -639,7 +649,7 @@ function replayConservation(document: SnapshotDocument): Replay {
       continue;
     }
     const remaining = bump(held, op.branch, -value);
-    if (remaining < 0n) {
+    if (nonNegativity && remaining < 0n) {
       replay.findings.push({
         screen: 'conservation',
         why:
@@ -649,7 +659,7 @@ function replayConservation(document: SnapshotDocument): Replay {
     }
     bump(supply, op.branch, -value);
     const escrow = bump(replay.escrow, op.vault, -value);
-    if (escrow < 0n) {
+    if (nonNegativity && escrow < 0n) {
       replay.findings.push({
         screen: 'conservation',
         why: `ops[${i}] takes vault "${op.vault}" escrow negative (${escrow})`,
@@ -963,6 +973,107 @@ export interface SnapshotAdmission {
  * module's; the conservative reading is in force until it answers.
  */
 export function admitSnapshot(text: string, admission: SnapshotAdmission, sha256: Sha256): SnapshotVerdict {
+  const screened = screenDocument(text, admission, sha256, 'snapshot');
+  if (screened.kind === 'rejected') return screened;
+  // The one construction site of the brand. An assertion rather than a literal because the
+  // phantom field has no runtime representation and cannot be written — same shape, and the
+  // same single-site discipline, as `chain-client`'s `Finalized<T>` mint (10 §2.1).
+  return { kind: 'admitted', document: screened.document } as AdmittedSnapshot;
+}
+
+/**
+ * A page that passed every screen **a page owes** — 10 §8.5.2. Deliberately not branded.
+ *
+ * {@link AdmittedSnapshot}'s brand means *every* §8.4 screen ran over those bytes, and a page
+ * skips two of them by specification. Handing a page back under that brand would make the one
+ * claim the brand exists to carry false, and would let {@link mintSnapshotRows} — which takes the
+ * branded type precisely so an unscreened document cannot become layer-3 rows — accept a document
+ * whose conservation replay never ran.
+ *
+ * **What actually stops it is two things, and this note claimed only the weaker one.** The brand
+ * blocks the object literal, the spread and `satisfies`, because `ADMITTED` is a non-exported
+ * `unique symbol` no other module can name. It does **not** block `page as AdmittedSnapshot`:
+ * TypeScript permits that assertion between related types, and an R-6 review on 2026-08-07 found
+ * this docstring asserting one step further than the code enforced. The other half is
+ * `tools/check-finalized-casts.ts`, which since that review governs **every** brand in the
+ * workspace rather than `Finalized` alone — it discovers them, so `AdmittedSnapshot` is covered
+ * without anyone having registered it, and an assertion to it outside this file fails the gate.
+ * 10 §2.1 always described the control as brand *plus* assertion ban; only one of the two was
+ * general.
+ */
+export interface AdmittedPage {
+  readonly kind: 'admitted';
+  readonly document: SnapshotDocument;
+}
+
+/** {@link admitIndexerPage}'s verdict. Rejection is shared with {@link admitSnapshot}. */
+export type PageVerdict = AdmittedPage | RejectedSnapshot;
+
+/**
+ * Admit one `GET /range` page — 10 §8.5.2's screen set, which is not §8.4's.
+ *
+ * > **A page owes canonical form and §8.2's ordering rules. It does not owe the conservation
+ * > replay.** … §8.4 already resolves this and the split is its own.
+ *
+ * §8.5.2 fixes exactly which of §8.4's three internal-consistency screens that drops, and the
+ * answer is two of the three — but **not for one shared reason**, which is the trap. Treating them
+ * as one fact is how a first draft of this note got the second one wrong.
+ *
+ * **The conservation replay drops** because it requires non-negativity at every step from a zero
+ * start, and a page that opens mid-history legitimately consumes positions minted before it. A
+ * `split` mints from escrow and is self-contained at any span; a `merge`, `transfer` or `redeem`
+ * of an earlier position replays negative. Running it is not strictness — it makes `from` and `to`
+ * unusable for every range that does not reach back to genesis, which is the whole of the route.
+ *
+ * **The event↔derived-row agreement drops for a different reason.** {@link checkDerivedRows}
+ * compares `balances` against the fold of the document's own `ops`, so it is a *self*-check and
+ * would survive a restriction perfectly well. What removes it is §8.5.2's ruling on what the field
+ * holds: on a page, `balances` is **read from state at the page's last block**, not folded from
+ * the page. It has to be, because §8.5.2 assigns this route to §8.4's 1-in-16-page sampling, and
+ * sampling re-verifies rows *against the chain*. A folded balance compared against a current
+ * holding disagrees on every honest page — which would turn the one live control §8.4 gives an
+ * indexer into a generator of false mismatches that auto-disable honest operators.
+ *
+ * **Monotone coverage stays**, and the distinction is worth being exact about because dropping all
+ * three as a block is the easy misreading. That screen is entirely internal — ranges ordered and
+ * non-overlapping, inside the declared span, every movement inside a covered range — and a
+ * mid-history page satisfies it without difficulty. It is also load-bearing on this path
+ * specifically: `readRange` builds a caller's coverage from the union of the lists the pages
+ * carried, so a page whose movements sit outside its own declared coverage would hand back
+ * movements at blocks that coverage does not claim. That is the accidental forgery §8.2 exists to
+ * prevent, arriving through the one screen it would have been tempting to drop with the others.
+ *
+ * The line is therefore **a page is checked against itself, and against the chain — never against
+ * a history it does not carry.**
+ *
+ * `expectedPin` is the digest of the bytes just received rather than a publisher's claim; see
+ * `indexer.ts`, which explains why that is a statement about this provider kind and not a check
+ * switched off.
+ */
+export function admitIndexerPage(
+  text: string,
+  admission: SnapshotAdmission,
+  sha256: Sha256,
+): PageVerdict {
+  return screenDocument(text, admission, sha256, 'page');
+}
+
+/**
+ * Which screens run over a document. 10 §8.5.2 owns the split; {@link admitIndexerPage} derives it.
+ *
+ * One function rather than two admission paths, because the alternative is two copies of the pin,
+ * canonical-form and binding screens that agree on the day they are written. The screens a page
+ * skips are named at the single `if` below, so the difference between the two callers is legible
+ * as a difference rather than as a second implementation.
+ */
+type ScreenSet = 'snapshot' | 'page';
+
+function screenDocument(
+  text: string,
+  admission: SnapshotAdmission,
+  sha256: Sha256,
+  screens: ScreenSet,
+): { readonly kind: 'admitted'; readonly document: SnapshotDocument } | RejectedSnapshot {
   const findings: SnapshotFinding[] = [];
   let parsed: unknown;
   try {
@@ -1016,14 +1127,22 @@ export function admitSnapshot(text: string, admission: SnapshotAdmission, sha256
   }
   findings.push(...checkCanonicalOrder(document));
   findings.push(...checkCoverage(document));
-  const replay = replayConservation(document);
+  // The replay runs for BOTH callers and reports a different finding set for each — see the note on
+  // `replayConservation`. A page owes its REFERENTIAL checks (the vault a movement names is
+  // declared; the branch it names exists on that vault), because those are self-checks an honest
+  // mid-history page satisfies. It does not owe non-negativity, which is meaningless from a zero
+  // start mid-history. Dropping the replay whole — which this did until an R-6 review on
+  // 2026-08-07 — left `ops`, the field layer-3 ingests, with no referential check at all, and
+  // §8.4's sampling is no compensating control for that: it projects `balances` and never reads a
+  // movement.
+  const replay = replayConservation(document, screens);
   findings.push(...replay.findings);
-  findings.push(...checkDerivedRows(document, replay));
+  // The derived-row check is snapshot-only outright, and for its own reason: 10 §8.5.2 rules that a
+  // page's `balances` are read from state rather than folded from the page, so on a page there is
+  // nothing for this comparison to compare.
+  if (screens === 'snapshot') findings.push(...checkDerivedRows(document, replay));
   if (findings.length > 0) return reject(findings);
-  // The one construction site of the brand. An assertion rather than a literal because the
-  // phantom field has no runtime representation and cannot be written — same shape, and the
-  // same single-site discipline, as `chain-client`'s `Finalized<T>` mint (10 §2.1).
-  return { kind: 'admitted', document } as AdmittedSnapshot;
+  return { kind: 'admitted', document };
 }
 
 /** Thrown to stop the walk in {@link isCanonicalForm}. Private, so nothing else can catch it. */

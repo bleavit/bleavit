@@ -21,6 +21,7 @@ import { createHash } from 'node:crypto';
 import {
   PROVIDER_REFUSAL_CODES,
   providerRefusal,
+  snapshotRefusal,
   SNAPSHOT_FORMAT,
   admitSnapshot,
   deriveBalances,
@@ -987,12 +988,34 @@ test('FE-PROV-004 offers no resolution, because 10 §8.4 declines to have one', 
   assert.match(refusal.recovery, /not a decision|not proof/);
 });
 
-test('FE-PROV-003 promises that nothing was imported and nothing was deleted', () => {
+test('FE-PROV-003 promises that nothing was stored and nothing was deleted', () => {
   // §8.4's eviction preview runs *before* the import precisely so a rejected snapshot costs
   // the user nothing, and the copy is where that promise becomes visible.
   const verdict = admitSnapshot('{}', { expectedPin: 'x', binding: { ...BINDING } }, sha256);
   assert.equal(verdict.kind, 'rejected');
   if (verdict.kind !== 'rejected') return;
-  assert.match(verdict.refusal.message, /nothing was imported/);
-  assert.match(verdict.refusal.recovery, /Nothing local was deleted/);
+  assert.match(verdict.refusal.message, /nothing from it was stored/);
+  assert.match(verdict.refusal.recovery, /Nothing local was deleted or replaced/);
+  assert.match(verdict.refusal.recovery, /eviction preview runs before the import/);
+});
+
+test('FE-PROV-003\'s fixed copy names a "document" — 10 §8.5.2 routes a live page here too', () => {
+  // The message and recovery are FIXED per code (§9.4), and since §8.5.2 a rejected `/range` page
+  // carries this same code. Copy naming a *snapshot file*, a *download* or a *publisher* is
+  // therefore false for half the failures that reach it — the defect that deleted the
+  // `incomplete-check` cause on 2026-08-06, arriving from the other direction. Artifact-specific
+  // advice belongs in the per-cause remedy, which is why `served-page` exists.
+  const verdict = admitSnapshot('{}', { expectedPin: 'x', binding: { ...BINDING } }, sha256);
+  assert.equal(verdict.kind, 'rejected');
+  if (verdict.kind !== 'rejected') return;
+  for (const fixed of [verdict.refusal.message, verdict.refusal.recovery]) {
+    assert.doesNotMatch(fixed, /snapshot file|download|publisher/i);
+  }
+  assert.match(verdict.refusal.message, /document/i);
+
+  // And the page cause carries advice a page's user can act on, with none of a file's in it.
+  const page = snapshotRefusal('served-page', 'the page failed: coverage');
+  assert.match(page.detail, /nothing to download again/);
+  assert.match(page.detail, /no published hash/);
+  assert.match(page.detail, /stay marked as not observed/);
 });

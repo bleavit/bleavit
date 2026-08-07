@@ -45,13 +45,83 @@ import ts from 'typescript';
 
 const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
-/** The single site permitted to mint the brand (10 §2.1). */
-const ALLOWED_MINT_SITE = join('packages', 'chain-client', 'src', 'provenance.ts');
+/**
+ * The brands this gate governs are **discovered**, not listed — added 2026-08-07.
+ *
+ * It governed exactly one, `Finalized`, while the workspace had grown fifteen `unique symbol`
+ * brands. Every one of them rests on the same argument this file opens with: the phantom field
+ * stops an object literal, a spread and `satisfies`, and it does **not** stop `x as Brand`, which
+ * TypeScript permits between related types. So fourteen brands had the weaker half of the control
+ * and not the other half, and nothing said so.
+ *
+ * An R-6 review found it through `AdmittedSnapshot`, whose docstring claimed a page "has no way to
+ * name the brand" — true of the literal and false of a single assertion.
+ *
+ * A hand-maintained list would have been the third time this gate enumerated where it could parse
+ * (the line scanner, then the wrapper types). Discovery instead: a brand is a `declare const S:
+ * unique symbol` plus the exported types in that same file carrying `[S]`, and the declaring file
+ * is that brand's one mint site. A brand added tomorrow is covered without anyone remembering.
+ */
+interface Brand {
+  /** The exported type name an assertion would name. */
+  readonly name: string;
+  /** Repo-relative path of the file that declares the symbol — its only mint site. */
+  readonly mintSite: string;
+}
 
 const SKIP_DIRS = new Set(['node_modules', 'dist', '.git', 'fixtures']);
 
-/** The branded type this gate governs. */
-const BRAND = 'Finalized';
+/**
+ * Every exported type in `file` whose shape carries a `unique symbol` declared in that same file.
+ *
+ * Both halves have to be local. A symbol declared elsewhere is not a brand this file mints, and a
+ * type that merely *references* a branded type (a union arm, a field) is not itself a mint — only
+ * a declaration whose own members include the computed key can be asserted into existence.
+ */
+function brandsDeclaredIn(source: ts.SourceFile, rel: string): Brand[] {
+  const symbols = new Set<string>();
+  source.forEachChild((node) => {
+    if (!ts.isVariableStatement(node)) return;
+    const declaresAmbient = node.modifiers?.some((m) => m.kind === ts.SyntaxKind.DeclareKeyword);
+    if (declaresAmbient !== true) return;
+    for (const decl of node.declarationList.declarations) {
+      const isUniqueSymbol =
+        decl.type !== undefined &&
+        ts.isTypeOperatorNode(decl.type) &&
+        decl.type.operator === ts.SyntaxKind.UniqueKeyword;
+      if (isUniqueSymbol && ts.isIdentifier(decl.name)) symbols.add(decl.name.text);
+    }
+  });
+  if (symbols.size === 0) return [];
+
+  const carriesBrandKey = (node: ts.Node): boolean => {
+    let found = false;
+    const walkMembers = (inner: ts.Node): void => {
+      if (found) return;
+      if (ts.isPropertySignature(inner) && ts.isComputedPropertyName(inner.name)) {
+        const expr = inner.name.expression;
+        if (ts.isIdentifier(expr) && symbols.has(expr.text)) {
+          found = true;
+          return;
+        }
+      }
+      ts.forEachChild(inner, walkMembers);
+    };
+    ts.forEachChild(node, walkMembers);
+    return found;
+  };
+
+  const brands: Brand[] = [];
+  source.forEachChild((node) => {
+    const exported = ts.canHaveModifiers(node)
+      ? ts.getModifiers(node)?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword) === true
+      : false;
+    if (!exported) return;
+    if (!ts.isInterfaceDeclaration(node) && !ts.isTypeAliasDeclaration(node)) return;
+    if (carriesBrandKey(node)) brands.push({ name: node.name.text, mintSite: rel });
+  });
+  return brands;
+}
 
 function* walk(dir: string): Generator<string> {
   for (const entry of readdirSync(dir)) {
@@ -63,21 +133,22 @@ function* walk(dir: string): Generator<string> {
 }
 
 /**
- * Whether a type node mentions `Finalized` anywhere inside it.
+ * Which governed brand a type node mentions anywhere inside it, or `undefined`.
  *
  * Recursive rather than a top-level name comparison, because a wrapper mints just as well:
  * `as Readonly<Finalized<T>>`, `as Finalized<T>[]` and `as Finalized<T> | undefined` all
  * produce a value the transaction path accepts, and a check that only read the outermost
  * name would pass every one of them.
  */
-function mentionsBrand(node: ts.TypeNode): boolean {
+function mentionsBrand(node: ts.TypeNode, brands: ReadonlyMap<string, Brand>): Brand | undefined {
   if (ts.isTypeReferenceNode(node)) {
     const name = ts.isIdentifier(node.typeName) ? node.typeName.text : node.typeName.right.text;
-    if (name === BRAND) return true;
+    const hit = brands.get(name);
+    if (hit !== undefined) return hit;
   }
-  let found = false;
+  let found: Brand | undefined;
   node.forEachChild((child) => {
-    if (!found && ts.isTypeNode(child) && mentionsBrand(child)) found = true;
+    if (found === undefined && ts.isTypeNode(child)) found = mentionsBrand(child, brands);
   });
   return found;
 }
@@ -96,19 +167,32 @@ interface Violation {
   readonly detail: string;
 }
 
-function scan(files: readonly string[]): Violation[] {
+function parse(file: string): ts.SourceFile {
+  return ts.createSourceFile(
+    file,
+    readFileSync(file, 'utf8'),
+    ts.ScriptTarget.ES2022,
+    true,
+    file.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
+  );
+}
+
+/** Pass one: every brand in the workspace, keyed by the type name an assertion would write. */
+function discoverBrands(files: readonly string[]): Map<string, Brand> {
+  const brands = new Map<string, Brand>();
+  for (const file of files) {
+    const rel = relative(appRoot, file);
+    for (const brand of brandsDeclaredIn(parse(file), rel)) brands.set(brand.name, brand);
+  }
+  return brands;
+}
+
+function scan(files: readonly string[], brands: ReadonlyMap<string, Brand>): Violation[] {
   const violations: Violation[] = [];
   for (const file of files) {
     const rel = relative(appRoot, file);
-    const isMintSite = rel.split('/').join(sep) === ALLOWED_MINT_SITE;
-    const source = ts.createSourceFile(
-      file,
-      readFileSync(file, 'utf8'),
-      ts.ScriptTarget.ES2022,
-      true,
-      file.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
-    );
-
+    const here = rel.split('/').join(sep);
+    const source = parse(file);
     const report = (node: ts.Node, rule: Rule, detail: string): void => {
       const { line } = source.getLineAndCharacterOfPosition(node.getStart(source));
       violations.push({ rule, file: rel, line: line + 1, detail });
@@ -124,8 +208,13 @@ function scan(files: readonly string[]): Violation[] {
         if (innerType && isUnknownKeyword(innerType)) {
           report(node, 'double', 'banned double assertion `as unknown as`');
         }
-        if (!isMintSite && mentionsBrand(node.type)) {
-          report(node, 'assertion', `assertion to a ${BRAND}<...> type outside ${ALLOWED_MINT_SITE}`);
+        const asserted = mentionsBrand(node.type, brands);
+        if (asserted !== undefined && here !== asserted.mintSite) {
+          report(
+            node,
+            'assertion',
+            `assertion to a ${asserted.name} type outside ${asserted.mintSite}`,
+          );
         }
       }
       // `x is Finalized<T>` — the third mint mechanism, and the one the gate was originally
@@ -134,13 +223,16 @@ function scan(files: readonly string[]): Violation[] {
       // survive structured clone. So a predicate is exactly as powerful as `as Finalized<T>`.
       // A shipped `isFinalized(v: Verified<T>): v is Finalized<T>` let any package launder a
       // forged literal into the transaction path with green CI.
-      if (ts.isTypePredicateNode(node) && !isMintSite && node.type && mentionsBrand(node.type)) {
-        report(
-          node,
-          'predicate',
-          `\`... is ${BRAND}<...>\` type predicate outside ${ALLOWED_MINT_SITE} — a predicate ` +
-            'asserts the brand it cannot check, so it mints',
-        );
+      if (ts.isTypePredicateNode(node) && node.type) {
+        const predicated = mentionsBrand(node.type, brands);
+        if (predicated !== undefined && here !== predicated.mintSite) {
+          report(
+            node,
+            'predicate',
+            `\`... is ${predicated.name}\` type predicate outside ${predicated.mintSite} — a ` +
+              'predicate asserts the brand it cannot check, so it mints',
+          );
+        }
       }
       ts.forEachChild(node, visit);
     };
@@ -181,7 +273,10 @@ function runWitness(): number {
     from: marker.at + 1,
     to: index + 1 < markers.length ? (markers[index + 1]?.at ?? lines.length) - 1 : lines.length,
   }));
-  const findings = scan([fixture]);
+  // The witness declares `Finalized` expectations, so the fixture is scanned against the brands
+  // the workspace really declares — not a set invented for it. A witness run against a synthetic
+  // brand table would prove the fixture matches the fixture.
+  const findings = scan([fixture], discoverBrands([...walk(appRoot)]));
   const claims = (finding: Violation, expected: (typeof expectations)[number]): boolean =>
     finding.rule === expected.rule && finding.line >= expected.from && finding.line <= expected.to;
 
@@ -206,18 +301,27 @@ function runWitness(): number {
 
 function main(argv: readonly string[]): number {
   if (argv.includes('--witness')) return runWitness();
-  const violations = scan([...walk(appRoot)]);
+  const files = [...walk(appRoot)];
+  const brands = discoverBrands(files);
+  if (brands.size === 0) {
+    // Discovery finding nothing is indistinguishable from a clean workspace, and it is the one
+    // way this gate can silently stop checking anything at all.
+    console.error('BRAND DISCOVERY FOUND NOTHING — the gate would pass by measuring nothing');
+    return 1;
+  }
+  const violations = scan(files, brands);
   if (violations.length > 0) {
-    console.error(`${BRAND}<T> assertion gate FAILED (10 §2.1):\n`);
+    console.error('Brand assertion gate FAILED (10 §2.1):\n');
     for (const v of violations) console.error(`  ${v.file}:${v.line}  ${v.detail}`);
     console.error(
-      '\nThe brand stops object literals; it cannot stop an assertion. Exactly one\n' +
-        `site may mint one: ${ALLOWED_MINT_SITE}. If you need one\n` +
-        'elsewhere, you need a light-client read instead.',
+      '\nA brand stops object literals, spreads and `satisfies`; it cannot stop an\n' +
+        'assertion. Each brand may be minted only in the file that declares its symbol.\n' +
+        'If you need one elsewhere, you need the check the brand stands for instead.',
     );
     return 1;
   }
-  console.log(`${BRAND}<T> assertion gate OK — one permitted mint site, no double assertions.`);
+  const named = [...brands.keys()].sort().join(', ');
+  console.log(`Brand assertion gate OK — ${brands.size} brands, each with one mint site: ${named}`);
   return 0;
 }
 

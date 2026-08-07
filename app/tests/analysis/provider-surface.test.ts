@@ -369,7 +369,13 @@ test('the three situations the row badge cannot tell apart are told apart here',
   assert.equal(new Set(collapsing.map((report) => reachReading(report))).size, 3);
   assert.equal(new Set(renderings).size, 3, 'two of the three collapsing situations render alike');
   for (const [at, markup] of renderings.entries()) {
-    const own = REACH_COPY[reachReading(collapsing[at] as SpotCheckReport)];
+    // A checked access rather than `as SpotCheckReport`. The assertion only stripped the
+    // `| undefined` that `noUncheckedIndexedAccess` adds — but it is the same mechanism a real
+    // forgery of the brand uses, and `check:casts` cannot tell the two apart. Neither can a
+    // reader, which is the better reason.
+    const report = collapsing[at];
+    assert.ok(report !== undefined);
+    const own = REACH_COPY[reachReading(report)];
     assert.ok(markup.includes(own.heading), markup);
     for (const other of Object.values(REACH_COPY)) {
       if (other.heading === own.heading) continue;

@@ -466,9 +466,15 @@ export interface SampledRound {
  *   user's own decision with an automatic one, or record a clean verdict about a source that
  *   served nothing.
  * - **`unprobed`** — nothing has answered yet, so the pages handed to this round did not come
- *   from a source this client has established is serving. A caller that *did* fetch them holds
- *   the outcome of that fetch and advances the ladder with {@link afterProbe} first; that is
- *   §8.3's *"probe on enable"* made structural rather than scheduled.
+ *   from a source this client has established is serving. The fix is a **probe**, which is §8.3's
+ *   *"probe on enable"* made structural rather than scheduled.
+ *
+ * That second bullet instructed a caller to *"advance the ladder with `afterProbe` from the
+ * request that fetched them"* until 2026-08-07, and the instruction was the one thing 10 §8.5.2
+ * forbids: **a liveness failure never reaches the ladder from a read.** A ladder that ratchets on
+ * data reads disables faster for a user who reads more, which is not the liveness signal §8.3
+ * describes. Correctness findings still reach it, but through `indexer.ts`'s `ladderEffect`, which
+ * is the one place that knows which read outcomes are correctness findings and which are not.
  */
 export class ProviderCannotServeError extends Error {
   constructor(provider: Provider) {
@@ -479,9 +485,8 @@ export class ProviderCannotServeError extends Error {
             'was shown.'
         : `provider ${provider.id} is ${provider.health.kind}: nothing has answered for it yet, ` +
             'so it is serving no reads and these pages did not come from a source this client ' +
-            'has established is live. Advance the ladder with `afterProbe` from the request that ' +
-            'fetched them before sampling — a round over an unprobed source is a verdict about ' +
-            'data nobody was shown.',
+            'has established is live. Probe it — `probe`, then `afterProbe` — before sampling. ' +
+            'A round over an unprobed source is a verdict about data nobody was shown.',
     );
     this.name = 'ProviderCannotServeError';
   }

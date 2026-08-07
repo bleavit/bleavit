@@ -20,35 +20,45 @@
  *
  * ## It cannot serve a page its own consumer would reject
  *
- * The last step before answering a `/range` request runs `admitSnapshot` — the client's real
+ * The last step before answering a `/range` request runs `admitIndexerPage` — the client's real
  * admission path, not a checklist of what it was believed to check — over exactly the bytes that
  * are about to go on the wire, with the digest of those bytes. A rejected page is answered `500`
  * and never served. The operator sees the reason in the response body and in their log; the client
- * sees a non-`200`, which §8.5.2 makes a failed read counted by §8.3's ladder, and never sees a
- * document it would have had to reject.
+ * sees a non-`200` and never a document it would have had to reject.
  *
- * That check is what turns the operator obligations in `README.md` from documentation into
- * behaviour. The sharpest of them is not obvious: a page's `balances` are the fold of **that page's
- * own movements**, because §8.4's event↔derived-row screen compares them against a replay of the
- * document it is in. They are not the accounts' holdings at the page's last block unless the page
- * happens to carry those accounts' whole history.
+ * It must be the **page** entry point and not `admitSnapshot`, which is what it called until
+ * 2026-08-07. A server that screens its output more strictly than its consumer screens the input is
+ * not being careful — it answers `500` to conforming requests, and that is exactly what happened:
+ * every span not reaching back to genesis was refused. See below.
  *
- * ## The limitation that decides which spans can be served, and it is unresolved
+ * The client sees a failed read, and §8.5.2 keeps a failed read **off** §8.3's probe ladder — a
+ * ladder that ratcheted on data reads would disable faster for a user who reads more. (This note
+ * claimed the opposite until 2026-08-07.) What does reach the ladder from this route is a
+ * *correctness* finding, and there is exactly one: a page whose binding names another chain.
  *
- * §8.4's conservation replay starts every holding, supply and escrow at **zero**, so a page is
- * admissible only if it carries the movements that created the positions it moves. A `split` mints
- * from escrow and is therefore self-contained at any span; a `merge`, `transfer` or `redeem` of a
- * position created in an earlier block replays negative and the page is refused. Restricting a real
- * history to blocks 15..19 is exactly that case, which means a conforming operator can only serve
- * spans reaching back to the origin of every position they touch — and §8.5.2's `from`/`to` are
- * then unusable for the ranged reads they exist for.
+ * ## What the screens no longer cover, and who covers it instead
  *
- * §8.4 may already answer it: it assigns the internal-consistency screens to **snapshots** and
- * gives live indexers *sampling*, which would leave a page owing canonical form and §8.2's ordering
- * rules without owing the replay. §8.5.2 does not say. That is a specification ruling rather than an
- * implementation choice (R-1), so the client's fail-closed reading is in force, this server refuses
- * rather than serving a page the client would reject, and `tests/providers/indexer.test.ts` names
- * the case so the cost is a tested fact instead of a surprise.
+ * A page owes canonical form, §8.2's ordering rules and monotone coverage. It does **not** owe
+ * §8.4's conservation replay or its event↔derived-row agreement (10 §8.5.2), so nothing here checks
+ * an operator's `balances`. That is the design: §8.4 gives snapshots screens and live indexers
+ * **sampling**, because a page cannot be checked against a history it does not carry. The client
+ * re-verifies 1 page in 16 against the chain, and a mismatch auto-disables the source.
+ *
+ * The consequence for an operator is in `README.md` and is the reverse of what it said before:
+ * `balances` are the accounts' **holdings at the page's last block, read from state**, not a fold
+ * of the page's own movements. Sampling compares them with the chain, so a fold would disagree on
+ * every honest page that does not begin at genesis.
+ *
+ * ## The limitation that used to be here is gone
+ *
+ * §8.4's conservation replay starts every holding, supply and escrow at **zero** and requires
+ * non-negativity at each step, so under it a page was admissible only if it carried the movements
+ * that created the positions it moves. A `split` mints from escrow and is self-contained at any
+ * span; a `merge`, `transfer` or `redeem` of a position created in an earlier block replays
+ * negative. Restricting a real history to blocks 15..19 is exactly that case — so this server could
+ * serve only spans reaching back to the origin of every position they touch, and §8.5.2's `from`
+ * and `to` were unusable for the ranged reads they exist for. §8.5.2 now rules the screen split and
+ * names which screens drop, and the suites carry the mid-history page that used to be refused.
  *
  * ## What is deliberately absent
  *
@@ -62,7 +72,7 @@
 import {
   NEXT_CURSOR_HEADER,
   SNAPSHOT_FORMAT,
-  admitSnapshot,
+  admitIndexerPage,
   deriveBalances,
   mergeCoverage,
   preimageOfSerialized,
@@ -228,8 +238,15 @@ function range(config: IndexerConfig, url: URL): ServedResponse {
 
   // The client's own admission, over the bytes about to be written, with the digest of those
   // bytes. See the module note: a live page has no publisher pin to compare against, so what this
-  // proves is every other screen — canonical form, coverage, conservation, derived rows.
-  const verdict = admitSnapshot(
+  // proves is every screen a page owes — canonical form, §8.2's ordering rules, monotone coverage.
+  //
+  // It must be the **same entry point the client calls**, and it was `admitSnapshot` until
+  // 2026-08-07. That made this server answer `500` to any page starting mid-history, because
+  // 10 §8.5.2 drops the conservation replay and the derived-row agreement for a page precisely
+  // where each would compare a document against a state predating it. A server that screens its
+  // output more strictly than its consumer screens the input is not being careful — it is
+  // refusing conforming requests, which is what this line did.
+  const verdict = admitIndexerPage(
     body,
     { expectedPin: config.sha256(preimageOfSerialized(body)), binding: config.binding },
     config.sha256,
@@ -253,19 +270,29 @@ function range(config: IndexerConfig, url: URL): ServedResponse {
 }
 
 /**
- * A slice built by folding the operator's own movements.
+ * A slice whose `balances` are the fold of **that page's own movements**.
  *
- * Offered so an operator holding a movement log can serve pages today, and labelled with what it
- * costs: `balances` derived this way agree with `ops` **by construction**, so §8.4's
- * event↔derived-row screen can never fail on a page this produces. That screen is live only against
- * an operator whose balances come from somewhere else — which is exactly the discipline
- * `tools/snapshot` follows, where the balance sheet is an independent read of chain state and the
- * fold is the claim being checked (10 §8.4).
+ * **Not the shape 10 §8.5.2 asks an operator to serve**, and this note said the opposite until
+ * 2026-08-07. A page's `balances` are the accounts' holdings at the page's last block, read from
+ * state: that is the row set §8.4's 1-in-16-page sampling audits *against the chain*, and a
+ * mid-history fold held up against a current holding disagrees on every honest page — which turns
+ * the one live control a client has over an indexer into a generator of false mismatches, and a
+ * sampling mismatch auto-disables the source.
  *
- * The failure it therefore cannot catch is the one that actually happens to an index: an
- * **incomplete op set** — a variant not decoded, a range answered short — which is perfectly
- * self-consistent. An operator with an independent balance read should supply {@link IndexerSlice}
- * directly and keep the screen.
+ * What survives is narrower than "genesis-anchored", and being exact matters because the loose
+ * version is reassuring and wrong. This function folds **only the movements inside the span it was
+ * asked for**, so its balances are that page's subtotal. They equal the holdings at the page's last
+ * block in one case: when the page **is** the whole history — one page, starting at the first block
+ * the operator holds. Page two of a splits-only history already disagrees, because it carries only
+ * the splits inside its own span and none of the earlier ones. So the honest scope is **fixtures,
+ * and a single-page read over a whole short history** — which is what the suites use it for.
+ *
+ * For anything else the failure is sharper than a disagreement and arrives sooner. A `merge`,
+ * `transfer` or `redeem` of a position created in an earlier block folds **negative**, and a
+ * negative holding is not an amount §8.2's grammar can express — so a page built this way is
+ * refused as `malformed` by the check below, before any balance is compared with anything, and the
+ * operator sees a `500` on every span that does not reach back to genesis. An operator serving real
+ * spans reads state and supplies {@link IndexerSlice} directly.
  */
 export function foldedSlice(
   vaults: readonly SnapshotVault[],
@@ -284,6 +311,40 @@ export function foldedSlice(
   );
   const ordered = orderVaults(vaults);
   return { coverage, vaults: ordered, ops, balances: deriveBalances(ordered, ops) };
+}
+
+/**
+ * A slice whose `balances` are the holdings **at the page's last block** — the shape §8.5.2 asks for.
+ *
+ * The counterpart of {@link foldedSlice}, and the one an operator serving real spans should reach
+ * for. It exists because shipping only the folded helper left the reference implementation unable
+ * to produce a conforming page for any history that is not splits-only, while `README.md` told
+ * operators to serve exactly that — a reference implementation that demonstrates the shape it
+ * documents as wrong.
+ *
+ * The `balances` come from folding **every movement up to `span.toBlock`**, not just the movements
+ * inside the span, which is what makes them state rather than a subtotal: at block 19 they include
+ * the positions split at block 10 that the page's own `ops` do not carry. That is the row set
+ * §8.4's 1-in-16-page sampling re-verifies against the chain, and it is why the fold is not usable
+ * here — see {@link foldedSlice}.
+ *
+ * This suits an operator who holds the **whole movement log**, which is the common case for an
+ * index built by replaying a chain. An operator who instead queries a state store at a height
+ * supplies {@link IndexerSlice} directly: the balances are the only member this helper computes
+ * differently, and there is nothing else it can do for them.
+ *
+ * `coverage`, `vaults` and `ops` are {@link foldedSlice}'s — they are the same question, and two
+ * copies of the span-intersection would be two chances to disagree about what was observed.
+ */
+export function stateSlice(
+  vaults: readonly SnapshotVault[],
+  history: readonly SnapshotOp[],
+  observed: readonly SnapshotRange[],
+  span: SnapshotRange,
+): IndexerSlice {
+  const inSpan = foldedSlice(vaults, history, observed, span);
+  const upToLastBlock = history.filter((op) => op.block <= span.toBlock);
+  return { ...inSpan, balances: deriveBalances(inSpan.vaults, upToLastBlock) };
 }
 
 // ------------------------------------------------------------------ ordering and parsing

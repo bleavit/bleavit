@@ -41,18 +41,24 @@ Four things, and the third is the one that surprises people.
      and 18–20 of a 10–20 page, say so; the gap is a first-class, rendered fact on the client and
      filling it in is the one thing you must not do.
    - `ops` is in **chain order** — block, then extrinsic, then event. This server never sorts them,
-     because their order is semantic: the client replays them and checks that no account ever goes
-     negative, so a merge before its split is a different, invalid history rather than the same one
-     written differently.
+     because their order is part of §8.2's canonical form, which a page owes: a merge before its
+     split is a different history rather than the same one written differently, and one covered set
+     has exactly one spelling. (This bullet used to justify the rule by the client's conservation
+     replay. A page is not replayed — 10 §8.5.2 — so the obligation survives and the old reason
+     does not.)
    - `vaults` carries each vault's full branch set. A vault with one branch is refused.
-   - `balances` is the fold of **that page's own movements**, not the accounts' holdings at the
-     page's last block. The client checks them against a replay of the document it received, so a
-     page carrying real chain balances alongside a partial op set is rejected. If you hold an
-     independent balance read, supply it — that is what keeps the check meaningful. If you do not,
-     `foldedSlice()` derives them from your movements, and the README of that function says plainly
-     what the shortcut costs.
-   - **A page must be a self-contained history.** Read the limitation below before you build a
-     reader: this is the obligation that decides what spans you can serve at all.
+   - `balances` is the accounts' **actual holdings at the page's last block**, read from state —
+     not a fold of the page's own movements. This obligation was the other way round until
+     2026-08-07, and 10 §8.5.2 settles it: this route is what §8.4's 1-in-16-page sampling audits,
+     and sampling re-verifies rows *against the chain*. A folded balance disagrees with a current
+     holding on every honest page that does not start at genesis, which would turn the one live
+     control a client has over an indexer into a generator of false mismatches — and a sampling
+     mismatch auto-disables the source. `foldedSlice()` remains for fixtures and for a
+     **single-page read over a whole short history** — it folds only the movements inside the span
+     it was handed, so page two already disagrees even for a splits-only history.
+   - Nothing on this server checks `balances`, and that is the design rather than an omission.
+     §8.4 gives snapshots screens and live indexers **sampling**, because a page cannot be checked
+     against a history it does not carry. The client audits these rows against the chain instead.
 
 4. **A `sha256`.** `(bytes) => hex`. On Node, `createHash('sha256').update(bytes).digest('hex')`.
 
@@ -61,7 +67,7 @@ Four things, and the third is the one that surprises people.
 ```ts
 import { createHash } from 'node:crypto';
 
-import { createIndexer, foldedSlice } from './indexer.ts';
+import { createIndexer, stateSlice } from './indexer.ts';
 import { SUGGESTED_BLOCKS_PER_PAGE, startIndexer } from './serve.ts';
 
 const VAULTS = [{ vault: 'v1', branches: ['FAIL', 'PASS'] }];
@@ -72,16 +78,19 @@ const handle = createIndexer({
   binding: { genesisHash: '0x…', specVersion: 2, contractVersion: 23 },
   coverage: OBSERVED,
   blocksPerPage: SUGGESTED_BLOCKS_PER_PAGE,
-  read: (span) => foldedSlice(VAULTS, HISTORY, OBSERVED, span),
+  read: (span) => stateSlice(VAULTS, HISTORY, OBSERVED, span),
   sha256: (preimage) => createHash('sha256').update(preimage).digest('hex'),
 });
 
 startIndexer(handle, { port: 8_080, host: '127.0.0.1' });
 ```
 
-Replace `foldedSlice` with your own reader when you have one. Where your movements come from — an
-archive node, an existing indexer, a database you already run — is not fixed by §8.5.2 and is not
-fixed here.
+`stateSlice()` suits an operator who holds the **whole movement log** — the common case for an index
+built by replaying a chain — because it takes the balances from every movement up to the page's last
+block rather than from the movements inside the span. If you query a state store at a height
+instead, supply the `IndexerSlice` yourself: `balances` is the only member these helpers compute
+differently. Where your movements come from — an archive node, an existing indexer, a database you
+already run — is not fixed by §8.5.2 and is not fixed here.
 
 ## What it refuses, and why that is the useful part
 
@@ -90,32 +99,36 @@ it is about to write. A page that would be rejected at the user is answered `500
 with the reason in the body. So the obligations above are enforced rather than documented, and the
 failures you will actually hit are these:
 
-- balances that do not match the fold of the page's movements;
 - a movement at a block your `coverage` does not claim;
 - movements out of block order;
 - a coverage range outside the page's own span;
-- an amount that is not a canonical decimal string inside the `u128` range — amounts run past
-  2⁵³, so a JSON *number* is silently rounded on load and the page then fails its own replay.
+- an amount that is not a canonical decimal string inside the `u128` range — amounts run past 2⁵³,
+  so a JSON *number* is silently rounded on load. That is refused as **malformed**, before the
+  canonical-form screen runs, because the value never parses into the document at all;
+- a **negative** balance, which is the failure you will actually hit if you reach for
+  `foldedSlice()` on real history: folding a `transfer` or `merge` of a position created in an
+  earlier block yields a negative holding, and §8.2's amount grammar cannot express one, so the
+  page is refused as malformed on every span that does not reach back to genesis. Use
+  `stateSlice()` or supply the slice yourself.
 
-## The limitation you will hit first, and it is unresolved
+Note what is **not** on that list: your `balances`. Nothing here checks them, because a page cannot
+be checked against a history it does not carry (see below). The client audits them against the
+chain by sampling, and a mismatch auto-disables you — so they are the rows to get right.
 
-**A page must be a self-contained history, so today you can only serve spans that reach back to the
-origin of every position they touch.**
+## The limitation that used to be here is gone
 
-The client replays the movements in each page and checks that no account, supply or escrow ever goes
-negative, starting from zero. A `split` mints a complete set out of escrow, so a page of splits
-replays cleanly whatever its span. Every other movement *consumes* a position: a `merge`, a
-`transfer` or a `redeem` of something created in an earlier block replays negative in a page that
-does not carry the earlier block, and the page is refused. That is not a defect in your index, and
-this server will tell you so with a `500` rather than serving bytes the client would reject.
+Until 2026-08-07 this server could only answer spans reaching back to the origin of every position
+they touched, which is not what `from` and `to` are for: a request for `from=10000&to=11000` over
+real history was refused with a `500`. The client ran a snapshot's full screen set over every page,
+including §8.4's conservation replay — and that replay starts every holding, supply and escrow at
+**zero** and requires non-negativity at each step. A `split` mints from escrow and is self-contained
+at any span, but a `merge`, `transfer` or `redeem` of something created in an earlier block replays
+negative in a page that does not carry that block.
 
-The consequence is blunt: a request for `from=10000&to=11000` over real history cannot be answered
-conformantly, which is most of what `from` and `to` are for. §8.4 may already resolve it — it
-assigns the internal-consistency screens (conservation replay, event↔derived-row agreement) to
-**snapshots** and gives live indexers *sampling* instead, which would leave a page owing canonical
-form and §8.2's ordering rules and not the replay. §8.5.2 does not say, the client takes the
-fail-closed reading until it does, and the ruling is filed as a spec question. Until it lands, serve
-spans that begin at the start of the history you hold.
+10 §8.5.2 rules it: a page owes canonical form, §8.2's ordering rules and monotone coverage, and
+**not** the conservation replay or the event↔derived-row agreement. §8.4 had already put the
+internal-consistency screens on *snapshots* and given live indexers *sampling* instead; §8.5.2 says
+so in as many words and names which screens that is. Serve any span you hold.
 
 ## What it does not do
 
@@ -135,6 +148,10 @@ need to operate is a choice you are making about somebody else's privacy.
   disagrees switches you off permanently until the user turns you back on. This is not a threat
   model of you specifically — it is that nothing a third party serves is ever treated as verified,
   and sampling is the honest, limited check available.
-- **Diff you against a snapshot** covering the same blocks, when the user has one. Both are the same
-  format for exactly this reason. A disagreement is reported as a disagreement: neither side wins,
-  and the range is left as a visible gap.
+There is no third item, and this list promised one until 2026-08-07: *"diff you against a snapshot
+covering the same blocks"*. `FE-PROV-004` is scoped by §8.4 to **two independent snapshots** covering
+one range, and §2.3 says the same, so a client never diffs a page against a snapshot. Serving §8.2's
+format is still required by §8.5.2 — but the reason is canonical serialization, so that one
+implementation of one check serves both artifacts, not a cross-check that was never in scope.
+**Sampling is the only check on a live indexer**, which is why the row above matters more than it
+looks, and why your `balances` are the rows to get right.

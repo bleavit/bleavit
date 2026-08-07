@@ -6,9 +6,14 @@
  * > second format.
  *
  * So there is no parser here, no format, and no document type. `snapshot.ts` owns all three and
- * this module reads its routes; a second shape would additionally leave `FE-PROV-004` unable to
- * diff a snapshot against an indexer, which §8.4 calls the only cross-check available at depths
- * the light client cannot reach.
+ * this module reads its routes.
+ *
+ * **`FE-PROV-004` is not part of that argument**, and this module said it was until 2026-08-07.
+ * §8.5.2 is explicit: that code is scoped by §8.4's table to *"two independent **snapshots**
+ * covering the same range"*, and §2.3 says the same — so it does not diff a snapshot against an
+ * indexer, and a second format would not have widened it. The one-format ruling stands on
+ * canonical serialization alone, which is enough: a consumer that cannot reconstruct the same
+ * bytes cannot check the producer.
  *
  * ## Three properties §8.5.2 fixes, each of which removes an invention
  *
@@ -35,36 +40,44 @@
  *
  * ## The pin screen does not apply here, and saying so is better than pretending it does
  *
- * {@link admitSnapshot} is the only entry point that runs §8.2's canonical-form check and §8.4's
- * coverage, conservation and derived-row screens, and it takes a publisher's content pin. A live
- * page has none: a snapshot is a **file** somebody published and quoted a hash for, and a page is
- * bytes served now. There is no second claim to compare against, so the pin argument here is the
- * digest of the bytes just received and the pin screen is satisfied by construction.
+ * {@link admitIndexerPage} runs §8.2's canonical-form check and the screens §8.5.2 says a page
+ * owes, and it takes a content pin. A live page has none: a snapshot is a **file** somebody
+ * published and quoted a hash for, and a page is bytes served now. There is no second claim to
+ * compare against, so the pin argument here is the digest of the bytes just received and the pin
+ * screen is satisfied by construction.
  *
  * That is deliberately **not** the `assertCheckable` shape this repository keeps removing — an
  * optional hash function, a check that defaults off. `sha256` is a required argument of
- * {@link readRange} and every other screen runs at full strength; what is absent is an out-of-band
- * claim that does not exist for this provider kind, which is exactly why §8.4 gives indexers
- * *sampling* where it gives snapshots *screens*. The digest is not discarded: it is reported as
- * {@link IndexerPage.pin}, the content address of those bytes, which is what a caller needs to
- * diff a page against a snapshot under `FE-PROV-004`.
+ * {@link readRange} and every screen a page owes runs at full strength; what is absent is an
+ * out-of-band claim that does not exist for this provider kind, which is exactly why §8.4 gives
+ * indexers *sampling* where it gives snapshots *screens*. The digest is not discarded: it is
+ * reported as {@link IndexerPage.pin}, the content address of those bytes, so a re-read of the
+ * same span can be recognised as the same bytes without re-comparing them.
  *
- * ## A page is admitted as a whole history, and that bounds what can be served
+ * ## A page is checked against itself, never against a history it does not carry
  *
- * §8.4's conservation replay starts every holding, supply and escrow at **zero** and checks
- * non-negativity at every step, so a page is admissible only when it carries the movements that
- * created the positions it moves. A `split` mints from escrow and is self-contained at any span;
- * a `merge`, `transfer` or `redeem` of a position created earlier replays negative. Restricting a
- * real history to a mid-history range is exactly that case — so a conforming operator can serve
- * only spans reaching back to the origin of every position they touch, and §8.5.2's `from`/`to`
- * are then unusable for the ranged reads they exist for.
+ * This module ran **every** `admitSnapshot` screen until 2026-08-07, and that was wrong in a way
+ * that made the route useless rather than merely strict. §8.4's conservation replay starts every
+ * holding, supply and escrow at zero and requires non-negativity at each step, so a document is
+ * admissible only when it carries the movements that created the positions it moves. A `split`
+ * mints from escrow and is self-contained at any span; a `merge`, `transfer` or `redeem` of a
+ * position created earlier replays negative. A page over blocks 15..19 of a real history is
+ * exactly that case — so under the old behaviour a conforming operator could serve only spans
+ * reaching back to the origin of every position they touch, and §8.5.2's `from` and `to` were
+ * unusable for every ranged read they exist for.
  *
- * §8.4 may already resolve it: it assigns the internal-consistency screens to **snapshots** and
- * gives live indexers *sampling* instead, which would leave a page owing canonical form and §8.2's
- * ordering rules and not the replay. §8.5.2 does not say which, and choosing is a specification
- * ruling rather than an implementation decision (R-1). The fail-closed reading is therefore in
- * force — every screen `admitSnapshot` runs, runs — and `tests/providers/indexer.test.ts` names
- * the case it costs so the limitation is a tested fact rather than a discovery.
+ * §8.5.2 rules it, and names which of §8.4's three internal-consistency screens drop — the
+ * **conservation replay** and the **event↔derived-row agreement**, for two *different* reasons
+ * that are easy to collapse into one. The replay goes because non-negativity from a zero start is
+ * meaningless for a page that opens mid-history. The derived-row check goes because §8.5.2 rules
+ * that a page's `balances` are **read from state at its last block** rather than folded from its
+ * own movements — which they must be, since §8.5.2 assigns this route to §8.4's sampling and
+ * sampling re-verifies rows against the chain.
+ *
+ * **Monotone coverage stays** — it is internal to the document, a mid-history page satisfies it,
+ * and it is what makes this module's coverage arithmetic sound, since {@link readRange} builds a
+ * caller's coverage from the union of the lists the pages carried. See {@link admitIndexerPage},
+ * which owns both derivations.
  *
  * ## Where the cursor travels, and the one thing §8.5.2 does not fix
  *
@@ -87,10 +100,17 @@
  */
 
 import { providerUrl } from './endpoint.js';
+import { snapshotRefusal, type ProviderRefusal } from './refusals.js';
 import type { ProbeOutcome } from './sampling.js';
-import { admitSnapshot, preimageOfSerialized } from './snapshot.js';
-import type { Sha256, SnapshotBalance, SnapshotDocument, SnapshotRange } from './snapshot.js';
-import type { ProviderPage } from './sampling.js';
+import { admitIndexerPage, preimageOfSerialized } from './snapshot.js';
+import type {
+  Sha256,
+  SnapshotBalance,
+  SnapshotDocument,
+  SnapshotFinding,
+  SnapshotRange,
+} from './snapshot.js';
+import type { ProviderPage, ProviderRow } from './sampling.js';
 import type { ChainBinding } from '@bleavit/handoff-envelope';
 
 /**
@@ -245,19 +265,13 @@ export function coverageHoles(
 /**
  * Build a route URL, refusing a scheme that is not HTTP(S).
  *
- * §8.5.2's interface is HTTP, so a `javascript:`, `data:` or `file:` endpoint is not an indexer
- * this client failed to reach — it is a string that would become whatever the injected transport
- * does with it. Refused here, at the one place that knows what the URL is for, rather than left
- * to a transport that cannot know.
+ * The refusal itself lives in {@link providerUrl} and is **not** repeated here. This function
+ * parsed the endpoint and checked the protocol itself before calling it until 2026-08-07, which
+ * put two copies of one rule about untrusted input in the same call chain — the duplication
+ * `endpoint.ts` was extracted to end, and the same shape that let a reachable ReDoS be written
+ * into the trailing-slash trim twice on the day it was introduced.
  */
 function routeUrl(endpoint: string, route: string, query: string): string | null {
-  let parsed: URL;
-  try {
-    parsed = new URL(endpoint);
-  } catch {
-    return null;
-  }
-  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return null;
   const base = providerUrl(endpoint, route);
   return base === null ? null : `${base}${query}`;
 }
@@ -378,8 +392,11 @@ export interface IndexerPage {
    * `sha256` over §8.2's pre-image of exactly the bytes served.
    *
    * The page's content address, **not** a verified pin — nobody published it and nobody quoted it.
-   * It is what a caller diffs against a snapshot's pin under `FE-PROV-004`, and what a caller
-   * records so a re-read of the same span can be recognised as the same bytes.
+   * A caller records it so a re-read of the same span can be recognised as the same bytes without
+   * re-comparing them.
+   *
+   * It is **not** a `FE-PROV-004` input, and this comment said it was. That code is scoped by
+   * §8.4's table to two independent *snapshots*, so a page has no pair to be half of.
    */
   readonly pin: string;
 }
@@ -392,8 +409,31 @@ export type RangeOutcome =
   | { readonly kind: 'cursor-repeated'; readonly cursor: string }
   /** The walk reached one page per block of the requested span. See {@link readRange}. */
   | { readonly kind: 'page-ceiling'; readonly pages: number }
-  /** §8.5.2's only error contract: a non-`200`, or a body that is not a canonical §8.2 document. */
-  | { readonly kind: 'failed'; readonly why: string }
+  /**
+   * **No page arrived**: the transport rejected, the status was not `200`, or the endpoint is one
+   * this client will not use. A liveness failure, and it carries no refusal code on purpose.
+   *
+   * §8.5.2 says a failed read is reported with `FE-PROV-003`, and its own justification is that
+   * *"a page is a §8.2 document and fails on exactly those grounds"* — which is true of a document
+   * that arrived and false of one that never did. `FE-PROV-003`'s fixed remedy tells the user to
+   * check that their download completed and to compare its hash against the publisher's. For a
+   * `503` there is no download, no publisher and no hash, so attaching it here would repeat
+   * exactly the defect that deleted the `incomplete-check` cause on 2026-08-06: a fixed remedy
+   * sentence that is false for the case that reaches it.
+   *
+   * What a user sees instead is already correct and already built — the span stays in
+   * {@link RangeRead.holes}, which is §6.3's coverage machinery saying *this range was not
+   * observed*. That is the honest surface for a read that did not happen.
+   */
+  | { readonly kind: 'unreachable'; readonly why: string }
+  /**
+   * **A page arrived and failed a screen a page owes** — §8.5.2's `FE-PROV-003`, carried.
+   *
+   * This is the arm the code names, and the grounds match: a malformed body, a body that is not in
+   * canonical form, or one whose coverage does not contain its own movements. Every one of those
+   * is a statement about a document the operator served, which is what `FE-PROV-003` is for.
+   */
+  | { readonly kind: 'rejected'; readonly why: string; readonly refusal: ProviderRefusal }
   /**
    * A page that proves the source cannot serve this client — today, a binding for another chain.
    *
@@ -488,41 +528,54 @@ export async function readRange(
     if (pages.length >= ceiling) return done({ kind: 'page-ceiling', pages: pages.length });
     const url = rangeUrl(source.endpoint, requested, cursor);
     if (url === null) {
-      return done({ kind: 'failed', why: `${source.endpoint} is not an http(s) endpoint` });
+      return done({ kind: 'unreachable', why: `${source.endpoint} is not an http(s) endpoint` });
     }
     let response: IndexerResponse;
     try {
       response = await source.get(url);
     } catch (error) {
-      return done({ kind: 'failed', why: failureText(error) });
+      return done({ kind: 'unreachable', why: failureText(error) });
     }
     if (response.status !== 200) {
-      return done({ kind: 'failed', why: `answered ${response.status}` });
+      return done({ kind: 'unreachable', why: `answered ${response.status}` });
     }
     // The one admission path, over the bytes as served. `expectedPin` is the digest of those
     // bytes — see the module note on why that is a statement about this provider kind and not a
-    // check switched off.
+    // check switched off. `admitIndexerPage`, never `admitSnapshot`: §8.5.2 drops the two screens
+    // that compare a document against a state predating it, and running them here made every
+    // mid-history range inadmissible.
     const pin = sha256(preimageOfSerialized(response.body));
-    const verdict = admitSnapshot(response.body, { expectedPin: pin, binding: source.binding }, sha256);
+    const verdict = admitIndexerPage(
+      response.body,
+      { expectedPin: pin, binding: source.binding },
+      sha256,
+    );
     if (verdict.kind === 'rejected') {
       // A page describing ANOTHER CHAIN is a correctness finding, not a liveness one, and it must
-      // reach the ladder even though §8.5.2 keeps ordinary read failures off it. `admitSnapshot`
-      // already runs the same `binding` screen the import path runs, so the evidence is here — it
-      // was simply being flattened into a `why` string and discarded.
+      // reach the ladder even though §8.5.2 keeps ordinary read failures off it. The page screens
+      // include the same `binding` screen the import path runs, so the evidence is here — it was
+      // simply being flattened into a `why` string and discarded.
       const wrongChain = verdict.findings.some((finding) => finding.screen === 'binding');
+      if (wrongChain) return done({ kind: 'disqualified', why: verdict.refusal.detail });
+      // `verdict.refusal` is built for a FILE — `admitIndexerPage` shares its refusal builder with
+      // the import path, so its remedy tells the user to check a download and compare a publisher's
+      // hash. A live page has neither. Re-code it with the `served-page` cause; §9.4 fixes the copy
+      // per code, and this is the one place that knows which artifact these bytes were.
       return done({
-        kind: wrongChain ? 'disqualified' : 'failed',
+        kind: 'rejected',
         why: verdict.refusal.detail,
+        refusal: snapshotRefusal('served-page', screensOf(verdict.findings)),
       });
     }
     const { document } = verdict;
     if (document.range.fromBlock < requested.fromBlock || document.range.toBlock > requested.toBlock) {
-      return done({
-        kind: 'failed',
-        why:
-          `answered a page covering ${document.range.fromBlock}..${document.range.toBlock}, which ` +
-          `leaves the requested span ${requested.fromBlock}..${requested.toBlock}`,
-      });
+      const why =
+        `answered a page covering ${document.range.fromBlock}..${document.range.toBlock}, which ` +
+        `leaves the requested span ${requested.fromBlock}..${requested.toBlock}`;
+      // A document that arrived and is wrong about itself, so it is `rejected` rather than
+      // `unreachable`: §8.5.2 makes a page a document over "some prefix of the requested span",
+      // and one that leaves the span is not a conforming answer to the question that was asked.
+      return done({ kind: 'rejected', why, refusal: snapshotRefusal('served-page', why) });
     }
     pages.push({ document, pin });
     carried.push(...document.coverage);
@@ -535,6 +588,12 @@ export async function readRange(
     followed.add(next);
     cursor = next;
   }
+}
+
+/** The screens that fired, for the expert detail beside a `served-page` remedy. */
+function screensOf(findings: readonly SnapshotFinding[]): string {
+  const named = [...new Set(findings.map((finding) => finding.screen))].join(', ');
+  return `the page failed: ${named}`;
 }
 
 /**
@@ -565,22 +624,42 @@ function rangeUrl(endpoint: string, span: SnapshotRange, cursor: string | null):
  * one row in this format that names a currently-existing object; a movement names an event in a
  * block, which a light client cannot re-read at depth.
  *
- * `reference` is injected for the reason `chainRowCheck` takes a `ChainRead`: it is a storage key,
+ * **This is why §8.5.2 rules that a page's `balances` are read from state, not folded.** The
+ * comparison at the other end of this projection is against a chain read, so a folded balance
+ * would be a mid-history subtotal held up against a current holding — disagreeing on every honest
+ * page, and auto-disabling the operator that served it (§8.3's *"auto-disable on sampling
+ * mismatch"* is uncounted and immediate). Until 2026-08-07 that was exactly what the reference
+ * implementation produced. It was never reachable, but only because a *second* defect masked it:
+ * `readRange` ran the full snapshot screen set, so every page that did not reach back to genesis
+ * was refused before it could be sampled, and on a genesis-anchored page the fold and the state
+ * coincide. Two defects, each hiding the other, and fixing one alone would have shipped the other.
+ *
+ * ## Both halves of a row are injected, and the second one was not until 2026-08-07
+ *
+ * `project` turns one §8.2 balance into the `reference`/`claimed` pair the sampler compares. It is
+ * injected for the reason `chainRowCheck` takes a `ChainRead`: a reference is a **storage key**,
  * this package may not open a chain connection or build one (10 §4.1), and a module that could
- * construct a reference would be a module that could construct the answer. `claimed` needs no
- * rendering — §8.2's amounts are already the canonical decimal string a comparison is a string
- * equality over.
+ * construct a reference would be a module that could construct the answer.
+ *
+ * It used to build `claimed` itself, on the reasoning that *"§8.2's amounts are already the
+ * canonical decimal string a comparison is a string equality over"*. That sentence is true about
+ * §8.2 and wrong about the comparison, and an R-6 review found it: `chainRowCheck` compares
+ * `claimed` against `ChainReadResult.hex` as **opaque hex**, and it declines to decode on purpose,
+ * because decoding needs the runtime metadata this package may not reach. So a decimal `"1000"`
+ * was being compared against a SCALE-encoded storage value — **every honest row mismatches**, and
+ * §8.4's *"any mismatch"* rule auto-disables the operator that served it. Each function was right
+ * on its own; the defect existed only where they met.
+ *
+ * The fix is the seam that was already half-there: `reference` and `claimed` must come from **one**
+ * function, because they must come from one metadata view. Two independent injections could be
+ * derived from two, and a key from one runtime version beside a value from another is a mismatch
+ * nobody served.
  */
 export function samplingPages(
   pages: readonly IndexerPage[],
-  reference: (row: SnapshotBalance) => string,
+  project: (row: SnapshotBalance) => ProviderRow,
 ): readonly ProviderPage[] {
-  return pages.map((page) => ({
-    rows: page.document.balances.map((row) => ({
-      reference: reference(row),
-      claimed: row.amount,
-    })),
-  }));
+  return pages.map((page) => ({ rows: page.document.balances.map(project) }));
 }
 
 // ------------------------------------------------------------------ small shared readers

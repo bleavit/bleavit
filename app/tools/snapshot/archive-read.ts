@@ -11,12 +11,21 @@
  *
  * §8.5.1 binds the producer to the **`archive_v1_*` group of the Polkadot JSON-RPC interface
  * specification** — `genesisHash`, `finalizedHeight`, `hashByHeight`, `header`, `body`,
- * `storage` and `call`. Not a preference: the in-browser client already speaks that
- * specification's `chainHead_v1_*` sibling, so the two readers share one storage model, one
- * key-type vocabulary and one operation convention, and `packages/chain-client`'s transport is
- * the working reference for every event this file handles. The legacy `state_*`/`chain_*` pair
- * carries no versioned contract, and reproduce-by-anyone is a promise made to second
- * producers, who need one. No method outside the group is issued here.
+ * `storage` and `call`. No method outside the group is issued here.
+ *
+ * **The reason is §8.2's promise, not §4.2's constraint**, and this note had those the wrong way
+ * round until 2026-08-07. 10 §4.2 limits the *in-browser light client* to `chainHead_v1_*`, and a
+ * producer running `tools/snapshot` against an archive node is not that client — so §4.2 does not
+ * reach this file, and leading with it made the binding look derived from a rule that does not
+ * apply. What does reach it is §8.2: a snapshot must be *"reproducible byte-identically by
+ * anyone"*, which is a promise made to **second producers**, and a second producer can only hold
+ * this one to it against a **versioned** contract. The legacy `state_*`/`chain_*` pair has none —
+ * no specification fixes its pagination, its ordering or its truncation behaviour, so two
+ * producers reading the same node through it can disagree with nobody at fault.
+ *
+ * That the browser client already speaks the `chainHead_v1_*` sibling is a genuine convenience —
+ * one storage model, one key-type vocabulary, and `packages/chain-client`'s transport as a working
+ * reference for every event handled below — but it is corroboration, not the derivation.
  *
  * ## The transport is injected, and so is the codec
  *
