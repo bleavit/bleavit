@@ -662,8 +662,13 @@ def main() -> int:
         checked += 1
 
     blob_mb = float(find(nine, r"\*\*measured ([\d.]+) MB gz\*\*", "§9.3's measured blob size").group(1))
+    # The adjective is deliberately not part of the anchor. This row read "Release-shipped
+    # *fallback* metadata" until FE-P5 resolved and §4.2 made the blobs **required**; an
+    # anchor holding the retired word would have failed as "anchor missing" on the rename
+    # that was itself the fix, which reads as a broken checker rather than a corrected
+    # document. "Release-shipped … metadata" is the part that identifies the row.
     bundle = float(
-        find(nine, r"Release-shipped fallback metadata[^|]*\|\s*≤ ([\d.]+) MB", "§9.4's metadata bundle row").group(1)
+        find(nine, r"Release-shipped [^|]*metadata[^|]*\|\s*≤ ([\d.]+) MB", "§9.4's metadata bundle row").group(1)
     )
     if bundle < int(desktop_blobs) * blob_mb:
         raise Fail(

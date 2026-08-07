@@ -353,11 +353,19 @@ class TestQuotaAndMetadata(unittest.TestCase):
     def test_a_budget_table_that_loses_the_metadata_row_is_detected_again(self):
         """Anti-vacuity: the finding must still fire, or it stopped being a check."""
         doc10 = (REPO_ROOT / DOC_10).read_text(encoding="utf-8")
+        # The anchor is deliberately the stem both spellings share. §4.2 made the blobs
+        # *required* rather than an FE-P5 fallback, so this row was renamed "fallback" ->
+        # "historical" on 2026-08-07 — and an anti-vacuity test anchored on the old word
+        # silently stops stripping anything, so the finding it exists to prove can fire
+        # never gets its chance. That is this test's own failure mode arriving through the
+        # door it was built to watch. The assertion below proves the strip happened, so a
+        # future rename fails loudly here instead of quietly passing.
         stripped = "\n".join(
             line
             for line in doc10.splitlines()
-            if not line.startswith("| Release-shipped fallback metadata")
+            if not line.startswith("| Release-shipped ")
         )
+        self.assertNotEqual(stripped, doc10, "the strip removed nothing — re-anchor it")
         finding = metadata_bundle_budget_finding(stripped)
         self.assertFalse(finding.ok)
         self.assertFalse(any("metadata" in row.lower() for row in finding.actual))

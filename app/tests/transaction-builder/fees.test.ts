@@ -10,6 +10,7 @@ import assert from 'node:assert/strict';
 
 import {
   FeeRateUnusableError,
+  TipNotPriceableError,
   MORTAL_ERA_BLOCKS,
   MORTAL_ERA_BLOCKS_RAW_EXTERNAL,
   PHASE_PROXIMITY_WARNING_BLOCKS,
@@ -84,10 +85,31 @@ const gatePin = (blockHash: HexString = `0x${'11'.repeat(32)}`, blockNumber = 1)
 };
 
 test('a rate inside [0.1x, 10x] of its reference is admitted', () => {
-  assert.equal(admitRate(rate(1_000_000n)).value, 1_000_000n);
-  assert.equal(admitRate(rate(100_000n)).value, 100_000n);      // exactly 0.1x
-  assert.equal(admitRate(rate(10_000_000n)).value, 10_000_000n); // exactly 10x
+  assert.equal(admitRate(rate(1_000_000n)).value.value, 1_000_000n);
+  assert.equal(admitRate(rate(100_000n)).value.value, 100_000n);      // exactly 0.1x
+  assert.equal(admitRate(rate(10_000_000n)).value.value, 10_000_000n); // exactly 10x
 });
+
+test('the admitted rate carries the pin of the read that was checked (FE-P1, V-301)', () => {
+  // The pin is what lets `estimateFee` tell one reading from two. Dropping it was how the
+  // old signature made the block-agreement check unstateable rather than merely unchecked.
+  const read = rate(1_000_000n);
+  const admitted = admitRate(read);
+  assert.equal(admitted.status.blockHash, read.status.blockHash);
+  assert.equal(admitted.status.chain, read.status.chain);
+  assert.equal(admitted.status.kind, 'verified-finalized');
+});
+
+/** Assert an estimate exists, then hand back its value. A refusal here is a test failure. */
+const estimated = (
+  fee: bigint,
+  admitted: ReturnType<typeof admitRate>,
+  selected: 'VIT' | 'USDC',
+) => {
+  const out = estimateFee(gatePin(), finalized(fee), admitted, selected);
+  assert.ok(out !== undefined, 'the two reads share a pin, so this must not be refused');
+  return out.value;
+};
 
 test('a rate outside its bounds is refused, never clamped', () => {
   // Clamping would transact at a price the constitution says is impossible, and the user
@@ -105,7 +127,7 @@ test('the bound is cross-multiplied, not divided', () => {
   // reference 7 and value 0 — and value 0 is rejected by the non-positive guard several
   // lines above, so it never reached the bound logic at all and the mutation survived.
   assert.throws(() => admitRate(rate(1n, 17n)), FeeRateUnusableError);
-  assert.equal(admitRate(rate(2n, 17n)).value, 2n); // 20 >= 17, genuinely in range
+  assert.equal(admitRate(rate(2n, 17n)).value.value, 2n); // 20 >= 17, genuinely in range
 });
 
 test('an unreadable or nonsensical rate yields no figure rather than a default', () => {
@@ -118,21 +140,115 @@ test('the USDC leg rounds up', () => {
   // Rounding down understates what the account must hold, and the failure lands as a
   // rejection *after* signing — the one point where the user has already committed.
   const admitted = admitRate(rate(1_500_000n));
-  assert.equal(estimateFee(1n, admitted, 'USDC').usdc, 2n); // 1.5 -> 2, not 1
-  assert.equal(estimateFee(2n, admitted, 'USDC').usdc, 3n);
+  assert.equal(estimated(1n, admitted, 'USDC').usdc, 2n); // 1.5 -> 2, not 1
+  assert.equal(estimated(2n, admitted, 'USDC').usdc, 3n);
 });
 
 test('headroom is denominated in the selected asset, so USDC-only accounts stay viable', () => {
   // A viability check denominated in VIT would deny exactly the accounts D-12 exists for.
   const admitted = admitRate(rate(2_000_000n));
-  assert.equal(estimateFee(100n, admitted, 'VIT').headroom, 100n);
-  assert.equal(estimateFee(100n, admitted, 'USDC').headroom, 200n);
+  assert.equal(estimated(100n, admitted, 'VIT').headroom, 100n);
+  assert.equal(estimated(100n, admitted, 'USDC').headroom, 200n);
 });
 
 test('the estimate discloses the key and its bounds (11 §11.5, expert mode)', () => {
-  const disclosure = estimateFee(1n, admitRate(rate(1_000_000n)), 'VIT').disclosure;
+  const disclosure = estimated(1n, admitRate(rate(1_000_000n)), 'VIT').disclosure;
   assert.match(disclosure, /fee\.vit_usdc_rate/);
   assert.match(disclosure, /0\.1×, 10×/);
+});
+
+test('the estimate carries the pin of the reads it priced (10 §2.3, FE-P1)', () => {
+  // 10 §2.3 names the fee estimate among the values that MUST be `Finalized<T>`. An
+  // estimate that came back unpinned would be a number the confirm screen could render
+  // without ever saying which state produced it.
+  const out = estimateFee(gatePin(), finalized(7n), admitRate(rate(1_000_000n)), 'VIT');
+  assert.ok(out !== undefined);
+  assert.equal(out.status.kind, 'verified-finalized');
+  assert.equal(out.status.blockHash, PIN.blockHash);
+  assert.equal(out.value.vit, 7n);
+});
+
+test('a fee read at a block the gate did not pin is refused (11 §11.4 rule 2)', () => {
+  // The two are separate reads. Combining them across a block boundary produces an
+  // arithmetically perfect figure that describes no state the chain was ever in — and it
+  // is invisible, because nothing about the number looks wrong.
+  //
+  // `meet` alone did not catch this, and that is the point of the check being here. It
+  // enforces that the two reads agree with *each other* and says nothing about *which*
+  // block they agree on, so a consistent pair read one block behind B′ satisfied it. 11
+  // §11.4 rule 2 requires an exact read at B′, and 10 §2.3 names the fee headroom among
+  // the rows that obligation covers — so the gate's own pin is the reference, exactly as
+  // `nonceFor` has always treated it.
+  const otherBlock = finalize(3n, {
+    chain: TEST_CHAIN,
+    blockHash: `0x${'99'.repeat(32)}` as const,
+    blockNumber: 2,
+  });
+  assert.throws(
+    () => estimateFee(gatePin(), otherBlock, admitRate(rate(1_000_000n)), 'VIT'),
+    /the fee was read at .* but the gate pinned/,
+  );
+});
+
+test('a rate read at a block the gate did not pin is refused too (11 §11.4 rule 2)', () => {
+  // Both inputs are sourced values under 10 §2.3, so both are checked. Testing only the
+  // fee would leave the rate as the way through — and the rate is the input that decides
+  // what the number *means* in the currency the user is reading.
+  const otherBlock = finalize({ value: 1_000_000n, reference: 1_000_000n, scale: SCALE }, {
+    chain: TEST_CHAIN,
+    blockHash: `0x${'99'.repeat(32)}` as const,
+    blockNumber: 2,
+  });
+  assert.throws(
+    () => estimateFee(gatePin(), finalized(3n), admitRate(otherBlock), 'VIT'),
+    /the rate was read at .* but the gate pinned/,
+  );
+});
+
+test('a fee and a rate read on different chains yield no estimate (F18)', () => {
+  // Asset Hub is a second light client. A fee read there priced against the futarchy
+  // chain's constitution rate is two chains' state in one figure.
+  //
+  // This is also what keeps `meet` load-bearing after the B′ check landed above: the block
+  // hashes all agree here, so only `meet` can see that the *chains* do not.
+  const otherChain = finalize(3n, {
+    chain: `0x${'aa'.repeat(32)}` as const,
+    blockHash: PIN.blockHash,
+    blockNumber: PIN.blockNumber,
+  });
+  assert.equal(estimateFee(gatePin(), otherChain, admitRate(rate(1_000_000n)), 'VIT'), undefined);
+});
+
+test('a negative fee is refused rather than priced', () => {
+  assert.throws(
+    () => estimateFee(gatePin(), finalized(-1n), admitRate(rate(1_000_000n)), 'VIT'),
+    FeeRateUnusableError,
+  );
+});
+
+test('a tip is refused rather than priced, and the code is FE-FEE-002 (10 §2.3, §9.4)', () => {
+  // `partial_fee` excludes the tip, so a headroom computed from it understates what the
+  // account must hold by exactly the tip — and the shortfall lands as a rejection *after*
+  // the user has signed. Understating is the one failure this module must not choose, so
+  // it refuses instead, and the refusal expires when the headroom question is ruled.
+  assert.throws(
+    () => estimateFee(gatePin(), finalized(7n), admitRate(rate(1_000_000n)), 'VIT', 5n),
+    (err: unknown) => {
+      assert.ok(err instanceof TipNotPriceableError);
+      // The code is asserted, not just the class: 10 §9.4 admits no free-text errors, and
+      // the taxonomy entry is what the confirm screen renders.
+      assert.equal(err.code, 'FE-FEE-002');
+      return true;
+    },
+  );
+});
+
+test('an explicit zero tip prices normally — the refusal is of a tip, not of the parameter', () => {
+  // Anti-vacuity for the test above: a refusal that fired on every call would look
+  // identical here and would have deleted the function rather than bounded it.
+  const out = estimateFee(gatePin(), finalized(7n), admitRate(rate(1_000_000n)), 'VIT', 0n);
+  assert.ok(out !== undefined);
+  assert.equal(out.value.headroom, 7n);
 });
 
 test('mortality is 64 blocks, and 256 only for a raw-external payload', () => {

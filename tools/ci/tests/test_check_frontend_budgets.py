@@ -253,8 +253,8 @@ class FrontendBudgets(unittest.TestCase):
     def test_a_bundle_budget_below_what_the_cache_admits_fails(self) -> None:
         self.assert_mutation_caught(
             FRONTEND,
-            "| Release-shipped fallback metadata (gz, lazy) | ≤ 1.5 MB",
-            "| Release-shipped fallback metadata (gz, lazy) | ≤ 0.5 MB",
+            "| Release-shipped historical metadata (gz, lazy) | ≤ 1.5 MB",
+            "| Release-shipped historical metadata (gz, lazy) | ≤ 0.5 MB",
             "budgets 0.5 MB for release-shipped metadata",
         )
 
@@ -357,8 +357,8 @@ class FrontendBudgets(unittest.TestCase):
         """The binding is symmetric: the document may not drift away from the gate either."""
         self.assert_mutation_caught(
             FRONTEND,
-            "| Release-shipped fallback metadata (gz, lazy) | ≤ 1.5 MB combined",
-            "| Release-shipped fallback metadata (gz, lazy) | ≤ 2.5 MB combined",
+            "| Release-shipped historical metadata (gz, lazy) | ≤ 1.5 MB combined",
+            "| Release-shipped historical metadata (gz, lazy) | ≤ 2.5 MB combined",
             "enforces 1.5e+06",
         )
 

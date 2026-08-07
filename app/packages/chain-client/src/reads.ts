@@ -10,10 +10,22 @@
  * module will hand back — it still refuses to finalize anything it did not read at a
  * pinned finalized block, which is 10 §2.2's never-promote rule expressed as a type.
  *
- * **smoldot exposes the `chainHead` group only — there are no `archive_*` methods**
- * (10 §4.2). Historical reads at arbitrary depth do not exist through the light client,
- * so this module offers none; depth is the three-layer model's problem (§6), not a read
- * option that quietly falls back to a provider.
+ * **This module offers no read at depth, and 10 §4.2's stated reason changed under it
+ * (FE-P5, V-303).** The comment here used to say *"smoldot exposes the `chainHead` group
+ * only — there are no `archive_*` methods"*, quoting the specification. Half of that is
+ * right: `smoldot@3.3.2` implements no `archive_*` method. The other half is wrong, and
+ * §4.2 has been corrected — the legacy group is present, and `state_getMetadata` /
+ * `state_call` accept **any** block hash at unbounded depth, proof-verified against that
+ * block's own header. What is actually missing is the step before: `chain_getBlockHash`
+ * refuses every height but genesis and best, because a light client cannot verify a full
+ * node's answer to "which block was at height N". Depth is reachable only by walking
+ * `parentHash` from a hash already trusted, at one round trip per block.
+ *
+ * The conclusion is unchanged and the module still offers no such read. Recording the
+ * right reason matters because the wrong one is *self-enforcing* — "the method does not
+ * exist" needs no discipline, while "the method exists and must not be used for this"
+ * does. Depth is the three-layer model's problem (§6), not a read option that quietly
+ * falls back to a provider.
  */
 
 import { finalize, type Finalized, type FinalizedBlockRef } from './provenance.js';
