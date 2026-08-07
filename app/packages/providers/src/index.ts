@@ -18,6 +18,18 @@ export * from './refusals.js';
 export * from './snapshot.js';
 export * from './suggestions.js';
 
+// §8.5.3's probe driver (F24). Named rather than `export *` for the reason above: `HttpGet` is a
+// transport type, and a barrel that re-exported every future transport by wildcard would
+// eventually hand one consumer two of them under one name.
+export { probe, runProbeRound } from './probe.js';
+export type {
+  HttpGet,
+  ProbeResponse,
+  ProbeRound,
+  ProbeRoundResult,
+  ProbeTarget,
+} from './probe.js';
+
 export {
   PAGES_PER_SAMPLED_ROW,
   ProviderCannotServeError,
