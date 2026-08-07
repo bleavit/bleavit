@@ -53,12 +53,18 @@ import {
   preimageOfSerialized,
   readChain,
   readRange,
+  chainRowCheck,
+  parseBinding,
+  providerUrl,
+  runSamplingRound,
   samplingPages,
   serializeSnapshot,
 } from '@bleavit/providers';
 import type {
+  ChainRead,
   IndexerGet,
   IndexerSource,
+  Provider,
   ProviderRow,
   SnapshotBalance,
   SnapshotDocument,
@@ -1339,4 +1345,128 @@ test('a round trip over a real socket produces bytes the client admits', async (
   const written = await fetch(`${endpoint}/range?from=10&to=24`, { method: 'POST' });
   assert.equal(written.status, 405);
   assert.equal(written.headers.get('allow'), 'GET, HEAD');
+});
+
+// ------------------------------------- §8.4's live control, composed end to end (the B-1 defect)
+
+test('samplingPages composed with chainRowCheck runs CLEAN on an honest page', async () => {
+  // The test that did not exist when the defect shipped, and the reason it shipped. Each half was
+  // covered on its own: `samplingPages`'s suite asserted the projection, `chainRowCheck`'s suite
+  // asserted the comparison, and the lying-indexer suite built its `ProviderRow`s **by hand** from
+  // a transcript. Nothing ran a real page through the real projection into the real comparison, so
+  // nothing could see that one produced §8.2's canonical decimal and the other compares
+  // `ChainReadResult.hex` as opaque hex. Composed, every honest row mismatched — and §8.4's "any
+  // mismatch" rule auto-disables the operator that served it, so the effect of the live control
+  // was to switch off honest operators and nothing else.
+  const span = { fromBlock: 10, toBlock: 12 };
+  const body = page(span, [span], [split(10, 'alice', '1000'), split(11, 'bob', '500')]);
+  const wire = transport([ok(body)]);
+  const read = await readRange(wire.source, span, sha256);
+  assert.equal(read.outcome.kind, 'exhausted');
+
+  // The chain answers what an honest operator's rows encode to. `projectRow` is the caller's
+  // metadata-holding projection; this is the same encoding seen from the chain's side.
+  const chain: ChainRead = (key) => {
+    const balance = read.pages
+      .flatMap((entry) => entry.document.balances)
+      .find((row) => projectRow(row).reference === key);
+    if (balance === undefined) return Promise.resolve({ kind: 'absent' as const });
+    return Promise.resolve({ kind: 'value' as const, hex: projectRow(balance).claimed });
+  };
+
+  const provider: Provider = { id: 'i', kind: 'indexer', health: { kind: 'healthy' } };
+  const round = await runSamplingRound(
+    provider,
+    samplingPages(read.pages, projectRow),
+    chainRowCheck(chain),
+    () => 0,
+  );
+  assert.equal(round.outcome, 'clean');
+  assert.equal(round.result.mismatches, 0);
+  assert.equal(round.refusal, undefined);
+  assert.deepEqual(round.provider, provider, 'an honest operator must not be disabled');
+});
+
+test('...and the decimal projection that shipped disables that same honest operator', async () => {
+  // The mutant, run rather than described. Swapping only `claimed` back to §8.2's canonical decimal
+  // — exactly what `samplingPages` built for itself before 2026-08-07 — turns the clean round into
+  // an auto-disable of a provider that served correct data. This is what makes the test above a
+  // control rather than a tautology.
+  const span = { fromBlock: 10, toBlock: 12 };
+  const body = page(span, [span], [split(10, 'alice', '1000'), split(11, 'bob', '500')]);
+  const wire = transport([ok(body)]);
+  const read = await readRange(wire.source, span, sha256);
+
+  const decimalProjection = (row: SnapshotBalance): ProviderRow => ({
+    reference: projectRow(row).reference,
+    claimed: row.amount,
+  });
+  const chain: ChainRead = (key) => {
+    const balance = read.pages
+      .flatMap((entry) => entry.document.balances)
+      .find((row) => projectRow(row).reference === key);
+    if (balance === undefined) return Promise.resolve({ kind: 'absent' as const });
+    return Promise.resolve({ kind: 'value' as const, hex: projectRow(balance).claimed });
+  };
+
+  const round = await runSamplingRound(
+    { id: 'i', kind: 'indexer', health: { kind: 'healthy' } },
+    samplingPages(read.pages, decimalProjection),
+    chainRowCheck(chain),
+    () => 0,
+  );
+  assert.equal(round.outcome, 'mismatch');
+  assert.ok(round.result.mismatches > 0);
+  assert.equal(round.provider.health.kind, 'disabled');
+  if (round.provider.health.kind !== 'disabled') return;
+  assert.equal(round.provider.health.by, 'auto');
+});
+
+// ------------------------------------------- one spelling of "parses as §8.2's binding object"
+
+test('a non-u32 version is refused by BOTH routes — one parser, 10 §8.5.2 and §8.5.3', async () => {
+  // §8.5.3 defines the probe's answer condition as the body "parsing as §8.2's `binding` object",
+  // and §8.5.2's `/chain` serves that same object. Two implementations of one sentence disagreed
+  // until 2026-08-07: the probe accepted any `typeof === 'number'` and `readChain` required a u32.
+  //
+  // The divergence was not cosmetic, because of where each feeds. An answering probe keeps the
+  // source `Healthy`, so `canServeReads` is true; every `/range` then fails at this route, and
+  // §8.5.2 deliberately keeps read failures off §8.3's ladder. The source ends up permanently
+  // healthy and permanently unusable, with nothing counting — reachable without a single `503`.
+  for (const bad of [Number.NaN, 1.5, -1, 2 ** 33]) {
+    assert.equal(
+      parseBinding({ genesisHash: BINDING.genesisHash, specVersion: bad, contractVersion: 1 }),
+      null,
+      `specVersion ${bad} must not parse as §8.2's binding object`,
+    );
+    const wire = transport([
+      { status: 200, body: JSON.stringify({ genesisHash: BINDING.genesisHash, specVersion: bad, contractVersion: 1, coverage: [] }), cursor: null },
+    ]);
+    const answer = await readChain(wire.source);
+    assert.equal(answer.kind, 'failed', `specVersion ${bad} must not answer /chain`);
+  }
+
+  // The anti-vacuity control: a real u32 pair parses, or the loop above proves nothing.
+  assert.deepEqual(parseBinding({ genesisHash: BINDING.genesisHash, specVersion: 2, contractVersion: 23 }), {
+    genesisHash: BINDING.genesisHash,
+    specVersion: 2,
+    contractVersion: 23,
+  });
+});
+
+test('an endpoint carrying a query or a fragment is refused, not silently rewritten', () => {
+  // Measured before the fix: the route was appended to the RAW endpoint, so it landed inside the
+  // query or the fragment and never reached `/chain` at all —
+  //   https://x.example/?a=1  ->  https://x.example/?a=1/chain   (requests `/`)
+  //   https://x.example/#f    ->  https://x.example/#f/chain     (never leaves the page)
+  // §8.1 makes the endpoint a value the user pastes, so this is reachable input. Refusing is
+  // fail-closed and visible; dropping the query would send the request somewhere the user did not
+  // ask for, and carrying it is what produced the two lines above.
+  for (const endpoint of ['https://x.example/?a=1', 'https://x.example/#f', 'https://x.example/p?q']) {
+    assert.equal(providerUrl(endpoint, 'chain'), null, endpoint);
+  }
+  // And the ordinary forms still build, including a base path and any number of trailing slashes.
+  assert.equal(providerUrl('https://x.example', 'chain'), 'https://x.example/chain');
+  assert.equal(providerUrl('https://x.example///', 'chain'), 'https://x.example/chain');
+  assert.equal(providerUrl('https://x.example/base/', 'range'), 'https://x.example/base/range');
 });

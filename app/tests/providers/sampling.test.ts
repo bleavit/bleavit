@@ -74,7 +74,7 @@ test('a probe never resurrects a provider that auto-disabled', () => {
   // of the latest outcome switches it straight back on, and the user is never told.
   const off: Provider = {
     ...HEALTHY,
-    health: { kind: 'disabled', by: 'auto', reason: 'a spot-checked row did not match' },
+    health: { kind: 'disabled', by: 'auto', cause: 'mismatch', reason: 'a spot-checked row did not match' },
   };
   assert.deepEqual(afterProbe(off, FAST), off);
   assert.deepEqual(afterProbe(off, SLOW), off);

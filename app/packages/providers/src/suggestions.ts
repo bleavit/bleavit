@@ -87,28 +87,53 @@ export const SUGGESTED_PROVIDERS: readonly ProviderSuggestion[] = Object.freeze(
  * ## The heartbeat sentence, added 2026-08-07 (F24, 10 §8.5.3)
  *
  * §8.1's obligation is *"exactly what the operator learns"*, and until F24 this copy described
- * **queries only** — which was complete while nothing drove §8.3's probe. It is not complete now.
+ * **queries only** — which was complete while nothing drove §8.3's probe, and which is complete
+ * again under `heartbeat: 'reads-only'`. Under `'probes'` it is not.
  * The probe is a request every ten minutes for as long as the source stays enabled, sent whether
  * or not the user reads anything, and it discloses presence, uptime and IP continuity rather than
  * interest in any object. A user who read this copy and then went idle would reasonably believe
  * the operator stopped hearing from them. 14 TH-60 mitigates on the same footing, and its
  * mitigation column names the query linkage only, so the gap was in both places.
  */
-export function disclosureFor(suggestion: ProviderSuggestion): string {
+export function disclosureFor(suggestion: ProviderSuggestion, heartbeat: Heartbeat): string {
+  const beat =
+    heartbeat === 'probes'
+      ? 'It also hears from this device every ten minutes while it stays on, even when you are ' +
+        'reading nothing, because that is how the app checks it is still answering — so it learns ' +
+        'when this device is switched on and roughly where it is. '
+      : 'This release contacts it only when you are reading something, so it hears from this ' +
+        'device when you look and not otherwise. ';
+  const off =
+    heartbeat === 'probes'
+      ? 'and switching it off stops the ten-minute check as well as the queries, '
+      : 'and switching it off stops the queries, ';
   return (
     `${suggestion.name} is run by ${suggestion.operator} at ${suggestion.endpoint}. If you turn ` +
     'it on, that operator sees which accounts, markets and proposals this device asks about, ' +
     'and it sees them over time rather than one at a time — together they identify you about as ' +
-    'well as an address does. It also hears from this device every ten minutes while it stays ' +
-    'on, even when you are reading nothing, because that is how the app checks it is still ' +
-    'answering — so it learns when this device is switched on and roughly where it is. It never ' +
+    `well as an address does. ${beat}It never ` +
     'sees your keys and never sees a transaction before you ' +
     'sign it. What it supplies is older history, always labelled as coming from it, and never ' +
-    'used to decide whether anything you sign is allowed. You can switch it off at any time, ' +
-    'and switching it off stops the ten-minute check as well as the queries, ' +
+    `used to decide whether anything you sign is allowed. You can switch it off at any time, ${off}` +
     'and leaves the gaps it was filling visible as gaps.'
   );
 }
+
+/**
+ * Whether this release actually runs §8.5.3's ten-minute probe.
+ *
+ * **Required, with no default**, and that is the whole point of the parameter. §8.1's obligation
+ * is a disclosure of *"exactly what the operator learns"*, so a sentence claiming a heartbeat is
+ * only honest if a heartbeat happens — and on 2026-08-07 an R-6 review found the copy asserting
+ * one while the provider panel said, correctly, *"This release does not yet contact optional
+ * sources to check whether they are answering."* Nothing in `app/src` calls `runProbeRound`: the
+ * driver exists and no scheduler drives it, so the disclosure was describing a different program.
+ *
+ * A default would put this back, because the wrong answer is the one nobody has to type. Making a
+ * caller state which release it is means the two sentences cannot disagree without somebody
+ * choosing to make them.
+ */
+export type Heartbeat = 'probes' | 'reads-only';
 
 /**
  * Accept one suggestion. The explicit user action §8.1 requires.
@@ -131,12 +156,15 @@ export function disclosureFor(suggestion: ProviderSuggestion): string {
  * at all, and inventing a pessimistic one is as wrong as inventing an optimistic one. What
  * `unprobed` says is exactly what is true — nobody has asked yet, so nothing may be read from it.
  */
-export function acceptSuggestion(suggestion: ProviderSuggestion): {
+export function acceptSuggestion(
+  suggestion: ProviderSuggestion,
+  heartbeat: Heartbeat,
+): {
   readonly provider: Provider;
   readonly disclosure: string;
 } {
   return {
     provider: { id: suggestion.id, kind: suggestion.kind, health: { kind: 'unprobed' } },
-    disclosure: disclosureFor(suggestion),
+    disclosure: disclosureFor(suggestion, heartbeat),
   };
 }

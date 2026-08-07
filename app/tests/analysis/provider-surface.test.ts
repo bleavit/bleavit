@@ -503,7 +503,7 @@ test('every ladder state renders, carries a reason, and reports what it permits'
     provider('b', { kind: 'healthy' }),
     provider('c', { kind: 'slow', observedMs: 4_000 }),
     provider('d', { kind: 'failing', consecutiveFailures: 2, everAnswered: true }),
-    provider('e', { kind: 'disabled', by: 'auto', reason: 'it contradicted the chain' }),
+    provider('e', { kind: 'disabled', by: 'auto', cause: 'mismatch', reason: 'it contradicted the chain' }),
   ];
   for (const source of states) {
     const line = healthLine(source);
@@ -537,7 +537,7 @@ test('no sources enabled is §8.1’s posture, not an incident', () => {
 
 test('every source switched off is FE-PROV-001, with every reason', () => {
   const fleet = fleetState([
-    provider('a', { kind: 'disabled', by: 'auto', reason: 'reason one' }),
+    provider('a', { kind: 'disabled', by: 'auto', cause: 'liveness', reason: 'reason one' }),
     provider('b', { kind: 'disabled', by: 'user', reason: 'reason two' }),
   ]);
   const markup = html(h(FleetSummary, { fleet }));
@@ -593,7 +593,7 @@ test('the disclosure is rendered BEFORE the accept control, and is derived from 
   const markup = html(
     h(AcceptInterstitial, { suggestion: SUGGESTION, onAccept: () => {}, onCancel: () => {} }),
   );
-  const disclosure = disclosureFor(SUGGESTION);
+  const disclosure = disclosureFor(SUGGESTION, 'reads-only');
   assert.ok(markup.includes(disclosure), 'the interstitial paraphrased §8.1’s disclosure');
   assert.ok(
     markup.indexOf(disclosure) < markup.indexOf('Turn this source on'),
@@ -605,7 +605,7 @@ test('the disclosure is rendered BEFORE the accept control, and is derived from 
   const otherMarkup = html(
     h(AcceptInterstitial, { suggestion: other, onAccept: () => {}, onCancel: () => {} }),
   );
-  assert.ok(otherMarkup.includes(disclosureFor(other)), otherMarkup);
+  assert.ok(otherMarkup.includes(disclosureFor(other, 'reads-only')), otherMarkup);
   assert.ok(!otherMarkup.includes(disclosure), 'the disclosure did not follow the suggestion');
 });
 
@@ -616,9 +616,9 @@ test('accepting hands back the provider AND the sentence the user was shown', ()
   assert.ok(markup.includes('Turn this source on'), markup);
   // The pair the screen's control produces, exercised through the same construction it calls.
   // A screen that stored only the provider could not record what the user agreed to.
-  const accepted = acceptSuggestion(SUGGESTION);
+  const accepted = acceptSuggestion(SUGGESTION, 'reads-only');
   assert.equal(accepted.provider.id, SUGGESTION.id);
-  assert.equal(accepted.disclosure, disclosureFor(SUGGESTION));
+  assert.equal(accepted.disclosure, disclosureFor(SUGGESTION, 'reads-only'));
   // §8.3's *"probe on enable"*: an accepted source cannot be read from until something asks it.
   assert.equal(accepted.provider.health.kind, 'unprobed');
   assert.equal(canServeReads(accepted.provider), false);
@@ -686,7 +686,7 @@ test('a declined import carries no FE-PROV code, and a rejected one carries its 
     kind: 'rejected',
     refusal: snapshotRefusal('chain-disagreement', 'block 12 disagrees'),
     findings: [{ screen: 'spot-check', why: 'block 12 disagrees' }],
-    provider: provider('p', { kind: 'disabled', by: 'auto', reason: 'caught' }),
+    provider: provider('p', { kind: 'disabled', by: 'auto', cause: 'mismatch', reason: 'caught' }),
     disabled: providerRefusal('FE-PROV-002', 'block 12 disagrees'),
   };
   const rejectedMarkup = html(h(ImportOutcomeView, { outcome: rejected }));

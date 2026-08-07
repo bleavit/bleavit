@@ -53,10 +53,16 @@ import {
   effectiveCoverage,
   shouldAutoDisable,
   type LadderThresholds,
+  type AutoDisableCause,
   type Provider,
   type SampleResult,
 } from './health.js';
-import { probeFailureReason, providerRefusal, type ProviderRefusal } from './refusals.js';
+import {
+  probeFailureReason,
+  providerRefusal,
+  type ProviderRefusal,
+  type ProviderRefusalCode,
+} from './refusals.js';
 
 // ------------------------------------------------------------------ release constants
 
@@ -157,7 +163,10 @@ export function afterProbe(
   switch (outcome.kind) {
     // A correctness finding disables at once, with no counter — see `ProbeOutcome`.
     case 'disqualified':
-      return { ...provider, health: { kind: 'disabled', by: 'auto', reason: outcome.why } };
+      return {
+        ...provider,
+        health: { kind: 'disabled', by: 'auto', cause: 'disqualified', reason: outcome.why },
+      };
 
     case 'responded':
       return {
@@ -177,6 +186,7 @@ export function afterProbe(
           health: {
             kind: 'disabled',
             by: 'auto',
+            cause: 'liveness',
             reason: probeFailureReason(consecutive, outcome.why),
           },
         };
@@ -234,8 +244,26 @@ export function afterProbe(
  */
 export function livenessRefusal(provider: Provider): ProviderRefusal | undefined {
   if (provider.health.kind !== 'disabled' || provider.health.by !== 'auto') return undefined;
-  return providerRefusal('FE-PROV-001', provider.health.reason);
+  return providerRefusal(CODE_FOR_CAUSE[provider.health.cause], provider.health.reason);
 }
+
+/**
+ * Which `FE-PROV-*` code names each automatic disable — the whole mapping, in one place.
+ *
+ * It was the constant `FE-PROV-001` until 2026-08-07, which told a user *"An optional data source
+ * is not responding"* about a source that had answered promptly and been switched off for **what
+ * the answer said**. A sampling mismatch is §8.4's own `FE-PROV-002` in as many words. A wrong-chain
+ * disqualification takes the same code, and the fit is exact rather than a nearest match: §8.4
+ * scopes `FE-PROV-002` to *"any mismatch against chain state"*, its fixed message is *"gave an
+ * answer that did not match the chain"*, and a genesis hash for another network is precisely that.
+ * The detection differs — probe rather than sampling round — and §9.4 fixes copy per **code**, not
+ * per mechanism, so a fifth code would give the user a second sentence saying the same thing.
+ */
+const CODE_FOR_CAUSE: Readonly<Record<AutoDisableCause, ProviderRefusalCode>> = Object.freeze({
+  liveness: 'FE-PROV-001',
+  mismatch: 'FE-PROV-002',
+  disqualified: 'FE-PROV-002',
+});
 
 // ------------------------------------------------------------------ selection
 
@@ -247,7 +275,20 @@ export interface ProviderRow {
    * construct one.
    */
   readonly reference: string;
-  /** What the provider claims, canonically rendered so a comparison is a string equality. */
+  /**
+   * The **encoded** value a chain read returns under {@link reference} — never §8.2's decimal.
+   *
+   * This said *"canonically rendered so a comparison is a string equality"* until 2026-08-07, and
+   * that phrase produced the defect it was meant to prevent: `samplingPages` read it, rendered
+   * §8.2's canonical **decimal** amount, and handed it to {@link chainRowCheck}, which compares
+   * against `ChainReadResult.hex` as opaque hex and declines to decode because decoding needs
+   * runtime metadata this package may not reach. Composed, every honest row mismatched — and
+   * §8.4's *"any mismatch"* rule auto-disables the operator that served it. Both functions were
+   * right about their own half; the contract between them named the wrong representation.
+   *
+   * "Canonical" was the trap: §8.2 has a canonical form and the chain has an encoding, and they
+   * are different strings for the same quantity. This field is the chain's.
+   */
   readonly claimed: string;
 }
 

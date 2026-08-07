@@ -97,11 +97,44 @@ export type ProviderHealth =
     }
   | {
       readonly kind: 'disabled';
-      /** `auto` when the client disabled it; `user` when the user did. */
-      readonly by: 'auto' | 'user';
+      /** The user switched it off. No cause: the reason is their decision. */
+      readonly by: 'user';
+      /** Required. A source that vanishes unexplained reads as a broken app. */
+      readonly reason: string;
+    }
+  | {
+      readonly kind: 'disabled';
+      readonly by: 'auto';
+      /**
+       * Which control switched it off, and therefore which `FE-PROV-*` code names it.
+       *
+       * A **required** discriminant rather than a string a caller composes, added 2026-08-07 after
+       * an R-6 review. `livenessRefusal` returned `FE-PROV-001` — *"An optional data source is not
+       * responding"* — for every automatic disable, including a sampling mismatch and a wrong-chain
+       * disqualification. Both of those **answered**, promptly and completely, and were switched
+       * off for what the answer said. Telling the user the source is not responding sends them to
+       * check their network for a source that is working perfectly and lying.
+       *
+       * The mapping lives in {@link autoDisableRefusal} and nowhere else, so a fourth cause cannot
+       * be added without choosing its code.
+       */
+      readonly cause: AutoDisableCause;
       /** Required. A source that vanishes unexplained reads as a broken app. */
       readonly reason: string;
     };
+
+/**
+ * Why the client switched a source off by itself — 10 §8.3, §8.4, §8.5.3.
+ *
+ * Three, and they are three different facts about the operator rather than three severities.
+ */
+export type AutoDisableCause =
+  /** §8.3's ladder ran out: consecutive probe failures, and the endpoint stopped answering. */
+  | 'liveness'
+  /** §8.4 re-verified a served row against the chain and it disagreed. */
+  | 'mismatch'
+  /** §8.5.3: it answered, and the answer describes another chain. Terminal at the first one. */
+  | 'disqualified';
 
 export interface Provider {
   readonly id: string;
@@ -351,6 +384,7 @@ export function afterSampling(
       health: {
         kind: 'disabled',
         by: 'auto',
+        cause: 'mismatch',
         reason: samplingMismatchReason(result.mismatches, result.rowsChecked, subject),
       },
     };

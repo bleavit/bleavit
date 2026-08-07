@@ -350,7 +350,7 @@ test('a healthy probe does not resurrect an auto-disabled source, and does not e
   const autoOff: Provider = {
     id: 'p1',
     kind: 'indexer',
-    health: { kind: 'disabled', by: 'auto', reason: 'three consecutive failures' },
+    health: { kind: 'disabled', by: 'auto', cause: 'liveness', reason: 'three consecutive failures' },
   };
   const { get, seen } = ok();
   const result = await runProbeRound(round([autoOff]), get, 10_000_000, clockOf(0, 1));

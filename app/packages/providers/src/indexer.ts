@@ -99,7 +99,8 @@
  * PLAN.md · *Spec questions* owns the ruling.
  */
 
-import { providerUrl } from './endpoint.js';
+import { parseBinding, providerUrl } from './endpoint.js';
+import { IMPORT_MAX_ROWS, IMPORT_MAX_UNCOMPRESSED_BYTES } from './import-quota.js';
 import { snapshotRefusal, type ProviderRefusal } from './refusals.js';
 import type { ProbeOutcome } from './sampling.js';
 import { admitIndexerPage, preimageOfSerialized } from './snapshot.js';
@@ -353,15 +354,14 @@ export async function readChain(source: IndexerSource): Promise<ChainAnswer> {
     return { kind: 'failed', why: 'answered something that is not an object' };
   }
   const record = parsed as Record<string, unknown>;
-  const genesisHash = record['genesisHash'];
-  const specVersion = record['specVersion'];
-  const contractVersion = record['contractVersion'];
-  if (typeof genesisHash !== 'string' || genesisHash === '') {
-    return { kind: 'failed', why: 'answered without a chain binding' };
+  // One parser, shared with §8.5.3's probe — see `bindingGenesisOf`. Two spellings of "parses as
+  // §8.2's binding object" let a body answer the probe and fail this route, which leaves a source
+  // permanently `Healthy` and permanently unusable.
+  const binding = parseBinding(record);
+  if (binding === null) {
+    return { kind: 'failed', why: "answered something that is not §8.2's binding object" };
   }
-  if (!isU32(specVersion) || !isU32(contractVersion)) {
-    return { kind: 'failed', why: 'answered a chain binding without u32 versions' };
-  }
+  const { genesisHash } = binding;
   if (genesisHash !== source.binding.genesisHash) {
     return {
       kind: 'disqualified',
@@ -378,11 +378,7 @@ export async function readChain(source: IndexerSource): Promise<ChainAnswer> {
         '(10 §8.2); one covered set has exactly one spelling',
     };
   }
-  return {
-    kind: 'answered',
-    binding: { genesisHash, specVersion, contractVersion },
-    coverage,
-  };
+  return { kind: 'answered', binding, coverage };
 }
 
 /** One `/range` response that passed every screen, with the content address of its bytes. */
@@ -409,6 +405,15 @@ export type RangeOutcome =
   | { readonly kind: 'cursor-repeated'; readonly cursor: string }
   /** The walk reached one page per block of the requested span. See {@link readRange}. */
   | { readonly kind: 'page-ceiling'; readonly pages: number }
+  /**
+   * The walk reached §8.4's byte or row ceiling and stopped.
+   *
+   * Not a failed read and not a finding about the operator: the pages that arrived were admitted,
+   * their coverage is real, and what is left of the span stays in {@link RangeRead.holes}. A
+   * caller that wants the rest issues a narrower span. Like the two stops above it, this
+   * under-claims, which is the direction that cannot invent history.
+   */
+  | { readonly kind: 'quota-reached'; readonly bytes: number; readonly rows: number }
   /**
    * **No page arrived**: the transport rejected, the status was not `200`, or the endpoint is one
    * this client will not use. A liveness failure, and it carries no refusal code on purpose.
@@ -524,8 +529,13 @@ export async function readRange(
   };
 
   let cursor: string | null = null;
+  let bytes = 0;
+  let rows = 0;
   for (;;) {
     if (pages.length >= ceiling) return done({ kind: 'page-ceiling', pages: pages.length });
+    if (bytes >= IMPORT_MAX_UNCOMPRESSED_BYTES || rows >= IMPORT_MAX_ROWS) {
+      return done({ kind: 'quota-reached', bytes, rows });
+    }
     const url = rangeUrl(source.endpoint, requested, cursor);
     if (url === null) {
       return done({ kind: 'unreachable', why: `${source.endpoint} is not an http(s) endpoint` });
@@ -555,8 +565,22 @@ export async function readRange(
       // reach the ladder even though §8.5.2 keeps ordinary read failures off it. The page screens
       // include the same `binding` screen the import path runs, so the evidence is here — it was
       // simply being flattened into a `why` string and discarded.
-      const wrongChain = verdict.findings.some((finding) => finding.screen === 'binding');
-      if (wrongChain) return done({ kind: 'disqualified', why: verdict.refusal.detail });
+      // NOT `verdict.refusal.detail` for the wrong-chain arm. That string is built with the
+      // `wrong-chain` cause, whose fixed remedy is written for a downloaded FILE — "Re-downloading
+      // will not help. Look for a snapshot published for this chain — the publisher's page should
+      // state which one each file covers." This is a live indexer with no publisher and no page.
+      // The `why` here becomes `Provider.health.reason` and is rendered verbatim, so the wrong
+      // artifact's advice reaches the user. An R-6 review found it surviving in the sibling branch
+      // of the same `if` as the fix that introduced `served-page` a few lines below.
+      const binding = verdict.findings.find((finding) => finding.screen === 'binding');
+      if (binding !== undefined) {
+        return done({
+          kind: 'disqualified',
+          why:
+            `${binding.why}. This is a live index rather than a file, so there is nothing to ` +
+            "re-download: the operator is serving another network's history.",
+        });
+      }
       // `verdict.refusal` is built for a FILE — `admitIndexerPage` shares its refusal builder with
       // the import path, so its remedy tells the user to check a download and compare a publisher's
       // hash. A live page has neither. Re-code it with the `served-page` cause; §9.4 fixes the copy
@@ -579,6 +603,15 @@ export async function readRange(
     }
     pages.push({ document, pin });
     carried.push(...document.coverage);
+    // Metered against §8.4's own ceiling, because this walk retains what it reads. The page
+    // ceiling above bounds the number of ROUND TRIPS and says nothing about size: a conforming
+    // server may answer every one of them with a 400 MB page. The sibling ingest path has been
+    // metered since F9 (`QuotaMeter`), and an R-6 review on 2026-08-07 found this one with no
+    // bound of any kind against an untrusted operator. Counted AFTER admission so a page that was
+    // refused does not consume the budget, and checked at the top of the next iteration so the
+    // walk stops before requesting more rather than after accepting it.
+    bytes += response.body.length;
+    rows += document.ops.length + document.balances.length;
 
     const next = response.header(NEXT_CURSOR_HEADER);
     // An absent header and an empty one are the same claim: a cursor is an opaque token, and the

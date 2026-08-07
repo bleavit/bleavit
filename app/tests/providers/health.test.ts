@@ -179,7 +179,7 @@ const HEALTHS: readonly ProviderHealth[] = [
   { kind: 'healthy' },
   { kind: 'slow', observedMs: 9_000 },
   { kind: 'failing', consecutiveFailures: 2, everAnswered: true },
-  { kind: 'disabled', by: 'auto', reason: 'a spot-checked row did not match' },
+  { kind: 'disabled', by: 'auto', cause: 'mismatch', reason: 'a spot-checked row did not match' },
   { kind: 'disabled', by: 'user', reason: 'switched off' },
 ];
 

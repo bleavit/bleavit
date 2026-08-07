@@ -124,7 +124,11 @@ export function AcceptInterstitial({
   readonly onCancel: () => void;
 }): ReactNode {
   // Derived here. See the module note: a prop is a sentence a caller can get wrong.
-  const disclosure = disclosureFor(suggestion);
+  // `reads-only`, because it is true of this release: nothing here schedules `runProbeRound`, so
+  // the operator hears from this device when the user reads and not otherwise. The provider panel
+  // says the same thing in its own words. When a scheduler lands, this becomes `'probes'` and both
+  // sentences change together — which is why the argument is required rather than defaulted.
+  const disclosure = disclosureFor(suggestion, 'reads-only');
   return (
     <Panel title="Before you turn this on" subject={suggestion.name} tone="advanced">
       <Notice severity="caution" heading="What this operator will learn">
@@ -139,7 +143,7 @@ export function AcceptInterstitial({
       <Button
         label="Turn this source on"
         intent="primary"
-        onClick={() => onAccept(acceptSuggestion(suggestion))}
+        onClick={() => onAccept(acceptSuggestion(suggestion, 'reads-only'))}
       />
       <Button label="Not now" onClick={onCancel} />
     </Panel>

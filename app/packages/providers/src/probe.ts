@@ -35,7 +35,7 @@
  * §8.4's screens, and there is nobody to ask.
  */
 
-import { providerUrl } from './endpoint.js';
+import { parseBinding, providerUrl } from './endpoint.js';
 import { LADDER, type LadderThresholds, type Provider } from './health.js';
 import { afterProbe, probeDue, type ProbeOutcome } from './sampling.js';
 
@@ -61,16 +61,7 @@ export interface ProbeTarget {
 }
 
 
-/** Whether a parsed body is §8.2's `binding` object. Shape only — the chain check is separate. */
-function bindingGenesis(body: unknown): string | null {
-  if (typeof body !== 'object' || body === null) return null;
-  const record = body as Record<string, unknown>;
-  const genesis = record['genesisHash'];
-  if (typeof genesis !== 'string' || genesis === '') return null;
-  if (typeof record['specVersion'] !== 'number') return null;
-  if (typeof record['contractVersion'] !== 'number') return null;
-  return genesis;
-}
+
 
 /**
  * Issue one probe (§8.5.3) and report what it found.
@@ -115,7 +106,7 @@ export async function probe(
     return { kind: 'failed', why: 'answered something that is not JSON' };
   }
 
-  const genesis = bindingGenesis(parsed);
+  const genesis = parseBinding(parsed)?.genesisHash ?? null;
   if (genesis === null) {
     return { kind: 'failed', why: 'answered without a chain binding' };
   }

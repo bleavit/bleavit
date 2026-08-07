@@ -323,10 +323,20 @@ export function foldedSlice(
  * documents as wrong.
  *
  * The `balances` come from folding **every movement up to `span.toBlock`**, not just the movements
- * inside the span, which is what makes them state rather than a subtotal: at block 19 they include
- * the positions split at block 10 that the page's own `ops` do not carry. That is the row set
- * §8.4's 1-in-16-page sampling re-verifies against the chain, and it is why the fold is not usable
- * here — see {@link foldedSlice}.
+ * inside the span: at block 19 they include the positions split at block 10 that the page's own
+ * `ops` do not carry. That is the row set §8.4's 1-in-16-page sampling re-verifies against the
+ * chain, and it is why the fold over the span alone is not usable here — see {@link foldedSlice}.
+ *
+ * **Two preconditions, and this helper can check neither.** It reconstructs state from a movement
+ * log, so it equals a state read only when (1) `history` is complete from the ledger's origin, and
+ * (2) the chain produced no movement outside `bleavit.snapshot.v1`'s `split`/`merge`/`transfer`/
+ * `redeem` alphabet. An earlier version of this note said the fold "is what makes them state",
+ * which is one step stronger than the code: with either precondition broken the result is
+ * positive, plausible, wrong, and served. `tools/snapshot` does not have this exposure because it
+ * reads holdings from state at the range's last block and lets §8.4's differential catch the
+ * difference; there is no differential here. An operator whose chain has movements outside the v1
+ * alphabet, or whose log does not reach the origin, must supply {@link IndexerSlice} directly from
+ * a state store.
  *
  * This suits an operator who holds the **whole movement log**, which is the common case for an
  * index built by replaying a chain. An operator who instead queries a state store at a height
