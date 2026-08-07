@@ -353,10 +353,22 @@ test('every sentence this client states cites a section that exists', () => {
     const doc = docs[match[1] ?? ''];
     assert.ok(doc !== undefined, `${copy.cite} names a document this suite does not read`);
     const text = architecture(doc);
-    const heading = new RegExp(`^#{2,4} ${(match[2] ?? '').replace(/\./g, '\\.')}[ .]`, 'm');
+    const heading = new RegExp(`^#{2,4} ${literal(match[2] ?? '')}[ .]`, 'm');
     assert.match(text, heading, `${copy.cite} names a section ${doc} does not have`);
   }
 });
+
+/**
+ * Escape a value for literal use inside a `RegExp`.
+ *
+ * Both call sites below build a pattern from text parsed out of a document. The first draft
+ * escaped only `.` in one and wrote `.replace(/-/g, '-')` in the other — a replacement of a
+ * substring with itself, which is a no-op in the shape of a safeguard. CodeQL flagged both
+ * (`js/incomplete-sanitization`, `js/identity-replacement`), and it was right: the dot-only
+ * escape is complete only while the input stays `[\\d.]+`, and nothing states that where the
+ * escape is written.
+ */
+const literal = (value: string): string => value.replace(/[.*+?^${}()|[\]\\-]/g, '\\$&');
 
 test('every empty copy slot names a code that really is in 10 §9.4’s taxonomy', () => {
   // A slot may not wait on a code that does not exist: that would be an excuse rather than a
@@ -372,7 +384,7 @@ test('every empty copy slot names a code that really is in 10 §9.4’s taxonomy
     const family = /^([A-Z-]+)-(\d+)$/.exec(copy.code);
     assert.ok(family !== null, `${copy.code} is not a taxonomy-shaped code`);
     const range = new RegExp(
-      `\`${(family[1] ?? '').replace(/-/g, '-')}-(\\d+)\\.\\.(\\d+)\``,
+      `\`${literal(family[1] ?? '')}-(\\d+)\\.\\.(\\d+)\``,
     ).exec(taxonomy);
     assert.ok(range !== null, `10 §9.4 declares no ${family[1]} range`);
     const number = Number(family[2]);
