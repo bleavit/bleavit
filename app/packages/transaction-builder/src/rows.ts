@@ -549,7 +549,7 @@ const P12: readonly PreconditionClause[] = [
  * them with a semicolon between them.
  *
  * **What §11.5 means by *round open* for `report` is an open question, and this row does not
- * pick a reading (SQ-XXX, proposed 2026-08-07).** `oracle_core::report`
+ * pick a reading (SQ-1004, proposed 2026-08-07).** `oracle_core::report`
  * (`crates/oracle-core/src/lib.rs:767-775`) refuses when a round for `(component, epoch,
  * spec_version)` already **exists**, with `AlreadyFinal` — `report` opens round 1 and a
  * counter-report is `oracle.challenge`, a different call on a different row. So the natural

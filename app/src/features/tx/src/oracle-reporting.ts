@@ -182,7 +182,7 @@ const P13_CHECKS: Readonly<Record<string, P13Check>> = Object.freeze({
   'round-open': {
     check: 'Round state',
     holds: (inputs) => inputs.roundOpen.value,
-    // **Deliberately conservative, and it names no state (SQ-XXX, proposed 2026-08-07).**
+    // **Deliberately conservative, and it names no state (SQ-1004, proposed 2026-08-07).**
     // The copy read *"A counter-report needs a live round; this one has been closed or
     // settled"*, which inverts the runtime: `oracle_core::report` refuses when a round for
     // `(component, epoch, spec_version)` already **exists** (`AlreadyFinal`,
