@@ -123,10 +123,13 @@ URGENT_UPGRADE) — the "update available" banner source.
 `ledger.split_scalar` / `ledger.merge_scalar` / `ledger.merge_gate` / `ledger.transfer` /
 `ledger.redeem` / `ledger.redeem_scalar` / `ledger.redeem_scalar_pair` / `ledger.redeem_void` ·
 `epoch.submit` / `epoch.withdraw` / `epoch.bind_ratification` · `oracle.register_reporter` / `oracle.report` /
-`oracle.challenge` / `oracle.recompute_proof` · `registry.file_incident` /
-`registry.file_milestone` / `registry.challenge` · `execution_guard.execute` /
+`oracle.challenge` / `oracle.recompute_proof` · `IncidentRegistry.file` /
+`MilestoneRegistry.file` / `IncidentRegistry.challenge_filing` /
+`MilestoneRegistry.challenge_filing` (two instances, no pallet called `Registry` — SQ-617) ·
+`execution_guard.execute` /
 `execution_guard.ratify(proposal_id, referendum_index)` · `futarchy_treasury.claim_stream` ·
-`guardian.approve_action` etc. · `welfare.snapshot(epoch)` ·
+`guardian.propose_action(power, justification_hash)` / `guardian.approve_action` ·
+`welfare.record_snapshot(epoch, spec_version)` ·
 `system.apply_authorized_upgrade` · `conviction_voting.vote/delegate/undelegate/remove_vote/
 unlock` · `referenda.submit/place_decision_deposit/refund_*` · cranks: `epoch.tick`,
 `market.crank_observe`, `market.reap`, `epoch.settle_cohort`,

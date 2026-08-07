@@ -4287,3 +4287,158 @@ fn reporter_records_round_trip_through_storage() {
         assert_ok!(Oracle::do_try_state());
     });
 }
+
+// =========================================================================
+// 12. `bond_quote`'s oracle arm (02 §3 contract v29; 07 §6.1, SQ-598)
+//
+// The whole design rests on one property: the amount a reporter is *shown*
+// and the amount `report` *freezes* are one number, not two. 07 §6.1 freezes
+// `B_1` at round-one creation, so the pre-game figure has no record to read
+// and must be recomputed — and a second implementation of the same rate is a
+// second answer to "what will this hold?". These tests bind the two.
+// =========================================================================
+
+/// 07 §6.1 / 02 §3: `report_bond_quote(c, m)` is exactly the `B_1` that a
+/// subsequent `report` freezes on the round it creates — in **both** pricing
+/// regimes, because the two differ by which term of `max(floor, ceil(bps·X /
+/// 10,000))` binds and a quote that agreed only on one of them would still walk
+/// a reporter to the wrong number on the other.
+///
+/// The expectations come from `oracle_core::round_bond` (the 07 §6.1 formula at
+/// the live params), never from a hand-computed literal (15 §4.4).
+#[test]
+fn v29_report_bond_quote_is_the_b1_report_freezes_in_both_regimes() {
+    new_test_ext().execute_with(|| {
+        register_reporter(1);
+        let params = ParamsValue::get();
+
+        // Two `StakeAtRisk` values, one per regime, each on its own game key so
+        // the second `report` opens a fresh game rather than escalating.
+        //   floor regime: 100,000 USDC × 250 bps = 2,500 USDC < the 10,000 floor
+        //   bps  regime: 1,000,000 USDC × 250 bps = 25,000 USDC > the floor
+        let regimes: [(EpochId, Balance, bool); 2] = [
+            (E, 100_000_000_000, true),
+            (E + 1, 1_000_000_000_000, false),
+        ];
+
+        for (epoch, stake, floor_binds) in regimes {
+            StakeAtRiskValue::set(stake);
+            let expected = round_bond(stake, 1, &params).expect("round one is representable");
+            // The regime is asserted, not assumed: a fixture that silently
+            // collapsed both cases onto the floor would test one thing twice.
+            if floor_binds {
+                assert_eq!(expected, params.bond_floor, "fixture must sit at the floor");
+            } else {
+                assert!(
+                    expected > params.bond_floor,
+                    "fixture must sit above the floor so the bps term binds",
+                );
+            }
+
+            // The quote, taken *before* the object that would freeze it exists.
+            let quote = Oracle::report_bond_quote(C, epoch);
+            assert_eq!(
+                quote,
+                Some((expected, stake)),
+                "the quote must publish the amount and the StakeAtRisk it scaled",
+            );
+
+            // The dispatch that freezes it.
+            assert_ok!(do_report(1, epoch, reported_value(), h(9)));
+            let round = Rounds::<Test>::get((C, epoch, V)).expect("round one exists");
+            let schedule = RoundSchedules::<Test>::get((C, epoch, V)).expect("schedule freezes");
+
+            assert_eq!(
+                Some((round.bond, round.stake_at_risk)),
+                quote,
+                "the frozen round must hold exactly the quoted amount",
+            );
+            assert_eq!(
+                schedule.round_one_bond, expected,
+                "the frozen ladder's `B_1` is the quoted amount too",
+            );
+            // And the event a client reconciles against carries the same figure.
+            assert!(oracle_events().iter().any(|event| matches!(
+                event,
+                Event::Reported { component, epoch: e, round: 1, bond, .. }
+                    if *component == C && *e == epoch && *bond == expected
+            )));
+        }
+        assert_ok!(Oracle::do_try_state());
+    });
+}
+
+/// 07 §6.1: the quote is a **quote**. `CohortEscrow` is read when round one is
+/// created and frozen for the lifecycle, so the figure moves with the exposure
+/// right up to submission and stops moving after it.
+#[test]
+fn v29_report_bond_quote_tracks_exposure_until_the_game_freezes_it() {
+    new_test_ext().execute_with(|| {
+        register_reporter(1);
+        let params = ParamsValue::get();
+        StakeAtRiskValue::set(1_000_000_000_000);
+        let at_submission = round_bond(StakeAtRiskValue::get(), 1, &params).expect("representable");
+        assert_ok!(do_report(1, E, reported_value(), h(9)));
+
+        // Exposure doubles after the game opened.
+        StakeAtRiskValue::set(2_000_000_000_000);
+        let repriced = round_bond(StakeAtRiskValue::get(), 1, &params).expect("representable");
+        assert!(repriced > at_submission);
+
+        // A *new* game is priced at the new exposure — the quote is live …
+        assert_eq!(
+            Oracle::report_bond_quote(C, E + 1),
+            Some((repriced, 2_000_000_000_000)),
+        );
+        // … while the open game keeps the amount it froze (I-28).
+        assert_eq!(
+            RoundSchedules::<Test>::get((C, E, V)).map(|schedule| schedule.round_one_bond),
+            Some(at_submission),
+        );
+        assert_ok!(Oracle::do_try_state());
+    });
+}
+
+/// 02 §3 / 07 §6.1: when the live parameters cannot price a round-one bond at
+/// all, the quote answers **`None`** — the same refusal `report` makes, reached
+/// before the reporter commits rather than after (G-1).
+///
+/// The adversarial half is what it must *not* answer: `Some(bond_floor)`. A
+/// floor here would be a real number for an action the runtime refuses, which is
+/// exactly the "walked to a signature the chain rejects" defect contract v29
+/// exists to close.
+#[test]
+fn v29_report_bond_quote_refuses_when_orc_rounds_leaves_its_kernel_band() {
+    use oracle_core::{ORC_ROUND_CAP_MAX, ORC_ROUND_CAP_MIN};
+
+    new_test_ext().execute_with(|| {
+        register_reporter(1);
+        let lawful = ParamsValue::get();
+        // Inside the band the same fixture quotes a real amount, so the refusals
+        // below are attributable to `orc.rounds` and to nothing else.
+        assert!(Oracle::report_bond_quote(C, E).is_some());
+
+        for rounds in [ORC_ROUND_CAP_MIN - 1, ORC_ROUND_CAP_MAX + 1] {
+            ParamsValue::set(OracleParams { rounds, ..lawful });
+            let quote = Oracle::report_bond_quote(C, E);
+            assert_eq!(quote, None, "an unpriceable ladder must answer nothing");
+            assert_ne!(
+                quote,
+                Some((lawful.bond_floor, StakeAtRiskValue::get())),
+                "a floor would under-collateralize an action `report` refuses",
+            );
+            // The mirror: the dispatch refuses on the same state, and refuses
+            // as a true no-op (G-1).
+            assert_noop!(
+                do_report(1, E, reported_value(), h(9)),
+                Error::<Test>::RoundNotFound
+            );
+            assert!(Rounds::<Test>::get((C, E, V)).is_none());
+            assert!(RoundSchedules::<Test>::get((C, E, V)).is_none());
+        }
+
+        ParamsValue::set(lawful);
+        assert!(Oracle::report_bond_quote(C, E).is_some());
+        assert_ok!(Oracle::do_try_state());
+    });
+}

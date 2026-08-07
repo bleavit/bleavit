@@ -9,7 +9,7 @@ use core::convert::TryFrom;
 use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 
-pub const INTEGRATION_CONTRACT_VERSION: u32 = 28;
+pub const INTEGRATION_CONTRACT_VERSION: u32 = 29;
 
 pub type Balance = u128;
 pub type ProposalId = u64;
@@ -875,6 +875,30 @@ pub struct NavView {
     pub spendable_nav: Balance,
     pub meter_utilization_bps: u32,
     pub class_floors: [Balance; 4],
+    /// 08 §1.2's derived INSURANCE target `T_ins` — the unreclaimed swept-residue
+    /// liability the account backs, plus `min_balance`. Trailing append at
+    /// contract v29 (02 §13 rule 3; SQ-602): 11 §11.8.3 requires `INSURANCE`
+    /// presented as a **sized reserve against its target** and never as income,
+    /// and without this field the only client that could classify would be one
+    /// that fabricated the target it compares against.
+    pub insurance_target: Balance,
+    /// Whether this runtime has the real-asset payout leg of
+    /// `futarchy_treasury.claim_stream` wired (08 §1.4's A9 fungibles follow-up).
+    ///
+    /// Trailing append at contract v29, and it is what keeps `treasury_streams`
+    /// from being a trap. An unwired runtime refuses `claim_stream` with
+    /// `OutflowCustodyUnwired` — every time, not occasionally — rather than
+    /// consuming a stream entitlement and reporting a movement that never
+    /// happened. Publishing a `claimable_now` for a call that cannot succeed
+    /// would walk a recipient to a guaranteed refusal, which is the defect class
+    /// this contract version exists to close, so the two ship together.
+    ///
+    /// It is scoped to the **claim leg**, and the name says so. The same seam
+    /// gates `spend`, `issue_vit` and `recover_foreign`, but those are dispatched
+    /// by governance rather than signed by a canonical-client user, so a
+    /// treasury-wide flag would publish a claim about three calls no client
+    /// reads. A client MUST NOT infer their state from this field.
+    pub stream_claims_wired: bool,
 }
 
 #[derive(
@@ -908,6 +932,107 @@ pub struct OracleRoundView {
     pub challenge_deadline: BlockNumber,
     pub acked_by_watchtowers: u8,
     pub escalated: bool,
+}
+
+/// Which pre-game bonded action a [`BondQuoteView`] prices (02 §3/§4, contract
+/// v29; 07 §6.1 and §7).
+///
+/// The three variants are the three bonds a client must show a user **before**
+/// the object that would freeze the amount exists. Every already-created bond is
+/// read from its own record instead — `OracleRoundView.bond` for a live round,
+/// and the filing's stored `bond` for a registry challenge — so this request set
+/// is deliberately not a general bond enumeration.
+///
+/// The registry arms name the two **instances** (`IncidentRegistry`,
+/// `MilestoneRegistry`) rather than carrying a `RegistryKind` argument, because
+/// that is what a client selects: the runtime instantiates `pallet-registry`
+/// twice and the two allocators share no filing-id space (02 §7.4).
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Decode,
+    DecodeWithMemTracking,
+    Encode,
+    Eq,
+    MaxEncodedLen,
+    PartialEq,
+    TypeInfo,
+)]
+pub enum BondQuoteRequest {
+    /// 07 §6.1 `B_1(c, m)` — what a **round-1** report on `(component, epoch)`
+    /// would hold. Round 1 is the only round this prices: every later round
+    /// derives from the game's stored `B_1` by the doubling rule and is read
+    /// from the round record.
+    #[codec(index = 0)]
+    OracleReport { component: MetricId, epoch: EpochId },
+    /// 07 §7 `F(Incident, m)` — what a filing against measurement epoch `epoch`
+    /// would hold in the `IncidentRegistry` instance.
+    #[codec(index = 1)]
+    IncidentFiling { epoch: EpochId },
+    /// 07 §7 `F(Milestone, m)` — the same, in the `MilestoneRegistry` instance.
+    #[codec(index = 2)]
+    MilestoneFiling { epoch: EpochId },
+}
+
+/// The amount a not-yet-created bonded action would hold, priced at `read_at`
+/// (02 §3/§4, contract v29).
+///
+/// **This is a quote, not the figure that will bind.** 07 §6.1 reads the cohort
+/// escrow when round 1 of a game is *created* and freezes it for the lifecycle,
+/// and 07 §7 freezes a filing's bond at creation the same way; a bond asked for
+/// beforehand is therefore the amount at the current block, and it fixes at
+/// submission. That is `quote()`'s shape (02 §4), applied to bonds.
+///
+/// `bond` is the amount and the only figure a client may present as such. A
+/// client MUST NOT recompute it from `exposure`: 07 §6.1 states three separate
+/// normative details — the `/ 10,000` division rounds **up**, rounding resolves
+/// toward custody, and the `max` against the floor applies **after** rounding —
+/// and getting any of them wrong under-collateralizes a bond, which is the
+/// under-custody direction (I-4 / I-28). `exposure` and `read_at` ship as
+/// disclosure beside it, never as a second source of truth.
+#[derive(
+    Clone, Debug, Decode, DecodeWithMemTracking, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo,
+)]
+pub struct BondQuoteView {
+    /// The amount the action would hold: `B_1(c, m)` for an oracle report,
+    /// `F(kind, m)` for a registry filing.
+    pub bond: Balance,
+    /// The value-at-risk `bond` was scaled against — `StakeAtRisk(c, m)` for an
+    /// oracle report, `Exposure(kind, m)` for a filing (07 §6.1, §7).
+    /// Disclosure only.
+    pub exposure: Balance,
+    /// The block the escrow fold was read at. The figure is priced here and
+    /// fixes at submission.
+    pub read_at: BlockNumber,
+}
+
+/// One outbound treasury stream, as its recipient sees it (02 §3/§4, contract
+/// v29; 08 §1.4).
+///
+/// `claimable_now` is the chain's own answer to 11 §11.8.3's *"claimable now"* —
+/// the exact quantity `futarchy_treasury.claim_stream` would pay at `now`,
+/// before it advances `claimed`. It is published rather than derived because
+/// §11.4 rule 2 requires the precondition to be an exact chain read and the
+/// vesting arithmetic floors against the claimant (08 §1.4).
+///
+/// The figure is monotone between the block it was read at and inclusion:
+/// vesting never decreases and `claimed` moves only on a claim, so a displayed
+/// `claimable_now` can only understate what a later claim pays. A `cancelled`
+/// stream is the one discontinuity, and it is a precondition re-read (11 §11.4).
+#[derive(
+    Clone, Debug, Decode, DecodeWithMemTracking, Encode, Eq, MaxEncodedLen, PartialEq, TypeInfo,
+)]
+pub struct StreamView {
+    pub id: u64,
+    /// Stored fields, unprojected (08 §1.4).
+    pub total: Balance,
+    pub claimed: Balance,
+    pub start: BlockNumber,
+    pub duration: BlockNumber,
+    pub cancelled: bool,
+    /// `vested(now) − claimed`, 0 while cancelled, not started or fully claimed.
+    pub claimable_now: Balance,
 }
 
 /// Hosted-question terminal failure reason (02 §4a; introduced at contract
@@ -1018,6 +1143,11 @@ pub mod bounds {
     /// Canonical on-chain execution-history ring bound (09 §1.5 / 13 §4).
     pub const MAX_EXECUTION_RECORDS: u32 = 256;
     pub const MAX_PARAM_KEYS: u32 = 64;
+    /// Outbound treasury streams (13 §4; `futarchy_treasury_core::MAX_STREAMS`,
+    /// already a frozen `FutarchyTreasury::MaxStreams` metadata constant per
+    /// 02 §9). It bounds `treasury_streams()` because the whole register may
+    /// lawfully belong to one recipient, so no narrower per-caller bound exists.
+    pub const MAX_TREASURY_STREAMS: u32 = 128;
     pub const RECENT_COHORT_SUMMARIES: u32 = 32;
     pub const MAX_OPEN_ORACLE_ROUNDS: u32 = 192;
     pub const MAX_COHORT_PROPOSALS: u32 = 12;
@@ -1966,7 +2096,34 @@ mod tests {
         // own v24 sweep: an inverse gate that matches `Pallet.Item` pairs cannot see
         // an obligation stated in prose that never spells the item. Doc 11 now
         // spells all six, so `check-client-surface-obligations.py` can see them.
-        assert_eq!(INTEGRATION_CONTRACT_VERSION, 28);
+        //
+        // v29 (SQ-598, SQ-601, SQ-602, SQ-731) is the first of these bumps that adds
+        // *quantities* rather than freezing reads the client was already told to make.
+        // Three amounts an operator must commit had no surface at all: the round-1
+        // report bond, the registry filing bond and a stream's claimable figure. §3
+        // gains a **fifteenth** and **sixteenth** method — `bond_quote(request) ->
+        // Option<BondQuoteView>` and `treasury_streams(who)` — so the `sp_api` version
+        // moves 4 -> 5; §4 gains `BondQuoteRequest`, `BondQuoteView` and `StreamView`,
+        // and `NavView` gains a trailing `insurance_target` under rule 3.
+        //
+        // One method for both bonds, because 07 §6.1 and §7 state **one** escrow fold
+        // under two names (`StakeAtRisk` and `Exposure`); publishing it twice would let
+        // the copies drift. It returns the amount rather than the exposure, because
+        // §6.1 states three separable rounding details a client applying them would own,
+        // in the under-custody direction I-4 and I-28 name as unsafe. And `None` is a
+        // first-class answer: §7's Milestone exposure is not determinable until the
+        // aggregate is bound to a component, and `file` MUST then refuse (G-1).
+        //
+        // `treasury_streams` needed **no** 02 §7.6 exception, which is the finding
+        // rather than a detail: that rule forbids binding *raw storage*, and a
+        // published projection is not raw storage — `nav()` is itself one.
+        //
+        // §7.1 and §7.4 additionally freeze `Epoch.PendingOracleVoids` and
+        // `ConditionalLedger.LedgerDrifted`, which 11 §11.8.2's new per-variant trigger
+        // table cites (SQ-730). Neither was frozen, and `PhaseFlags` bit 5 does not
+        // substitute for the second: it tracks the applied *effect*, so it is clear at
+        // the moment an activation is proposed.
+        assert_eq!(INTEGRATION_CONTRACT_VERSION, 29);
     }
 
     #[test]
@@ -2182,7 +2339,7 @@ mod tests {
     fn nav_view_v4_fields_and_scale_layout_match_contract_02_section_4() {
         use scale_info::TypeDef;
 
-        const CONTRACT_FIELDS: [&str; 13] = [
+        const CONTRACT_FIELDS: [&str; 15] = [
             "total",
             "main",
             "pol",
@@ -2196,6 +2353,14 @@ mod tests {
             "spendable_nav",
             "meter_utilization_bps",
             "class_floors",
+            // Contract v29 (SQ-602): 08 §1.2's derived `T_ins`, appended trailing under
+            // 02 §13 rule 3 so a client compiled against v28 decodes exactly what it did.
+            "insurance_target",
+            // Contract v29, second trailing append: whether `claim_stream`'s real-asset leg
+            // is wired. It ships with `treasury_streams` rather than after it, because a
+            // `claimable_now` for a call that always refuses walks a recipient to a
+            // guaranteed failure — the defect class this bump exists to close.
+            "stream_claims_wired",
         ];
         let type_info = NavView::type_info();
         let names: alloc::vec::Vec<&str> = match &type_info.type_def {
@@ -2222,10 +2387,15 @@ mod tests {
             spendable_nav: 0,
             meter_utilization_bps: 7_500,
             class_floors: [10, 20, 30, 40],
+            insurance_target: 11,
+            stream_claims_wired: true,
         };
         let encoded = view.encode();
         assert_eq!(NavView::decode(&mut &encoded[..]).unwrap(), view);
-        assert_eq!(NavView::max_encoded_len(), 229);
+        // 229 + one `u128` + one `bool`. Both appends are trailing, so a v28 decoder reading
+        // the first 229 bytes still gets every field it knew — which is what 02 §13 rule 3
+        // buys, and what makes a two-field bump lawful in one version.
+        assert_eq!(NavView::max_encoded_len(), 246);
     }
 
     #[test]

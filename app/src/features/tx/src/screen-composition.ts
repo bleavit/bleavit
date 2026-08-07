@@ -103,7 +103,7 @@ export interface ScreenChain {
 }
 
 /**
- * The runtime API every read below goes through — 02 §3's frozen 13-method surface.
+ * The runtime API every read below goes through — 02 §3's frozen `FutarchyApi` surface.
  *
  * Named once. `FinalizedReader.crossCheckedCall` prefixes the method itself while `call`
  * does not, which is a difference `proposal-reads.ts` documents on its own port; the codec

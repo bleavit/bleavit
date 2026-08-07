@@ -106,7 +106,9 @@ import {
   RegisterReporter,
   SnapshotCrank,
   RegistryFiling,
+  ClaimStream,
   InsurancePanel,
+  STREAM_CLAIMS_NOT_WIRED,
   TreasuryStreams,
   UpgradeCrank,
   UpgradeHashMismatch,
@@ -129,13 +131,15 @@ import {
   escalationConsequence,
   filingBlocks,
   reportBlocks,
-  reportBondFloor,
+  BOND_QUOTE_IS_A_QUOTE,
+  BOND_QUOTE_UNDETERMINABLE,
+  bondQuoteRefusal,
+  coversBond,
   ChallengeRound,
   ProofRefused,
   RecomputeProof,
   SubmitReport,
   RegistryInstanceCollisionError,
-  REPORT_BOND_NOT_ESTABLISHED,
   recomputeProof,
   maySubmitRecompute,
   ProofMismatchError,
@@ -200,6 +204,7 @@ import type {
 } from '@bleavit/transaction-builder';
 import type {
   AllowanceMeter,
+  BondQuoteState,
   ChallengeWindow,
   DepositProgress,
   ProposalSummary,
@@ -215,6 +220,7 @@ import type {
   PendingAction,
   ProposalsReader,
   RatificationView,
+  PlaybookTrigger,
   RawDecoded,
   RawEvent,
   RecomputeInputs,
@@ -244,6 +250,7 @@ import type { Clamped, Intent } from '@bleavit/intents';
 import { classifyCheckpointAge } from '@bleavit/verify';
 import type { VerificationPanel } from '@bleavit/verify';
 import type { Fixture } from '@bleavit/mock-runtime';
+import { declarationOf, txSource, withoutComments } from './spec-sources.ts';
 
 /** The chain identity every verified fixture in this file is read against (F18).
  *  A named constant rather than a literal per site: the point of the field is that two
@@ -320,6 +327,79 @@ const copy = (text: string | undefined, what = 'copy'): string => {
  */
 const stripComments = (source: string): string =>
   source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\/\/.*$/gm, '');
+
+/**
+ * Source reduced to **code**: comments gone, import specifiers gone, and every string or
+ * template literal's *text* gone while its `${…}` interpolations survive.
+ *
+ * Written as a scanner rather than as a regex, because every hole `check:chain-literals` had
+ * to close was a tokenizer hole. Both directions bite an absence test over arithmetic: a `*`
+ * inside a sentence is not multiplication (`treasury.ts` says "everything **vested** so far"
+ * in user copy), and blanking whole template literals would also blank their interpolations
+ * — which is precisely where a reinstated computation would sit.
+ *
+ * It knows nothing about regex literals, which neither module scanned with it contains; the
+ * non-vacuity assertions beside each use are what keep that honest.
+ */
+type ScanMode =
+  | { kind: 'code'; braces: number }
+  | { kind: 'single' }
+  | { kind: 'double' }
+  | { kind: 'template' };
+
+/**
+ * A shift **operator**, as opposed to two closing generic brackets.
+ *
+ * `Readonly<Record<Exclude<K, 'x'>, string>>` ends in `>>`, so a substring scan for the
+ * operator fires on ordinary TypeScript and the temptation is then to drop the check
+ * entirely — which is how `B_1 << (round - 1)` would get back in. Matching an operator
+ * *between operands* keeps the check and loses the collision.
+ */
+const SHIFT_OPERATOR = /[\w)\]]\s*(?:<<|>>>?)\s*[\w(]/;
+
+const codeOnly = (source: string): string => {
+  const src = withoutComments(source).replace(/^import[\s\S]*?;$/gm, '');
+  // `braces: -1` marks the outermost frame, which never pops.
+  const stack: ScanMode[] = [{ kind: 'code', braces: -1 }];
+  let out = '';
+  for (let index = 0; index < src.length; index += 1) {
+    const top = stack[stack.length - 1] as ScanMode;
+    const char = src[index] as string;
+    if (char === '\\') {
+      index += 1;
+      continue;
+    }
+    if (top.kind === 'code') {
+      if (char === "'") stack.push({ kind: 'single' });
+      else if (char === '"') stack.push({ kind: 'double' });
+      else if (char === '`') stack.push({ kind: 'template' });
+      else if (char === '{' && top.braces >= 0) {
+        top.braces += 1;
+        out += char;
+      } else if (char === '}' && top.braces >= 0) {
+        if (top.braces === 0) stack.pop();
+        else {
+          top.braces -= 1;
+          out += char;
+        }
+      } else out += char;
+      continue;
+    }
+    if (top.kind === 'template') {
+      if (char === '`') stack.pop();
+      else if (char === '$' && src[index + 1] === '{') {
+        stack.push({ kind: 'code', braces: 0 });
+        index += 1;
+        out += ' ';
+      }
+      continue;
+    }
+    if ((top.kind === 'single' && char === "'") || (top.kind === 'double' && char === '"')) {
+      stack.pop();
+    }
+  }
+  return out;
+};
 
 const nth = <T,>(items: readonly T[], index: number, what: string): T => {
   const item = items.at(index);
@@ -1450,11 +1530,29 @@ const CHALLENGE_FILING = (
   ...over,
 });
 
+/**
+ * `api.bond_quote` answering — 02 §4's `BondQuoteView`, as `BondQuoteState.quoted`.
+ *
+ * `exposure` is deliberately **not** derived from `bond` here. 07 §6.1's fold is the chain's
+ * and the client performs none of it, so a fixture computing one from the other would encode
+ * the very arithmetic `bond-quote.ts` is asserted to contain nowhere — and would then agree
+ * with a client that had started doing it.
+ */
+const QUOTED = (bond: bigint, exposure: bigint, readAt = 1_000_000): BondQuoteState => ({
+  kind: 'quoted',
+  quote: { bond: finalized(bond), exposure: finalized(exposure), readAt: finalized(readAt) },
+});
+
+/** The chain answered `None` — 07 §7's not-determinable exposure, not a read failure. */
+const UNDETERMINABLE: BondQuoteState = { kind: 'undeterminable' };
+/** The call did not answer. A different state with a different remedy. */
+const UNREAD_QUOTE: BondQuoteState = { kind: 'unread', reason: 'the state call timed out' };
+
 /** §11.8.6 row 1's inputs — the clean path, so a refusal elsewhere is not this fixture. */
 const FILING = (over: Partial<FilingInputs> = {}): FilingInputs => ({
   kind: 'incident',
   freeUsdc: finalized(10_000_000n),
-  filingBond: finalized(1_000_000n),
+  filingBond: QUOTED(1_000_000n, 40_000_000n),
   filingsUsed: finalized(1),
   filingsBound: finalized(8),
   evidenceHash: '0xevidence',
@@ -2727,34 +2825,99 @@ test('a proposal is blocked by allowance and by trigger independently', () => {
 
 // ------------------------------------------------ S16 treasury streams (F17)
 
+/**
+ * 02 §4's `StreamView` as the client holds it (contract v29).
+ *
+ * The default `claimableNow` is deliberately **not** what linear vesting over the other
+ * fields would produce: half of `total` at block 600 of a 1,000-block schedule is 500,000,
+ * and this fixture answers 400,000. Every test below that reads the amount therefore fails
+ * the moment the client re-derives it, rather than agreeing with a re-derivation by
+ * coincidence — which is what a self-consistent fixture would have done.
+ */
 const STREAM = (over: Partial<Stream> = {}): Stream => ({
-  id: finalized('s1'), recipient: finalized('5Grw'),
+  id: finalized('s1'),
   total: finalized(1_000_000n), claimed: finalized(0n),
-  startBlock: finalized(100), endBlock: finalized(1_100),
-  cancelled: finalized(false), ...over,
+  startBlock: finalized(100), duration: finalized(1_000),
+  cancelled: finalized(false), claimableNow: finalized(400_000n),
+  ...over,
 });
 
-test('vesting floors against the claimant, and the last unit is not invented', () => {
-  // R-7's rounding rule. `total * elapsed / span` on bigint — a float would round a
-  // recipient's last unit into or out of existence.
-  assert.equal(stated(claimableNow(STREAM(), finalized(600))).amount, 500_000n);
-  // 1 block into a 1000-block stream of 1,000,000 vests exactly 1,000.
-  assert.equal(stated(claimableNow(STREAM(), finalized(101))).amount, 1_000n);
-  // A total that does not divide evenly floors rather than rounding up.
-  assert.equal(stated(claimableNow(STREAM({ total: finalized(999n) }), finalized(101))).amount, 0n);
+test('claimableNow reports the chain’s own claimable_now, never a figure derived here', () => {
+  // 11 §11.8.3 rule 1 (contract v29): "The client MUST NOT re-derive it from `total`,
+  // `claimed`, `start` and `duration`: the vesting division floors against the claimant
+  // (08 §1.4), and a client rounding the other way shows a payout the chain will not make."
+  //
+  // The fixture's own fields would vest 500,000 at block 600. The published field says
+  // 400,000, and 400,000 is what must come back — so this assertion fails on any client
+  // that computes rather than reads, in the direction that matters.
+  assert.equal(stated(claimableNow(STREAM(), finalized(600))).amount, 400_000n);
+
+  // The other direction, which a clamp would swallow: a published figure ABOVE what the
+  // four schedule fields imply is still reported verbatim. Clamping it to a locally derived
+  // ceiling would understate a payout the chain will make — and 02 §4 says the field "is
+  // exactly what `claim_stream` would pay", not a bound this client may narrow.
+  assert.equal(
+    stated(claimableNow(STREAM({ claimableNow: finalized(900_000n) }), finalized(600))).amount,
+    900_000n,
+  );
+
+  // And it moves with the published field alone: `total`, `claimed`, `startBlock` and
+  // `duration` are display and classification inputs, never terms in the amount.
+  const same = STREAM({
+    total: finalized(7n), claimed: finalized(6n), duration: finalized(2), claimableNow: finalized(123n),
+  });
+  assert.equal(stated(claimableNow(same, finalized(600))).amount, 123n);
+});
+
+test('no vesting arithmetic exists in treasury.ts — the amount is read (11 §11.8.3 rule 1)', () => {
+  // Asserted by absence, the way `upgrade-crank.ts` proves it does no lead-time arithmetic.
+  // The reason is the same shape as SQ-552's: a second implementation of somebody's payout,
+  // rounding the other way, shows money the chain will not pay.
+  //
+  // Scanned as **code** rather than as text. The module legitimately says "vested" and
+  // "vesting" in the copy it shows a recipient, so a word scan over raw source reports the
+  // sentence explaining the absence as the thing itself — the tokenizer hole every version
+  // of `check:chain-literals` had to close.
+  const code = codeOnly(txSource('treasury.ts'));
+  for (const forbidden of ['*', '/', '%', 'elapsed', 'span', 'vested', 'Math.']) {
+    assert.ok(
+      !code.includes(forbidden),
+      `treasury.ts must contain no vesting arithmetic — found ${JSON.stringify(forbidden)}`,
+    );
+  }
+  assert.doesNotMatch(code, SHIFT_OPERATOR, 'a shift operator appeared in the treasury module');
+  // The shift check is not vacuous, and it is not the generics collision either.
+  assert.match('total << 1', SHIFT_OPERATOR);
+  assert.doesNotMatch('Readonly<Record<K, string>>', SHIFT_OPERATOR);
+  // Not vacuous: the scan still sees the code it is scanning, and it still sees the one
+  // subtraction the module is allowed (08 §1.2's target comparison, which is not vesting).
+  assert.ok(code.includes('export function claimableNow'), 'the absence scan read an empty file');
+  assert.ok(code.includes('sized - held'), 'the scan no longer reaches the module’s own body');
+  // …and it really does keep the words out of reach: the copy the scan must not see is in
+  // the file, so a scanner that had simply stopped stripping would fail the loop above.
+  assert.match(txSource('treasury.ts'), /Everything vested so far has already been claimed/);
 });
 
 test('the claimable figure carries the provenance of every read it came from', () => {
-  // Six reads: total, claimed, startBlock, endBlock, cancelled and now. Every call site had
-  // been picking `claimed`'s status for the result, which renders a figure derived partly
-  // from provider data with a verified badge — INV-FE-1 by arithmetic. `check-render-
+  // Six reads: claimableNow, claimed, startBlock, duration, cancelled and now. Every call
+  // site had been picking `claimed`'s status for the result, which renders a figure derived
+  // partly from provider data with a verified badge — INV-FE-1 by arithmetic. `check-render-
   // provenance`'s rule B caught it in this very file.
   const mixed = claimableNow(
-    STREAM({ total: { value: 1_000_000n, status: { kind: 'provider', providerId: 'p', sampled: false } } }),
+    STREAM({ claimableNow: { value: 400_000n, status: { kind: 'provider', providerId: 'p', sampled: false } } }),
     finalized(600),
   );
   assert.equal(mixed.kind, 'stated');
   assert.equal(mixed.datum.status.kind, 'provider', 'must not inherit the verified badge');
+  // A classification input taints it too, not only the amount: `duration` decides `malformed`
+  // and `cancelled` decides `cancelled`, so a provider answer for either makes the verdict
+  // provider-grade even though the figure itself was verified.
+  const providerFlag = claimableNow(
+    STREAM({ cancelled: { value: false, status: { kind: 'provider', providerId: 'p', sampled: false } } }),
+    finalized(600),
+  );
+  assert.equal(stated(providerFlag).amount, 400_000n);
+  assert.equal(providerFlag.kind === 'stated' && providerFlag.datum.status.kind, 'provider');
 });
 
 test('a claim across two blocks is refused rather than shown — this is somebody’s money', () => {
@@ -2766,40 +2929,50 @@ test('a claim across two blocks is refused rather than shown — this is somebod
   const blocks = claimBlocks({
     stream: STREAM({ claimed: { value: 0n, status: { kind: 'verified-finalized', chain: TEST_CHAIN, blockHash: '0xbeef', blockNumber: 999_000 } } }),
     callerIsRecipient: true,
+    streamClaimsWired: finalized(true),
     now: finalized(600),
   });
   assert.deepEqual(blocks.map((b) => b.check), ['Claimable amount']);
   assert.match(nth(blocks, 0, 'block').detail, /cannot establish what is claimable/);
 });
 
-test('not-started and fully-claimed are different zeros', () => {
-  // A screen showing a bare zero for both tells a recipient the wrong thing to do.
+test('not-started, fully-claimed and cancelled are different zeros', () => {
+  // 11 §11.8.3 rule 2 (contract v29): "Zero has three meanings and the client MUST say
+  // which." A screen showing a bare zero for all three tells a recipient the wrong thing.
+  // Each fixture keeps a NON-zero `claimableNow` where the chain could still publish one,
+  // so the classification is not passing merely because the amount happened to be zero.
   assert.deepEqual(stated(claimableNow(STREAM(), finalized(50))), { amount: 0n, reason: 'not-started' });
   assert.deepEqual(
-    stated(claimableNow(STREAM({ claimed: finalized(1_000_000n) }), finalized(2_000))),
+    stated(claimableNow(STREAM({ claimed: finalized(1_000_000n), claimableNow: finalized(0n) }), finalized(2_000))),
     { amount: 0n, reason: 'fully-claimed' },
   );
   assert.equal(
     stated(claimableNow(STREAM({ cancelled: finalized(true) }), finalized(600))).reason,
     'cancelled',
   );
+  // Cancellation wins over a published non-zero amount, which is the safe direction: 02 §4
+  // makes cancellation the one discontinuity in an otherwise monotone figure, so a stream
+  // read before it was cancelled must not keep offering the amount it was read with.
+  assert.equal(stated(claimableNow(STREAM({ cancelled: finalized(true) }), finalized(600))).amount, 0n);
 });
 
-test('a stream whose end is not after its start is refused, not divided by', () => {
-  // Returning the whole total — the "treat it as instant" reading — would credit a
-  // recipient everything from malformed chain state.
-  const bad = claimableNow(STREAM({ startBlock: finalized(500), endBlock: finalized(500) }), finalized(900));
+test('a zero-length schedule is classified, not divided by — `duration` is the field now', () => {
+  // Retained after contract v29 moved the arithmetic on chain: the chain's own
+  // `vested_amount` divides by `duration`, so a zero there is real state worth surfacing.
+  // It is a *classification*, which is why it survives the removal of the division — the
+  // client reports the state, and reports nothing claimable against it.
+  const bad = claimableNow(STREAM({ duration: finalized(0), claimableNow: finalized(400_000n) }), finalized(900));
   assert.deepEqual(stated(bad), { amount: 0n, reason: 'malformed' });
+  // A negative duration is the same state and must not read as a schedule running backwards.
+  assert.equal(
+    stated(claimableNow(STREAM({ duration: finalized(-1) }), finalized(900))).reason,
+    'malformed',
+  );
   const blocks = claimBlocks({
-    stream: STREAM({ startBlock: finalized(500), endBlock: finalized(500) }),
-    callerIsRecipient: true, now: finalized(900),
+    stream: STREAM({ duration: finalized(0) }),
+    callerIsRecipient: true, streamClaimsWired: finalized(true), now: finalized(900),
   });
   assert.match(nth(blocks, 0, 'block').detail, /no vesting schedule can be derived/);
-});
-
-test('vesting stops at the end block rather than continuing past it', () => {
-  assert.equal(stated(claimableNow(STREAM(), finalized(1_100))).amount, 1_000_000n);
-  assert.equal(stated(claimableNow(STREAM(), finalized(99_999))).amount, 1_000_000n);
 });
 
 const READ_TARGET = (value: bigint): InsuranceTarget => ({ kind: 'read', value: finalized(value) });
@@ -2819,16 +2992,25 @@ test('INSURANCE is classified against its target, never shown as a bare trend', 
 });
 
 test('an unobtainable T_ins is its own arm, never rendered as "at target"', () => {
-  // SQ-616: `T_ins` is a treasury-internal counter (08 §1.2) and no frozen surface carries
-  // it — `NavView` publishes `insurance` and nothing beside it. The old signature demanded
-  // a `Verified<bigint>` target, so the only way to satisfy it was to invent one, and an
-  // invented zero classifies an empty reserve as *exactly sized*.
+  // The arm survives contract v29 rather than being retired with SQ-602. `NavView` now
+  // publishes `insurance_target`, so the `read` arm is reachable — but a `nav()` that did
+  // not answer must not fall back to an equality test against a fabricated zero, which
+  // renders as *this reserve is exactly sized* at the moment it holds nothing.
   const standing = insuranceStanding(finalized(140n), {
     kind: 'unestablished',
     reason: INSURANCE_TARGET_UNREADABLE,
   });
   assert.equal(stated(standing).kind, 'unestablished');
-  assert.match(INSURANCE_TARGET_UNREADABLE, /SQ-616/);
+  // The copy must name where the figure comes from — a reason that says only "unavailable"
+  // gives an operator nothing to check — and must say the comparison is withheld rather
+  // than guessed, which is the sentence that distinguishes this arm from a zero.
+  assert.match(INSURANCE_TARGET_UNREADABLE, /nav\(\)/, 'the reason must name the read it needs');
+  assert.match(INSURANCE_TARGET_UNREADABLE, /withheld rather than guessed/);
+  assert.doesNotMatch(
+    INSURANCE_TARGET_UNREADABLE,
+    /SQ-6\d\d/,
+    'a spec-question pointer outlived the question it pointed at (SQ-602 is resolved at v29)',
+  );
   // It still carries the balance's own provenance — the block is knowable, the comparison
   // is not, and collapsing the two would withhold more than is actually missing.
   assert.equal(standing.kind === 'stated' && standing.datum.status.kind, 'verified-finalized');
@@ -2855,12 +3037,104 @@ test('an above-target INSURANCE says it is not income and not a surplus', () => 
 
 test('only the recipient may claim, and both blocks report together', () => {
   const blocks = claimBlocks({
-    stream: STREAM({ cancelled: finalized(true) }), callerIsRecipient: false, now: finalized(600),
+    stream: STREAM({ cancelled: finalized(true) }), callerIsRecipient: false,
+    streamClaimsWired: finalized(true), now: finalized(600),
   });
   assert.deepEqual(blocks.map((b) => b.check), ['Recipient', 'Claimable amount']);
   assert.deepEqual(
-    claimBlocks({ stream: STREAM(), callerIsRecipient: true, now: finalized(600) }),
+    claimBlocks({ stream: STREAM(), callerIsRecipient: true, streamClaimsWired: finalized(true), now: finalized(600) }),
     [],
+  );
+});
+
+test('an unwired payout leg blocks EVERY claim, first, and names the runtime not the stream', () => {
+  // Contract v29's second `NavView` append, and the reason it ships with `treasury_streams`
+  // rather than after it. `TreasuryOutflowCustody::is_wired` is `cfg!(runtime-benchmarks)`,
+  // so a production runtime refuses every `claim_stream` with `OutflowCustodyUnwired`
+  // (08 §1.4's A9 follow-up). Opening S16's control on `claimable_now` alone would have
+  // walked a recipient to a guaranteed post-signature refusal — the defect class contract
+  // v29 exists to close, reintroduced by the fix for it.
+  const blocks = claimBlocks({
+    stream: STREAM(),
+    callerIsRecipient: true,
+    streamClaimsWired: finalized(false),
+    now: finalized(600),
+  });
+  assert.deepEqual(blocks.map((b) => b.check), ['Payout leg']);
+  // First, and on a stream with nothing else wrong: the refusal applies to every stream at
+  // once, so a per-stream reason would tell a recipient to fix something about theirs.
+  assert.equal(nth(blocks, 0, 'block').detail, STREAM_CLAIMS_NOT_WIRED);
+  // The words matter as much as the block. It must not read as a defect in the entitlement.
+  assert.match(STREAM_CLAIMS_NOT_WIRED, /entitlement is unaffected and keeps vesting/);
+  assert.match(STREAM_CLAIMS_NOT_WIRED, /payout leg/);
+  assert.doesNotMatch(STREAM_CLAIMS_NOT_WIRED, /your stream|this stream is/i);
+});
+
+test('the payout-leg block is reported BEFORE the stream’s own, and never instead of it', () => {
+  // Order is the content here: a recipient on an unwired runtime whose stream is also
+  // cancelled needs the deployment fact first, because it is the one they cannot act on.
+  // But the stream's own state is still reported — suppressing it would hide a second
+  // reason that survives the payout leg landing.
+  const blocks = claimBlocks({
+    stream: STREAM({ cancelled: finalized(true) }),
+    callerIsRecipient: false,
+    streamClaimsWired: finalized(false),
+    now: finalized(600),
+  });
+  assert.deepEqual(blocks.map((b) => b.check), ['Payout leg', 'Recipient', 'Claimable amount']);
+});
+
+test('an unwired runtime disables every row’s claim control, not a chosen one', () => {
+  // The table's own half of the same rule. A per-row check that happened to pass for a
+  // freshly vesting stream would offer exactly the control the chain refuses.
+  const html = renderToStaticMarkup(
+    h(TreasuryStreams, {
+      streams: [STREAM({ id: finalized('s1') }), STREAM({ id: finalized('s2') })],
+      now: finalized(600),
+      decimals: 6,
+      symbol: 'USDC',
+      callerIsRecipient: () => true,
+      streamClaimsWired: finalized(false),
+      onSelect: () => {},
+    }),
+  );
+  assert.ok(buttonDisabled(html, 'Claim'), 'a claim is offered on a runtime that pays none');
+  assert.match(html, /Payout leg/);
+});
+
+test('the claim screen still shows what has vested while the payout leg is unwired', () => {
+  // Withholding the figure would be the wrong fail-closed: the entitlement is real and the
+  // recipient is entitled to see it. What is withheld is the control.
+  const html = renderToStaticMarkup(
+    h(ClaimStream, {
+      context: {
+        stream: STREAM(),
+        callerIsRecipient: true,
+        streamClaimsWired: finalized(false),
+        now: finalized(600),
+      },
+      decimals: 6,
+      symbol: 'USDC',
+      session: readySession('O-5'),
+      onClaim: () => {},
+    }),
+  );
+  assert.match(html, /This runtime cannot pay claims yet/);
+  assert.match(html, /0\.400000/, 'the vested figure is withheld along with the control');
+});
+
+test('02 §4 and 11 §11.8.3 make stream_claims_wired a checked-first precondition', () => {
+  // The document half, so a moved spec fails here rather than in a client nobody re-reads.
+  const doc02 = readFileSync(join(REPO, 'docs/architecture/02-integration-contract.md'), 'utf8');
+  assert.match(doc02, /pub stream_claims_wired: bool,/);
+  assert.match(doc02, /keeps `treasury_streams` from being a trap/);
+  const doc11 = readFileSync(DOC11, 'utf8');
+  assert.match(doc11, /\*\*`NavView\.stream_claims_wired` true\*\*/);
+  assert.match(doc11, /A claimable figure is not an offer to claim/);
+  // And the client actually reads it, rather than the document merely asking.
+  assert.ok(
+    withoutComments(txSource('treasury.ts')).includes('streamClaimsWired'),
+    'the claim model does not read the flag the contract publishes for it',
   );
 });
 
@@ -3210,6 +3484,7 @@ test('a claimable amount derived across two blocks is withheld in the streams ta
       decimals: 6,
       symbol: 'USDC',
       callerIsRecipient: () => true,
+      streamClaimsWired: finalized(true),
       onSelect: () => {},
     }),
   );
@@ -3232,6 +3507,7 @@ test('every stream row carries its own claim control, named by that row', () => 
       decimals: 6,
       symbol: 'USDC',
       callerIsRecipient: () => true,
+      streamClaimsWired: finalized(true),
       onSelect: () => {},
     }),
   );
@@ -3685,6 +3961,16 @@ const NAV = (over: Partial<NavView> = {}): NavView => ({
   spendableNav: finalized(900_000_000n),
   meterUtilizationBps: finalized(1_500),
   classFloors: [finalized(100n), finalized(200n), finalized(300n), finalized(400n)],
+  // Contract v29 (SQ-602). Deliberately **above** `insurance` (50,000,000) so the default
+  // fixture classifies as `below-target` — the state 08 §1.2 says the account is expected
+  // to sit in, since `T_ins` is a monotone over-estimate in v1. A fixture that happened to
+  // equal the balance would make `at-target` the accidental default and hide the arm the
+  // panel most often renders.
+  insuranceTarget: finalized(80_000_000n),
+  // Contract v29. `true` in the default fixture so the *stream* refusals stay the subject
+  // of the tests written for them; the unwired case has its own tests, which is where the
+  // deployment-level refusal belongs.
+  streamClaimsWired: finalized(true),
   ...over,
 });
 
@@ -3793,12 +4079,18 @@ test('the conservative zeros are explained, not just shown as 0', () => {
 
 // ------------------ §11.8.6 the pallet-bound ingest filter and the filing path (F17)
 
-/** Just enough of `tools/release/surface-manifest.json` to name pallets and their fields. */
+/** Just enough of `tools/release/surface-manifest.json` to name pallets, items and fields. */
 interface SurfaceManifest {
   readonly entries: readonly {
     readonly id: string;
-    readonly pallet: string;
-    readonly layout?: { readonly fields?: readonly { readonly name: string }[] };
+    /** Present on `kind: 'storage'` entries; a runtime-API entry names an `api`/`method`. */
+    readonly pallet?: string;
+    readonly item?: string;
+    readonly layout?: {
+      readonly fields?: readonly { readonly name: string }[];
+      /** The SCALE shape a runtime-API method answers with, as the extractor recorded it. */
+      readonly return?: string;
+    };
   }[];
 }
 
@@ -3834,13 +4126,29 @@ function surfaceFields(id: string): readonly string[] {
   return fields.map((field) => field.name);
 }
 
+/**
+ * The pallet a storage or event entry names.
+ *
+ * Asserted rather than assumed, because the manifest also carries **runtime-API** entries,
+ * which name an `api`/`method` pair and no pallet at all. A helper returning `undefined`
+ * silently would put the string `"undefined"` into an ingest filter's pallet comparison,
+ * which matches nothing — V-169's failure shape, one type-widening later.
+ */
+function surfacePallet(id: string): string {
+  const { pallet } = surfaceEntry(id);
+  assert.ok(pallet !== undefined, `${id} names no pallet`);
+  return pallet;
+}
+
 const REGISTRIES: RegistryInstances = {
-  incident: surfaceEntry('event.registry.window_extended.incident').pallet,
-  milestone: surfaceEntry('event.registry.window_extended.milestone').pallet,
+  incident: surfacePallet('event.registry.window_extended.incident'),
+  milestone: surfacePallet('event.registry.window_extended.milestone'),
 };
 
 test('there is no pallet named `Registry`, and the module holds no name of its own (V-169)', () => {
-  const pallets = new Set(SURFACE.entries.map((entry) => entry.pallet));
+  const pallets = new Set(
+    SURFACE.entries.map((entry) => entry.pallet).filter((name): name is string => name !== undefined),
+  );
   assert.ok(!pallets.has('Registry'), 'the frozen surface declares no pallet named `Registry`');
   assert.ok(pallets.has(REGISTRIES.incident));
   assert.ok(pallets.has(REGISTRIES.milestone));
@@ -3893,7 +4201,7 @@ test('an oracle event of the same name is refused — the filter binds the palle
   assert.deepEqual([...oracleFields].sort(), ['component', 'epoch', 'new_deadline', 'round']);
   const fromOracle = admitRegistryWindowEvent(
     {
-      pallet: surfaceEntry('event.oracle.window_extended').pallet,
+      pallet: surfacePallet('event.oracle.window_extended'),
       variant: 'WindowExtended',
       fields: Object.fromEntries(oracleFields.map((name) => [name, 1])),
     },
@@ -3963,7 +4271,7 @@ test('a filing is blocked by bond, bounds and evidence independently', () => {
   const ok = filingBlocks({
     kind: 'incident',
     freeUsdc: finalized(1_000n),
-    filingBond: finalized(100n),
+    filingBond: QUOTED(100n, 4_000n),
     filingsUsed: finalized(3),
     filingsBound: finalized(10),
     evidenceHash: '0xev',
@@ -3973,7 +4281,7 @@ test('a filing is blocked by bond, bounds and evidence independently', () => {
   const all = filingBlocks({
     kind: 'incident',
     freeUsdc: finalized(10n),
-    filingBond: finalized(100n),
+    filingBond: QUOTED(100n, 4_000n),
     filingsUsed: finalized(10),
     filingsBound: finalized(10),
     evidenceHash: undefined,
@@ -3990,12 +4298,23 @@ test('a filing is blocked by bond, bounds and evidence independently', () => {
   const empty = filingBlocks({
     kind: 'milestone',
     freeUsdc: finalized(1_000n),
-    filingBond: finalized(100n),
+    filingBond: QUOTED(100n, 4_000n),
     filingsUsed: finalized(0),
     filingsBound: finalized(10),
     evidenceHash: '',
   });
   assert.deepEqual(empty.map((b) => b.check), ['Evidence']);
+});
+
+test('the exact filing bond is what the headroom is checked against, to the base unit', () => {
+  // 11 §11.8.6's O-8 row: "free USDC ≥ that amount". The boundary is where a client that
+  // compared against a floor, or that rounded, comes apart from the chain — so it is the
+  // boundary that is asserted rather than a comfortable margin.
+  const at = (free: bigint) =>
+    filingBlocks(FILING({ freeUsdc: finalized(free), filingBond: QUOTED(1_000_000n, 40_000_000n) }))
+      .map((block) => block.check);
+  assert.deepEqual(at(1_000_000n), [], 'exactly the bond covers it');
+  assert.deepEqual(at(999_999n), ['Filing bond'], 'one base unit short must block');
 });
 
 test('the pending-actions list shows the target, not just the power', () => {
@@ -4104,7 +4423,7 @@ const REPORT = (over: Partial<ReportInputs> = {}): ReportInputs => ({
   stakeHeld: finalized(100_000_000_000n),
   reporterStake: finalized(100_000_000_000n),
   freeUsdc: finalized(50_000_000_000n),
-  bondFloor: reportBondFloor(finalized(10_000_000_000n)),
+  bondQuote: QUOTED(10_000_000_000n, 400_000_000_000n),
   evidenceHash: '0xev',
   ...over,
 });
@@ -4141,54 +4460,130 @@ test('no bond arithmetic exists in this client — the round bond is read (SQ-55
   assert.deepEqual(exact, []);
 });
 
-test('the round-1 report bond is a labelled floor, never presented as the amount (SQ-598)', () => {
-  // `StakeAtRisk` is on no frozen surface, so P-13's "recomputed and displayed" cannot be
-  // honoured for a fresh report. The honest shape is SQ-564's: state the bound that CAN be
-  // read and refuse to let a screen render it where an exact amount would go.
-  // **The path is closed, not captioned.** The floor is not the bond for any component with
-  // stake at risk, so an account passing a floor-only check is either short at dispatch or
-  // has more taken than the screen showed — money the user was shown and would reasonably
-  // read as the price. §11.5's redemption-fee rule 5 rules exactly this case: unreadable ⇒
-  // no figure and the transaction blocked, and the FE must not mirror the runtime's own
-  // fail-open read. The block is the table's declaration, so the module cannot disagree
-  // with it again.
+test('the round-1 report bond is the chain’s amount, and the disclosure calls it a quote', () => {
+  // Contract v29 (SQ-598/SQ-620): `FutarchyApi.bond_quote(OracleReport { component, epoch })`
+  // answers `B_1(c, m)`. P-13's `bond-floor` clause is **deleted** rather than kept beside the
+  // quote — a floor is a lower bound on the bond and never the bond, and two answers to
+  // "what will this hold?" on a bonded, slashable action is the defect SQ-620 was filed about.
   const check = reportBlocks(REPORT());
-  assert.deepEqual(check.blocks.map((block) => block.check), ['Bond amount']);
-  assert.match(nth(check.blocks, 0, 'block').detail, /SQ-598/);
-  // Required, not optional — there is no shape of the result without it. It is the module's
-  // own sentence **bound to the table's obligation by id**, so the two answers that once
-  // shipped disagreeing cannot drift again: drop P-13's declaration and this throws.
-  assert.ok(check.bondUnknown.startsWith(REPORT_BOND_NOT_ESTABLISHED), check.bondUnknown);
-  assert.match(check.bondUnknown, /cannot state the bond/);
-  assert.match(check.bondUnknown, /the least the bond can be/);
-  assert.match(check.bondUnknown, /SQ-598/, 'the caveat must carry its own expiry pointer');
+  assert.deepEqual(check.blocks, [], 'a quoted bond the account covers must block nothing');
 
-  // Below even the floor the row says both things: the bond is unknown AND the balance does
-  // not cover the least it can be. Two reasons rather than one, because they have different
-  // remedies and a merged sentence would send the user to the wrong one.
-  const poor = reportBlocks(REPORT({ freeUsdc: finalized(9_999_999_999n) }));
-  assert.deepEqual(poor.blocks.map((block) => block.check), ['Bond amount', 'Round bond']);
-  assert.match(nth(poor.blocks, 1, 'block').detail, /even the floor/);
+  // Required, not optional — there is no shape of the result without it, which is why
+  // `bondDisclosure` is a field rather than a block. What it says has changed meaning: it is
+  // no longer "we cannot tell you the amount" but "this is a quote priced at a block".
+  assert.equal(check.bondDisclosure, BOND_QUOTE_IS_A_QUOTE);
+  assert.match(check.bondDisclosure, /priced at the block shown/);
+  assert.match(check.bondDisclosure, /fixes when your transaction is included/);
+  assert.match(check.bondDisclosure, /the chain’s reading is the one that binds/);
+  // And it is stated on the CLEAN path, not only when something is wrong: 02 §3 requires the
+  // caveat, and the reader who most needs it is the one with nothing else on screen to
+  // signal that the figure can move.
+  assert.equal(reportBlocks(REPORT({ freeUsdc: finalized(0n) })).bondDisclosure, check.bondDisclosure);
+
+  // The floor is gone from the copy as well as from the clause list. A sentence still
+  // offering a floor is a screen still able to present one as the amount.
+  assert.doesNotMatch(check.bondDisclosure, /floor/i, 'the disclosure still offers a floor');
+  assert.doesNotMatch(check.bondDisclosure, /SQ-598/, 'the caveat outlived the question it named');
 });
 
-test('the report control is CLOSED while the bond is unreadable (Codex #3730437906)', () => {
-  // R-7's direction, applied to the gate rather than to the model: a reporter must not be
-  // walked to a signature for a value-scaled bond nobody can show them. `operatorGate`
-  // converts P-13's blocking obligation into a closed control, and the anti-vacuity half is
-  // `oracle.challenge`, whose bond IS readable (`OracleRoundView.bond`) and which opens on
-  // the same session shape.
-  const report = operatorGate('oracle.report', readySession('P-13'), []);
-  assert.equal(report.state, 'blocked', 'a report was offered on a bond nobody can state');
-  assert.equal(report.window, undefined);
-  assert.ok(report.blocks.some((block) => block.detail.includes('SQ-598')), 'the block names no reason');
+test('the headroom is checked against the QUOTED amount, to the base unit', () => {
+  // P-13's `bond-headroom` clause now reads "your USDC balance covers that bond", where
+  // *that* is the quote. The boundary is where a client comparing against a floor — or
+  // rounding — comes apart from the chain, so the boundary is what is asserted.
+  const at = (free: bigint) =>
+    reportBlocks(REPORT({ freeUsdc: finalized(free) })).blocks.map((block) => block.check);
+  assert.deepEqual(at(10_000_000_000n), [], 'exactly the bond covers it');
+  assert.deepEqual(at(9_999_999_999n), ['Round bond'], 'one base unit short must block');
+  // `coversBond` is false whenever the bond is not quoted, so an unpriced bond can never
+  // pass the headroom check on a figure that was never established — and the two clauses
+  // then say different things, which is the point of keeping them separate.
+  assert.equal(coversBond(UNDETERMINABLE, finalized(10n ** 30n)), false);
+  assert.equal(coversBond(UNREAD_QUOTE, finalized(10n ** 30n)), false);
+});
+
+test('both non-quoted arms block P-13 and O-8, in different sentences, with no floor', () => {
+  // 07 §7's not-determinable exposure and a read that did not land are different states with
+  // different remedies — one waits for the aggregate to be bound to a component, the other
+  // is a retry. Collapsing them tells a reporter to retry a call the chain answered
+  // correctly. Neither may fall back to `orc.bond_floor` / `reg.bond_*`.
+  const p13 = (quote: BondQuoteState) => reportBlocks(REPORT({ bondQuote: quote })).blocks;
+  const undeterminable = p13(UNDETERMINABLE);
+  const unread = p13(UNREAD_QUOTE);
+  // Both close the bond clause, and both take the headroom clause down with them: with no
+  // amount there is nothing to compare, and `coversBond` answering `true` would let a
+  // headroom check pass on a figure nobody established.
+  assert.deepEqual(undeterminable.map((b) => b.check), ['Bond amount', 'Round bond']);
+  assert.deepEqual(unread.map((b) => b.check), ['Bond amount', 'Round bond']);
+
+  const bondDetail = (blocks: readonly ReportBlock[]) => nth(blocks, 0, 'block').detail;
+  assert.notEqual(
+    bondDetail(undeterminable),
+    bondDetail(unread),
+    'the two silences must not share one sentence — the remedies differ',
+  );
+  assert.equal(bondDetail(undeterminable), BOND_QUOTE_UNDETERMINABLE);
+  assert.match(bondDetail(undeterminable), /not determinable/);
+  assert.match(bondDetail(undeterminable), /ExposureUnavailable/);
+  assert.match(bondDetail(unread), /could not be read/);
+  assert.match(bondDetail(unread), /the state call timed out/, 'the read’s own reason must travel');
+  for (const detail of [bondDetail(undeterminable), bondDetail(unread)]) {
+    assert.doesNotMatch(detail, /at least/i, 'a floor was offered in place of the amount');
+  }
+  // The `unread` sentence says in as many words why a floor is not substituted; the
+  // `undeterminable` one says the control stays closed rather than asking for a commitment.
+  assert.match(bondDetail(unread), /not\s+defaulted to a floor/);
+  assert.match(bondDetail(undeterminable), /stays closed/);
+
+  // The same two arms, one pallet over — O-8 shares `bond-quote.ts` because the chain
+  // publishes one fold under two names (02 §3, contract v29).
+  const o8 = (quote: BondQuoteState) => filingBlocks(FILING({ filingBond: quote }));
+  const filingUndeterminable = o8(UNDETERMINABLE);
+  const filingUnread = o8(UNREAD_QUOTE);
+  assert.deepEqual(filingUndeterminable.map((b) => b.check), ['Bond amount']);
+  assert.deepEqual(filingUnread.map((b) => b.check), ['Bond amount']);
+  assert.notEqual(
+    nth(filingUndeterminable, 0, 'block').detail,
+    nth(filingUnread, 0, 'block').detail,
+  );
+  // One module, so the two rows state the same refusal — checked rather than assumed,
+  // because a second copy of this sentence is how the two would drift.
+  assert.equal(nth(filingUndeterminable, 0, 'block').detail, bondDetail(undeterminable));
+  assert.equal(nth(filingUnread, 0, 'block').detail, bondDetail(unread));
+  assert.equal(bondQuoteRefusal(QUOTED(1n, 1n)), undefined, 'a quoted bond must not refuse');
+});
+
+test('the report control OPENS on a quoted bond, and closes on an unpriced one', () => {
+  // Contract v29 retired P-13's `blocking` unreadable obligation, so `operatorGate` no
+  // longer closes this control on its own. What must still close it is the model: R-7's
+  // direction is that a reporter is never walked to a signature for a bond nobody can show
+  // them, and that now travels through `reportBlocks` rather than through the row.
+  const open = operatorGate('oracle.report', readySession('P-13'), reportBlocks(REPORT()).blocks);
+  assert.equal(open.state, 'ready', 'a fully quoted report is still refused');
+  assert.ok(open.window !== undefined);
+
+  for (const quote of [UNDETERMINABLE, UNREAD_QUOTE]) {
+    const blocked = operatorGate(
+      'oracle.report',
+      readySession('P-13'),
+      reportBlocks(REPORT({ bondQuote: quote })).blocks,
+    );
+    assert.equal(blocked.state, 'blocked', `a report was offered on a ${quote.kind} bond`);
+    assert.equal(blocked.window, undefined);
+    assert.ok(blocked.blocks.some((block) => block.check === 'Bond amount'));
+  }
+  // Anti-vacuity from the other side: `oracle.challenge`'s bond is a plain read
+  // (`OracleRoundView.bond`) and it opens on the same session shape.
   assert.equal(operatorGate('oracle.challenge', readySession('P-14'), []).state, 'ready');
 });
 
 test('P-13 blocks on window, registry, a short stake and evidence — each independently', () => {
-  // Every case carries the unreadable-bond block as well, since it holds unconditionally;
-  // what this test is about is that the *clause* blocks are reported one per failing group.
+  // One block per failing group. The bond clause no longer holds unconditionally, so this
+  // reads the whole block list rather than filtering it — which also proves the clean
+  // fixture is clean.
   const clauseBlocks = (over: Partial<ReportInputs>): readonly string[] =>
-    reportBlocks(REPORT(over)).blocks.map((b) => b.check).filter((check) => check !== 'Bond amount');
+    reportBlocks(REPORT(over)).blocks.map((b) => b.check);
+  assert.deepEqual(clauseBlocks({}), []);
+  assert.deepEqual(clauseBlocks({ roundOpen: finalized(false) }), ['Round open']);
   assert.deepEqual(clauseBlocks({ reportWindowOpen: finalized(false) }), ['Report window']);
   assert.deepEqual(clauseBlocks({ registered: finalized(false) }), ['Reporter registry']);
   // Registered but under-staked is its own state with its own remedy: a prior slash leaves
@@ -4199,6 +4594,41 @@ test('P-13 blocks on window, registry, a short stake and evidence — each indep
   assert.match(nth(short.blocks.filter((b) => b.check === 'Reporter stake'), 0, 'block').detail, /previous slash/);
   // An EMPTY hash is not a hash — what an unfilled form field actually produces.
   assert.deepEqual(clauseBlocks({ evidenceHash: '' }), ['Evidence']);
+});
+
+test('bond-quote.ts performs no arithmetic at all — the amount is the chain’s (07 §6.1)', () => {
+  // 07 §6.1 states three separable normative details: the `/ 10,000` division rounds **up**,
+  // rounding resolves toward custody, and the `max` against the floor applies **after**
+  // rounding. A client applying them owns all three, and getting any wrong
+  // under-collateralizes a bond — the under-custody direction I-4 and I-28 name as unsafe,
+  // on money a user must post. So the module reads and displays, and computes nothing.
+  //
+  // Scanned as **code**: comments, import specifiers and every string body are removed, so
+  // the copy explaining the absence cannot be read as the thing itself, while a `${…}`
+  // interpolation — where a reinstated computation would sit — is kept.
+  const code = codeOnly(txSource('bond-quote.ts'));
+  for (const forbidden of ['*', '/', '%', '10_000', '10000', 'Math.']) {
+    assert.ok(
+      !code.includes(forbidden),
+      `bond-quote.ts must contain no arithmetic — found ${JSON.stringify(forbidden)}`,
+    );
+  }
+  // `B_1 << (round - 1)` is the exact shape P-14's "doubles per round" invites, so the shift
+  // is checked as an operator rather than as a substring — `Record<K, V>>` ends in `>>`.
+  assert.doesNotMatch(code, SHIFT_OPERATOR, 'a shift operator appeared in the bond module');
+  assert.match('floor << round', SHIFT_OPERATOR, 'the shift check no longer detects anything');
+  // Not vacuous: the scan still reaches the module's body, including the one comparison it
+  // is allowed — a `>=` between two read balances is not bond arithmetic.
+  assert.ok(code.includes('export function coversBond'), 'the absence scan read an empty file');
+  assert.ok(code.includes('freeUsdc.value >= state.quote.bond.value'));
+  // And `bond` is never derived from `exposure` — 02 §4's own prohibition, in the only form
+  // that can be checked: the field is **declared once and never read**, so there is no site
+  // at which the amount could be recomputed from the disclosure beside it.
+  assert.equal(
+    [...code.matchAll(/exposure/g)].length,
+    1,
+    '`exposure` is read in bond-quote.ts; 02 §4 makes it disclosure only, never an input',
+  );
 });
 
 test('a reporter may not challenge their own round — 07 §5.2, and the view carries it', () => {
@@ -4254,9 +4684,9 @@ test('the escalation copy cannot carry a chain value — it is given none (10 §
   assert.ok(!body.includes('${'), 'the escalation copy must contain no interpolation at all');
 });
 
-test('the report screen shows the floor caveat on the CLEAN path, where it matters', () => {
+test('the report screen renders the AMOUNT and the quote caveat on the CLEAN path', () => {
   // A blocked form already says why. The dangerous render is the one with nothing wrong,
-  // where a reporter reads the floor as the charge and budgets for the wrong number.
+  // where a reporter reads a qualified figure as the settled charge.
   const html = renderToStaticMarkup(
     h(SubmitReport, {
       inputs: REPORT(),
@@ -4267,9 +4697,69 @@ test('the report screen shows the floor caveat on the CLEAN path, where it matte
       onReport: noSubmit,
     }),
   );
-  assert.match(html, /a floor, not the amount/);
-  assert.match(html, /cannot state the bond/);
-  assert.match(html, /Round bond — at least/);
+  // The amount, not a floor. 10,000,000,000 base units at 6 decimals is 10,000 USDC.
+  assert.ok(fieldPresent(html, 'Round bond'), html);
+  assert.match(html, /10,000\.000000/, 'the quoted amount is not on screen');
+  assert.ok(
+    !html.includes('Round bond — at least') && !/a floor, not the amount/.test(html),
+    'the screen still labels the bond as a floor',
+  );
+  // 02 §4 ships `read_at` and `exposure` beside the amount: the block prices the quote, and
+  // the exposure is disclosure so a reporter can see what the bond scales with. Both are
+  // labelled, so neither can be read as a second price.
+  assert.ok(fieldPresent(html, 'Priced at block'), html);
+  assert.ok(fieldPresent(html, 'Cohort escrow this bond is scaled against'), html);
+  // The caveat renders unconditionally on the clean path — this is the reader with nothing
+  // else on screen telling them the figure can move.
+  assert.ok(html.includes(BOND_QUOTE_IS_A_QUOTE), `the quote disclosure is absent:\n${html}`);
+  assert.ok(!buttonDisabled(html, 'Post the report'), 'a fully quoted report was still refused');
+});
+
+test('an unpriced bond renders NO amount field — a floor is not put in that slot', () => {
+  // The direction a caption cannot fix: with no quote there is no figure, and any number in
+  // the amount slot understates what the reporter is about to commit. 02 §4: "a client that
+  // receives it blocks rather than substituting a floor".
+  for (const quote of [UNDETERMINABLE, UNREAD_QUOTE]) {
+    const html = renderToStaticMarkup(
+      h(SubmitReport, {
+        inputs: REPORT({ bondQuote: quote }),
+        decimals: 6,
+        symbol: 'USDC',
+        evidence: EVIDENCE_FIXTURE,
+        session: readySession('P-13'),
+        onReport: noSubmit,
+      }),
+    );
+    assert.ok(!fieldPresent(html, 'Round bond'), `a bond amount was rendered for ${quote.kind}`);
+    assert.ok(!fieldPresent(html, 'Priced at block'), quote.kind);
+    assert.ok(buttonDisabled(html, 'Post the report'), `${quote.kind} left the control live`);
+  }
+});
+
+test('the filing screen renders the amount, the block and the same quote caveat', () => {
+  // O-8 and P-13 share one method and one freezing rule (07 §7 freezes `F(kind, m)` at
+  // creation), so the two screens state the same sentence — asserted rather than assumed,
+  // because a second copy is how they would drift.
+  const html = renderToStaticMarkup(
+    h(RegistryFilingForm, {
+      inputs: FILING(), decimals: 6, symbol: 'USDC', evidence: EVIDENCE_FIXTURE,
+      session: readySession('O-8'), onFile: noSubmit,
+    }),
+  );
+  assert.ok(fieldPresent(html, 'Filing bond'), html);
+  assert.ok(fieldPresent(html, 'Priced at block'), html);
+  assert.ok(fieldPresent(html, 'Cohort escrow this bond is scaled against'), html);
+  assert.ok(html.includes(BOND_QUOTE_IS_A_QUOTE), `the quote disclosure is absent:\n${html}`);
+
+  const unpriced = renderToStaticMarkup(
+    h(RegistryFilingForm, {
+      inputs: FILING({ filingBond: UNDETERMINABLE }), decimals: 6, symbol: 'USDC',
+      evidence: EVIDENCE_FIXTURE, session: readySession('O-8'), onFile: noSubmit,
+    }),
+  );
+  assert.ok(!fieldPresent(unpriced, 'Filing bond'), 'a bond amount was rendered with no quote');
+  assert.ok(buttonDisabled(unpriced, 'File'), unpriced);
+  assert.match(unpriced, /not determinable/);
 });
 
 test('the challenge screen renders the chain’s own bond and the risk before the control', () => {
@@ -4467,18 +4957,29 @@ test('an unverifiable withdraw destination warns in its own words, and does not 
 /**
  * The §11.8 calls whose row this release can actually read end to end.
  *
- * It was five and it is now nine. Contract v28 froze the guardian pending-action pair, the
- * two upgrade items and the registry's three maps (SQ-615/616/619), which retired the
- * `blocking` declarations that had kept S15, S17 and S19 shut; `oracle.report` left the list
- * in the other direction, because its bond is money no frozen surface publishes.
+ * It was seven and it is now **eleven — every operator surface call there is**. Contract v28
+ * froze the guardian pending-action pair, the two upgrade items and the registry's three
+ * maps (SQ-615/616/619); contract v29 published the last four reads §11.8 requires and
+ * nothing carried — `api.bond_quote` for the report and filing bonds (SQ-598/SQ-731),
+ * `api.treasury_streams` for the per-stream claim (SQ-601), and the two storage latches
+ * behind §11.8.2's trigger table (SQ-730). So `oracle.report`, `registry.file`,
+ * `futarchy_treasury.claim_stream` and `guardian.propose_action` join the list.
+ *
+ * A list rather than a derivation, deliberately: derived from `UNREADABLE` it would agree
+ * with whatever that file says and could never disagree with it. The binding between the two
+ * is asserted below instead, in both directions.
  */
 const OPENABLE_CALLS = [
   'oracle.register_reporter',
   'oracle.recompute_proof',
   'welfare.record_snapshot',
   'oracle.challenge',
+  'oracle.report',
   'guardian.approve_action',
+  'guardian.propose_action',
+  'futarchy_treasury.claim_stream',
   'system.apply_authorized_upgrade',
+  'registry.file',
   'registry.challenge',
 ] as const;
 
@@ -4493,8 +4994,9 @@ test('no operator control opens without a gate result the screen cannot mint', (
   }
   // For a row this release can read end to end, the state is `not-refreshed` and **not**
   // `blocked`: nothing is wrong, the chain has simply not been re-read, and telling an
-  // operator a condition failed sends them hunting a problem that does not exist. The other
-  // four rows are `blocked` for a stated reason — asserted separately below.
+  // operator a condition failed sends them hunting a problem that does not exist. Since
+  // contract v29 that is every row — the closed set is empty, and the test below is what
+  // keeps that a *derived* fact rather than this list quietly becoming exhaustive.
   for (const call of OPENABLE_CALLS) {
     const gated = operatorGate(call, preparedSession(OPERATOR_SURFACE_ROWS[call]), []);
     assert.equal(gated.state, 'not-refreshed', call);
@@ -4508,33 +5010,49 @@ test('every row whose central read 02 does not freeze is CLOSED, with its id nam
   // INV-FE-12's lattice: an unproven capability is absent, and absence disables the
   // dependent surface with a named reason.
   //
-  // **Four rows, and it was six.** Contract v28 froze six surfaces in this branch's own base
-  // and PLAN.md marked SQ-615, SQ-616 and SQ-619 resolved, while the declarations stayed —
-  // so S15, S17 and S19 could not reach `ready` at all and this test asserted that as though
-  // it were the specification. What is left is genuinely unread: the trigger→item mapping
-  // §11.8.2 never states (SQ-730), the per-stream treasury read §7.6 forbids (SQ-601), the
-  // filing bond's exposure (SQ-731) and the report bond's `StakeAtRisk` (SQ-598).
-  const closed: Record<string, string> = {
-    'guardian.propose_action': 'SQ-730',
-    'futarchy_treasury.claim_stream': 'SQ-601',
-    'registry.file': 'SQ-731',
-    'oracle.report': 'SQ-598',
-  };
-  for (const [call, sq] of Object.entries(closed)) {
-    const row = OPERATOR_SURFACE_ROWS[call as keyof typeof OPERATOR_SURFACE_ROWS];
-    const gated = operatorGate(call as keyof typeof OPERATOR_SURFACE_ROWS, readySession(row), []);
-    assert.equal(gated.state, 'blocked', `${call} opened on an unread condition`);
-    assert.equal(gated.window, undefined, call);
-    assert.ok(
-      gated.blocks.some((block) => block.detail.includes(sq)),
-      `${call} is closed without naming ${sq}`,
-    );
-  }
-  // The retired ones open, which is the half a "closed" list can never assert about itself.
-  for (const call of ['guardian.approve_action', 'system.apply_authorized_upgrade', 'registry.challenge'] as const) {
-    const gated = operatorGate(call, readySession(OPERATOR_SURFACE_ROWS[call]), []);
+  // **The closed set is now derived, not listed, and it is empty.** It was six, then four;
+  // contract v28 froze six surfaces in this branch's own base and PLAN.md marked SQ-615,
+  // SQ-616 and SQ-619 resolved while the declarations stayed — so S15, S17 and S19 could not
+  // reach `ready` at all and this test asserted that as though it *were* the specification.
+  // A hand-written list is what made that possible, so the closed set now comes from the
+  // declarations themselves (`OperatorGate.unreadable`) and the two dispositions are checked
+  // as an implication in both directions. Contract v29 published the last four reads
+  // (SQ-598 / SQ-601 / SQ-730 / SQ-731), so nothing is `blocking` any more — and this test
+  // still fails the moment one is declared and the control opens anyway.
+  const blocking: string[] = [];
+  const stated: string[] = [];
+  for (const call of Object.keys(OPERATOR_SURFACE_ROWS) as (keyof typeof OPERATOR_SURFACE_ROWS)[]) {
+    const row = OPERATOR_SURFACE_ROWS[call];
+    const gated = operatorGate(call, readySession(row), []);
+    const blockers = gated.unreadable.filter((entry) => entry.disposition === 'blocking');
+    if (blockers.length > 0) {
+      blocking.push(call);
+      assert.equal(gated.state, 'blocked', `${call} opened on an unread condition`);
+      assert.equal(gated.window, undefined, call);
+      for (const entry of blockers) {
+        assert.ok(
+          gated.blocks.some((block) => block.detail.includes(entry.specQuestion)),
+          `${call} is closed without naming ${entry.specQuestion}`,
+        );
+      }
+      continue;
+    }
+    // No blocking obligation ⇒ the control opens. This is the half a "closed" list can
+    // never assert about itself, and it is what caught the v28 declarations that outlived
+    // their questions.
+    stated.push(...gated.unreadable.map((entry) => entry.specQuestion));
     assert.equal(gated.state, 'ready', `${call} is still closed on a resolved spec question`);
   }
+  // The list above and the declarations must partition the surface — a call missing from
+  // `OPENABLE_CALLS` that nothing blocks is a row nobody is exercising end to end.
+  assert.deepEqual(
+    [...OPENABLE_CALLS].sort(),
+    Object.keys(OPERATOR_SURFACE_ROWS).filter((call) => !blocking.includes(call)).sort(),
+  );
+  assert.deepEqual(blocking, [], `contract v29 retired every blocking obligation: ${blocking}`);
+  // Anti-vacuity for the `stated` half, which must survive the blocking set emptying:
+  // O-1's two SQ-564 conditions are still surfaced, and they still do not close a control.
+  assert.deepEqual(stated, ['SQ-564', 'SQ-564'], 'the stated obligations stopped being carried');
 });
 
 test('a preparation declaring somebody else’s row is refused, not gated against it', () => {
@@ -4595,17 +5113,47 @@ test('the window a control hands its submitter carries the bytes it proves', () 
   assert.ok(handed?.prep.requires.includes('O-1'));
 });
 
-test('a blocking unreadable obligation closes the control even with a passing gate', () => {
+test('the model’s own refusal closes the control the row no longer closes (O-5, SQ-601)', () => {
   // `clauseGroupsFor` answers "every declared read passed", which for a row whose central
-  // read 02 freezes no surface for is **vacuously** true. INV-FE-12's lattice says an
-  // unproven capability is absent, so the row is closed with its spec question named.
-  const blocked = operatorGate('futarchy_treasury.claim_stream', readySession('O-5'), []);
-  assert.equal(blocked.state, 'blocked', 'a row with no lawful source opened its control');
-  assert.match(nth(blocked.blocks, 0, 'block').detail, /SQ-601/);
-  assert.match(nth(blocked.blocks, 0, 'block').detail, /control is closed rather than offered/);
-  // Anti-vacuity: a row with no blocking obligation opens on the same session shape, so the
-  // refusal above is the obligation's and not a gate that never opens for anything.
-  assert.equal(operatorGate('welfare.record_snapshot', readySession('O-7'), []).state, 'ready');
+  // read 02 freezes no surface for is **vacuously** true — and that is what O-5's `blocking`
+  // declaration used to cover. Contract v29 gave the row a real source
+  // (`api.treasury_streams`), so the row opens; what must still refuse is the *model*, and
+  // the fail-closed direction has to survive the declaration's retirement rather than
+  // travelling with it.
+  const open = operatorGate('futarchy_treasury.claim_stream', readySession('O-5'), []);
+  assert.equal(open.state, 'ready', 'the claim row is still closed on a resolved question');
+
+  // A figure this client cannot establish is money it must not offer a claim against. The
+  // block comes from `claimBlocks`, so it reaches the control through `operatorGate`'s
+  // `local` argument — required rather than optional for exactly this reason.
+  const acrossBlocks = claimBlocks({
+    stream: STREAM({
+      claimed: { value: 0n, status: { kind: 'verified-finalized', chain: TEST_CHAIN, blockHash: '0xbeef', blockNumber: 999_000 } },
+    }),
+    callerIsRecipient: true,
+    streamClaimsWired: finalized(true),
+    now: finalized(600),
+  });
+  const blocked = operatorGate('futarchy_treasury.claim_stream', readySession('O-5'), acrossBlocks);
+  assert.equal(blocked.state, 'blocked', 'a claim was offered against a figure true of no block');
+  assert.equal(blocked.window, undefined);
+  assert.match(nth(blocked.blocks, 0, 'block').detail, /cannot establish what is claimable/);
+  // And the three zeros close it too, each with its own sentence rather than one refusal.
+  // Labelled by name rather than by serializing the fixture: `JSON.stringify` throws on a
+  // BigInt, and a message helper that throws turns a real failure into a harness error.
+  for (const [label, over, phrase] of [
+    ['cancelled', { cancelled: finalized(true) }, /cancelled/],
+    ['zero-length', { duration: finalized(0) }, /no vesting schedule can be derived/],
+    ['fully claimed', { claimableNow: finalized(0n) }, /already been claimed/],
+  ] as const) {
+    const gated = operatorGate(
+      'futarchy_treasury.claim_stream',
+      readySession('O-5'),
+      claimBlocks({ stream: STREAM(over), callerIsRecipient: true, streamClaimsWired: finalized(true), now: finalized(600) }),
+    );
+    assert.equal(gated.state, 'blocked', label);
+    assert.match(nth(gated.blocks, 0, 'block').detail, phrase, label);
+  }
 });
 
 test('a STATED obligation is carried without blocking, and never dropped', () => {
@@ -4696,20 +5244,32 @@ test('reportBlocks consumes P-13’s clause list rather than re-deriving one', (
     'report-window': { reportWindowOpen: finalized(false) },
     registered: { registered: finalized(false) },
     'stake-held': { stakeHeld: finalized(1n) },
+    // Contract v29's clause. It used to hold unconditionally (there was no amount to read),
+    // so nothing here could drive it — and a predicate that can only fail is as unexercised
+    // as one that can only pass.
+    'bond-quote': { bondQuote: UNDETERMINABLE },
     'bond-headroom': { freeUsdc: finalized(0n) },
     evidence: { evidenceHash: undefined },
   };
+  // Every clause key the table declares must appear above: a clause added to P-13 with no
+  // failing fixture here is one this test would report as covered while never driving it.
+  assert.deepEqual(
+    [...keys].filter((key) => key !== undefined).sort(),
+    Object.keys(failing).sort(),
+    'a P-13 clause has no failing fixture in this test',
+  );
   for (const [key, over] of Object.entries(failing)) {
-    const check = reportBlocks(REPORT(over)).blocks.filter((block) => block.check !== 'Bond amount');
+    const check = reportBlocks(REPORT(over)).blocks;
     assert.ok(check.length > 0, `P-13 clause ${key} has no predicate that can fail`);
   }
   assert.deepEqual(
     reportBlocks(REPORT()).blocks.map((block) => block.check),
-    ['Bond amount'],
-    'the clean fixture must block on the unreadable bond and nothing else',
+    [],
+    'the clean fixture must block on nothing at all',
   );
-  // And the caveat text is the table's own obligation, so the two cannot drift again.
-  assert.match(reportBlocks(REPORT()).bondUnknown, /SQ-598|not computable|StakeAtRisk/);
+  // And the disclosure is 02 §3's own obligation, carried on every result including this one.
+  assert.equal(reportBlocks(REPORT()).bondDisclosure, BOND_QUOTE_IS_A_QUOTE);
+  assert.match(reportBlocks(REPORT()).bondDisclosure, /priced at the block shown/);
 });
 
 test('a P-13 clause with no predicate throws rather than being skipped', () => {
@@ -4741,7 +5301,7 @@ test('round open and report window are reported as SEPARATE blocks', () => {
   // A counter-report on a live round: the round is open and the window has elapsed. One
   // collapsed flag cannot say which half failed, and the two have different remedies.
   const clauseBlocks = (over: Partial<ReportInputs>): readonly ReportBlock[] =>
-    reportBlocks(REPORT(over)).blocks.filter((block) => block.check !== 'Bond amount');
+    reportBlocks(REPORT(over)).blocks;
   const windowGone = clauseBlocks({ reportWindowOpen: finalized(false) });
   assert.deepEqual(windowGone.map((block) => block.check), ['Report window']);
   assert.deepEqual(clauseBlocks({ roundOpen: finalized(false) }).map((b) => b.check), ['Round open']);
@@ -4841,6 +5401,258 @@ test('the tracker screen states the consequence first, and never hides an unread
   assert.match(html, /treat the consequence above as live/);
 });
 
+/* ------------------------- §11.8.2's trigger table, bound to the runtime it mirrors */
+
+/**
+ * `guardian_core`, read in place.
+ *
+ * The client's trigger data is a **restatement** of two runtime declarations, and a
+ * restatement nothing binds is a copy that stops tracking the thing it copies. Both sides are
+ * therefore parsed here — the Rust from `crates/guardian-core/src/lib.rs`, the TypeScript from
+ * `guardian.ts` — so a variant added, renamed or re-paired on either side fails this suite
+ * rather than surfacing as a 5-of-7 signature the chain refuses with `BadPlaybookTrigger`.
+ */
+const GUARDIAN_CORE = readFileSync(join(REPO, 'crates/guardian-core/src/lib.rs'), 'utf8');
+
+/** The variant names of one `pub enum` in `guardian-core`, refusing an empty parse. */
+function rustEnumVariants(name: string): readonly string[] {
+  const start = GUARDIAN_CORE.indexOf(`pub enum ${name} {`);
+  assert.ok(start >= 0, `guardian-core no longer declares \`pub enum ${name}\``);
+  const end = GUARDIAN_CORE.indexOf('\n}', start);
+  assert.ok(end > start, `\`${name}\`'s declaration never terminates`);
+  const variants = [...GUARDIAN_CORE.slice(start, end).matchAll(/^\s{4}(\w+),$/gm)].map(
+    (match) => match[1] as string,
+  );
+  // Fail closed on a parse that found nothing: an empty expectation is satisfied by an
+  // empty client, which is the vacuity every doc-parsing test in this file guards against.
+  assert.ok(variants.length > 0, `parsed no variants out of \`${name}\``);
+  return variants;
+}
+
+/**
+ * `guardian_core::trigger_matches`, as a playbook → triggers map.
+ *
+ * Parsed by scanning for `PlaybookId::X` and taking every `PlaybookTrigger::Y` up to the next
+ * `PlaybookId::`. That shape reads both spellings the `matches!` arm uses — the flat
+ * `(PlaybookId::Reserve, PlaybookTrigger::ReserveHealth)` tuples and the grouped
+ * `(PlaybookId::HaltIntake, A | B | C)` one — without depending on line breaks, which is
+ * what a `rustfmt` run would otherwise move.
+ */
+function rustTriggerMatches(): ReadonlyMap<string, readonly string[]> {
+  const start = GUARDIAN_CORE.indexOf('fn trigger_matches(');
+  assert.ok(start >= 0, 'guardian-core no longer declares `trigger_matches`');
+  const end = GUARDIAN_CORE.indexOf('\n}', start);
+  const body = GUARDIAN_CORE.slice(start, end);
+  const marks = [...body.matchAll(/PlaybookId::(\w+)/g)];
+  assert.ok(marks.length > 0, 'parsed no playbooks out of `trigger_matches`');
+  const pairs = new Map<string, readonly string[]>();
+  marks.forEach((mark, index) => {
+    const from = (mark.index ?? 0) + mark[0].length;
+    const to = index + 1 < marks.length ? marks[index + 1]?.index ?? body.length : body.length;
+    const triggers = [...body.slice(from, to).matchAll(/PlaybookTrigger::(\w+)/g)].map(
+      (match) => match[1] as string,
+    );
+    assert.ok(triggers.length > 0, `\`${mark[1]}\` matched no trigger`);
+    assert.ok(!pairs.has(mark[1] as string), `\`${mark[1]}\` appears twice in \`trigger_matches\``);
+    pairs.set(mark[1] as string, triggers);
+  });
+  return pairs;
+}
+
+/** One `export const NAME … Object.freeze({ … })` block of a `features-tx` module. */
+function constBlock(file: string, name: string): string {
+  const source = withoutComments(txSource(file));
+  const start = source.indexOf(`export const ${name}`);
+  assert.ok(start >= 0, `${file} no longer exports \`${name}\``);
+  const open = source.indexOf('{', start);
+  assert.ok(open > start, `\`${name}\` is not an object literal`);
+  let depth = 0;
+  for (let index = open; index < source.length; index += 1) {
+    if (source[index] === '{') depth += 1;
+    else if (source[index] === '}') {
+      depth -= 1;
+      if (depth === 0) return source.slice(open, index + 1);
+    }
+  }
+  return assert.fail(`\`${name}\`'s literal never terminates`);
+}
+
+/** A `Record<K, readonly string[]>` object literal, as `key -> members`. */
+function frozenListMap(file: string, name: string): ReadonlyMap<string, readonly string[]> {
+  const block = constBlock(file, name);
+  const entries = new Map<string, readonly string[]>();
+  for (const match of block.matchAll(/(?:'([^']+)'|(\w+)):\s*Object\.freeze\(\[([\s\S]*?)\]/g)) {
+    const key = (match[1] ?? match[2]) as string;
+    const members = [...(match[3] ?? '').matchAll(/'([^']+)'/g)].map((entry) => entry[1] as string);
+    assert.ok(!entries.has(key), `\`${name}\` declares \`${key}\` twice`);
+    entries.set(key, members);
+  }
+  assert.ok(entries.size > 0, `parsed nothing out of \`${name}\``);
+  return entries;
+}
+
+/** The members of an exported string-literal union in a `features-tx` module. */
+function clientUnion(file: string, name: string): readonly string[] {
+  const members = [...declarationOf(txSource(file), name).matchAll(/'([^']+)'/g)].map(
+    (match) => match[1] as string,
+  );
+  assert.ok(members.length > 0, `parsed no members out of \`${name}\``);
+  return members;
+}
+
+/** 11 §11.8.2's trigger table, one row per `PlaybookTrigger` variant. */
+const TRIGGER_TABLE: readonly { trigger: string; playbook: string; item: string }[] = (() => {
+  const doc = readFileSync(DOC11, 'utf8');
+  const section = /^### The trigger table[\s\S]*?(?=^### )/m.exec(doc);
+  assert.ok(section !== null, 'doc 11 no longer carries §11.8.2’s trigger table');
+  const rows = [...section[0].matchAll(/^\| `(\w+)` \| `(PB-[A-Z-]+)` \| (.*?) \|\s*$/gm)].map(
+    (match) => ({
+      trigger: match[1] as string,
+      playbook: match[2] as string,
+      item: match[3] as string,
+    }),
+  );
+  assert.ok(rows.length >= 8, `parsed only ${rows.length} trigger rows out of doc 11`);
+  return rows;
+})();
+
+/**
+ * The six playbook ids as a compile-time tuple.
+ *
+ * Written out **only** because `@bleavit/features-tx` does not re-export `PlaybookId` (it is
+ * declared and exported in `guardian.ts` and dropped by the barrel), so the suite cannot name
+ * the client's own type. The tuple is bound to three independent sources by the drift lock
+ * below — `guardian.ts`'s union, doc 11 §11.8.2's table and `guardian_core::PlaybookId` — so
+ * it is a checked restatement rather than a copy that can go stale.
+ */
+const DOC_PLAYBOOK_IDS = [
+  'PB-DEPEG',
+  'PB-MIGRATION',
+  'PB-ORACLE-VOID',
+  'PB-HALT-INTAKE',
+  'PB-RESERVE',
+  'PB-LEDGER-FREEZE',
+] as const;
+type PlaybookId = (typeof DOC_PLAYBOOK_IDS)[number];
+
+const DOC_TRIGGERS: readonly PlaybookTrigger[] = TRIGGER_TABLE.map(
+  (row) => row.trigger as PlaybookTrigger,
+);
+const DOC_PLAYBOOK_TRIGGERS: readonly (readonly [PlaybookId, PlaybookTrigger])[] =
+  TRIGGER_TABLE.map((row) => [row.playbook as PlaybookId, row.trigger as PlaybookTrigger]);
+
+test('PLAYBOOK_TRIGGERS mirrors `guardian_core::trigger_matches` exactly, both ways', () => {
+  // A drift lock, so it must fail if **either** side moves. The chain refuses a mismatched
+  // pair with `BadPlaybookTrigger` *after* five approvals have been collected, so a client
+  // holding the enum and not this map walks a council through five signatures on a refusal —
+  // and the failure is invisible until somebody tries it.
+  const rustPairs = rustTriggerMatches();
+  const rustIds = rustEnumVariants('PlaybookId');
+  assert.deepEqual([...rustPairs.keys()].sort(), [...rustIds].sort(), 'a playbook matches no trigger');
+
+  // The Rust variant ↔ document id mapping is **derived**, not written: strip `PB-` and the
+  // hyphens and the two names are the same word. A hand-written table here would be a third
+  // copy of the thing this test exists to stop from having copies.
+  const normalize = (value: string) => value.replace(/^PB-/, '').replace(/-/g, '').toUpperCase();
+  const idFor = new Map<string, string>();
+  for (const variant of rustIds) {
+    const matches = DOC_PLAYBOOK_IDS.filter((id) => normalize(id) === variant.toUpperCase());
+    assert.equal(matches.length, 1, `\`PlaybookId::${variant}\` names no single document id`);
+    idFor.set(variant, matches[0] as string);
+  }
+  assert.equal(new Set(idFor.values()).size, DOC_PLAYBOOK_IDS.length, 'the mapping is not a bijection');
+
+  // What the runtime accepts, in the client's own spelling.
+  const expected = new Map<string, readonly string[]>(
+    [...rustPairs].map(([variant, triggers]) => [idFor.get(variant) as string, [...triggers].sort()]),
+  );
+  const client = frozenListMap('guardian.ts', 'PLAYBOOK_TRIGGERS');
+  const asSorted = (map: ReadonlyMap<string, readonly string[]>) =>
+    [...map].map(([key, value]) => [key, [...value].sort()] as const).sort();
+  // Both directions in one comparison: a missing pair and an extra pair both fail.
+  assert.deepEqual(asSorted(client), asSorted(expected));
+
+  // And doc 11 §11.8.2's table says the same thing, which is the half a two-way lock between
+  // two implementations can never assert — the specification is the third party.
+  const fromDoc = new Map<string, string[]>();
+  for (const [id, trigger] of DOC_PLAYBOOK_TRIGGERS) {
+    fromDoc.set(id, [...(fromDoc.get(id) ?? []), trigger].sort());
+  }
+  assert.deepEqual(asSorted(fromDoc), asSorted(expected), 'doc 11 and the runtime disagree');
+
+  // The client's own `PlaybookId` union is the same closed set — an id it can name and the
+  // map cannot key is a form that builds a call nothing checked.
+  assert.deepEqual([...clientUnion('guardian.ts', 'PlaybookId')].sort(), [...DOC_PLAYBOOK_IDS].sort());
+  assert.deepEqual(
+    [...clientUnion('guardian.ts', 'PlaybookTrigger')].sort(),
+    [...rustEnumVariants('PlaybookTrigger')].sort(),
+  );
+});
+
+test('TRIGGER_READS covers every PlaybookTrigger and cites only frozen surfaces (SQ-730)', () => {
+  // 11 §11.8.2: "the table below binds each variant to the item that establishes it", and
+  // "an unreadable trigger is treated exactly as an inactive one". A variant with no read is
+  // one a client must invent a read for — on the action that costs a 5-of-7 signature.
+  const reads = frozenListMap('guardian.ts', 'TRIGGER_READS');
+  const variants = rustEnumVariants('PlaybookTrigger');
+  assert.deepEqual([...reads.keys()].sort(), [...variants].sort(), 'a trigger has no declared read');
+  assert.deepEqual([...reads.keys()].sort(), [...DOC_TRIGGERS].sort(), 'doc 11’s table drifted');
+
+  // Every cited id is a frozen surface. `surface:check` byte-compares `CRITICAL_SURFACE`
+  // against this manifest in both directions, so the manifest **is** that set — and reading
+  // it here rather than the generated module keeps the assertion on the artefact 10 §5.2's
+  // classifier probes. An unfrozen read is one the compat lattice cannot fail on (SQ-580).
+  const frozen = new Map(SURFACE.entries.map((entry) => [entry.id, entry]));
+  for (const [trigger, ids] of reads) {
+    for (const id of ids) {
+      const entry = frozen.get(id);
+      assert.ok(entry !== undefined, `${trigger} cites ${id}, which 02 §7 does not freeze`);
+      // …and doc 11's own row for that trigger names the same item, so the client is not
+      // reading a frozen surface that answers a different question.
+      const row = TRIGGER_TABLE.find((candidate) => candidate.trigger === trigger);
+      assert.ok(row !== undefined, trigger);
+      assert.ok(
+        row.item.includes(`${entry.pallet}.${entry.item}`),
+        `${trigger} reads ${id}; doc 11 names ${row.item}`,
+      );
+    }
+  }
+  // The reverse direction, restricted to `Pallet.Item` pairs that really are frozen storage:
+  // an item doc 11 names for a trigger and the client does not read is a check that never
+  // runs. (`WelfareView.reserve_flag` and `PhaseFlags bit 5` are filtered out by this — the
+  // first is a view field and the second is written without a pallet, deliberately.)
+  for (const row of TRIGGER_TABLE) {
+    const named = [...row.item.matchAll(/`?([A-Z]\w*)\.([A-Z]\w*)/g)]
+      .map(([, pallet, item]) => SURFACE.entries.find((e) => e.pallet === pallet && e.item === item))
+      .filter((entry): entry is SurfaceManifest['entries'][number] => entry !== undefined)
+      .map((entry) => entry.id);
+    assert.deepEqual(
+      [...new Set(named)].sort(),
+      [...(reads.get(row.trigger) ?? [])].sort(),
+      `${row.trigger}: doc 11 names a frozen item the client does not read`,
+    );
+  }
+
+  // `DepegMedian` maps to the EMPTY list, and that is the answer rather than an omission.
+  assert.deepEqual(reads.get('DepegMedian'), [], 'a read was invented for the depeg trigger');
+  const depeg = TRIGGER_TABLE.find((row) => row.trigger === 'DepegMedian');
+  assert.ok(depeg !== undefined, 'doc 11 dropped the `DepegMedian` row');
+  assert.equal(depeg.playbook, 'PB-DEPEG');
+  assert.match(depeg.item, /\*\*None — and that is the answer\.\*\*/);
+  assert.match(depeg.item, /unavailable in v1/);
+  // The half a client gets wrong by being helpful: a monitoring observation is not a source.
+  assert.match(depeg.item, /MUST NOT offer a monitoring-derived observation in its place/);
+  // …and the client says so in its own words rather than rendering it as merely inactive.
+  const unavailable = declarationOf(txSource('guardian.ts'), 'TriggerState');
+  assert.match(unavailable, /'unavailable'/, '`TriggerState` lost the arm `DepegMedian` needs');
+  // `unavailable` is distinct from `inactive` and from `unread`: one will not become true,
+  // one is being measured and does not hold, one is a retry.
+  assert.deepEqual(
+    [...unavailable.matchAll(/kind: '([a-z]+)'/g)].map((match) => match[1]).sort(),
+    ['active', 'inactive', 'unavailable', 'unread'],
+  );
+});
+
 // ------------------------------------- §11.8.2's power-specific forms (F17)
 
 test('each power renders its OWN arguments, and the empty one says so', () => {
@@ -4861,7 +5673,9 @@ test('each power renders its OWN arguments, and the empty one says so', () => {
     h(ProposeAction, {
       meter: { power: 'activate_playbook', used: finalized(0), limit: finalized(3) },
       inputs: {
-        args: { power: 'activate_playbook', id: 'PB-1', trigger: 'GateBreach', expiry: 9_000 },
+        // A real `PlaybookId` — the union is closed at contract v29, and `PB-HALT-INTAKE`
+        // is the playbook `GateBreach` admits (06 §6.2; 11 §11.8.2's trigger table).
+        args: { power: 'activate_playbook', id: 'PB-HALT-INTAKE', trigger: 'GateBreach', expiry: 9_000 },
         justificationHash: '0xj',
       },
       trigger: { kind: 'active', since: finalized(10) },
@@ -4886,19 +5700,84 @@ test('the propose form refuses a missing justification and a misplaced cohort ta
   // so a form offering it generally builds a call the chain refuses after signing.
   assert.deepEqual(
     proposeFormBlocks({
-      args: { power: 'activate_playbook', id: 'PB-1', trigger: 'GateBreach', expiry: 1, target: 7 },
+      args: { power: 'activate_playbook', id: 'PB-HALT-INTAKE', trigger: 'GateBreach', expiry: 1, target: 7 },
       justificationHash: '0xj',
     }).map((block) => block.check),
     ['Cohort target'],
   );
-  assert.deepEqual(
+});
+
+test('the cohort-target rule keys on the PLAYBOOK, and it is two-sided (contract v29)', () => {
+  // **The previous check keyed on `trigger !== 'VoidInFlight'`, and that was wrong in both
+  // directions.** `VoidInFlight` is `PB-HALT-INTAKE`'s trigger (11 §11.8.2's table: "any
+  // latched cohort is a VOID in flight"), so the old rule *admitted* a target on the one
+  // playbook that must not carry one — where `guardian_core` answers `BadPlaybookTarget`
+  // after five approvals have been collected. And `PB-ORACLE-VOID`'s trigger is
+  // `OracleDeadlock`, so the old rule *refused* the only lawful VOID activation there is.
+  //
+  // `guardian_core::Guardian::check_power` requires `Some` for `PlaybookId::OracleVoid` and
+  // `None` for every other playbook, keyed on the id. 11 §11.8.2 states the same rule:
+  // "`ActivatePlaybook.target` is accepted by `PB-ORACLE-VOID` alone".
+  const propose = (id: PlaybookId, trigger: PlaybookTrigger, target?: number) =>
     proposeFormBlocks({
-      args: { power: 'activate_playbook', id: 'PB-1', trigger: 'VoidInFlight', expiry: 1, target: 7 },
+      args: { power: 'activate_playbook', id, trigger, expiry: 1, ...(target === undefined ? {} : { target }) },
       justificationHash: '0xj',
-    }),
-    [],
-    'the VOID playbook does take a target — the refusal must not be blanket',
+    }).map((block) => block.check);
+
+  // 1. The VOID playbook WITHOUT a target blocks — a VOID that could act on any cohort is
+  //    not what the trigger authorizes: one failed cohort never authorizes VOID of another.
+  assert.deepEqual(propose('PB-ORACLE-VOID', 'OracleDeadlock'), ['Cohort target']);
+  // 2. The VOID playbook WITH a target is the lawful activation, and must not be refused.
+  assert.deepEqual(propose('PB-ORACLE-VOID', 'OracleDeadlock', 7), []);
+  // 3. Every other playbook with a target blocks — including under `VoidInFlight`, the
+  //    trigger the previous rule keyed on, which is exactly the admitted-wrongly case.
+  for (const [id, trigger] of DOC_PLAYBOOK_TRIGGERS) {
+    if (id === 'PB-ORACLE-VOID') continue;
+    assert.deepEqual(propose(id, trigger, 7), ['Cohort target'], `${id}/${trigger} accepted a target`);
+    // And the same pair without a target is clean, so the refusal above is the target's.
+    assert.deepEqual(propose(id, trigger), [], `${id}/${trigger} was refused with no target`);
+  }
+  // 4. A target on a playbook that also mismatches its trigger reports BOTH — two chain
+  //    refusals (`BadPlaybookTarget`, `BadPlaybookTrigger`) with two different fixes.
+  assert.deepEqual(
+    propose('PB-RESERVE', 'GateBreach', 7),
+    ['Cohort target', 'Trigger'],
   );
+});
+
+test('a playbook is refused under a trigger it does not accept — BadPlaybookTrigger', () => {
+  // The chain checks this **after** five approvals have been collected, so a client holding
+  // the trigger enum and not the map walks a council through five signatures on a refusal.
+  const propose = (id: PlaybookId, trigger: PlaybookTrigger) =>
+    proposeFormBlocks({
+      args: { power: 'activate_playbook', id, trigger, expiry: 1 },
+      justificationHash: '0xj',
+    });
+  const accepted = new Map<PlaybookId, Set<PlaybookTrigger>>();
+  for (const [id, trigger] of DOC_PLAYBOOK_TRIGGERS) {
+    const set = accepted.get(id) ?? new Set<PlaybookTrigger>();
+    set.add(trigger);
+    accepted.set(id, set);
+  }
+  for (const [id, triggers] of accepted) {
+    for (const trigger of DOC_TRIGGERS) {
+      const target = id === 'PB-ORACLE-VOID' ? 7 : undefined;
+      const blocks = proposeFormBlocks({
+        args: { power: 'activate_playbook', id, trigger, expiry: 1, ...(target === undefined ? {} : { target }) },
+        justificationHash: '0xj',
+      }).map((block) => block.check);
+      if (triggers.has(trigger)) {
+        assert.deepEqual(blocks, [], `${id} refused its own trigger ${trigger}`);
+      } else {
+        assert.deepEqual(blocks, ['Trigger'], `${id} accepted the foreign trigger ${trigger}`);
+      }
+    }
+  }
+  // Anti-vacuity: the loop above must actually have exercised both arms.
+  assert.equal(accepted.size, 6, 'the playbook set is not the six 06 §6.2 registers');
+  assert.equal(DOC_TRIGGERS.length, 8, 'the trigger set is not `guardian_core`’s eight');
+  // And the refusal names both sides, so a guardian can tell which half to change.
+  assert.match(nth(propose('PB-RESERVE', 'GateBreach'), 0, 'block').detail, /PB-RESERVE is not activated by the GateBreach condition/);
 });
 
 // -------------------------- §11.8.2's pending list: hash AND resolved document

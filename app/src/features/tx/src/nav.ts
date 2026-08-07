@@ -67,6 +67,32 @@ export interface NavView {
     Verified<bigint>,
     Verified<bigint>,
   ];
+  /**
+   * 08 §1.2's derived `T_ins`, appended trailing at contract v29 (02 §4, SQ-602).
+   *
+   * §11.8.3 requires `INSURANCE` presented as a **sized reserve against its target**, and
+   * this is the only field that answers it — `insuranceStanding`'s `read` arm has no other
+   * producer, because §11.8.3 also says *"The FE reads `NavView` and nothing else for this
+   * screen"*. Before v29 no surface published the target at all, so the panel could reach
+   * only `unestablished`; that is the state SQ-602 was resolved to remove.
+   *
+   * It is **not** a floor the account is topped up to, and the gap between `insurance` and
+   * this figure is **not** a measured shortfall: §1.2's archived-claims decrement is
+   * unspecified in v1, so `T_ins` is a deliberate over-estimate and the account is expected
+   * to sit below it.
+   */
+  readonly insuranceTarget: Verified<bigint>;
+  /**
+   * Whether this runtime has `claim_stream`'s real-asset payout leg wired
+   * (02 §4, contract v29; 08 §1.4's A9 follow-up).
+   *
+   * An unwired runtime refuses **every** claim with `OutflowCustodyUnwired`, so
+   * `treasury_streams`' per-stream `claimable_now` describes money no claim can
+   * move. §11.8.3 checks this first and blocks the control with a reason about
+   * the runtime rather than the stream — the figure is still shown, because a
+   * recipient is entitled to know what has vested.
+   */
+  readonly streamClaimsWired: Verified<boolean>;
 }
 
 /** 08 §4.1's declaration order. A named tuple, so an index cannot be mislabelled. */

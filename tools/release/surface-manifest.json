@@ -1,6 +1,6 @@
 {
   "schema": "bleavit.critical-surface.v1",
-  "integration_contract_version": 28,
+  "integration_contract_version": 29,
   "description": "Critical chain/frontend surface frozen by architecture 02 sections 3, 6-9, and 12.",
   "release_blockers": [
     {
@@ -183,7 +183,7 @@
       "citation": "02 §9",
       "layout": {
         "type": "u32",
-        "value": "0x1c000000"
+        "value": "0x1d000000"
       }
     },
     {
@@ -315,7 +315,7 @@
       "citation": "02 §9",
       "layout": {
         "type": "u32",
-        "value": "0x1c000000"
+        "value": "0x1d000000"
       }
     },
     {
@@ -447,7 +447,7 @@
       "citation": "02 §8; 02 §13",
       "layout": {
         "type": "u32",
-        "value": "0x1c000000"
+        "value": "0x1d000000"
       }
     },
     {
@@ -831,7 +831,7 @@
       "citation": "02 §9",
       "layout": {
         "type": "u32",
-        "value": "0x1c000000"
+        "value": "0x1d000000"
       }
     },
     {
@@ -879,7 +879,7 @@
       "citation": "02 §9",
       "layout": {
         "type": "u32",
-        "value": "0x1c000000"
+        "value": "0x1d000000"
       }
     },
     {
@@ -3768,6 +3768,26 @@
       }
     },
     {
+      "id": "api.bond_quote",
+      "kind": "runtime_api",
+      "api": "FutarchyApi",
+      "method": "bond_quote",
+      "state_call": "FutarchyApi_bond_quote",
+      "params_hex": "0x00000000000000",
+      "params_description": "BondQuoteRequest::OracleReport { component: 0, epoch: 0 }",
+      "required": true,
+      "citation": "02 §3; 07 §6.1, §7; 11 §11.5 P-13, §11.8.6 O-8",
+      "layout": {
+        "params": [
+          {
+            "name": "request",
+            "type": "futarchy_primitives::BondQuoteRequestenum[OracleReport=0{component:u16,epoch:u32}|IncidentFiling=1{epoch:u32}|MilestoneFiling=2{epoch:u32}]"
+          }
+        ],
+        "return": "Optionenum[None=0|Some=1(futarchy_primitives::BondQuoteView{bond:u128,exposure:u128,read_at:u32})]"
+      }
+    },
+    {
       "id": "api.decision_stats",
       "kind": "runtime_api",
       "api": "FutarchyApi",
@@ -3866,7 +3886,7 @@
       "citation": "02 §3",
       "layout": {
         "params": [],
-        "return": "futarchy_primitives::NavView{total:u128,main:u128,pol:u128,insurance:u128,keeper:u128,oracle:u128,rewards:u128,stream_remainders:u128,obligations:u128,haircut_flag:bool,spendable_nav:u128,meter_utilization_bps:u32,class_floors:[u128;4]}"
+        "return": "futarchy_primitives::NavView{total:u128,main:u128,pol:u128,insurance:u128,keeper:u128,oracle:u128,rewards:u128,stream_remainders:u128,obligations:u128,haircut_flag:bool,spendable_nav:u128,meter_utilization_bps:u32,class_floors:[u128;4],insurance_target:u128,stream_claims_wired:bool}"
       }
     },
     {
@@ -3977,6 +3997,26 @@
           }
         ],
         "return": "futarchy_primitives::BoundedVec(Vec<futarchy_primitives::PositionView{position:futarchy_primitives::PositionIdenum[Proposal=0{proposal:u64,branch:futarchy_primitives::Branchenum[Accept=0|Reject=1],kind:futarchy_primitives::PositionKindenum[BranchUsdc=0|Long=1|Short=2|GateYes=3(futarchy_primitives::GateTypeenum[Survival=0|Security=1])|GateNo=4(futarchy_primitives::GateTypeenum[Survival=0|Security=1])]}|Baseline=1{epoch:u32,side:futarchy_primitives::ScalarSideenum[Long=0|Short=1]}],balance:u128,vault_state:futarchy_primitives::VaultStateenum[Open=0|Resolved=1(futarchy_primitives::Branchenum[Accept=0|Reject=1])|ScalarSettled=2{winner:futarchy_primitives::Branchenum[Accept=0|Reject=1],s:futarchy_primitives::FixedU64(u64)}|Voided=3|BaselineSettled=4{s:futarchy_primitives::FixedU64(u64)}]}>)"
+      }
+    },
+    {
+      "id": "api.treasury_streams",
+      "kind": "runtime_api",
+      "api": "FutarchyApi",
+      "method": "treasury_streams",
+      "state_call": "FutarchyApi_treasury_streams",
+      "params_hex": "0x0000000000000000000000000000000000000000000000000000000000000000",
+      "params_description": "AccountId([0;32])",
+      "required": true,
+      "citation": "02 §3; 11 §11.8.3",
+      "layout": {
+        "params": [
+          {
+            "name": "who",
+            "type": "[u8;32]"
+          }
+        ],
+        "return": "futarchy_primitives::BoundedVec(Vec<futarchy_primitives::StreamView{id:u64,total:u128,claimed:u128,start:u32,duration:u32,cancelled:bool,claimable_now:u128}>)"
       }
     },
     {
@@ -4198,6 +4238,22 @@
         "hashers": [],
         "key": null,
         "value": "bounded_collections::bounded_vec::BoundedVec(Vec<u64>)"
+      }
+    },
+    {
+      "id": "storage.epoch.pending_oracle_voids",
+      "kind": "storage",
+      "pallet": "Epoch",
+      "item": "PendingOracleVoids",
+      "query": "prefix",
+      "required": true,
+      "citation": "02 §7.1; 11 §11.8.2",
+      "layout": {
+        "hashers": [
+          "Blake2_128Concat"
+        ],
+        "key": "u32",
+        "value": "()"
       }
     },
     {
@@ -4602,6 +4658,20 @@
       }
     },
     {
+      "id": "storage.ledger.ledger_drifted",
+      "kind": "storage",
+      "pallet": "ConditionalLedger",
+      "item": "LedgerDrifted",
+      "query": "value",
+      "required": true,
+      "citation": "02 §7.4; 11 §11.8.2",
+      "layout": {
+        "hashers": [],
+        "key": null,
+        "value": "bool"
+      }
+    },
+    {
       "id": "storage.ledger.position_totals",
       "kind": "storage",
       "pallet": "ConditionalLedger",
@@ -4872,7 +4942,7 @@
       "item": "Proxies",
       "query": "prefix",
       "required": true,
-      "citation": "02 \u00a77.6",
+      "citation": "02 §7.6",
       "layout": {
         "hashers": [
           "Twox64Concat"

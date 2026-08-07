@@ -51,15 +51,34 @@
  * the pallet binding exists to prevent, re-entering one level down. This is 11 §11.2a rule 2
  * in another domain: two id spaces, never merged.
  *
- * ## A filing's preconditions are value-scaled, and the bond is not a constant
+ * ## A filing's bond is **read**, and `undeterminable` is one of the chain's answers
  *
- * §11.8.6's row: *"filing bond balance (value-scaled per [07])"*. So the bond arrives as a
- * read rather than as a number this module knows — app-code rule 7, and the reason is that a
- * value-scaled bond is exactly the kind of figure a client would otherwise bake in at
- * launch and silently under-report after the first amendment.
+ * §11.8.6's row scales the filing bond off `Exposure(kind, m)` (07 §7), and until contract
+ * v29 nothing published it — so S19's file control asked a user to commit an amount nobody
+ * could show them, and the row carried a `blocking` obligation under SQ-731.
+ * `FutarchyApi.bond_quote(IncidentFiling { epoch })` / `MilestoneFiling { epoch }` now
+ * answers it, and this module shares `bond-quote.ts` with P-13's reporter console because
+ * the chain publishes **one** fold under two names.
+ *
+ * The optional return is load-bearing rather than defensive: 07 §7 makes the Milestone
+ * exposure not determinable until the aggregate is bound to a component, and `file` MUST
+ * then refuse with `ExposureUnavailable` — the status-quo default (G-1). A client receiving
+ * nothing blocks and says which of the two silences it got, because waiting for an aggregate
+ * and retrying a read are different remedies.
+ *
+ * The **challenge** bond is a different quantity and stays a plain read: `challenge_filing`
+ * posts the filing's own stored `bond` (07 §7, I-28), which the chain priced when the filing
+ * was created. A bond that already exists has been priced; one that does not has not — the
+ * same asymmetry P-13 has against P-14.
  */
 
 import type { Verified } from '@bleavit/shared-types';
+import {
+  bondQuoteRefusal,
+  coversBond,
+  BOND_QUOTE_IS_A_QUOTE,
+  type BondQuoteState,
+} from './bond-quote.js';
 
 export type FilingKind = 'incident' | 'milestone';
 
@@ -206,8 +225,13 @@ export function admitRegistryWindowEvent(
 export interface FilingInputs {
   readonly kind: FilingKind;
   readonly freeUsdc: Verified<bigint>;
-  /** Value-scaled per 07 — a read, never a constant this module knows (app-code rule 7). */
-  readonly filingBond: Verified<bigint>;
+  /**
+   * The chain's own answer for this filing's bond (contract v29, SQ-731).
+   *
+   * Not a constant and not a floor — see the module note. Its non-`quoted` arms block, so
+   * there is no shape of these inputs in which an unpriced filing proceeds.
+   */
+  readonly filingBond: BondQuoteState;
   /** Current occupancy and its bound, both read. */
   readonly filingsUsed: Verified<number>;
   readonly filingsBound: Verified<number>;
@@ -283,14 +307,24 @@ export function challengeFilingBlocks(inputs: ChallengeFilingInputs): readonly F
   return blocks;
 }
 
+/**
+ * 02 §3's required disclosure for a filing bond — the same sentence P-13 states, because it
+ * is the same method and the same freezing rule (07 §7 freezes `F(kind, m)` at creation).
+ */
+export const FILING_BOND_IS_A_QUOTE = BOND_QUOTE_IS_A_QUOTE;
+
 export function filingBlocks(inputs: FilingInputs): readonly FilingBlock[] {
   const blocks: FilingBlock[] = [];
-  if (inputs.freeUsdc.value < inputs.filingBond.value) {
+  const refusal = bondQuoteRefusal(inputs.filingBond);
+  if (refusal !== undefined) {
+    blocks.push({ check: 'Bond amount', detail: refusal });
+  } else if (!coversBond(inputs.filingBond, inputs.freeUsdc)) {
     blocks.push({
       check: 'Filing bond',
       detail:
-        'Your free USDC does not cover the filing bond. The bond is value-scaled, so it is ' +
-        'read from chain state rather than fixed — a larger claim costs more to file.',
+        'Your free USDC does not cover the filing bond. The bond is value-scaled against the ' +
+        'escrow of every cohort the claim can move, so it is read from chain state rather ' +
+        'than fixed — a larger claim costs more to file.',
     });
   }
   if (inputs.filingsUsed.value >= inputs.filingsBound.value) {

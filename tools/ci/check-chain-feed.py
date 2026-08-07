@@ -59,8 +59,8 @@ NON_METADATA_KINDS = {"raw_storage", "properties"}
 
 # Metadata v15 introduced the runtime-APIs section. Below it a blob cannot express a
 # runtime API *at all*, so descriptors generated from one can serve none of 02 §3's
-# frozen thirteen methods — the entire point of `packages/descriptors`. The stale blob
-# was v14, which is why its 13 `FutarchyApi` failures were a format fact rather than
+# frozen `FutarchyApi` methods — the entire point of `packages/descriptors`. The stale
+# blob was v14, which is why its `FutarchyApi` failures were a format fact rather than
 # staleness, and why a pallet-only check would have called it merely out of date.
 MIN_METADATA_VERSION = 15
 

@@ -4,10 +4,11 @@ use alloc::vec::Vec;
 
 use frame_support::traits::{fungibles::Inspect, Get};
 use futarchy_primitives::{
-    bounds, AccountId as ViewAccountId, Balance, BoundedVec, CohortSummaryView, DecisionStatsView,
-    EpochStatusView, FixedU64, MarketId, NavView, OracleRoundView, ParamKey, ParamView,
-    PositionView, ProposalClass, ProposalId, ProposalSummaryView, QuestionId, QueuedExecutionView,
-    QuoteView, RatificationStatus, ReportView, TradeSide, VaultState, WelfareView,
+    bounds, AccountId as ViewAccountId, Balance, BondQuoteRequest, BondQuoteView, BoundedVec,
+    CohortSummaryView, DecisionStatsView, EpochStatusView, FixedU64, MarketId, NavView,
+    OracleRoundView, ParamKey, ParamView, PositionView, ProposalClass, ProposalId,
+    ProposalSummaryView, QuestionId, QueuedExecutionView, QuoteView, RatificationStatus,
+    ReportView, StreamView, TradeSide, VaultState, WelfareView,
 };
 
 use crate::{usdc_location, AccountId, ForeignAssets, Runtime};
@@ -452,6 +453,20 @@ pub fn nav() -> NavView {
             pallet_futarchy_treasury::Pallet::<Runtime>::floor(ProposalClass::Code),
             pallet_futarchy_treasury::Pallet::<Runtime>::floor(ProposalClass::Meta),
         ],
+        // Contract v29 (SQ-602): 08 §1.2's derived `T_ins`, read through the
+        // pallet's own helper rather than recomputed from the residue counter
+        // and `min_balance` — the target and the overflow rule that enforces it
+        // must not be able to disagree.
+        insurance_target: pallet_futarchy_treasury::Pallet::<Runtime>::insurance_target(),
+        // Contract v29: read through the **same** `OutflowCustody` seam
+        // `claim_stream` itself checks (`ensure_outflow_custody`), so the
+        // published flag and the dispatch's refusal cannot disagree. A restated
+        // `cfg!` here would be a second copy of the predicate, and the copy that
+        // matters is the one the extrinsic reads.
+        stream_claims_wired: <<Runtime as pallet_futarchy_treasury::Config>::OutflowCustody
+            as pallet_futarchy_treasury::OutflowCustody>::is_wired(
+            pallet_futarchy_treasury::OutflowLeg::StreamClaim,
+        ),
     }
 }
 
@@ -489,4 +504,86 @@ pub fn open_oracle_rounds() -> BoundedVec<OracleRoundView, { bounds::MAX_OPEN_OR
 /// Contract-v22 immutable hosted report projection (unchanged from v21; 02 §4a).
 pub fn hosted_report(question_id: QuestionId) -> Option<ReportView> {
     pallet_question_service::Pallet::<Runtime>::hosted_report(question_id)
+}
+
+/// Assemble `FutarchyApi::bond_quote` per 02 §3/§4 (contract v29; 07 §6.1, §7).
+///
+/// Every arm delegates to the owning pallet's own quote helper, which in turn
+/// calls the very function its dispatch path calls — `oracle_core::round_bond`
+/// for a report, `pallet_registry`'s `required_bond` for a filing. Nothing here
+/// restates a rate, a rounding direction or a floor, which is the point: two
+/// implementations of one bond are two answers to *"what will this hold?"*.
+///
+/// **Bounded.** Both folds walk `pallet_epoch::CohortSchedules`, whose key set
+/// is exactly the live cohort epochs — `Cohorts` is capped at
+/// `MAX_NON_TERMINAL_COHORTS = 4` (02 §7.1) and `pallet-epoch`'s `try_state`
+/// refuses an orphan schedule. Each schedule carries at most
+/// `MAX_COHORT_PROPOSALS = 12` bindings, the hard maximum of `epoch.slots`
+/// (13 §1), so the walk is at most 4 schedule reads, 48 vault reads and 48
+/// `MetricSpecs` reads regardless of chain age or of how many games exist. That
+/// is the bound 07 §7's audit-concerns note asks for.
+pub fn bond_quote(request: BondQuoteRequest) -> Option<BondQuoteView> {
+    let (bond, exposure) = match request {
+        BondQuoteRequest::OracleReport { component, epoch } => {
+            pallet_oracle::Pallet::<Runtime>::report_bond_quote(component, epoch)?
+        }
+        // `IncidentRegistry` is instance `()` and `MilestoneRegistry` is
+        // `Instance1` (`construct_runtime!`, pallets 56 and 57). The two
+        // allocators share no filing-id space, and the request enum names the
+        // instance for that reason rather than carrying a `RegistryKind`.
+        BondQuoteRequest::IncidentFiling { epoch } => {
+            pallet_registry::Pallet::<Runtime>::filing_bond_quote(epoch)?
+        }
+        BondQuoteRequest::MilestoneFiling { epoch } => pallet_registry::Pallet::<
+            Runtime,
+            pallet_registry::Instance1,
+        >::filing_bond_quote(epoch)?,
+    };
+    Some(BondQuoteView {
+        bond,
+        exposure,
+        read_at: frame_system::Pallet::<Runtime>::block_number(),
+    })
+}
+
+/// Assemble `FutarchyApi::treasury_streams` per 02 §3/§4 (contract v29;
+/// 11 §11.8.3).
+///
+/// A per-caller projection of the treasury's stream register, each row carrying
+/// the exact amount `claim_stream` would pay now, from
+/// `futarchy_treasury_core::stream_claimable_at` — the same function the call
+/// itself pays from.
+///
+/// **Bounded** by `MAX_STREAMS = 128`, the whole register (13 §4; the frozen
+/// `FutarchyTreasury::MaxStreams` metadata constant). The bound is the register
+/// rather than a narrower per-recipient figure because every stream may lawfully
+/// name one recipient, so `try_push` can never truncate a caller's real rows.
+///
+/// An arithmetic refusal reports `claimable_now = 0`, which is the same verdict
+/// `claim_stream` reaches on that state and the fail-closed direction for a
+/// figure a user acts on: understating what is claimable costs a retry, and the
+/// call re-checks the amount at dispatch in any case (11 §11.4).
+pub fn treasury_streams(
+    who: ViewAccountId,
+) -> BoundedVec<StreamView, { bounds::MAX_TREASURY_STREAMS }> {
+    let mut out = BoundedVec::new();
+    for (stream, claimable_now) in
+        pallet_futarchy_treasury::Pallet::<Runtime>::streams_for(&AccountId::new(who))
+    {
+        if out
+            .try_push(StreamView {
+                id: stream.id,
+                total: stream.total,
+                claimed: stream.claimed,
+                start: stream.start,
+                duration: stream.duration,
+                cancelled: stream.cancelled,
+                claimable_now,
+            })
+            .is_err()
+        {
+            break;
+        }
+    }
+    out
 }

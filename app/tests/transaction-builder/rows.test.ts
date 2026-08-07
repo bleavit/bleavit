@@ -919,11 +919,14 @@ test('every operator row computes fee headroom in the SELECTED asset', () => {
   assert.notEqual(vit.surface, usdc.surface);
 });
 
-test('P-13 no longer recomputes the bond, and its escrow clause is gone', () => {
-  // Two disagreeing implementations of P-13 shipped in one client: this table declared the
-  // bond "recomputed and displayed" from a cohort escrow, while `oracle-reporting.ts` had
-  // already concluded it is structurally uncomputable and shipped that. A bonded, slashable
+test('P-13 reads the bond and never recomputes or floors it (contract v29)', () => {
+  // Two disagreeing implementations of P-13 once shipped in one client: this table declared
+  // the bond "recomputed and displayed" from a cohort escrow, while `oracle-reporting.ts`
+  // had concluded it is structurally uncomputable and shipped that. A bonded, slashable
   // action carried two different answers to "what will this hold?".
+  //
+  // Contract v29 settles it in the third direction, which neither implementation had:
+  // `FutarchyApi.bond_quote` publishes the amount, so the row makes one exact chain read.
   const clauses = rowsFor('P-13', 'USDC');
   // The escrow clause cited `storage.epoch.cohorts`, and `CohortInfo { epoch, proposals,
   // status }` carries no escrow field at all — a clause reading a map that cannot answer it,
@@ -936,13 +939,96 @@ test('P-13 no longer recomputes the bond, and its escrow clause is gone', () => 
     !clauses.some((clause) => /recomputed|recompute/i.test(clause.requirement)),
     'P-13 still promises a recomputed bond',
   );
-  // What survives is what can be read: the floor, and whether the balance covers it.
-  assert.ok(clauses.some((clause) => clause.key === 'bond-floor'));
-  assert.ok(clauses.some((clause) => clause.key === 'bond-headroom'));
-  // And the gap is declared rather than implied, with the open question that retires it.
-  const unreadable = unreadableObligationsFor('P-13');
-  assert.equal(unreadable.length, 1);
-  assert.equal(nth(unreadable, 0, 'obligation').specQuestion, 'SQ-598');
+  // The **floor clause is deleted, not kept beside the quote** (SQ-620): a floor is a lower
+  // bound on the bond and never the bond, and two answers to "what will this hold?" is the
+  // defect this row already carried once.
+  assert.ok(
+    !clauses.some((clause) => clause.key === 'bond-floor'),
+    'P-13 still reads a floor beside the quote — two answers to one question',
+  );
+  assert.ok(
+    !clauses.some((clause) => /floor/i.test(clause.requirement)),
+    'a P-13 clause still describes the bond as a floor',
+  );
+  // What it does read: the quote, from the method 02 §3 publishes, and the headroom against
+  // **that amount** rather than against a bound.
+  const quote = clauses.find((clause) => clause.key === 'bond-quote');
+  assert.ok(quote !== undefined, 'P-13 declares no bond-quote clause');
+  assert.equal(quote.surface, 'api.bond_quote');
+  assert.equal(quote.source, 'runtime-api');
+  const headroom = clauses.find((clause) => clause.key === 'bond-headroom');
+  assert.ok(headroom !== undefined, 'P-13 declares no bond-headroom clause');
+  assert.match(headroom.requirement, /covers that bond/, 'the headroom is not against the quote');
+  // And the gap is gone rather than restated: SQ-598 was the declaration, and the method is
+  // the answer, so the row now carries no unreadable obligation at all.
+  assert.deepEqual(unreadableObligationsFor('P-13'), []);
+});
+
+test('O-8 reads the same one method, and O-5 reads the per-caller stream projection', () => {
+  // 02 §3 publishes **one** fold under two names — `StakeAtRisk(c, m)` and
+  // `Exposure(kind, m)` are the same sum of `CohortEscrow(k)` in different scopes — so a
+  // second surface here would be the drift the single method exists to prevent.
+  for (const instance of ['incident', 'milestone'] as const) {
+    const clauses = operatorRowsFor(instance)['O-8'];
+    const quote = clauses.find((clause) => clause.key === 'bond-quote');
+    assert.ok(quote !== undefined, `O-8/${instance} declares no bond-quote clause`);
+    // One method for both instances — the request enum names the instance
+    // (`IncidentFiling` / `MilestoneFiling`), so this clause needs no per-instance surface.
+    assert.equal(quote.surface, 'api.bond_quote', instance);
+  }
+  assert.deepEqual(unreadableObligationsFor('O-8'), []);
+
+  // O-5's three clauses over one method, not one: presence in a per-caller projection **is**
+  // the exists-and-is-yours check, `cancelled` is a separate refusal, and `claimable_now > 0`
+  // is the amount. Folding them would report one reason for three different states, which is
+  // exactly what 11 §11.8.3 rule 2 forbids on screen.
+  const o5 = rowsFor('O-5', 'USDC');
+  const streams = o5.filter((clause) => clause.surface === 'api.treasury_streams');
+  assert.deepEqual(
+    streams.map((clause) => clause.key).sort(),
+    ['claimable', 'stream-live', 'stream-yours'],
+  );
+  // Per **caller**: the projection is `treasury_streams(who)`, so these are `acting` reads
+  // rather than chain-wide ones — a `chain` subject would read somebody else's streams.
+  for (const clause of streams) assert.equal(clause.subject, 'acting', clause.key);
+  // §7.6's closing rule still stands unamended: the row binds `nav()` as well, and no raw
+  // `pallet-futarchy-treasury` storage appears anywhere in it.
+  assert.ok(o5.some((clause) => clause.surface === 'api.nav'), 'O-5 stopped binding nav()');
+  assert.ok(
+    !o5.some((clause) => clause.surface.startsWith('storage.futarchy_treasury')),
+    'O-5 binds raw treasury storage, which 02 §7.6 forbids',
+  );
+  assert.deepEqual(unreadableObligationsFor('O-5'), []);
+});
+
+test('O-4 declares every readable trigger item, not the one the form happens to select', () => {
+  // 11 §11.8.2 makes the trigger read part of the precondition row, and `gate()` checks a
+  // preparation's declared clauses against the **row**. A clause list that varied with a form
+  // field would let a preparation built for one trigger mint a window a different trigger's
+  // evaluation never covered — the `GatePassed`-for-other-bytes defect, one level up.
+  const surfaces = new Set(rowsFor('O-4', 'USDC').map((clause) => clause.surface));
+  // Typed as `SurfaceId`, so an item 02 §7 does not freeze is a compile error here rather
+  // than a runtime miss — the same discipline the row itself is held to.
+  for (const item of [
+    'storage.constitution.phase_flags',
+    'storage.welfare.gate_breach_flags',
+    'storage.epoch.epoch_of',
+    'storage.execution_guard.migration_halt',
+    'storage.epoch.pending_oracle_voids',
+    'storage.ledger.ledger_drifted',
+  ] as const satisfies readonly SurfaceId[]) {
+    assert.ok(surfaces.has(item), `O-4 does not read ${item}`);
+  }
+  // **Not `PhaseFlags` bit 5**, which is the applied freeze effect and is clear at the moment
+  // an activation is proposed — a client bound to it would refuse the one action the drift
+  // authorizes (02 §7.4, contract v29; 06 §6.3). The item read is the I-4 latch itself, and
+  // the row says so rather than leaving the distinction to a comment.
+  const drift = rowsFor('O-4', 'USDC').find(
+    (clause) => clause.surface === 'storage.ledger.ledger_drifted',
+  );
+  assert.ok(drift !== undefined);
+  assert.match(drift.requirement, /ledger-drift latch/);
+  assert.deepEqual(unreadableObligationsFor('O-4'), []);
 });
 
 test('P-13 splits "round open" from "report window not elapsed"', () => {
@@ -999,14 +1085,21 @@ test('an unreadable obligation names an OPEN spec question, and blocking ones cl
     !/open/i.test(specQuestionStatus(plan, 'SQ-615') ?? ''),
     'SQ-615 reads as open — the resolved-row half of this check proves nothing',
   );
-  // Both dispositions are present, so neither arm is dead code — `stated` is §11.8.1's
-  // SQ-564 posture (the transaction is offered with the gap named) and `blocking` is
-  // INV-FE-12's (an unproven capability is absent).
+  // `stated` is §11.8.1's SQ-564 posture — the transaction is offered and the gap is named.
   assert.ok(all.some((entry) => entry.disposition === 'stated'));
-  assert.ok(all.some((entry) => entry.disposition === 'blocking'));
-  // O-6's seam is retired: contract v28 froze `System.AuthorizedUpgrade` and
-  // `ExecutionGuard.PendingUpgrade`, so §11.8.4 steps 1 and 4 are ordinary clauses and S17
-  // can reach `ready`.
+  // **`blocking` is empty at contract v29, and that is asserted rather than assumed.** Every
+  // one of the four rows that carried one (SQ-598, SQ-601, SQ-730, SQ-731) got a published
+  // read, so INV-FE-12's arm has nothing left to close. The arm itself is not dead code — it
+  // is exercised in `tests/screens`, where `operatorGate` is driven over the declarations and
+  // asserted to close exactly the rows that declare one — but a `blocking` entry appearing
+  // here again must be a deliberate act, so this states the current fact and its reason.
+  assert.deepEqual(
+    all.filter((entry) => entry.disposition === 'blocking').map((entry) => entry.row),
+    [],
+    'a blocking obligation is back; contract v29 published a read for every row that had one',
+  );
+  // Each retired row's replacement read is present, so "no obligation" is not "no check".
+  // O-6 (SQ-615, contract v28): §11.8.4 steps 1 and 4 became ordinary clauses.
   assert.deepEqual(blockingObligationsFor('O-6'), [], 'S17 is still closed on a resolved question');
   assert.ok(
     rowsFor('O-6', 'USDC').some((clause) => clause.surface === 'storage.system.authorized_upgrade'),
@@ -1016,12 +1109,24 @@ test('an unreadable obligation names an OPEN spec question, and blocking ones cl
     rowsFor('O-6', 'USDC').some((clause) => clause.surface === 'storage.execution_guard.pending_upgrade'),
     'O-6 does not read the stored applicable_at',
   );
-  // P-13 **blocks**: the bond is money the client cannot state, and §11.5's redemption-fee
-  // rule 5 already rules that case — no figure, and the transaction blocked.
-  assert.deepEqual(
-    blockingObligationsFor('P-13').map((entry) => entry.specQuestion),
-    ['SQ-598'],
-    'P-13 offers a report whose bond nobody can show the reporter',
+  // P-13 / O-8 (SQ-598, SQ-731) and O-5 (SQ-601), contract v29: the bond and the claimable
+  // amount are published, so each row reads the figure instead of declaring it unreadable.
+  for (const [row, surface] of [
+    ['P-13', 'api.bond_quote'],
+    ['O-8', 'api.bond_quote'],
+    ['O-5', 'api.treasury_streams'],
+  ] as const) {
+    assert.deepEqual(blockingObligationsFor(row), [], `${row} is still closed on a resolved question`);
+    assert.ok(
+      rowsFor(row, 'USDC').some((clause) => clause.surface === surface),
+      `${row} declares no ${surface} clause, so its check was retired rather than replaced`,
+    );
+  }
+  // O-4 (SQ-730): the trigger reads §11.8.2 now binds, one clause per readable variant.
+  assert.deepEqual(blockingObligationsFor('O-4'), []);
+  assert.ok(
+    rowsFor('O-4', 'USDC').filter((clause) => clause.key?.startsWith('trigger-')).length >= 6,
+    'O-4 declares no trigger reads, so §11.8.2’s precondition was dropped rather than bound',
   );
 });
 

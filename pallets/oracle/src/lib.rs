@@ -1155,6 +1155,42 @@ pub mod pallet {
     impl<T: Config> Pallet<T> {
         // ---- Runtime-internal APIs (not extrinsics; wired by sibling pallets) ----
 
+        /// What a **round-1** report on `(component, epoch)` would hold right
+        /// now, with the `StakeAtRisk` it was scaled against (07 §6.1).
+        ///
+        /// Backs 02 §3's `bond_quote` (contract v29, SQ-598). It reads the same
+        /// `T::Reporting::stake_at_risk` seam and calls the same
+        /// `oracle_core::round_bond` that `report` itself calls, so the quoted
+        /// amount is the amount `report` will freeze if it lands at this block —
+        /// not a restatement of the formula that could drift from it.
+        ///
+        /// `None` when the live parameters cannot price a round-1 bond at all
+        /// (`orc.rounds` outside its kernel band, or the product overflowing
+        /// `Balance`). That is the same refusal `report` would make, surfaced
+        /// before the user commits rather than after (G-1).
+        ///
+        /// **Both of `report`'s refusals, not just the first.** 07 §6.1 requires
+        /// an implementation to *"refuse to open a game whose complete frozen
+        /// ladder (through `B_1 · 2^(R_max−1)`) is not representable in
+        /// `Balance`"*, so a state where `B_1` fits and the terminal rung does not
+        /// is one `report` rejects and a `B_1`-only quote would have priced. The
+        /// gap is unreachable at 13 §1's bounds — `orc.bond_floor` caps at 100,000
+        /// USDC and the scaled term cannot reach `u128::MAX / 2^(R_max−1)` at any
+        /// lawful `orc.bond_bps` — but a quote whose refusal condition is narrower
+        /// than its dispatch's is precisely the *"walked to a signature the chain
+        /// refuses"* shape contract v29 exists to close, and closing it costs one
+        /// call to the same function `report` uses.
+        pub fn report_bond_quote(
+            component: MetricId,
+            epoch: EpochId,
+        ) -> Option<(Balance, Balance)> {
+            let stake_at_risk = T::Reporting::stake_at_risk(component, epoch);
+            let params = T::Params::get();
+            let bond = round_bond(stake_at_risk, 1, &params).ok()?;
+            stored_round_bond(bond, params.rounds, params.rounds).ok()?;
+            Some((bond, stake_at_risk))
+        }
+
         /// XCM `QueryResponse` handler for the reserve probe (07 §8, B4). Records
         /// the outcome for the outstanding `query_id`; a response at or after the
         /// `res.probe_timeout` deadline is counted as a fail regardless of the

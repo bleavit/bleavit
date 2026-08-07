@@ -22102,3 +22102,696 @@ fn the_sdk_collator_reward_pot_is_unfunded_so_its_payout_path_is_dormant() {
         );
     });
 }
+
+// =============================================================================
+// Contract v29: `bond_quote` and `treasury_streams` in the real runtime
+// (02 §3/§4; 07 §6.1 and §7; 11 §11.8.3 — SQ-598, SQ-601, SQ-602, SQ-731)
+//
+// The pallet suites bind each helper to its own dispatch. What only the real
+// runtime can show is the **fold**: `StakeAtRisk(c, m)` and `Exposure(kind, m)`
+// are one sum of `CohortEscrow(k)` over live cohort schedules, and 07 §7's
+// audit-concerns note asks that the walk stay bounded.
+// =============================================================================
+
+/// The live oracle parameters, read the same way the pallet reads them.
+fn v29_oracle_params() -> pallet_oracle::OracleParams {
+    <crate::configs::RuntimeOracleParams as pallet_oracle::OracleParamsProvider>::get()
+}
+
+/// Bind `pid` into the cohort schedule for `epoch` and give its vault `escrowed`
+/// USDC — one `CohortEscrow(k)` term, built the way the SQ-174 fixture builds it.
+fn v29_seed_cohort(
+    epoch: futarchy_primitives::EpochId,
+    measurement_until: futarchy_primitives::EpochId,
+    spec: futarchy_primitives::MetricSpecVersion,
+    bindings: &[(u64, Balance)],
+) {
+    let mut specs = Vec::new();
+    for (pid, escrowed) in bindings {
+        let mut vault = conditional_ledger_core::VaultInfo::open(spec);
+        vault.escrowed = *escrowed;
+        pallet_conditional_ledger::Vaults::<Runtime>::insert(pid, vault);
+        specs.push((*pid, spec));
+    }
+    pallet_epoch::CohortSchedules::<Runtime>::insert(
+        epoch,
+        pallet_epoch::CohortSchedule {
+            epoch,
+            creation_epoch_length: 1,
+            measurement_until,
+            settlement_epoch: measurement_until.saturating_add(1),
+            specs: pallet_epoch::SpecBindings::truncate_from(specs),
+        },
+    );
+}
+
+/// Install a MetricSpec version that **does** carry the A-pillar milestone
+/// component, which is the predicate 07 §7's `Exposure(Milestone, m)` is scoped
+/// by. `install_single_active_metric_spec` deliberately installs a different
+/// component, so the two helpers give the `None` and `Some` arms.
+fn v29_install_milestone_bearing_spec(version: futarchy_primitives::MetricSpecVersion) {
+    for (stored, _) in pallet_welfare::MetricSpecs::<Runtime>::iter() {
+        pallet_welfare::MetricSpecs::<Runtime>::remove(stored);
+    }
+    let specs = match pallet_welfare::BoundedSpecSet::try_from(spec_set(version)) {
+        Ok(specs) => specs,
+        Err(_) => {
+            assert!(false, "the four-pillar fixture fits MaxComponentsPerSpec");
+            return;
+        }
+    };
+    assert!(specs
+        .iter()
+        .any(|spec| spec.id == futarchy_primitives::metric_ids::A_SHIPPED_UPGRADES));
+    pallet_welfare::MetricSpecs::<Runtime>::insert(version, specs);
+}
+
+/// 07 §6.1 / 02 §3: `bond_quote`'s oracle arm publishes `Σ CohortEscrow(k)` over
+/// **every** cohort whose frozen MetricSpec consumes the component for the
+/// measurement epoch, and the amount is `round_bond` of that sum at round one.
+///
+/// Two overlapping cohorts, because §6.1's `Σ` is the whole point: at `k = 2`
+/// two cohorts measure the same epoch, so the value a false report can move is
+/// their combined escrow. A fold that took one cohort would under-collateralize
+/// the bond by exactly the other's escrow.
+#[test]
+fn v29_bond_quote_oracle_exposure_is_the_consuming_cohort_escrow_sum() {
+    use futarchy_primitives::{BondQuoteRequest, BondQuoteView};
+
+    const COMPONENT: u16 = 1;
+    const SPEC: u16 = 71;
+    const MEASUREMENT: futarchy_primitives::EpochId = 7;
+
+    development_ext().execute_with(|| {
+        // A non-zero block, so the `read_at` equality below cannot be satisfied
+        // by a stamp that was never read.
+        System::set_block_number(123);
+        // With no cohort consuming the epoch there is no exposure, and the bond
+        // is the `orc.bond_floor` knee rather than zero.
+        install_single_active_metric_spec(SPEC).expect("spec installs");
+        let empty = crate::views::bond_quote(BondQuoteRequest::OracleReport {
+            component: COMPONENT,
+            epoch: MEASUREMENT,
+        });
+        assert_eq!(empty.as_ref().map(|view| view.exposure), Some(0));
+        assert_eq!(
+            empty.as_ref().map(|view| view.bond),
+            Some(v29_oracle_params().bond_floor),
+        );
+
+        // Two cohorts, both measuring epoch 7 (the k = 2 overlap of 07 §6.1).
+        v29_seed_cohort(
+            MEASUREMENT - 1,
+            MEASUREMENT + 1,
+            SPEC,
+            &[
+                (901, 300_000 * currency::USDC),
+                (902, 500_000 * currency::USDC),
+            ],
+        );
+        v29_seed_cohort(
+            MEASUREMENT - 2,
+            MEASUREMENT,
+            SPEC,
+            &[(903, 700_000 * currency::USDC)],
+        );
+        let expected_exposure = 1_500_000 * currency::USDC;
+
+        let view = match crate::views::bond_quote(BondQuoteRequest::OracleReport {
+            component: COMPONENT,
+            epoch: MEASUREMENT,
+        }) {
+            Some(view) => view,
+            None => {
+                assert!(false, "a determinable exposure must quote a bond");
+                return;
+            }
+        };
+        assert_eq!(
+            view.exposure, expected_exposure,
+            "the exposure must be the summed escrow of every consuming cohort",
+        );
+        // The amount is the 07 §6.1 formula at the live parameters, taken from
+        // the core rather than hand-computed (15 §4.4).
+        let expected_bond = match pallet_oracle::round_bond(view.exposure, 1, &v29_oracle_params())
+        {
+            Ok(bond) => bond,
+            Err(_) => {
+                assert!(false, "the fixture ladder is representable");
+                return;
+            }
+        };
+        assert_eq!(view.bond, expected_bond);
+        assert!(
+            view.bond > v29_oracle_params().bond_floor,
+            "the fixture must sit above the floor, or the Σ is untested",
+        );
+        // Dropping one cohort's escrow must move the quote by exactly it —
+        // the fold is a sum, not a maximum or a first match.
+        pallet_conditional_ledger::Vaults::<Runtime>::mutate(903u64, |vault| {
+            if let Some(vault) = vault {
+                vault.escrowed = 0;
+            }
+        });
+        assert_eq!(
+            crate::views::bond_quote(BondQuoteRequest::OracleReport {
+                component: COMPONENT,
+                epoch: MEASUREMENT,
+            })
+            .map(|view| view.exposure),
+            Some(expected_exposure - 700_000 * currency::USDC),
+        );
+
+        // The view is exactly the pallet helper's answer plus the read block —
+        // the runtime assembles, it does not re-derive.
+        let helper = pallet_oracle::Pallet::<Runtime>::report_bond_quote(COMPONENT, MEASUREMENT);
+        assert_eq!(
+            crate::views::bond_quote(BondQuoteRequest::OracleReport {
+                component: COMPONENT,
+                epoch: MEASUREMENT,
+            }),
+            helper.map(|(bond, exposure)| BondQuoteView {
+                bond,
+                exposure,
+                read_at: System::block_number(),
+            }),
+        );
+    });
+}
+
+/// 02 §4: `read_at` is the block the escrow fold was read at — the current one.
+/// It is what makes the figure a *quote* rather than a commitment, so it has to
+/// move with the chain rather than be stamped once.
+#[test]
+fn v29_bond_quote_read_at_is_the_current_block_and_moves_with_it() {
+    use futarchy_primitives::BondQuoteRequest;
+
+    const SPEC: u16 = 72;
+    const MEASUREMENT: futarchy_primitives::EpochId = 7;
+
+    development_ext().execute_with(|| {
+        install_single_active_metric_spec(SPEC).expect("spec installs");
+        v29_seed_cohort(
+            MEASUREMENT - 1,
+            MEASUREMENT + 1,
+            SPEC,
+            &[(911, 400_000 * currency::USDC)],
+        );
+
+        for block in [1u32, 2, 7_777] {
+            System::set_block_number(block);
+            for request in [
+                BondQuoteRequest::OracleReport {
+                    component: 1,
+                    epoch: MEASUREMENT,
+                },
+                BondQuoteRequest::IncidentFiling { epoch: MEASUREMENT },
+            ] {
+                assert_eq!(
+                    crate::views::bond_quote(request).map(|view| view.read_at),
+                    Some(block),
+                    "every arm prices at the current block",
+                );
+            }
+        }
+    });
+}
+
+/// 07 §7's audit-concerns note and 02 §3's bounded-implementation rule: the fold
+/// walks **live cohort schedules only**, so its cost is `MAX_NON_TERMINAL_COHORTS`
+/// (4) schedules × `MAX_COHORT_PROPOSALS` (12) bindings — at most 4 schedule
+/// reads, 48 vault reads and 48 `MetricSpecs` reads — and does not grow with
+/// chain age or with how many games or epochs have ever existed.
+///
+/// `Epoch.CohortSchedules`' key set is exactly the live cohort epochs:
+/// `Cohorts` is capped at four non-terminal (02 §7.1) and `pallet-epoch`'s
+/// `try_state` refuses an orphan schedule ("epoch orphan cohort schedule
+/// violates I-16"), so a fifth key cannot lawfully exist. This drives the
+/// maximum lawful shape and then buries it in unrelated state to show the walk
+/// does not widen.
+#[test]
+fn v29_bond_quote_fold_is_bounded_by_four_cohorts_of_twelve_bindings() {
+    use futarchy_primitives::{
+        bounds::{MAX_COHORT_PROPOSALS, MAX_NON_TERMINAL_COHORTS},
+        BondQuoteRequest,
+    };
+
+    const COMPONENT: u16 = 1;
+    const SPEC: u16 = 73;
+    const MEASUREMENT: futarchy_primitives::EpochId = 9;
+    const PER_VAULT: Balance = 1_000 * currency::USDC;
+
+    development_ext().execute_with(|| {
+        install_single_active_metric_spec(SPEC).expect("spec installs");
+
+        // The maximum lawful state: four non-terminal cohorts, each carrying a
+        // full slate of twelve proposal bindings, all consuming epoch 9.
+        let mut pid = 1_000u64;
+        for cohort in 0..MAX_NON_TERMINAL_COHORTS {
+            let bindings: Vec<(u64, Balance)> = (0..MAX_COHORT_PROPOSALS)
+                .map(|_| {
+                    pid += 1;
+                    (pid, PER_VAULT)
+                })
+                .collect();
+            v29_seed_cohort(MEASUREMENT - 1 - cohort, MEASUREMENT + 1, SPEC, &bindings);
+        }
+
+        assert_eq!(
+            pallet_epoch::CohortSchedules::<Runtime>::iter().count(),
+            MAX_NON_TERMINAL_COHORTS as usize,
+            "the schedule map cannot hold more than four live cohorts",
+        );
+        for (_, schedule) in pallet_epoch::CohortSchedules::<Runtime>::iter() {
+            assert_eq!(
+                schedule.specs.len(),
+                MAX_COHORT_PROPOSALS as usize,
+                "each schedule is at its `epoch.slots` hard maximum",
+            );
+        }
+
+        let bounded = Balance::from(MAX_NON_TERMINAL_COHORTS)
+            .saturating_mul(Balance::from(MAX_COHORT_PROPOSALS))
+            .saturating_mul(PER_VAULT);
+        let full = crate::views::bond_quote(BondQuoteRequest::OracleReport {
+            component: COMPONENT,
+            epoch: MEASUREMENT,
+        });
+        assert_eq!(
+            full.as_ref().map(|view| view.exposure),
+            Some(bounded),
+            "the fold must cover all 4 x 12 bindings and no more",
+        );
+        // The Incident arm walks the same schedules, so it returns the same sum.
+        assert_eq!(
+            crate::views::bond_quote(BondQuoteRequest::IncidentFiling { epoch: MEASUREMENT })
+                .map(|view| view.exposure),
+            Some(bounded),
+        );
+
+        // Now age the chain: two hundred vaults no schedule binds, a long
+        // history of epoch timings, and a pile of settled oracle values. None of
+        // it is reachable from a live cohort schedule, so none of it may move
+        // the answer or widen the walk.
+        for extra in 0..200u64 {
+            let mut vault = conditional_ledger_core::VaultInfo::open(SPEC);
+            vault.escrowed = 999 * currency::USDC;
+            pallet_conditional_ledger::Vaults::<Runtime>::insert(50_000 + extra, vault);
+        }
+        for epoch in 0..64u32 {
+            pallet_oracle::ComponentValues::<Runtime>::insert(
+                (COMPONENT, epoch, SPEC),
+                pallet_oracle::SettledComponent {
+                    value: futarchy_primitives::FixedU64(500_000_000),
+                    path: pallet_oracle::SettlePath::Unchallenged,
+                    flagged: false,
+                },
+            );
+        }
+
+        assert_eq!(
+            crate::views::bond_quote(BondQuoteRequest::OracleReport {
+                component: COMPONENT,
+                epoch: MEASUREMENT,
+            }),
+            full,
+            "chain age must not enter the fold (07 §7 audit-concerns note)",
+        );
+        assert_eq!(
+            pallet_epoch::CohortSchedules::<Runtime>::iter().count(),
+            MAX_NON_TERMINAL_COHORTS as usize,
+        );
+    });
+}
+
+/// 07 §7 / 02 §3: `MilestoneFiling` answers **`None`** while no live cohort's
+/// frozen MetricSpec carries the A-pillar milestone component — the exposure is
+/// not determinable, `file` MUST refuse with `ExposureUnavailable` (G-1), and a
+/// floor would under-collateralize the filing. It answers `Some` as soon as one
+/// does.
+#[test]
+fn v29_bond_quote_milestone_filing_is_none_until_a_cohort_freezes_the_component() {
+    use futarchy_primitives::BondQuoteRequest;
+
+    const SPEC: u16 = 74;
+    const MEASUREMENT: futarchy_primitives::EpochId = 7;
+    const EXPOSURE: Balance = 400_000 * currency::USDC;
+
+    development_ext().execute_with(|| {
+        // A live cohort whose frozen spec carries a *different* component.
+        install_single_active_metric_spec(SPEC).expect("spec installs");
+        v29_seed_cohort(MEASUREMENT - 1, MEASUREMENT + 1, SPEC, &[(921, EXPOSURE)]);
+
+        let refused =
+            crate::views::bond_quote(BondQuoteRequest::MilestoneFiling { epoch: MEASUREMENT });
+        assert_eq!(refused, None, "an undeterminable exposure answers nothing");
+        assert_ne!(
+            refused.map(|view| view.bond),
+            Some(crate::configs::balance_param(b"reg.bond_mile")),
+            "a floor would price the filing below its exposure (07 §7)",
+        );
+        // The dispatch mirror: `file` refuses the same state.
+        assert_noop!(
+            MilestoneRegistry::file(
+                RuntimeOrigin::signed(account(231)),
+                MEASUREMENT,
+                registry_core::FilingClass::Scope(1),
+                10,
+                [9; 32],
+                SPEC,
+            ),
+            pallet_registry::Error::<Runtime, pallet_registry::Instance1>::ExposureUnavailable
+        );
+
+        // Freeze a spec that does carry the milestone component, under the same
+        // cohort binding, and the same request becomes answerable.
+        v29_install_milestone_bearing_spec(SPEC);
+        let quoted = match crate::views::bond_quote(BondQuoteRequest::MilestoneFiling {
+            epoch: MEASUREMENT,
+        }) {
+            Some(view) => view,
+            None => {
+                assert!(
+                    false,
+                    "a component-bearing spec makes the exposure determinable"
+                );
+                return;
+            }
+        };
+        assert_eq!(quoted.exposure, EXPOSURE);
+        assert_eq!(
+            quoted.bond,
+            pallet_registry::Pallet::<Runtime, pallet_registry::Instance1>::filing_bond_quote(
+                MEASUREMENT
+            )
+            .map(|(bond, _)| bond)
+            .unwrap_or_default(),
+        );
+        assert!(
+            quoted.bond > crate::configs::balance_param(b"reg.bond_mile"),
+            "at this exposure the coverage term binds, not the floor",
+        );
+        // The Incident arm reads the same escrow through its own (wider) scope.
+        assert_eq!(
+            crate::views::bond_quote(BondQuoteRequest::IncidentFiling { epoch: MEASUREMENT })
+                .map(|view| view.exposure),
+            Some(EXPOSURE),
+        );
+    });
+}
+
+/// 07 §7: the Incident exposure set is *every* cohort consuming the epoch, so
+/// when none does the exposure is a determinable **zero** — and a zero exposure
+/// still prices the filing at the `reg.bond_incident` floor, never at nothing.
+///
+/// The distinction matters because the two absences carry opposite evidence: the
+/// Milestone arm above answers `None` (undeterminable), while this one answers
+/// `Some(0)` with a real bond. A client that collapsed them would either block a
+/// lawful filing or quote it at zero.
+#[test]
+fn v29_bond_quote_incident_filing_at_zero_exposure_prices_the_floor() {
+    use futarchy_primitives::BondQuoteRequest;
+
+    const MEASUREMENT: futarchy_primitives::EpochId = 7;
+
+    development_ext().execute_with(|| {
+        // No cohort schedule at all, so no cohort consumes the epoch.
+        assert_eq!(pallet_epoch::CohortSchedules::<Runtime>::iter().count(), 0);
+        use pallet_registry::EpochContext as _;
+        assert_eq!(
+            crate::configs::RuntimeRegistryEpoch::cohort_exposure(
+                registry_core::RegistryKind::Incident,
+                MEASUREMENT,
+            ),
+            Some(0),
+            "the Incident exposure is determinable and zero, not unavailable",
+        );
+
+        let view =
+            match crate::views::bond_quote(BondQuoteRequest::IncidentFiling { epoch: MEASUREMENT })
+            {
+                Some(view) => view,
+                None => {
+                    assert!(false, "a determinable zero exposure must still quote");
+                    return;
+                }
+            };
+        let floor = crate::configs::balance_param(b"reg.bond_inc");
+        assert_eq!(view.exposure, 0);
+        assert_eq!(view.bond, floor, "the floor is applied after rounding");
+        assert!(view.bond > 0, "a zero exposure must not quote a zero bond");
+
+        // The same zero reached the other way: a cohort *does* consume the
+        // epoch, and it holds no escrow. This is the state `file` can actually
+        // run on — the version gate needs a frozen cohort — so it is where the
+        // quote can be bound to the amount really escrowed.
+        const SPEC: u16 = 75;
+        install_single_active_metric_spec(SPEC).expect("spec installs");
+        pallet_epoch::EpochTimings::<Runtime>::mutate(|timings| {
+            if !timings.iter().any(|timing| timing.index == MEASUREMENT) {
+                assert!(
+                    timings
+                        .try_push(pallet_epoch::EpochTiming {
+                            index: MEASUREMENT,
+                            start: 0,
+                            length: 100,
+                        })
+                        .is_ok(),
+                    "measurement timing fixture must fit",
+                );
+            }
+        });
+        v29_seed_cohort(MEASUREMENT - 1, MEASUREMENT + 1, SPEC, &[(931, 0)]);
+        let quoted =
+            match crate::views::bond_quote(BondQuoteRequest::IncidentFiling { epoch: MEASUREMENT })
+            {
+                Some(view) => view,
+                None => {
+                    assert!(false, "a consuming cohort with no escrow still quotes");
+                    return;
+                }
+            };
+        assert_eq!(quoted.exposure, 0);
+        assert_eq!(quoted.bond, floor);
+
+        let filer = account(232);
+        assert_ok!(ForeignAssets::mint_into(
+            usdc_location(),
+            &filer,
+            floor.saturating_add(ForeignAssets::minimum_balance(usdc_location())),
+        ));
+        let filer_before = ForeignAssets::balance(usdc_location(), &filer);
+        assert_ok!(IncidentRegistry::file(
+            RuntimeOrigin::signed(filer.clone()),
+            MEASUREMENT,
+            registry_core::FilingClass::S2,
+            0,
+            [9; 32],
+            SPEC,
+        ));
+        assert_eq!(
+            pallet_registry::Filings::<Runtime>::get(MEASUREMENT, 0).map(|filing| filing.bond),
+            Some(quoted.bond),
+            "the quoted floor is the amount `file` escrowed",
+        );
+        assert_eq!(
+            ForeignAssets::balance(usdc_location(), &filer),
+            filer_before - quoted.bond,
+        );
+    });
+}
+
+/// 02 §3 / 11 §11.8.3: `treasury_streams` is a per-caller projection. An account
+/// with no streams gets an empty vector, an account with streams gets exactly
+/// its own, and every `claimable_now` is the treasury pallet's own answer rather
+/// than a second computation inside the view.
+#[test]
+fn v29_treasury_streams_view_is_per_caller_and_matches_the_pallet() {
+    use pallet_futarchy_treasury::{BudgetLine, Stream};
+
+    development_ext().execute_with(|| {
+        System::set_block_number(60);
+        pallet_futarchy_treasury::State::<Runtime>::mutate(|state| {
+            state.streams = frame_support::BoundedVec::truncate_from(vec![
+                // Half vested at block 60.
+                Stream {
+                    id: 4,
+                    recipient: [4; 32],
+                    line: BudgetLine::Rewards,
+                    total: 1_000,
+                    claimed: 100,
+                    start: 10,
+                    duration: 100,
+                    cancelled: false,
+                },
+                // Another recipient's row, deliberately between the caller's two.
+                Stream {
+                    id: 5,
+                    recipient: [5; 32],
+                    line: BudgetLine::Rewards,
+                    total: 2_000,
+                    claimed: 0,
+                    start: 0,
+                    duration: 100,
+                    cancelled: false,
+                },
+                // Cancelled: reports zero while its fields still say why.
+                Stream {
+                    id: 6,
+                    recipient: [4; 32],
+                    line: BudgetLine::Rewards,
+                    total: 3_000,
+                    claimed: 0,
+                    start: 0,
+                    duration: 100,
+                    cancelled: true,
+                },
+            ]);
+        });
+
+        assert!(
+            crate::views::treasury_streams([9u8; 32]).is_empty(),
+            "an account with no streams gets nothing, not somebody else's rows",
+        );
+
+        let view = crate::views::treasury_streams([4u8; 32]);
+        assert_eq!(
+            view.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![4, 6],
+            "exactly the caller's streams, ordered by id",
+        );
+
+        // Field-for-field against the pallet's own projection, `claimable_now`
+        // included — the view assembles, it does not recompute.
+        let pallet_rows = FutarchyTreasury::streams_for(&AccountId::new([4u8; 32]));
+        assert_eq!(view.len(), pallet_rows.len());
+        for (row, (stream, claimable)) in view.iter().zip(pallet_rows.iter()) {
+            assert_eq!(row.id, stream.id);
+            assert_eq!(row.total, stream.total);
+            assert_eq!(row.claimed, stream.claimed);
+            assert_eq!(row.start, stream.start);
+            assert_eq!(row.duration, stream.duration);
+            assert_eq!(row.cancelled, stream.cancelled);
+            assert_eq!(row.claimable_now, *claimable);
+        }
+        // The two zero-reporting states remain distinguishable in the view.
+        assert!(view.as_slice()[0].claimable_now > 0);
+        assert_eq!(view.as_slice()[1].claimable_now, 0);
+        assert!(view.as_slice()[1].cancelled);
+    });
+}
+
+/// Contract v29's second `NavView` append, and the one that keeps `treasury_streams`
+/// from being a trap.
+///
+/// `TreasuryOutflowCustody::is_wired` reports `cfg!(feature = "runtime-benchmarks")`, so a
+/// production runtime refuses **every** `claim_stream` with `OutflowCustodyUnwired`
+/// (08 §1.4's A9 fungibles follow-up). Publishing a per-stream `claimable_now` without
+/// publishing that fact would open a control whose every use is refused after the
+/// signature — the defect class contract v29 exists to close, arriving from the direction
+/// of the fix.
+///
+/// The binding asserted here is the one that matters: the **published flag** and the
+/// **dispatch's own refusal** must agree in this build, whichever build it is. A test that
+/// hardcoded `false` would pass for the wrong reason under `runtime-benchmarks` and would
+/// stop meaning anything the day the leg is wired.
+#[test]
+fn v29_nav_stream_claims_wired_agrees_with_what_claim_stream_does() {
+    development_ext().execute_with(|| {
+        let published = crate::views::nav().stream_claims_wired;
+        assert_eq!(
+            published,
+            <<Runtime as pallet_futarchy_treasury::Config>::OutflowCustody
+                as pallet_futarchy_treasury::OutflowCustody>::is_wired(
+                pallet_futarchy_treasury::OutflowLeg::StreamClaim,
+            ),
+            "the view must publish the seam the extrinsic reads, not a restatement of it",
+        );
+
+        // Open a stream that has genuinely vested, so the only thing that can refuse the
+        // claim is the payout leg. Without this the assertion below would pass on a
+        // stream with nothing claimable and prove nothing.
+        System::set_block_number(200);
+        let recipient: AccountId = AccountId::new([9u8; 32]);
+        pallet_futarchy_treasury::State::<Runtime>::mutate(|state| {
+            state.streams =
+                frame_support::BoundedVec::truncate_from(vec![pallet_futarchy_treasury::Stream {
+                    id: 7,
+                    recipient: [9; 32],
+                    line: pallet_futarchy_treasury::BudgetLine::Rewards,
+                    total: 1_000,
+                    claimed: 0,
+                    start: 100,
+                    duration: 100,
+                    cancelled: false,
+                }]);
+        });
+        let (_, claimable) = FutarchyTreasury::streams_for(&recipient)
+            .into_iter()
+            .find(|(stream, _)| stream.id == 7)
+            .expect("the seeded stream is the caller's");
+        assert!(claimable > 0, "the fixture must have something to claim");
+
+        if published {
+            assert_ok!(FutarchyTreasury::claim_stream(
+                RuntimeOrigin::signed(recipient),
+                7
+            ));
+        } else {
+            assert_noop!(
+                FutarchyTreasury::claim_stream(RuntimeOrigin::signed(recipient), 7),
+                pallet_futarchy_treasury::Error::<Runtime>::OutflowCustodyUnwired,
+            );
+        }
+    });
+}
+
+/// 02 §4 / 08 §1.2 (SQ-602): `NavView.insurance_target` is the treasury pallet's
+/// own derived `T_ins`, not a figure the view recomputes — and it is not
+/// zero-by-default once the swept-residue counter carries a liability.
+///
+/// 11 §11.8.3 requires INSURANCE presented as a **sized reserve against its
+/// target**; a client that had to fabricate the target it compares against is
+/// the INV-FE-1 defect this field closes.
+#[test]
+fn v29_nav_insurance_target_is_the_pallets_derived_t_ins() {
+    development_ext().execute_with(|| {
+        let min_balance =
+            <ForeignAssets as FungiblesInspect<AccountId>>::minimum_balance(usdc_location());
+
+        // Empty counter: the target is the 03 §7 R-4 permanent-account floor.
+        assert_eq!(
+            pallet_futarchy_treasury::SweptResidueUnreclaimed::<Runtime>::get(),
+            0,
+        );
+        assert_eq!(
+            crate::views::nav().insurance_target,
+            FutarchyTreasury::insurance_target(),
+        );
+        assert_eq!(crate::views::nav().insurance_target, min_balance);
+
+        // A real unreclaimed liability moves the target by exactly its amount.
+        let residue = 250_000 * currency::USDC;
+        pallet_futarchy_treasury::SweptResidueUnreclaimed::<Runtime>::put(residue);
+        let view = crate::views::nav();
+        assert_eq!(
+            view.insurance_target,
+            FutarchyTreasury::insurance_target(),
+            "the view must publish the pallet's answer, not its own",
+        );
+        assert_eq!(view.insurance_target, residue.saturating_add(min_balance));
+        assert_ne!(
+            view.insurance_target, 0,
+            "a non-zero residue counter must not read as an unsized reserve",
+        );
+        // The target is a liability measure, not the balance: it moves without
+        // any USDC arriving, which is what makes it a *target* (08 §1.2).
+        assert_eq!(
+            view.insurance,
+            <ForeignAssets as FungiblesInspect<AccountId>>::balance(
+                usdc_location(),
+                &crate::configs::insurance_account(),
+            ),
+        );
+    });
+}

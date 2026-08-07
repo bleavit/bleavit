@@ -24,50 +24,35 @@
  * `challenge_deadline` is likewise the stored deadline, already carrying any extension the
  * chain applied — recomputing it from `orc.window` would be the same defect one field over.
  *
- * ## The round-1 report bond is **not** computable from any frozen surface (SQ-598)
+ * ## The round-1 report bond is **read**, and this module still computes no bond (contract v29)
  *
- * P-13 asks for the bond to be *"recomputed and displayed"*, and for a fresh report there is
- * no round yet to read it from. The formula needs `StakeAtRisk(c, m)` — the sum of
- * `CohortEscrow(k)` over *every* cohort whose frozen MetricSpec consumes component `c` for
- * measurement epoch `m` (07 §6.1). 02 freezes no surface carrying it: `open_oracle_rounds()`
- * returns only rounds that already exist, `RoundState.stake_at_risk` is explicitly not what
- * the FE reads, and reassembling the sum from cohort membership and per-vault escrow would be
- * a client *computation* where 11 §11.4 rule 2 requires an exact chain read — the same
- * distinction 02 §4 draws when it explains why `is_reserved_protocol_destination` is a method
- * rather than published constants.
+ * P-13 used to ask for the bond *"recomputed and displayed"*, and for a fresh report there is
+ * no round yet to read it from. SQ-598 established that no client could do the recomputation:
+ * the formula needs `StakeAtRisk(c, m)` — the sum of `CohortEscrow(k)` over every cohort whose
+ * frozen MetricSpec consumes component `c` for measurement epoch `m` (07 §6.1) — and 02 froze
+ * no surface carrying it. This module shipped that refusal, rendering `orc.bond_floor` as a
+ * labelled lower bound and blocking.
  *
- * The honest shape is the one this console already uses for SQ-564: state the bound that
- * *can* be read and refuse to present it as the amount. `reportBondFloor` returns a value
- * **labelled a lower bound**, and `REPORT_BOND_NOT_ESTABLISHED` says plainly that the
- * value-scaled part is unknown to this client. There is deliberately no `exact` arm: an arm
- * no code path can construct is `FE-HANDOFF-010`'s shape, and its presence would suggest a
- * capability that does not exist.
+ * **Contract v29 publishes the amount**, so the refusal is gone rather than kept beside a
+ * read: `FutarchyApi.bond_quote(OracleReport { component, epoch })` answers `B_1(c, m)` at the
+ * current block, and the client displays it exactly as P-14 already displays
+ * `OracleRoundView.bond`. Three properties survive from the refusal and are load-bearing.
  *
- * **And the path is closed, not merely captioned (2026-08-06).** Blocking only on failing to
- * cover the floor is a true statement about a number that is not the bond: for any component
- * with stake at risk the chain holds strictly more, so an account passing that check is
- * either short at dispatch or has a larger sum taken than the screen showed — on a slashable
- * action, from a figure the user was shown and can reasonably read as the price. §11.5's
- * redemption-fee rule 5 governs the case directly (*"Unreadable ⇒ no figure, never a default …
- * the transaction blocked"*, and the FE MUST NOT mirror the runtime's fail-open read), so
- * P-13's obligation is `blocking` and `reportBlocks` emits it. SQ-598 must publish
- * `StakeAtRisk` before this opens; SQ-620 records that §11.5's own text still says
- * *"recomputed and displayed"* and needs amending to whatever that surface turns out to be.
+ * The floor is **not** a fallback. It is the least the bond can be and not the amount, so
+ * substituting it understates what the user commits — the under-custody direction. The
+ * `bond-floor` clause is deleted from P-13 rather than kept beside the quote, because two
+ * answers to *"what will this hold?"* on a bonded, slashable action is the defect SQ-620 was
+ * filed about and the one this branch is closing.
  *
- * ## That conclusion is now the table's, not this module's
+ * The figure is a **quote**. 07 §6.1 reads the cohort escrow when round 1 is created and
+ * freezes it for the lifecycle, so what is shown is priced at `BondQuoteView.read_at` and
+ * fixes at submission. `ReportCheck.bondDisclosure` is a **required** field for the reason
+ * `bondUnknown` was: there is no shape of this result in which the caveat is absent.
  *
- * Until this review the two disagreed **in one shipped client**. `rows.ts`'s P-13 declared
- * the bond recomputed from a cohort escrow and a headroom clause against the recomputed
- * amount; this module declared the same bond structurally uncomputable and blocked only on
- * `orc.bond_floor`. Nothing bound them, so a bonded and slashable action carried two
- * different answers to *"what will this hold?"*. Worse, the table's escrow clause cited
- * `storage.epoch.cohorts` — `CohortInfo { epoch, proposals, status }` holds no escrow, so
- * the clause read a map that cannot answer it.
- *
- * The repair is one direction of dependency rather than a corrected copy: P-13's clause list
- * is `reportBlocks`' **work list**. Every clause must have a predicate here and a clause with
- * none throws, so a clause added to the table cannot be silently unimplemented — the failure
- * mode where a check is absent and the screen still reports that everything passes.
+ * And an unanswered quote **blocks**. `bond_quote` can return nothing — 07 §7's not-
+ * determinable exposure, or a read that did not land — and `bond-quote`'s predicate fails
+ * on both, so the control closes with the reason stated (§11.5's redemption-fee rule 5:
+ * unreadable means no figure and the transaction blocked, never a default).
  *
  * ## A reporter may not challenge their own round
  *
@@ -80,13 +65,13 @@
 
 import type { Verified } from '@bleavit/shared-types';
 import { accountKey } from '@bleavit/chain-client';
+import { clauseGroupsFor, type FeeAsset, type PreconditionClause } from '@bleavit/transaction-builder';
 import {
-  blockingObligationsFor,
-  clauseGroupsFor,
-  unreadableObligationsFor,
-  type FeeAsset,
-  type PreconditionClause,
-} from '@bleavit/transaction-builder';
+  bondQuoteRefusal,
+  coversBond,
+  BOND_QUOTE_IS_A_QUOTE,
+  type BondQuoteState,
+} from './bond-quote.js';
 
 /**
  * 02 §4's `OracleRoundView`, as the client holds it.
@@ -110,31 +95,6 @@ export interface OracleRound {
   readonly escalated: Verified<boolean>;
 }
 
-/**
- * A lower bound on the round-1 report bond, and it says so.
- *
- * Not an estimate and not a default: `floor` is `orc.bond_floor`, read through `params()`,
- * and the value-scaled term above it is unreadable (see the module note). Carrying it as its
- * own type keeps a screen from rendering it in the place an exact amount would go.
- */
-export interface ReportBondFloor {
-  readonly floor: Verified<bigint>;
-  /** Why this is a bound rather than the amount. Fixed copy — the reason is structural. */
-  readonly why: string;
-}
-
-export const REPORT_BOND_NOT_ESTABLISHED =
-  'This client cannot state the bond your report will hold, so it will not ask you to sign ' +
-  'for it. The bond is value-scaled against the escrow of every cohort measuring this ' +
-  'component (07 §6), and no surface the integration contract freezes publishes that figure. ' +
-  'The amount shown is the floor — the least the bond can be — and for a cohort with escrow ' +
-  'the chain holds more. Reporting from this release would mean committing an amount nobody ' +
-  'could show you first.';
-
-export function reportBondFloor(floor: Verified<bigint>): ReportBondFloor {
-  return { floor, why: REPORT_BOND_NOT_ESTABLISHED };
-}
-
 export interface ReportInputs {
   /**
    * Whether the round itself is still open — **read**, never derived from the epoch clock.
@@ -155,7 +115,13 @@ export interface ReportInputs {
   readonly stakeHeld: Verified<bigint>;
   readonly reporterStake: Verified<bigint>;
   readonly freeUsdc: Verified<bigint>;
-  readonly bondFloor: ReportBondFloor;
+  /**
+   * The chain's own answer for this report's bond (contract v29).
+   *
+   * Not a floor and not a client computation — see the module note. Its non-`quoted` arms
+   * block, so there is no shape of these inputs in which an unpriced report proceeds.
+   */
+  readonly bondQuote: BondQuoteState;
   /**
    * The fee asset the user selected. **No default** — `rowsFor` refuses one, because a
    * default is a decision about somebody else's balance made silently.
@@ -171,15 +137,21 @@ export interface ReportBlock {
 }
 
 /**
- * What this client can establish before `oracle.report`, and what it cannot.
+ * What this client establishes before `oracle.report`, and the caveat it always states.
  *
- * `bondUnknown` is a **required** field for the reason `RegistrationCheck.uncheckable` is:
- * there is no shape of this result in which the unreadable part is absent, so no screen can
- * present the check as complete.
+ * `bondDisclosure` is a **required** field for the reason `RegistrationCheck.uncheckable` is:
+ * there is no shape of this result in which the caveat is absent, so no screen can present
+ * a quoted bond as the settled amount.
  */
 export interface ReportCheck {
   readonly blocks: readonly ReportBlock[];
-  readonly bondUnknown: string;
+  /**
+   * 02 §3's required disclosure that the amount is a quote priced at a block.
+   *
+   * **Required** for the reason `bondUnknown` was before it: there is no shape of this result
+   * in which the caveat is absent, so no screen can present the bond as a settled figure.
+   */
+  readonly bondDisclosure: string;
 }
 
 /** A clause of P-13 with no predicate here — a table entry nobody implemented. */
@@ -236,19 +208,21 @@ const P13_CHECKS: Readonly<Record<string, P13Check>> = Object.freeze({
       'Your reporter stake is no longer held in full — a previous slash left it short. ' +
       'Reporting requires the whole stake held, so it must be topped up first.',
   },
-  'bond-floor': {
-    // The floor is a `params()` read. Unreadable means no figure at all, never a default:
-    // a zero floor would let the headroom clause below pass for an empty account.
-    check: 'Round-bond floor',
-    holds: (inputs) => inputs.bondFloor.floor.value >= 0n,
-    detail:
-      'The round-bond floor could not be read from chain parameters, so this client cannot ' +
-      'state even the least the bond can be.',
+  'bond-quote': {
+    // Contract v29's read. The two non-`quoted` arms are separate refusals with separate
+    // remedies, so the detail comes from `bondQuoteRefusal` rather than being one sentence
+    // for both. A floor is never substituted — see the module note.
+    check: 'Bond amount',
+    holds: (inputs) => inputs.bondQuote.kind === 'quoted',
+    detail: 'placeholder — replaced per-arm by `reportBlocks`',
   },
   'bond-headroom': {
+    // `coversBond` is false whenever the bond is not quoted, so this clause cannot pass on a
+    // figure that was never established. It fails alongside `bond-quote` in that case, and
+    // the two sentences say different things: we cannot price it, and you cannot cover it.
     check: 'Round bond',
-    holds: (inputs) => inputs.freeUsdc.value >= inputs.bondFloor.floor.value,
-    detail: 'Your free USDC does not cover even the floor of the round bond.',
+    holds: (inputs) => coversBond(inputs.bondQuote, inputs.freeUsdc),
+    detail: 'Your free USDC does not cover the bond this report will hold.',
   },
   evidence: {
     check: 'Evidence',
@@ -266,10 +240,9 @@ const P13_CHECKS: Readonly<Record<string, P13Check>> = Object.freeze({
  * The list is the work list. A group is satisfied when any member holds (`anyOf`), which is
  * `clauseGroupsFor`'s contract; a clause with no predicate throws rather than being skipped.
  *
- * `bondUnknown` remains a **required** field for the reason `RegistrationCheck.uncheckable`
- * is: there is no shape of this result in which the unreadable part is absent, so no screen
- * can present the check as complete. Its text is now taken from the table's own SQ-598
- * obligation, so the module and the row cannot drift again.
+ * `bondDisclosure` remains a **required** field for the reason `RegistrationCheck.uncheckable`
+ * is: 02 §3 requires a client to say the amount is priced at a block and fixes at submission,
+ * and a disclosure a screen may omit is one it will.
  */
 /**
  * The predicate for one P-13 clause, or the refusal.
@@ -291,45 +264,20 @@ export const P13_CHECK_KEYS: readonly string[] = Object.freeze(Object.keys(P13_C
 
 export function reportBlocks(inputs: ReportInputs): ReportCheck {
   const blocks: ReportBlock[] = [];
-  // **The unreadable bond is a block, not a caveat (2026-08-06).** It shipped as `stated`,
-  // which left the control open on a floor-only check — and the floor is not the amount for
-  // any component with stake at risk, so an account that passed here either goes short at
-  // dispatch or has more taken than the screen showed. §11.5's redemption-fee rule 5 already
-  // rules this case for a monetary figure: unreadable means no figure and the transaction
-  // blocked, and the frontend MUST NOT mirror the runtime's own fail-open read. The blocks
-  // are taken from the table's own declarations so the module cannot disagree with it again.
-  for (const entry of blockingObligationsFor('P-13')) {
-    // A distinct check name from the `bond-headroom` clause's, which is also about the bond
-    // and is a different statement: *we cannot tell you the amount* against *your balance
-    // does not cover the least it can be*. Two remedies, so two sentences.
-    blocks.push({
-      check: 'Bond amount',
-      detail: `${inputs.bondFloor.why} (${entry.specQuestion})`,
-    });
-  }
   for (const group of clauseGroupsFor('P-13', inputs.feeAsset)) {
     const checks = group.map(p13Predicate);
     if (checks.some((entry) => entry.holds(inputs))) continue;
     // One block per failing group, named for its first member — a disjunctive group has one
     // obligation and one reason, not one per alternative.
     const first = checks[0];
-    if (first !== undefined) blocks.push({ check: first.check, detail: first.detail });
+    if (first === undefined) continue;
+    // The bond clause is the one whose reason is not fixed copy: `undeterminable` and
+    // `unread` are different states with different remedies, and collapsing them would
+    // tell a reporter to retry a read the chain answered correctly.
+    const refusal = first.check === 'Bond amount' ? bondQuoteRefusal(inputs.bondQuote) : undefined;
+    blocks.push({ check: first.check, detail: refusal ?? first.detail });
   }
-  // The caveat is the module's own user-facing sentence, **bound** to the table rather than
-  // duplicating it: P-13 must declare the gap, and if it stops declaring one this throws
-  // rather than quietly presenting a floor as a complete answer. Concatenating the table's
-  // developer-facing reason onto the user's sentence said the same thing twice; citing the
-  // id keeps the binding and gives the caveat its own expiry pointer.
-  const obligations = unreadableObligationsFor('P-13');
-  if (obligations.length === 0) {
-    throw new Error(
-      'P-13 declares no unreadable obligation, so this module’s bond caveat has nothing ' +
-        'behind it. Either the bond became computable — in which case this caveat must go — ' +
-        'or the declaration was dropped and the screen would present a floor as the amount.',
-    );
-  }
-  const cited = obligations.map((entry) => entry.specQuestion).join(', ');
-  return { blocks, bondUnknown: `${inputs.bondFloor.why} (${cited})` };
+  return { blocks, bondDisclosure: BOND_QUOTE_IS_A_QUOTE };
 }
 
 /**

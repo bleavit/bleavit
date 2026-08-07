@@ -188,7 +188,7 @@ positions" are different sentences and only one of them is a fact about the chai
 ```json
 {
   "schema": "bleavit.intent.v1",
-  "binding": { "genesisHash": "0x…", "specVersion": 2, "contractVersion": 28 },
+  "binding": { "genesisHash": "0x…", "specVersion": 2, "contractVersion": 29 },
   "action": { "kind": "prepare_pass_position", "id": "7", "collateral": "25000000" },
   "limits": { "maxCost": "26000000" },
   "digest": "…"

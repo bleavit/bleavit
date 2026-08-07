@@ -27,6 +27,7 @@
  */
 
 import { combine2, type Combined, type Verified } from '@bleavit/shared-types';
+import type { SurfaceId } from '@bleavit/transaction-builder';
 import type { EvidenceState } from './evidence.js';
 
 /** The five powers §11.8.2 names. Closed, so a form cannot invent a sixth. */
@@ -46,7 +47,17 @@ export type GuardianPower =
 export type TriggerState =
   | { readonly kind: 'active'; readonly since: Verified<number> }
   | { readonly kind: 'inactive' }
-  | { readonly kind: 'unread'; readonly reason: string };
+  | { readonly kind: 'unread'; readonly reason: string }
+  /**
+   * No on-chain condition can set this trigger in this runtime.
+   *
+   * `DepegMedian` only: 06 §6.2 marks `PB-DEPEG` unavailable in v1 — no authoritative
+   * attested price source, median formula or latch lifecycle is specified — so the runtime
+   * never reports it active. Distinct from `inactive`, which means the condition is being
+   * measured and does not hold, and from `unread`, which means retry: this one will not
+   * become true, and an operator waiting for it should be told so.
+   */
+  | { readonly kind: 'unavailable'; readonly reason: string };
 
 /**
  * One call inside a guardian action's enumerated batch.
@@ -201,6 +212,59 @@ export function mayActivatePlaybook(trigger: TriggerState): boolean {
   return trigger.kind === 'active';
 }
 
+/**
+ * 11 §11.8.2's trigger table, as data: the frozen `CRITICAL_SURFACE` items that establish
+ * each `PlaybookTrigger` variant (contract v29, SQ-730).
+ *
+ * The specification names one row per variant; this is that row's read side, so a client
+ * reads rather than invents on the one action that costs a 5-of-7 signature before the chain
+ * refuses it. `DepegMedian` maps to the **empty** list, which is not an omission — see
+ * `TriggerState.unavailable`.
+ *
+ * Two entries share `storage.epoch.pending_oracle_voids` under different predicates
+ * (`contains_key(target)` for `OracleDeadlock`, non-empty for `VoidInFlight`), and two share
+ * `storage.constitution.phase_flags` under different bits (6 for `DeadMan`, 7 for
+ * `ReserveHealth`). `GateBreach` needs `storage.epoch.epoch_of` alongside its flag map,
+ * because `GateBreachFlags` is epoch-keyed and undecidable alone.
+ */
+export const TRIGGER_READS: Readonly<Record<PlaybookTrigger, readonly SurfaceId[]>> =
+  Object.freeze({
+    DepegMedian: Object.freeze([]),
+    MigrationHalt: Object.freeze(['storage.execution_guard.migration_halt'] as SurfaceId[]),
+    OracleDeadlock: Object.freeze(['storage.epoch.pending_oracle_voids'] as SurfaceId[]),
+    GateBreach: Object.freeze([
+      'storage.welfare.gate_breach_flags',
+      'storage.epoch.epoch_of',
+    ] as SurfaceId[]),
+    DeadMan: Object.freeze(['storage.constitution.phase_flags'] as SurfaceId[]),
+    VoidInFlight: Object.freeze(['storage.epoch.pending_oracle_voids'] as SurfaceId[]),
+    ReserveHealth: Object.freeze(['storage.constitution.phase_flags'] as SurfaceId[]),
+    LedgerDrift: Object.freeze(['storage.ledger.ledger_drifted'] as SurfaceId[]),
+  });
+
+/** Fixed copy for the one trigger no runtime condition sets (06 §6.2). */
+export const DEPEG_TRIGGER_UNAVAILABLE =
+  'The depeg trigger is unavailable in this runtime. It needs an authoritative attested ' +
+  'price source, an exact 30-day-median formula and a latch lifecycle, none of which is ' +
+  'specified yet — so no on-chain condition sets it and PB-DEPEG cannot be activated. A ' +
+  'monitoring observation is explicitly not a substitute (06 §6.2).';
+
+/**
+ * Which triggers each playbook accepts — `guardian_core::trigger_matches`, exactly.
+ *
+ * The chain refuses a mismatched pair with `BadPlaybookTrigger`, **after** five approvals
+ * have been collected. A client holding the enum and not this map builds that call.
+ */
+export const PLAYBOOK_TRIGGERS: Readonly<Record<PlaybookId, readonly PlaybookTrigger[]>> =
+  Object.freeze({
+    'PB-DEPEG': Object.freeze(['DepegMedian'] as PlaybookTrigger[]),
+    'PB-MIGRATION': Object.freeze(['MigrationHalt'] as PlaybookTrigger[]),
+    'PB-ORACLE-VOID': Object.freeze(['OracleDeadlock'] as PlaybookTrigger[]),
+    'PB-HALT-INTAKE': Object.freeze(['GateBreach', 'DeadMan', 'VoidInFlight'] as PlaybookTrigger[]),
+    'PB-RESERVE': Object.freeze(['ReserveHealth'] as PlaybookTrigger[]),
+    'PB-LEDGER-FREEZE': Object.freeze(['LedgerDrift'] as PlaybookTrigger[]),
+  });
+
 /** Why a playbook is unavailable, in words a guardian can act on. */
 export function triggerRefusal(trigger: TriggerState): string | undefined {
   switch (trigger.kind) {
@@ -216,6 +280,8 @@ export function triggerRefusal(trigger: TriggerState): string | undefined {
         `This playbook’s trigger could not be read (${trigger.reason}). It is treated as ` +
         'not active: a condition this client could not establish is not one it will act on.'
       );
+    case 'unavailable':
+      return trigger.reason;
   }
 }
 
@@ -436,6 +502,20 @@ export function ratificationCopy(state: ActionRatification): string {
  * chosen here: `PauseIntake { until }`, `DelayOnce { pid }`, `ForceRerun { pid }`,
  * `ActivatePlaybook { id, trigger, expiry, target }`, `SuspendOnGate`.
  */
+/**
+ * The six playbooks 06 §6.2 registers, by their document ids.
+ *
+ * Closed, and it must be: `target` and the admissible trigger set are both keyed on the
+ * **playbook**, not on the trigger, so a free-form id would let a form build either wrong.
+ */
+export type PlaybookId =
+  | 'PB-DEPEG'
+  | 'PB-MIGRATION'
+  | 'PB-ORACLE-VOID'
+  | 'PB-HALT-INTAKE'
+  | 'PB-RESERVE'
+  | 'PB-LEDGER-FREEZE';
+
 export type PlaybookTrigger =
   | 'DepegMedian'
   | 'MigrationHalt'
@@ -452,13 +532,15 @@ export type PowerArguments =
   | { readonly power: 'force_rerun'; readonly pid: string }
   | {
       readonly power: 'activate_playbook';
-      readonly id: string;
+      readonly id: PlaybookId;
       readonly trigger: PlaybookTrigger;
       readonly expiry: number;
       /**
-       * PB-ORACLE-VOID's cohort target. **Every other playbook rejects `Some`**, which is
-       * the runtime's rule and not a convention — so it is optional here and a form that
-       * offers it for another playbook builds a call the chain refuses.
+       * PB-ORACLE-VOID's cohort target, and the rule is **two-sided**.
+       *
+       * `guardian_core` requires `Some` for `PlaybookId::OracleVoid` and `None` for every
+       * other playbook (`BadPlaybookTarget`), and it keys that on the **playbook id**, not
+       * on the trigger. It is optional in the type because five of six arms must omit it.
        */
       readonly target?: number | undefined;
     }
@@ -498,17 +580,43 @@ export function proposeFormBlocks(inputs: ProposeInputs): readonly GuardianBlock
         'something with no stated reason.',
     });
   }
-  if (
-    inputs.args.power === 'activate_playbook' &&
-    inputs.args.target !== undefined &&
-    inputs.args.trigger !== 'VoidInFlight'
-  ) {
-    blocks.push({
-      check: 'Cohort target',
-      detail:
-        'Only the VOID playbook takes a cohort target. Every other playbook rejects one on ' +
-        'chain, so this call would be refused after signing.',
-    });
+  if (inputs.args.power === 'activate_playbook') {
+    const { id, trigger, target } = inputs.args;
+    // **The target rule is keyed on the playbook, and it is two-sided** (contract-v29
+    // batch). The previous check keyed it on `trigger !== 'VoidInFlight'`, which is wrong
+    // in both directions: `VoidInFlight` is PB-HALT-INTAKE's trigger, so a target was
+    // admitted where the chain answers `BadPlaybookTarget`; and PB-ORACLE-VOID's trigger is
+    // `OracleDeadlock`, so the *only* lawful VOID activation was refused by the client.
+    // `guardian_core` requires `Some` for `OracleVoid` and `None` for every other playbook.
+    if (id === 'PB-ORACLE-VOID' && target === undefined) {
+      blocks.push({
+        check: 'Cohort target',
+        detail:
+          'The VOID playbook acts on one named cohort and takes its id as an argument. ' +
+          'Without it the call is refused on chain — and a VOID that could act on any ' +
+          'cohort is not what the trigger authorizes: one failed cohort never authorizes ' +
+          'VOID of another.',
+      });
+    }
+    if (id !== 'PB-ORACLE-VOID' && target !== undefined) {
+      blocks.push({
+        check: 'Cohort target',
+        detail:
+          'Only the VOID playbook takes a cohort target. Every other playbook rejects one ' +
+          'on chain, so this call would be refused after five approvals had been collected.',
+      });
+    }
+    // The pairing the chain checks as `BadPlaybookTrigger`. A client holding the trigger
+    // enum and not this map walks a council through five signatures on a refusal.
+    if (!PLAYBOOK_TRIGGERS[id].includes(trigger)) {
+      blocks.push({
+        check: 'Trigger',
+        detail:
+          `${id} is not activated by the ${trigger} condition. Each playbook answers a ` +
+          'specific failure and the chain refuses any other pairing, so this call would be ' +
+          'rejected after signing.',
+      });
+    }
   }
   return blocks;
 }

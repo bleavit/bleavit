@@ -68,12 +68,12 @@ mod tests;
 // The functional core is the semantic source of truth; re-export its surface
 // (named, not glob — the pallet defines its own `Event`/`Error`).
 pub use futarchy_treasury_core::{
-    bps, reserve_probe_runway_debit, vested_amount, AssetKind, BudgetLine, CoretimeQuote,
-    Error as CoreError, Event as CoreEvent, KeeperMeter, KeeperMeterClass, NavComponents,
-    RollingMeter, Stream, StreamInput, Treasury, TreasuryAccount, DEFAULT_VIT_SUPPLY,
-    ISS_INFLATION_CAP_BPS, MAX_BUDGET_LINES, MAX_FUNDED_CORETIME_PERIODS, MAX_PENDING_OUTFLOWS,
-    MAX_POL_COMMITMENTS, MAX_STREAMS, TRS_CAP_180D_BPS, TRS_CAP_30D_BPS, TRS_CAP_PROPOSAL_BPS,
-    TRS_STREAM_THRESHOLD_BPS, USDC, VIT,
+    bps, reserve_probe_runway_debit, stream_claimable_at, vested_amount, AssetKind, BudgetLine,
+    CoretimeQuote, Error as CoreError, Event as CoreEvent, KeeperMeter, KeeperMeterClass,
+    NavComponents, RollingMeter, Stream, StreamInput, Treasury, TreasuryAccount,
+    DEFAULT_VIT_SUPPLY, ISS_INFLATION_CAP_BPS, MAX_BUDGET_LINES, MAX_FUNDED_CORETIME_PERIODS,
+    MAX_PENDING_OUTFLOWS, MAX_POL_COMMITMENTS, MAX_STREAMS, TRS_CAP_180D_BPS, TRS_CAP_30D_BPS,
+    TRS_CAP_PROPOSAL_BPS, TRS_STREAM_THRESHOLD_BPS, USDC, VIT,
 };
 pub use origins_core::Origin;
 
@@ -2110,6 +2110,37 @@ pub mod pallet {
         /// records; the `events` vec is empty.
         pub fn treasury() -> Treasury {
             Self::load()
+        }
+
+        /// Every stream whose recipient is `who`, ordered by id, each paired with
+        /// the exact amount [`Treasury::claim_stream`] would pay at `now`
+        /// (11 §11.8.3's *"claimable now"*).
+        ///
+        /// Backs 02 §3's `treasury_streams` (contract v29, SQ-601). The amount
+        /// comes from `futarchy_treasury_core::stream_claimable_at`, which is
+        /// also what `claim_stream` pays from, so the published figure and the
+        /// dispatched one cannot be two different answers. An arithmetic refusal
+        /// reports zero — the same verdict `claim_stream` reaches on that state,
+        /// and the direction that understates rather than overstates a payout.
+        ///
+        /// Bounded by `MAX_STREAMS = 128`, the whole register: every stream may
+        /// lawfully name one recipient, so no narrower per-caller bound exists.
+        pub fn streams_for(who: &T::AccountId) -> Vec<(Stream, Balance)> {
+            let recipient = Self::to_core_account(who.clone());
+            let mut streams = Self::load()
+                .streams
+                .iter()
+                .filter(|stream| stream.recipient == recipient)
+                .copied()
+                .collect::<Vec<_>>();
+            streams.sort_unstable_by_key(|stream| stream.id);
+            streams
+                .into_iter()
+                .map(|stream| {
+                    let claimable = stream_claimable_at(&stream, Self::now()).unwrap_or(0);
+                    (stream, claimable)
+                })
+                .collect()
         }
 
         /// Seed arbitrary (bounded) accounting state for tests and benchmarks.

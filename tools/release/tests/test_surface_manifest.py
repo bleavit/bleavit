@@ -630,7 +630,7 @@ class SurfaceManifestTests(unittest.TestCase):
         runtime_apis = [
             entry for entry in self.entries if entry["kind"] == "runtime_api"
         ]
-        self.assertEqual(len(runtime_apis), 14)
+        self.assertEqual(len(runtime_apis), 16)
         for entry in runtime_apis:
             self.assertNotIn("blocked_by", entry, entry["id"])
             # These entries carried no `layout` until F2, under the rule that this
@@ -641,9 +641,9 @@ class SurfaceManifestTests(unittest.TestCase):
             # released metadata* by `scale_metadata.surface_layout` — the same function
             # the recorder compares against — and cross-checked against the paired
             # terminal-recovery runtime. Freezing them is required, not optional:
-            # 02 §3 says of the thirteen methods that "the generated metadata path and
-            # composite form are part of the freeze", and presence-only checking let a
-            # return type change without any gate seeing it.
+            # 02 §3 says of its methods that "the generated metadata path and composite
+            # form are part of the freeze", and presence-only checking let a return type
+            # change without any gate seeing it.
             self.assertIn("layout", entry, entry["id"])
             self.assertIn("params", entry["layout"], entry["id"])
             self.assertIn("return", entry["layout"], entry["id"])
@@ -880,7 +880,7 @@ class SurfaceManifestTests(unittest.TestCase):
             "0x" + (2**63).to_bytes(8, "little").hex(),
         )
 
-    def test_all_fourteen_runtime_api_methods_are_present(self) -> None:
+    def test_all_sixteen_runtime_api_methods_are_present(self) -> None:
         methods = {
             entry["method"]
             for entry in self.entries
@@ -907,6 +907,14 @@ class SurfaceManifestTests(unittest.TestCase):
                 # user's real holdings (02 §3).
                 "service_positions",
                 "is_reserved_protocol_destination",
+                # Contract v29 (SQ-598/SQ-731): one method for both pre-game bonds,
+                # because 07 §6.1 and §7 state one escrow fold under two names — two
+                # methods would publish it twice and let the copies drift.
+                "bond_quote",
+                # Contract v29 (SQ-601): the per-caller stream projection 11 §11.8.3
+                # needs. Not frozen storage: 02 §7.6 forbids binding raw treasury state,
+                # and a published projection is not raw state.
+                "treasury_streams",
             },
         )
 

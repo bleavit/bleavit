@@ -3,7 +3,7 @@
 
 //! Bleavit runtime-API declarations.
 //!
-//! The frozen 13-method [`FutarchyApi`] surface is specified by the integration
+//! The frozen 16-method [`FutarchyApi`] surface is specified by the integration
 //! contract (02 §3). The separate [`telemetry`] module is monitoring-only and
 //! explicitly outside that contract (12 §6.3). Both are read-only, bounded, and
 //! shared with their respective clients.
@@ -23,10 +23,10 @@ pub use telemetry::{
 };
 
 use futarchy_primitives::{
-    bounds, AccountId, Balance, BoundedVec, CohortSummaryView, DecisionStatsView, EpochStatusView,
-    MarketId, NavView, OracleRoundView, ParamKey, ParamView, PositionView, ProposalId,
-    ProposalSummaryView, QuestionId, QueuedExecutionView, QuoteView, ReportView, TradeSide,
-    WelfareView,
+    bounds, AccountId, Balance, BondQuoteRequest, BondQuoteView, BoundedVec, CohortSummaryView,
+    DecisionStatsView, EpochStatusView, MarketId, NavView, OracleRoundView, ParamKey, ParamView,
+    PositionView, ProposalId, ProposalSummaryView, QuestionId, QueuedExecutionView, QuoteView,
+    ReportView, StreamView, TradeSide, WelfareView,
 };
 
 /// Maximum number of queued executions returned by [`FutarchyApi::execution_queue`]
@@ -38,7 +38,7 @@ pub const MAX_QUEUED_EXECUTIONS: u32 = bounds::MAX_LIVE_PROPOSALS;
 
 sp_api::decl_runtime_apis! {
     /// The frozen Bleavit read-only runtime API (02 §3).
-    #[api_version(4)]
+    #[api_version(5)]
     pub trait FutarchyApi {
         /// Epoch clock: index, phase, boundaries, dead-man, freeze and phase flags.
         fn epoch_status() -> EpochStatusView;
@@ -91,6 +91,40 @@ sp_api::decl_runtime_apis! {
         /// book currently references it (SQ-588). A client bound to the narrower
         /// predicate would pass a row the runtime then refuses.
         fn is_reserved_protocol_destination(who: AccountId) -> bool;
+        /// What a **not-yet-created** bonded action would hold, priced at the
+        /// current block (02 §3/§4, contract v29; 07 §6.1, §7).
+        ///
+        /// One method for both bonds, because 07 states **one** fold under two
+        /// names: `StakeAtRisk(c, m)` and `Exposure(kind, m)` are the same sum of
+        /// `CohortEscrow(k)` over live cohort schedules, differing only in which
+        /// cohorts are in scope. Two methods would publish it twice and let the
+        /// copies drift.
+        ///
+        /// It returns the **amount**, not the ingredients. 07 §6.1 states three
+        /// separable normative details — the `/ 10,000` division rounds up,
+        /// rounding resolves toward custody, and the `max` against the floor
+        /// applies after rounding — and a client applying them itself would own
+        /// them. Under-collateralizing a bond is the under-custody direction
+        /// (I-4 / I-28), and this is money a user must post. The challenge side
+        /// is already symmetric: it reads `OracleRoundView.bond`, the chain's own
+        /// frozen figure.
+        ///
+        /// `None` is a **first-class answer**, not an error: 07 §7 makes the
+        /// Milestone exposure not determinable until the aggregate is bound to a
+        /// component, and `file` MUST then refuse with `ExposureUnavailable` —
+        /// the status-quo default (G-1). A client receiving `None` blocks.
+        fn bond_quote(request: BondQuoteRequest) -> Option<BondQuoteView>;
+        /// Every outbound treasury stream whose recipient is `who`, each with the
+        /// exact amount `futarchy_treasury.claim_stream` would pay now
+        /// (02 §3/§4, contract v29; 11 §11.8.3).
+        ///
+        /// A per-caller projection rather than frozen `pallet-futarchy-treasury`
+        /// storage, and that **preserves** §7.6's closing rule rather than
+        /// carving into it: the rule forbids binding *raw storage*, and a
+        /// published runtime-API projection is not raw storage — `nav()` is
+        /// itself one. It also keeps 11 §11.4 rule 2's exact-chain-read
+        /// property, which a stated exception would give up.
+        fn treasury_streams(who: AccountId) -> BoundedVec<StreamView, { bounds::MAX_TREASURY_STREAMS }>;
     }
 }
 

@@ -52,7 +52,32 @@ import {
 } from '@bleavit/features-tx';
 import type { ScreenChain, StatsRecord } from '@bleavit/features-tx';
 
-import { APP_ROOT, DOC_02, DOC_11, architecture, txSource, withoutComments } from './spec-sources.ts';
+import {
+  APP_ROOT,
+  DOC_02,
+  DOC_11,
+  REPO_ROOT,
+  architecture,
+  declarationOf,
+  propertyNames,
+  txSource,
+  withoutComments,
+} from './spec-sources.ts';
+
+/**
+ * The 02 §6/§7 frozen surface manifest, as `surface:check` byte-compares `CRITICAL_SURFACE`
+ * against it. Read for the **recorded return layouts** of the two runtime-API methods
+ * contract v29 added: they are the runtime's own answer shape, so a view type that drifted
+ * from the chain fails here even while the client and the document agree with each other.
+ */
+const SURFACE = JSON.parse(
+  readFileSync(join(REPO_ROOT, 'tools/release/surface-manifest.json'), 'utf8'),
+) as {
+  readonly entries: readonly {
+    readonly id: string;
+    readonly layout?: { readonly return?: string };
+  }[];
+};
 
 /* --------------------------------------------------------------------------- the artifacts */
 
@@ -566,6 +591,103 @@ function docBlock(kind: 'struct' | 'enum', name: string): string {
   }
   return assert.fail(`\`${name}\`'s declaration never terminates`);
 }
+
+/* ----------------------------- contract v29's new views, pinned to doc 02's own text */
+
+/** The `pub <name>:` field list of one doc 02 §4 struct, in declaration order. */
+function docFields(kind: 'struct', name: string): readonly string[] {
+  const fields = [...docBlock(kind, name).matchAll(/^\s{4}pub (\w+):/gm)].map(
+    (match) => match[1] as string,
+  );
+  // Fail closed on a parse that found nothing: an empty expectation is satisfied by an
+  // empty client type, which is the vacuity every doc-parsing test here guards against.
+  assert.ok(fields.length > 0, `parsed no fields out of \`${name}\``);
+  return fields;
+}
+
+/** Every property name one exported `features-tx` interface declares, at its top level. */
+function clientFields(file: string, name: string): readonly string[] {
+  const fields = propertyNames(declarationOf(txSource(file), name));
+  assert.ok(fields.length > 0, `parsed no properties out of \`${name}\``);
+  return fields;
+}
+
+/**
+ * `snake_case` → the client's own spelling, with every rename declared.
+ *
+ * Case conversion covers all but one field, and the exception is stated rather than
+ * absorbed: `StreamView.start` is a **block number**, and a client property called `start`
+ * beside a `duration` reads as a timestamp. Declaring the rename here is what keeps a *new*
+ * doc field with no client property from being waved through as "probably renamed".
+ */
+const FIELD_RENAMES: Readonly<Record<string, string>> = Object.freeze({ start: 'startBlock' });
+
+const clientSpelling = (field: string): string =>
+  FIELD_RENAMES[field] ?? field.replace(/_(\w)/g, (_, char: string) => char.toUpperCase());
+
+test('BondQuoteView and StreamView: doc 02 §4, the manifest and the client agree (v29)', () => {
+  // Contract v29 appended two view types and a `NavView` field, and each exists because
+  // 11 §11.8 requires a figure this client had no surface for. A view type the client
+  // consumes **partially** is the failure that hides: the missing field simply is not
+  // rendered, and nothing distinguishes that from a chain that did not publish it.
+  //
+  // Three independent artefacts, so no two can agree with each other and be wrong: doc 02's
+  // frozen listing, `tools/release/surface-manifest.json`'s recorded return layout (which
+  // `check-chain-feed.py` checks against the runtime's own metadata), and the client type.
+  for (const [struct, file, type, api] of [
+    ['BondQuoteView', 'bond-quote.ts', 'BondQuote', 'api.bond_quote'],
+    ['StreamView', 'treasury.ts', 'Stream', 'api.treasury_streams'],
+  ] as const) {
+    const declared = docFields('struct', struct);
+    // The manifest records the method's return shape as the extractor read it off the
+    // runtime, so this leg fails when the chain and the contract disagree.
+    const entry = SURFACE.entries.find((candidate) => candidate.id === api);
+    assert.ok(entry?.layout?.return !== undefined, `${api} records no return layout`);
+    const recorded = /\{([^}]*)\}/.exec(entry.layout.return.slice(entry.layout.return.indexOf(struct)));
+    assert.ok(recorded !== null, `${api}'s return layout does not name \`${struct}\``);
+    const runtime = (recorded[1] ?? '').split(',').map((pair) => (pair.split(':')[0] ?? '').trim());
+    assert.deepEqual([...runtime].sort(), [...declared].sort(), `${struct}: 02 §4 and the runtime disagree`);
+
+    // …and the client consumes exactly that set — no field dropped, none invented.
+    assert.deepEqual(
+      [...clientFields(file, type)].sort(),
+      declared.map(clientSpelling).sort(),
+      `${type} does not consume every field 02 §4 freezes on \`${struct}\``,
+    );
+  }
+});
+
+test('02 §4 and 11 §11.8.3 make `NavView.insurance_target` a mandatory read (SQ-602)', () => {
+  // The specification half, kept separate from the client half below so a red client does
+  // not hide a moved document. 02 §4 appends the field trailing under §13 rule 3, and
+  // 11 §11.8.3 states the consequence in as many words — "until this field the only client
+  // that could make that classification was one that fabricated the target it compares
+  // against, which is the INV-FE-1 defect".
+  assert.ok(
+    docFields('struct', 'NavView').includes('insurance_target'),
+    '02 §4 no longer declares `NavView.insurance_target`',
+  );
+  assert.match(
+    architecture(DOC_11),
+    /The target is read from `NavView\.insurance_target`, never derived/,
+    '11 §11.8.3 no longer mandates the read',
+  );
+  // …and the runtime really answers with it, so the obligation is not a paper one.
+  const nav = SURFACE.entries.find((candidate) => candidate.id === 'api.nav');
+  assert.match(nav?.layout?.return ?? '', /insurance_target/, 'the runtime’s `nav()` omits it');
+});
+
+test('the client’s NavView consumes `insurance_target`, so INSURANCE can be classified', () => {
+  // 11 §11.8.3: "The FE reads `NavView` and nothing else for this screen", and the target
+  // is read from `NavView.insurance_target`. `insuranceStanding`'s `read` arm takes a
+  // `Verified<bigint>` and `nav()` is its only lawful producer — so a client projection
+  // without the field leaves that arm with no producer at all, and `InsurancePanel` can only
+  // ever render `unestablished`. That is exactly the state SQ-602 was resolved to remove.
+  assert.ok(
+    clientFields('nav.ts', 'NavView').includes('insuranceTarget'),
+    'the client’s NavView does not consume `insurance_target`, so 11 §11.8.3’s classification has no source',
+  );
+});
 
 test('the decoder consumes every field 02 §4 freezes on DecisionStatsView', () => {
   // The direction that matters: a field the contract gains must fail here rather than being

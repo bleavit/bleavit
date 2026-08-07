@@ -1754,3 +1754,199 @@ fn sq141_close_refuses_a_version_the_epoch_never_froze() {
         assert_ok!(IncidentRegistry::do_try_state());
     });
 }
+
+// ------------------------------------------- `bond_quote`'s registry arms
+//
+// 02 §3 (contract v29) / 07 §7 (SQ-731). `F(kind, m)` is frozen at creation,
+// so a filer has no record to read it from and the amount must be published
+// before the filing exists. The obligation is that the published amount and
+// the escrowed amount are one number — and that a **not determinable**
+// exposure answers `None`, never a floor.
+
+/// The quote is exactly the bond `file` stores, on **both** instances and in
+/// both pricing regimes (the `reg.bond_*` floor, and the 07 §6.3 coverage rate).
+///
+/// The expectation is never a literal: it is read back out of `Filings`, which
+/// is the only figure that can custody money. A test that compared the quote
+/// against its own recomputation of `max(floor, ceil(bps·X / 10,000))` would be
+/// asserting a second implementation, which is the defect this method removes.
+#[test]
+fn v29_filing_bond_quote_is_the_amount_file_escrows_on_both_instances() {
+    new_test_ext().execute_with(|| {
+        // 400,000 USDC of exposure at the mock's 1,750 bps coverage rate sits
+        // far above either floor; zero exposure sits at it.
+        let scaled_exposure = 400_000 * UNIT;
+
+        for (epoch, exposure) in [(5u32, scaled_exposure), (6u32, 0)] {
+            IncidentExposure::set(Some(exposure));
+            MilestoneExposure::set(Some(exposure));
+
+            let incident_quote = IncidentRegistry::filing_bond_quote(epoch);
+            let milestone_quote = MilestoneRegistry::filing_bond_quote(epoch);
+            assert_eq!(incident_quote.map(|(_, e)| e), Some(exposure));
+            assert_eq!(milestone_quote.map(|(_, e)| e), Some(exposure));
+
+            let filer_before = usdc(&acct(ALICE));
+            assert_ok!(IncidentRegistry::file(
+                signed(ALICE),
+                epoch,
+                FilingClass::S2,
+                0,
+                H,
+                VER
+            ));
+            assert_ok!(MilestoneRegistry::file(
+                signed(ALICE),
+                epoch,
+                FilingClass::Scope(1),
+                10,
+                H,
+                VER
+            ));
+
+            let incident_bond = Filings::<Test, IncidentInstance>::get(epoch, 0)
+                .expect("the incident filing exists")
+                .bond;
+            let milestone_bond = Filings::<Test, MilestoneInstance>::get(epoch, 0)
+                .expect("the milestone filing exists")
+                .bond;
+            assert_eq!(
+                incident_quote,
+                Some((incident_bond, exposure)),
+                "the Incident quote must be the amount `file` escrowed",
+            );
+            assert_eq!(
+                milestone_quote,
+                Some((milestone_bond, exposure)),
+                "the Milestone quote must be the amount `file` escrowed",
+            );
+            // The custody move is the same number again — the quote is money,
+            // not a display figure.
+            assert_eq!(
+                usdc(&acct(ALICE)),
+                filer_before - incident_bond - milestone_bond,
+            );
+
+            // Which term bound is asserted rather than assumed, so the loop
+            // cannot silently test the floor twice. The two instances carry
+            // different floors, which is why they are read separately.
+            if exposure == 0 {
+                assert_eq!(incident_bond, BondIncident::get());
+                assert_eq!(milestone_bond, BondMilestone::get());
+            } else {
+                assert!(incident_bond > BondIncident::get());
+                assert!(milestone_bond > BondMilestone::get());
+                // One fold, two names (02 §3): the Incident and Milestone
+                // amounts coincide at equal exposure because the rate is shared.
+                assert_eq!(incident_bond, milestone_bond);
+            }
+        }
+        assert_ok!(IncidentRegistry::do_try_state());
+        assert_ok!(MilestoneRegistry::do_try_state());
+    });
+}
+
+/// 07 §7: the quote is priced at the current block and the filing's bond is
+/// frozen at creation. A live amendment therefore moves the quote for the *next*
+/// filing and must not move the stored one (I-28).
+#[test]
+fn v29_filing_bond_quote_reprices_while_the_stored_bond_stays_frozen() {
+    new_test_ext().execute_with(|| {
+        IncidentExposure::set(Some(400_000 * UNIT));
+        let before = IncidentRegistry::filing_bond_quote(5).expect("exposure is determinable");
+        assert_ok!(IncidentRegistry::file(
+            signed(ALICE),
+            5,
+            FilingClass::S2,
+            0,
+            H,
+            VER
+        ));
+        let stored = Filings::<Test, IncidentInstance>::get(5, 0)
+            .expect("the filing exists")
+            .bond;
+        assert_eq!(before.0, stored);
+
+        // A lawful META amendment to `orc.bond_bps` doubles the coverage rate.
+        CoverageBps::set(3_500);
+        let after = IncidentRegistry::filing_bond_quote(5).expect("exposure is determinable");
+        assert_eq!(after.0, stored.saturating_mul(2), "the quote is live");
+        assert_eq!(
+            Filings::<Test, IncidentInstance>::get(5, 0).map(|filing| filing.bond),
+            Some(stored),
+            "the created filing keeps the amount it froze",
+        );
+    });
+}
+
+/// 07 §7's **not determinable** answer. The Milestone exposure is undeterminable
+/// until the aggregate is bound to a component, and the quote MUST then answer
+/// `None`; `Some(floor)` would price the filing at `reg.bond_milestone` and
+/// under-collateralize it. The mirror is the point: the client-visible refusal
+/// and the dispatch refusal are the same condition (G-1), so a user is never
+/// walked to a signature `file` rejects.
+#[test]
+fn v29_filing_bond_quote_is_none_when_the_exposure_is_not_determinable() {
+    new_test_ext().execute_with(|| {
+        for (quote, floor) in [
+            (
+                (|| MilestoneRegistry::filing_bond_quote(5)) as fn() -> Option<(Balance, Balance)>,
+                BondMilestone::get(),
+            ),
+            (
+                (|| IncidentRegistry::filing_bond_quote(5)) as fn() -> Option<(Balance, Balance)>,
+                BondIncident::get(),
+            ),
+        ] {
+            // Determinable first, so the `None` below is the seam's answer and
+            // not a fixture that never worked.
+            IncidentExposure::set(Some(0));
+            MilestoneExposure::set(Some(0));
+            assert_eq!(quote(), Some((floor, 0)));
+
+            IncidentExposure::set(None);
+            MilestoneExposure::set(None);
+            assert_eq!(quote(), None, "an undeterminable exposure answers nothing");
+            assert_ne!(
+                quote(),
+                Some((floor, 0)),
+                "a floor would under-collateralize the filing (07 §7)",
+            );
+        }
+
+        // The dispatch mirror, per instance, with its own error identity.
+        assert_noop!(
+            MilestoneRegistry::file(signed(ALICE), 5, FilingClass::Scope(1), 10, H, VER),
+            Error::<Test, MilestoneInstance>::ExposureUnavailable
+        );
+        assert_noop!(
+            IncidentRegistry::file(signed(ALICE), 5, FilingClass::S2, 0, H, VER),
+            Error::<Test, IncidentInstance>::ExposureUnavailable
+        );
+        // Nothing was custodied and no filing exists on either instance (G-1).
+        assert_eq!(usdc(&incident_account()), 0);
+        assert_eq!(usdc(&milestone_account()), 0);
+        assert_eq!(FilingCount::<Test, IncidentInstance>::get(5), 0);
+        assert_eq!(FilingCount::<Test, MilestoneInstance>::get(5), 0);
+    });
+}
+
+/// The overflow arm answers `None` for the same reason, and `file` refuses with
+/// `Overflow` — the two dispositions still agree that the action cannot be
+/// priced, which is the property a client depends on.
+#[test]
+fn v29_filing_bond_quote_is_none_when_the_scaled_bond_overflows() {
+    new_test_ext().execute_with(|| {
+        IncidentExposure::set(Some(Balance::MAX));
+        assert_eq!(IncidentRegistry::filing_bond_quote(5), None);
+        assert_ne!(
+            IncidentRegistry::filing_bond_quote(5),
+            Some((BondIncident::get(), Balance::MAX)),
+        );
+        assert_noop!(
+            IncidentRegistry::file(signed(ALICE), 5, FilingClass::S2, 0, H, VER),
+            Error::<Test, IncidentInstance>::Overflow
+        );
+        assert_eq!(usdc(&incident_account()), 0);
+    });
+}

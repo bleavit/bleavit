@@ -45,6 +45,7 @@ import {
   Button,
   Count,
   DataTable,
+  Datum,
   Derived,
   Field,
   Identifier,
@@ -87,6 +88,8 @@ import {
   type ReportInputs,
 } from './oracle-reporting.js';
 import {
+  CLAIMABLE_IS_A_LOWER_BOUND,
+  STREAM_CLAIMS_NOT_WIRED,
   claimBlocks,
   claimableNow,
   insuranceCopy,
@@ -117,6 +120,7 @@ import {
   type SnapshotStaleness,
 } from './registry-crank.js';
 import {
+  FILING_BOND_IS_A_QUOTE,
   challengeFilingBlocks,
   filingBlocks,
   type ChallengeFilingInputs,
@@ -181,13 +185,17 @@ export function RegisterReporter({
 }
 
 /**
- * `oracle.report` — P-13, and the one screen in this client that must show a bond it cannot
- * compute.
+ * `oracle.report` — P-13, and the screen contract v29 opened.
  *
- * The caveat renders **unconditionally**, like `RegisterReporter`'s. Showing it only when
- * something else blocks would restore exactly the green "ready to sign" the model exists to
- * prevent — and here the unknown is an *amount of money*, which is worse than an unknown
- * eligibility: a reporter who reads the floor as the charge budgets for the wrong number.
+ * The bond is the chain's own figure (`api.bond_quote`), rendered as the amount rather than
+ * as a floor. Everything about that is a read: this screen performs no bond arithmetic, and
+ * neither does the module behind it.
+ *
+ * The disclosure renders **unconditionally**, like `RegisterReporter`'s caveat and for the
+ * same reason. It no longer says *"we cannot tell you the amount"* — it says the amount is a
+ * quote priced at a block and fixes at submission, which 02 §3 requires. Showing it only on
+ * the blocked path would restore exactly the green "ready to sign" the model exists to
+ * prevent, and here the qualified figure is money the reporter is about to commit.
  */
 export function SubmitReport({
   inputs,
@@ -214,9 +222,24 @@ export function SubmitReport({
   const gate = operatorGate('oracle.report', session, check.blocks);
   return (
     <Panel title="Report a component value">
-      <Field label="Round bond — at least">
-        <Amount datum={inputs.bondFloor.floor} decimals={decimals} symbol={symbol} />
-      </Field>
+      {/* The amount, when the chain quoted one. The non-`quoted` arms are blocks rather
+          than a rendered fallback: a floor in this slot understates what is committed. */}
+      {inputs.bondQuote.kind === 'quoted' ? (
+        <>
+          <Field label="Round bond">
+            <Amount datum={inputs.bondQuote.quote.bond} decimals={decimals} symbol={symbol} />
+          </Field>
+          <Field label="Priced at block">
+            <Count datum={inputs.bondQuote.quote.readAt} />
+          </Field>
+          {/* 02 §4 ships the exposure as disclosure beside the amount, never as an input a
+              client multiplies. It is rendered so a reporter can see what the bond scales
+              with, and it is labelled as the exposure rather than as a second price. */}
+          <Field label="Cohort escrow this bond is scaled against">
+            <Amount datum={inputs.bondQuote.quote.exposure} decimals={decimals} symbol={symbol} />
+          </Field>
+        </>
+      ) : null}
       <Field label="Your free balance">
         <Amount datum={inputs.freeUsdc} decimals={decimals} symbol={symbol} />
       </Field>
@@ -228,8 +251,8 @@ export function SubmitReport({
       <EvidencePanel state={evidence} label="Evidence for this round" />
 
       {/* Always, never only on the blocked path — see the component note. */}
-      <Notice severity="caution" heading="The bond shown is a floor, not the amount">
-        {check.bondUnknown}
+      <Notice severity="caution" heading="This bond is a quote, priced now">
+        {check.bondDisclosure}
       </Notice>
 
       <GateControl label="Post the report" intent="primary" gate={gate} onSubmit={onReport} />
@@ -427,6 +450,7 @@ export function TreasuryStreams({
   decimals,
   symbol,
   callerIsRecipient,
+  streamClaimsWired,
   onSelect,
 }: {
   readonly streams: readonly Stream[];
@@ -434,6 +458,8 @@ export function TreasuryStreams({
   readonly decimals: number;
   readonly symbol: string;
   readonly callerIsRecipient: (stream: Stream) => boolean;
+  /** `NavView.streamClaimsWired` — required, so the table cannot assume a payout leg. */
+  readonly streamClaimsWired: Verified<boolean>;
   /** Opens `ClaimStream` for this stream. Selection, not submission — no gate is involved. */
   readonly onSelect: (streamId: string) => void;
 }): ReactNode {
@@ -441,12 +467,17 @@ export function TreasuryStreams({
     <Panel title="Treasury streams">
       <DataTable
         caption="Streams paying out to accounts, with what each has released so far"
-        headers={['Stream', 'Recipient', 'Total', 'Claimed', 'Claimable now', 'Claim']}
+        // No recipient column: `treasury_streams(who)` is a **per-caller** projection
+        // (02 §3), so every row here is already the caller's. A column repeating the
+        // signer's own address would read as a fact about the stream rather than about
+        // the query, and the client holds no recipient field to fill it from.
+        headers={['Stream', 'Total', 'Claimed', 'Claimable now', 'Claim']}
         rows={streams.map((stream) => {
           const claimable = claimableNow(stream, now);
           const blocks = claimBlocks({
             stream,
             now,
+            streamClaimsWired,
             callerIsRecipient: callerIsRecipient(stream),
           });
           const labelId = `stream-${stream.id.value}`;
@@ -458,7 +489,6 @@ export function TreasuryStreams({
               <span id={labelId} key={`id-${stream.id.value}`}>
                 <Identifier datum={stream.id} />
               </span>,
-              <Identifier datum={stream.recipient} key={`to-${stream.id.value}`} />,
               <Amount
                 datum={stream.total}
                 decimals={decimals}
@@ -473,8 +503,9 @@ export function TreasuryStreams({
               />,
               // The reason travels with the zero: "not started" and "nothing left" are
               // different states, and a bare 0 for both tells a recipient the wrong next
-              // step. The amount is derived from six reads, so it renders through `Derived`
-              // and is withheld rather than fabricated when they do not agree on a block.
+              // step. The amount is the chain's `claimable_now`, and the classification
+              // combines it with four other reads — so it renders through `Derived` and is
+              // withheld rather than fabricated when they do not agree on a block.
               <Derived
                 key={`n-${stream.id.value}`}
                 combined={claimable}
@@ -519,6 +550,9 @@ export function ClaimStream({
   const blocks = claimBlocks(context);
   const claimable = claimableNow(context.stream, context.now);
   const gate = operatorGate('futarchy_treasury.claim_stream', session, blocks);
+  // Read once, outside JSX. The badged field below carries the provenance; this local
+  // only decides whether the standing caution appears.
+  const claimsWired = context.streamClaimsWired.value;
   return (
     <Panel title="Claim from a stream" subject={<Identifier datum={context.stream.id} />}>
       <Field label="Claimable now">
@@ -527,6 +561,35 @@ export function ClaimStream({
           render={(value) => `${formatBaseUnits(value.amount, decimals)} ${symbol}`}
         />
       </Field>
+      {/* 02 §4's monotonicity, stated on the screen that acts on the figure: a claim
+          included later pays at least this, never less. Unconditional, because a reader
+          who assumes the number is exact reports a discrepancy that is not one. */}
+      <Notice severity="info" heading="This is what the chain would pay now">
+        {CLAIMABLE_IS_A_LOWER_BOUND}
+      </Notice>
+      {/* The runtime-level refusal, rendered as its own notice rather than only as a
+          gate block: it is a standing property of the deployment, not something about
+          this claim, and a recipient reading a disabled button needs to know their
+          entitlement is intact.
+
+          The state is ALSO stated as its own badged field rather than only as a
+          conditional notice. `streamClaimsWired` is a chain read like any other, so
+          INV-FE-9 applies even though what it drives is a notice rather than a number:
+          "this runtime cannot pay" is a claim about the chain, and a reader is owed the
+          same provenance for it as for the amount above. `check:render-provenance`
+          caught the unwrapped form, and it was right — this is the second time today the
+          gate has caught this exact shape. */}
+      <Field label="Claim leg">
+        <Datum
+          datum={context.streamClaimsWired}
+          render={(wired) => (wired ? 'wired' : 'not wired on this runtime')}
+        />
+      </Field>
+      {claimsWired ? null : (
+        <Notice severity="caution" heading="This runtime cannot pay claims yet">
+          {STREAM_CLAIMS_NOT_WIRED}
+        </Notice>
+      )}
       <GateControl label="Claim" intent="primary" gate={gate} onSubmit={onClaim} />
     </Panel>
   );
@@ -678,9 +741,21 @@ export function RegistryFilingForm({
         {REGISTRY_HOLDS_SETTLEMENT}
       </Notice>
 
-      <Field label="Filing bond">
-        <Amount datum={inputs.filingBond} decimals={decimals} symbol={symbol} />
-      </Field>
+      {/* The chain's own figure, and nothing rendered when it did not answer: 07 §7's
+          not-determinable exposure is a block, not a slot to fill with a floor. */}
+      {inputs.filingBond.kind === 'quoted' ? (
+        <>
+          <Field label="Filing bond">
+            <Amount datum={inputs.filingBond.quote.bond} decimals={decimals} symbol={symbol} />
+          </Field>
+          <Field label="Priced at block">
+            <Count datum={inputs.filingBond.quote.readAt} />
+          </Field>
+          <Field label="Cohort escrow this bond is scaled against">
+            <Amount datum={inputs.filingBond.quote.exposure} decimals={decimals} symbol={symbol} />
+          </Field>
+        </>
+      ) : null}
       <Field label="Your free balance">
         <Amount datum={inputs.freeUsdc} decimals={decimals} symbol={symbol} />
       </Field>
@@ -690,6 +765,12 @@ export function RegistryFilingForm({
       </Field>
 
       <EvidencePanel state={evidence} label="Evidence this filing commits to" />
+
+      {/* The same disclosure P-13 states, because it is the same method and the same
+          freezing rule: 07 §7 fixes `F(kind, m)` when the filing is created. */}
+      <Notice severity="caution" heading="This bond is a quote, priced now">
+        {FILING_BOND_IS_A_QUOTE}
+      </Notice>
 
       <GateControl label="File" intent="primary" gate={gate} onSubmit={onFile} />
     </Panel>
@@ -1023,6 +1104,26 @@ export function NavPanel({
       </Field>
       <Field label="Rolling-meter utilization">
         <Ratio datum={nav.meterUtilizationBps} />
+      </Field>
+
+      {/* Contract v29's `insurance_target` (SQ-602). Rendered here rather than only inside
+          `InsurancePanel`, because §11.8.3 requires **every** `NavView` field on this
+          screen — and it is labelled as the liability the account backs rather than as a
+          target it is topped up to, which is the reading §1.2 forbids. */}
+      <Field label="INSURANCE target (the liability it backs)">
+        <Amount datum={nav.insuranceTarget} decimals={decimals} symbol={symbol} />
+      </Field>
+
+      {/* Contract v29. §11.8.3 requires every `NavView` field rendered, and this one is
+          the deployment fact behind S16's claim control — a reader of the treasury screen
+          is entitled to know the payout leg's state without opening a stream. `Datum`
+          with an explicit renderer rather than a bare boolean: "false" on a treasury
+          screen reads as an absence, and the two states need words. */}
+      <Field label="Stream claims payable">
+        <Datum
+          datum={nav.streamClaimsWired}
+          render={(wired) => (wired ? 'yes' : 'no — the payout leg is not wired')}
+        />
       </Field>
 
       {/* Continuous, never a pass/fail badge: one USDC above a floor and a million above

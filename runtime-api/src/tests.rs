@@ -1,11 +1,12 @@
 use core::fmt::Debug;
 
 use futarchy_primitives::{
-    bounds, AccountId, BoundedVec, Branch, CohortSummaryView, DecisionOutcome, DecisionStatsView,
-    EpochPhase, EpochStatusView, FixedU64, NavView, OracleRoundView, ParamKey, ParamView,
-    PositionId, PositionKind, PositionView, ProposalClass, ProposalState, ProposalSummaryView,
-    QueuedExecutionView, QuoteView, RatificationStatus, ReportView, RuntimeVersionConstraint,
-    SettlementTrust, TradeSide, VaultState, WelfareView,
+    bounds, AccountId, BondQuoteRequest, BondQuoteView, BoundedVec, Branch, CohortSummaryView,
+    DecisionOutcome, DecisionStatsView, EpochPhase, EpochStatusView, FixedU64, NavView,
+    OracleRoundView, ParamKey, ParamView, PositionId, PositionKind, PositionView, ProposalClass,
+    ProposalState, ProposalSummaryView, QueuedExecutionView, QuoteView, RatificationStatus,
+    ReportView, RuntimeVersionConstraint, SettlementTrust, StreamView, TradeSide, VaultState,
+    WelfareView,
 };
 use parity_scale_codec::{Decode, Encode, MaxEncodedLen};
 use sp_runtime::traits::Block as BlockT;
@@ -74,6 +75,18 @@ sp_api::mock_impl_runtime_apis! {
 
         fn service_positions(who: AccountId) -> BoundedVec<PositionView, { bounds::MAX_ACCOUNT_POSITIONS }> {
             singleton(service_position(who))
+        }
+
+        fn is_reserved_protocol_destination(who: AccountId) -> bool {
+            who == [0xff; 32]
+        }
+
+        fn bond_quote(request: BondQuoteRequest) -> Option<BondQuoteView> {
+            bond_quote(request)
+        }
+
+        fn treasury_streams(who: AccountId) -> BoundedVec<StreamView, { bounds::MAX_TREASURY_STREAMS }> {
+            singleton(stream(who))
         }
     }
 }
@@ -273,6 +286,48 @@ fn nav() -> NavView {
         spendable_nav: 0,
         meter_utilization_bps: 7_500,
         class_floors: [10, 20, 30, 40],
+        // Contract v29 (SQ-602): 08 §1.2's derived `T_ins`, trailing.
+        insurance_target: 55,
+        // Contract v29 (SQ-601), the second trailing append. `true` here so the fixture
+        // exercises the arm that actually renders a claim control; the refusing arm has
+        // its own case, since a fixture that only ever sets `false` would let the block
+        // be deleted and still pass.
+        stream_claims_wired: true,
+    }
+}
+
+/// Contract v29 (SQ-598/SQ-731). The `MilestoneFiling` arm answers `None` on
+/// purpose: 07 §7 makes that exposure not determinable until the aggregate is
+/// bound to a component, and the optional return is what lets the method say so
+/// rather than pricing the filing at its floor.
+fn bond_quote(request: BondQuoteRequest) -> Option<BondQuoteView> {
+    match request {
+        BondQuoteRequest::OracleReport { component, epoch } => Some(BondQuoteView {
+            bond: 30_000_000_000,
+            exposure: 1_200_000_000_000,
+            read_at: 900 + u32::from(component) + epoch,
+        }),
+        BondQuoteRequest::IncidentFiling { epoch } => Some(BondQuoteView {
+            bond: 5_000_000_000,
+            exposure: 0,
+            read_at: 900 + epoch,
+        }),
+        BondQuoteRequest::MilestoneFiling { .. } => None,
+    }
+}
+
+/// Contract v29 (SQ-601). `duration` and `claimable_now` are the published
+/// fields — the view carries no end block and no recipient, because the
+/// projection is already per caller.
+fn stream(who: AccountId) -> StreamView {
+    StreamView {
+        id: u64::from(who[0]),
+        total: 1_000_000,
+        claimed: 250_000,
+        start: 100,
+        duration: 1_000,
+        cancelled: false,
+        claimable_now: 250_000,
     }
 }
 
@@ -368,6 +423,41 @@ fn all_methods_are_callable_through_api_ref() {
             .expect("hosted report call succeeds"),
         Some(hosted_report(9))
     );
+    assert!(api
+        .is_reserved_protocol_destination(at, [0xff; 32])
+        .expect("reserved-destination call succeeds"));
+    // Contract v29: both arms of the optional return are exercised, because
+    // `None` is 07 §7's not-determinable answer and not an error — a caller that
+    // only ever saw `Some` would have no evidence the refusal is reachable.
+    assert_eq!(
+        api.bond_quote(
+            at,
+            BondQuoteRequest::OracleReport {
+                component: 4,
+                epoch: 7
+            }
+        )
+        .expect("bond quote call succeeds"),
+        bond_quote(BondQuoteRequest::OracleReport {
+            component: 4,
+            epoch: 7
+        })
+    );
+    assert_eq!(
+        api.bond_quote(at, BondQuoteRequest::IncidentFiling { epoch: 7 })
+            .expect("bond quote call succeeds"),
+        bond_quote(BondQuoteRequest::IncidentFiling { epoch: 7 })
+    );
+    assert_eq!(
+        api.bond_quote(at, BondQuoteRequest::MilestoneFiling { epoch: 7 })
+            .expect("bond quote call succeeds"),
+        None
+    );
+    assert_eq!(
+        api.treasury_streams(at, [7; 32])
+            .expect("treasury streams call succeeds"),
+        singleton(stream([7; 32]))
+    );
 }
 
 #[test]
@@ -387,7 +477,11 @@ fn runtime_api_id_and_version_are_frozen() {
     // `is_reserved_protocol_destination` — 11 §11.5's P-9 predicate, which the
     // runtime enforces as a `Contains` implementation rather than as storage, so
     // there was no surface for a precondition row to read (SQ-588).
-    assert_eq!(runtime_decl_for_futarchy_api::VERSION, 4);
+    // Contract v29 raises it to 5 by appending the fifteenth and sixteenth
+    // methods, `bond_quote` and `treasury_streams` — the three amounts an
+    // operator must commit before the record that would freeze them exists
+    // (SQ-598, SQ-601, SQ-731).
+    assert_eq!(runtime_decl_for_futarchy_api::VERSION, 5);
     // N9 raised this to 4 by adding the isolated I-36 service-egress counters;
     // **N7 raised it to 5** by appending `service_partition`, the row that
     // retired the last five declared monitoring seams — 16 §8.4's
@@ -429,6 +523,14 @@ fn api_collection_bounds_match_contract() {
     assert_eq!(
         BoundedVec::<OracleRoundView, { bounds::MAX_OPEN_ORACLE_ROUNDS }>::BOUND,
         192
+    );
+    // Contract v29. The bound is the **whole** stream register (02 §9's
+    // `MaxStreams`), not a narrower per-recipient figure: every stream may
+    // lawfully name one recipient, so anything smaller could truncate a caller's
+    // real rows — which for a claimable figure is money the client would not show.
+    assert_eq!(
+        BoundedVec::<StreamView, { bounds::MAX_TREASURY_STREAMS }>::BOUND,
+        128
     );
 }
 
@@ -504,4 +606,42 @@ fn every_populated_view_round_trips_across_api_boundary() {
     assert_scale_round_trip(cohort());
     assert_scale_round_trip(oracle_round());
     assert_scale_round_trip(hosted_report(99));
+    // Contract v29. Every `BondQuoteRequest` arm round-trips, not just the one a
+    // fixture happens to use: the enum is a *call argument*, so a discriminant that
+    // decoded wrongly would price a different action rather than fail.
+    assert_scale_round_trip(BondQuoteRequest::OracleReport {
+        component: 4,
+        epoch: 7,
+    });
+    assert_scale_round_trip(BondQuoteRequest::IncidentFiling { epoch: 7 });
+    assert_scale_round_trip(BondQuoteRequest::MilestoneFiling { epoch: 7 });
+    assert_scale_round_trip(bond_quote(BondQuoteRequest::OracleReport {
+        component: 4,
+        epoch: 7,
+    }));
+    assert_scale_round_trip(bond_quote(BondQuoteRequest::MilestoneFiling { epoch: 7 }));
+    assert_scale_round_trip(stream([7; 32]));
+}
+
+/// Contract v29's request enum is a **call argument**, so its discriminants are
+/// frozen the same way `QuestionPhase`'s are: a reordering would silently price a
+/// registry filing when the caller asked for an oracle report.
+#[test]
+fn contract_v29_bond_quote_request_discriminants_are_frozen() {
+    assert_eq!(
+        BondQuoteRequest::OracleReport {
+            component: 0x0201,
+            epoch: 0x0605_0403
+        }
+        .encode(),
+        vec![0, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06]
+    );
+    assert_eq!(
+        BondQuoteRequest::IncidentFiling { epoch: 0x0605_0403 }.encode(),
+        vec![1, 0x03, 0x04, 0x05, 0x06]
+    );
+    assert_eq!(
+        BondQuoteRequest::MilestoneFiling { epoch: 0x0605_0403 }.encode(),
+        vec![2, 0x03, 0x04, 0x05, 0x06]
+    );
 }

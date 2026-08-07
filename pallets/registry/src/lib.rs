@@ -856,6 +856,28 @@ pub mod pallet {
             Ok(core::cmp::max(floor, scaled))
         }
 
+        /// What a filing against measurement `epoch` would hold in **this**
+        /// instance right now, with the `Exposure(kind, epoch)` it was scaled
+        /// against (07 §7).
+        ///
+        /// Backs 02 §3's `bond_quote` (contract v29, SQ-731). It reads the same
+        /// `T::Epoch::cohort_exposure` seam and calls the same
+        /// [`Self::required_bond`] that `file` calls, so the quoted amount is
+        /// what `file` would freeze at this block rather than a second
+        /// implementation of the same rate.
+        ///
+        /// `None` is 07 §7's **not determinable** answer, and it is the only
+        /// disposition permitted: the Milestone exposure is undeterminable until
+        /// the aggregate is bound to a component, and `file` MUST then refuse
+        /// with `ExposureUnavailable`, which is the status-quo default (G-1).
+        /// A zero would price the filing at the floor and under-collateralize
+        /// it. The overflow arm returns `None` for the same reason.
+        pub fn filing_bond_quote(epoch: EpochId) -> Option<(Balance, Balance)> {
+            let exposure = T::Epoch::cohort_exposure(T::Kind::get(), epoch)?;
+            let bond = Self::required_bond(Some(exposure)).ok()?;
+            Some((bond, exposure))
+        }
+
         /// Current block as the core's `u32` block number (real runtime is u32;
         /// mocks stay well below the ceiling).
         fn now() -> BlockNumber {
