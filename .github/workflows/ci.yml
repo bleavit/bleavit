@@ -180,7 +180,7 @@ jobs:
         run: python3 tools/ci/check-integration-abi.py
       - name: Check runbooks
         run: python3 tools/deploy/check-runbooks.py
-      - name: Bind the ops handbook to 12 §6.1's service table (F15)
+      - name: Bind the ops handbook to doc 12's operational layer (F15)
         # 12 §6 opens with "every row names an owner role (an accountable person holds
         # each role; assignments are published in the ops handbook)". The document owns
         # the commitments, the handbook owns the assignments, and nothing made the two
@@ -188,6 +188,13 @@ jobs:
         # is a commitment nobody made. A vacancy is DECLARED rather than omitted — an
         # omitted row reads as "no such commitment" — and `--strict`, which a launch gate
         # runs rather than CI, refuses one.
+        # Three sections are bound. §6.1's services carry an owner and a funding line.
+        # §6.3's first-responder roster is DERIVED — domain to runbook to that runbook's
+        # owner_role — because §6.3 states its ownership rule and never applies it, and
+        # its cross-row escalation MUST had no mechanical reader at all. §6.4's incident
+        # classes must each name an accountable role and a real runbook section: a class
+        # can be added there with no alert row and no runbook, and check-runbooks.py reads
+        # that heading only as a boundary marker.
         run: python3 tools/deploy/check-ops-handbook.py
 
   # S1 formal models — 15 §4.1; 03 §11.

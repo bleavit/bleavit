@@ -84,8 +84,8 @@ one frontmatter occurrence; compares frontmatter and body `Alerts` tables (Domai
 Key series, Trigger) after the normalization stated above; enforces paging markers,
 strict scalar/frontmatter syntax, body section order, case-sensitive filenames,
 local files and Markdown heading fragments; pins doc 12 and this index to the
-frozen 13-ID O4 set; and binds the index bidirectionally to every runbook's title,
-owner role, and paging flag.
+frozen 14-ID runbook set (13 from O4, plus RB-SERVICE with D-20); and binds the
+index bidirectionally to every runbook's title, owner role, and paging flag.
 
 Run it from the repository root:
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Bind the ops handbook to 12 §6.1's normative service table (F15).
+"""Bind the ops handbook to doc 12's operational layer (F15).
 
 12 §6 opens with the sentence this checker exists to make true: *"Every row
 names an owner role (an accountable person holds each role; assignments are
@@ -7,12 +7,15 @@ published in the ops handbook) and a treasury budget line whose amount is
 normative in 08."* The document owns the commitments; the handbook owns the
 assignments; and nothing before this made the two agree.
 
-The binding is **bidirectional**, for the reason every other gate in this
-repository is: a checker that only walked the handbook would pass a handbook
-that quietly dropped a service, and a checker that only walked the table would
-pass a handbook that invented one. Both are failures, and they are different
-failures — a dropped row is a commitment nobody owns, an invented one is a
-commitment nobody made.
+Three sections of doc 12 are bound here, and each binding is **bidirectional**,
+for the reason every other gate in this repository is: a checker that only
+walked the handbook would pass a handbook that quietly dropped a commitment, and
+a checker that only walked the document would pass a handbook that invented one.
+Both are failures, and they are different failures — a dropped row is a
+commitment nobody owns, an invented one is a commitment nobody made.
+
+**§6.1 — the service table.** Every service is assigned with its owner role and
+funding line.
 
 **A vacant role is declared, never omitted.** This is the design decision worth
 stating, because the tempting shape is to list only the roles that are filled.
@@ -21,6 +24,31 @@ An omitted row reads as *there is no such commitment*; a row declaring
 is what a launch gate needs to see and what 12 §6.5's phase entries are checked
 against. So a blank holder is an error, and ``VACANT`` is a legal value that
 ``--strict`` refuses.
+
+**§6.3 — the ownership roster.** §6.3's *Ownership* paragraph states the rule
+and never applies it: *"This table assigns runbooks, not owners: an alert's
+owner is the owner of its §6.1 row"*, with protocol domains falling to the
+Monitoring coordinator. Applying it is the handbook's job, and the roster is
+therefore **derived rather than read** — see ``check_roster`` for the derivation
+and for why the runbook column is deliberately not its source. This is not a
+restatement of ``check-runbooks.py``, which binds §6.3 to the runbook files;
+here the runbooks are an *input* and the handbook is the artifact under test.
+
+§6.3 also carries one obligation that only prose asserted until now: *"A runbook
+spanning §6.3 rows that map to different §6.1 rows takes its primary row's owner
+and MUST name the other row's owner in its escalation path."* Those instances
+are derived too — a runbook whose owner differs from a domain's accountable
+owner is one by definition — and the MUST is tested against that runbook's own
+Escalation text.
+
+**§6.4 — the incident classes.** An incident class can be added to §6.4 with no
+alert row, no runbook section and no owner, and nothing else in the repository
+would notice: ``check-runbooks.py`` reads §6.4's heading only as a boundary
+marker. Each class must name an accountable role and a standing response, the
+response must resolve to a real runbook section. Accountability comes from the
+§6.1 row that commits to the playbooks, never from the runbook that happens to
+hold the procedure. That procedure stays in the runbook — a handbook section
+that restates a runbook is worse than none.
 """
 
 from __future__ import annotations
@@ -35,15 +63,55 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DOC = Path("docs/architecture/12-release-and-operations.md")
 DEFAULT_HANDBOOK = Path("deploy/ops-handbook/README.md")
+DEFAULT_RUNBOOKS = Path("deploy/runbooks")
 
 VACANT = "VACANT"
+
+SERVICE_HEADING = "### 6.1 Owned-and-funded ops table"
+ALERT_HEADING = "### 6.3 Monitoring and alerting"
+INCIDENT_HEADING = "### 6.4 Incident response"
+
+# Both §6.3 tables reduce to this header once decoration and the parenthetical
+# of "Alert (example)" are stripped.
+ALERT_HEADER = ("Domain", "Key series", "Alert", "Runbook")
+ROSTER_HEADER = ("Accountable owner", "Alert domains")
+CROSS_ROW_HEADER = ("Alert domain", "Accountable owner", "Runbook", "Runbook owner")
+INCIDENT_HEADER = ("Incident class", "Accountable role", "Standing response")
+
+RUNBOOK_ID_RE = re.compile(r"RB-[A-Z]+")
+# §6.4 names each class in bold, optionally annotated, before an em dash.
+INCIDENT_CLASS_RE = re.compile(r"\*\*([^*]+?)\*\*(?:\s*\([^)]*\))?\s*—")
+RESPONSE_RE = re.compile(r"^(RB-[A-Z]+) § (.+)$")
+FRONTMATTER_ID_RE = re.compile(r"^id:\s*(.+)$", re.MULTILINE)
+FRONTMATTER_OWNER_RE = re.compile(r"^owner_role:\s*(.+)$", re.MULTILINE)
 
 
 @dataclass(frozen=True)
 class ServiceRow:
     service: str
+    commitment: str
     owner_role: str
     funding_line: str
+
+
+@dataclass(frozen=True)
+class AlertRow:
+    domain: str
+    runbook_id: str
+
+
+@dataclass(frozen=True)
+class RunbookFacts:
+    """The three things this gate needs from a runbook, and nothing else.
+
+    ``check-runbooks.py`` owns runbook validity, including strict frontmatter
+    syntax; reading two keys leniently here keeps one gate from failing for the
+    other's reasons.
+    """
+
+    owner_role: str
+    escalation: str
+    sections: frozenset[str]
 
 
 def strip_markdown(cell: str) -> str:
@@ -60,6 +128,31 @@ def strip_markdown(cell: str) -> str:
     return " ".join(text.split()).strip()
 
 
+def table_cells(line: str) -> list[str] | None:
+    """Split a Markdown table row into stripped cells, or return None.
+
+    Escaped pipes are not decoded: no table this gate reads contains one, and a
+    row that grew one would land here as a cell-count error rather than as a
+    silently mis-split row.
+    """
+    if not line.lstrip().startswith("|"):
+        return None
+    return [strip_markdown(cell) for cell in line.strip().strip("|").split("|")]
+
+
+def is_separator(cells: list[str]) -> bool:
+    return bool(cells) and all(cell and set(cell) <= set("-: ") for cell in cells)
+
+
+def doc_section(doc_text: str, heading: str, what: str) -> str:
+    start = doc_text.find(heading)
+    if start == -1:
+        raise SystemExit(f"{what} is gone; this gate has nothing to read")
+    rest = doc_text[start:]
+    end = rest.find("\n### ", 1)
+    return rest if end == -1 else rest[:end]
+
+
 def parse_service_table(doc_text: str) -> list[ServiceRow]:
     """Extract 12 §6.1's rows.
 
@@ -67,30 +160,152 @@ def parse_service_table(doc_text: str) -> list[ServiceRow]:
     several, and a checker that matched them all would compare the handbook
     against the alert tables and fail for reasons that are not about it.
     """
-    start = doc_text.find("### 6.1 Owned-and-funded ops table")
-    if start == -1:
-        raise SystemExit("12 §6.1's ops table is gone; this gate has nothing to read")
-    rest = doc_text[start:]
-    end = rest.find("\n### ", 1)
-    section = rest if end == -1 else rest[:end]
+    section = doc_section(doc_text, SERVICE_HEADING, "12 §6.1's ops table")
 
     rows: list[ServiceRow] = []
     for line in section.splitlines():
-        if not line.startswith("|"):
+        cells = table_cells(line)
+        if cells is None or len(cells) != 4:
             continue
-        cells = [strip_markdown(cell) for cell in line.strip().strip("|").split("|")]
-        if len(cells) != 4:
-            continue
-        service, _commitment, owner_role, funding_line = cells
+        service, commitment, owner_role, funding_line = cells
         if service in {"Service", ""} or set(service) <= set("-: "):
             continue
-        rows.append(ServiceRow(service, owner_role, funding_line))
+        rows.append(ServiceRow(service, commitment, owner_role, funding_line))
     if not rows:
         raise SystemExit(
             "parsed no service rows out of 12 §6.1; the table shape moved and this gate "
             "would have passed by comparing against nothing"
         )
+    seen: set[str] = set()
+    for row in rows:
+        # Two rows of the same name collapse into one key and the second silently
+        # wins, which would let a service change owner with no failure anywhere.
+        if row.service in seen:
+            raise SystemExit(f"12 §6.1 names the service {row.service!r} twice")
+        seen.add(row.service)
     return rows
+
+
+def parse_alert_rows(doc_text: str) -> list[AlertRow]:
+    """Extract every alert row of 12 §6.3's two tables, with its runbook.
+
+    Anchored on the header rather than on cell shape, and it insists on finding
+    both tables: §6.3's second table is the one this document owns, and a parser
+    that silently read only the first would roster two thirds of the domains and
+    look content.
+    """
+    section = doc_section(doc_text, ALERT_HEADING, "12 §6.3's alert tables")
+    lines = section.splitlines()
+
+    rows: list[AlertRow] = []
+    tables = 0
+    index = 0
+    while index < len(lines):
+        cells = table_cells(lines[index])
+        if cells is None or tuple(cells) != ALERT_HEADER:
+            index += 1
+            continue
+        separator = table_cells(lines[index + 1]) if index + 1 < len(lines) else None
+        if separator is None or not is_separator(separator):
+            raise SystemExit(
+                "a 12 §6.3 alert table header has no separator row; the table shape moved"
+            )
+        tables += 1
+        index += 2
+        while index < len(lines):
+            row = table_cells(lines[index])
+            if row is None:
+                break
+            runbook = RUNBOOK_ID_RE.fullmatch(row[3]) if len(row) == 4 else None
+            if len(row) != 4 or is_separator(row) or not row[0] or runbook is None:
+                raise SystemExit(
+                    f"unparsable 12 §6.3 alert row, so this gate cannot say who answers "
+                    f"for it: {lines[index].strip()!r}"
+                )
+            rows.append(AlertRow(row[0], runbook.group(0)))
+            index += 1
+
+    if tables != 2:
+        raise SystemExit(
+            f"found {tables} parseable 12 §6.3 alert tables, expected 2; the table shape "
+            "moved and this gate would have compared against nothing"
+        )
+    if not rows:
+        raise SystemExit("parsed no alert rows out of 12 §6.3's tables")
+    owners: dict[str, set[str]] = {}
+    for row in rows:
+        owners.setdefault(row.domain, set()).add(row.runbook_id)
+    for domain, runbooks in sorted(owners.items()):
+        if len(runbooks) > 1:
+            raise SystemExit(
+                f"12 §6.3 splits the domain {domain!r} across {', '.join(sorted(runbooks))}, "
+                "so it has no single first responder to publish"
+            )
+    return rows
+
+
+def parse_incident_classes(doc_text: str) -> list[str]:
+    """Extract 12 §6.4's incident classes."""
+    section = doc_section(doc_text, INCIDENT_HEADING, "12 §6.4's incident classes")
+    classes = [
+        strip_markdown(match.group(1)) for match in INCIDENT_CLASS_RE.finditer(section)
+    ]
+    if not classes:
+        raise SystemExit(
+            "parsed no incident classes out of 12 §6.4; the section shape moved and this "
+            "gate would have passed by comparing against nothing"
+        )
+    seen: set[str] = set()
+    for name in classes:
+        if name in seen:
+            raise SystemExit(f"12 §6.4 names the incident class {name!r} twice")
+        seen.add(name)
+    return classes
+
+
+def runbook_section(text: str, heading: str) -> str:
+    start = text.find(heading)
+    if start == -1:
+        return ""
+    rest = text[start:]
+    end = rest.find("\n## ", 1)
+    return rest if end == -1 else rest[:end]
+
+
+def load_runbooks(directory: Path) -> tuple[dict[str, RunbookFacts], list[str]]:
+    """Read the O4 runbooks this gate resolves ownership through."""
+    if not directory.is_dir():
+        return {}, [
+            f"the runbooks directory {directory} does not exist, so no alert domain can be "
+            "resolved to a first responder"
+        ]
+    facts: dict[str, RunbookFacts] = {}
+    problems: list[str] = []
+    for path in sorted(directory.glob("RB-*.md")):
+        text = path.read_text(encoding="utf-8")
+        id_match = FRONTMATTER_ID_RE.search(text)
+        owner_match = FRONTMATTER_OWNER_RE.search(text)
+        if id_match is None or owner_match is None:
+            problems.append(
+                f"{path.name}: no id and owner_role frontmatter, so this gate cannot say "
+                "who answers for the alerts it owns"
+            )
+            continue
+        runbook_id = id_match.group(1).strip().strip('"')
+        if runbook_id in facts:
+            problems.append(f"{path.name}: duplicate runbook id {runbook_id}")
+            continue
+        sections = frozenset(
+            strip_markdown(line.lstrip("#").strip())
+            for line in text.splitlines()
+            if line.startswith(("## ", "### "))
+        )
+        facts[runbook_id] = RunbookFacts(
+            owner_role=owner_match.group(1).strip().strip('"'),
+            escalation=runbook_section(text, "## Escalation"),
+            sections=sections,
+        )
+    return facts, problems
 
 
 @dataclass(frozen=True)
@@ -107,13 +322,56 @@ ASSIGNMENT = re.compile(
 )
 
 
-def parse_handbook(text: str) -> list[Assignment]:
-    start = text.find("## Role assignments")
+def handbook_section(text: str, heading: str, what: str) -> str:
+    start = text.find(heading)
     if start == -1:
-        raise SystemExit("the handbook has no '## Role assignments' section")
+        raise SystemExit(f"the handbook has no '{heading}' section; {what}")
     rest = text[start:]
     end = rest.find("\n## ", 1)
-    section = rest if end == -1 else rest[:end]
+    return rest if end == -1 else rest[:end]
+
+
+def handbook_table(
+    section: str, header: tuple[str, ...], what: str
+) -> list[list[str]]:
+    """Return a handbook table's data rows, anchored on its exact header."""
+    lines = section.splitlines()
+    starts = [
+        index
+        for index, line in enumerate(lines)
+        if (cells := table_cells(line)) is not None and tuple(cells) == header
+    ]
+    if len(starts) != 1:
+        raise SystemExit(
+            f"found {len(starts)} tables headed {' | '.join(header)} in the handbook, "
+            f"expected exactly 1; {what}"
+        )
+    index = starts[0]
+    separator = table_cells(lines[index + 1]) if index + 1 < len(lines) else None
+    if separator is None or not is_separator(separator):
+        raise SystemExit(f"the handbook's {header[0]!r} table has no separator row")
+    rows: list[list[str]] = []
+    index += 2
+    while index < len(lines):
+        cells = table_cells(lines[index])
+        if cells is None:
+            break
+        if len(cells) != len(header) or is_separator(cells):
+            raise SystemExit(
+                f"unparsable handbook row in the {header[0]!r} table: "
+                f"{lines[index].strip()!r}"
+            )
+        rows.append(cells)
+        index += 1
+    if not rows:
+        raise SystemExit(f"the handbook's {header[0]!r} table has no rows; {what}")
+    return rows
+
+
+def parse_handbook(text: str) -> list[Assignment]:
+    section = handbook_section(
+        text, "## Role assignments", "12 §6.1's services would have no published owner"
+    )
 
     assignments: list[Assignment] = []
     for line in section.splitlines():
@@ -130,6 +388,8 @@ def parse_handbook(text: str) -> list[Assignment]:
                 "left blank — an omitted holder reads as 'no such commitment' rather than "
                 "as 'this commitment has nobody accountable'."
             )
+        if any(existing.service == service for existing in assignments):
+            raise SystemExit(f"the handbook assigns {service!r} twice")
         assignments.append(
             Assignment(
                 service=service,
@@ -141,11 +401,78 @@ def parse_handbook(text: str) -> list[Assignment]:
     return assignments
 
 
-def check(doc_text: str, handbook_text: str, strict: bool) -> list[str]:
-    rows = {row.service: row for row in parse_service_table(doc_text)}
-    assignments = {a.service: a for a in parse_handbook(handbook_text)}
+def parse_roster(text: str) -> tuple[dict[str, str], list[str]]:
+    """Read the handbook's ownership roster as domain -> accountable owner."""
+    section = handbook_section(
+        text,
+        "## Monitoring and alerting",
+        "12 §6.3's alerts would have no published owner",
+    )
+    roster: dict[str, str] = {}
     failures: list[str] = []
+    seen_roles: set[str] = set()
+    for cells in handbook_table(
+        section, ROSTER_HEADER, "no alert domain would be rostered"
+    ):
+        role, domain_cell = cells
+        if not role:
+            failures.append("the roster has a row with no accountable owner")
+            continue
+        if role in seen_roles:
+            failures.append(
+                f"the roster lists {role!r} twice; one role holds one list of domains"
+            )
+        seen_roles.add(role)
+        domains = [part.strip() for part in domain_cell.split(",") if part.strip()]
+        if not domains:
+            failures.append(f"the roster gives {role!r} no alert domains")
+        for domain in domains:
+            if domain in roster:
+                failures.append(
+                    f"the roster names the domain {domain!r} twice, under {roster[domain]!r} "
+                    f"and {role!r}; one domain has one accountable owner"
+                )
+                continue
+            roster[domain] = role
+    return roster, failures
 
+
+def parse_cross_rows(text: str) -> dict[str, tuple[str, str, str]]:
+    """Read the handbook's cross-row table as domain -> (owner, runbook, its owner)."""
+    section = handbook_section(
+        text,
+        "## Monitoring and alerting",
+        "12 §6.3's cross-row escalation rule would go unrecorded",
+    )
+    rows: dict[str, tuple[str, str, str]] = {}
+    for cells in handbook_table(
+        section, CROSS_ROW_HEADER, "no cross-row instance would be declared"
+    ):
+        domain, owner, runbook_id, runbook_owner = cells
+        rows[domain] = (owner, runbook_id, runbook_owner)
+    return rows
+
+
+def parse_incidents(text: str) -> dict[str, tuple[str, str]]:
+    """Read the handbook's incident table as class -> (role, response)."""
+    section = handbook_section(
+        text,
+        "## Incident response",
+        "12 §6.4's incident classes would have no accountable role",
+    )
+    incidents: dict[str, tuple[str, str]] = {}
+    for cells in handbook_table(
+        section, INCIDENT_HEADER, "no incident class would be owned"
+    ):
+        incident_class, role, response = cells
+        incidents[incident_class] = (role, response)
+    return incidents
+
+
+def check_services(
+    rows: dict[str, ServiceRow], assignments: dict[str, Assignment], strict: bool
+) -> list[str]:
+    failures: list[str] = []
     for service, row in rows.items():
         assignment = assignments.get(service)
         if assignment is None:
@@ -182,10 +509,268 @@ def check(doc_text: str, handbook_text: str, strict: bool) -> list[str]:
     return failures
 
 
+def check_roster(
+    alert_rows: list[AlertRow],
+    services: dict[str, ServiceRow],
+    runbooks: dict[str, RunbookFacts],
+    owner_roles: set[str],
+    roster: dict[str, str],
+) -> tuple[list[str], dict[str, str], dict[str, str]]:
+    """Derive domain -> accountable owner, the way 12 §6.3 states it.
+
+    §6.3's *Ownership* paragraph opens with *"This table assigns runbooks, not
+    owners: an alert's owner is the owner of its §6.1 row"*, so the runbook
+    column is deliberately **not** the source. Where an alert domain names a
+    §6.1 service, that row's owner is the answer. Where it does not, the runbook
+    that answers it supplies one — licensed by the same paragraph's closing
+    claim that the Bootnodes / Served-state-window pair is *the* live instance
+    of a runbook whose owner differs from the alert's §6.1 row, which asserts
+    there is no other divergence.
+
+    Deriving every domain from its runbook instead would invert the rule for
+    exactly that pair, and would let a runbook's `owner_role` — which
+    `check-runbooks.py` only binds to *some* §6.1 row pair — dictate an owner
+    §6.1 never gave it.
+    """
+    failures: list[str] = []
+    expected: dict[str, str] = {}
+    runbook_by_domain: dict[str, str] = {}
+    for row in alert_rows:
+        if row.domain in expected:
+            continue
+        runbook_by_domain[row.domain] = row.runbook_id
+        service = services.get(row.domain)
+        if service is not None:
+            expected[row.domain] = service.owner_role
+            continue
+        facts = runbooks.get(row.runbook_id)
+        if facts is None:
+            failures.append(
+                f"12 §6.3 binds the domain {row.domain!r} to {row.runbook_id}, 12 §6.1 has "
+                "no row of that name, and no readable runbook of that id declares an owner "
+                "role. An alert nobody owns is a commitment nobody owns."
+            )
+            continue
+        if facts.owner_role not in owner_roles:
+            failures.append(
+                f"{row.runbook_id} answers to {facts.owner_role!r}, which 12 §6.1 does not "
+                "name as an owner role, so this gate cannot publish it as an owner"
+            )
+            continue
+        expected[row.domain] = facts.owner_role
+
+    for domain, role in sorted(expected.items()):
+        rostered = roster.get(domain)
+        if rostered is None:
+            failures.append(
+                f"12 §6.3 alerts on {domain!r} and the handbook rosters no accountable "
+                f"owner for it. 12 §6.3 makes that {role!r}."
+            )
+        elif rostered != role:
+            failures.append(
+                f"{domain}: 12 §6.3 makes the owner {role!r}, the handbook rosters "
+                f"{rostered!r}"
+            )
+
+    for domain, role in sorted(roster.items()):
+        if domain not in expected and domain not in runbook_by_domain:
+            failures.append(
+                f"the handbook rosters {role!r} for the alert domain {domain!r}, which "
+                "12 §6.3 does not alert on. An invented domain is a commitment nobody made."
+            )
+    return failures, expected, runbook_by_domain
+
+
+def check_cross_rows(
+    expected_roles: dict[str, str],
+    runbook_by_domain: dict[str, str],
+    runbooks: dict[str, RunbookFacts],
+    declared: dict[str, tuple[str, str, str]],
+) -> list[str]:
+    """12 §6.3's cross-row rule, derived for every domain rather than declared.
+
+    *"A runbook spanning §6.3 rows that map to different §6.1 rows takes its
+    primary row's owner and MUST name the other row's owner in its escalation
+    path."* A runbook whose `owner_role` differs from a domain's accountable
+    owner is exactly that case, so the instances fall out of the comparison and
+    the handbook cannot omit one by not declaring it. The MUST itself is then
+    tested against the runbook's own Escalation text.
+    """
+    failures: list[str] = []
+    required: dict[str, tuple[str, str, str]] = {}
+    for domain, owner in expected_roles.items():
+        runbook_id = runbook_by_domain.get(domain)
+        facts = runbooks.get(runbook_id) if runbook_id else None
+        if facts is not None and facts.owner_role != owner:
+            required[domain] = (owner, runbook_id, facts.owner_role)
+
+    for domain, expected_row in sorted(required.items()):
+        if domain not in declared:
+            failures.append(
+                f"{domain}: 12 §6.1 owns it to {expected_row[0]!r} while {expected_row[1]} "
+                f"answers to {expected_row[2]!r}, and the handbook records no cross-row "
+                "instance. 12 §6.3 requires the other row's owner to be named."
+            )
+        elif declared[domain] != expected_row:
+            failures.append(
+                f"{domain}: the cross-row instance is "
+                f"{' / '.join(expected_row)}, the handbook records "
+                f"{' / '.join(declared[domain])}"
+            )
+
+    for domain in sorted(declared):
+        if domain not in expected_roles:
+            failures.append(
+                f"the handbook records a cross-row instance for {domain!r}, which 12 §6.3 "
+                "does not alert on"
+            )
+        elif domain not in required:
+            failures.append(
+                f"the handbook records a cross-row instance for {domain!r}, whose runbook "
+                "answers to the same role 12 §6.1 owns it to. That is not a cross-row case."
+            )
+
+    for domain, (owner, runbook_id, _runbook_owner) in sorted(required.items()):
+        facts = runbooks[runbook_id]
+        if owner not in facts.escalation:
+            failures.append(
+                f"{runbook_id}: its Escalation section does not name {owner!r}. 12 §6.3 "
+                f"requires the runbook spanning {domain!r} to name that row's owner."
+            )
+    return failures
+
+
+def incident_playbook_owner(service_rows: list[ServiceRow]) -> str:
+    """The 12 §6.1 row that commits to the §6.4 playbooks names their owner.
+
+    §6.1's Release-operations row reads *"§1 ceremonies, key ceremonies (§2),
+    signer registry upkeep, incident playbooks (§6.4)"*, so accountability for
+    an incident class is fixed there rather than by whichever runbook happens to
+    hold the procedure. Anchored on that commitment phrase, so a row rename
+    cannot quietly move the accountability.
+    """
+    owners = [row for row in service_rows if "incident playbooks" in row.commitment]
+    if len(owners) != 1:
+        raise SystemExit(
+            f"{len(owners)} 12 §6.1 rows commit to the incident playbooks, expected 1; "
+            "without exactly one this gate cannot say who is accountable for a §6.4 class"
+        )
+    return owners[0].owner_role
+
+
+def check_incidents(
+    classes: list[str],
+    incidents: dict[str, tuple[str, str]],
+    runbooks: dict[str, RunbookFacts],
+    accountable: str,
+) -> list[str]:
+    failures: list[str] = []
+    for incident_class in classes:
+        if incident_class not in incidents:
+            failures.append(
+                f"12 §6.4 names the incident class {incident_class!r} and the handbook gives "
+                "it no accountable role. An incident class nobody owns has nobody to route "
+                "it to."
+            )
+
+    known = set(classes)
+    for incident_class, (role, response) in sorted(incidents.items()):
+        if incident_class not in known:
+            failures.append(
+                f"the handbook owns the incident class {incident_class!r}, which 12 §6.4 "
+                "does not name. An invented class is a commitment nobody made."
+            )
+            continue
+        match = RESPONSE_RE.match(response)
+        if match is None:
+            failures.append(
+                f"{incident_class}: the standing response {response!r} does not name a "
+                "runbook section as 'RB-ID § Section'"
+            )
+            continue
+        runbook_id, section = match.group(1), match.group(2)
+        facts = runbooks.get(runbook_id)
+        if facts is None:
+            failures.append(
+                f"{incident_class}: the standing response names {runbook_id}, which is not a "
+                "runbook this gate can read"
+            )
+            continue
+        if section not in facts.sections:
+            failures.append(
+                f"{incident_class}: {runbook_id} has no section {section!r}. A standing "
+                "response with no written procedure is a name, not a procedure."
+            )
+        if role != accountable:
+            failures.append(
+                f"{incident_class}: 12 §6.1 puts the incident playbooks on {accountable!r}, "
+                f"the handbook makes {role!r} accountable"
+            )
+    return failures
+
+
+def check(
+    doc_text: str,
+    handbook_text: str,
+    runbooks: dict[str, RunbookFacts],
+    strict: bool,
+) -> list[str]:
+    service_rows = parse_service_table(doc_text)
+    services = {row.service: row for row in service_rows}
+    owner_roles = {row.owner_role for row in service_rows}
+    assignments = {a.service: a for a in parse_handbook(handbook_text)}
+
+    failures = check_services(services, assignments, strict)
+
+    alert_rows = parse_alert_rows(doc_text)
+    roster, roster_failures = parse_roster(handbook_text)
+    failures.extend(roster_failures)
+    roster_binding, expected_roles, runbook_by_domain = check_roster(
+        alert_rows, services, runbooks, owner_roles, roster
+    )
+    failures.extend(roster_binding)
+
+    failures.extend(
+        check_cross_rows(
+            expected_roles,
+            runbook_by_domain,
+            runbooks,
+            parse_cross_rows(handbook_text),
+        )
+    )
+
+    failures.extend(
+        check_incidents(
+            parse_incident_classes(doc_text),
+            parse_incidents(handbook_text),
+            runbooks,
+            incident_playbook_owner(service_rows),
+        )
+    )
+    return failures
+
+
+def summarize(
+    doc_text: str, handbook_text: str, runbooks: dict[str, RunbookFacts]
+) -> str:
+    rows = parse_service_table(doc_text)
+    assignments = parse_handbook(handbook_text)
+    vacant = sum(1 for a in assignments if a.holder == VACANT)
+    roster, _failures = parse_roster(handbook_text)
+    return (
+        f"Ops handbook OK — {len(rows)} service commitments bound, "
+        f"{len(assignments) - vacant} assigned, {vacant} declared vacant. "
+        f"{len(roster)} alert domains rostered across {len(set(roster.values()))} owners, "
+        f"{len(parse_incident_classes(doc_text))} incident classes owned, "
+        f"{len(runbooks)} runbooks read."
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--doc", type=Path, default=ROOT / DEFAULT_DOC)
     parser.add_argument("--handbook", type=Path, default=ROOT / DEFAULT_HANDBOOK)
+    parser.add_argument("--runbooks-dir", type=Path, default=ROOT / DEFAULT_RUNBOOKS)
     parser.add_argument(
         "--strict",
         action="store_true",
@@ -195,21 +780,16 @@ def main() -> int:
 
     doc_text = args.doc.read_text(encoding="utf-8")
     handbook_text = args.handbook.read_text(encoding="utf-8")
-    failures = check(doc_text, handbook_text, args.strict)
+    runbooks, problems = load_runbooks(args.runbooks_dir)
+    failures = problems + check(doc_text, handbook_text, runbooks, args.strict)
 
     if failures:
-        print("Ops handbook does not agree with 12 §6.1:", file=sys.stderr)
+        print("Ops handbook does not agree with doc 12:", file=sys.stderr)
         for failure in failures:
             print(f"  - {failure}", file=sys.stderr)
         return 1
 
-    rows = parse_service_table(doc_text)
-    assignments = parse_handbook(handbook_text)
-    vacant = sum(1 for a in assignments if a.holder == VACANT)
-    print(
-        f"Ops handbook OK — {len(rows)} service commitments bound, "
-        f"{len(assignments) - vacant} assigned, {vacant} declared vacant."
-    )
+    print(summarize(doc_text, handbook_text, runbooks))
     return 0
 
 
