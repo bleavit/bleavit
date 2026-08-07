@@ -83,16 +83,30 @@ export const SUGGESTED_PROVIDERS: readonly ProviderSuggestion[] = Object.freeze(
  * the true bound — INV-FE-3 makes provider data structurally unable to satisfy a precondition —
  * and omitting it would leave a user weighing a privacy cost against an unstated risk, which is
  * how people decline something harmless and accept something that is not.
+ *
+ * ## The heartbeat sentence, added 2026-08-07 (F24, 10 §8.5.3)
+ *
+ * §8.1's obligation is *"exactly what the operator learns"*, and until F24 this copy described
+ * **queries only** — which was complete while nothing drove §8.3's probe. It is not complete now.
+ * The probe is a request every ten minutes for as long as the source stays enabled, sent whether
+ * or not the user reads anything, and it discloses presence, uptime and IP continuity rather than
+ * interest in any object. A user who read this copy and then went idle would reasonably believe
+ * the operator stopped hearing from them. 14 TH-60 mitigates on the same footing, and its
+ * mitigation column names the query linkage only, so the gap was in both places.
  */
 export function disclosureFor(suggestion: ProviderSuggestion): string {
   return (
     `${suggestion.name} is run by ${suggestion.operator} at ${suggestion.endpoint}. If you turn ` +
     'it on, that operator sees which accounts, markets and proposals this device asks about, ' +
     'and it sees them over time rather than one at a time — together they identify you about as ' +
-    'well as an address does. It never sees your keys and never sees a transaction before you ' +
+    'well as an address does. It also hears from this device every ten minutes while it stays ' +
+    'on, even when you are reading nothing, because that is how the app checks it is still ' +
+    'answering — so it learns when this device is switched on and roughly where it is. It never ' +
+    'sees your keys and never sees a transaction before you ' +
     'sign it. What it supplies is older history, always labelled as coming from it, and never ' +
     'used to decide whether anything you sign is allowed. You can switch it off at any time, ' +
-    'and switching it off leaves the gaps it was filling visible as gaps.'
+    'and switching it off stops the ten-minute check as well as the queries, ' +
+    'and leaves the gaps it was filling visible as gaps.'
   );
 }
 

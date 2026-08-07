@@ -1,13 +1,14 @@
 > **DERIVED COPY for design-tool context — DO NOT EDIT.**
 > Verbatim copy of `docs/architecture/10-frontend-architecture.md` (the source of truth),
-> regenerated 2026-08-06 on its second pass that day, picking up the §2.3 verb ruling:
-> the deep-history cross-check is one the UI *"supports and **recommends**"* in both
-> §2.3 and §8.4, where §2.3 said *"discloses"* until then and a client shipping one
-> fixed string could satisfy only one of the two. The earlier pass picked up §10.2's
-> handoff reference set gaining `handoff-envelope` — the package `review.tsx` already
-> imported `HandoffRefusal` from, which §10.1 states depends on nothing at all, so the
-> edge is transitively empty. For upload to Claude Design. If this copy and the source
-> ever differ, the source wins. Regenerate by re-copying the source file.
+> regenerated 2026-08-07, picking up the new **§8.5 (the provider wire)** and §8.3's
+> `unprobed` paragraph — F24's R-1 rulings on SQ-612, SQ-613 and SQ-771. Two corrections
+> inside §8.5 landed the same day after an R-6 review: a snapshot states **heights and no
+> block hash** (§6.3 fixes that shape and refuses a provider range carrying one, so the
+> earlier text contradicted it), and a wrong-chain probe answer now **disables** rather
+> than counting as a failure — routed through the failure ladder it made the source
+> `Failing`, which serves, so answering gained it eligibility that not answering withheld.
+> For upload to Claude Design. If this copy and the source ever differ, the source wins.
+> Regenerate by re-copying the source file.
 
 # 10 — Frontend Architecture
 
@@ -476,12 +477,18 @@ An indexer serves **§8.2's snapshot document restricted to a range** — the sa
 
 `FE-PROV-004` is **not** part of this argument, and an earlier draft said it was. That code is scoped by §8.4's table to *"two independent **snapshots** covering the same range"*, and §2.3 says the same — so it does not diff a snapshot against an indexer, and a second format would not have widened it. The one-format ruling stands on canonical serialization alone.
 
+**A page owes canonical form and §8.2's ordering rules. It does not owe the conservation replay.** This has to be said, because one format could otherwise be read as one set of obligations, and that reading makes ranged reads impossible rather than merely strict. §8.4's replay starts every holding, supply and escrow at zero and requires non-negativity at each step. A `split` mints from escrow and is self-contained at any span, but a `merge`, `transfer` or `redeem` of a position created in an earlier block replays negative — so a page covering blocks 15 to 19 of a real history is inadmissible, and a conforming operator could serve only spans reaching back to the origin of every position they touch. §8.4 already resolves this and the split is its own: it assigns the internal-consistency screens (*"monotone coverage, event↔derived-row agreement, conservation-identity replay"*) to **snapshots**, and gives **live indexers** *"1-in-16-page row re-verification"* instead. A page is therefore screened as §8.4 screens an indexer, and the replay stays where §8.4 put it.
+
 Two routes satisfy INV-FE-15's *"minimal open read-only interface anyone can operate"*, and the interface is exactly these two:
 
 | Route | Answers | Used by |
 |---|---|---|
-| `GET /chain` | The `binding` object of §8.2's envelope (`genesisHash`, `specVersion`, `contractVersion`) and the operator's currently served coverage, in §8.2's ordered, non-overlapping, maximally-merged form | §8.5.3's probe, and the compatibility check before any range read |
+| `GET /chain` | The `binding` object of §8.2's envelope (`genesisHash`, `specVersion`, `contractVersion`) and the operator's currently served coverage, in §8.2's ordered, non-overlapping, maximally-merged form — all at the **top level**, not nested | §8.5.3's probe, whose answer condition is the `genesisHash` comparison and nothing else |
 | `GET /range?from=<block>&to=<block>&cursor=<opaque>` | One **page**: a §8.2 document covering some prefix of the requested span, plus `nextCursor` when more pages follow | Layer-3 ingest, and §8.4's 1-in-16-page sampling, whose *page* is one response of this route |
+
+An earlier draft of this table said `/chain` also served *"the compatibility check before any range read"*, and no section defines such a check. The phrase is removed rather than defined here: whether an indexer's live `specVersion` may be compared against this client's is a real question with a non-obvious answer, because §6.3 forbids the analogous comparison for a *snapshot* — §6.4 assigns snapshots history predating the current runtime, so comparing would refuse every deep snapshot after the first upgrade — and whether that reasoning carries to a live indexer is not derivable from either section. It is **SQ-982**, and until it is ruled the probe's answer condition is the genesis comparison alone.
+
+**Every provider reachable at an endpoint serves `GET /chain`, whatever its kind.** §8.2 defines two kinds and §8.1 gives every suggestion an `endpoint`, so a hosted snapshot provider is on §8.3's ladder exactly like an indexer and must be probeable. The cost is three JSON fields and a coverage list, which is the minimum for any source to say which chain it is on — an operator serving only files over HTTP adds one route. `GET /range` remains an indexer obligation. A source the user supplies purely as a file has no endpoint and is not on the ladder at all (§8.5.3).
 
 Four consequences, each of which removes an invention rather than adding one.
 
@@ -499,7 +506,9 @@ The probe is a `GET /chain` (§8.5.2) against the provider's endpoint. It **answ
 
 **A wrong-chain answer disables the source immediately, and it does not count as a failure.** The distinction is not taxonomy. A failure is a *liveness* observation — the endpoint did not answer — and §8.3 handles those with a consecutive counter precisely so that one timeout cannot ratchet the ladder, which is why `Failing` still serves. An answer that names another chain is a *correctness* finding: the endpoint answered, promptly and well-formed, and proved it can never serve a usable row here. Counting it as a failure inverts the control, and the composition is worth stating because each part is right on its own: the source sits in `unprobed`, which serves nothing, answers about another chain, becomes `Failing`, and `Failing` serves — so **answering gains it the eligibility that not answering withheld**. §8.3 already carries the correct precedent one clause away, since *"auto-disable on sampling mismatch"* is immediate and uncounted for the same reason. This also puts the probe in line with every other chain-identity check in this document: §3.1's `WrongChain` is *"terminal, no override"*, §6.3 invalidates a range whose genesis disagrees, and §13.3 refuses outright.
 
-The probe fires on enable and every 10 minutes thereafter (§8.3), and the on-enable probe is what keeps `unprobed` to a single round trip. §8.3's ladder governs a provider that **has an endpoint**; a source the user supplies as a file has none, is never probed, and is admitted or refused entirely by the content pin and §8.4's screens.
+The probe fires on enable and every 10 minutes thereafter (§8.3), and the on-enable probe is what keeps `unprobed` to a single round trip. §8.3's ladder governs a provider that **has an endpoint**; a source the user supplies as a file has none, is never probed, and is admitted or refused entirely by the content pin and §8.4's screens. A `Disabled` source is not probed either — see [11](11-frontend-workflows.md) E10.
+
+**§8.1's disclosure must name the heartbeat, not only the queries.** §8.1 requires *"a disclosure of exactly what the operator learns (the addresses/objects you query)"*, and [14](14-threat-model.md) TH-60 mitigates on the same footing. A ten-minute probe is not a query: it runs whether or not the user reads anything, for as long as the source stays enabled, and what it discloses is presence, uptime and IP continuity rather than interest in any particular object. The cadence itself is older than this section, but §8.5.3 is what turns *"probe"* into a standing outbound request, so the disclosure obligation moves with it. An accepted suggestion must therefore say that this device contacts the operator every ten minutes while the source is enabled, in the same fixed copy that names the query linkage.
 
 ---
 

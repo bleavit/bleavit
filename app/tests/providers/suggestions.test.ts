@@ -153,6 +153,32 @@ test('the disclosure names the operator, the endpoint, and what they learn', () 
   assert.match(disclosure, /over time/, 'the pattern is the disclosure, not the single lookup');
 });
 
+test('the disclosure names the ten-minute heartbeat, not only the queries (§8.5.3)', () => {
+  // Added 2026-08-07 with F24, and the reason is that adding the clause to `disclosureFor`
+  // broke NO test — the two disclosure tests either side of this one both passed unchanged,
+  // because each asserts what the copy says about queries and neither could notice a whole
+  // category going unmentioned.
+  //
+  // §8.1's obligation is "exactly what the operator learns". Until F24 nothing drove §8.3's
+  // probe, so describing queries alone was complete. §8.5.3 makes the client contact the
+  // endpoint every ten minutes for as long as the source is enabled, whether or not the user
+  // reads anything — presence and IP continuity rather than interest in an object. A user who
+  // read the old copy and went idle would reasonably believe the operator stopped hearing
+  // from them.
+  const disclosure = disclosureFor(EXAMPLE);
+  assert.match(disclosure, /every ten minutes/, 'the cadence must be stated, not implied');
+  assert.match(
+    disclosure,
+    /even when you are reading nothing/,
+    'the point is that it happens while idle — a user who skips this reads it as query-driven',
+  );
+  assert.match(
+    disclosure,
+    /switching it off stops the ten-minute check/,
+    '§8.1 makes switching off a user action, so its effect on the heartbeat must be stated too',
+  );
+});
+
 test('the disclosure states the true bound too, and does not overstate it', () => {
   // The bound is real — INV-FE-3 makes provider data structurally unable to satisfy a
   // precondition — and omitting it leaves a user weighing a privacy cost against an unstated
