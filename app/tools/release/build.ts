@@ -41,6 +41,7 @@ import {
   buildReleaseJson,
   perFileHashes,
   readChainFeed,
+  readForeignChainFeed,
   sha256,
   walkTree,
 } from './release-json.ts';
@@ -296,45 +297,40 @@ function tokenDecimals(declared: JsonRecord, blockers: string[]): Record<string,
  *
  * `release.json` MUST record the Asset Hub descriptor metadata hashes as well as Bleavit's:
  * the funding flow's second light-client connection pins them, and Asset Hub upgrades ride
- * the Fellowship's schedule rather than this protocol's governance. The set is **F4's**
- * deliverable and is blocked on a network decision only the user can make (SQ-587: Paseo or
- * Polkadot), so it is a named readiness blocker rather than a silently absent field — the
- * shape a reader would otherwise mistake for "there is nothing to pin here".
+ * the Fellowship's schedule rather than this protocol's governance.
+ *
+ * **Read from the committed feed, not from `release-sources.json`.** This was a hand-declared
+ * field whose blocker said a release could not choose *which* Asset Hub to pin. There is no
+ * standing choice: the rollout phases it, opening Paseo's Asset Hub at Phase 2 and
+ * Polkadot's at Phase 3 (08 §2.5; 09 §6.3), so a release pins the Asset Hub of the relay it
+ * targets, exactly as it pins the relay. F4 landed every artifact the set needs — the feed
+ * directory, the PAPI descriptor entry and `FOREIGN_CHAIN_PINS` — and nothing connected them
+ * to this document, so the blocker stood over finished work. Deriving the set removes both
+ * the stale claim and the second home for a value the feed already owns.
+ * (`tools/ci/check-release-blocker-citations.py` is what keeps the next one from surviving
+ * its own ruling; PLAN.md's decision log is where the ruling itself is recorded.)
+ *
+ * The empty case stays reachable and stays a **named blocker**: a release targeting a relay
+ * whose Asset Hub is unpinned ships the deposit leg blocked (`classifyForeign` →
+ * `unreachable`), which is a state the rollout has and not one this document may be silent
+ * about.
  */
-function readAssetHub(sources: unknown): {
+export function readAssetHub(feedDir: string): {
   assetHub: NonNullable<ReleaseJsonInputs['assetHub']>;
   blockers: string[];
 } {
-  const declared = record(record(sources)['assetHub']);
-  const network = declared['network'];
-  const networkPin = typeof network === 'string' ? network : null;
-  const hashes = hexHashes(declared['descriptorMetadataHashes']);
-  if (Object.keys(hashes).length === 0) {
+  const feed = readForeignChainFeed(feedDir);
+  if (Object.keys(feed.descriptorMetadataHashes).length === 0) {
     return {
-      assetHub: { network: networkPin, descriptorMetadataHashes: {} },
+      assetHub: feed,
       blockers: [
-        'Asset Hub descriptor set is unpinned (12 §1.1/§1.6, D-12) — F4, blocked on SQ-587 ' +
-          '(which network a release targets)',
+        'Asset Hub descriptor set is unpinned (12 §1.1/§1.6, D-12): the foreign chain feed ' +
+          'carries no Asset Hub runtime, so this release would ship the deposit leg blocked ' +
+          '(10 §5.2 reports the foreign chain as `unreachable`)',
       ],
     };
   }
-  return { assetHub: { network: networkPin, descriptorMetadataHashes: hashes }, blockers: [] };
-}
-
-/**
- * A declared `name → sha256` map, keeping only the entries that are one.
- *
- * Dropping a malformed entry rather than the whole map is deliberate here and is the
- * opposite of the choice `connect-src.ts` makes for bootnodes: a descriptor hash that is
- * not a hash pins nothing, and an emptied map is already a named readiness blocker, so the
- * fail-closed outcome arrives either way.
- */
-function hexHashes(value: unknown): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const [name, hash] of Object.entries(record(value))) {
-    if (typeof hash === 'string' && /^[0-9a-f]{64}$/.test(hash)) out[name] = hash;
-  }
-  return out;
+  return { assetHub: feed, blockers: [] };
 }
 
 function readSigning(sources: unknown): {
@@ -474,7 +470,9 @@ export function pipeline({ check = false }: PipelineOptions = {}) {
   const chainFeed = readChainFeed(join(APP_ROOT, 'fixtures/chain-feed'));
   const { identity, blockers: identityBlockers } = readChainIdentity(sources);
   const { signing, blockers: signingBlockers } = readSigning(sources);
-  const { assetHub, blockers: assetHubBlockers } = readAssetHub(sources);
+  const { assetHub, blockers: assetHubBlockers } = readAssetHub(
+    join(APP_ROOT, 'fixtures/foreign-chain-feed'),
+  );
   blockers.push(...identityBlockers, ...signingBlockers, ...assetHubBlockers);
   if (packageVersion === '0.0.0') {
     blockers.push('app/package.json still carries version 0.0.0, which no release may publish');

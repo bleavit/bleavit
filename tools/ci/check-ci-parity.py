@@ -88,6 +88,9 @@ STANDALONE_GATES: tuple[tuple[str, ...], ...] = (
     ("python3", "tools/ci/check-plan-tables.py"),
     ("python3", "tools/ci/check-verbatim-copies.py"),
     ("python3", "tools/ci/check-spec-question-batches.py"),
+    # Reads `app/tools/release/` and PLAN.md — two committed sources, and a gate whose
+    # whole job is to notice that one of them moved without the other.
+    ("python3", "tools/ci/check-release-blocker-citations.py"),
     ("python3", "tools/deploy/check-runbooks.py"),
     ("python3", "tools/limit-coverage/check-limit-coverage.py"),
     ("python3", "tools/monitoring/check_alert_coverage.py"),
