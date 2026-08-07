@@ -77,7 +77,24 @@ export type ProviderHealth =
   | { readonly kind: 'unprobed' }
   | { readonly kind: 'healthy' }
   | { readonly kind: 'slow'; readonly observedMs: number }
-  | { readonly kind: 'failing'; readonly consecutiveFailures: number }
+  | {
+      readonly kind: 'failing';
+      readonly consecutiveFailures: number;
+      /**
+       * Has this source ever answered a probe?
+       *
+       * Added 2026-08-07 by the R-6 re-review of F24, which found the wrong-chain blocker's
+       * shape surviving in the liveness arm. §8.3 lets `Failing` serve, and its stated reason
+       * is that *"one timeout in a **healthy series** cannot ratchet the ladder"*. A source
+       * whose very first probe timed out has no series: it went `unprobed` (serving nothing)
+       * → `failing` (serving), so **failing to answer bought it the eligibility that not
+       * being asked withheld** — the same non-monotonicity, with silence as the trigger.
+       *
+       * So the flag is not bookkeeping. It is the `healthy series` clause, made checkable, and
+       * {@link canServeReads} reads it rather than assuming it.
+       */
+      readonly everAnswered: boolean;
+    }
   | {
       readonly kind: 'disabled';
       /** `auto` when the client disabled it; `user` when the user did. */
@@ -129,8 +146,14 @@ export function canServeReads(provider: Provider): boolean {
   switch (provider.health.kind) {
     case 'healthy':
     case 'slow':
-    case 'failing':
       return true;
+    // §8.3's clause is "one timeout in a **healthy series**", so `failing` serves only where
+    // there is a series. A source whose first probe timed out has none, and letting it serve
+    // would mean silence bought the eligibility that not being asked withheld — see
+    // `ProviderHealth`. This is the liveness twin of the wrong-chain blocker, and it was live
+    // in the shipped code until the R-6 re-review of 2026-08-07 reproduced it.
+    case 'failing':
+      return provider.health.everAnswered;
     case 'unprobed':
     case 'disabled':
       return false;

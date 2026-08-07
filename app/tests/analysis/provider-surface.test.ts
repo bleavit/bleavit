@@ -496,7 +496,7 @@ test('every ladder state renders, carries a reason, and reports what it permits'
     provider('a', { kind: 'unprobed' }),
     provider('b', { kind: 'healthy' }),
     provider('c', { kind: 'slow', observedMs: 4_000 }),
-    provider('d', { kind: 'failing', consecutiveFailures: 2 }),
+    provider('d', { kind: 'failing', consecutiveFailures: 2, everAnswered: true }),
     provider('e', { kind: 'disabled', by: 'auto', reason: 'it contradicted the chain' }),
   ];
   for (const source of states) {
@@ -512,7 +512,7 @@ test('every ladder state renders, carries a reason, and reports what it permits'
   assert.equal(unprobed.serves, false);
   assert.equal(unprobed.mayImport, true);
   // `failing` serves: §8.3's own clause, and the narrowing this repository already made once.
-  assert.equal(healthLine(provider('d', { kind: 'failing', consecutiveFailures: 2 })).serves, true);
+  assert.equal(healthLine(provider('d', { kind: 'failing', consecutiveFailures: 2, everAnswered: true })).serves, true);
 
   const markup = html(
     h(ProviderSettings, { providers: states, onEnable: () => {}, onDisable: () => {} }),
@@ -545,7 +545,7 @@ test('a fleet answering nothing does not render as N sources serving', () => {
   // three timed-out sources report `serving: 3` — and a panel showing only that number says
   // *3 sources serving* over a fleet that is answering nothing.
   const failing = [1, 2, 3].map((n) =>
-    provider(`p${n}`, { kind: 'failing', consecutiveFailures: 2 }),
+    provider(`p${n}`, { kind: 'failing', consecutiveFailures: 2, everAnswered: true }),
   );
   const fleet = fleetState(failing);
   assert.equal(fleet.kind, 'serving');

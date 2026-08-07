@@ -122,13 +122,36 @@ test('an accepted provider CANNOT be read from until a probe answers — §8.3\'
   const answered = afterProbe(accepted.provider, { kind: 'responded', latencyMs: 5 });
   assert.equal(answered.health.kind, 'healthy');
   assert.equal(canServeReads(answered), true);
+
+  // The failing direction, and this assertion has now moved twice — worth recording, because
+  // both moves were right and the second is not a reversal of the first.
+  //
+  // It asserted `false` until 2026-08-06. That was a narrowing §8.3 does not authorise: its
+  // normative shape says `Failing` counts consecutive failures "so one timeout in a healthy
+  // series cannot ratchet the ladder; and only `Disabled` stops reads". So it became `true`.
+  //
+  // On 2026-08-07 an R-6 re-review of F24 pointed at the clause that had been read past.
+  // §8.3 licenses `Failing` to serve on account of **a healthy series**, and the provider here
+  // has none — it was accepted a moment ago and its very first probe timed out. Under the
+  // `true` reading it went `unprobed` (serving nothing) → `failing` (serving), so *failing to
+  // answer* bought it the eligibility that not being asked withheld. That is the same
+  // non-monotonicity as the wrong-chain blocker, with silence as the trigger.
+  //
+  // So: `failing` still serves, exactly as §8.3 says — but only where the series exists.
   const silent = afterProbe(accepted.provider, { kind: 'failed', why: 'timeout' });
-  assert.equal(silent.health.kind, 'failing');
-  // And a failing source **does** still serve. This asserted the opposite until 2026-08-06, which
-  // was a narrowing §8.3 does not authorise: its normative shape says `Failing` counts consecutive
-  // failures "so one timeout in a healthy series cannot ratchet the ladder; and only `Disabled`
-  // stops reads". `unprobed` is refused because it is *before* the ladder, not a state on it.
-  assert.equal(canServeReads(silent), true, '§8.3: only Disabled stops reads');
+  assert.equal(silent.health.kind, 'failing', 'the counter runs, so it can still auto-disable');
+  assert.equal(
+    canServeReads(silent),
+    false,
+    'never answered ⇒ no healthy series ⇒ §8.3 does not license this one to serve',
+  );
+
+  // And the series, once it exists, survives a timeout — which is the thing §8.3 is explicit
+  // about and the property the assertion above must not have broken.
+  const afterOneGood = afterProbe(accepted.provider, { kind: 'responded', latencyMs: 5 });
+  const thenSilent = afterProbe(afterOneGood, { kind: 'failed', why: 'timeout' });
+  assert.equal(thenSilent.health.kind, 'failing');
+  assert.equal(canServeReads(thenSilent), true, '§8.3: one timeout in a healthy series serves');
 });
 
 test('the fleet counts an unprobed source as enabled and NOT as serving', () => {

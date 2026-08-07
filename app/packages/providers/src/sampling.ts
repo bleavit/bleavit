@@ -148,33 +148,56 @@ export function afterProbe(
   thresholds: LadderThresholds = LADDER,
 ): Provider {
   if (provider.health.kind === 'disabled') return provider;
-  // A correctness finding disables at once, with no counter — see `ProbeOutcome`. Placed before
-  // the `responded` arm so that adding a fourth arm later cannot fall through to the counter.
-  if (outcome.kind === 'disqualified') {
-    return { ...provider, health: { kind: 'disabled', by: 'auto', reason: outcome.why } };
+
+  // An exhaustive `switch` rather than two `if`s and a fall-through. The R-6 re-review of
+  // 2026-08-07 pointed out that the counter WAS the fall-through, so a fourth `ProbeOutcome`
+  // arm carrying a `why` field would compile and be counted silently as a liveness failure —
+  // landing the source in `failing`. Comments claimed a guarantee the shape did not provide.
+  // `canServeReads` two files over uses `never` for exactly this reason.
+  switch (outcome.kind) {
+    // A correctness finding disables at once, with no counter — see `ProbeOutcome`.
+    case 'disqualified':
+      return { ...provider, health: { kind: 'disabled', by: 'auto', reason: outcome.why } };
+
+    case 'responded':
+      return {
+        ...provider,
+        health:
+          outcome.latencyMs > thresholds.slowAboveMs
+            ? { kind: 'slow', observedMs: outcome.latencyMs }
+            : { kind: 'healthy' },
+      };
+
+    case 'failed': {
+      const consecutive =
+        (provider.health.kind === 'failing' ? provider.health.consecutiveFailures : 0) + 1;
+      if (consecutive >= thresholds.disableAfter) {
+        return {
+          ...provider,
+          health: {
+            kind: 'disabled',
+            by: 'auto',
+            reason: probeFailureReason(consecutive, outcome.why),
+          },
+        };
+      }
+      // `everAnswered` carries §8.3's "healthy series" across the transition. It is true only
+      // if this source has previously answered — either it is answering-then-failing now
+      // (`healthy`/`slow` before), or it was already `failing` with a series behind it. From
+      // `unprobed` it is false, and `canServeReads` then withholds reads: a source whose first
+      // probe timed out must not gain by silence what it did not have by not being asked.
+      const everAnswered =
+        provider.health.kind === 'healthy' ||
+        provider.health.kind === 'slow' ||
+        (provider.health.kind === 'failing' && provider.health.everAnswered);
+      return { ...provider, health: { kind: 'failing', consecutiveFailures: consecutive, everAnswered } };
+    }
+
+    default: {
+      const unhandled: never = outcome;
+      return unhandled;
+    }
   }
-  if (outcome.kind === 'responded') {
-    return {
-      ...provider,
-      health:
-        outcome.latencyMs > thresholds.slowAboveMs
-          ? { kind: 'slow', observedMs: outcome.latencyMs }
-          : { kind: 'healthy' },
-    };
-  }
-  const consecutive =
-    (provider.health.kind === 'failing' ? provider.health.consecutiveFailures : 0) + 1;
-  if (consecutive >= thresholds.disableAfter) {
-    return {
-      ...provider,
-      health: {
-        kind: 'disabled',
-        by: 'auto',
-        reason: probeFailureReason(consecutive, outcome.why),
-      },
-    };
-  }
-  return { ...provider, health: { kind: 'failing', consecutiveFailures: consecutive } };
 }
 
 /**

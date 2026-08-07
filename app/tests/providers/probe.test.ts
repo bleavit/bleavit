@@ -129,6 +129,48 @@ test('a wrong-chain answer must not GAIN the source read eligibility (R-6 blocke
   assert.equal(canServeReads(after), false, 'answering about another chain must never gain eligibility');
 });
 
+test('a source whose FIRST probe times out must not gain eligibility either (R-6 re-review)', async () => {
+  // The twin of the test above, and the reason the first fix was only half a fix. The
+  // re-review found the same non-monotonicity surviving in the liveness arm: `unprobed`
+  // serves nothing, one timeout produced `failing`, and `failing` serves — so **silence**
+  // bought the eligibility that not being asked withheld.
+  //
+  // §8.3 lets `Failing` serve because "one timeout in a healthy series cannot ratchet the
+  // ladder". A source whose first probe timed out has no series. `everAnswered` is that
+  // clause made checkable.
+  const before: Provider = { id: 'p1', kind: 'indexer', health: { kind: 'unprobed' } };
+  assert.equal(canServeReads(before), false);
+
+  const get: HttpGet = async () => {
+    throw new Error('ETIMEDOUT');
+  };
+  const result = await runProbeRound(round([before]), get, 1_000, clockOf(0, 5));
+  const after = result.providers[0];
+
+  assert.ok(after !== undefined);
+  assert.equal(after.health.kind, 'failing', 'the counter still runs, so it can still disable');
+  assert.equal(after.health.kind === 'failing' ? after.health.everAnswered : true, false);
+  assert.equal(canServeReads(after), false, 'never answered ⇒ no healthy series ⇒ no reads');
+});
+
+test('a source that answered and THEN failed keeps serving — §8.3’s actual clause', async () => {
+  // The other side of the same rule, and the one §8.3 is explicit about: one timeout in a
+  // healthy series must not take a working source off every read path. Without this
+  // assertion the fix above could be "withhold on any failure", which is the ratchet §8.3
+  // names as the failure mode.
+  const healthy: Provider = { id: 'p1', kind: 'indexer', health: { kind: 'healthy' } };
+  const get: HttpGet = async () => {
+    throw new Error('ETIMEDOUT');
+  };
+  const result = await runProbeRound(round([healthy]), get, 10_000_000, clockOf(0, 5));
+  const after = result.providers[0];
+
+  assert.ok(after !== undefined);
+  assert.equal(after.health.kind, 'failing');
+  assert.equal(after.health.kind === 'failing' ? after.health.everAnswered : false, true);
+  assert.equal(canServeReads(after), true, 'a healthy series survives one timeout');
+});
+
 test('a disqualifying answer disables at once — no consecutive counter (§8.3 precedent)', async () => {
   // `failed` needs three rounds to disable. `disqualified` needs one, for the same reason
   // "auto-disable on sampling mismatch" is uncounted: a correctness finding is not a flaky
@@ -276,6 +318,7 @@ test('one dead endpoint does not stop the round for the others', async () => {
   assert.deepEqual(result.providers.find((p) => p.id === 'dead')?.health, {
     kind: 'failing',
     consecutiveFailures: 1,
+    everAnswered: false,
   });
 });
 
