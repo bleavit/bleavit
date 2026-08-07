@@ -41,19 +41,32 @@
  * defect this repository keeps finding is a true statement about the wrong chain; it does not
  * get a friendly message.
  *
- * ## What this module deliberately does not decide
+ * ## The foreign verdict is computed here now, and it is a **row**, not a gate
  *
- * `assetHubCompatible` — 10 §5.2's **foreign** verdict — is not computed here and is not
- * defaulted. `classifyForeign` needs a probe of every 02 §7.7 surface through a descriptor-
- * bearing typed API, and nothing in this client constructs one yet (`light-client.ts` says so
- * about `createClient` in as many words). R-2 forbids resolving that by assumption, so the
- * verdict stays a required argument of `readDepositInputs` with no producer, and this module
- * does not invent one. Attaching the chain is a different fact from its runtime being
- * compatible, and reporting the first as the second is how a `restricted` Asset Hub would
- * pass a precondition nobody evaluated.
+ * This header used to say `assetHubCompatible` *"is not computed here and is not defaulted"*,
+ * because nothing constructed a typed API. F26 built that (`compat-boot.ts`), so the leg now
+ * runs 10 §5.2's foreign classifier and carries the result — the value `readDepositInputs`
+ * has always required and nothing produced.
+ *
+ * **It does not turn `ready` into `blocked`.** §11.9.1 makes *"AH connection synced &
+ * descriptors compatible"* a precondition **row**, and a row is something the user is shown
+ * failing, at B′, beside the others. A `restricted` Asset Hub whose readers opened perfectly
+ * well would, under a gate, produce a screen that never renders and a diagnosis the user
+ * never sees — E17 asks for the opposite, *"blocked with diagnostics"*. So the verdict rides
+ * on the `ready` arm and `depositBlocks` refuses on it. `blocked` stays what it always was:
+ * the chain is not attached, or a reader could not be opened.
+ *
+ * Attaching the chain remains a different fact from its runtime being compatible; what has
+ * changed is that both are now established rather than one being assumed.
  */
 
-import type { AssetHubConnection, BundledChain, ChainHeadTransport } from '@bleavit/chain-client';
+import type {
+  AssetHubConnection,
+  BundledChain,
+  ChainHeadTransport,
+  RuntimeVersionReport,
+} from '@bleavit/chain-client';
+import type { ForeignVerdict } from './compat-session.js';
 import {
   fundingDecoders,
   fundingKeys,
@@ -118,6 +131,21 @@ export interface DepositLegDeps<T extends ChainHeadTransport> extends WithdrawLe
   /** Usually `client.connectAssetHub`. Attaches the chain lazily, on entering the flow (E17). */
   readonly connectAssetHub: (assetHub: BundledChain) => Promise<AssetHubConnection<T>>;
   readonly pins: FundingPins;
+  /**
+   * 10 §5.2's **foreign** verdict — usually `classifyAssetHubFor` from `compat-boot.ts`.
+   *
+   * Injected, for the reason `chain-session.ts` injects `start`: the supplier names PAPI and
+   * `@polkadot-api/descriptors`, and importing either here would load both into every Node
+   * suite that imports `@bleavit/application`.
+   *
+   * It takes the runtime the **reader's** transport reports, so the verdict and the deposit
+   * preconditions describe the same finalized block. A second follow subscription's own head
+   * would be a verdict about a block nothing else in the flow used.
+   */
+  readonly classifyAssetHub: (
+    assetHub: BundledChain,
+    runtime: RuntimeVersionReport | undefined,
+  ) => Promise<ForeignVerdict>;
 }
 
 /**
@@ -140,7 +168,20 @@ export type WithdrawLeg =
  * rewriting either into a generic sentence would discard the distinction a user acts on.
  */
 export type DepositLeg =
-  | { readonly kind: 'ready'; readonly readers: FundingReaders; readonly artifacts: FundingArtifacts }
+  | {
+      readonly kind: 'ready';
+      readonly readers: FundingReaders;
+      readonly artifacts: FundingArtifacts;
+      /**
+       * 10 §5.2's foreign verdict for this connection — §11.9.1's first precondition row.
+       *
+       * Present on `ready` and nowhere else, because it is a statement about a chain that
+       * answered: a `blocked` leg has no Asset Hub connection to have a verdict about, and a
+       * field carrying one would invite a screen to render a compatibility diagnosis for a
+       * chain it never reached.
+       */
+      readonly foreign: ForeignVerdict;
+    }
   | { readonly kind: 'blocked'; readonly reason: string };
 
 function because(error: unknown): string {
@@ -214,6 +255,22 @@ export async function openDepositLeg<T extends ChainHeadTransport>(
     };
   }
 
+  // The 02 §7.7 probe, **after** the readers, and the order is the same argument E17 makes
+  // about the connection: the reader's transport is where the runtime version comes from, so
+  // there is nothing to classify against until it has reported a finalized block. It never
+  // throws — `classifyAssetHubFor` returns a verdict for every arm, including the ones where
+  // the probe itself failed — and a `restricted` or `unsupported` Asset Hub leaves this leg
+  // `ready` so §11.9.1's row can fail on screen rather than the screen not existing.
+  const foreign = await deps.classifyAssetHub(
+    deps.pins.assetHub,
+    connection.transport.finalizedRuntime(),
+  );
+
   // Throws `SameChainError` rather than blocking — see this module's header.
-  return { kind: 'ready', readers: fundingReaders(local, assetHub), artifacts: deps.artifacts };
+  return {
+    kind: 'ready',
+    readers: fundingReaders(local, assetHub),
+    artifacts: deps.artifacts,
+    foreign,
+  };
 }

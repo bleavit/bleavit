@@ -38,6 +38,28 @@ export interface StorageItem {
 }
 
 /**
+ * The runtime of the block this connection has finalized — 10 §5.2's classifier input.
+ *
+ * **Read off the follow subscription, not asked for.** `chainHead_v1_follow(withRuntime)` is
+ * already opened with `withRuntime` true (below), so the node already sends this: the
+ * `initialized` event carries `finalizedBlockRuntime` and a `newBlock` carries `newRuntime`
+ * whenever the runtime changes at that block. Until F26 the field was parsed off the wire
+ * and dropped, and the compatibility classifier — whose whole first question is *"which
+ * `spec_version` is this?"* — had no source for it at all.
+ *
+ * Field names are the JSON-RPC interface spec's and were read out of the pinned client
+ * rather than assumed: `specName`, `implName`, `specVersion`, `implVersion`,
+ * `transactionVersion`, `apis` all appear verbatim in `smoldot@3.3.2`'s serialiser table,
+ * beside `finalizedBlockRuntime` and `newRuntime`.
+ */
+export interface RuntimeVersionReport {
+  readonly specName: string;
+  readonly specVersion: number;
+  readonly implVersion: number;
+  readonly transactionVersion: number;
+}
+
+/**
  * The minimum a transport must do. Deliberately narrow: exactly the two chainHead
  * operations 02 §11's fixtures record, so the mock-runtime test double and a real
  * smoldot connection satisfy the same interface with nothing to diverge on.
@@ -69,6 +91,22 @@ export interface ChainHeadTransport {
     type: 'value' | 'descendantsValues',
   ): Promise<readonly StorageItem[]>;
   call(at: FinalizedBlockRef, api: string, argsHex?: string): Promise<string>;
+  /**
+   * The runtime of the finalized head, or `undefined` if none has been established.
+   *
+   * **Required rather than optional, and the difference is the whole point.** 10 §5.2's
+   * classifier asks *"which `spec_version` is this?"* before it asks anything else, and an
+   * optional member would let a transport answer by not having the method — which reads to a
+   * caller exactly like *"the runtime could not be established"* while actually meaning *"this
+   * double was written before the question existed"*. Making it required forces every
+   * implementation, test doubles included, to state what runtime it reports.
+   *
+   * Synchronous, and not a `Promise`, because it is not a read: the follow subscription has
+   * already delivered it. A method rather than a property so the answer is the current one
+   * rather than whatever was true when the transport was handed over — a runtime upgrade
+   * mid-session is exactly the case 10 §3.2 makes the classifier re-run for.
+   */
+  finalizedRuntime(): RuntimeVersionReport | undefined;
 }
 
 export class UnverifiedReadError extends Error {

@@ -134,6 +134,9 @@ test('a malformed pin is refused when the reader is opened', async () => {
     pinnedBlock: async () => ({ chain: TEST_CHAIN, blockHash: '0xdead', blockNumber: 1 }),
     storage: async () => [],
     call: async () => '0x',
+    // No runtime established. Required by the port rather than optional, so a double has to
+    // say so — `undefined` here is the honest answer for a transport nothing followed.
+    finalizedRuntime: () => undefined,
   };
   await assert.rejects(() => FinalizedReader.open(transport), UnverifiedReadError);
 });

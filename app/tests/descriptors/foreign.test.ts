@@ -23,10 +23,16 @@ import {
   classifyForeign,
   classify,
   depositMayProceed,
+  probeForeignSurface,
   surfaceIsProven,
   withdrawIsBlockedBy,
 } from '@bleavit/descriptors';
-import type { ForeignObservation, SurfaceProbe } from '@bleavit/descriptors';
+import type {
+  AnyCompatHelper,
+  CompatSurface,
+  ForeignObservation,
+  SurfaceProbe,
+} from '@bleavit/descriptors';
 
 const PIN = {
   label: 'Asset Hub',
@@ -257,3 +263,74 @@ test('a foreign verdict cannot satisfy the local proven-surface gate', () => {
   );
   assert.ok(verdict.proven.includes('assethub.Assets.Account'));
 });
+
+/* ------------------------------------------ probing the frozen foreign surface (F26) */
+
+test('every frozen §7.7 surface names the compat coordinates a probe needs', () => {
+  // The coordinates are written down rather than parsed out of the `id`. A parser would
+  // reproduce them until a member name contains a dot, at which point the lookup misses —
+  // and a missed lookup reports `incompatible`, which is fail-closed and therefore silent:
+  // the deposit leg would be blocked by a parser while the reason string blamed Asset Hub.
+  for (const entry of FOREIGN_SURFACE) {
+    assert.ok(entry.pallet.length > 0 && entry.member.length > 0, entry.id);
+    assert.equal(entry.id, `assethub.${entry.pallet}.${entry.member}`);
+    assert.equal(entry.compatGroup, entry.kind === 'call' ? 'tx' : 'query');
+  }
+});
+
+test('the frozen call is probed through PAPI’s `tx` group, which the surface type now carries', () => {
+  // 02 §7.7 freezes `PolkadotXcm.limited_reserve_transfer_assets` as a dispatchable. Its
+  // helper lives in `compat.tx`, which `CompatSurface` did not declare before F26 — so this
+  // row was structurally unprobeable, `classifyForeign` could only ever be handed a short
+  // list, and the coverage refusal would have fired on the surface with the most to lose.
+  const call = FOREIGN_SURFACE.find((entry) => entry.kind === 'call');
+  assert.ok(call);
+  const probes = probeForeignSurface(foreignSurfaceDouble());
+  assert.deepEqual(
+    [...probes].map((p) => p.id).sort(),
+    FOREIGN_SURFACE.map((e) => e.id).sort(),
+  );
+  assert.equal(probes.find((p) => p.id === call.id)?.compatible, true);
+});
+
+test('a surface the compat object does not carry probes `incompatible`, never absent from the list', () => {
+  const absent = FOREIGN_SURFACE[1];
+  assert.ok(absent);
+  const probes = probeForeignSurface(foreignSurfaceDouble([absent.id]));
+  // Short lists are what `classifyForeign` refuses; an entry reported `incompatible` is what
+  // it turns into a named disabled surface. Dropping the entry instead would make the whole
+  // verdict throw, which reads as a client defect rather than as an Asset Hub that moved.
+  assert.equal(probes.length, FOREIGN_SURFACE.length);
+  assert.equal(probes.find((p) => p.id === absent.id)?.level, 'incompatible');
+});
+
+test('the foreign probe never reads a local id, and the local probe never reads a foreign one', () => {
+  // Two entry points rather than one with a `surface` argument: both take a `CompatSurface`
+  // and nothing structural distinguishes Bleavit's from Asset Hub's, so the chain is chosen
+  // at the call site and the names are what make a swap visible there.
+  const foreignIds = new Set<string>(FOREIGN_SURFACE.map((e) => e.id));
+  for (const probe of probeForeignSurface(foreignSurfaceDouble())) {
+    assert.ok(foreignIds.has(probe.id), `${probe.id} is not a frozen Asset Hub surface`);
+  }
+  // A Bleavit compat object handed the foreign list finds nothing, which is exactly the
+  // fail-closed direction — and exactly why the two must not share one entry point.
+  const empty = { apis: {}, query: {}, constants: {}, event: {}, tx: {} };
+  assert.ok(probeForeignSurface(empty).every((p) => p.compatible === false));
+});
+
+/** A compat surface carrying every frozen Asset Hub helper, minus whatever is named absent. */
+function foreignSurfaceDouble(absent: readonly string[] = []): CompatSurface {
+  const groups: { [K in keyof CompatSurface]: Record<string, Record<string, AnyCompatHelper>> } = {
+    apis: {},
+    query: {},
+    constants: {},
+    event: {},
+    tx: {},
+  };
+  for (const entry of FOREIGN_SURFACE) {
+    if (absent.includes(entry.id)) continue;
+    const pallet = (groups[entry.compatGroup][entry.pallet] ??= {});
+    pallet[entry.member] = { level: 3, isCompatible: () => true };
+  }
+  return groups;
+}

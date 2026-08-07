@@ -326,7 +326,7 @@ function compatSurface(overrides: Readonly<Record<string, CompatOverride>> = {})
   });
   const groups: {
     [K in keyof CompatSurface]: Record<string, Record<string, AnyCompatHelper>>;
-  } = { apis: {}, query: {}, constants: {}, event: {} };
+  } = { apis: {}, query: {}, constants: {}, event: {}, tx: {} };
   for (const entry of CRITICAL_SURFACE) {
     const raw = overrides[entry.id];
     const over = raw === 'absent' || raw === undefined ? undefined : raw;

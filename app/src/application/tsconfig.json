@@ -13,6 +13,9 @@
       "path": "../../packages/chain-client"
     },
     {
+      "path": "../../packages/descriptors"
+    },
+    {
       "path": "../../packages/platform"
     },
     {

@@ -64,7 +64,26 @@ export {
   type ChainSpecs,
   type WorkerSource,
 } from './chain-session.js';
-export { connectChain } from './chain-boot.js';
+export { connectAndClassify, connectChain } from './chain-boot.js';
+export {
+  assetHubBlockReason,
+  assetHubCompatible,
+  classifyAssetHub,
+  classifyLocalRuntime,
+  foreignIdentityVerdict,
+  verdictAllowsSigning,
+  verdictProvesSurface,
+  type CompatProbeDeps,
+  type CompatVerdict,
+  type ForeignProbeDeps,
+  type ForeignVerdict,
+  type PulledSurface,
+} from './compat-session.js';
+// Exported on the same terms as `connectChain`: every module reference inside `compat-boot`
+// is either type-only (erased) or a **dynamic** `import()` inside a function body, so naming
+// it here loads no PAPI module and no metadata blob. That is what makes the wiring assertable
+// from a Node suite without any of it being evaluated.
+export { classifyAssetHubFor, classifyChain } from './compat-boot.js';
 export {
   fundingArtifacts,
   openDepositLeg,

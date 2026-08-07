@@ -17,6 +17,15 @@
  * `read-only-incompatible` classifier cannot see it — the app would fail to construct a
  * client instead of booting into `ReadOnlyIncompatible` and telling the user why.
  *
+ * **That ruling still holds, and F26 kept it by moving the *provider* rather than the
+ * client.** `createClient` lives in `compat.ts`, behind its own subpath export, and nothing
+ * on the read path imports it. What this module now hands out is the two things only it can
+ * supply — a provider for this chain, and a *second* Asset Hub chain handle — so the compat
+ * client is built **above** the transport, after it is already serving reads. The ordering
+ * the ruling protects is structural rather than remembered: `startLightClient` returns a
+ * working `LightClient` whether or not anybody ever asks for a compat surface, and an
+ * undecodable runtime fails in a function whose result is a value.
+ *
  * **Honest limit.** Everything below the structural seam — that smoldot actually syncs,
  * that browser-WSS peers are reachable (FE-P4), that the follow subscription behaves as
  * specified against a real node — is *not* verified by any test in this repository. It is
@@ -29,12 +38,14 @@ import { startFromWorker } from 'polkadot-api/smoldot/from-worker';
 
 import type { HexString } from '@bleavit/shared-types';
 import { ChainHeadConnection, type JsonRpcProviderLike } from './transport.js';
+import type { CompatProvider } from './compat.js';
 import {
   assetHubConnector,
   type AssetHubConnection as AssetHubLegConnection,
 } from './asset-hub.js';
 import {
   startTopology,
+  type AssetHubLeg,
   type BundledChain,
   type SmoldotClientLike,
   type Topology,
@@ -87,8 +98,43 @@ export interface LightClient {
    * yield a transport connected to nothing while reporting no failure.
    */
   connectAssetHub(assetHub: BundledChain): Promise<AssetHubConnection>;
+  /**
+   * A provider for **this chain**, for 10 §5.2's compat probe — not for reading.
+   *
+   * Safe to hand out repeatedly, and that is a property of the factory rather than a promise
+   * made here: `getSmProvider` is constructed over a `getChain` that builds a **fresh
+   * topology per connection**, so each caller resolves to its own smoldot `Chain` and none
+   * collides with the transport's. A factory closing over one `Chain` would hand the second
+   * caller a chain PAPI has already seen, which `getSmProvider` refuses with a console
+   * warning — a transport connected to nothing, reporting success.
+   */
+  compatProvider(): CompatProvider;
+  /**
+   * A provider for a **second, transient** Asset Hub chain handle — 02 §7.7's compat probe.
+   *
+   * Separate from `connectAssetHub` because one smoldot `Chain` serves one JSON-RPC
+   * connection and closing it removes the chain (see `AttachOptions.reuse`). The deposit leg
+   * needs the reader *and* the probe, so it needs two handles; this is the second, and
+   * `release()` returns it. `release()` never touches the connection the reader holds.
+   *
+   * Returns the leg's refusal instead of a provider when the chain does not attach — the
+   * same arms `connectAssetHub` reports, so a `wrong-chain` verdict stays `wrong-chain`
+   * rather than becoming "the probe failed".
+   */
+  assetHubCompatProvider(assetHub: BundledChain): Promise<AssetHubCompatProvider>;
   stop(): Promise<void>;
 }
+
+/** A transient Asset Hub handle for the compat probe, or the leg's own reason for refusing. */
+export type AssetHubCompatProvider =
+  | {
+      readonly kind: 'attached';
+      readonly provider: CompatProvider;
+      readonly genesisHash: HexString;
+      /** Remove this handle. Never affects the reader's handle. */
+      release(): void;
+    }
+  | Exclude<AssetHubLeg<RealSmoldotChain>, { kind: 'attached' }>;
 
 /**
  * Ask a raw smoldot chain for its genesis hash.
@@ -192,6 +238,24 @@ export async function startLightClient(options: LightClientOptions): Promise<Lig
     transport,
     topology,
     connectAssetHub: (bundled) => assetHub.connect(bundled),
+    compatProvider: () => provider,
+    async assetHubCompatProvider(bundled) {
+      // `reuse: false` — a second handle beside the reader's, never the reader's own. See
+      // `AttachOptions.reuse` for why one handle cannot serve both.
+      const leg = await topology.attachAssetHub(bundled, { reuse: false });
+      if (leg.kind !== 'attached') return leg;
+      return {
+        kind: 'attached',
+        // Built here and only here, after `attachAssetHub`'s genesis probe has already run
+        // on this chain — `probeGenesisHash` drives `nextJsonRpcResponse()` directly, and a
+        // provider attached first would race it for every response.
+        provider: getSmProvider(async () => leg.chain),
+        genesisHash: leg.genesisHash,
+        release: () => {
+          leg.detach();
+        },
+      };
+    },
     async stop() {
       transport.close();
       assetHub.close();

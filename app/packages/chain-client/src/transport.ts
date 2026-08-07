@@ -24,7 +24,7 @@
 
 import type { ChainId, HexString } from '@bleavit/shared-types';
 import type { FinalizedBlockRef } from './provenance.js';
-import type { ChainHeadTransport, StorageItem } from './reads.js';
+import type { ChainHeadTransport, RuntimeVersionReport, StorageItem } from './reads.js';
 
 /* ------------------------------------------------------------------ provider shape */
 
@@ -161,6 +161,28 @@ interface PendingOperation {
   reject: (error: Error) => void;
 }
 
+/**
+ * Read a `RuntimeEvent` — `{ type: "valid", spec } | { type: "invalid", error }`.
+ *
+ * An `invalid` runtime yields `undefined` rather than a partly-filled report, and so does a
+ * `valid` one whose numbers are not numbers. Both are the same decision: 10 §5.2 refuses an
+ * unprobed surface, and a `spec_version` this client could not read is the same kind of
+ * absence one layer up — the classifier must say *"I could not establish the runtime"*,
+ * never guess a version and then classify a chain against it.
+ */
+function runtimeReport(event: unknown): RuntimeVersionReport | undefined {
+  if (typeof event !== 'object' || event === null) return undefined;
+  const runtime = event as { type?: unknown; spec?: unknown };
+  if (runtime.type !== 'valid') return undefined;
+  if (typeof runtime.spec !== 'object' || runtime.spec === null) return undefined;
+  const spec = runtime.spec as Record<string, unknown>;
+  const { specName, specVersion, implVersion, transactionVersion } = spec;
+  if (typeof specName !== 'string') return undefined;
+  if (typeof specVersion !== 'number' || typeof implVersion !== 'number') return undefined;
+  if (typeof transactionVersion !== 'number') return undefined;
+  return { specName, specVersion, implVersion, transactionVersion };
+}
+
 export interface ChainHeadConnectionOptions {
   /**
    * Which chain this connection follows — its genesis hash (F18).
@@ -215,12 +237,15 @@ export class ChainHeadConnection implements ChainHeadTransport {
   readonly #operations = new Map<string, PendingOperation>();
   readonly #orphanEvents = new Map<string, Record<string, unknown>[]>();
   readonly #headerNumbers = new Map<string, number>();
+  /** Runtimes announced for blocks not yet finalized. Trimmed with the pins that carry them. */
+  readonly #runtimeAt = new Map<string, RuntimeVersionReport>();
   readonly #pinWindow: number;
   readonly #chain: ChainId;
   #pinnedOrder: HexString[] = [];
   #nextId = 1;
   #subscription: string | undefined;
   #finalized: HexString | undefined;
+  #finalizedRuntime: RuntimeVersionReport | undefined;
 
   readonly #finalizedListeners = new Set<(hash: HexString) => void>();
   #initialized: ((hash: HexString) => void) | undefined;
@@ -317,6 +342,29 @@ export class ChainHeadConnection implements ChainHeadTransport {
     return this.#headerNumbers.size;
   }
 
+  /** How many announced runtimes are held. Bound assertion only. */
+  runtimeCacheCountForTest(): number {
+    return this.#runtimeAt.size;
+  }
+
+  /**
+   * The runtime of the **finalized** head, or `undefined` if none has been established.
+   *
+   * Finalized, never best. 10 §4.2 rule 1 makes a `chainHead` result exactly as trustworthy
+   * as the block it is pinned to, and this figure decides whether the app may sign — so it
+   * takes the same rule every transaction-critical read takes. A runtime announced on a
+   * `newBlock` is held aside and only becomes this connection's answer once that block is
+   * reported finalized; before then the client would be classifying against a runtime that
+   * may still be reorged away, which is exactly the direction that enables signing early.
+   *
+   * `undefined` is a real answer and callers must fail closed on it — a follow opened with
+   * `withRuntime: false`, an `invalid` runtime, or a subscription that has not initialized
+   * all produce it, and none of them means *"the runtime is fine"*.
+   */
+  finalizedRuntime(): RuntimeVersionReport | undefined {
+    return this.#finalizedRuntime;
+  }
+
   async pinnedBlock(): Promise<FinalizedBlockRef> {
     this.#assertLive();
     const blockHash = this.#finalized;
@@ -393,6 +441,10 @@ export class ChainHeadConnection implements ChainHeadTransport {
       // The block-number cache is keyed by hash and was never evicted either — a second,
       // quieter unbounded map, growing once per finalized block for the life of the tab.
       this.#headerNumbers.delete(hash);
+      // The announced-runtime map is the third, and it is the sparsest of the three: an
+      // entry appears only at a runtime upgrade. Sparse is not bounded, so it is trimmed
+      // here rather than reasoned about.
+      this.#runtimeAt.delete(hash);
     }
     void this.#request('chainHead_v1_unpin', [this.#subscription, releasable]).catch(() => {
       // A failed unpin means the node has already dropped the block, which is the state
@@ -546,6 +598,10 @@ export class ChainHeadConnection implements ChainHeadTransport {
         const hash = (hashes?.at(-1) ?? event['finalizedBlockHash']) as HexString | undefined;
         if (hash === undefined) return;
         this.#finalized = hash;
+        // The runtime of the block this event finalizes. `initialized` is the only event
+        // that reports a runtime for an already-finalized block, so it is the only one that
+        // may set this directly.
+        this.#finalizedRuntime = runtimeReport(event['finalizedBlockRuntime']);
         this.#announcePinned(hashes ?? [hash]);
         this.#initialized?.(hash);
         this.#initialized = undefined;
@@ -556,7 +612,15 @@ export class ChainHeadConnection implements ChainHeadTransport {
         // Announced blocks are pinned by the node whether or not we ever read at them,
         // so they have to enter the window; dropping them here would leak the majority
         // of pins, since most blocks are announced and never finalized-and-read.
-        this.#announcePinned([event['blockHash'] as HexString | undefined]);
+        const announced = event['blockHash'] as HexString | undefined;
+        this.#announcePinned([announced]);
+        // A runtime **change** at an unfinalized block. Held aside, never promoted here:
+        // this block may still be reorged away, and a classifier reading it would decide
+        // signing against a runtime the chain never adopted.
+        if (announced !== undefined) {
+          const announcedRuntime = runtimeReport(event['newRuntime']);
+          if (announcedRuntime !== undefined) this.#runtimeAt.set(announced, announcedRuntime);
+        }
         this.#trimPins();
         return;
       }
@@ -565,6 +629,14 @@ export class ChainHeadConnection implements ChainHeadTransport {
         const hash = hashes?.at(-1) as HexString | undefined;
         if (hash !== undefined) this.#finalized = hash;
         this.#announcePinned(hashes ?? []);
+        // Promote an announced runtime once its block is finalized. **In order**, so a
+        // batch that finalizes two upgrades leaves the later one standing; taking the last
+        // *known* entry instead would depend on iteration order of a map, which is the
+        // insertion order of announcements and not the order of the chain.
+        for (const finalizedHash of hashes ?? []) {
+          const promoted = this.#runtimeAt.get(finalizedHash);
+          if (promoted !== undefined) this.#finalizedRuntime = promoted;
+        }
         // Every hash, in order — see `onFinalized`. Emitted **after** `#announcePinned` so a
         // listener that immediately reads at one finds it pinned; that is the whole of the
         // ordering requirement. It is deliberately not claimed that emission must precede
