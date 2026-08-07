@@ -19,6 +19,7 @@ import { join } from 'node:path';
 
 import {
   ConnectSrcError,
+  GATEWAY_FLOOR,
   OWN_ORIGIN,
   collectAllowlist,
   diffAgainstIncumbent,
@@ -149,6 +150,31 @@ test('an empty bootnode program and an empty gateway list are named blockers', (
   });
   assert.deepEqual(entries, []);
   assert.equal(blockers.length, 2, blockers.join('; '));
+});
+
+test('the gateway blocker binds 12 §5.1’s floor of three, not merely a non-empty list', () => {
+  // Written because nothing here covered it. The check read `gateways.length === 0` until
+  // SQ-994 was ruled on 2026-08-07, so **one** gateway satisfied it — and one gateway is a
+  // release the §5.2 monitor cannot check, since that monitor resolves across >= 3
+  // independent gateways. Changing the check broke no test, which is the tell.
+  const dir = mkdtempSync(join(tmpdir(), 'bleavit-gwfloor-'));
+  const declare = (gateways: readonly string[]) =>
+    collectAllowlist(dir, {
+      bootnodeManifests: [],
+      chainSpecs: [],
+      gateways: [...gateways],
+      providers: [],
+      rpcFallbacks: [],
+    }).blockers.filter((line) => line.includes('ar.io gateway'));
+
+  const gw = (n: number) => Array.from({ length: n }, (_, i) => `https://gw${i}.example`);
+  for (const short of [0, 1, GATEWAY_FLOOR - 1]) {
+    assert.equal(declare(gw(short)).length, 1, `${short} gateway(s) must still block`);
+  }
+  assert.deepEqual(declare(gw(GATEWAY_FLOOR)), [], 'three independent gateways clear the floor');
+  // The message states the floor rather than only the shortfall, because the operator reading
+  // it has to know how many to seat, and membership is theirs to choose (12 §5.1).
+  assert.match(declare(gw(1))[0], new RegExp(`floor of ${GATEWAY_FLOOR}`));
 });
 
 test('a declared chain spec that is not present is a blocker, not a silent omission', () => {

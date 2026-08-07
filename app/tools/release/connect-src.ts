@@ -61,6 +61,18 @@ import { resolve } from 'node:path';
 export const OWN_ORIGIN = "'self'";
 
 /**
+ * How many independent ar.io gateways 12 §5.1 class 2 must carry before a production release.
+ *
+ * Three, and the figure is §5.2's rather than this file's: the out-of-band monitor resolves the
+ * release name across **≥ 3 independent gateways**, so a release baking fewer ships a bundle the
+ * repository's own monitor cannot check. SQ-994 ruled it into §5.1 on 2026-08-07, alongside the
+ * separate ruling that *which* operators belong is an operator decision — each entry is
+ * permanent allowlisted egress for every user, and §5.1 says plainly that exfiltration to an
+ * allowlisted host is not stopped.
+ */
+export const GATEWAY_FLOOR = 3;
+
+/**
  * What the renderer and the diff gate actually read.
  *
  * Kept separate from `AllowlistEntry` deliberately: rendering a policy and diffing one
@@ -293,8 +305,18 @@ export function collectAllowlist(repoRoot: string, declared: DeclaredSources): C
   for (const raw of declared.gateways) {
     add(normaliseOrigin(raw, ['https:']), 'gateway', 'sources/release-sources.json:gateways');
   }
-  if (declared.gateways.length === 0) {
-    blockers.push('no ar.io gateway fallback is baked in (12 §5.1 class 2 is empty)');
+  // The floor is three, not one — SQ-994, ruled 2026-08-07 into 12 §5.1. The number is not
+  // invented here: §5.2's out-of-band monitor requires resolution across >= 3 independent
+  // gateways, so a shorter list ships a release this repository's own monitor cannot check.
+  // Checking only for emptiness admitted a one-gateway release under a document that now
+  // says three. Held inline with its citation, the way §1.4's floor of two is held in
+  // `build.ts` — doc 12 has no cell binder as doc 10 §9 does (SQ-996).
+  if (declared.gateways.length < GATEWAY_FLOOR) {
+    blockers.push(
+      `only ${declared.gateways.length} baked ar.io gateway(s); 12 §5.1 fixes a floor of ` +
+        `${GATEWAY_FLOOR} independent operators, matching §5.2's >= 3-gateway monitor. ` +
+        'Membership is an operator decision (12 §5.1), not a values-layer number',
+    );
   }
 
   for (const raw of declared.providers) {
