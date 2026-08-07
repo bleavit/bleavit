@@ -55,8 +55,14 @@ Legend: ⬜ pending · 🔨 in progress · ✅ done · ⛔ blocked · 🅿 defer
 > which on this repository also covers `cancelled` — then merge #261, flip those seven rows, and
 > close #250 and #252–#260 with a pointer to it.
 >
-> **F1** has all eleven prototype gates resolved or recorded with what would unblock each, and is
-> held by **SQ-940** alone.
+> **F1** has all eleven prototype gates resolved or recorded with what would unblock each. This
+> block said F1 was *"held by SQ-940 alone"*, and that was wrong — checked against 10 §12's own
+> experiment column rather than restated. SQ-940 holds one half of **FE-P7**. Four other gates
+> wait on things no ruling reaches: **FE-P3** wants a *"matrix spike on device lab"*, **FE-P4**'s
+> remaining halves want *"instrumented testnet runs on device lab"*, **FE-P9** wants a *"TestNet
+> pipeline run"*, and **FE-P10**'s capacity half wants an instrumented submission of a real
+> runtime artifact. So F1 is parked below with the other four, and it is not waiting on a
+> decision.
 >
 > **SQ-940 needs a ruling from the user and blocks launch.** Verified against primary sources,
 > not inferred: `ar-io/ar-io-ant-process` was archived 2026-06-09 — *"The AR.IO smart contracts
@@ -65,8 +71,9 @@ Legend: ⬜ pending · 🔨 in progress · ✅ done · ⛔ blocked · 🅿 defer
 > custody, which is the opposite of what D-16 chose it for. Doc 12 §4.2's primary option is
 > withdrawn across 00, 10, 12 and 14; the replacement custody model is a values judgement.
 >
-> **PARKED:** four rows cannot close by any amount of work in this session, and each is parked on
-> what it actually waits for. **F11** waits on SQ-940 plus ten `release.json` readiness blockers
+> **PARKED:** five rows cannot close by any amount of work in this session, and each is parked on
+> what it actually waits for. **F1** waits on a device lab and a running testnet, per the gate
+> list above. **F11** waits on SQ-940 plus ten `release.json` readiness blockers
 > (no seated bootnode operator, no gateway set, no production keys). **F13** waits on the key
 > ceremony and a two-environment byte-identical run. **F15** waits on roles being seated. **F18**
 > waits on committed chain-spec bytes — `chainSpecs: []` with both hashes null, so nothing can
