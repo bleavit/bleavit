@@ -25,10 +25,12 @@
  */
 
 import { mount as mountTree } from '@bleavit/ui';
+import { IndexBootDisclosure, bootLocalIndex, cannotObserve } from '@bleavit/features-analysis';
 import { registerReleaseWorker, type WorkerStatus } from './release-worker.js';
 import { Shell, type ShellChainState } from './shell.js';
 import { Outlet, screenFor } from './routes.js';
 import { implementedScreens } from './composition.js';
+import { releaseParaChain } from './chain-identity.js';
 
 /**
  * What the shell shows before anything has been read: nothing, said out loud.
@@ -78,9 +80,21 @@ export async function boot(container: Element): Promise<WorkerStatus> {
   // `handoff` may not see each other (10 §10.2); assembling it at the top level is what
   // keeps that true while still letting one outlet render either unit's screens.
   const implemented = implementedScreens();
+  // 10 §3.1's `StorageOpen`, and F25's whole point: `checkIndexAtBoot` now has a production
+  // call site, and what it returns is rendered rather than logged. It is awaited before the
+  // mount only because it does no I/O in this build — `releaseParaChain()` is `unpinned`, so
+  // `bootLocalIndex` returns without touching IndexedDB. §3.1 puts the skeleton render *before*
+  // `StorageOpen`, so once a genesis pin lands the open has to move after the first paint,
+  // which needs a re-render path this build does not have (recorded in PLAN.md, not assumed).
+  //
+  // `cannotObserve` is the honest observer, not a stub: nothing here starts a light client, so
+  // the chain's answer about every range's edge really is *cannot say* — which §6.3 says keeps
+  // the range and lists it as unchecked, never as one that passed.
+  const { state: indexState } = await bootLocalIndex(releaseParaChain(), cannotObserve);
   mountTree(
     container,
     <Shell chain={initialChainState()} handoffEnabled={handoffEnabled} activeScreen={active}>
+      <IndexBootDisclosure state={indexState} />
       <Outlet hash={hash} handoffEnabled={handoffEnabled} implemented={implemented} />
     </Shell>,
   );

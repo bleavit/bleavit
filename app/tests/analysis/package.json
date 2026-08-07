@@ -7,9 +7,15 @@
     "test": "node --test"
   },
   "dependencies": {
+    "@bleavit/application": "workspace:*",
     "@bleavit/chain-client": "workspace:*",
     "@bleavit/features-analysis": "workspace:*",
     "@bleavit/local-index": "workspace:*",
-    "@polkadot-api/descriptors": "workspace:*"
+    "@polkadot-api/descriptors": "workspace:*",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
+  "devDependencies": {
+    "fake-indexeddb": "6.2.5"
   }
 }
