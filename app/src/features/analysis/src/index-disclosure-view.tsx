@@ -36,9 +36,11 @@ import { DataTable, Notice, Panel, type ReactNode } from '@bleavit/ui';
 import {
   bootDisclosure,
   historyDisclosure,
+  retentionDisclosure,
   type DisclosureItem,
   type IndexBootState,
 } from './index-disclosure.js';
+import type { RetentionOutcome } from './index-quota.js';
 import type { CoveredHistory } from '@bleavit/local-index';
 
 /**
@@ -95,14 +97,28 @@ function Disclosure({ item }: { readonly item: DisclosureItem }): ReactNode {
 }
 
 /**
- * What the boot check found — rendered on every route, because the index is not a screen.
+ * What the boot check found and what the storage budget did — rendered on every route, because
+ * the index is not a screen.
  *
- * Never `null`: `bootDisclosure` returns at least one item for every arm of the state, including
- * the two where no index was opened. An index nothing looked at must not render as one that was
+ * Never `null`: `bootDisclosure` returns at least one item for every arm of the state and
+ * `retentionDisclosure` returns one for both of its own, including the arms where nothing was
+ * opened and nothing was applied. An index nothing looked at must not render as one that was
  * looked at and was fine, and rendering nothing is exactly how it would.
+ *
+ * **One panel, two disclosures, and deliberately not two panels.** Both are statements about
+ * this device's own storage, and 10 §9.2 makes the retention pass *"user-visible"* rather than a
+ * screen of its own — the same reason the boot check is shell furniture rather than an S-number
+ * (SQ-920). A second panel would also let a build render one and not the other, which is how a
+ * disclosure quietly stops being on every route.
  */
-export function IndexBootDisclosure({ state }: { readonly state: IndexBootState }): ReactNode {
-  const items = bootDisclosure(state);
+export function IndexBootDisclosure({
+  state,
+  retention,
+}: {
+  readonly state: IndexBootState;
+  readonly retention: RetentionOutcome;
+}): ReactNode {
+  const items = [...bootDisclosure(state), ...retentionDisclosure(retention)];
   return (
     <Panel title="Local history" tone="advanced">
       {items.map((item) => (

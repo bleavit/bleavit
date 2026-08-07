@@ -49,6 +49,7 @@
  * agreed**.
  */
 
+import type { RetentionOutcome } from './index-quota.js';
 import {
   boundarySet,
   type ChartDiscardRecord,
@@ -61,6 +62,7 @@ import {
   type Hole,
   type IndexBootReport,
   type PendingRawEvictionRecord,
+  type QuotaStep,
   type RangeCheck,
 } from '@bleavit/local-index';
 
@@ -75,6 +77,17 @@ import {
 export type IndexDisclosureId =
   | 'index-not-opened'
   | 'index-unopenable'
+  /**
+   * 10 §9.2's retention pass — *"deterministic and user-visible"*, which needs a reader.
+   *
+   * Four ids for four outcomes, because *applied*, *another tab is doing it*, *nothing was
+   * attempted* and *a pass began and did not finish* are four different things to be told, and
+   * any two of them sharing a sentence makes that sentence false for one of them.
+   */
+  | 'storage-retention'
+  | 'storage-retention-deferred'
+  | 'storage-retention-not-run'
+  | 'storage-retention-interrupted'
   | 'coverage'
   | 'ranges-dropped'
   | 'ranges-invalidated'
@@ -557,6 +570,173 @@ export function bootDisclosure(state: IndexBootState): readonly DisclosureItem[]
   if (report.pendingRawEvicted !== undefined) items.push(rawEvictedItem(report.pendingRawEvicted));
   if (report.chartDiscard !== undefined) items.push(chartDiscardItem(report.chartDiscard));
   return items;
+}
+
+/**
+ * Bytes as 10 §9 states them: **MB is 10⁶**, once, for the whole section.
+ *
+ * A rendering rather than a threshold, so nothing binds it — but it is written against the same
+ * convention the caps are, because a cap shown in MiB beside a cap enforced in MB is the closed
+ * loop `check-smoldot-budget.ts` shipped for a day (SQ-557).
+ */
+const mb = (bytes: number): string => `${(bytes / (1000 * 1000)).toFixed(1)} MB`;
+
+/** Days at one decimal — the unit §9.2 publishes every depth in, deliberately not glossed. */
+const days = (value: number): string => `${value.toFixed(1)} days`;
+
+/**
+ * The pass's non-refusal steps, counted per rung, in the order §9.2 publishes them.
+ *
+ * A `Map` preserves insertion order, and the steps arrive in ladder order, so the rendering is
+ * the section's order without this function knowing what that order is — which is the point: a
+ * list written here would be a second copy of §9.2's ladder, disagreeing the day it changed.
+ * Refusals are excluded because they are rendered individually and never elided.
+ */
+function rungTally(steps: readonly QuotaStep[]): ReadonlyMap<string, number> {
+  const tally = new Map<string, number>();
+  for (const step of steps) {
+    if (step.kind === 'refused') continue;
+    const rung = step.kind === 'downsample' ? `${step.from} → ${step.to}` : step.kind;
+    tally.set(rung, (tally.get(rung) ?? 0) + 1);
+  }
+  return tally;
+}
+
+/**
+ * What 10 §9.2's retention pass did — *"deterministic and **user-visible**"*, as the reader that
+ * clause requires.
+ *
+ * The pass produces a `QuotaReport` with an ordered step list, the refusals kept separately so
+ * one cannot go unreported, and a measured depth per tier. Every one of those fields existed
+ * with no consumer, which is the same shape as a record with a producer and no reader one module
+ * over — and here it is worse, because the thing being reported is deletion.
+ *
+ * **`heldDays` and `budgetedDays` are rendered because §9.2 makes them a `MUST`**: *"Raw depth
+ * is the tier that moves with hosted occupancy, so a client MUST present it as measured-and-
+ * current rather than as a promise"*. An unmeasurable rate renders as a stated absence rather
+ * than as zero or as a table cell — §9.2's published depths are a planning model at four book
+ * counts, and quoting one of them here would be quoting exactly the promise that sentence
+ * forbids.
+ */
+export function retentionDisclosure(outcome: RetentionOutcome): readonly DisclosureItem[] {
+  if (outcome.kind === 'not-run') {
+    return [
+      {
+        id: 'storage-retention-not-run',
+        severity: 'info',
+        heading: 'No storage budget applied this session',
+        facts: [{ label: 'Reason', value: outcome.reason }],
+        copy: {
+          kind: 'stated',
+          cite: '10 §9.2',
+          text:
+            'This client did not apply its storage budget, so nothing local was folded or ' +
+            'removed. That is not the same as being inside the budget: nothing was measured.',
+        },
+      },
+    ];
+  }
+  if (outcome.kind === 'deferred') {
+    return [
+      {
+        id: 'storage-retention-deferred',
+        severity: 'info',
+        heading: 'Another tab is applying the storage budget',
+        facts: [{ label: 'Reason', value: outcome.reason }],
+        copy: {
+          kind: 'stated',
+          cite: '10 §4.4',
+          text:
+            'Only one tab of this app writes to local history at a time, so this tab left the ' +
+            'cleanup to the one already doing it. The budget is being applied — just not here.',
+        },
+      },
+    ];
+  }
+  if (outcome.kind === 'interrupted') {
+    return [
+      {
+        id: 'storage-retention-interrupted',
+        severity: 'caution',
+        heading: 'A storage cleanup started and did not finish',
+        facts: [{ label: 'What stopped it', value: outcome.reason }],
+        copy: {
+          kind: 'stated',
+          cite: '10 §9.2',
+          text:
+            'A cleanup of this device’s local history began and stopped part-way. Some older ' +
+            'detail may already have been folded into coarser summaries or removed, and this ' +
+            'client cannot say how much — so it is telling you that rather than reporting a ' +
+            'figure it did not finish measuring. Anything folded is still labelled as folded. ' +
+            'Nothing read from the chain and nothing on the transaction path is affected.',
+        },
+      },
+    ];
+  }
+  const { profile, budget, report } = outcome;
+  const raw = report.depth.tiers.find((tier) => tier.tier === 'raw');
+  const facts: DisclosureFact[] = [
+    { label: 'Storage budget', value: `${mb(budget.capBytes)} (${profile.platform})` },
+    { label: 'Why this budget', value: profile.why },
+    { label: 'Held after this pass', value: mb(report.after.totalBytes) },
+    { label: 'Freed by this pass', value: mb(report.before.totalBytes - report.after.totalBytes) },
+    { label: 'Steps performed', value: String(report.stepsPerformed) },
+  ];
+  if (raw !== undefined) {
+    facts.push({ label: 'Raw price history held now', value: days(raw.heldDays) });
+    facts.push({
+      label: 'Raw price history this budget admits',
+      value:
+        raw.budgetedDays === undefined
+          ? 'not measurable yet — this device has not held raw samples over a long enough span ' +
+            'to measure a rate, and a made-up rate would report an unlimited depth'
+          : `${days(raw.budgetedDays)} at the rate this device is currently ingesting`,
+    });
+  }
+  // §9.2 calls the ladder *"deterministic and user-visible"* and `QuotaReport.steps` is what
+  // renders it — the sequence, not only the count. Summarised per rung rather than listed: one
+  // `downsample` step is one folded bucket and a full desktop pass is thousands of them, which
+  // is the envelope-and-count treatment `PendingRawEvictionRecord` already applies one layer
+  // down. Without this the step list was a producer with no reader, in the milestone whose
+  // subject is that class.
+  for (const [rung, count] of rungTally(report.steps)) {
+    facts.push({ label: `Degraded: ${rung}`, value: `${count} time(s) in this pass` });
+  }
+  if (outcome.metadataRungSkipped !== undefined) {
+    facts.push({
+      label: 'Cached runtime metadata was left alone',
+      value: `${outcome.metadataRungSkipped} — nothing cached was discarded on an unknown set`,
+    });
+  }
+  for (const refusal of report.refusals) {
+    facts.push({ label: `Could not run: ${refusal.rung} (${refusal.at})`, value: refusal.reason });
+  }
+  if (report.exhausted) {
+    facts.push({
+      label: 'Still over budget',
+      value: 'every rung of the ladder has been applied and this device still holds more than ' +
+        'its budget',
+    });
+  }
+  return [
+    {
+      id: 'storage-retention',
+      severity: report.exhausted || report.refusals.length > 0 ? 'caution' : 'info',
+      heading: 'Storage budget for local history',
+      facts,
+      copy: {
+        kind: 'stated',
+        cite: '10 §9.2',
+        text:
+          'This device keeps local history inside a fixed budget. When it fills, the oldest ' +
+          'detail is folded into coarser summaries — hourly, then four-hourly, then daily — ' +
+          'and the folded ranges stay labelled as folded rather than disappearing. This ' +
+          'changes chart resolution and event detail only. It never touches transactions, ' +
+          'never touches anything read from the chain, and never turns a gap into a smooth ' +
+          'line.',
+      },
+    },
+  ];
 }
 
 /**

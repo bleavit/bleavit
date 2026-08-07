@@ -894,6 +894,45 @@ export async function readMetadataBlob(
 }
 
 /**
+ * The spec versions the cache currently holds — the set a caller pins when it cannot name
+ * §9.3's own pinned pair.
+ *
+ * §9.3 pins *"the current and next-authorized runtime's metadata"* non-evictable, and both are
+ * **chain facts**: a client that has completed no chain read knows neither. Passing an empty
+ * pinned set in that state is not a neutral default — it makes every blob evictable, so the
+ * first retention pass of a session that has not yet synced can discard exactly the metadata
+ * the next block needs, under a mobile bound of three blobs.
+ *
+ * So the honest substitute is *pin everything present*: the LRU rung then evicts nothing, and if
+ * the cache alone is over its budget `evictMetadataToBudget` refuses and `applyQuota` files the
+ * refusal as a step rather than guessing which era to drop. That is the fail-closed direction —
+ * metadata is never discarded on an assumption, and the chart ladder still frees its own shares.
+ *
+ * Reads the keys through the primary index rather than materialising the blobs: the cache is
+ * bounded at 8 rows but each carries a whole SCALE metadata blob (§9.3, measured 147,008 B), and
+ * this is called on the boot path.
+ *
+ * A key that is not a spec version **refuses** rather than being filtered out. Filtering would
+ * return a set that is silently short of what the cache holds, and this set's whole job is to be
+ * a superset of what must not be evicted — a short one is an eviction of the omitted blob.
+ */
+export async function cachedSpecVersions(db: LocalIndex): Promise<number[]> {
+  const keys = await db.metadataCache.orderBy('specVersion').keys();
+  const versions: number[] = [];
+  for (const key of keys) {
+    if (typeof key !== 'number') {
+      throw new StoreError(
+        `metadataCache holds the key ${String(key)}, which is not a spec version. This set is ` +
+          'used to pin blobs against eviction, so answering without it would drop the blob it ' +
+          'names rather than merely omitting it from a report.',
+      );
+    }
+    versions.push(key);
+  }
+  return versions;
+}
+
+/**
  * §6.5's *"N events pending decoder"*, as the number that surface renders.
  *
  * A filter rather than an index lookup, and that is not laziness. **A boolean is not a valid

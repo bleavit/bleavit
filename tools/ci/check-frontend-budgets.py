@@ -52,6 +52,11 @@ PRIMITIVES = ROOT / "crates" / "futarchy-primitives" / "src" / "lib.rs"
 BUNDLE_GATE = ROOT / "app" / "tools" / "check-bundle-budget.ts"
 ARTIFACT_GATE = ROOT / "app" / "tools" / "check-artifact-budget.ts"
 RENDER_GATE = ROOT / "app" / "tools" / "render-budget" / "check.ts"
+#: 10 §9.4's *IndexedDB growth* row enforces through *"quota manager + tests"* rather than
+#: through a size gate over an artifact, so the code its threshold has to be bound to is the
+#: manager itself and the client module that runs it.
+QUOTA_MANAGER = ROOT / "app" / "packages" / "local-index" / "src" / "quota.ts"
+QUOTA_CALLER = ROOT / "app" / "src" / "features" / "analysis" / "src" / "index-quota.ts"
 
 #: 10 §9.1's effective per-row cost, and the one modelling assumption the documents
 #: state rather than derive. It is labelled as an assumption in §9.1 itself, so it is
@@ -107,6 +112,45 @@ def gate_constant(source: str, name: str, gate: str) -> float:
     """
     return product(
         find(source, rf"const {name} = ([\d._eE+*\s]+);", f"{gate}'s {name}").group(1).replace("_", "")
+    )
+
+
+def gate_source(path: pathlib.Path, what: str) -> str:
+    """Read a gate's source, or explain the absence in this file's own voice.
+
+    A bare `FileNotFoundError` traceback is how a gate gets switched off instead of fixed — the
+    contract `find` states one function up. A module that moved is a real finding here: doc 10
+    §9.4 names two of these paths, so an unreadable one means the document points at code that
+    is not there.
+    """
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise Fail(
+            f"cannot read {what} at {path.relative_to(ROOT)}: {error.strerror}. Either the "
+            f"module moved — update this checker and doc 10 §9.4's enforcement column, which "
+            f"names it — or the enforcement it carries no longer exists."
+        ) from error
+
+
+def object_field(source: str, declaration: str, field: str, what: str) -> float:
+    """The value of one field of a `const NAME = { field: <expression>, … }` object.
+
+    Separate from `gate_constant` because the quota manager publishes its caps, shares and
+    metadata bounds as **tables keyed by platform**, which is the right shape for the code and
+    the wrong shape for that helper's `const NAME = …;` pattern. The RHS is evaluated for the
+    same reason it is there: `300 * 1000 * 1000` and `3e8` are the same grant, and `300 * 1024 *
+    1024` is not — which is exactly the MiB-for-MB defect this file exists to catch.
+
+    The search is anchored at the declaration and bounded to it, so a field of the same name in
+    a neighbouring table cannot answer for this one.
+    """
+    start = find(source, rf"const {declaration}\b", f"{what}'s {declaration}").end()
+    block = source[start : start + 2000]
+    return product(
+        find(block, rf"\b{field}:\s*([\d._eE+*\s]+)[,}}]", f"{what}'s {declaration}.{field}")
+        .group(1)
+        .replace("_", "")
     )
 
 
@@ -747,6 +791,122 @@ def main() -> int:
             "size decides what the p95 comparison is — at nineteen runs or fewer the nearest-rank "
             "p95 is the slowest run, and from twenty it stops being — so it is a published figure "
             "with one home, not a detail of the gate."
+        )
+    checked += 1
+
+    # --- §9.4's IndexedDB-growth row, and the quota manager that is its enforcement ---
+    # This row is unlike every other one above it: its enforcement column names *"quota
+    # manager + tests"* rather than a size gate over a built artifact, so the code its
+    # threshold has to be bound to is the retention module itself. Until F14 that module
+    # had no production caller at all — the caps were computed by something the client never
+    # ran, which is the same closed loop as a gate holding its own copy of a number, with
+    # the loop closed one step earlier: nothing enforced the figure anywhere.
+    quota = gate_source(QUOTA_MANAGER, "the §9.2 quota manager")
+    caller = gate_source(QUOTA_CALLER, "the client module that runs it")
+
+    # §9.4 restates §9.2's caps inside its own row, and nothing compared the two. One
+    # document with one figure in two places drifts exactly like a document and a gate do.
+    row_caps = find(
+        nine,
+        r"\| IndexedDB growth \| §9\.2 caps \((\d+) MB / (\d+) MB\)",
+        "§9.4's IndexedDB-growth row",
+    )
+    if [float(g) for g in row_caps.groups()] != [desktop_cap, mobile_cap]:
+        raise Fail(
+            f"§9.4's IndexedDB row restates §9.2's caps as {row_caps.group(1)} MB / "
+            f"{row_caps.group(2)} MB; §9.2 states {desktop_cap:g} MB / {mobile_cap:g} MB"
+        )
+    checked += 1
+
+    for platform, cap in (("desktop", desktop_cap), ("mobile", mobile_cap)):
+        enforced = object_field(quota, "STORAGE_CAP_BYTES", platform, "the quota manager")
+        if enforced != cap * 1e6:
+            raise Fail(
+                f"§9.2 caps {platform} local storage at {cap:g} MB = {cap * 1e6:.0f} B, but "
+                f"`app/packages/local-index/src/quota.ts` enforces {enforced:.0f} B via "
+                "STORAGE_CAP_BYTES. §9 states MB = 10⁶, and §9.2's depth tables are only "
+                "reproducible under that reading."
+            )
+        checked += 1
+
+    # The four shares are as load-bearing as the caps: they are what turns one cap into the
+    # four budgets the ladder actually compares against, and §9.2 publishes them as
+    # percentages that nothing tied to the code applying them.
+    for published, field in (
+        ("raw samples", "rawSamples"),
+        ("candles", "candles"),
+        ("events+archive", "eventsAndArchive"),
+        ("metadata", "metadata"),
+    ):
+        enforced = object_field(quota, "QUOTA_SHARES", field, "the quota manager")
+        if abs(enforced - shares[published]) > 1e-12:
+            raise Fail(
+                f"§9.2 gives '{published}' {shares[published]:.0%} of the cap and the quota "
+                f"manager applies {enforced:.4f} via QUOTA_SHARES.{field}"
+            )
+        checked += 1
+
+    # §9.3's own bound, which the metadata budget is the *tighter* of. Both halves are bound
+    # because the count is what binds at the measured blob size and the byte figure is the
+    # headroom — a gate checking only one would pass the 16 MB / 6 MB pair SQ-557 cut, since
+    # that pair kept the counts and exceeded the share in bytes alone.
+    for platform, stated_blobs, stated_bytes in (
+        ("desktop", desktop_blobs, desktop_bytes),
+        ("mobile", mobile_blobs, mobile_bytes),
+    ):
+        pair = find(
+            quota,
+            rf"{platform}: Object\.freeze\(\{{ blobs: (\d+), bytes: ([\d._eE+*\s]+) \}}\)",
+            f"the quota manager's METADATA_BOUND.{platform}",
+        )
+        if float(pair.group(1)) != float(stated_blobs):
+            raise Fail(
+                f"§9.3 bounds the {platform} metadata cache at {stated_blobs} blobs and the "
+                f"quota manager enforces {pair.group(1)} via METADATA_BOUND"
+            )
+        enforced_bytes = product(pair.group(2).replace("_", ""))
+        if enforced_bytes != float(stated_bytes) * 1e6:
+            raise Fail(
+                f"§9.3 bounds the {platform} metadata cache at {stated_bytes} MB = "
+                f"{float(stated_bytes) * 1e6:.0f} B and the quota manager enforces "
+                f"{enforced_bytes:.0f} B via METADATA_BOUND"
+            )
+        checked += 2
+
+    # §9.1's per-row model, where the client names it. The package refuses to compile a
+    # default in, because §9.1 labels the figure a modelling assumption — so exactly one
+    # module in the client supplies it, and this is what stops that module from becoming a
+    # second, quieter home for the number the depth tables are derived from.
+    modelled = gate_constant(caller, "MODELLED_ROW_BYTES", "the client's retention caller")
+    if modelled != row_bytes:
+        raise Fail(
+            f"§9.1 models storage at {row_bytes:.0f} B effective per row and "
+            f"`app/src/features/analysis/src/index-quota.ts` charges {modelled:.0f} B via "
+            "MODELLED_ROW_BYTES. Every depth in §9.2 divides by this figure."
+        )
+    checked += 1
+
+    # The enforcement column names a mechanism, and a named mechanism with no implementation
+    # is SQ-557's shape exactly — §9.4's bundle row named a *"bundle-size CI gate"* that did
+    # not exist for as long as the row did. So the module the row names must be the module
+    # that runs the pass, in both directions.
+    named = find(
+        nine,
+        r"\| IndexedDB growth \|[^|]*\|[^|]*`(app/src/[^`]+)`",
+        "§9.4's IndexedDB-growth enforcement call site",
+    ).group(1)
+    if ROOT / named != QUOTA_CALLER:
+        raise Fail(
+            f"§9.4's IndexedDB row names {named} as the quota manager's call site; this gate "
+            f"binds {QUOTA_CALLER.relative_to(ROOT)}. One of them is reading a module that no "
+            "longer applies the budget."
+        )
+    if "applyQuota(" not in caller:
+        raise Fail(
+            f"{named} does not call `applyQuota`, so §9.4's IndexedDB row is enforced by "
+            "nothing on a running client. The manager implements every clause of §9.2 and a "
+            "manager the client never reaches holds no cap at all — which is the state this "
+            "binding exists to make impossible to re-enter."
         )
     checked += 1
 

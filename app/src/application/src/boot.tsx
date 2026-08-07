@@ -25,12 +25,19 @@
  */
 
 import { mount as mountTree } from '@bleavit/ui';
-import { IndexBootDisclosure, bootLocalIndex, cannotObserve } from '@bleavit/features-analysis';
+import {
+  IndexBootDisclosure,
+  bootLocalIndex,
+  cannotObserve,
+  deviceHints,
+  enforceStorageBudget,
+  storagePlatform,
+} from '@bleavit/features-analysis';
 import { registerReleaseWorker, type WorkerStatus } from './release-worker.js';
 import { Shell, type ShellChainState } from './shell.js';
 import { Outlet, screenFor } from './routes.js';
 import { implementedScreens } from './composition.js';
-import { releaseParaChain } from './chain-identity.js';
+import { releaseMetadataPins, releaseParaChain } from './chain-identity.js';
 
 /**
  * What the shell shows before anything has been read: nothing, said out loud.
@@ -90,11 +97,43 @@ export async function boot(container: Element): Promise<WorkerStatus> {
   // `cannotObserve` is the honest observer, not a stub: nothing here starts a light client, so
   // the chain's answer about every range's edge really is *cannot say* — which §6.3 says keeps
   // the range and lists it as unchecked, never as one that passed.
-  const { state: indexState } = await bootLocalIndex(releaseParaChain(), cannotObserve);
+  const chain = releaseParaChain();
+  const { state: indexState, db } = await bootLocalIndex(chain, cannotObserve);
+  // F14 — 10 §9.2's quota manager reaches a running client. §9.4's *IndexedDB growth* row
+  // budgets *"§9.2 caps (300 MB / 75 MB) with auto-tuned retention"* and enforces it through
+  // *"quota manager + tests"*; the manager existed in full and was called by nothing outside its
+  // own suite, so on a running client no cap was held at all. The handle `bootLocalIndex`
+  // returns is what this runs against — it is deliberately returned so a later consumer need not
+  // reopen the database, and this is that consumer.
+  //
+  // **Under `fut-ingest`.** The pass deletes rows and rewrites one `meta` row wholesale, so two
+  // tabs booting together would each persist their own label accumulator and the later one would
+  // erase a label whose rows the earlier had already deleted — §9.2 obligation 1's silent
+  // splice, produced by a user having the app open twice. §4.4 gives that writer role to the
+  // leader, and `withIngestLock` had no production caller until this line.
+  //
+  // The platform is classified rather than assumed and fails closed to the 75 MB mobile cap; the
+  // metadata pins are `unnameable` rather than empty, since nothing here reads the chain. Both
+  // decisions are rendered, because §9.2 calls the ladder "deterministic and user-visible".
+  //
+  // **Awaited before the mount for the same reason the boot check is, and it inherits the same
+  // note one paragraph up — with more force.** Today it returns immediately, because there is no
+  // database to apply a budget to. Once a genesis pin lands it will not: a full pass at the
+  // desktop raw share is thousands of folded buckets, and §9.4 budgets *first meaningful render*
+  // at 1.5 s p50 on the same reference hardware this milestone measures. So the move after the
+  // first paint that `StorageOpen` needs is the move this call needs too, and the render budget
+  // is what would notice if it were skipped.
+  const retention = await enforceStorageBudget(db, {
+    chain,
+    locks: globalThis.navigator?.locks,
+    profile: storagePlatform(deviceHints(globalThis.navigator)),
+    pins: releaseMetadataPins(),
+    now: Math.floor(Date.now() / 1000),
+  });
   mountTree(
     container,
     <Shell chain={initialChainState()} handoffEnabled={handoffEnabled} activeScreen={active}>
-      <IndexBootDisclosure state={indexState} />
+      <IndexBootDisclosure state={indexState} retention={retention} />
       <Outlet hash={hash} handoffEnabled={handoffEnabled} implemented={implemented} />
     </Shell>,
   );

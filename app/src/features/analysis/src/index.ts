@@ -62,11 +62,29 @@ export {
   type IndexChainIdentity,
   type RangeObserver,
 } from './index-boot.js';
+// F14 — 10 §9.2's quota manager reaches a running client. `enforceStorageBudget` is
+// `applyQuota`'s production call site; `retentionDisclosure` is its reader. `LocalIndex` is
+// still not re-exported (see above), and neither is `applyQuota`: the budget is applied through
+// the wrapper that names the platform, the row model and the metadata pins, so no caller above
+// the firewall can run a pass against a cap it invented.
+export {
+  MODELLED_ROW_BYTES,
+  MODELLED_ROW_SIZES,
+  deviceHints,
+  enforceStorageBudget,
+  storagePlatform,
+  type DeviceHints,
+  type MetadataPins,
+  type RetentionOutcome,
+  type StorageBudgetOptions,
+  type StorageProfile,
+} from './index-quota.js';
 export {
   HISTORY_DISCLOSURES,
   REPORT_DISCLOSURES,
   bootDisclosure,
   historyDisclosure,
+  retentionDisclosure,
   type DisclosureCopy,
   type DisclosureFact,
   type DisclosureItem,

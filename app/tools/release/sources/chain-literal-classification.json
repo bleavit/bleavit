@@ -26,6 +26,17 @@
       ]
     },
     {
+      "name": "storage-budget-units",
+      "reason": "10 §9 states its own unit convention once, for the whole section: \"MB means 10⁶ bytes throughout §9, and KB 10³\", and §9.2's depth tables are only reproducible under that reading. This divisor is that convention applied where the storage budget is rendered — a byte-count unit, not a chain value — and it collides with `Market::MinTrade` only because one USDC is also 10⁶ base units, exactly the collision the handoff-document-units group already records for parts-per-million. There is no metadata constant for a megabyte to read it from, and the figures it formats are §9.2's client-local caps, which that section states outright are \"client-local values owned by this section\" rather than chain parameters. Scoped to the one module that renders them.",
+      "files": [
+        "src/features/analysis/src/index-disclosure.ts"
+      ],
+      "values": [
+        "1000000"
+      ],
+      "constants": []
+    },
+    {
       "name": "handoff-document-units",
       "reason": "`PPM` is parts-per-million \u2014 the unit 10 \u00a713.2's `fractionPpm` is expressed in, a property of the handoff document format that an external tool authors and this package parses. It is not a chain value and there is no metadata constant for it; it collides with `Market::MinTrade` only because one USDC is also 10^6 base units. 11 \u00a711.14.3 keeps the two apart: a stated fraction is narrowed against a chain-derived amount, never substituted for one.",
       "files": [

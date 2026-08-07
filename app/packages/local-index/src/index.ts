@@ -69,6 +69,7 @@ export * from './ingest-lock.js';
 // import; the suites reach it through `@bleavit/local-index/testing`, which
 // `no-testing-import` forbids production code from touching.
 export {
+  cachedSpecVersions,
   candleTableFor,
   coveredCandles,
   coveredQuery,
