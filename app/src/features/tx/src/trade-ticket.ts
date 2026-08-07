@@ -157,8 +157,17 @@ export interface QuoteFigures {
 
 /** The chain's own quote and the client's recompute of the same trade. */
 export interface QuoteAgreement {
-  /** `quote()`'s `QuoteView` figures at B′ — one runtime-API read, so one pin. */
-  readonly fromChain: Finalized<QuoteFigures>;
+  /**
+   * `quote()`'s `QuoteView` figures at B′ — one runtime-API read, so one pin.
+   *
+   * `undefined` is **unread**, and it is not a zero pair (V-323). A substituted
+   * `{cost: 0n, fee: 0n}` blocks the ticket just as this does, and it also gives the screen a
+   * figure to render: `0.000000 USDC` under a `verified-finalized` badge beneath *"What the
+   * chain says this costs"*. 10 §2.2 admits that status only for values read through smoldot
+   * or computed purely from them, and §11.5 forbids rendering a fail-closed zero quote as a
+   * market price — so the honest shape is no figure at all, and the row below says which.
+   */
+  readonly fromChain: Finalized<QuoteFigures> | undefined;
   /** `packages/protocol`'s figures for the same book state, amount and side. */
   readonly fromClient: QuoteFigures;
 }
@@ -245,7 +254,7 @@ function pinnedLeaves(inputs: TradeInputs): readonly (readonly [string, Finalize
     ['the market phase', inputs.marketOpen],
     ['Market::Fee', inputs.fee.metadataBps],
     ['params(mkt.fee)', inputs.fee.paramsPerbill],
-    ['quote()', inputs.quote.fromChain],
+    ...optional(['quote()', inputs.quote.fromChain]),
     ['MinTrade', inputs.minTrade],
     ['MaxTrade', inputs.maxTrade],
     ['the spendable balance', inputs.spendable],
@@ -329,9 +338,23 @@ export function tradeBlocks(inputs: TradeInputs): readonly TradeBlock[] {
   // path and `chain-quote-agreement.json` certifies the same base unit. Compared
   // field by field: one sum can hide two offsetting differences, and which of them
   // matters depends on the direction.
-  const chainQuote = inputs.quote.fromChain.value;
+  //
+  // An **unread** `quote()` is its own row and carries no code (V-323). It blocks for the
+  // same reason every unread precondition blocks, but it is not E6's failure: E6 says the
+  // disagreement "means one of the two is wrong about what the chain will charge", and the
+  // recovery copy this client renders under `FE-CHAIN-005` says exactly that. Neither
+  // sentence is true when the chain's own quote was never decoded, and a refusal that
+  // describes the wrong failure is worse than a plain one.
+  const chainQuote = inputs.quote.fromChain?.value;
   const clientQuote = inputs.quote.fromClient;
-  if (chainQuote.cost !== clientQuote.cost || chainQuote.fee !== clientQuote.fee) {
+  if (chainQuote === undefined) {
+    blocks.push({
+      check: 'P-1 quote()',
+      detail:
+        'the chain’s own quote could not be read at this block, so neither the charge nor the ' +
+        'slippage bound can be checked against it; an unread precondition is not a passed one',
+    });
+  } else if (chainQuote.cost !== clientQuote.cost || chainQuote.fee !== clientQuote.fee) {
     blocks.push({
       check: 'P-1 quote agreement',
       code: 'FE-CHAIN-005',
@@ -345,23 +368,28 @@ export function tradeBlocks(inputs: TradeInputs): readonly TradeBlock[] {
   // P-1: "recheck max_cost/min_proceeds still satisfiable". The refreshed quote is
   // compared against the bound this ticket will encode, which is the same test the
   // runtime makes at 04 §6.1 step 4 — after the user has paid a transaction fee.
-  const total = orderTotal(inputs.order.direction, chainQuote);
-  if (inputs.order.direction === 'buy') {
-    if (total > inputs.order.maxCost) {
+  //
+  // `undefined` where the chain's quote was not read: the row above already refuses, and a
+  // second row derived from a figure nobody read would state a charge as though it had been.
+  const total = chainQuote === undefined ? undefined : orderTotal(inputs.order.direction, chainQuote);
+  if (total !== undefined) {
+    if (inputs.order.direction === 'buy') {
+      if (total > inputs.order.maxCost) {
+        blocks.push({
+          check: 'P-1 slippage bound',
+          detail:
+            `the refreshed charge is ${total} base units and this ticket encodes max_cost ` +
+            `${inputs.order.maxCost}; the runtime refuses a buy whose cost plus fee exceeds it`,
+        });
+      }
+    } else if (total < inputs.order.minProceeds) {
       blocks.push({
         check: 'P-1 slippage bound',
         detail:
-          `the refreshed charge is ${total} base units and this ticket encodes max_cost ` +
-          `${inputs.order.maxCost}; the runtime refuses a buy whose cost plus fee exceeds it`,
+          `the refreshed net proceeds are ${total} base units and this ticket encodes min_proceeds ` +
+          `${inputs.order.minProceeds}; the runtime refuses a sale that pays less`,
       });
     }
-  } else if (total < inputs.order.minProceeds) {
-    blocks.push({
-      check: 'P-1 slippage bound',
-      detail:
-        `the refreshed net proceeds are ${total} base units and this ticket encodes min_proceeds ` +
-        `${inputs.order.minProceeds}; the runtime refuses a sale that pays less`,
-    });
   }
 
   // P-1: per-trade bounds, both from the constants API.
@@ -386,8 +414,12 @@ export function tradeBlocks(inputs: TradeInputs): readonly TradeBlock[] {
   // holdings are checked against the amount: comparing them against the proceeds
   // passes a user who holds less than they are selling whenever the sale pays less
   // than they hold.
+  //
+  // The buy leg is checked only where the charge is established. The sell leg is compared
+  // against the **amount**, so it does not depend on `quote()` and is evaluated either way —
+  // dropping it with the charge would silently stop checking a seller's holdings.
   if (inputs.order.direction === 'buy') {
-    if (inputs.spendable.value < total) {
+    if (total !== undefined && inputs.spendable.value < total) {
       blocks.push({
         check: 'P-1 USDC balance',
         detail: `the charge is ${total} base units and ${inputs.spendable.value} is available`,

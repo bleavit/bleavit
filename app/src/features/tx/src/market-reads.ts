@@ -250,23 +250,6 @@ function firstValue(items: readonly StorageItem[]): string | undefined {
 }
 
 /**
- * What a failed quote decode contributes: neither published field was read.
- *
- * Zero is not a price here — it is the one pair that cannot equal a real recompute, so
- * `FE-CHAIN-005` fires rather than the ticket passing on figures nobody read.
- *
- * Written from a named zero rather than two bare literals, and the reason is worth
- * stating: `fee` is a frozen metadata constant's name, so 10 §5.4 rule A reads
- * `fee: 0n` as a hardcoded `Market::Fee` — correctly, on the spelling. What is
- * different here is only that this `fee` is a charged amount in base units and not the
- * rate, and the rate in this file (`feeMetadataBps`) is a required parameter with no
- * default. A classification group exempting the constant *name* in this file would
- * cover a genuinely hardcoded rate too, which is a worse trade than one named local.
- */
-const NOTHING_READ = 0n;
-const NO_QUOTE: QuoteFigures = Object.freeze({ cost: NOTHING_READ, fee: NOTHING_READ });
-
-/**
  * A caller-supplied reading that was not made at this reader's block.
  *
  * Thrown rather than returned, because it is a defect in whatever assembled the call —
@@ -443,9 +426,19 @@ export async function readMarketTrade(
   // One runtime-API read, so **one** pin over the pair rather than one per field: `cost`
   // and `fee` arrive in a single `QuoteView` and pinning them separately would let a
   // future edit re-read one of them and leave the ticket's own pin row unable to notice.
-  // A failed decode contributes zeroes, which cannot equal a real recompute — so
-  // `FE-CHAIN-005` fires rather than the ticket passing on figures nobody read.
-  const fromChain = derive(quoteDecoded, (decoded) => (decoded.ok ? decoded.value : NO_QUOTE));
+  //
+  // A failed decode makes the chain's quote **absent**, not zero (V-323). It used to
+  // contribute `{cost: 0n, fee: 0n}` derived from the read, on the argument that a zero pair
+  // cannot equal a real recompute and so blocks. It does block — and it also rendered
+  // `0.000000 USDC` under a `verified-finalized` badge beneath *"What the chain says this
+  // costs"*. 10 §2.2 assigns that status *"only to values read through smoldot with storage
+  // proofs checked, or computed client-side purely from such values"*, and a zero this client
+  // chose is neither; §11.5 says a client MUST NOT render a fail-closed zero quote as a market
+  // price. This is V-183's repair in `balance-reads.ts` — *absent figure, not badged zero* —
+  // one module over. `tradeBlocks` keeps blocking, on an unread row rather than a fabricated
+  // disagreement.
+  const figures = quoteDecoded.value;
+  const fromChain = figures.ok ? derive(quoteDecoded, () => figures.value) : undefined;
 
   // A book that failed to decode contributes a zero state. That is not a price on screen:
   // `fromChain` above is the chain's own answer and the recompute is the caller's — this
@@ -519,11 +512,16 @@ export async function readMarketTrade(
       bookId: combine(bookId.toString(), [params.bookId.status]),
       inputs,
       quote: {
-        fromChain: {
-          cost: derive(fromChain, (figures) => figures.cost),
-          fee: derive(fromChain, (figures) => figures.fee),
-          total: derive(fromChain, (figures) => orderTotal(direction, figures)),
-        },
+        // Absent rather than zeroed, so the screen has no figure to render and renders a
+        // refusal in its place. There is no arm here a fail-closed zero could occupy.
+        fromChain:
+          fromChain === undefined
+            ? undefined
+            : {
+                cost: derive(fromChain, (quoted) => quoted.cost),
+                fee: derive(fromChain, (quoted) => quoted.fee),
+                total: derive(fromChain, (quoted) => orderTotal(direction, quoted)),
+              },
         fromClient: {
           cost: combine(params.clientQuote.cost, clientStatuses),
           fee: combine(params.clientQuote.fee, clientStatuses),

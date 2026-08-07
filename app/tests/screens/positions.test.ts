@@ -40,6 +40,7 @@ import {
   quoteRedemption,
   readPositions,
   voidRecoveryView,
+  type DecodedVaultState,
   type DomainPositionDecoders,
   type PositionDecoders,
   type PositionKeys,
@@ -53,7 +54,7 @@ import {
 import type { Finalized, StorageItem } from '@bleavit/chain-client';
 import { finalize } from '@bleavit/chain-client/testing';
 import { Disclosure, DeferredMeaningChangingFactError } from '@bleavit/ui';
-import type { HexString, Verified } from '@bleavit/shared-types';
+import type { HexString } from '@bleavit/shared-types';
 
 import {
   DISABLED_BUTTON,
@@ -73,8 +74,15 @@ const OTHER_BLOCK: HexString = `0x${'22'.repeat(32)}`;
 const AT = { chain: CHAIN, blockHash: BLOCK, blockNumber: 42 };
 const UNIT = { decimals: 6, symbol: 'USDC' } as const;
 
-function verified<T>(value: T, chain: HexString = CHAIN): Verified<T> {
-  return { value, status: { kind: 'verified-finalized', chain, blockHash: BLOCK, blockNumber: 42 } };
+/**
+ * A finalized reading, minted the only way a fixture may mint one.
+ *
+ * `finalize` rather than a hand-written status object: `quoteRedemption`'s leaves are
+ * `Finalized<T>` since V-321, and a hand-built status would be a `Verified<T>` that could no
+ * longer tell whether the module under test had stopped requiring the brand.
+ */
+function verified<T>(value: T, chain: HexString = CHAIN): Finalized<T> {
+  return finalize(value, { chain, blockHash: BLOCK, blockNumber: 42 });
 }
 
 const SERVICE_ID_BASE = recordedScalar('constant.ledger.service_id_base');
@@ -130,6 +138,8 @@ test('the S4 row gives the service domain no BaselineVaults read, and neither do
   // The two APIs are the domain's own, per 02 §7.4.
   assert.equal(POSITION_READS.primary.api, 'account_positions');
   assert.equal(POSITION_READS.service.api, 'service_positions');
+  // The service domain's own vault map, which it does read (see the read-log test below).
+  assert.equal(POSITION_READS.service.vaults, 'ServiceLedger.Vaults');
 });
 
 test('§11.5 rule 3 makes net the headline and forbids summing the two fees', () => {
@@ -191,6 +201,27 @@ interface Book {
   readonly witness: readonly PositionWitnessEntry[];
   readonly decodesView?: boolean;
   readonly decodesWitness?: boolean;
+  /**
+   * What the vault surfaces hold, keyed by the **reader's own storage key**.
+   *
+   * Defaulted from each record's own `vault`, so the happy path agrees and every disagreement
+   * below is one a fixture states deliberately. `undefined` is *the map holds no entry*; the
+   * literal `'undecodable'` is a stored value the decoder does not know.
+   */
+  readonly vaults?: ReadonlyMap<string, string | undefined>;
+}
+
+/**
+ * A vault state as this harness stores it — a token the decoder below resolves.
+ *
+ * A token rather than a serialization, because what is being doubled is a **decoder**: a value
+ * nobody registered must fail to decode, which is how the undecodable case gets tested at all.
+ */
+const VAULT_TOKENS = new Map<string, DecodedVaultState>();
+function vaultValue(state: DecodedVaultState): string {
+  const token = `vault-${VAULT_TOKENS.size}-${state.kind}`;
+  VAULT_TOKENS.set(token, state);
+  return token;
 }
 
 function witnessFor(records: readonly PositionRecord[]): PositionWitnessEntry[] {
@@ -207,17 +238,54 @@ function book(records: readonly PositionRecord[], overrides: Partial<Book> = {})
 
 interface CallLog {
   readonly calls: { api: string; storagePrefix: string; argsHex?: string }[];
+  /** Every raw storage key the reader asked for, in order — the S4 vault reads land here. */
+  readonly storage: string[];
 }
 
-const KEYS: PositionKeys = { positionsPrefix: (pallet) => `prefix:${pallet}.Positions` };
+const KEYS: PositionKeys = {
+  positionsPrefix: (pallet) => `prefix:${pallet}.Positions`,
+  vault: (pallet, proposalId) => `key:${pallet}.Vaults(${proposalId})`,
+  baselineVault: (epoch) => `key:${POSITION_READS.primary.baselineVaults}(${epoch})`,
+};
+
+/** The pallet each domain's vault key is built against — `positionSourceFor`'s own answer. */
+const PALLET_OF = { primary: 'ConditionalLedger', service: 'ServiceLedger' } as const;
+
+/** The reader's own key spelling, so a fixture cannot answer a key the reader never built. */
+function vaultKeyOf(record: PositionRecord, pallet: string): string {
+  return record.subject.kind === 'baseline'
+    ? KEYS.baselineVault(record.subject.epoch)
+    : KEYS.vault(pallet, record.subject.id);
+}
 
 function harness(primary: Book, service: Book, log: CallLog) {
   const books = new Map<string, Book>([
     [POSITION_READS.primary.api, primary],
     [POSITION_READS.service.api, service],
   ]);
+  // The vault surfaces both books publish, defaulted from the rows and then overridden by
+  // whatever the fixture declared. A key nothing registered answers with **no value**, which
+  // is what an absent entry looks like on chain.
+  const stored = new Map<string, string | undefined>();
+  for (const [domain, held] of [
+    ['primary', primary],
+    ['service', service],
+  ] as const) {
+    for (const record of held.records) {
+      stored.set(vaultKeyOf(record, PALLET_OF[domain]), vaultValue(record.vault));
+    }
+  }
+  for (const held of [primary, service]) {
+    for (const [key, value] of held.vaults ?? []) stored.set(key, value);
+  }
+
   const reader: PositionsReader = {
     at: AT,
+    async storage(key: string): Promise<Finalized<readonly StorageItem[]>> {
+      log.storage.push(key);
+      const value = stored.get(key);
+      return finalize(value === undefined ? [] : [{ key, value }], AT);
+    },
     async crossCheckedCall(source): Promise<
       Finalized<{ result: string; witness: readonly StorageItem[] }>
     > {
@@ -227,6 +295,12 @@ function harness(primary: Book, service: Book, log: CallLog) {
         AT,
       );
     },
+  };
+  const decodeVault = (raw: string): ReturnType<DomainPositionDecoders['vault']> => {
+    const found = VAULT_TOKENS.get(raw);
+    return found === undefined
+      ? { ok: false, reason: `the vault decoder was handed "${raw}"` }
+      : { ok: true, value: found };
   };
   // One pair **per domain**, which is what `PositionDecoders` now requires. The two stubs are
   // deliberately identical here: what is under test is that `readBook` reaches for the pair
@@ -246,8 +320,13 @@ function harness(primary: Book, service: Book, log: CallLog) {
       }
       return { ok: true, value: found.witness };
     },
+    vault: decodeVault,
   });
-  const decoders: PositionDecoders = { primary: pairFor(), service: pairFor() };
+  const decoders: PositionDecoders = {
+    primary: pairFor(),
+    service: pairFor(),
+    baselineVault: decodeVault,
+  };
   return { reader, decoders };
 }
 
@@ -263,7 +342,7 @@ async function read(
   service: Book = book([SERVICE_ROW]),
   params: PositionReadParams = PARAMS,
 ): Promise<{ view: PositionsView; log: CallLog }> {
-  const log: CallLog = { calls: [] };
+  const log: CallLog = { calls: [], storage: [] };
   const { reader, decoders } = harness(primary, service, log);
   const view = await readPositions(reader, KEYS, decoders, params);
   return { view, log };
@@ -291,6 +370,103 @@ test('each domain’s view is cross-checked against ITS OWN prefix, never the ot
       argsHex: PARAMS.whoArgsHex,
     },
   ]);
+});
+
+test('the S4 row’s three vault surfaces are READ, not merely declared', async () => {
+  // V-322, and the reason this assertion is over the **call log** rather than over
+  // `POSITION_READS`. The three vault entries were declared under a comment calling them
+  // "the frozen 02 surfaces this screen reads" while nothing built a key, a decoder or a read
+  // for any of them — and the test written to prevent exactly that asserted
+  // `'baselineVaults' in POSITION_READS.primary`, which is a check on an object literal in
+  // the same file. It passed while measuring nothing, which is this repository's defining
+  // defect sitting inside its own guard.
+  //
+  // `vault_state` is the field that decides which redemption call a row may sign (11 §11.5's
+  // charged/exempt split, §11.6's VOID layout), so it is the one the FE-P2 cross-check 02 §3
+  // retains is least optional on.
+  const { log } = await read(book([PRIMARY_ROW, BASELINE_ROW]), book([SERVICE_ROW]));
+  assert.deepEqual(
+    [...log.storage],
+    [
+      KEYS.vault('ConditionalLedger', 1n),
+      KEYS.baselineVault(4),
+      KEYS.vault('ServiceLedger', SERVICE_ID_BASE + 1n),
+    ],
+    'a vault surface named in the S4 row was never read',
+  );
+  // Each key really is the domain's own: a `ServiceLedger` row must not be cross-checked
+  // against a `ConditionalLedger` vault, which is the crossing 02 §7.4 forbids by name.
+  assert.notEqual(KEYS.vault('ConditionalLedger', 1n), KEYS.vault('ServiceLedger', 1n));
+});
+
+test('one vault answers all of its instruments — the read is per vault, not per row', async () => {
+  // The runtime stamps every instrument of one vault with that vault's own state, so a
+  // per-row read would ask the same question up to eleven times and report one failure
+  // eleven times over.
+  const sameVault = [
+    row(1n, 1_000_000n, 'primary-long'),
+    row(1n, 2_000_000n, 'primary-short'),
+    row(1n, 3_000_000n, 'primary-usdc'),
+  ];
+  const { view, log } = await read(book(sameVault), book([]));
+  assert.equal(view.primary.rows.length, 3);
+  assert.deepEqual([...log.storage], [KEYS.vault('ConditionalLedger', 1n)]);
+});
+
+test('a vault state the view and its own storage disagree on drops the row and says so', async () => {
+  // The balance cross-check already dropped a row on a disagreement; the state that selects
+  // the payout call was rendered on the view's word alone. Both legs are read at one pin, so
+  // this is a real disagreement rather than a race.
+  const voided = { ...PRIMARY_ROW, vault: { kind: 'voided' } as const };
+  const disagreeing = book([voided], {
+    vaults: new Map([
+      [KEYS.vault('ConditionalLedger', 1n), vaultValue({ kind: 'scalar-settled', winner: 'Accept', score: 700_050_000n })],
+    ]),
+  });
+  const { view } = await read(disagreeing, book([]));
+  assert.equal(view.primary.rows.length, 0, 'a row whose vault state is unverified rendered');
+  assert.equal(view.anomalies.length, 1);
+  assert.match(view.anomalies[0]?.detail ?? '', /FE-P2/);
+  assert.match(view.anomalies[0]?.detail ?? '', /Voided/);
+  assert.match(view.anomalies[0]?.detail ?? '', /ScalarSettled/);
+
+  // The agreeing case renders, or the assertion above holds for a reader that drops every row.
+  const agreeing = await read(book([voided]), book([]));
+  assert.equal(agreeing.view.primary.rows.length, 1);
+  assert.deepEqual([...agreeing.view.anomalies], []);
+});
+
+test('a vault the map holds no entry for is a disagreement, not an empty read', async () => {
+  // The runtime emits a `PositionView` only for a vault it iterated, so an absent entry
+  // beside a returned row cannot both be true. Defaulting to the view here would make the
+  // cross-check pass in exactly the case where the two surfaces are furthest apart.
+  const { view } = await read(
+    book([PRIMARY_ROW], { vaults: new Map([[KEYS.vault('ConditionalLedger', 1n), undefined]]) }),
+    book([]),
+  );
+  assert.equal(view.primary.rows.length, 0);
+  assert.match(view.anomalies[0]?.detail ?? '', /no vault entry/);
+});
+
+test('an undecodable vault reports itself once and leaves the rows rendering', async () => {
+  // INV-FE-12 shows undecodable data with a warning rather than hiding an account's whole
+  // portfolio — the same answer this reader gives an undecodable `Positions` prefix. What
+  // matters is that the skipped cross-check is visible rather than assumed to have passed,
+  // and that a vault shared by three rows is reported once rather than three times.
+  const sameVault = [
+    row(1n, 1_000_000n, 'primary-long'),
+    row(1n, 2_000_000n, 'primary-short'),
+  ];
+  const { view } = await read(
+    book(sameVault, {
+      vaults: new Map([[KEYS.vault('ConditionalLedger', 1n), 'not-a-vault-this-release-knows']]),
+    }),
+    book([]),
+  );
+  assert.equal(view.primary.rows.length, 2);
+  assert.deepEqual([...view.anomalies], []);
+  assert.equal(view.undecodable.length, 1);
+  assert.equal(view.undecodable[0]?.label, 'ConditionalLedger.Vaults(1)');
 });
 
 test('both domains are read even when one is empty, and each states its own total', async () => {
@@ -342,6 +518,9 @@ test('a Baseline position is primary by structure, and hosted Baseline state is 
   const hosted = await read(book([]), book([BASELINE_ROW]));
   assert.equal(hosted.view.service.rows.length, 0);
   assert.equal(hosted.view.anomalies.length, 1);
+  // And the hosted book never reaches `BaselineVaults`, which has one instance and would be
+  // the primary domain's map answering for a service row (11 §11.2a rule 4, 02 §7.4).
+  assert.deepEqual([...hosted.log.storage], []);
 });
 
 test('FE-P2: a view disagreeing with its own storage drops the row and says so', async () => {
@@ -441,9 +620,17 @@ test('a row’s pin is the CALL’s own, not a field copied off the reader', asy
     ...PRIMARY_ROW,
     vault: { kind: 'resolved', branch: 'Accept' },
   };
-  const { decoders } = harness(book([resolved]), book([]), { calls: [] });
+  const { decoders, reader: served } = harness(book([resolved]), book([]), {
+    calls: [],
+    storage: [],
+  });
   const reader: PositionsReader = {
     at: AT,
+    // The vault surfaces are served by the harness, so this row survives its FE-P2 vault
+    // cross-check and the assertions below are about the pin rather than about a dropped row.
+    // Only a double can answer the two legs at different blocks: in production both come from
+    // one `FinalizedReader`, which reads every leg at its single pin.
+    storage: (key, type) => served.storage(key, type),
     async crossCheckedCall(source): Promise<
       Finalized<{ result: string; witness: readonly StorageItem[] }>
     > {

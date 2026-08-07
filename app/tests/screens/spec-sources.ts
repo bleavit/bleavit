@@ -32,6 +32,7 @@ export const REPO_ROOT = resolve(here, '../../..');
 
 export const DOC_02 = '02-integration-contract.md';
 export const DOC_03 = '03-conditional-ledger.md';
+export const DOC_10 = '10-frontend-architecture.md';
 export const DOC_11 = '11-frontend-workflows.md';
 
 /** One architecture document, whole. */

@@ -34,7 +34,18 @@ import {
   type RedemptionRateReadings,
 } from '@bleavit/features-tx';
 import { redemptionAmounts, redemptionAmountsPair } from '@bleavit/protocol';
-import type { HexString, Verified } from '@bleavit/shared-types';
+import type { Finalized } from '@bleavit/chain-client';
+import { finalize } from '@bleavit/chain-client/testing';
+import type { HexString } from '@bleavit/shared-types';
+
+import {
+  DOC_11 as DOC_11_NAME,
+  architecture,
+  declarationOf,
+  theLineContaining,
+  txSource,
+  withoutComments,
+} from './spec-sources.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const DOC_03 = resolve(here, '../../../docs/architecture/03-conditional-ledger.md');
@@ -43,8 +54,15 @@ const DOC_11 = resolve(here, '../../../docs/architecture/11-frontend-workflows.m
 const CHAIN: HexString = `0x${'ce'.repeat(32)}`;
 const BLOCK: HexString = `0x${'11'.repeat(32)}`;
 
-function verified<T>(value: T, blockHash: HexString = BLOCK, blockNumber = 42): Verified<T> {
-  return { value, status: { kind: 'verified-finalized', chain: CHAIN, blockHash, blockNumber } };
+/**
+ * A finalized reading, minted the only way a fixture may mint one.
+ *
+ * `finalize` from `@bleavit/chain-client/testing`, never a hand-written status object:
+ * production code cannot name it, and a fixture that hand-built one could not tell whether
+ * the module under test had stopped requiring the brand (V-321).
+ */
+function verified<T>(value: T, blockHash: HexString = BLOCK, blockNumber = 42): Finalized<T> {
+  return finalize(value, { chain: CHAIN, blockHash, blockNumber });
 }
 
 /**
@@ -97,6 +115,54 @@ function rates(perbill: bigint, bps: bigint = perbill / 100_000n): RedemptionRat
 
 /** Neither form readable — 11 §11.5 rule 5's first condition. */
 const UNREAD_RATE: RedemptionRateReadings = { metadataBps: undefined, paramsPerbill: undefined };
+
+// ---------------------------------------------------- provider data cannot reach a payout
+
+test('every leaf this ticket reads is Finalized, so a provider read cannot satisfy a row', () => {
+  // V-321. The leaves were `Verified<T>`, which admits `provider`, `stale-cache`,
+  // `derived-local` and `external-proposal` — so an operator snapshot's rate and `MinSplit`
+  // produced a `charged` quote and `mayPrepareRedemption() === true`, on the figure §11.5
+  // rule 3 makes the headline and §11.2 constraint 3 puts above the fold.
+  const rule4 = theLineContaining(architecture(DOC_11_NAME), 'Provider/local-index data never satisfies any precondition');
+  assert.match(rule4, /every row reads chain state/);
+  const rule5 = theLineContaining(architecture(DOC_11_NAME), '**Unreadable ⇒ no figure, never a default.**');
+  assert.match(rule5, /computed from chain-read values or not displayed at all/);
+
+  // The declaration is where the claim lives: a `Verified<T>` leaf renders identically until
+  // somebody hands one in. Both input types, every leaf, and nothing left `Verified`.
+  const source = txSource('redemption-ticket.ts');
+  for (const declaration of ['RedemptionRateReadings', 'RedemptionInputs']) {
+    const declared = declarationOf(source, declaration);
+    const leaves = [...declared.matchAll(/readonly (\w+)\??:\s*([^;]+);/g)];
+    assert.ok(leaves.length >= 2, `${declaration} declared no leaves: ${declared}`);
+    for (const [, field, type] of leaves) {
+      if (field === 'call' || field === 'rate') continue;
+      assert.match(type as string, /\bFinalized</, `${declaration}.${String(field)} is not finalized`);
+      assert.doesNotMatch(type as string, /\bVerified</, `${declaration}.${String(field)} admits a provider read`);
+    }
+  }
+  // And nowhere in this module — not in a type, not in a signature, not in a local.
+  //
+  // The first form of this assertion was `assert.match(source, /minSplit: Finalized<bigint>/)`,
+  // and a mutant that reverted only `redemptionRateBlocks`' own **parameter** survived it: the
+  // interface still carried the spelling one screen up, so the regex still matched. That is
+  // the defect this whole change is about, found in the test written to catch it. Both
+  // exported evaluators are reachable directly — `redemptionRateBlocks` deliberately so, since
+  // "a caller assembling a confirm surface needs the rows themselves" — so a `Verified` leaf
+  // in either signature is a provider read satisfying §11.5 rule 5 by another door.
+  assert.doesNotMatch(
+    withoutComments(source),
+    /\bVerified</,
+    'redemption-ticket.ts names Verified<T>, which admits provider and stale-cache readings',
+  );
+
+  // The compile-time proof lives in the negative-compilation corpus, which is the only suite
+  // that can demonstrate a rejection: `tests/firewall/fixtures/`.
+  const fixture = resolve(here, '../firewall/fixtures/provider-cannot-satisfy-a-redemption-precondition.ts');
+  const text = readFileSync(fixture, 'utf8');
+  assert.match(text, /^\/\/ expect-error: TS\d+/, 'the fixture declares no error code');
+  assert.match(text, /quoteRedemption/, 'the fixture does not exercise this module');
+});
 
 // ------------------------------------------------------- the classification, bound twice
 

@@ -58,9 +58,37 @@
  * with, and a row can be finalized only because that call was made. A later edit that reads
  * one field from somewhere else can no longer inherit this pin by sitting next to the others.
  *
- * @see docs/architecture/10-frontend-architecture.md §2.1, §2.2
+ * ## The vault surfaces are read, not merely declared (V-322)
+ *
+ * 11 §11.2's S4 row names four reads per book and this module performed two of them.
+ * `ConditionalLedger.Vaults(pid)`, `ConditionalLedger.BaselineVaults(epoch)` and
+ * `ServiceLedger.Vaults(question)` sat in {@link POSITION_READS} under a comment calling them
+ * *"the frozen 02 surfaces this screen reads"*, and nothing built a key, a decoder or a read
+ * for any of the three — so every vault state on this screen reached the VOID layout and the
+ * redemption-call selection through `PositionView.vault_state` alone, with no cross-check
+ * against the storage it is projected from.
+ *
+ * That is the one field with a payout behind it. §11.5's charged/exempt split, §11.6's whole
+ * VOID decomposition and P-4/P-5's *"vault ∈ {…}"* rows are all decided by it, and 02 §3
+ * retains the FE-P2 cross-check of every runtime-API result on the transaction path *"as
+ * defence against a client misreading an aggregate API's semantics — which proof verification
+ * says nothing about."* A balance that disagreed with storage was already dropped; a vault
+ * state that disagreed was rendered.
+ *
+ * The read is **per vault, not per row**: the runtime stamps every instrument of one vault
+ * with that vault's own `state`, so one storage read answers for all of them.
+ *
+ * Its two failure directions follow the ones this module already draws for the `Positions`
+ * prefix, for the same reasons. A **disagreement or a missing entry drops the row** and
+ * reports it — the runtime only emits a `PositionView` for a vault it iterated, so an absent
+ * entry beside a returned row is a real disagreement. An **undecodable** vault reports itself
+ * and leaves the rows rendering: INV-FE-12 shows undecodable data with a warning rather than
+ * hiding an account's whole portfolio, and a skipped cross-check that says so is not a passed
+ * one.
+ *
+ * @see docs/architecture/10-frontend-architecture.md §2.1, §2.2, §4.2
  * @see docs/architecture/02-integration-contract.md §7.4, §3, §9
- * @see docs/architecture/11-frontend-workflows.md §11.2, §11.2a, §11.6
+ * @see docs/architecture/11-frontend-workflows.md §11.2, §11.2a, §11.5, §11.6
  */
 
 import {
@@ -94,6 +122,12 @@ export type Decoded<T> =
 
 /**
  * The frozen 02 surfaces this screen reads, per domain.
+ *
+ * Every name here is a read {@link readPositions} performs. It was not: the three vault
+ * entries were declared under this sentence and nothing built a key, a decoder or a read for
+ * any of them, so the sentence was the whole of the claim (V-322). `app/tests/screens` now
+ * asserts the **calls** the reader made rather than the fields this object has — a check that
+ * a name is present in a frozen record is a check that passes while measuring nothing.
  *
  * The service entry deliberately carries **no** `baselineVaults`: doc 11's S4 row states
  * *"no `BaselineVaults` read, that map is structurally empty in the service domain"*, and a
@@ -153,7 +187,7 @@ export interface PositionWitnessEntry {
   readonly balance: bigint;
 }
 
-/** One domain's two decoders: its own view, and its own storage prefix. */
+/** One domain's decoders: its own view, its own storage prefix, and its own vault map. */
 export interface DomainPositionDecoders {
   /** The API result — a `BoundedVec<PositionView, 64>` (02 §3). */
   readonly positions: (raw: string) => Decoded<readonly PositionRecord[]>;
@@ -161,6 +195,16 @@ export interface DomainPositionDecoders {
   readonly positionEntries: (
     items: readonly StorageItem[],
   ) => Decoded<readonly PositionWitnessEntry[]>;
+  /**
+   * `<pallet>.Vaults(pid)`'s stored state — the surface `PositionView.vault_state` is
+   * projected from, for the FE-P2 cross-check of the field that decides which redemption
+   * call is offered.
+   *
+   * `undefined` means the map holds **no entry**, which is not a decode failure and is not
+   * an ordinary empty read either: a view row exists only for a vault the runtime iterated,
+   * so an absent entry beside a returned row is a disagreement.
+   */
+  readonly vault: (raw: string) => Decoded<DecodedVaultState | undefined>;
 }
 
 /**
@@ -180,6 +224,17 @@ export interface DomainPositionDecoders {
 export interface PositionDecoders {
   readonly primary: DomainPositionDecoders;
   readonly service: DomainPositionDecoders;
+  /**
+   * `ConditionalLedger.BaselineVaults(epoch)`'s stored state, projected as the runtime's own
+   * view projects it (02 §4, contract v6): a Baseline instrument has no winning proposal
+   * branch to publish, so `Open` stays `Open` and `Settled(s)` becomes `BaselineSettled { s }`.
+   *
+   * Not on {@link DomainPositionDecoders}, and that is the same claim {@link POSITION_READS}
+   * makes by giving its service entry no `baselineVaults` field: 16 §7.6 gives a hosted
+   * question two books and no Baseline leg, so this map has exactly one home and a per-domain
+   * field would be a field a later edit fills in.
+   */
+  readonly baselineVault: (raw: string) => Decoded<DecodedVaultState | undefined>;
 }
 
 /**
@@ -192,11 +247,24 @@ export interface PositionDecoders {
 export interface PositionKeys {
   /** The 32-byte prefix of `<pallet>.Positions`. */
   positionsPrefix(pallet: string): string;
+  /** `<pallet>.Vaults(pid)` — the proposal vault, in the domain that owns the row. */
+  vault(pallet: string, proposalId: bigint): string;
+  /**
+   * `ConditionalLedger.BaselineVaults(epoch)`.
+   *
+   * No pallet argument, for {@link PositionDecoders.baselineVault}'s reason: the map exists
+   * in one instance only, so a caller has no second one it could name.
+   */
+  baselineVault(epoch: number): string;
 }
 
-/** One pin, and the FE-P2 cross-checked call. Structural, per `ProposalsReader`. */
+/** One pin, storage reads at it, and the FE-P2 cross-checked call. Structural. */
 export interface PositionsReader {
   readonly at: FinalizedBlockRef;
+  storage(
+    key: string,
+    type?: 'value' | 'descendantsValues',
+  ): Promise<Finalized<readonly StorageItem[]>>;
   crossCheckedCall(source: {
     readonly api: string;
     readonly storagePrefix: string;
@@ -228,6 +296,54 @@ export interface PositionReadParams {
 
 function chainOf(datum: Verified<unknown>): string | undefined {
   return 'chain' in datum.status ? datum.status.chain : undefined;
+}
+
+/**
+ * One vault state as a single comparable string.
+ *
+ * A rendered form rather than a field-by-field comparison, because the anomaly has to *say*
+ * what the two surfaces reported and two spellings of that would let the comparison and the
+ * message disagree. `undefined` is *no entry*, which is a state of the map and not an absence
+ * of information.
+ */
+function describeVault(state: DecodedVaultState | undefined): string {
+  if (state === undefined) return 'no vault entry';
+  switch (state.kind) {
+    case 'resolved':
+      return `Resolved(${state.branch})`;
+    case 'scalar-settled':
+      return `ScalarSettled(winner ${state.winner}, s ${state.score})`;
+    case 'baseline-settled':
+      return `BaselineSettled(s ${state.score})`;
+    case 'voided':
+      return 'Voided';
+    default:
+      return 'Open';
+  }
+}
+
+/** Which vault surface a row's subject is projected from — one key, one label, one decoder. */
+function vaultSourceFor(
+  subject: PositionSubject,
+  pallet: string,
+  keys: PositionKeys,
+  decoders: PositionDecoders,
+  domained: DomainPositionDecoders,
+): { readonly key: string; readonly label: string; readonly decode: (raw: string) => Decoded<DecodedVaultState | undefined> } {
+  if (subject.kind === 'baseline') {
+    // Reachable in the primary domain only: a Baseline subject is primary by structure, so a
+    // service book has already dropped this row as a cross-domain anomaly before here.
+    return {
+      key: keys.baselineVault(subject.epoch),
+      label: `${POSITION_READS.primary.baselineVaults}(${subject.epoch})`,
+      decode: decoders.baselineVault,
+    };
+  }
+  return {
+    key: keys.vault(pallet, subject.id),
+    label: `${pallet}.Vaults(${subject.id})`,
+    decode: domained.vault,
+  };
 }
 
 /**
@@ -284,6 +400,29 @@ async function readBook<D extends LedgerDomain>(
     });
   }
 
+  // One reading per **vault**, not per row: `positions_for` stamps every instrument of one
+  // vault with that vault's own `state`, so one storage read answers for up to eleven rows —
+  // and pushing the `undecodable` entry where the read is made rather than where it is used
+  // is what keeps a shared failure from being reported eleven times.
+  const vaultStates = new Map<string, Decoded<DecodedVaultState | undefined>>();
+  const vaultStateFor = async (
+    subject: PositionSubject,
+  ): Promise<Decoded<DecodedVaultState | undefined>> => {
+    const memo = subject.kind === 'baseline' ? `baseline:${subject.epoch}` : `proposal:${subject.id}`;
+    const cached = vaultStates.get(memo);
+    if (cached !== undefined) return cached;
+    const vaultSource = vaultSourceFor(subject, source.storagePallet, keys, decoders, domained);
+    const read = await reader.storage(vaultSource.key);
+    const rawHex = read.value[0]?.value;
+    const state: Decoded<DecodedVaultState | undefined> =
+      rawHex === undefined ? { ok: true, value: undefined } : vaultSource.decode(rawHex);
+    if (!state.ok) {
+      undecodable.push({ label: vaultSource.label, rawHex: rawHex ?? '0x', reason: state.reason });
+    }
+    vaultStates.set(memo, state);
+    return state;
+  };
+
   const rows: PositionRow<D>[] = [];
   for (const record of decoded.value) {
     // §11.2a rule 1 — the datum decides, by a bit test on an id the client already holds.
@@ -314,6 +453,28 @@ async function readBook<D extends LedgerDomain>(
             `${label.positions} reports ${fromStorage === undefined ? 'no entry' : String(fromStorage)} ` +
             'at the same finalized block. The runtime view and its own storage disagree, so ' +
             'the row is not rendered (10 §4.2, FE-P2).',
+        });
+        continue;
+      }
+    }
+
+    // The S4 row's third read, and the one with a payout behind it. `vault_state` decides
+    // §11.5's charged/exempt split, §11.6's whole VOID layout and P-4/P-5's admissible-state
+    // rows, so admitting it on the view's word alone admits the field that selects the call.
+    // Both legs are read at this reader's one pin, so a disagreement is a disagreement rather
+    // than a race.
+    const vaultState = await vaultStateFor(record.subject);
+    if (vaultState.ok) {
+      const fromStorage = describeVault(vaultState.value);
+      const fromView = describeVault(record.vault);
+      if (fromStorage !== fromView) {
+        const surface = vaultSourceFor(record.subject, source.storagePallet, keys, decoders, domained);
+        anomalies.push({
+          detail:
+            `${label.api}() reports ${record.positionId} against a vault in ${fromView} and ` +
+            `${surface.label} reports ${fromStorage} at the same finalized block. The runtime ` +
+            'view and its own storage disagree about the state that decides which redemption ' +
+            'call this row may sign, so the row is not rendered (10 §4.2, FE-P2; 11 §11.5).',
         });
         continue;
       }

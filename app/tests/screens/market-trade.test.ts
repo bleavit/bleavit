@@ -53,6 +53,7 @@ import { maxTradeAmount } from '@bleavit/protocol';
 import {
   DISABLED_BUTTON,
   DOC_02,
+  DOC_10,
   DOC_11,
   architecture,
   declarationOf,
@@ -414,30 +415,82 @@ test('an unreadable PhaseFlags fails CLOSED — frozen, not enabled', async () =
   }
 });
 
-test('an undecodable quote charges zero, which cannot agree with a real recompute', async () => {
-  // The dangerous alternative is a ticket that passes on a figure nobody read. Zero is not a
-  // price here — it is a value that cannot equal the client's non-zero recompute, so
-  // FE-CHAIN-005 fires and the ticket blocks. Both fields go to zero, not just the total.
+test('an undecodable quote is ABSENT, not a badged zero — and the ticket still blocks', async () => {
+  // V-183's defect, one module over (V-323). A failed decode used to contribute
+  // `{cost: 0n, fee: 0n}` *derived from the read*, on the argument that a zero pair cannot
+  // equal a real recompute and therefore blocks. It does block. It also gave the screen a
+  // figure, and the screen rendered `0.000000 USDC` under a `verified-finalized` badge under
+  // the heading "What the chain says this costs" — a status 10 §2.2 assigns "only to values
+  // read through smoldot with storage proofs checked, or computed client-side purely from
+  // such values", on a zero this client chose. §11.5 forbids exactly that rendering.
+  //
+  // The rule is parsed rather than restated, and it is the same sentence the reaped-book test
+  // above binds to — which is the point: one arm obeyed it and the live arm did not.
+  const rule = theLineContaining(architecture(DOC_11), 'MUST label the book **reaped/archived**');
+  assert.match(rule, /MUST NOT render a missing or fail-closed zero quote as a market price/);
+  const badge = theLineContaining(
+    architecture(DOC_10),
+    'to values read through smoldot with storage proofs checked',
+  );
+  assert.match(badge, /computed client-side purely from such values/);
+
   const { read } = await readTicket(LIVE_BOOK, DECISION, 'bad');
-  const { inputs } = tradable(read);
-  assert.deepEqual(inputs.quote.fromChain.value, { cost: 0n, fee: 0n });
-  assert.ok(tradeBlocks(inputs).some((block) => block.code === 'FE-CHAIN-005'));
+  const screen = tradable(read);
+  assert.equal(screen.inputs.quote.fromChain, undefined, 'a zero quote was substituted');
+  assert.equal(screen.quote.fromChain, undefined, 'the screen was handed a zero to render');
   assert.equal(read.kind === 'screen' ? read.undecodable.length : 0, 1);
+
+  // The block is kept, and it is **not** FE-CHAIN-005: E6's code means the two quotes
+  // disagree, and this client's recovery copy for it says so in as many words. Neither
+  // sentence is true of a quote that was never decoded.
+  const blocks = tradeBlocks(screen.inputs);
+  assert.deepEqual(
+    blocks.map((block) => block.check),
+    ['P-1 quote()'],
+  );
+  assert.equal(blocks[0]?.code, undefined);
+  assert.match(blocks[0]?.detail ?? '', /an unread precondition is not a passed one/);
+
+  // And on the screen: a refusal in the figure's place, no zero anywhere, control disabled.
+  const html = markupOf(screen);
+  assert.ok(html.includes('datum--unread'), html);
+  assert.ok(html.includes('Not available'), html);
+  assert.equal(html.includes('0.000000 USDC'), false, 'a fail-closed zero reached the screen');
+  assert.equal(html.includes('data-code="FE-CHAIN-005"'), false, 'the wrong refusal rendered');
+  assert.match(html, DISABLED_BUTTON, 'trading was not blocked');
+  // The client's own recompute still renders — it is derived from the book and the fee rate,
+  // not from `quote()`, so suppressing it too would hide a figure this client really has.
+  assert.ok(html.includes(QUOTE_COPY.buy.client), html);
+  assert.ok(html.includes('5.015000 USDC'), html);
+});
+
+test('a sale with no chain quote keeps the row that does not depend on one', async () => {
+  // The seller's holdings are compared against the **amount**, not against the proceeds, so
+  // that row is evaluable with no quote at all. Dropping it alongside the quote-dependent
+  // rows would silently stop checking a seller's balance on exactly the path where the
+  // client already knows something is wrong.
+  const { read } = await readTicket(LIVE_BOOK, { ...SELL, spendable: at(0n) }, 'bad');
+  const checks = tradeBlocks(tradable(read).inputs).map((block) => block.check);
+  assert.deepEqual(checks, ['P-1 quote()', 'P-1 position balance']);
 });
 
 test('every figure carries the reader’s one pin', async () => {
   const { read } = await readTicket();
   const screen = tradable(read);
+  const chainQuote = screen.quote.fromChain;
+  assert.ok(chainQuote !== undefined, 'the happy path produced no chain quote');
+  const fromChain = screen.inputs.quote.fromChain;
+  assert.ok(fromChain !== undefined, 'the happy path produced no chain quote');
   const leaves = [
     screen.inputs.marketOpen,
-    screen.inputs.quote.fromChain,
+    fromChain,
     screen.inputs.minTrade,
     screen.inputs.maxTrade,
     screen.inputs.tradingEnabled,
     screen.inputs.ledgerFrozen,
-    screen.quote.fromChain.cost,
-    screen.quote.fromChain.fee,
-    screen.quote.fromChain.total,
+    chainQuote.cost,
+    chainQuote.fee,
+    chainQuote.total,
   ];
   for (const leaf of leaves) {
     assert.equal(leaf.status.kind, 'verified-finalized');
@@ -524,7 +577,7 @@ test('cost and fee are read APART, so a pair that agrees on the total still bloc
 
   const { read } = await readTicket(LIVE_BOOK, DECISION, `quote:${chain.cost}:${chain.fee}`);
   const { inputs } = tradable(read);
-  assert.deepEqual(inputs.quote.fromChain.value, chain);
+  assert.deepEqual(inputs.quote.fromChain?.value, chain);
   const disagreement = tradeBlocks(inputs).find((block) => block.code === 'FE-CHAIN-005');
   assert.ok(disagreement !== undefined, 'a quote disagreeing field-by-field was admitted');
 });

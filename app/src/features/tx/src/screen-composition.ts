@@ -471,30 +471,55 @@ export function quoteArgs(
 export function positionKeys(chain: ScreenChain): PositionKeys {
   const primary = split(POSITION_READS.primary.positions);
   const service = split(POSITION_READS.service.positions);
-  if (primary[1] !== service[1]) {
-    throw new Error(
-      `the two ledger domains name different storage items ("${primary[1]}" and ` +
-        `"${service[1]}"). 02 §7.4 pairs each domain's view with that domain's own prefix of ` +
-        'the same item, so this is a client defect rather than a chain state.',
-    );
+  const primaryVault = split(POSITION_READS.primary.vaults);
+  const serviceVault = split(POSITION_READS.service.vaults);
+  // Both pairs, because both are read per domain and both would otherwise be a third place
+  // for the item name to drift. The vault pair carries the same hazard as the positions one:
+  // a `Vaults` key built against the wrong instance returns no value, which reads as a vault
+  // that does not exist — and this reader treats that as a disagreement that drops the row.
+  for (const [one, other] of [
+    [primary, service],
+    [primaryVault, serviceVault],
+  ] as const) {
+    if (one[1] !== other[1]) {
+      throw new Error(
+        `the two ledger domains name different storage items ("${one[1]}" and ` +
+          `"${other[1]}"). 02 §7.4 pairs each domain's view with that domain's own prefix of ` +
+          'the same item, so this is a client defect rather than a chain state.',
+      );
+    }
   }
   const item = primary[1] as string;
+  const vaultItem = primaryVault[1] as string;
   const allowed = new Set([primary[0], service[0]]);
+  const baselineVaults = builder(chain, POSITION_READS.primary.baselineVaults);
+  /** A pallet the two domains do not name is refused rather than hashed — see below. */
+  const instance = (pallet: string): string => {
+    // `storagePrefix` hashes any two strings into a well-formed 32-byte prefix, and
+    // `descendantsValues` answers an unknown prefix with **nothing** — which is
+    // indistinguishable from an account holding no positions, on the screen whose job is to
+    // show them.
+    if (!allowed.has(pallet)) {
+      throw new Error(
+        `"${pallet}" is not one of this client's two ledger instances (${[...allowed].join(
+          ', ',
+        )}). A prefix built for another pallet returns no entries, which renders as an empty book.`,
+      );
+    }
+    return pallet;
+  };
   return {
     positionsPrefix(pallet) {
-      // A pallet the two domains do not name is refused rather than hashed. `storagePrefix`
-      // hashes any two strings into a well-formed 32-byte prefix, and `descendantsValues`
-      // answers an unknown prefix with **nothing** — which is indistinguishable from an
-      // account holding no positions, on the screen whose job is to show them.
-      if (!allowed.has(pallet)) {
-        throw new Error(
-          `"${pallet}" is not one of this client's two ledger instances (${[...allowed].join(
-            ', ',
-          )}). A prefix built for another pallet returns no entries, which renders as an empty book.`,
-        );
-      }
-      return storageKeyBuilder(chain.codecs, chain.metadata, pallet, item).prefix;
+      return storageKeyBuilder(chain.codecs, chain.metadata, instance(pallet), item).prefix;
     },
+    vault(pallet, proposalId) {
+      return storageKeyBuilder(chain.codecs, chain.metadata, instance(pallet), vaultItem).key([
+        proposalId,
+      ]);
+    },
+    // No pallet argument: 16 §7.6 gives a hosted question no Baseline leg, so this map has one
+    // instance and the reader has no second one it could name.
+    baselineVault: (epoch) => baselineVaults.key([epoch]),
   };
 }
 
@@ -613,6 +638,57 @@ function asVaultState(value: unknown): Decoded<DecodedVaultState> {
       // nearest one. `open` is the closest arm and it is the one that offers actions.
       return { ok: false, reason: `${surface} decoded to an unknown variant "${variant.value}"` };
   }
+}
+
+/**
+ * `<pallet>.Vaults(pid)`'s stored `VaultInfo`, reduced to the one field a `PositionView`
+ * publishes — the FE-P2 witness for `vault_state`.
+ *
+ * `state` is read through the same {@link asVaultState} the view goes through, deliberately:
+ * both surfaces encode `futarchy_primitives::VaultState`, and a second reader of one enum is
+ * a second place for an unknown variant to be mapped onto the nearest known one. The rest of
+ * `VaultInfo` — `escrowed`, the two `BranchSupply` rows, `gate_outcomes`, `spec` — is not
+ * read, because none of it is projected into a `PositionView` and a cross-check over fields
+ * the view never carried would fail on states that agree.
+ */
+function asVaultInfo(surface: string): (value: unknown) => Decoded<DecodedVaultState | undefined> {
+  return (value) => {
+    const record = asRecord(value, surface);
+    if (!record.ok) return record;
+    return asVaultState(record.value['state']);
+  };
+}
+
+/**
+ * `ConditionalLedger.BaselineVaults(epoch)`'s stored `BaselineVaultInfo`, projected exactly as
+ * the runtime's own view projects it (02 §4, contract v6).
+ *
+ * `BaselineState` has **two** variants and `VaultState` has five, so this mapping is written
+ * out rather than routed through {@link asVaultState}: `Open → Open`, `Settled(s) →
+ * BaselineSettled { s }`, and a Baseline instrument has no winning proposal branch to publish.
+ * A variant this release has never heard of is refused rather than mapped onto `Open`, which
+ * is the arm that offers actions.
+ */
+function asBaselineVaultInfo(value: unknown): Decoded<DecodedVaultState | undefined> {
+  const surface = POSITION_READS.primary.baselineVaults;
+  const record = asRecord(value, surface);
+  if (!record.ok) return record;
+  const state: unknown = record.value['state'];
+  const variant = variantOf(state, `${surface}.state`);
+  if (!variant.ok) return variant;
+  if (variant.value === 'Open') return { ok: true, value: { kind: 'open' } };
+  if (variant.value === 'Settled') {
+    const inner = asRecord(state, `${surface}.state`);
+    if (!inner.ok) return inner;
+    // `BaselineState::Settled(FixedU64)` is a newtype variant, so PAPI's `value` is the inner
+    // scalar rather than a record — the same shape `VaultState::ScalarSettled`'s `s` decodes to.
+    const score = inner.value['value'];
+    if (typeof score !== 'bigint') {
+      return { ok: false, reason: `${surface}.state.Settled does not carry a fixed-point score` };
+    }
+    return { ok: true, value: { kind: 'baseline-settled', score } };
+  }
+  return { ok: false, reason: `${surface}.state decoded to an unknown variant "${variant.value}"` };
 }
 
 function asPositionView(value: unknown): Decoded<PositionRecord> {
@@ -756,12 +832,13 @@ export function positionDecoders(chain: ScreenChain): PositionDecoders {
   return {
     primary: domainPositionDecoders(chain, POSITION_READS.primary),
     service: domainPositionDecoders(chain, POSITION_READS.service),
+    baselineVault: storage(chain, POSITION_READS.primary.baselineVaults, asBaselineVaultInfo),
   };
 }
 
 function domainPositionDecoders(
   chain: ScreenChain,
-  reads: { readonly api: string; readonly positions: string },
+  reads: { readonly api: string; readonly positions: string; readonly vaults: string },
 ): DomainPositionDecoders {
   const view = api(chain, reads.api, (value): Decoded<readonly PositionRecord[]> => {
     if (!Array.isArray(value)) {
@@ -784,6 +861,9 @@ function domainPositionDecoders(
 
   return {
     positions: view,
+    // The domain's own vault map, bound to the same qualified name its `Positions` prefix and
+    // its view came from — so a decoder cannot end up reading the other instance's bytes.
+    vault: storage(chain, reads.vaults, asVaultInfo(reads.vaults)),
     positionEntries: (items: readonly StorageItem[]) => {
       const out: PositionWitnessEntry[] = [];
       for (const item of items) {

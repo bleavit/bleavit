@@ -26,6 +26,17 @@
  * from a frozen copy record keyed by the domain the *model* established (rule 1's bit test),
  * not from anything this component works out.
  *
+ * ## 1a. An unreadable chain quote is an absent figure, never a badged zero (V-323)
+ *
+ * The same sentence binds the *live* book, and it was violated there while the reaped arm
+ * obeyed it. A failed `quote()` decode used to contribute `{cost: 0n, fee: 0n}` derived from
+ * the read, which rendered `0.000000 USDC` under a `verified-finalized` badge beneath *"What
+ * the chain says this costs"*. 10 §2.2 admits that status *"only to values read through
+ * smoldot with storage proofs checked, or computed client-side purely from such values"*, and
+ * §11.5 forbids rendering a fail-closed zero quote as a market price. The read layer now makes
+ * the figure absent, this screen renders {@link ChainQuoteUnreadable} in its place, and the
+ * ticket still blocks — on an unread row rather than on a fabricated disagreement.
+ *
  * ## 2a. The quote is two figures on each side, never one
  *
  * 02 §4 publishes `cost` and `fee` as separate fields and 04 §6.1 combines them differently
@@ -118,7 +129,18 @@ export type MarketTradeScreen =
        * refusal rather than a number.
        */
       readonly quote: {
-        readonly fromChain: QuoteBreakdown<Verified<bigint>>;
+        /**
+         * The chain's own figures, or **absent** when `quote()` was read and did not decode
+         * (V-323).
+         *
+         * Not a substituted `{cost: 0n, fee: 0n}`. 10 §2.2 assigns `verified-finalized`
+         * *"only to values read through smoldot with storage proofs checked, or computed
+         * client-side purely from such values"*, and a zero this client chose on a failure
+         * path is neither — while §11.5 forbids rendering a fail-closed zero quote as a
+         * market price. The absence is the honest arm and the screen renders a refusal in
+         * its place, exactly as S20 does for an unreadable balance.
+         */
+        readonly fromChain: QuoteBreakdown<Verified<bigint>> | undefined;
         readonly fromClient: QuoteBreakdown<Combined<bigint>>;
       };
     }
@@ -200,6 +222,33 @@ export const QUOTE_DISAGREEMENT_RECOVERY =
 
 const FE_CHAIN_005 = 'FE-CHAIN-005';
 
+/**
+ * The chain's own quote, read and undecodable.
+ *
+ * No number and no badge. The read layer made the figure **absent** rather than substituting
+ * `{cost: 0n, fee: 0n}` (10 §2.2, 11 §11.5), and a screen that filled the gap back in with a
+ * zero would restore the defect one layer up — under the heading *"What the chain says this
+ * costs"*, with no `Verified<T>` left for a badge to hang off, so nothing on screen would mark
+ * the figure as manufactured. The raw bytes are already in this screen's `Undecodable` list;
+ * this row is what stops the field itself reading as a free trade.
+ *
+ * Shaped like `balances.tsx`'s `BalanceUnreadable` and `ui`'s own `Derived` refusal
+ * (`datum--unread` + a reason), so an absent figure looks the same wherever it comes from. It
+ * is not `Derived`: that component takes a `Combined<T>`, and there is nothing to combine.
+ */
+function ChainQuoteUnreadable(): ReactNode {
+  return (
+    <span className="datum datum--unread" role="status">
+      <span className="datum__unavailable">Not available</span>
+      <span className="datum__reason">
+        The chain’s own quote for this trade was read and could not be decoded, so this client
+        is not stating what it would cost. Nothing is being substituted, and trading is blocked
+        until the figure can be read. The raw bytes are shown below.
+      </span>
+    </span>
+  );
+}
+
 export function MarketTrade({
   screen,
   decimals,
@@ -252,19 +301,30 @@ export function MarketTrade({
           kept apart on both sides, because their sum agrees on a buy for a pair that
           disagrees on a sell (see the module note). */}
       <Field label={copy.chain}>
-        <Amount datum={quote.fromChain.cost} name={copy.cost} decimals={decimals} symbol={symbol} />
-        <Amount
-          datum={quote.fromChain.fee}
-          name={QUOTE_FEE_LABEL}
-          decimals={decimals}
-          symbol={symbol}
-        />
-        <Amount
-          datum={quote.fromChain.total}
-          name={copy.total}
-          decimals={decimals}
-          symbol={symbol}
-        />
+        {quote.fromChain === undefined ? (
+          <ChainQuoteUnreadable />
+        ) : (
+          <>
+            <Amount
+              datum={quote.fromChain.cost}
+              name={copy.cost}
+              decimals={decimals}
+              symbol={symbol}
+            />
+            <Amount
+              datum={quote.fromChain.fee}
+              name={QUOTE_FEE_LABEL}
+              decimals={decimals}
+              symbol={symbol}
+            />
+            <Amount
+              datum={quote.fromChain.total}
+              name={copy.total}
+              decimals={decimals}
+              symbol={symbol}
+            />
+          </>
+        )}
       </Field>
       <Field label={copy.client}>
         <Derived combined={quote.fromClient.cost} name={copy.cost} render={render} />

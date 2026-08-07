@@ -39,17 +39,40 @@
  * every screen meets it as data. A caller that let it propagate would render a blank region,
  * which is how *"we cannot say"* becomes indistinguishable from zero.
  *
- * @see docs/architecture/11-frontend-workflows.md §11.5, §11.6
+ * ## Every leaf is `Finalized<T>`, because this module decides a payout (V-321)
+ *
+ * This module's leaves were `Verified<T>`, which admits `provider`, `stale-cache`,
+ * `derived-local` and `external-proposal`. A provider-sourced rate and `MinSplit` therefore
+ * produced a `charged` quote and `mayPrepareRedemption() === true`: the net payout is the
+ * headline §11.5 rule 3 makes it, it is emitted through `AlwaysVisible` above the fold, and
+ * 11 §11.2 constraint 3 names it a fact that changes the meaning of a signature.
+ *
+ * 11 §11.4 rule 4 is one sentence — *"provider/local-index data never satisfies any
+ * precondition"* — and §11.5 rule 5 says a net redemption payout *"is computed from chain-read
+ * values or not displayed at all"*. A `Verified<T>` parameter makes both a review obligation
+ * repeated at every call site; `Finalized<T>` is constructible only inside
+ * `@bleavit/chain-client` (10 §2.1), so the wrong input does not typecheck. Same control
+ * `trade-ticket.ts` carries for §11.5 P-1, and `tests/firewall` holds it here too — the trade
+ * ticket had a fixture and this module did not, which is why the type survived on one surface
+ * and not on the other.
+ *
+ * `undefined` is still *unread*, and it still blocks a charged call. The union is
+ * `Finalized<T> | undefined` rather than `Verified<T>` precisely so the third state — read,
+ * but not from the chain — has no spelling here at all.
+ *
+ * @see docs/architecture/11-frontend-workflows.md §11.4, §11.5, §11.6
  * @see docs/architecture/03-conditional-ledger.md §5.3, §5.3a
+ * @see docs/architecture/10-frontend-architecture.md §2.1, §2.3
  */
 
+import type { Finalized } from '@bleavit/chain-client';
 import {
   RedemptionRateError,
   firstChargedGross,
   redemptionAmounts,
   redemptionAmountsPair,
 } from '@bleavit/protocol';
-import { combine, type Combined, type VerificationStatus, type Verified } from '@bleavit/shared-types';
+import { combine, type Combined, type VerificationStatus } from '@bleavit/shared-types';
 
 import { perbillToBps } from './trade-ticket.js';
 
@@ -142,9 +165,9 @@ export function isPairCall(call: PayoutCall): boolean {
  */
 export interface RedemptionRateReadings {
   /** `ConditionalLedger::RedemptionFee`, basis points, from the constants API. */
-  readonly metadataBps: Verified<bigint> | undefined;
+  readonly metadataBps: Finalized<bigint> | undefined;
   /** Raw `params(ledger.redeem_fee)`, a `Perbill` inner scalar. */
-  readonly paramsPerbill: Verified<bigint> | undefined;
+  readonly paramsPerbill: Finalized<bigint> | undefined;
 }
 
 /** A reason the payout figure cannot be stated, or the transaction cannot be signed. */
@@ -162,16 +185,16 @@ export interface RedemptionInputs {
    * (`a`, `floor(a·s)`, `floor(a/2)`, …) and computing it from a call name plus an amount
    * would put a second implementation of §5.3's table in the client.
    */
-  readonly gross: Verified<bigint>;
+  readonly gross: Finalized<bigint>;
   /**
    * The settlement score `s` on the 1e9 grid. Required for a pair call and refused for
    * anything else — a pair's fee is `fee(floor(a·s)) + fee(floor(a·(1−s)))` and cannot be
    * derived from the gross alone (03 §5.3a(2a)).
    */
-  readonly settlementScore?: Verified<bigint> | undefined;
+  readonly settlementScore?: Finalized<bigint> | undefined;
   readonly rate: RedemptionRateReadings;
   /** `ConditionalLedger::MinSplit` `[C]`. `undefined` is unread, and unread blocks. */
-  readonly minSplit: Verified<bigint> | undefined;
+  readonly minSplit: Finalized<bigint> | undefined;
 }
 
 /**
@@ -227,7 +250,7 @@ export type FeeThreshold =
  */
 export function redemptionRateBlocks(
   rate: RedemptionRateReadings,
-  minSplit: Verified<bigint> | undefined,
+  minSplit: Finalized<bigint> | undefined,
 ): readonly RedemptionBlock[] {
   const blocks: RedemptionBlock[] = [];
   if (rate.metadataBps === undefined) {
@@ -282,7 +305,7 @@ export function redemptionRateBlocks(
  */
 export function feeThreshold(
   rate: RedemptionRateReadings,
-  minSplit: Verified<bigint> | undefined,
+  minSplit: Finalized<bigint> | undefined,
   searchCeiling: bigint,
 ): FeeThreshold {
   const blocks = redemptionRateBlocks(rate, minSplit);

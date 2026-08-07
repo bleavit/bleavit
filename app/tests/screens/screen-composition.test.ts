@@ -152,6 +152,32 @@ test('a pallet that is neither ledger instance is refused, never hashed', () => 
   // `descendantsValues` answers an unknown prefix with nothing — indistinguishable from an
   // account holding no positions, on the screen whose job is to show them.
   assert.throws(() => positionKeys(chain).positionsPrefix('Balances'), /not one of this client/);
+  // The vault key carries the same refusal. A `Vaults` key built against another pallet
+  // returns no value, which this reader treats as *no vault entry* — a disagreement that
+  // drops the row rather than a state of the chain.
+  assert.throws(() => positionKeys(chain).vault('Balances', 1n), /not one of this client/);
+});
+
+test('the vault keys are per instance and carry their argument (V-322)', () => {
+  // The three surfaces 11 §11.2's S4 row names beside the two position ones. Until V-322 they
+  // were declared and never built, so this is where the key exists at all.
+  const keys = positionKeys(chain);
+  // 32 (prefix) + 16 + 8 — `Blake2_128Concat` over a `u64` ProposalId, the same arithmetic
+  // `Market.Markets(id)` above is checked by.
+  assert.equal((keys.vault('ConditionalLedger', 5n).length - 2) / 2, 32 + 16 + 8);
+  assert.notEqual(keys.vault('ConditionalLedger', 5n), keys.vault('ConditionalLedger', 6n));
+  // Two instances of one item: same suffix, different prefix. Satisfying a service row's
+  // cross-check with the primary vault is the crossing 02 §7.4 forbids by name.
+  assert.notEqual(keys.vault('ConditionalLedger', 5n), keys.vault('ServiceLedger', 5n));
+  assert.equal(
+    keys.vault('ConditionalLedger', 5n).slice(66),
+    keys.vault('ServiceLedger', 5n).slice(66),
+  );
+  // `BaselineVaults` is keyed by an **epoch** and has one instance — 16 §7.6 gives a hosted
+  // question no Baseline leg — so it takes no pallet argument to get wrong.
+  assert.equal((keys.baselineVault(4).length - 2) / 2, 32 + 16 + 4);
+  assert.notEqual(keys.baselineVault(4), keys.baselineVault(5));
+  assert.notEqual(keys.baselineVault(4).slice(0, 66), keys.vault('ConditionalLedger', 4n).slice(0, 66));
 });
 
 test('the market keys carry their argument, and a plain item is a bare prefix', () => {
@@ -335,6 +361,9 @@ test('every decoder is bound to a real surface on this chain', () => {
     ['decisionStats', proposalDecoders(chain).decisionStats],
     ['primary.positions', positionDecoders(chain).primary.positions],
     ['service.positions', positionDecoders(chain).service.positions],
+    ['primary.vault', positionDecoders(chain).primary.vault],
+    ['service.vault', positionDecoders(chain).service.vault],
+    ['baselineVault', positionDecoders(chain).baselineVault],
   ];
   for (const [name, decode] of decoders) {
     const result = decode('0x00');
@@ -367,6 +396,93 @@ test('a u32 that decoded to a float is not a bitset, and is refused', () => {
   const decoded = marketDecoders(stub).phaseFlags('0x00');
   assert.equal(decoded.ok, false);
   assert.match(decoded.ok ? '' : decoded.reason, /integer/);
+});
+
+/* ---------------------------------------------- the vault surfaces the cross-check reads */
+
+/** One storage item's value codec, from the chain's own descriptors. Inputs only. */
+function valueCodec(pallet: string, item: string): { enc(value: unknown): Uint8Array } {
+  const found = (
+    encoders.query as Record<string, Record<string, { value: { enc(value: unknown): Uint8Array } }>>
+  )[pallet]?.[item];
+  assert.ok(found !== undefined, `${pallet}.${item} is not on this chain`);
+  return found.value;
+}
+
+/** A `BranchSupply` with nothing in it — the cross-check reads only `state`. */
+const EMPTY_BRANCH = { usdc: 0n, scalar_sets: 0n, gate_sets: [0n, 0n] };
+
+function vaultBytes(state: unknown): string {
+  return hex(
+    valueCodec('ConditionalLedger', 'Vaults').enc({
+      escrowed: 1_000n,
+      branches: [EMPTY_BRANCH, EMPTY_BRANCH],
+      state,
+      gate_outcomes: [undefined, undefined],
+      spec: 1,
+    }),
+  );
+}
+
+test('every VaultState the chain can store decodes to the projection the view publishes', () => {
+  // The FE-P2 witness for `vault_state`, and the field that decides which redemption call a
+  // row may sign (11 §11.5, §11.6). Driven with bytes **this runtime's own codec** wrote, so
+  // no layout in this file was typed out — and read through the same `asVaultState` the view
+  // goes through, which is why a second reader of one enum is not written.
+  const decode = positionDecoders(chain).primary.vault;
+  const cases: readonly [unknown, unknown][] = [
+    [{ type: 'Open', value: undefined }, { kind: 'open' }],
+    [{ type: 'Voided', value: undefined }, { kind: 'voided' }],
+    [
+      { type: 'Resolved', value: { type: 'Reject', value: undefined } },
+      { kind: 'resolved', branch: 'Reject' },
+    ],
+    [
+      {
+        type: 'ScalarSettled',
+        value: { winner: { type: 'Accept', value: undefined }, s: 700_050_000n },
+      },
+      { kind: 'scalar-settled', winner: 'Accept', score: 700_050_000n },
+    ],
+    [
+      { type: 'BaselineSettled', value: { s: 500_000_000n } },
+      { kind: 'baseline-settled', score: 500_000_000n },
+    ],
+  ];
+  for (const [state, expected] of cases) {
+    const decoded = decode(vaultBytes(state));
+    assert.ok(decoded.ok, decoded.ok ? '' : decoded.reason);
+    assert.deepEqual(decoded.value, expected);
+  }
+  // The service instance reads its own map identically — same shapes, different prefix — so a
+  // hosted row's vault state is checked against the ledger that really backs it.
+  const service = positionDecoders(chain).service.vault(vaultBytes({ type: 'Voided', value: undefined }));
+  assert.ok(service.ok);
+  assert.deepEqual(service.ok ? service.value : undefined, { kind: 'voided' });
+});
+
+test('BaselineVaults projects branch-free, exactly as the runtime’s own view does', () => {
+  // 02 §4, contract v6: a Baseline instrument has no winning proposal branch to publish, so
+  // `Settled(s)` becomes `BaselineSettled { s }` and never a `ScalarSettled` with an invented
+  // winner. `BaselineState` has two variants and `VaultState` five, which is why this mapping
+  // is written out rather than routed through the five-arm reader.
+  const bytes = (state: unknown): string =>
+    hex(valueCodec('ConditionalLedger', 'BaselineVaults').enc({ escrowed: 5n, sets: 3n, state }));
+  const decode = positionDecoders(chain).baselineVault;
+
+  const open = decode(bytes({ type: 'Open', value: undefined }));
+  assert.ok(open.ok, open.ok ? '' : open.reason);
+  assert.deepEqual(open.value, { kind: 'open' });
+
+  const settled = decode(bytes({ type: 'Settled', value: 700_050_000n }));
+  assert.ok(settled.ok, settled.ok ? '' : settled.reason);
+  assert.deepEqual(settled.value, { kind: 'baseline-settled', score: 700_050_000n });
+
+  // A state this release has never heard of is refused rather than mapped onto `Open`, which
+  // is the arm that offers actions.
+  const unknown = decode(hex(new Uint8Array([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x7f])));
+  assert.equal(unknown.ok, false);
 });
 
 /* ------------------------------------------------------- the storage key the witness needs */
