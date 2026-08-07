@@ -52,6 +52,7 @@
 import {
   boundarySet,
   type ChartDiscardRecord,
+  type ChartDiscardSpan,
   type CoverageRange,
   type CoverageRef,
   type CoveredHistory,
@@ -398,6 +399,27 @@ function rawEvictedItem(record: PendingRawEvictionRecord): DisclosureItem {
 }
 
 /**
+ * The discard's block envelope, one sentence per arm — a **total** switch, deliberately.
+ *
+ * Named and exhaustive rather than a nested ternary, because this is the exact place the two
+ * meanings get welded back together. `none` and `unreadable` were one `undefined` until F8 split
+ * them, and a fourth arm added to `ChartDiscardSpan` must fail to compile here rather than fall
+ * through to whichever sentence the last `else` happened to hold.
+ */
+function envelopeNote(envelope: ChartDiscardSpan): string {
+  switch (envelope.kind) {
+    case 'named':
+      return span(envelope.fromBlock, envelope.toBlock);
+    case 'none':
+      // The ordinary state of a client that has charted nothing. It may not read as corruption.
+      return 'no blocks were covered when this ran';
+    case 'unreadable':
+      // The corruption event INV-FE-7 expects. It may not read as an empty index.
+      return 'the coverage record could not be read, so the span cannot be named';
+  }
+}
+
+/**
  * Chart rows a schema migration emptied over blocks `meta.coverage` still claims.
  *
  * The one obligation F25's row names first, because it is the newest and the easiest to lose.
@@ -405,14 +427,12 @@ function rawEvictedItem(record: PendingRawEvictionRecord): DisclosureItem {
  * and the block envelope — and the envelope's three arms stay apart: a coverage row that named
  * no blocks and one that could not be parsed are an ordinary client and a corruption event, and
  * one rendering for both is wrong in one direction whichever it picks.
+ *
+ * This is the client's **only** renderer of the record; `coverage-view.tsx` reaches it through
+ * `CoveredHistoryDisclosure`, and `index-disclosure.test.ts` asserts nothing else names it.
  */
 function chartDiscardItem(record: ChartDiscardRecord): DisclosureItem {
-  const envelope =
-    record.span.kind === 'named'
-      ? span(record.span.fromBlock, record.span.toBlock)
-      : record.span.kind === 'none'
-        ? 'no blocks were covered when this ran'
-        : 'the coverage record could not be read, so the span cannot be named';
+  const envelope = envelopeNote(record.span);
   return {
     id: 'chart-rows-discarded',
     severity: 'caution',

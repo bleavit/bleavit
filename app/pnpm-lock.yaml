@@ -344,6 +344,15 @@ importers:
       '@bleavit/local-index':
         specifier: workspace:*
         version: link:../../packages/local-index
+      '@bleavit/providers':
+        specifier: workspace:*
+        version: link:../../packages/providers
+      '@bleavit/shared-types':
+        specifier: workspace:*
+        version: link:../../packages/shared-types
+      '@bleavit/ui':
+        specifier: workspace:*
+        version: link:../../packages/ui
       '@polkadot-api/descriptors':
         specifier: workspace:*
         version: link:../../packages/papi-descriptors

@@ -23,7 +23,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createElement as h } from 'react';
@@ -292,6 +292,46 @@ test('a migration discard has one renderer, not one per path', () => {
     chartDiscard: CHART_DISCARD,
   }).filter((item) => item.id === HISTORY_DISCLOSURES.chartDiscard);
   assert.deepEqual(fromBoot, fromRead);
+});
+
+test('the migration discard has one renderer in the client, not one per surface', () => {
+  // The assertion above is true, item-for-item, and weaker than it reads: **both sides of its
+  // `deepEqual` are produced by `chartDiscardItem`**, so it can only fail if this one module grew
+  // two. It is blind to every renderer outside it — and there was one. F23's `coverage-view.tsx`
+  // rendered this record in its own package, exported from the same index, with its own sentence
+  // about `FE-IDX-002` (whose copy F25 says may not be invented) and a two-state reading of a
+  // three-state span. Nothing in this suite could see it, and nothing did until the two branches
+  // were compiled together.
+  //
+  // So the claim is made a property of the source tree instead, the shape `check:covered-history`
+  // rule A already uses: the record is reached through its container, and **named** in exactly one
+  // module. A surface that wants to show it renders `CoveredHistoryDisclosure`.
+  const OWNER = 'src/features/analysis/src/index-disclosure.ts';
+  const TOKENS = ['chartDiscard', 'ChartDiscardRecord', 'ChartDiscardSpan'];
+  const names = (file: string): readonly string[] => {
+    const code = withoutComments(appSource(file));
+    return TOKENS.filter((token) => code.includes(token));
+  };
+
+  // Anti-vacuity: the owner must still name the record, or the rule below is satisfied by a
+  // rename and proves nothing.
+  assert.deepEqual([...names(OWNER)].sort(), [...TOKENS].sort(), `${OWNER} no longer reads the record`);
+
+  const modules = readdirSync(join(APP, 'src'), { recursive: true, encoding: 'utf8' })
+    .filter((entry) => /\.tsx?$/.test(entry))
+    .filter((entry) => !entry.split('/').includes('dist') && !entry.split('/').includes('node_modules'))
+    .map((entry) => join('src', entry));
+  assert.ok(modules.length > 20, `only ${modules.length} client modules were scanned`);
+  assert.ok(modules.includes(OWNER), `the scan does not reach ${OWNER}`);
+
+  const others = modules.filter((file) => file !== OWNER && names(file).length > 0);
+  assert.deepEqual(
+    others,
+    [],
+    `these modules read the migration-discard record directly rather than through ` +
+      `CoveredHistoryDisclosure, so 10 §9.4's fixed copy has more than one implementation: ` +
+      others.join(', '),
+  );
 });
 
 // ------------------------------------------------------------- the copy rule, both halves

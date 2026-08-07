@@ -37,6 +37,7 @@ import {
   AWAITING_CHAIN_READ,
   AcceptInterstitial,
   CoverageView,
+  CoveredHistoryDisclosure,
   CrossCheckView,
   EvictionPreview,
   FleetSummary,
@@ -76,7 +77,7 @@ import {
 } from '@bleavit/providers';
 import { providerRange } from '@bleavit/local-index';
 import { selfRange } from '@bleavit/local-index/testing';
-import type { CoverageRange, CoveredHistory } from '@bleavit/local-index';
+import type { ChartDiscardRecord, CoverageRange, CoveredHistory } from '@bleavit/local-index';
 import { badgeCopyFor } from '@bleavit/ui';
 // `finalize` is test-only on purpose (10 §2.1): `Finalized<T>` is mintable only inside
 // `chain-client`, which is exactly what makes `onAct`'s parameter unreachable from a provider
@@ -718,27 +719,95 @@ test('a hole is rendered as a gap with an explainer, never elided', () => {
     }),
   );
   assert.match(markup, /data-holes="1"/);
-  assert.ok(markup.includes('#21–#29'), markup);
-  assert.ok(markup.includes('never read'), markup);
+  // The gap and its explainer come from F25's one reader, so the span and the sentence are that
+  // module's rather than a second spelling written here.
+  assert.ok(markup.includes('data-disclosure="history-holes"'), markup);
+  assert.ok(markup.includes('21..29'), markup);
+  assert.ok(markup.includes('never drawn'), markup);
 });
 
-test('an unnameable chart discard is reported for every span', () => {
-  const answer: CoveredHistory<readonly string[]> = {
-    ...history([providerRange('snapshot', 'pub-1', 1, 20, 0, EDGE)]),
-    chartDiscard: {
-      fromSchema: 1,
-      toSchema: 3,
-      tables: ['priceSamples'],
-      rows: 12,
-      fromBlock: undefined,
-      toBlock: undefined,
-      at: 0,
-      detail: 'the chart tables were rekeyed and emptied',
-    },
-  };
+// ------------------------------------------------- the migration discard has one renderer
+
+/** The discard record, with only its span varying — the field the two branches disagreed on. */
+const discard = (span: ChartDiscardRecord['span']): ChartDiscardRecord => ({
+  fromSchema: 1,
+  toSchema: 3,
+  tables: ['priceSamples'],
+  rows: 12,
+  span,
+  at: 0,
+  detail: 'the chart tables were rekeyed and emptied',
+});
+
+/** A covered answer whose only disclosure is the discard: no holes, nothing folded. */
+const onlyDiscard = (span: ChartDiscardRecord['span']): CoveredHistory<readonly string[]> => ({
+  covered: {
+    data: [],
+    span: { fromBlock: 1, toBlock: 100 },
+    ranges: [providerRange('snapshot', 'pub-1', 1, 100, 0, EDGE)],
+    holes: [],
+  },
+  downsampled: [],
+  chartDiscard: discard(span),
+});
+
+test('the coverage view shows the discard through F25’s renderer, not a second one', () => {
+  // This surface used to render the record itself, in its own words, and read the span as two
+  // states — an absent block pair meant "a span this device can no longer name". `ChartDiscardSpan`
+  // was split into three arms precisely because that reading is wrong in one direction whichever
+  // way it falls: `none` is the ordinary state of a client that has charted nothing and
+  // `unreadable` is the corruption event INV-FE-7 expects, so one encoding for both either
+  // announces a corruption that did not happen or hides one that did.
+  //
+  // The stronger reason for one renderer is 10 §9.4: `FE-IDX-002` has no fixed copy yet (SQ-604,
+  // SQ-783, SQ-820, SQ-821), and the sentence this file used to render was that missing copy
+  // written anyway — a confident claim with no authority behind it, beside a slot whose whole
+  // job is to say the wording does not exist.
+  const answer = onlyDiscard({ kind: 'named', fromBlock: 1, toBlock: 900 });
   const markup = html(h(CoverageView, { answer, caption: 'Price history' }));
-  assert.ok(markup.includes('can no longer name'), markup);
+
+  // Byte-for-byte the same element the disclosure surface renders for the same record. A second
+  // renderer agreeing today would not survive this; a second renderer at all is caught in
+  // `index-disclosure.test.ts`, which asserts the record is named in exactly one module.
+  const alone = html(h(CoveredHistoryDisclosure, { history: answer }));
+  assert.ok(alone.includes('data-disclosure="chart-rows-discarded"'), alone);
+  assert.ok(markup.includes(alone), `the coverage view renders its own discard:\n${markup}`);
+
+  // The record's own fields reach the screen, and the copy slot says it is a slot.
   assert.ok(markup.includes('priceSamples'), markup);
+  assert.ok(markup.includes('1..900'), markup);
+  assert.ok(markup.includes('data-awaiting="FE-IDX-002"'), markup);
+});
+
+test('a client that charted nothing is not reported as one whose coverage is unreadable', () => {
+  // The exact conflation the three-arm span exists to prevent, asserted at the pixel on the
+  // surface that used to make it.
+  const named = html(
+    h(CoverageView, {
+      answer: onlyDiscard({ kind: 'named', fromBlock: 1, toBlock: 900 }),
+      caption: 'Price history',
+    }),
+  );
+  const none = html(
+    h(CoverageView, { answer: onlyDiscard({ kind: 'none' }), caption: 'Price history' }),
+  );
+  const unreadable = html(
+    h(CoverageView, { answer: onlyDiscard({ kind: 'unreadable' }), caption: 'Price history' }),
+  );
+
+  assert.notEqual(none, unreadable);
+  assert.notEqual(named, none);
+  assert.ok(named.includes('1..900'), named);
+  assert.ok(none.includes('no blocks were covered'), none);
+  assert.ok(unreadable.includes('could not be read'), unreadable);
+  // The direction that announces a corruption that did not happen.
+  assert.ok(!none.includes('could not be read'), `an ordinary empty client was reported corrupt: ${none}`);
+  assert.ok(!none.includes('cannot be named'), `an ordinary empty client was reported corrupt: ${none}`);
+  // And the direction that hides one that did.
+  assert.ok(
+    !unreadable.includes('no blocks were covered'),
+    `an unreadable coverage row was reported as an empty index: ${unreadable}`,
+  );
 });
 
 // ------------------------------------------------------------------ INV-FE-3's actionable object
