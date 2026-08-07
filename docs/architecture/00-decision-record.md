@@ -127,7 +127,7 @@ New FE epic **FE-14 (Governance surface)**: referenda list/detail, vote/delegate
 ### D-16. Operations layer: owners, funding lines, ArNS permabuy (X-13, F-5, F-mediums)
 
 - Named treasury budget lines: bootnodes/RPC/archive (the 30-day commitment of D-6), keeper subsidies beyond the metered budget (raised to **12,000 USDC/epoch**, recomputed from crank volume), oracle evidence hosting, monitoring, Arweave/ArNS.
-- **ArNS: permabuy** (eliminates the lease-lapse takeover). ANT control: 3-of-5 if n-of-m is confirmed by prototype FE-P7 (the ANT-capability experiment; an earlier draft of this record mislabeled it FE-P8), else the FROST-ed25519 ceremony; **single-key custody is prohibited** — if neither materializes, launch blocks on this line.
+- **ArNS: permabuy** (eliminates the lease-lapse takeover). ANT control: 3-of-5. **Prototype FE-P7 resolved the capability question on 2026-08-07 and the answer is negative** — an ANT authorizes by membership, so its controller list is 1-of-m and no native n-of-m exists ([12](12-release-and-operations.md) §4.2; SQ-940). The threshold ceremony is therefore the only path, and it produces one controller principal held 3-of-5. **Single-key custody is prohibited** — if the ceremony does not materialize, launch blocks on this line. The decision is unchanged; only its second option is gone.
 - **Signer disjointness required**: ArNS controllers ∩ minisign release keys = ∅, enforced organizationally and listed in the threat model.
 
 ### D-17. Chain identity constants (X-11a/b)

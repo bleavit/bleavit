@@ -3,7 +3,7 @@
  * The 10 §9.4 smoldot artifact budget, measured rather than asserted (FE-P4, V-88).
  *
  * §9.4 budgets *"smoldot WASM (worker, lazy) ≤ 3.5 MB gz"* and tagged the figure
- * `[VERIFY artifact size — FE-P4]`. It is now measured — 2.23 MiB gz for `smoldot@3.3.2` —
+ * `[VERIFY artifact size — FE-P4]`. It is now measured — 2.21 MiB gz for `smoldot@3.3.2` —
  * and this gate keeps it measured, because a budget nothing checks is a sentence, and the
  * one thing certain about a dependency's compressed size is that it changes.
  *
@@ -11,6 +11,15 @@
  * carrying zlib-compressed, base64-encoded string literals**, not as a `.wasm` file. So
  * the transferred bytes are those modules gzipped — which is what §9.4's "MB gz" means and
  * what a static gateway actually serves.
+ *
+ * **The gz figure is toolchain-dependent, and only the gz one (V-300).** V-88 recorded
+ * 2,333,920 B for this same package; the same four modules now compress to 2,320,965 B —
+ * 12,955 B less — while the **raw** total (3,082,260 B) and the **brotli** total
+ * (2,312,719 B) are byte-identical to V-88. Identical input and identical brotli with a
+ * different gzip means the DEFLATE implementation moved, not the dependency. So this gate
+ * is a *budget* check and must never become an equality check against a recorded number:
+ * pinning the byte count would fail on a Node upgrade while nothing shipped had changed.
+ * It is also why the doc cell is quoted to two decimals rather than to the byte.
  *
  * **Fails closed.** If the expected files are not where the pinned version puts them, this
  * exits non-zero rather than reporting a small number: a version bump that reorganised the

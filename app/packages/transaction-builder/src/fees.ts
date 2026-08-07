@@ -17,9 +17,27 @@
  * *selected* asset rather than converted to VIT for a single comparison. An account with
  * no VIT at all must be able to pay, so a viability check denominated in VIT would deny
  * exactly the accounts D-12 exists to serve.
+ *
+ * **The chain's own fee figure is sourced, and that is now a verified fact rather than a
+ * conservative posture (FE-P1, V-301).** 10 §2.3 names the fee estimate and the fee
+ * headroom explicitly among the values that MUST be `Finalized<T>` — *"named explicitly
+ * because it is the one an implementer is most likely to take from a wallet or an RPC"* —
+ * and then qualified itself: *"FE-P1 leaves the exact PAPI fee-estimation surface open, so
+ * until it resolves the conservative reading is in force"*. FE-P1's fee half is resolved.
+ * PAPI 2.1.8 answers `getEstimatedFees` from `TransactionPaymentApi_query_info` issued as
+ * `chainHead.call$(null, …)`, and `null` resolves to the **finalized** hash (V-82), so the
+ * figure is verified state and the strong reading applies. This module therefore takes the
+ * fee as a read rather than as a number: `bigint` accepted a wallet's guess, an RPC's
+ * answer and a literal on equal terms with a light-client read, and no type said otherwise.
+ *
+ * **And two reads are not one reading.** The fee and the rate are separate reads, so the
+ * estimate goes through `meet`, which refuses a pair from different blocks instead of
+ * picking one. INV-FE-2 requires a precondition to be evaluated at a single finalized
+ * block, and a fee priced at B against a rate read at B−1 is exactly the composite that
+ * requirement excludes — invisible in the arithmetic, and wrong on the confirm screen.
  */
 
-import type { Finalized } from '@bleavit/chain-client';
+import { derive, meet, type Finalized } from '@bleavit/chain-client';
 import type { GatePassed } from './machine.js';
 
 export type { FeeAsset } from './fee-asset.js';
@@ -78,8 +96,15 @@ const UPPER_MULTIPLE = 10n;
  *
  * Cross-multiplied rather than divided: a division would floor the bound itself, and a
  * rate one unit outside a floored bound reads as inside it.
+ *
+ * **The read's pin travels with the admitted rate.** This used to return a bare
+ * `AdmittedRate`, which threw away the one thing that says *which block* the constitution
+ * published that rate at — so `estimateFee` had no way to check that its two inputs
+ * described the same state, and no caller could be made to supply it. `derive` reattaches
+ * the pin of the read that was actually checked; it cannot attach any other, which is why
+ * it is the sanctioned spelling rather than a `finalize` call this package is barred from.
  */
-export function admitRate(read: Finalized<VitUsdcRate>): AdmittedRate {
+export function admitRate(read: Finalized<VitUsdcRate>): Finalized<AdmittedRate> {
   const rate = read.value;
   if (rate.scale <= 0n) {
     throw new FeeRateUnusableError('fee.vit_usdc_rate has a non-positive scale; no figure can be computed');
@@ -100,7 +125,7 @@ export function admitRate(read: Finalized<VitUsdcRate>): AdmittedRate {
         'constitution does not admit this rate',
     );
   }
-  return rate as AdmittedRate;
+  return derive(read, (checked) => checked as AdmittedRate);
 }
 
 export interface FeeEstimate {
@@ -119,23 +144,39 @@ export interface FeeEstimate {
  * Rounds the USDC leg **up**. A fee estimate that rounds down understates what the account
  * must hold, and the failure lands as a rejected transaction after signing — the one point
  * in the flow where the user has already committed.
+ *
+ * **Takes the chain's VIT fee as a read, not as a number (10 §2.3; FE-P1, V-301).** The
+ * figure this prices is `TransactionPaymentApi_query_info`'s `partial_fee` for these exact
+ * bytes, and PAPI answers it at the finalized block — so it *is* available as
+ * `Finalized<bigint>`, and there is no longer any reason for the type to accept a value
+ * with no read behind it. The previous `bigint` parameter is the exact shape 10 §2.3 warns
+ * about: it took a wallet's estimate, an RPC's answer, and a literal on the same terms as a
+ * light-client read.
+ *
+ * **Returns `undefined` when the two reads disagree about the block.** That is `meet`'s
+ * refusal, not a failure mode invented here: two reads at two blocks describe no single
+ * state, and INV-FE-2 evaluates every precondition at one finalized block. A caller that
+ * gets `undefined` has no fee figure — which is the honest answer, and the same shape
+ * `admitRate` already takes for an out-of-bounds rate.
  */
 export function estimateFee(
-  feeInVit: bigint,
-  rate: AdmittedRate,
+  feeInVit: Finalized<bigint>,
+  rate: Finalized<AdmittedRate>,
   selected: FeeAsset,
-): FeeEstimate {
-  if (feeInVit < 0n) throw new FeeRateUnusableError('a negative fee is not an estimate');
-  const usdc = (feeInVit * rate.value + rate.scale - 1n) / rate.scale;
-  return {
-    vit: feeInVit,
-    usdc,
-    selected,
-    headroom: selected === 'VIT' ? feeInVit : usdc,
-    disclosure:
-      `fee.vit_usdc_rate = ${rate.value}/${rate.scale} (reference ${rate.reference}, ` +
-      'bounded [0.1×, 10×], PARAM-adjustable)',
-  };
+): Finalized<FeeEstimate> | undefined {
+  if (feeInVit.value < 0n) throw new FeeRateUnusableError('a negative fee is not an estimate');
+  return meet(feeInVit, rate, (fee, admitted) => {
+    const usdc = (fee * admitted.value + admitted.scale - 1n) / admitted.scale;
+    return {
+      vit: fee,
+      usdc,
+      selected,
+      headroom: selected === 'VIT' ? fee : usdc,
+      disclosure:
+        `fee.vit_usdc_rate = ${admitted.value}/${admitted.scale} (reference ${admitted.reference}, ` +
+        'bounded [0.1×, 10×], PARAM-adjustable)',
+    };
+  });
 }
 
 /* --------------------------------------------------------------- mortality and nonce */
