@@ -26,6 +26,7 @@ import {
   CRANK_CALLS,
   GOVERNANCE_ROW_IDS,
   OPERATOR_ROWS,
+  operatorRowsFor,
   OPERATOR_SURFACE_ROWS,
   blockingObligationsFor,
   unreadableObligationsFor,
@@ -845,6 +846,43 @@ test('11 §11.8 publishes an operator row family, separate from §11.5’s fifte
     assert.ok(!(id in PRECONDITION_ROWS), `${id} leaked into §11.5's table`);
   }
   assert.equal(Object.keys(PRECONDITION_ROWS).length, 15);
+});
+
+test('the two registry rows read the instance they are filed against — 11 §11.8.6', () => {
+  // The blocker an R-6 review found on 2026-08-07. §11.8.6 gives ONE precondition row for TWO
+  // allocators, and 02 §7.4 freezes six items across them precisely because "the allocators are
+  // independent and share no filing-id space". O-8 and O-9 named `storage.incident_registry.*`
+  // unconditionally while `FilingKind` was threaded through the inputs and read by nobody — so a
+  // MILESTONE challenge was gated on the INCIDENT registry's window, closure and occupancy. It
+  // fails both ways: admitting a challenge on a closed milestone window whose incident twin is
+  // open, and refusing a lawful one.
+  const surfacesOf = (rows: ReturnType<typeof operatorRowsFor>, id: 'O-8' | 'O-9') =>
+    new Set(rows[id].map((c) => c.surface));
+
+  for (const id of ['O-8', 'O-9'] as const) {
+    const incident = surfacesOf(operatorRowsFor('incident'), id);
+    const milestone = surfacesOf(operatorRowsFor('milestone'), id);
+    assert.ok(
+      [...milestone].some((s) => s.startsWith('storage.milestone_registry.')),
+      `${id} must read the milestone registry when that is the instance filed against`,
+    );
+    assert.ok(
+      ![...milestone].some((s) => s.startsWith('storage.incident_registry.')),
+      `${id} must not read the incident registry for a milestone filing`,
+    );
+    assert.ok(
+      ![...incident].some((s) => s.startsWith('storage.milestone_registry.')),
+      `${id} must not read the milestone registry for an incident filing`,
+    );
+    // And the two differ, or the parameter is doing nothing.
+    assert.notDeepEqual(incident, milestone, `${id} is not instance-parameterised at all`);
+  }
+
+  // The rest of the rows are the same either way — only the two registry rows are per instance.
+  const others = OPERATOR_IDS.filter((id) => id !== 'O-8' && id !== 'O-9');
+  for (const id of others) {
+    assert.deepEqual(operatorRowsFor('milestone')[id], OPERATOR_ROWS[id], `${id} must not move`);
+  }
 });
 
 test('every §11.8 submit call names exactly one row, and that row has clauses', () => {

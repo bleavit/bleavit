@@ -867,11 +867,43 @@ const O7: readonly PreconditionClause[] = [
  * under SQ-731 for the reason P-13 is — money the account parts with is computed from
  * chain-read values or the transaction is blocked (§11.5's redemption-fee rule 5).
  */
-const O8: readonly PreconditionClause[] = [
-  clause('O-8', 'this registry instance has room for another filing this epoch', 'storage.incident_registry.filings', 'storage', 'chain', { key: 'occupancy' }),
+/**
+ * Which registry instance a filing row reads — 11 §11.8.6, and the fix for a 2026-08-07 blocker.
+ *
+ * §11.8.6 gives **one** precondition row for **two independent allocators**, and 02 §7.4 freezes
+ * six storage items across them precisely because *"the allocators are independent and share no
+ * filing-id space"*. Until this factory existed, O-8 and O-9 named `storage.incident_registry.*`
+ * unconditionally while `FilingKind` was threaded through `FilingInputs` and read by nobody — so
+ * a **milestone** challenge minted a `GatePassed` over the **incident** registry's window,
+ * closure and occupancy. It fails in both directions: it admits a challenge on a closed milestone
+ * window whose incident twin is open, and refuses a lawful one for the mirror reason.
+ *
+ * The `storage.milestone_registry.*` surfaces were already frozen in `CRITICAL_SURFACE` with
+ * byte-asserted key fixtures, and nothing cited them. A surface nothing reads is the shape this
+ * repository keeps finding: declared, gated, and never the thing the code actually does.
+ */
+export type RegistryInstance = 'incident' | 'milestone';
+
+const REGISTRY_SURFACE = {
+  incident: {
+    filings: 'storage.incident_registry.filings',
+    closedAt: 'storage.incident_registry.closed_at',
+    ackRecords: 'storage.incident_registry.ack_records',
+  },
+  milestone: {
+    filings: 'storage.milestone_registry.filings',
+    closedAt: 'storage.milestone_registry.closed_at',
+    ackRecords: 'storage.milestone_registry.ack_records',
+  },
+} as const satisfies Readonly<Record<RegistryInstance, Readonly<Record<string, SurfaceId>>>>;
+
+const o8For = (instance: RegistryInstance): readonly PreconditionClause[] => [
+  clause('O-8', 'this registry instance has room for another filing this epoch', REGISTRY_SURFACE[instance].filings, 'storage', 'chain', { key: 'occupancy' }),
   clause('O-8', 'your free USDC covers the filing bond', 'storage.foreign_assets.account', 'storage', 'acting', { key: 'bond-headroom' }),
   ...feeHeadroom('O-8'),
 ];
+
+const O8: readonly PreconditionClause[] = o8For('incident');
 
 /**
  * O-9 — `registry.challenge_filing(epoch, filing_id, evidence_hash)` (§11.8.6 row 2).
@@ -884,21 +916,41 @@ const O8: readonly PreconditionClause[] = [
  * challenge mirrors P-13 against P-14 and is not a coincidence: a bond that already exists
  * has been priced by the chain, and a bond that does not has not.
  */
-const O9: readonly PreconditionClause[] = [
-  clause('O-9', 'the filing exists and its challenge window has not closed', 'storage.incident_registry.filings', 'storage', 'chain', { key: 'window' }),
-  clause('O-9', 'the registry epoch is not already closed', 'storage.incident_registry.closed_at', 'storage', 'chain', { key: 'not-closed' }),
-  clause('O-9', 'any watchtower-quorum extension of the window is accounted for', 'storage.incident_registry.ack_records', 'storage', 'chain', { key: 'extension' }),
+const o9For = (instance: RegistryInstance): readonly PreconditionClause[] => [
+  clause('O-9', 'the filing exists and its challenge window has not closed', REGISTRY_SURFACE[instance].filings, 'storage', 'chain', { key: 'window' }),
+  clause('O-9', 'the registry epoch is not already closed', REGISTRY_SURFACE[instance].closedAt, 'storage', 'chain', { key: 'not-closed' }),
+  clause('O-9', 'any watchtower-quorum extension of the window is accounted for', REGISTRY_SURFACE[instance].ackRecords, 'storage', 'chain', { key: 'extension' }),
   // §11.8.6 row 2 requires the **challenge bond balance**, and `mayChallenge` tested only
   // the window: a client offering a challenge the chain refuses for want of bond.
   clause('O-9', 'your free USDC covers the challenge bond', 'storage.foreign_assets.account', 'storage', 'acting', { key: 'bond-headroom' }),
   ...feeHeadroom('O-9'),
 ];
 
+const O9: readonly PreconditionClause[] = o9For('incident');
+
 /** 11 §11.8's rows, as data. Separate from §11.5's fifteen — see `OperatorRowId`. */
 export const OPERATOR_ROWS: Readonly<Record<OperatorRowId, readonly PreconditionClause[]>> = {
   'O-1': O1, 'O-2': O2, 'O-3': O3, 'O-4': O4, 'O-5': O5,
   'O-6': O6, 'O-7': O7, 'O-8': O8, 'O-9': O9,
 };
+
+/**
+ * The operator rows as the **named registry instance** reads them — 11 §11.8.6.
+ *
+ * `OPERATOR_ROWS` keeps the incident instance so every existing consumer, and every doc gate that
+ * walks the row registry, still sees one clause list per `OperatorRowId`. A caller that knows
+ * which allocator it is filing against uses this instead, and the two registry rows then name
+ * that instance's own storage.
+ *
+ * Nothing routes on `kind` implicitly: the argument is required, because the whole defect this
+ * repairs was a `FilingKind` that was carried everywhere and read nowhere.
+ */
+export function operatorRowsFor(
+  instance: RegistryInstance,
+): Readonly<Record<OperatorRowId, readonly PreconditionClause[]>> {
+  return { ...OPERATOR_ROWS, 'O-8': o8For(instance), 'O-9': o9For(instance) };
+}
+
 
 export const OPERATOR_ROW_IDS: readonly OperatorRowId[] = Object.freeze(
   Object.keys(OPERATOR_ROWS) as OperatorRowId[],
