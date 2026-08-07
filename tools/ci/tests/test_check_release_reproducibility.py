@@ -4,7 +4,7 @@ Every case here is an outcome a healthy release never produces, which is the onl
 a gate like this is ever really exercised: on a good day it compares two identical maps
 and prints one line, and so would a checker that compared nothing at all.
 
-Three groups, and the middle one is the reason this file is longer than a diff test:
+Four groups, and the middle two are the reason this file is longer than a diff test:
 
   * **The files.** A difference must fail *and name the path*, in both directions — a
     file only in one environment is as much a divergence as a file whose digest moved,
@@ -14,6 +14,10 @@ Three groups, and the middle one is the reason this file is longer than a diff t
     identically and prove nothing; a manifest whose declared tree digest does not match
     its own file map proves something about the producer rather than about a build.
     Each is refused with its own sentence.
+  * **The recipe axes** (SQ-1009). 12 §1.1 fixes `SOURCE_DATE_EPOCH`, so the two
+    environments must carry the same one — and the refusal must name the *recipe*, since
+    the same divergence reported as a file diff invites the repair that unsets the
+    variable. The anti-vacuity case is two manifests differing in nothing else.
   * **The digest convention.** `app/fixtures/tree-digest-cases.json` is read in place
     here and by `app/tests/release/repro-manifest.test.ts`, so the Python consumer and
     the TypeScript producer are bound to one definition of a tree hash rather than to
@@ -50,6 +54,9 @@ HASH_B = "b" * 64
 HASH_C = "c" * 64
 COMMIT = "c13aace095c510f06262e6eeb09ae6a215b7f38b"
 RECIPE = "d" * 64
+# The commit time `source-date-epoch.ts` would derive. A decimal string, because that is what
+# an environment variable is and what the producer records.
+EPOCH = "1786017411"
 
 
 def manifest(
@@ -59,6 +66,7 @@ def manifest(
     build_path: str = "/home/runner/work/bleavit/bleavit/app",
     commit: str = COMMIT,
     recipe: str = RECIPE,
+    epoch: str | None = EPOCH,
 ) -> dict:
     files = {"dist/index.html": HASH_A, "release-out/release.json": HASH_B} if files is None else files
     return {
@@ -76,7 +84,7 @@ def manifest(
                 "buildPath": build_path,
                 "home": "/home/runner",
                 "cpuCount": 4,
-                "sourceDateEpoch": None,
+                "sourceDateEpoch": epoch,
             },
             "incidental": {"hostname": f"runner-{environment_id}", "runner": "GitHub Actions 1"},
         },
@@ -264,6 +272,134 @@ class Preconditions(unittest.TestCase):
         self.assertIn("desktop-shell", "\n".join(failures))
 
 
+class RecipeAxes(unittest.TestCase):
+    """Refusal 4 — 12 §1.1's `SOURCE_DATE_EPOCH`, as something that can fail (SQ-1009).
+
+    Every case here is a way the *recipe* diverged while the file maps stayed identical,
+    which is the only shape this refusal can catch and the shape a file-map diff reports
+    as a mystery.
+    """
+
+    def test_a_differing_epoch_is_refused(self) -> None:
+        """The anti-vacuity case: two manifests that differ in **nothing else**.
+
+        The whole refusal exists for this pair. Their files are byte-identical, their
+        commits and recipe digests agree, and the only thing between them is the variable
+        12 §1.1 fixes — so a gate that had not been taught about it prints one green line.
+        """
+        first, second = manifest("app"), manifest("desktop-shell", epoch="1786017412")
+        failures, _ = checker.check(first, second)
+        self.assertTrue(
+            any("different SOURCE_DATE_EPOCH values" in failure for failure in failures),
+            failures,
+        )
+
+    def test_the_refusal_names_the_recipe_and_not_the_bytes(self) -> None:
+        """The wording is load-bearing, not decoration.
+
+        A recipe divergence reported as "these files differ" has an obvious cheapest
+        repair — unset the variable — and that repair is the failure the convention
+        exists to prevent, arriving through the gate meant to catch it. So the sentence
+        must say *recipe*, name the variable an operator would set, and there must be no
+        file-level failure alongside it inviting the other reading.
+        """
+        first, second = manifest("app"), manifest("desktop-shell", epoch="1786017412")
+        joined = "\n".join(checker.check(first, second)[0])
+        self.assertIn("SOURCE_DATE_EPOCH", joined)
+        self.assertIn("recipe divergence and not a file difference", joined)
+        self.assertNotIn("byte-identical across the two environments", joined)
+
+    def test_a_differing_epoch_cannot_supply_the_independence_difference(self) -> None:
+        """The axis that must never move cannot be the one proving two environments.
+
+        It is recorded in `substantive` because the producer reads it off the
+        environment, and a comparator that took it at face value would let a *defect*
+        satisfy refusal 1. Both failures must fire on the pair above: the recipe
+        diverged, and nothing else about the two environments differed at all.
+        """
+        first, second = manifest("app"), manifest("desktop-shell", epoch="1786017412")
+        failures, _ = checker.check(first, second)
+        self.assertTrue(
+            any("agree on every recorded environment axis" in failure for failure in failures),
+            failures,
+        )
+
+    def test_an_unset_epoch_on_one_side_is_refused(self) -> None:
+        """`null` is an honest answer about a machine and a dishonest one about a recipe.
+
+        Everywhere else in this manifest it means "not observable here". 12 §1.1 fixes
+        this value, so an unset one is a build that did not follow the recipe.
+        """
+        first, second = manifest("app"), manifest("desktop-shell", epoch=None)
+        failures, _ = checker.check(first, second)
+        self.assertTrue(
+            any("desktop-shell recorded no SOURCE_DATE_EPOCH" in failure for failure in failures),
+            failures,
+        )
+
+    def test_unsetting_it_on_both_sides_does_not_buy_silence(self) -> None:
+        """The repair the refusal's own wording warns against.
+
+        Two `null`s compare equal, so an equality-only rule would go green on exactly the
+        pair that proves nobody set the variable.
+        """
+        first = manifest("app", epoch=None)
+        second = manifest("desktop-shell", epoch=None)
+        failures, _ = checker.check(first, second)
+        self.assertTrue(
+            any("app and desktop-shell recorded no SOURCE_DATE_EPOCH" in f for f in failures),
+            failures,
+        )
+
+    def test_deleting_the_axis_from_both_producers_does_not_buy_silence(self) -> None:
+        """The same repair, one level further: remove the evidence rather than the value.
+
+        Deleting the key from *both* sides keeps the key sets equal, so the producer-drift
+        check never fires and every equality test ever written passes over an absent key.
+        """
+        first, second = pair()
+        del first["environment"]["substantive"]["sourceDateEpoch"]
+        del second["environment"]["substantive"]["sourceDateEpoch"]
+        failures, _ = checker.check(first, second)
+        self.assertTrue(
+            any("recorded no SOURCE_DATE_EPOCH" in failure for failure in failures), failures
+        )
+
+    def test_deleting_the_axis_from_one_producer_still_reaches_the_recipe_check(self) -> None:
+        """A key-set mismatch is reported, and it does not swallow the recipe finding.
+
+        The axis check returns early on producer drift — correctly, since the tally would
+        be meaningless — and the recipe axes are evaluated on that path too, so a manifest
+        that dropped the key is not merely "an older tool".
+        """
+        first, second = pair()
+        del second["environment"]["substantive"]["sourceDateEpoch"]
+        failures, _ = checker.check(first, second)
+        joined = "\n".join(failures)
+        self.assertIn("different environment axes", joined)
+        self.assertIn("recorded no SOURCE_DATE_EPOCH", joined)
+
+    def test_the_agreed_value_is_reported_on_the_healthy_path(self) -> None:
+        """Evidence, not silence. A gate that mentions the epoch only when it fails leaves
+        a reader unable to tell "both carried the same one" from "nobody looked"."""
+        failures, report = checker.check(*pair())
+        self.assertEqual(failures, [], failures)
+        self.assertTrue(
+            any(f"agree on SOURCE_DATE_EPOCH: {EPOCH}" in line for line in report), report
+        )
+
+    def test_every_recipe_axis_is_named_by_the_variable_an_operator_sets(self) -> None:
+        """The classification is data, and a future axis must arrive with its own name.
+
+        `RECIPE_AXES` maps the manifest's JSON key to the environment variable, so the
+        failure names the thing to fix rather than the field it was recorded under. An
+        entry mapping a key to itself would quietly reintroduce the JSON-key wording.
+        """
+        self.assertEqual(checker.RECIPE_AXES["sourceDateEpoch"], "SOURCE_DATE_EPOCH")
+        for axis, variable in checker.RECIPE_AXES.items():
+            self.assertNotEqual(axis, variable)
+
+
 class Cli(unittest.TestCase):
     """The entry point, because everything above tests `check()` and CI runs the file."""
 
@@ -290,6 +426,12 @@ class Cli(unittest.TestCase):
         result = self.run_on(first, second)
         self.assertEqual(result.returncode, 1)
         self.assertIn("dist/index.html", result.stderr)
+
+    def test_a_recipe_divergence_exits_one_and_names_the_variable(self) -> None:
+        """Through the real entry point, because the wording only helps if it is printed."""
+        result = self.run_on(manifest("app"), manifest("desktop-shell", epoch="1786017412"))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("SOURCE_DATE_EPOCH", result.stderr)
 
     def test_a_foreign_schema_is_refused(self) -> None:
         first, second = pair()

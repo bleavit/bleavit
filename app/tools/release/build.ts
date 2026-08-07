@@ -46,6 +46,7 @@ import {
   walkTree,
 } from './release-json.ts';
 import { buildSbom, parseLockfile } from './sbom.ts';
+import { resolveSourceDateEpoch } from './source-date-epoch.ts';
 import { injectSri, verifySri } from './sri.ts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -397,6 +398,14 @@ export interface PipelineOptions {
 }
 
 export function pipeline({ check = false }: PipelineOptions = {}) {
+  // 0 — the recipe's own variable, before any child process exists to inherit it (12 §1.1).
+  // Set here rather than in the CI step that invokes this, so a local build carries the same
+  // recipe as a CI one; the chain-side `tools/release/build-runtime.sh` puts it in the build
+  // script for the same reason. It does not make a clock-reading tool deterministic — only
+  // one that honours the convention — so the byte-identical claim still rests on the tree
+  // being clock-free and on the two-environment compare that proves it.
+  resolveSourceDateEpoch(REPO_ROOT);
+
   const sources: unknown = JSON.parse(readFileSync(SOURCES, 'utf8'));
   const declared = readDeclaredSources(SOURCES);
   const blockers: string[] = [];

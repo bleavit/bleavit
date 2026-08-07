@@ -1112,9 +1112,13 @@ jobs:
           path: repro/desktop-shell
       - name: Compare the two environments file by file
         # Fails on any difference and names every differing path with both digests. It also
-        # refuses three cases a naive file-map diff would pass: the same environment twice,
-        # two different source commits, and a manifest whose declared tree digest does not
-        # describe its own file map.
+        # refuses four cases a naive file-map diff would pass: the same environment twice,
+        # two different source commits, a manifest whose declared tree digest does not
+        # describe its own file map, and two environments carrying different
+        # `SOURCE_DATE_EPOCH` values — which 12 §1.1 fixes as part of the recipe, so it is
+        # reported as a recipe divergence rather than as the file diff it would cause. That
+        # wording is the point: the cheapest way to make such a diff go away is to unset the
+        # variable, which is the failure the convention exists to prevent (SQ-1009).
         run: |
           python3 tools/ci/check-release-reproducibility.py \
             repro/app/repro-manifest.json \

@@ -45,7 +45,7 @@ source commit, the build-recipe digest, and the environment's own facts.
 with both digests — a reproducibility gate that reports only "not identical" leaves the
 person who has to fix it with a whole tree to bisect.
 
-Three things about it are not obvious:
+Four things about it are not obvious:
 
 - **The environment facts are recorded to be *different*.** A "two-environment" gate whose
   two environments are one environment proves that a build is repeatable on one machine,
@@ -55,6 +55,16 @@ Three things about it are not obvious:
   one this pipeline is most exposed to, since pnpm's virtual store lives inside the project.
   The facts that differ between any two runners for uninteresting reasons (hostname, runner
   name) are held apart where they cannot satisfy that requirement.
+- **One key in that block is a recipe fact, not an environment axis.** 12 §1.1
+  fixes `SOURCE_DATE_EPOCH`, so `source-date-epoch.ts` resolves and exports it — injected
+  value first, `git show -s --format=%ct HEAD` otherwise, the shape the repository root's
+  `tools/release/build-runtime.sh` already uses on the chain side — and the
+  comparator both **requires the two environments to carry the same one** and refuses to let
+  it count towards the difference above. The refusal names the *recipe*: reported as a file
+  diff, its cheapest repair is to unset the variable, which is the failure the convention
+  exists to prevent. Setting it does not make a clock-reading tool deterministic — only one
+  that honours the convention — so the byte-identical property still rests on the tree being
+  clock-free, and the compare below is what tests that.
 - **The tree digest is `sha256(path \0 <file digest> \n …)` over sorted paths** — the framing
   `buildRecipeDigest` already uses, so there is one convention here rather than two. It is
   implemented twice, in TypeScript and in Python, and `app/fixtures/tree-digest-cases.json`
