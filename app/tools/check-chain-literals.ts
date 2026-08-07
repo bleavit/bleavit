@@ -214,6 +214,12 @@ export function sourceFiles(appRoot: string = APP_ROOT): string[] {
     if (statSync(dir).isDirectory()) walk(dir, files);
   }
   walk(resolve(appRoot, 'src'), files);
+  // F22: `tools/desktop/` decides what the desktop shell may embed, so it is client source in
+  // every sense that matters here even though it runs on a build machine. It is named rather
+  // than swept from `tools/` because the rest of that directory is checkers — several of which
+  // carry 02 §9 values as the data they check *against*, so scanning them would make this gate
+  // fire on its own oracle.
+  walk(resolve(appRoot, 'tools/desktop'), files);
   return files.sort();
 }
 

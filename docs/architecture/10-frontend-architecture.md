@@ -29,9 +29,11 @@ What changed relative to FRONTEND_PLAN.md, and why, is the subject of the rest o
 Every store value is a `Verified<T>`: payload plus `VerificationStatus` and provenance block reference. UI data components accept only `Verified<T>`; a component cannot render a value without a status.
 
 ```ts
+export type ChainId = HexString;                                             // genesis hash, §3.1
+
 export type VerificationStatus =
-  | { kind: 'verified-finalized'; blockHash: HexString; blockNumber: number }
-  | { kind: 'verified-best'; blockHash: HexString; blockNumber: number }      // display-only
+  | { kind: 'verified-finalized'; chain: ChainId; blockHash: HexString; blockNumber: number }
+  | { kind: 'verified-best'; chain: ChainId; blockHash: HexString; blockNumber: number } // display-only
   | { kind: 'derived-local'; coverage: CoverageRef }                          // local index, layer 3
   | { kind: 'provider'; providerId: string; sampled: boolean }                // untrusted, labelled
   | { kind: 'stale-cache'; asOfBlock: number; ageMs: number }                 // pre-sync IndexedDB
@@ -52,6 +54,8 @@ export type Finalized<T> = Verified<T>
   & { status: { kind: 'verified-finalized' } }
   & { readonly [FINALIZED]: true };
 ```
+
+**The two verified statuses name their chain, and that is normative rather than an implementation convenience.** §11.9.1 connects a **second** light client (the Asset Hub of the relay this release targets, 02 §7.7), and a status that named only a block does not identify an observation once there is more than one chain to observe: `blockNumber` collides trivially — every chain has a block 1,000 — so *"these two reads are comparable"* was being inferred from the block rather than stated. The chain is its **genesis hash**, which is the one identifier the light client has already proved for itself (§3.1's identity check) rather than one taken on the word of whatever served the read. It is what lets a derivation over two reads refuse a cross-chain combination *for the stated reason* instead of by a collision argument that holds only accidentally — a deposit figure read on Asset Hub and one read here would otherwise sit side by side as indistinguishable "verified" values.
 
 `Finalized<T>` has **no public constructor outside `packages/chain-client`**. Provider-status and derived-local values are unrepresentable as `Finalized<T>` at the type level; the promotion bug class of F-2 is therefore not merely forbidden but untypeable.
 
@@ -84,7 +88,9 @@ Normative rules:
 
 Values that shape a user's *discretionary judgment* — price charts, history tables, provider-filled series — are **not** transaction-critical under this definition. Provider-fed charts influencing trading decisions are declared an **accepted residual risk**, mitigated by mandatory, non-suppressible provenance labelling (hatched/badged rendering, distinct icons, text equivalents), never by a verification claim the system cannot honor. The corresponding threat row (chart-shaping via a poisoned provider) lives in [14-threat-model.md](14-threat-model.md), not here.
 
-Consistently with this honesty: the §8.4 sampling regime is stated for what it is — it detects sloppy and inconsistent forgeries and liveness failures; **it does not detect a self-consistent forgery of history at unreachable depth**. The only cross-check for deep history is comparing two independent snapshot producers, which the UI supports and discloses.
+Consistently with this honesty: the §8.4 sampling regime is stated for what it is — it detects sloppy and inconsistent forgeries and liveness failures; **it does not detect a self-consistent forgery of history at unreachable depth**. The only cross-check for deep history is comparing two independent snapshot producers, which the UI supports and **recommends**.
+
+**On that verb, ruled 2026-08-06.** §8.4 owns the clause and designates it *normative UI copy*; this sentence is a summary of it, so it uses §8.4's verb rather than a second one. The two sections spelled it differently until this ruling — *"discloses"* here, *"recommends"* there — and a client shipping one fixed string can satisfy only one of them. **Recommending is the stronger obligation and the safe one.** A diff is a **falsifier**: urging a user to run one can reveal a forgery and can never certify one away, because §2.2's never-promote rule already bars a passing diff from becoming verification and §8.4 already scopes `FE-PROV-004` to a flag on the pair rather than a verdict on either member. *Disclosing* is also already carried by the clauses beside it, which state the limit; **recommending** is the only word in the sentence that tells a user what to do about the limit they were just shown.
 
 ### 2.4 Checkpoint age and the long-range bound (FE-P8 resolved, 2026-08-05)
 
@@ -302,21 +308,43 @@ Protocol-funded bootnode/RPC operators commit to serving **30 days** *(normative
 The local index no longer models history as a single contiguous cursor. It models **coverage**:
 
 ```ts
+export type RangeEdge =
+  // A range this client's own ingest produced: all three facts, all three checks can run.
+  | { kind: 'checked';
+      genesisHash: HexString;                   // §6.3's genesis binding
+      hash: HexString;                          // the finalized block hash AT toBlock
+      specVersion: number; }                    // the runtime spec_version AT toBlock
+  // A range minted from a provider (§8.2), which carries neither of the other two facts.
+  | { kind: 'unverifiable';
+      genesisHash: HexString;                   // still known, and still checked
+      why: string; }                            // why the other two are absent
 export interface CoverageRange {
   fromBlock: number; toBlock: number;          // inclusive, contiguous
   origin: 'self' | 'operator' | 'snapshot' | 'indexer';
   providerId?: string;                          // origin ≠ self
   ingestedAt: number;
+  edge: RangeEdge;                              // what the integrity checks below read
 }
-export interface CoverageRef { ranges: CoverageRange[]; holes: Array<[number, number]>; }
+export interface Hole { fromBlock: number; toBlock: number; }
+export interface CoverageRef { ranges: CoverageRange[]; holes: Hole[]; }
+
+/** A history query's answer: data plus the coverage it came from, bounded by the question. */
+export interface CoveredResult<T> {
+  data: T;
+  span: Hole;                                   // the span asked about
+  ranges: CoverageRange[];                      // the ranges overlapping it, unclipped
+  holes: Hole[];                                // the blocks inside span no range covers
+}
 ```
 
 Normative rules:
 
-- **Holes are first-class states.** Every history query returns data *plus* the coverage it came from; charts render holes as visible gaps with an explainer, tables state "complete within [ranges]". A hole is never interpolated over, never elided.
-- **Never silently spliced**: adjacent ranges with different origins are never merged; an `origin ≠ self` range keeps its origin forever (there is no promotion, §2.2). A range boundary is a rendered fact.
+- **Holes are first-class states.** Every history query returns data *plus* the coverage it came from — a `CoveredResult<T>`, never bare rows, because bare rows render as a complete series and *"there were no observations in this window"* and *"we never ingested this window"* then arrive as the same empty answer. Charts render holes as visible gaps with an explainer, tables state "complete within [ranges]". A hole is never interpolated over, never elided.
+- **Never silently spliced**: adjacent ranges with different origins are never merged; an `origin ≠ self` range keeps its origin forever (there is no promotion, §2.2). A range boundary is a rendered fact, so a surface summarising coverage names its **distinct sources** rather than counting its gaps: a count states how much is missing and nothing about who supplied what is present, which is the half §2.3's mandatory labelling requires.
 - **The corrected E3 promise** *(degradation matrix owned by [11-frontend-workflows.md](11-frontend-workflows.md))*: on returning after a gap, forward ingestion resumes from the live pinned window; the gap between the old coverage edge and the new one becomes a **visible hole, provider-fillable** from layer 2 (labelled) — *not* "local-index catch-up; history continuous". A 2-hour gap (1,200 blocks) exceeds the pinned window and cannot be closed with verified data; the old promise was impossible and is withdrawn.
-- Cursor integrity checks (hash-at-edge, genesis binding, spec-version-at-edge) apply per range; corruption of one range invalidates that range, not the index.
+- Cursor integrity checks (hash-at-edge, genesis binding, spec-version-at-edge) apply per range; corruption of one range invalidates that range, not the index. **The three checks read `RangeEdge`, and the edge is the range's `toBlock`** — a range grows forward, so its high end is the block a resumed ingest continues from and the one a reorg or runtime upgrade invalidates first. A range whose edge is missing is refused rather than checked: every comparison against an absent field is false, so a missing edge would report as *corrupt* rather than as *unverifiable* and the client would drop honest ranges on a schema slip. **A check that cannot be performed keeps the range**: an unreachable chain, a block outside the pinned window and a client still syncing all mean *cannot say*, and dropping on *cannot say* would empty the index during ordinary offline use. Only a disagreement invalidates.
+- **`RangeEdge` is a discriminated union, and every range carries one.** A range minted from a provider (§8.2) takes the `unverifiable` arm: `bleavit.snapshot.v1` states no block hash at any block, and its declared `spec_version` is a producer claim the import screen deliberately does not compare — §6.4 assigns snapshots history that predates the current runtime, so comparing it would refuse every deep snapshot after the first upgrade. An indexer serves pages and states no binding at all. Filling either field from the client's own reads is forbidden for the stronger reason: the check would then compare the chain against itself and could never fail. The arm keeps `genesisHash`, which the client does know — a snapshot's was compared against this client's at admission, and an indexer serves the chain the client is on — so the **genesis binding still runs on provider ranges**, and it is the check that catches another network's history filed under this chain's ids. The arm names the reason the other two facts are absent, and a surface may render it. This is §8.4's posture for the depth blind spot applied one level down, and INV-FE-15's rule in general: **absent with an explanation, never silently spliced.** An `unverifiable` edge that also carries a hash or a spec version is refused, as is one that gives no reason.
+- **An unverifiable edge yields *unchecked*, never *ok*.** `ok` states that a range was compared against the chain and agreed, which is the promotion §2.2 gives provider data no path to; `invalid` states a disagreement, and there is none. A caller is handed such ranges as the set that could not be checked — the same answer a chain it cannot reach produces — so a range that appears in neither the invalidated nor the unchecked set is one that genuinely passed.
 
 ### 6.4 Backfill — honest arithmetic (F-medium: backfill math)
 
@@ -357,6 +385,8 @@ Dexie DB `futarchy@<paraGenesisHash-prefix8>`, one DB per chain identity. Tables
 |---|---|
 | `meta.cursor` → `meta.coverage: CoverageRange[]` (+ derived holes) | gap tolerance (§6.3) |
 | every row's `origin` gains `'operator'` | layer-2 backfill is distinguishable from opt-in third-party providers |
+| **every row carries the full four-valued `origin` (+ `providerId`), including `priceSamples` and the candle tables** | the row's origin is the *whole* mitigation §2.3 offers for chart data, and INV-FE-15 requires it "to the pixel". A two-valued provenance forces the writer to guess which third party a `provider` row came from, and the guess badges an opt-in indexer's row as protocol-funded layer-2 data |
+| **a chart row's primary key includes its source**, so one book's observations from two sources are two rows | provenance is not decoration on the row: a key without it takes the two rows the no-splice rule produced and stores one on top of the other. The label survives and the datum under it becomes whichever source wrote last |
 | `candles4h`, `candles1d` tables added | auto-tuned downsampling ladder (§9.2) |
 | `metadataCache` gains `lastUsedAt`, byte size; bounded (§9.3) | metadata blobs were unbounded |
 | corruption invalidates per-range, not whole-index (where detectable); whole-DB rebuild (`FE-IDX-001`) remains the fallback | §6.3 |
@@ -465,13 +495,21 @@ Depths are stated in days throughout rather than glossed as years or months, bec
 
 Degradation ladder, applied oldest-first and in this order, deterministic and user-visible: raw samples → `candles1h` → `candles4h` → `candles1d` (a `candles1d` row costs `books × 120 B/day` ≈ 19.1 KB/day even at the 159-book maximum — effectively unbounded depth); `events` for settled+reaped proposals → compacted into `proposalsArchive` summaries; imported provider rows evicted before self-ingested rows at equal age. The ladder **degrades chart resolution and event granularity only**. It never touches: the tx path (structurally isolated, §10), layer-1 data (chain-served, not stored here), coverage metadata (holes stay truthful even after eviction — an evicted range becomes a labelled "downsampled" range, not a hole, and never a silent splice).
 
+Three obligations follow from that last clause and are normative, because each is a way the ladder tells the user something false while freeing exactly the bytes it was asked to free:
+
+1. **The "downsampled" label is written in the same storage transaction that deletes the rows.** Written afterwards it is absent for as long as it takes a tab to close mid-eviction, and what remains is the silent splice this paragraph forbids — produced by the most ordinary failure the ladder meets.
+2. **Degradation is applied in whole, closed buckets.** Folding part of a bucket now and the rest later writes two coarse rows under one bucket key, the second replacing the first, so the chart shows a bar describing part of an hour labelled as the hour.
+3. **Provenance is never degraded on the way.** A coarse row carries one origin, so a verified observation and a provider-supplied one are summarised separately at every rung; the ladder degrades resolution and may not relabel a source to do it (§2.2, §6.3).
+
+*"Imported before self-ingested at equal age"* is an ordering with a reason worth stating: a provider row can be re-fetched from the provider that supplied it, while a self-ingested row past the light client's pinned window cannot be recovered at all (§6.2). Age leads and provenance breaks the tie — the reverse would evict a fresh provider row ahead of an ancient verified one.
+
 **What "maximum load" means has to be said twice, because the two partitions answer differently.** Against the primary slate alone the caps are generous — ~54 days of raw verified samples on desktop and ~672 days of hourly candles — and the revision this replaced stated the opposite, *"not achievable within the caps"*, which followed from the 196-book count rather than from any measurement (SQ-557). Against a fully-subscribed hosted partition the raw tier is genuinely thin: ~7 days desktop, ~2 days mobile. Both are true, neither is the headline on its own, and quoting only the first would repeat this section's original error in the opposite direction.
 
 What is genuinely not achievable at any depth is a chain-wide trade tape (§9.1), and that is the limitation this section states plainly. The honest offer at the 159-book maximum is: layer-1 verified summaries forever, ~7 days of raw verified samples, ~131 days of hourly candles, unbounded daily candles, the user's own event history without practical bound, and provider snapshots for everything deeper, labelled as such. Raw depth is the tier that moves with hosted occupancy, so a client MUST present it as measured-and-current rather than as a promise — §9.2's opening sentence, that retention is computed from the *measured* ingest rate, is what makes that honest rather than merely cautious.
 
 ### 9.3 Metadata blobs bounded (F-medium: metadata blobs)
 
-`metadataCache` (historical SCALE metadata for per-era decode; **measured 0.14 MB gz** per blob — `gzip -9` over the committed 469,581 B `metadata.scale`, against the "~1–2 MB" this section previously assumed): bounded at **≤ 8 blobs / ≤ 15 MB desktop, ≤ 3 blobs / ≤ 3.75 MB mobile**. Those byte bounds are §9.2's metadata share exactly; the previous 16 MB / 6 MB caps **exceeded their own share** in both cases (SQ-557), which is a bound that cannot bind. At the measured blob size the **count** limit is what actually binds and the byte limit is headroom against metadata growth — eight blobs are ~1.1 MB. LRU-evicted; the current and next-authorized runtime's metadata are pinned non-evictable. Eviction of a blob needed by old undecoded rows is acceptable: those rows already carry the raw-bytes "pending decoder" state (§6.5) and re-fetch/re-ship paths exist (FE-P5). Release-shipped blobs (the FE-P5 fallback) count against the same bound **and against the §9.4 bundle row**, which they previously did not have.
+`metadataCache` (historical SCALE metadata for per-era decode; **measured 0.15 MB gz** per blob — DEFLATE level 9 over the committed 470,546 B `metadata.scale`, against the "~1–2 MB" this section previously assumed): bounded at **≤ 8 blobs / ≤ 15 MB desktop, ≤ 3 blobs / ≤ 3.75 MB mobile**. Those byte bounds are §9.2's metadata share exactly; the previous 16 MB / 6 MB caps **exceeded their own share** in both cases (SQ-557), which is a bound that cannot bind. At the measured blob size the **count** limit is what actually binds and the byte limit is headroom against metadata growth — eight blobs are ~1.2 MB. This cell read 0.14 MB until `app/tools/check-artifact-budget.ts` re-measured it: the blob is 147,008 B, which is 0.15 MB at the two decimals this figure is published to (it read 146,946 B over a 469,581 B blob until contract v28's six frozen operator reads grew the metadata; the rounded gz figure did not move, so §9.4's metadata row is unchanged), and a *measured* value has to round rather than truncate because §9.4's metadata row is derived from it. LRU-evicted; the current and next-authorized runtime's metadata are pinned non-evictable. Eviction of a blob needed by old undecoded rows is acceptable: those rows already carry the raw-bytes "pending decoder" state (§6.5) and re-fetch/re-ship paths exist (FE-P5). Release-shipped blobs (the FE-P5 fallback) count against the same bound **and against the §9.4 bundle row**, which they previously did not have.
 
 ### 9.4 Budget table
 
@@ -481,9 +519,9 @@ Measured in CI (Lighthouse + Playwright timers) on reference hardware (desktop =
 |---|---|---|
 | Initial JS (critical path, gz) | ≤ 350 KB / hard-fail 450 KB | bundle-size CI gate — `app/tools/check-bundle-budget.ts`, over the entry chunk's **static** import closure. A dynamic `import(` is not followed: that is the same lazy boundary the smoldot and chain-spec rows are budgeted on separately, and summing all of `assets/` would charge first render for code it never touches |
 | smoldot WASM (worker, lazy) | ≤ 3.5 MB gz **[VERIFY artifact size — FE-P4]** | size gate + lazy load |
-| Chain specs (relay + para + Asset Hub, gz, lazy) | ≤ 3.5 MB combined (checkpoint-trimmed) | size gate |
-| Release-shipped fallback metadata (gz, lazy) | ≤ 1.5 MB combined — §9.3's 8-blob cache bound × the measured 0.14 MB blob, rounded up for metadata growth. The release cannot ship more blobs than the cache admits | size gate |
-| First meaningful render (shell) | ≤ 1.5 s / 3 s desktop; ≤ 3 s / 6 s mobile | Lighthouse CI |
+| Chain specs (relay + para + Asset Hub, gz, lazy) | ≤ 3.5 MB combined (checkpoint-trimmed) | size gate — `app/tools/check-artifact-budget.ts`, over the specs the release **emits** into `dist/chain-specs/`. A source path is what the release is built from and a browser fetches none of it, so the emitted tree is the only artifact that can answer this row: the gate binds declaration and emission in **both** directions (a declared spec the build never copied is a release with nothing to boot from, an emitted spec no declaration covers is bytes no budget weighed) and requires every pinned `chainSpecHashes` role to be matched by an emitted file **by SHA-256**, which is the same check the client makes at boot (§4.1). **Unmeasured while none is declared**: no production chain exists, so the gate instead requires the chain-spec readiness blocker to still stand, requires the emitted tree to carry no chain spec either, and fails the moment a spec hash is pinned without a spec to weigh |
+| Release-shipped fallback metadata (gz, lazy) | ≤ 1.5 MB combined — §9.3's 8-blob cache bound × the measured 0.15 MB blob, rounded up for metadata growth. The release cannot ship more blobs than the cache admits | size gate — `app/tools/check-artifact-budget.ts`, over the committed per-`spec_version` blobs an FE-P5 fallback would carry, against **both** bounds: this combined size and §9.3's blob count |
+| First meaningful render (shell) | ≤ 1.5 s / 3 s desktop; ≤ 3 s / 6 s mobile | Lighthouse CI — `app/tools/render-budget/check.ts`. **First Contentful Paint** over the built release tree, because Lighthouse's own `first-meaningful-paint` audit yields no numeric value in 12.8.2 and binding to it would gate on nothing. The reference hardware is Lighthouse's own presets, read at run time rather than copied: its default mobile preset **is** the Moto G-class device named above, and its desktop preset supplies the viewport and network while this table's 4× CPU throttle is set explicitly, since that preset's own multiplier is 1. The gate takes **3 runs** per profile and compares each published threshold against the statistic it is stated for: the sample's **p95 tail** hard-fails against the p95 column, and its **median** warns against p50. At three samples the nearest-rank p95 is the slowest run, so the tail comparison errs toward refusing rather than toward passing — a median compared against a p95 threshold would let one run in three sit above it with the gate green, which is a gate measuring a statistic the document does not publish |
 | First **verified** current-state render | ≤ 30 s / 90 s desktop; ≤ 90 s / 240 s mobile — **hypothesis, FE-P4 gates release** | Playwright sync timer vs live testnet |
 | Finalized-head refresh work | ≤ 50 ms main-thread per head | perf marks |
 | Per-refresh storage-proof traffic | ≤ 512 KiB per pinned-block screen refresh **[VERIFY measured proof sizes — FE-P4]** | perf test |
@@ -527,7 +565,9 @@ The reviewed design (whose application package was then called `apps/web`) enfor
 - `app/src` is split into **separate build-time compilation units**, each its own TypeScript project (project references) with an exact reference set:
   - `app/src/features/tx/**` — transaction surfaces, form state, confirm flows — references exactly `{shared-types, chain-client, protocol, simulation, transaction-builder, signing, platform, ui}`.
   - `app/src/features/analysis/**` — provider-fed and local-index-fed stores and screens — references `{shared-types, chain-client, protocol, simulation, local-index, providers, receipts, ui}`.
-  - `app/src/features/handoff/**` — context export and intent review — references `{shared-types, chain-client, protocol, contexts, intents, receipts, llm-handoff, ui}`.
+  - `app/src/features/handoff/**` — context export and intent review — references `{shared-types, chain-client, protocol, contexts, handoff-envelope, intents, receipts, llm-handoff, ui}`.
+
+  `handoff-envelope` joined the handoff set on 2026-08-06 (F9), correcting an omission rather than widening the firewall: the review surface renders the `FE-HANDOFF-001..013` refusals and must name their type, which §10.1 places in that package as the single home of the §13.1 envelope conventions. The edge is transitively empty — §10.1 states that `handoff-envelope` **depends on nothing at all** — so it cannot lead to a signer, a provider, a local index or a chain connection. The tx unit's exclusion of it is unchanged and remains CI-fatal.
 
   An import from `tx/**` into `analysis/**` or `handoff/**`, or into `providers`/`local-index`, **fails compilation** — module resolution cannot see it. This requires an isolated `node_modules` layout: under a hoisted layout the undeclared import resolves and only `tsc -b` objects, which demotes the primary gate to the secondary one. dependency-cruiser remains as the second, redundant gate.
 - **Type-level enforcement on top of the import boundary.** Transaction form state is the product of two things, and conflating them is a defect this section previously carried: **(a) chosen values** — a typed amount, a selected account, a chosen fee asset, an imported ceiling — which assert nothing *about the chain* and therefore **can never be represented as verified**, and **(b) `Finalized<T>` chain values**. The two are not interchangeable and the distinction is typed. A chosen value that is *displayed as a data item* — an imported ceiling shown beside the chain-derived value it is clamped to — carries `external-proposal` (§2.1), because INV-FE-9 admits no unlabeled rendering path. A value the user is presently typing into a field is form input rather than a displayed data item and needs no status; what it needs, and what INV-FE-1 requires, is that it never satisfies a precondition and is evaluated against `Finalized<T>` before it can reach a signature. Every `PreconditionCheck` input is `Finalized<T>` without exception. Since `Finalized<T>` is constructible only inside `packages/chain-client` (§2.1), a provider- or index-fed value cannot inhabit either role even if a future refactor breached the import boundary. The firewall's target — provider- and index-fed values structurally unable to seed tx state — is unchanged and unweakened by this restatement.

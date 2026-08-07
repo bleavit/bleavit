@@ -101,11 +101,21 @@ const SURFACES: readonly (readonly [string, string, string])[] = [
   ['storage.execution_guard.hard_gate_breach.json', 'ExecutionGuard', 'HardGateBreach'],
   ['storage.execution_guard.held_resources.json', 'ExecutionGuard', 'HeldResources'],
   ['storage.execution_guard.migration_halt.json', 'ExecutionGuard', 'MigrationHalt'],
+  ['storage.execution_guard.pending_upgrade.json', 'ExecutionGuard', 'PendingUpgrade'],
   ['storage.execution_guard.queue.json', 'ExecutionGuard', 'Queue'],
   ['storage.execution_guard.ratifications.json', 'ExecutionGuard', 'Ratifications'],
   ['storage.foreign_assets.account.json', 'ForeignAssets', 'Account'],
   ['storage.guardian.allowances.json', 'Guardian', 'Allowances'],
+  ['storage.guardian.approvals.json', 'Guardian', 'Approvals'],
   ['storage.guardian.members.json', 'Guardian', 'Members'],
+  ['storage.guardian.pending_actions.json', 'Guardian', 'PendingActions'],
+  ['storage.incident_registry.ack_records.json', 'IncidentRegistry', 'AckRecords'],
+  ['storage.incident_registry.closed_at.json', 'IncidentRegistry', 'ClosedAt'],
+  ['storage.incident_registry.filings.json', 'IncidentRegistry', 'Filings'],
+  ['storage.milestone_registry.ack_records.json', 'MilestoneRegistry', 'AckRecords'],
+  ['storage.milestone_registry.closed_at.json', 'MilestoneRegistry', 'ClosedAt'],
+  ['storage.milestone_registry.filings.json', 'MilestoneRegistry', 'Filings'],
+  ['storage.system.authorized_upgrade.json', 'System', 'AuthorizedUpgrade'],
   ['storage.identity.parachain_id.json', 'ParachainInfo', 'ParachainId'],
   ['storage.identity.usdc_asset.json', 'ForeignAssets', 'Asset'],
   ['storage.identity.usdc_metadata.json', 'ForeignAssets', 'Metadata'],
@@ -236,7 +246,7 @@ test('the table covers EVERY recorded storage surface, not a chosen subset', () 
   assert.equal(named.size, SURFACES.length, 'the table names a fixture twice');
 });
 
-test('the corpus is 65 prefixes and exactly 2 full keys — measured, not assumed (V-159)', () => {
+test('the corpus is 75 prefixes and exactly 2 full keys — measured, not assumed (V-159)', () => {
   // What the corpus actually contains, counted. An earlier version of this suite asserted
   // that *every* recorded key was a 32-byte prefix; that was false, and it passed only
   // because it inspected the first request per file. Two files record a second,
@@ -245,6 +255,11 @@ test('the corpus is 65 prefixes and exactly 2 full keys — measured, not assume
   // Counting both classes is what keeps the claim honest in either direction: a corpus that
   // gained single-entry reads would silently widen what this suite is entitled to say, and
   // one that lost these two would silently narrow it.
+  //
+  // 65 -> 75 at contract v28, which froze ten more operator surfaces (02 §7.4/§7.6). All ten
+  // are prefix reads, so the single-entry pair is unchanged and this suite's reach is the
+  // same one hasher on the same two key types it always was. The count is re-pinned rather
+  // than relaxed: a number that moves whenever the corpus does asserts nothing.
   const prefixes: string[] = [];
   const full: { file: string; key: string }[] = [];
   for (const [file] of SURFACES) {
@@ -253,7 +268,7 @@ test('the corpus is 65 prefixes and exactly 2 full keys — measured, not assume
       else full.push({ file, key });
     }
   }
-  assert.equal(prefixes.length, 65, 'the number of recorded map-prefix reads changed');
+  assert.equal(prefixes.length, 75, 'the number of recorded map-prefix reads changed');
   assert.equal(full.length, 2, 'the number of recorded single-entry reads changed');
   assert.deepEqual(
     full.map((f) => f.file).sort(),

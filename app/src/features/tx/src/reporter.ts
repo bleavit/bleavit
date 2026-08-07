@@ -81,14 +81,39 @@ export const UNCHECKABLE_REGISTRATION_CONDITIONS: readonly UncheckableCondition[
   ]);
 
 /**
+ * §11.8.1 row 1's last clause, as fixed copy.
+ *
+ * > free USDC ≥ `ReporterStake` …; **stake-hold consequence displayed**
+ *
+ * It shipped inside a `RegistrationBlock` detail, which fires **only when free USDC is
+ * short** — so the one path where the consequence matters, an account that *can* afford
+ * the stake and is about to commit it, was the path that never saw it. A consequence is not
+ * a failure message: the reader who needs it is the one nothing is blocking.
+ */
+export const STAKE_HOLD_CONSEQUENCE =
+  'Registering places a hold on the reporter stake for as long as you are registered. The ' +
+  'funds are not spent and not transferred, and they are not available to you either: they ' +
+  'cannot pay a bond, a fee, or anything else while the hold stands. A false report ' +
+  'adjudicated against you is slashed from it, and the registration survives the slash — ' +
+  'so the hold can be short of the full stake, which then blocks reporting until it is ' +
+  'topped up.';
+
+/**
  * The result of checking what *can* be checked.
  *
  * `uncheckable` is **required**. There is no shape of this type in which the unreadable
  * conditions are absent, so a screen cannot render a complete-looking verdict.
+ *
+ * `stakeHold` is required for the same structural reason, applied to a *consequence* rather
+ * than to a gap: a screen holding this result cannot render the check without also holding
+ * the sentence §11.8.1 requires displayed. An optional field, or copy living inside a
+ * conditional block, is how it went missing on the only path that needed it.
  */
 export interface RegistrationCheck {
   readonly blocks: readonly RegistrationBlock[];
   readonly uncheckable: readonly UncheckableCondition[];
+  /** §11.8.1's *"stake-hold consequence displayed"*. Fixed, unconditional, required. */
+  readonly stakeHold: string;
 }
 
 export function checkRegistration(inputs: RegistrationInputs): RegistrationCheck {
@@ -103,11 +128,15 @@ export function checkRegistration(inputs: RegistrationInputs): RegistrationCheck
     blocks.push({
       check: 'Reporter stake',
       detail:
-        'Your free USDC does not cover the reporter stake. The stake is held for as long as ' +
-        'you are registered, so it must be free rather than committed elsewhere.',
+        'Your free USDC does not cover the reporter stake. It must be free rather than ' +
+        'committed elsewhere.',
     });
   }
-  return { blocks, uncheckable: UNCHECKABLE_REGISTRATION_CONDITIONS };
+  return {
+    blocks,
+    uncheckable: UNCHECKABLE_REGISTRATION_CONDITIONS,
+    stakeHold: STAKE_HOLD_CONSEQUENCE,
+  };
 }
 
 /**

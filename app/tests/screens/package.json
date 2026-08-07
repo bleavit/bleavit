@@ -15,6 +15,7 @@
     "@bleavit/handoff-envelope": "workspace:*",
     "@bleavit/intents": "workspace:*",
     "@bleavit/mock-runtime": "workspace:*",
+    "@bleavit/protocol": "workspace:*",
     "@bleavit/shared-types": "workspace:*",
     "@bleavit/transaction-builder": "workspace:*",
     "@bleavit/ui": "workspace:*",

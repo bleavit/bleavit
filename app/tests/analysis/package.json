@@ -10,6 +10,15 @@
     "@bleavit/chain-client": "workspace:*",
     "@bleavit/features-analysis": "workspace:*",
     "@bleavit/local-index": "workspace:*",
-    "@polkadot-api/descriptors": "workspace:*"
+    "@bleavit/providers": "workspace:*",
+    "@bleavit/shared-types": "workspace:*",
+    "@bleavit/ui": "workspace:*",
+    "@polkadot-api/descriptors": "workspace:*",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "@bleavit/application": "workspace:*"
+  },
+  "devDependencies": {
+    "fake-indexeddb": "6.2.5"
   }
 }

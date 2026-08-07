@@ -803,6 +803,12 @@ error = "ExecutionGuard::DescriptorLeadTime"
 reason = "13 §2; 15 §4.6: dispatch-path limit coverage."
 
 [[entry]]
+key = "EXECUTION_RETRY_WINDOW"
+class = "dispatch-limit"
+error = "ExecutionGuard::GraceExpired"
+reason = "13 §2 / 09 §1.2(1); 15 §4.6: dispatch-path limit coverage. Kernel constant (3 x BLOCKS_PER_DAY = 43,200 via futarchy_primitives::kernel::EXECUTION_RETRY_WINDOW_BLOCKS), so it is not an amendable ParamKey and cannot be param-bounds; it is not genesis-seeded. Not value either: once T18 stamps failed_at the guard admits execute against failed_at + RETRY_WINDOW **instead of** grace_end, so a real user dispatch is refused with a Module error. The substitution is not monotone, and the marked test pins both directions."
+
+[[entry]]
 key = "MIGRATION_STALL_BLOCKS"
 class = "value"
 reason = "13 §2: automatic liveness threshold that raises PB-MIGRATION; the threshold itself is not a dispatch argument."

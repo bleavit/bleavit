@@ -24,6 +24,13 @@ import '@bleavit/signing/testing';
 // minting `origin: 'self'` and laundering backfilled data into light-client-verified.
 import '@bleavit/local-index/testing';
 
+// The sampling-rate subpath, witnessed on its own for the same parameterisation reason. A
+// typo in either half of `WORKSPACE_SUBPATH('@bleavit/providers/testing', …)` leaves
+// `no-loosened-sampling-rate-in-production` unable to fire while every other subpath witness
+// stays green — and that rule is the only thing between 14 TH-49's "1 row per 16 pages" and a
+// round that compares one row of any import at all and reports it clean.
+import '@bleavit/providers/testing';
+
 // And the third instance of the same matcher, for the subpath that matters most:
 // `@bleavit/chain-client/testing` is the `Finalized<T>` construction site, so a vacuous
 // `no-finalized-minting-outside-chain-client` would let `transaction-builder` mint the one
@@ -55,3 +62,13 @@ import 'node:http';
 // use one, is exactly what makes that rule stop firing. Both matchers must catch these.
 import '@polkadot-api/ws-provider';
 import '@polkadot-api/sm-provider';
+
+// The HOST-SDK matcher (`only-platform-touches-host-sdks`, 10 §10.1). F22 declined the
+// permission that rule grants — `packages/platform` imports no `@tauri-apps/*` at all, so
+// the desktop shell can embed the published `dist/` byte for byte rather than a
+// desktop-specific rebuild — and a forbidden rule with nothing anywhere in the tree to
+// catch is exactly the shape that goes vacuous unwatched. Both spellings the rule names are
+// witnessed, because `EXTERNAL` takes an alternation and a typo in either arm leaves half
+// the rule dead while the other half keeps this witness green.
+import '@tauri-apps/api';
+import '@parity/product-sdk';

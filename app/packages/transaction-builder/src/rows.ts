@@ -36,6 +36,7 @@
  */
 
 import type { SurfaceId } from '@bleavit/descriptors';
+import type { ClauseId } from './preconditions.js';
 
 export type { SurfaceId };
 
@@ -76,10 +77,20 @@ export type { FeeAsset } from './fee-asset.js';
 import { isFeeAsset, type FeeAsset } from './fee-asset.js';
 
 export interface PreconditionClause {
-  /** The `P-n` row this clause belongs to. */
-  readonly row: PreconditionRowId;
+  /** The `P-n` or `O-n` row this clause belongs to. */
+  readonly row: RowId;
   /** What must hold, in the words a blocked user is shown (rule 5). */
   readonly requirement: string;
+  /**
+   * A stable short name for this clause, so a checker can **consume** the table.
+   *
+   * Optional only because retro-fitting one onto every P-row clause is churn with no
+   * reader. Where a module evaluates a row it takes the clause list as its work list and
+   * refuses a clause it has no predicate for — see `oracle-reporting.ts`. That refusal is
+   * the whole point: a clause added to the table then has to be implemented, rather than
+   * being silently absent from a check that still reports "everything passes".
+   */
+  readonly key?: string;
   /** The `CRITICAL_SURFACE` id it is read from. */
   readonly surface: SurfaceId;
   readonly source: ClauseSource;
@@ -110,13 +121,35 @@ export type PreconditionRowId =
   | 'P-1' | 'P-2' | 'P-3' | 'P-4' | 'P-5' | 'P-6' | 'P-7' | 'P-8'
   | 'P-9' | 'P-10' | 'P-11' | 'P-12' | 'P-13' | 'P-14' | 'P-15';
 
+/**
+ * The 11 §11.8 operator rows — S14…S19's calls, which §11.5 does not table.
+ *
+ * §11.8's opening sentence binds every workflow below it to §11.4 discipline, and §11.4
+ * rule 1 requires the gate **structurally**. A call with no row cannot declare one in
+ * `TxPreparation.requires`, so `gate()` has nothing to demand and every operator console
+ * was left gating its own button on a module-local check. That is the bypass rule 1 names,
+ * reached by omission rather than by an added edge.
+ *
+ * They are a separate union from `PreconditionRowId` for the reason `GovernanceRowId` is:
+ * §11.5's table is fifteen rows and a test asserts that spec fact. These are §11.8's.
+ */
+export type OperatorRowId =
+  | 'O-1' | 'O-2' | 'O-3' | 'O-4' | 'O-5' | 'O-6' | 'O-7' | 'O-8' | 'O-9';
+
+/** Any row a preparation may declare. */
+export type RowId = PreconditionRowId | OperatorRowId;
+
 const clause = (
-  row: PreconditionRowId,
+  row: RowId,
   requirement: string,
   surface: SurfaceId,
   source: ClauseSource,
   subject: ClauseSubject,
-  extra: { readonly feeAsset?: FeeAsset; readonly anyOf?: string } = {},
+  extra: {
+    readonly feeAsset?: FeeAsset;
+    readonly anyOf?: string;
+    readonly key?: string;
+  } = {},
 ): PreconditionClause => ({ row, requirement, surface, source, subject, ...extra });
 
 /**
@@ -476,22 +509,67 @@ const P12: readonly PreconditionClause[] = [
 ];
 
 /**
- * P-13 — `oracle.report`. The bond is `max(flat_floor, bps × cohort_escrow)`, recomputed.
+ * P-13 — `oracle.report`. The bond is **not computable by any client** (SQ-598).
  *
  * The bond is **USDC**, not VIT: `configs.rs:7566` is explicit that oracle registration
  * stakes and round-bond collateral are held in `ForeignAssets` USDC custody. Reading
  * `System.Account` reported healthy headroom from a balance the bond never draws on.
  *
- * The bond size is *recomputed* from the cohort escrow rather than read, so the escrow it
- * scales against is a declared read of its own — a recomputation against a value the
- * client assumed is not a precondition, it is a guess with an arithmetic step in front.
+ * ## Two disagreeing answers shipped in one client, and this row held the wrong one
+ *
+ * §11.5's P-13 text says the bond is `max(flat_floor, bps × cohort_escrow)` *"recomputed
+ * and displayed"*, and this row declared exactly that: a clause reading a cohort escrow,
+ * and a headroom clause against the recomputed amount. `oracle-reporting.ts` had already
+ * concluded the opposite and shipped it — the bond is **structurally uncomputable** from
+ * any surface 02 freezes, so the module states a floor and refuses to present it as the
+ * amount. Nothing bound the two, so a bonded, slashable action carried two different
+ * answers to *"what will this hold?"*, in one release.
+ *
+ * The escrow clause was worse than redundant. It cited `storage.epoch.cohorts` as *"the
+ * cohort escrow the bond scales against"*, and `CohortInfo { epoch, proposals, status }`
+ * (`pallets/epoch/src/lib.rs:602`) carries **no escrow field at all** — a clause reading a
+ * map that cannot answer it, which typechecks because a `SurfaceId` says nothing about
+ * what the item holds. It is deleted rather than re-pointed: 07 §6.1's `StakeAtRisk(c, m)`
+ * sums escrow over every cohort whose frozen MetricSpec consumes the component, and
+ * reassembling that from cohort membership would be a client *computation* where §11.4
+ * rule 2 requires an exact read.
+ *
+ * What survives is what can be read: the floor parameter, and whether the balance covers
+ * it. The rest is declared **unreadable** below, with SQ-598 as its citation, so the row
+ * states the gap instead of implying an arithmetic nobody can perform.
+ *
+ * ## The floor is not sufficient, and the row now fails closed on it (2026-08-06)
+ *
+ * Declaring the gap `stated` left the control **open** on a floor-only check, and that is the
+ * wrong direction on this row. For any component with non-zero stake at risk the runtime
+ * holds `ceil(orc.bond_bps × StakeAtRisk / 10,000)`, which is strictly more than the floor —
+ * so an account passing the local headroom check is either short at dispatch or has a larger
+ * sum taken than the screen showed. Either way the user signed against a number the chain
+ * does not use, on a slashable action.
+ *
+ * §11.5 already rules this exact case, one rule over: the redemption-fee rule 5 says
+ * *"Unreadable ⇒ no figure, never a default … the net-payout figure is disabled with an
+ * explanation and the transaction blocked"*, and it adds that the frontend MUST NOT mirror
+ * the runtime's own fail-open read. A bond is the same kind of quantity — money the account
+ * parts with, computed from chain-read values or not displayed at all — so the disposition is
+ * `blocking` and `oracle.report` stays closed until 02 publishes `StakeAtRisk` (SQ-598).
+ * SQ-620 stays open with it: P-13's text still says *"recomputed and displayed"*, and the
+ * honest repair for that is the missing surface, not a doc edit blessing the floor.
+ *
+ * ## *Round open* and *report window not elapsed* are two clauses
+ *
+ * They were one, and they are distinct for a **counter-report on a live round**: a round
+ * still open whose report window has elapsed refuses the report, and one clause covering
+ * both cannot say which half failed. §11.5 writes them with a semicolon between them.
  */
 const P13: readonly PreconditionClause[] = [
-  clause('P-13', 'the round is open and its report window has not elapsed', 'storage.oracle.rounds', 'storage', 'chain'),
-  clause('P-13', 'you are a registered reporter holding the full stake', 'storage.oracle.reporters', 'storage', 'acting'),
-  clause('P-13', 'the cohort escrow the bond scales against is read live', 'storage.epoch.cohorts', 'storage', 'chain'),
-  clause('P-13', 'your USDC balance covers the recomputed round bond', 'storage.foreign_assets.account', 'storage', 'acting'),
-  clause('P-13', 'an evidence hash is attached to the report', 'storage.oracle.rounds', 'storage', 'chain'),
+  clause('P-13', 'the round is open', 'storage.oracle.rounds', 'storage', 'chain', { key: 'round-open' }),
+  clause('P-13', 'the report window has not elapsed', 'storage.oracle.rounds', 'storage', 'chain', { key: 'report-window' }),
+  clause('P-13', 'you are a registered reporter', 'storage.oracle.reporters', 'storage', 'acting', { key: 'registered' }),
+  clause('P-13', 'your reporter stake is held in full', 'storage.oracle.reporters', 'storage', 'acting', { key: 'stake-held' }),
+  clause('P-13', 'the round-bond floor is read live', 'api.params', 'runtime-api', 'chain', { key: 'bond-floor' }),
+  clause('P-13', 'your USDC balance covers at least the bond floor', 'storage.foreign_assets.account', 'storage', 'acting', { key: 'bond-headroom' }),
+  clause('P-13', 'an evidence hash is attached to the report', 'storage.oracle.rounds', 'storage', 'chain', { key: 'evidence' }),
 ];
 
 /** P-14 — `oracle.challenge`. The bond doubles per round against a value-scaled floor. */
@@ -546,7 +624,21 @@ export type CrankCall =
   | 'market.reap'
   | 'epoch.settle_cohort'
   | 'market.sweep_revenue'
-  | 'ledger.sweep_redemption_fees';
+  | 'ledger.sweep_redemption_fees'
+  /**
+   * §11.8.5's crank, and it was missing from this union.
+   *
+   * §11.8.5 binds the welfare snapshot to row P-15 by name — *"otherwise 'no-op —
+   * nothing to crank' (row P-15)"* — while `CrankCall` listed six members and this was
+   * not one. `crankStaleness` **throws** on an unrecognised call by design, so the one
+   * crank §11.8's own text puts in the table could not be gated at all: the S18 console
+   * had to answer the staleness question itself, which is the re-derivation the table
+   * exists to prevent.
+   *
+   * `Welfare.Snapshots` is frozen surface (02 §7), so this member needs no exemption:
+   * unlike the two sweeps, the client can read whether the snapshot exists.
+   */
+  | 'welfare.record_snapshot';
 
 export type CrankStaleness =
   | { readonly kind: 'readable'; readonly clause: PreconditionClause }
@@ -573,6 +665,14 @@ const CRANK_STALENESS: Readonly<Record<CrankCall, CrankStaleness>> = {
       '02 §7 freezes, so this release cannot tell you whether there is anything to sweep. ' +
       'Signing this needs the expert override.',
   ),
+  // Keyed by `(epoch, spec_version)`, which is why the read is the snapshot map rather than
+  // the epoch clock: a second admissible MetricSpec version needs its own record, and the
+  // epoch boundary alone cannot answer whether *this* version has one. See `snapshotTaken`.
+  'welfare.record_snapshot': readable(
+    'no snapshot exists for this epoch at this MetricSpec version',
+    'storage.welfare.snapshots',
+    'storage',
+  ),
 };
 
 /**
@@ -593,6 +693,389 @@ export function crankStaleness(call: CrankCall): CrankStaleness {
 /** Every crank P-15 covers — exported so a caller cannot silently miss one. */
 export const CRANK_CALLS = Object.keys(CRANK_STALENESS) as readonly CrankCall[];
 
+/* ------------------------------------------------------------------ 11 §11.8 operator rows */
+
+/**
+ * A read 11 §11.8 requires and 02 freezes no surface for.
+ *
+ * This is the `CrankStaleness.unreadable` arm generalised, and it exists because the
+ * alternative shapes are both wrong. **Omitting** the obligation makes an unperformed
+ * check indistinguishable from a passed one, which is the defect every entry below would
+ * otherwise be. **Inventing** a `SurfaceId` for it is the hand-listing app-code rule 7
+ * forbids, and it would make `surface:check` agree with a fiction.
+ *
+ * `disposition` is not a severity dial — it records which of two things the specification
+ * says, and the two are genuinely different:
+ *
+ * - **`stated`** — §11.8 accepts that the transaction is offered and requires the gap
+ *   named. §11.8.1's SQ-564 paragraph is the worked example: the client *"MUST render both
+ *   errors explicitly rather than as a generic failure, and MUST NOT present registration
+ *   as unconditionally available"*, which is a caveat, not a disabled control. The cost is
+ *   bounded and stated there: one transaction fee.
+ * - **`blocking`** — nothing in §11.8 licenses acting on an unread condition, so the
+ *   control is closed with the reason named. This is INV-FE-12's fail-closed lattice: an
+ *   unproven capability is *absent*, and absence disables the dependent surface.
+ *
+ * Every entry carries the open spec-question id that owns it, so the declaration expires
+ * the way the limit-coverage registry and the monitoring seams do — by the row closing,
+ * not by somebody remembering to delete a comment.
+ */
+export interface UnreadableObligation {
+  readonly row: RowId;
+  /** The condition §11.8 requires, in the words the user is shown. */
+  readonly requirement: string;
+  /** Why no frozen surface answers it. */
+  readonly reason: string;
+  /** The open PLAN.md spec-question id. */
+  readonly specQuestion: string;
+  readonly disposition: 'stated' | 'blocking';
+}
+
+const unread = (
+  row: RowId,
+  requirement: string,
+  reason: string,
+  specQuestion: string,
+  disposition: 'stated' | 'blocking',
+): UnreadableObligation => ({ row, requirement, reason, specQuestion, disposition });
+
+/**
+ * Fee headroom in the **selected** asset — 11 §11.3, applied to every operator row.
+ *
+ * > USDC-only accounts are always viable: every precondition table below computes fee
+ * > headroom in the *selected* fee asset.
+ *
+ * That sentence is normative and scoped to every table under it, so it is written once
+ * here rather than forgotten per row. A single hardcoded `ForeignAssets` read would report
+ * USDC headroom for an account paying in VIT, which is a balance the transaction never
+ * touches; `rowsFor` selects on the asset the user chose.
+ */
+const feeHeadroom = (row: RowId): readonly PreconditionClause[] => [
+  clause(row, 'your fee headroom covers the fee in VIT', 'storage.system.account', 'storage', 'signer', {
+    feeAsset: 'VIT',
+    key: 'fee-headroom',
+  }),
+  clause(row, 'your fee headroom covers the fee in USDC', 'storage.foreign_assets.account', 'storage', 'signer', {
+    feeAsset: 'USDC',
+    key: 'fee-headroom',
+  }),
+];
+
+/**
+ * O-1 — `oracle.register_reporter()` (§11.8.1 row 1).
+ *
+ * The stake is **USDC** (`configs.rs:7566`), so free balance is a `ForeignAssets` read and
+ * `orc.reporter_stake` is read live rather than carried as 13's launch value.
+ */
+const O1: readonly PreconditionClause[] = [
+  clause('O-1', 'you are not already in the reporter registry', 'storage.oracle.reporters', 'storage', 'acting', { key: 'not-registered' }),
+  clause('O-1', 'the reporter stake is read live', 'api.params', 'runtime-api', 'chain', { key: 'stake-amount' }),
+  clause('O-1', 'your free USDC covers the reporter stake', 'storage.foreign_assets.account', 'storage', 'acting', { key: 'stake-headroom' }),
+  ...feeHeadroom('O-1'),
+];
+
+/** O-2 — `oracle.recompute_proof(component, epoch, spec_version, proof)` (§11.8.1 row 3). */
+const O2: readonly PreconditionClause[] = [
+  clause('O-2', 'the round is open', 'storage.oracle.rounds', 'storage', 'chain', { key: 'round-open' }),
+  // The *second* half of §11.8.1's row, and the one a client would skip: running an
+  // evaluator over a non-deterministic component produces a number, and a number that
+  // disagrees with the reporter's is indistinguishable from fraud when it is really a
+  // component nobody promised would reproduce.
+  clause('O-2', 'this component’s frozen MetricSpec permits deterministic recomputation', 'storage.welfare.metric_specs', 'storage', 'chain', { key: 'deterministic' }),
+  ...feeHeadroom('O-2'),
+];
+
+/**
+ * O-3 — `guardian.approve_action(action_id)` (§11.8.2 approve flow).
+ *
+ * The pending-action reads are ordinary clauses since **contract v28** froze
+ * `Guardian.PendingActions` and `Guardian.Approvals` in 02 §7.4 (SQ-616). Until they were
+ * frozen this row carried a `blocking` unreadable obligation instead, which closed S15
+ * outright.
+ */
+const O3: readonly PreconditionClause[] = [
+  clause('O-3', 'you are a guardian', 'storage.guardian.members', 'storage', 'acting', { key: 'member' }),
+  clause('O-3', 'the approval threshold and seat count are read live', 'constant.guardian.guardian_threshold', 'constant', 'chain', { key: 'threshold' }),
+  clause('O-3', 'the action is pending and has not expired', 'storage.guardian.pending_actions', 'storage', 'chain', { key: 'pending' }),
+  // Read against the **acting** account: "has this signer already approved" is a question
+  // about the origin the call executes as, which a proxy or multisig wrapper moves.
+  clause('O-3', 'you have not already approved this action', 'storage.guardian.approvals', 'storage', 'acting', { key: 'not-approved' }),
+  // §11.8.2: playbooks are preimage-committed enumerated batches, "decoded and displayed,
+  // never summarized away".
+  clause('O-3', 'the enumerated call batch’s preimage is noted', 'storage.preimage.preimage_for', 'storage', 'chain', { key: 'batch-preimage' }),
+  ...feeHeadroom('O-3'),
+];
+
+/** O-4 — `guardian.propose_action(...)` (§11.8.2 propose flow). */
+const O4: readonly PreconditionClause[] = [
+  clause('O-4', 'you are a guardian', 'storage.guardian.members', 'storage', 'acting', { key: 'member' }),
+  clause('O-4', 'this power’s allowance has room', 'storage.guardian.allowances', 'storage', 'acting', { key: 'allowance' }),
+  ...feeHeadroom('O-4'),
+];
+
+/** O-5 — `futarchy_treasury.claim_stream(stream_id)` (§11.8.3). */
+const O5: readonly PreconditionClause[] = [
+  // 02 §7.6's closing rule: every treasury consumer binds `nav()` rather than raw state.
+  // It is the only treasury read this row can lawfully make, and it publishes the
+  // `stream_remainders` aggregate rather than any one stream — see the unreadable list.
+  clause('O-5', 'the treasury view the chain publishes is read at B′', 'api.nav', 'runtime-api', 'chain', { key: 'nav' }),
+  ...feeHeadroom('O-5'),
+];
+
+/**
+ * O-6 — `system.apply_authorized_upgrade(code)` (§11.8.4 step 4).
+ *
+ * **Contract v28 froze both of this row's central reads** — `System.AuthorizedUpgrade` in
+ * 02 §7.6 and `ExecutionGuard.PendingUpgrade` in §7.4 (SQ-615) — so §11.8.4 steps 1 and 4 are
+ * ordinary clauses over frozen surfaces. Until then the row had a `blocking` unreadable
+ * obligation and three fee clauses, which meant `operatorGate` returned `blocked` for S17
+ * unconditionally: the screen could never reach `ready`, so no test could exercise the
+ * behaviour and the suite asserted the block instead.
+ *
+ * `applicable_at` is the **stored** field. There is deliberately no clause reading
+ * `DescriptorLeadTime`: §11.8.4 step 4 forbids recomputing the deadline from
+ * `authorized_at + DescriptorLeadTime`, because the SafetyFilter denies on the stored value
+ * and a client re-deriving it would refuse or admit on a number the filter is not using
+ * (SQ-552). A clause naming that constant here would be that recomputation, declared.
+ */
+const O6: readonly PreconditionClause[] = [
+  clause('O-6', 'the chain has an authorized upgrade, and this artifact hashes to it', 'storage.system.authorized_upgrade', 'storage', 'chain', { key: 'authorized-hash' }),
+  clause('O-6', 'the upgrade’s stored applicable_at has been reached', 'storage.execution_guard.pending_upgrade', 'storage', 'chain', { key: 'applicable-at' }),
+  // §11.8.4 step 4's closing clause: "fee headroom for a multi-MB extrinsic (displayed —
+  // it is large)". The row carried no fee clause at all until this review.
+  ...feeHeadroom('O-6'),
+];
+
+/** O-7 — `welfare.record_snapshot(epoch, spec_version)` (§11.8.5, row P-15). */
+const O7: readonly PreconditionClause[] = [
+  clause('O-7', 'the epoch boundary has passed', 'storage.epoch.epoch_of', 'storage', 'chain', { key: 'boundary' }),
+  clause('O-7', 'no snapshot exists for this epoch at this MetricSpec version', 'storage.welfare.snapshots', 'storage', 'chain', { key: 'not-taken' }),
+  clause('O-7', 'the MetricSpec version this snapshot would record', 'storage.welfare.metric_specs', 'storage', 'chain', { key: 'spec-version' }),
+  ...feeHeadroom('O-7'),
+];
+
+/**
+ * O-8 — `registry.file_incident(...)` / `file_milestone(...)` (§11.8.6 row 1).
+ *
+ * **Contract v28 froze `Filings`/`ClosedAt`/`AckRecords` for both instances** (02 §7.4,
+ * SQ-619), so the occupancy bound §11.8.6 requires is a real read. The clause names the
+ * instance's own `Filings` map because the two allocators share no filing-id space.
+ *
+ * The **bond amount** is still not readable, and that is a different question from the one
+ * v28 answered: 07 §7 scales the filing bond off `Exposure(kind, m)`, the same cohort-escrow
+ * sum P-13's bond needs, and 02 publishes no view of it. It is declared `blocking` below
+ * under SQ-731 for the reason P-13 is — money the account parts with is computed from
+ * chain-read values or the transaction is blocked (§11.5's redemption-fee rule 5).
+ */
+const O8: readonly PreconditionClause[] = [
+  clause('O-8', 'this registry instance has room for another filing this epoch', 'storage.incident_registry.filings', 'storage', 'chain', { key: 'occupancy' }),
+  clause('O-8', 'your free USDC covers the filing bond', 'storage.foreign_assets.account', 'storage', 'acting', { key: 'bond-headroom' }),
+  ...feeHeadroom('O-8'),
+];
+
+/**
+ * O-9 — `registry.challenge_filing(epoch, filing_id, evidence_hash)` (§11.8.6 row 2).
+ *
+ * Fully readable since **contract v28**. The challenge bond needs no unreadable declaration
+ * and no arithmetic: `registry_core`'s `challenge_filing` posts `filing.bond`
+ * (`crates/registry-core/src/lib.rs:479`) — the filing's *own* stored amount — so the client
+ * reads it from the now-frozen `Filings` entry, exactly as `oracle.challenge` reads
+ * `OracleRoundView.bond` rather than doubling anything. That asymmetry between filing and
+ * challenge mirrors P-13 against P-14 and is not a coincidence: a bond that already exists
+ * has been priced by the chain, and a bond that does not has not.
+ */
+const O9: readonly PreconditionClause[] = [
+  clause('O-9', 'the filing exists and its challenge window has not closed', 'storage.incident_registry.filings', 'storage', 'chain', { key: 'window' }),
+  clause('O-9', 'the registry epoch is not already closed', 'storage.incident_registry.closed_at', 'storage', 'chain', { key: 'not-closed' }),
+  clause('O-9', 'any watchtower-quorum extension of the window is accounted for', 'storage.incident_registry.ack_records', 'storage', 'chain', { key: 'extension' }),
+  // §11.8.6 row 2 requires the **challenge bond balance**, and `mayChallenge` tested only
+  // the window: a client offering a challenge the chain refuses for want of bond.
+  clause('O-9', 'your free USDC covers the challenge bond', 'storage.foreign_assets.account', 'storage', 'acting', { key: 'bond-headroom' }),
+  ...feeHeadroom('O-9'),
+];
+
+/** 11 §11.8's rows, as data. Separate from §11.5's fifteen — see `OperatorRowId`. */
+export const OPERATOR_ROWS: Readonly<Record<OperatorRowId, readonly PreconditionClause[]>> = {
+  'O-1': O1, 'O-2': O2, 'O-3': O3, 'O-4': O4, 'O-5': O5,
+  'O-6': O6, 'O-7': O7, 'O-8': O8, 'O-9': O9,
+};
+
+export const OPERATOR_ROW_IDS: readonly OperatorRowId[] = Object.freeze(
+  Object.keys(OPERATOR_ROWS) as OperatorRowId[],
+);
+
+/**
+ * The operator calls, each bound to its row.
+ *
+ * A map rather than a naming convention, because the binding is what a preparation
+ * declares and a convention is what a hurried edge ignores. Note that three of these names
+ * are disputed between documents — 11 §11.8.6 and 06 §5.1 write
+ * `registry.{file_incident, file_milestone, challenge}` while 07 §7 writes
+ * `challenge_filing(epoch, filing_id, evidence_hash)` and the runtime has two instances of
+ * `file(epoch, class, points, evidence_hash, spec_version)`. The names below are the
+ * documents' (§11.8.6 is the owning section for this surface); the disagreement is filed
+ * rather than resolved here, because picking one silently is how V-169 happened.
+ */
+export type OperatorCall =
+  | 'oracle.register_reporter'
+  | 'oracle.recompute_proof'
+  | 'guardian.approve_action'
+  | 'guardian.propose_action'
+  | 'futarchy_treasury.claim_stream'
+  | 'system.apply_authorized_upgrade'
+  | 'welfare.record_snapshot'
+  | 'registry.file'
+  | 'registry.challenge';
+
+export const OPERATOR_CALL_ROWS: Readonly<Record<OperatorCall, OperatorRowId>> = Object.freeze({
+  'oracle.register_reporter': 'O-1',
+  'oracle.recompute_proof': 'O-2',
+  'guardian.approve_action': 'O-3',
+  'guardian.propose_action': 'O-4',
+  'futarchy_treasury.claim_stream': 'O-5',
+  'system.apply_authorized_upgrade': 'O-6',
+  'welfare.record_snapshot': 'O-7',
+  'registry.file': 'O-8',
+  'registry.challenge': 'O-9',
+});
+
+/**
+ * Every call an §11.8 console submits, bound to the row it declares.
+ *
+ * Two of them are **not** operator rows, and that is §11.8.1's own routing rather than an
+ * exception made here: its table writes `oracle.report` / `oracle.challenge` as *"rows
+ * P-13/P-14 (§11.5)"*. A separate `O-n` row for either would be a second table for one
+ * obligation, and the two would drift — which is exactly the defect P-13 already carried
+ * when a module re-derived its clause list instead of consuming it.
+ *
+ * The map exists so a console cannot pick its own row. `gate()` verifies the rows a
+ * preparation *declares*; nothing in the machine can know whether the declaration is the
+ * right one for the call being signed, so that binding has to be data somewhere, and a
+ * naming convention is what a hurried edge ignores.
+ */
+export type OperatorSurfaceCall = OperatorCall | 'oracle.report' | 'oracle.challenge';
+
+export const OPERATOR_SURFACE_ROWS: Readonly<Record<OperatorSurfaceCall, RowId>> = Object.freeze({
+  ...OPERATOR_CALL_ROWS,
+  'oracle.report': 'P-13',
+  'oracle.challenge': 'P-14',
+});
+
+/**
+ * Every §11.8 read that has no surface behind it, by row.
+ *
+ * Partial on purpose: an absent row has nothing unreadable, and `unreadableObligationsFor`
+ * returns an empty list for it. That is not the same as an empty *array* being meaningful
+ * — every entry here is a condition the specification requires and this release cannot
+ * evaluate, and each one names the spec question that will retire it.
+ *
+ * ## The expiry is now mechanical, because claiming it was not enough
+ *
+ * The previous version of this comment said these declarations *"expire the way the
+ * limit-coverage registry and the monitoring seams do — by the row closing, not by somebody
+ * remembering to delete a comment"*, and nothing checked it. Contract v28 froze six of the
+ * surfaces in this list and PLAN.md marked SQ-615, SQ-616 and SQ-619 resolved **in this
+ * branch's own base**, and the entries stayed — so `operatorGate` kept converting each into a
+ * block and S15, S17 and S19 could not reach `ready` at all. A screen that can never open is
+ * a screen nothing has exercised end to end, and its tests had settled for asserting the
+ * block. `tools/ci/check-unreadable-obligations.py` now fails when a cited question is not an
+ * open row of PLAN.md's table, which is the property this paragraph used to only assert.
+ *
+ * Retired at contract v28: `O-3` (SQ-616 — `Guardian.PendingActions`/`Approvals`), `O-6`
+ * (SQ-615 — `System.AuthorizedUpgrade`, `ExecutionGuard.PendingUpgrade`) and `O-9` (SQ-619 —
+ * the registry's `Filings`/`ClosedAt`/`AckRecords`, whose `bond` field also prices a
+ * challenge). `O-8` keeps one entry because the *filing* bond is a different question from
+ * the storage freeze, and `O-5`'s citation moved to SQ-601, which is the open row that
+ * actually owns the per-stream treasury read — it had been filed under SQ-615.
+ */
+const UNREADABLE: Partial<Readonly<Record<RowId, readonly UnreadableObligation[]>>> = {
+  'P-13': [
+    unread(
+      'P-13',
+      'the bond this report will hold',
+      'The bond is value-scaled against `StakeAtRisk(c, m)` — the escrow of every cohort ' +
+        'whose frozen MetricSpec consumes this component (07 §6.1) — and 02 freezes no ' +
+        'surface publishing it. `open_oracle_rounds()` returns rounds that already exist, ' +
+        'so a first report has none to read. The floor is a lower bound and not the amount ' +
+        '(SQ-620 records that §11.5’s P-13 text has not yet been amended to say so).',
+      'SQ-598',
+      'blocking',
+    ),
+  ],
+  'O-1': [
+    unread(
+      'O-1',
+      'your account carries no retained 07 §3 ejection',
+      'The offence record lives in a pallet-internal store 02 §7 deliberately does not ' +
+        'freeze. The dispatch error is `ReporterEjected`.',
+      'SQ-564',
+      'stated',
+    ),
+    unread(
+      'O-1',
+      'permissionless entry is not closed by the §3 saturation clause',
+      'The same store, and the same reason. The dispatch error is `ReporterRecordsSaturated`.',
+      'SQ-564',
+      'stated',
+    ),
+  ],
+  'O-4': [
+    unread(
+      'O-4',
+      'the playbook’s on-chain trigger condition is active at B′',
+      '§11.8.2 makes the trigger read part of this precondition row and names its five ' +
+        'conditions in prose — gate breach, depeg, dead-man, VOID, the I-4 drift flag — ' +
+        'without binding any of them to the item that answers it. The trigger itself is a ' +
+        'call argument (`GuardianPower::ActivatePlaybook { trigger }`), so a client must ' +
+        'invent the mapping from variant to read, and a 5-of-7 signature spent on an ' +
+        'inactive trigger is refused after the fact. `TriggerState.unread` carries the same ' +
+        'refusal at the model layer.',
+      'SQ-730',
+      'blocking',
+    ),
+  ],
+  'O-5': [
+    unread(
+      'O-5',
+      'the stream exists, is not cancelled, and you are its recipient',
+      '02 §7 freezes no `pallet-futarchy-treasury` storage, and 02 §7.6’s closing rule says ' +
+        'every treasury consumer MUST bind `nav()` rather than raw state — while `nav()` ' +
+        'publishes only the `stream_remainders` aggregate. Per-stream reads have no lawful ' +
+        'source, so the claimable amount §11.8.3 requires computed client-side has no inputs.',
+      'SQ-601',
+      'blocking',
+    ),
+  ],
+  'O-8': [
+    unread(
+      'O-8',
+      'the bond this filing will hold',
+      '07 §7 scales the filing bond off `Exposure(kind, m)` — the same cohort-escrow sum ' +
+        'P-13’s round bond needs — and 02 publishes no view of it. Contract v28 froze the ' +
+        'registry’s own storage, which answers the window and the occupancy bound but not ' +
+        'the price of a filing that does not exist yet.',
+      'SQ-731',
+      'blocking',
+    ),
+  ],
+};
+
+/**
+ * What a row requires and this release cannot read.
+ *
+ * Empty for most rows. A caller MUST consult it — `clauseGroupsFor` alone answers "every
+ * declared read passed", which for a row whose reads were never declarable is vacuously
+ * true, and that is precisely the shape this list exists to make visible.
+ */
+export function unreadableObligationsFor(id: RowId): readonly UnreadableObligation[] {
+  return UNREADABLE[id] ?? [];
+}
+
+/** The obligations that close a control rather than being stated beside it. */
+export function blockingObligationsFor(id: RowId): readonly UnreadableObligation[] {
+  return unreadableObligationsFor(id).filter((entry) => entry.disposition === 'blocking');
+}
+
 /** 11 §11.5's table, as data. */
 export const PRECONDITION_ROWS: Readonly<Record<PreconditionRowId, readonly PreconditionClause[]>> = {
   'P-1': P1, 'P-2': P2, 'P-3': P3, 'P-4': P4, 'P-5': P5,
@@ -600,8 +1083,25 @@ export const PRECONDITION_ROWS: Readonly<Record<PreconditionRowId, readonly Prec
   'P-11': P11, 'P-12': P12, 'P-13': P13, 'P-14': P14, 'P-15': P15,
 };
 
-/** Every clause, flattened — the form the binding gate checks. */
-export const ALL_CLAUSES: readonly PreconditionClause[] = Object.values(PRECONDITION_ROWS).flat();
+/**
+ * Both tables in one map, which is what `rowsFor` indexes.
+ *
+ * A merged record rather than two lookups with a fallback: `PRECONDITION_ROWS[id]` for an
+ * `O-n` id is `undefined` at runtime and an *error* to the compiler, so the fallback form
+ * needed an `as` on each half — two assertions guarding a lookup that a single total record
+ * makes unnecessary. `Record<RowId, …>` is total over the union, so a row added to either
+ * family without a clause list is a type error here rather than a throw at the call site.
+ */
+const ALL_ROWS: Readonly<Record<RowId, readonly PreconditionClause[]>> = {
+  ...PRECONDITION_ROWS,
+  ...OPERATOR_ROWS,
+};
+
+/** Every clause, flattened — the form the binding gate checks. Both families. */
+export const ALL_CLAUSES: readonly PreconditionClause[] = Object.values(ALL_ROWS).flat();
+
+/** Every row id a preparation may declare from these two tables, in table order. */
+export const ROW_IDS: readonly RowId[] = Object.freeze(Object.keys(ALL_ROWS) as RowId[]);
 
 /**
  * The rows a call must satisfy before it may be signed.
@@ -611,8 +1111,8 @@ export const ALL_CLAUSES: readonly PreconditionClause[] = Object.values(PRECONDI
  * no rows would pass it. 11 §11.4 rule 1 asks for the gate to be unbypassable, and a
  * silent empty set is a bypass with extra steps.
  */
-export function rowsFor(id: PreconditionRowId, feeAsset: FeeAsset): readonly PreconditionClause[] {
-  const rows = PRECONDITION_ROWS[id];
+export function rowsFor(id: RowId, feeAsset: FeeAsset): readonly PreconditionClause[] {
+  const rows: readonly PreconditionClause[] | undefined = ALL_ROWS[id];
   if (rows === undefined || rows.length === 0) {
     throw new Error(`no precondition clauses for ${id}; refusing to treat that as "nothing to check"`);
   }
@@ -650,7 +1150,7 @@ export function rowsFor(id: PreconditionRowId, feeAsset: FeeAsset): readonly Pre
  * accepts.
  */
 export function clauseGroupsFor(
-  id: PreconditionRowId,
+  id: RowId,
   feeAsset: FeeAsset,
 ): readonly (readonly PreconditionClause[])[] {
   const groups = new Map<string, PreconditionClause[]>();
@@ -670,6 +1170,66 @@ export function clauseGroupsFor(
     }
   }
   return ordered;
+}
+
+/**
+ * The identity of one obligation — what a `PreconditionResult` must name to cover it.
+ *
+ * ## Why a clause needed an identity at all
+ *
+ * `gate()` compares what a preparation declares against what was read, and until this
+ * function existed both sides were **row** ids. A row is a set of clauses, so one result
+ * saying `O-1` covered all five of `O-1`'s obligations: the registry read alone could mint
+ * the signing window while the stake amount, the stake balance and the fee headroom were
+ * never evaluated — on a call that reserves 100,000 USDC. Every multi-clause row had the
+ * same hole, `P-1` and `P-12` included; the operator rows only made it new.
+ *
+ * The discriminator is `anyOf` first, then `key`, then the requirement sentence:
+ *
+ * - **`anyOf` first**, because a disjunctive group is *one* obligation with several
+ *   admissible answers. Keying its members separately would demand a result per alternative
+ *   and re-impose the conjunction `anyOf` exists to lift.
+ * - **`key` next**, because where a module evaluates a row it already keys its predicates on
+ *   that field (`oracle-reporting.ts`), so the coverage id and the predicate binding agree by
+ *   construction rather than by a second convention.
+ * - **the requirement last**, because it is the one field every clause is required to carry
+ *   and it is stable in the only sense that matters here: both the required set and the
+ *   evaluated set are derived from this table, in the same process, so they cannot drift.
+ *   Two clauses of one row with identical requirement text would collide, which is a table
+ *   defect — `clauseCoverageIds` refuses it rather than silently merging two obligations.
+ */
+export function clauseCoverageId(entry: PreconditionClause): ClauseId {
+  return `${entry.row}/${entry.anyOf ?? entry.key ?? entry.requirement}`;
+}
+
+/**
+ * Every obligation a row imposes under the selected fee asset — one id per group.
+ *
+ * This is the set `gate()` demands be covered. Fee-asset selection happens here rather than
+ * in the caller for the reason `rowsFor` refuses a default: the VIT and USDC headroom clauses
+ * read different pallets, so "which obligations does this row have" is not answerable without
+ * knowing which currency was chosen, and answering it anyway drops a precondition.
+ */
+export function clauseCoverageIds(id: RowId, feeAsset: FeeAsset): readonly ClauseId[] {
+  const ids: ClauseId[] = [];
+  const seen = new Map<ClauseId, string>();
+  for (const group of clauseGroupsFor(id, feeAsset)) {
+    const first = group[0];
+    if (first === undefined) continue;
+    const coverageId = clauseCoverageId(first);
+    const collision = seen.get(coverageId);
+    if (collision !== undefined) {
+      throw new Error(
+        `${id} has two obligations with the same coverage id (${coverageId}): "${collision}" ` +
+          `and "${first.requirement}". Two obligations sharing an id are one obligation to ` +
+          'the gate, so a result answering either would certify both. Give one of them a ' +
+          '`key`.',
+      );
+    }
+    seen.set(coverageId, first.requirement);
+    ids.push(coverageId);
+  }
+  return ids;
 }
 
 /**
@@ -718,7 +1278,7 @@ export function accountForClause(
  * the row has no account-scoped clause and the wrapper is doing nothing.
  */
 export function clausesNeedingOtherAccounts(
-  id: PreconditionRowId,
+  id: RowId,
   wrapper: CallWrapper,
   signer: AccountId,
   feeAsset: FeeAsset,

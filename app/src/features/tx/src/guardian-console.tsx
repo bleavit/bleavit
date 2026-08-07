@@ -28,7 +28,6 @@
  */
 
 import {
-  Button,
   Count,
   DataTable,
   Derived,
@@ -40,18 +39,28 @@ import {
   Undecodable,
   type ReactNode,
 } from '@bleavit/ui';
+import type { Verified } from '@bleavit/shared-types';
+import type { GatePassed, TxSession } from '@bleavit/transaction-builder';
 import {
+  POWER_FIELDS,
   UNRATIFIED_CONSEQUENCE,
   allowanceRemaining,
   approvalBlocks,
   proposalBlocks,
+  proposeFormBlocks,
+  ratificationCopy,
+  type ActionRatification,
   type AllowanceMeter,
   type ApprovalContext,
   type GuardianPower,
   type PendingAction,
+  type ProposeInputs,
   type TriggerState,
 } from './guardian.js';
 import { EvidencePanel } from './operator-consoles.js';
+import { operatorGate } from './operator-gate.js';
+import { GateControl } from './gate-control.js';
+import type { EvidenceState } from './evidence.js';
 
 /** Release copy for the five powers. Closed over `GuardianPower`, so a sixth cannot slip in. */
 const POWER_LABEL: Readonly<Record<GuardianPower, string>> = Object.freeze({
@@ -62,18 +71,49 @@ const POWER_LABEL: Readonly<Record<GuardianPower, string>> = Object.freeze({
   suspend_on_gate: 'a suspension on the gate',
 });
 
+/**
+ * §11.8.2's pending-actions list.
+ *
+ * Its row is specified field by field: *"power, target, `justification_hash` (+ resolved
+ * justification document via the evidence rules of §11.8.1), current approvals m-of-7,
+ * expiry"*. The table shipped with the hash and the document **missing** — both of them,
+ * although the model carried the hash and `ApproveAction` already resolved the document.
+ *
+ * That absence is not cosmetic. The list is where a guardian decides which action to open,
+ * and the justification is the only thing on the row that says *why* an action exists.
+ * Without it the list ranks five identical-looking privileged actions by nothing but their
+ * ids, and the document that would distinguish them appears one click later — after the
+ * choice it was meant to inform.
+ */
 export function PendingActions({
   actions,
+  justifications,
   onOpen,
 }: {
   readonly actions: readonly PendingAction[];
+  /**
+   * The resolved justification per action id, under §11.8.1's evidence rules.
+   *
+   * A **total** function rather than an optional map, so a caller cannot omit an action and
+   * have the row render blank: `evidenceUnavailable(reason)` is the answer for one that
+   * could not be fetched, and blank is not an available answer at all.
+   */
+  readonly justifications: (actionId: string) => EvidenceState;
   readonly onOpen: (actionId: string) => void;
 }) {
   return (
     <Panel title="Pending guardian actions">
       <DataTable
         caption="Actions awaiting approval, with how many signatures each still needs"
-        headers={['Action', 'Power', 'Target', 'Approvals', 'Required', 'Expires']}
+        headers={[
+          'Action',
+          'Power',
+          'Target',
+          'Justification',
+          'Approvals',
+          'Required',
+          'Expires',
+        ]}
         rows={actions.map((action) => ({
           key: action.actionId.value,
           cells: [
@@ -89,6 +129,17 @@ export function PendingActions({
             // A power without its target is not actionable: "delay_once" does not say what
             // is being delayed, and a guardian cannot weigh a re-run without its cohort.
             <Identifier datum={action.target} key={`tg-${action.actionId.value}`} />,
+            // The hash **and** the resolved document, per §11.8.2. The hash always shows —
+            // it is what a reader checks a document against elsewhere when this device
+            // cannot fetch one — and the document's absence renders as a stated fact rather
+            // than as an empty cell, which would read as "no justification was filed".
+            <span key={`j-${action.actionId.value}`}>
+              <Identifier datum={action.justificationHash} />
+              <EvidencePanel
+                state={justifications(action.actionId.value)}
+                label="Justification"
+              />
+            </span>,
             // Both numbers, never a percentage: at 4-of-5 versus 5-of-7 a bar looks the
             // same and the decision is entirely different.
             <Count datum={action.approvals} key={`a-${action.actionId.value}`} />,
@@ -101,14 +152,60 @@ export function PendingActions({
   );
 }
 
+/**
+ * §11.8.2's fourth element — the ratification tracker, which had no screen at all.
+ *
+ * The consequence copy is rendered **above** the state, not below it, and unconditionally.
+ * A guardian reading "ratified" has no further exposure and a guardian reading anything
+ * else does; putting the consequence first means the ordering never has to be re-derived
+ * from which arm happened to render.
+ */
+export function RatificationTracker({
+  actionId,
+  state,
+}: {
+  readonly actionId: Verified<string>;
+  readonly state: ActionRatification;
+}): ReactNode {
+  const severity =
+    state.kind === 'ratified' ? 'info' : state.kind === 'failed' ? 'danger' : 'caution';
+  return (
+    <Panel title="Retrospective ratification" subject={<Identifier datum={actionId} />}>
+      <Notice severity="caution" heading="What happens to you if this is not ratified">
+        {UNRATIFIED_CONSEQUENCE}
+      </Notice>
+      <Notice severity={severity} heading="Where the review stands">
+        {ratificationCopy(state)}
+      </Notice>
+      {state.kind === 'pending' && state.review.kind === 'ongoing' ? (
+        <Field label="Review referendum">
+          <Count datum={state.review.ayes} name="ayes" />
+          <Count datum={state.review.nays} name="nays" />
+        </Field>
+      ) : null}
+      {/* An unread referendum is stated, never rendered as a quiet one: a review this device
+          could not read is not a review going well, and E20's discipline for the trigger is
+          the same discipline here. */}
+      {state.kind === 'pending' && state.review.kind === 'unread' ? (
+        <Notice severity="caution" heading="The review referendum could not be read">
+          {state.review.reason} Until it can be, treat the consequence above as live.
+        </Notice>
+      ) : null}
+    </Panel>
+  );
+}
+
 export function ApproveAction({
   context,
+  session,
   onApprove,
 }: {
   readonly context: ApprovalContext;
-  readonly onApprove: () => void;
+  readonly session: TxSession;
+  readonly onApprove: (window: GatePassed) => void;
 }): ReactNode {
   const blocks = approvalBlocks(context);
+  const gate = operatorGate('guardian.approve_action', session, blocks);
   return (
     <Panel title="Approve action" subject={<Identifier datum={context.action.actionId} />}>
       <Field label="Power">
@@ -160,40 +257,44 @@ export function ApproveAction({
         <Count datum={context.action.threshold} />
       </Field>
 
-      {/* Every reason, not the first: fixing one and hitting the next reads as guesswork. */}
-      {blocks.map((block) => (
-        <Notice severity="danger" heading={block.check} key={block.check}>
-          {block.detail}
-        </Notice>
-      ))}
-
-      <Button
-        label="Approve"
-        intent="primary"
-        onClick={onApprove}
-        disabled={blocks.length > 0}
-        {...(blocks.length > 0
-          ? { disabledReason: blocks.map((block) => block.check).join('; ') }
-          : {})}
-      />
+      <GateControl label="Approve" intent="primary" gate={gate} onSubmit={onApprove} />
     </Panel>
   );
 }
 
+/**
+ * §11.8.2's *"power-specific forms"*, which shipped as one generic form for all five.
+ *
+ * The powers do not take the same arguments — `suspend_on_gate` takes none, and
+ * `activate_playbook` takes four including a target only one playbook accepts — so a single
+ * form presented five different calls as interchangeable. `POWER_FIELDS` is closed over
+ * `GuardianPower`, so the field list for a power is data rather than markup a sixth power
+ * could quietly miss.
+ *
+ * The empty case renders as a sentence, not as an empty form: a form with no fields looks
+ * like one that failed to load, on a screen where the next click is a privileged signature.
+ */
 export function ProposeAction({
   meter,
+  inputs,
   trigger,
+  session,
   onPropose,
 }: {
   readonly meter: AllowanceMeter;
+  /** The power's own arguments and the justification hash — see `PowerArguments`. */
+  readonly inputs: ProposeInputs;
   /** Only `activate_playbook` has one; `undefined` for the other four powers. */
   readonly trigger?: TriggerState | undefined;
-  readonly onPropose: () => void;
+  readonly session: TxSession;
+  readonly onPropose: (window: GatePassed) => void;
 }): ReactNode {
   // The model owns every reason — the screen re-deriving them was how the two lists drifted
   // apart in the first place, and a button enabled on the screen's own weaker test is the
   // failure that matters.
-  const blocks = proposalBlocks(meter, trigger);
+  const blocks = [...proposalBlocks(meter, trigger), ...proposeFormBlocks(inputs)];
+  const gate = operatorGate('guardian.propose_action', session, blocks);
+  const fields = POWER_FIELDS[meter.power];
   // `power` is a release-defined literal — which form the user opened — not a chain read, so
   // it belongs in the title. Borrowing the meter's status for it would claim the chain told
   // us which button was pressed.
@@ -212,21 +313,22 @@ export function ProposeAction({
         <Count datum={meter.limit} name="of" />
       </Field>
 
-      {blocks.map((block) => (
-        <Notice severity="danger" heading={block.check} key={block.check}>
-          {block.detail}
+      {fields.length === 0 ? (
+        <Notice severity="info" heading="This power takes no arguments">
+          Suspending on the gate carries no parameters — the action is fully described by
+          the power itself and by the justification you attach to it.
         </Notice>
-      ))}
+      ) : (
+        <Field label="This power’s arguments">
+          <ul className="power-fields">
+            {fields.map((field) => (
+              <li key={field}>{field}</li>
+            ))}
+          </ul>
+        </Field>
+      )}
 
-      <Button
-        label="Propose"
-        intent="primary"
-        onClick={onPropose}
-        disabled={blocks.length > 0}
-        {...(blocks.length > 0
-          ? { disabledReason: blocks.map((block) => block.check).join('; ') }
-          : {})}
-      />
+      <GateControl label="Propose" intent="primary" gate={gate} onSubmit={onPropose} />
     </Panel>
   );
 }

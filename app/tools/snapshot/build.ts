@@ -40,14 +40,41 @@
  * know about, which is the point of running the real consumer rather than a checklist of what
  * the consumer was believed to check.
  *
- * ## What is deliberately absent
+ * ## What is deliberately absent, and the actual reason
  *
  * The **archive-node adapter**. This driver is pure over an injected {@link ArchiveExport}, and
- * the code that turns an archive node's RPC into one is not written here: doing it by
- * assumption is what R-2 forbids, and the client's own `chain-client` deliberately offers no
- * archive path (smoldot serves `chainHead` only — 10 §4.2). The CLI beside this file reads an
- * export produced elsewhere, so an operator with an archive reader in the documented shape can
- * produce a pinned snapshot today, and the missing piece is named rather than approximated.
+ * the code that turns an archive node's responses into one is not written here.
+ *
+ * An earlier version of this note gave 10 §4.2 as the reason — *smoldot serves `chainHead`
+ * only, with no `archive_*`*. That is true and it is **not** the reason: §4.2 constrains the
+ * light client running inside the browser, and this is a Node command-line tool that never
+ * loads smoldot, has no §4.2 to obey, and is free to open an ordinary RPC connection to an
+ * archive node. Citing it made the park look like a constraint when it is a gap.
+ *
+ * The operative reason is that **no document names the interface**. 10 §8.2 says a snapshot is
+ * *"reproducible byte-identically by anyone from `tools/snapshot` against an archive node"*, and
+ * that promise is to independent producers — so which reads a second producer must perform, in
+ * what order, is exactly the part that has to be written down before it is implemented. Four
+ * things are unspecified and none of them is a detail:
+ *
+ *  1. **Which read interface.** `archive_v1_*`, the legacy `state_*`/`chain_*` pair, or a
+ *     Subsquid/Subsquare-style index. They differ in what a range query even means.
+ *  2. **At which endpoint**, and how a producer names it — a snapshot's whole value is that two
+ *     unrelated people can produce it, which needs an addressing convention, not a flag.
+ *  3. **What pagination looks like**, which decides what `observed` can honestly claim. This
+ *     file already refuses an export whose `observed` overstates what a reader saw; the reader
+ *     cannot report that faithfully without knowing how the interface signals a short answer.
+ *  4. **Which historical metadata policy applies.** Decoding events at depth needs the
+ *     *producing* runtime's metadata (10 §6.5), whose retrievability at depth is 10's own open
+ *     `[VERIFY — FE-P5]`. A reader that guessed would silently mis-decode exactly the old
+ *     history a snapshot exists to carry.
+ *
+ * Answering any of those by assumption is what R-2 forbids, and getting one wrong produces
+ * documents that pass every screen in `@bleavit/providers` while describing a history that did
+ * not happen. So it is filed as PLAN.md · *Spec questions* SQ-612 rather than approximated. The
+ * CLI beside this file reads an export produced elsewhere, so an operator with a reader in the
+ * documented shape can produce a pinned snapshot today — and the differential below is what
+ * catches such a reader when it is incomplete.
  */
 
 import {
@@ -107,6 +134,45 @@ export interface ArchiveExport {
   /** Read from chain state at `range.toBlock`, independently of `ops`. See the module note. */
   readonly balances: readonly SnapshotBalance[];
 }
+
+/**
+ * The movement kinds an export may carry, and the fields each one has.
+ *
+ * Declared as data rather than only as branches of {@link parseArchiveExport} because
+ * `app/schemas/bleavit.archive-export.v1.schema.json` is **generated** from these two
+ * constants. A schema restating them would agree on the day it was written; an operator
+ * writing a second archive reader against a drifted schema produces documents this tool
+ * refuses, which is the failure `10 §8.2`'s reproduce-by-anyone promise cannot survive.
+ *
+ * `parseArchiveExport` tests membership against `ARCHIVE_EXPORT_OP_KINDS` before it dispatches,
+ * so the list is load-bearing rather than descriptive.
+ */
+export const ARCHIVE_EXPORT_OP_KINDS = Object.freeze([
+  'merge',
+  'redeem',
+  'split',
+  'transfer',
+] as const);
+
+export type ArchiveExportOpKind = (typeof ARCHIVE_EXPORT_OP_KINDS)[number];
+
+export const ARCHIVE_EXPORT_OP_FIELDS: Readonly<Record<ArchiveExportOpKind, readonly string[]>> =
+  Object.freeze({
+    merge: ['kind', 'block', 'vault', 'account', 'amount'],
+    redeem: ['kind', 'block', 'vault', 'account', 'branch', 'amount'],
+    split: ['kind', 'block', 'vault', 'account', 'amount'],
+    transfer: ['kind', 'block', 'vault', 'account', 'to', 'branch', 'amount'],
+  });
+
+/** The export's top-level members. Every one is required — see {@link ArchiveExport}. */
+export const ARCHIVE_EXPORT_KEYS = Object.freeze([
+  'binding',
+  'range',
+  'observed',
+  'vaults',
+  'ops',
+  'balances',
+] as const);
 
 export class MalformedExport extends Error {
   constructor(message: string) {
@@ -180,6 +246,17 @@ export function parseArchiveExport(raw: unknown): ArchiveExport {
     const at = field(record['at'], `ops[${i}].at`);
     const opRaw = field(record['op'], `ops[${i}].op`);
     const kind = opRaw['kind'];
+    // Membership first, then dispatch. Testing the declared list rather than only the branches
+    // is what keeps `ARCHIVE_EXPORT_OP_KINDS` — and therefore the published schema — bound to
+    // what this parser actually accepts.
+    if (typeof kind !== 'string' || !(ARCHIVE_EXPORT_OP_KINDS as readonly string[]).includes(kind)) {
+      throw new MalformedExport(
+        `ops[${i}].op.kind: expected one of ${ARCHIVE_EXPORT_OP_KINDS.join(', ')}, got ` +
+          `${JSON.stringify(kind)}. The scalar, gate and Baseline instruments are outside ` +
+          'bleavit.snapshot.v1; a range containing one cannot be published as a v1 snapshot, ' +
+          'and the differential below is what stops an exporter silently dropping it instead.',
+      );
+    }
     const common = {
       block: u32(opRaw['block'], `ops[${i}].op.block`),
       vault: label(opRaw['vault'], `ops[${i}].op.vault`),
@@ -209,11 +286,12 @@ export function parseArchiveExport(raw: unknown): ArchiveExport {
         op: { kind, ...common, branch: label(opRaw['branch'], `ops[${i}].op.branch`) },
       };
     }
+    // Unreachable while `ARCHIVE_EXPORT_OP_KINDS` and the branches above agree. Kept as a
+    // refusal rather than deleted: adding a kind to the list without a branch here would
+    // otherwise fall off the end of the callback and produce `undefined` as a `PositionedOp`.
     throw new MalformedExport(
-      `ops[${i}].op.kind: expected split, merge, transfer or redeem, got ${JSON.stringify(kind)}. ` +
-        'The scalar, gate and Baseline instruments are outside bleavit.snapshot.v1; a range ' +
-        'containing one cannot be published as a v1 snapshot, and the differential below is ' +
-        'what stops an exporter silently dropping it instead.',
+      `ops[${i}].op.kind: ${JSON.stringify(kind)} is a declared movement kind with no parser ` +
+        'branch. That is a defect in this tool, not in the export.',
     );
   });
   return {

@@ -37,13 +37,31 @@
  * `app/tests/providers` contains such a document and asserts that it is **admitted**, because
  * a corpus that only contains documents we reject would be evidence for a guarantee this
  * mechanism declines to make ([14](14-threat-model.md) TH-50).
+ *
+ * ## The one screen that asks the chain
+ *
+ * {@link spotCheckSnapshot} is §8.4's *"deterministic spot re-derivation for the covered blocks
+ * that fall inside light-client-reachable depth"*, and it is the only thing here that compares
+ * the document against anything but itself. It is asynchronous and injected, so it lives beside
+ * {@link admitSnapshot} rather than inside it; the streamed importer runs both in order.
+ *
+ * ## An admitted document is a branded value, not a boolean somebody checked
+ *
+ * {@link admitSnapshot} returns an {@link AdmittedSnapshot} whose brand this module alone can
+ * write, and `mint.ts` takes that type. So *"nothing becomes a layer-3 row without passing every
+ * screen"* is a property of the type system rather than a rule a call site is trusted to follow.
  */
 
-import { byCodePoint, canonicalJson, digestPreimage, equalBinding } from '@bleavit/handoff-envelope';
+import {
+  byCodePoint,
+  canonicalJson,
+  canonicalJsonInto,
+  digestPreimage,
+} from '@bleavit/handoff-envelope';
 import type { ChainBinding } from '@bleavit/handoff-envelope';
 
-import { providerRefusal } from './refusals.js';
-import type { ProviderRefusal } from './refusals.js';
+import { providerRefusal, snapshotRefusal } from './refusals.js';
+import type { ProviderRefusal, SnapshotRejectionCause } from './refusals.js';
 
 /** The domain-separation tag. Distinct from every handoff tag — see the module note. */
 export const SNAPSHOT_FORMAT = 'bleavit.snapshot.v1';
@@ -194,13 +212,63 @@ export type SnapshotFinding =
   | { readonly screen: 'binding'; readonly why: string }
   | { readonly screen: 'coverage'; readonly why: string }
   | { readonly screen: 'derived-rows'; readonly why: string }
-  | { readonly screen: 'conservation'; readonly why: string };
+  | { readonly screen: 'conservation'; readonly why: string }
+  /**
+   * §8.4's *deterministic spot re-derivation* — see {@link spotCheckSnapshot}.
+   *
+   * The only class this screen raises, and there was a second (`spot-check-incomplete`) until
+   * 2026-08-06. It fired when the work ceiling stopped the walk, and the ceiling stopped being
+   * a refusal: §8.4's `FE-PROV-003` causes are all statements about the **document**, and *"this
+   * device ran out of asks"* is a statement about the device. Its remedy sentence was also false
+   * for one of the two configurations that reach it. Deleted rather than left unproduced — a
+   * finding class nobody raises is copy nobody can read. SQ-811 asks §8.4 whether an unfinished
+   * re-derivation should refuse; a ruling that way restores this class and its remedy.
+   */
+  | { readonly screen: 'spot-check'; readonly why: string };
 
-export type SnapshotVerdict =
-  | { readonly kind: 'admitted'; readonly document: SnapshotDocument }
-  | { readonly kind: 'rejected'; readonly refusal: ProviderRefusal; readonly findings: readonly SnapshotFinding[] };
+/**
+ * The brand that makes "this document passed every screen" a thing a caller cannot assert.
+ *
+ * Declared here and **not exported**, so no module outside this one can name the field and
+ * therefore no module outside this one can produce an `AdmittedSnapshot` by object literal,
+ * spread or `satisfies`. Exactly the device 10 §2.1 uses for `Finalized<T>`, one layer down
+ * and for a smaller claim: not *"the light client verified this"* but *"every §8.4 screen ran
+ * over these bytes and none of them fired"*.
+ *
+ * It exists because {@link mintSnapshotRows} — the one place a document becomes layer-3 rows
+ * — takes this type rather than a `SnapshotDocument`. Without the brand the mint's argument
+ * is a structural shape any caller can build, and *"the mint is the only way an admitted
+ * document becomes rows"* would be a comment rather than a property.
+ */
+declare const ADMITTED: unique symbol;
 
-const DECIMAL = /^(0|[1-9][0-9]*)$/;
+/** A document that passed {@link admitSnapshot}. Constructible only inside this module. */
+export type AdmittedSnapshot = {
+  readonly kind: 'admitted';
+  readonly document: SnapshotDocument;
+  readonly [ADMITTED]: true;
+};
+
+export interface RejectedSnapshot {
+  readonly kind: 'rejected';
+  readonly refusal: ProviderRefusal;
+  readonly findings: readonly SnapshotFinding[];
+}
+
+export type SnapshotVerdict = AdmittedSnapshot | RejectedSnapshot;
+
+/**
+ * The wire form of an amount, as a pattern.
+ *
+ * Exported because the published JSON Schema for the producer's input format is **generated**
+ * from it (`app/schemas/`), and a schema carrying its own copy of this regex would publish a
+ * rule that agreed with {@link isCanonicalAmount} on the day it was written. The u128 bound the
+ * function additionally applies is not expressible as a pattern, which the schema says in words
+ * rather than leaving a reader to infer.
+ */
+export const CANONICAL_AMOUNT_PATTERN = /^(0|[1-9][0-9]*)$/;
+
+const DECIMAL = CANONICAL_AMOUNT_PATTERN;
 
 /**
  * The chain's `Balance` ceiling.
@@ -707,13 +775,26 @@ function checkDerivedRows(document: SnapshotDocument, replay: Replay): readonly 
  * So the order is a rule, and being a rule it is **checked** rather than documented: a rule two
  * producers must follow and nobody verifies is a rule they will diverge on.
  *
- * **`ops` is deliberately exempt.** Its order is the *chain's* — block, then extrinsic, then
- * event — which is semantic rather than presentational: the conservation replay checks
- * non-negativity at every step, so a merge before its split is a different (and invalid)
- * history than the same two the other way round. Sorting ops would destroy that and would let
- * an invalid history be reordered into a valid-looking one. Two honest producers reading one
- * chain already agree on it, which is what determinism requires; a producer that cannot supply
- * chain order cannot supply a snapshot.
+ * **`ops` may not be sorted, and that is not the same as leaving it unchecked** — a distinction
+ * an earlier version of this comment collapsed, and the collapse was a defect. Its order is the
+ * *chain's* — block, then extrinsic, then event — which is semantic: the conservation replay
+ * checks non-negativity at every step, so a merge before its split is a different, invalid
+ * history rather than the same one written differently. Sorting would destroy that and would
+ * let an invalid history be reordered into a valid-looking one.
+ *
+ * But §8.2 says *"Consumers check these on import"* of all three rules, and leaving this one
+ * unchecked has a measured consequence: a document whose `ops` run block 13, 10, 12 is admitted,
+ * the same history in block order is admitted, the two pins differ, and `diffSnapshots` of the
+ * pair reports `disagree` with `FE-PROV-004` — which is exactly the failure this paragraph
+ * exists to prevent, and it makes §8.2's *"reproducible byte-identically by anyone"* false for
+ * any producer that is not this repository's own tool.
+ *
+ * So the **block-level consequence is checked** — `ops` must be non-decreasing in `block` — which
+ * refuses the divergence without reordering anything. The finer half of chain order, extrinsic
+ * then event, is **not checkable against this format**: `SnapshotOp` carries no
+ * `extrinsicIndex` or `eventIndex`, though the producer computes both and discards them. A
+ * consumer therefore cannot check the rule as §8.2 states it, which is a format question rather
+ * than a code one (see the spec-question row) and is why this check is the block half alone.
  */
 function checkCanonicalOrder(document: SnapshotDocument): readonly SnapshotFinding[] {
   const findings: SnapshotFinding[] = [];
@@ -758,6 +839,23 @@ function checkCanonicalOrder(document: SnapshotDocument): readonly SnapshotFindi
           `coverage: ${previous.fromBlock}..${previous.toBlock} and ${current.fromBlock}..` +
           `${current.toBlock} are adjacent and must be written as one range ` +
           `${previous.fromBlock}..${current.toBlock}; a covered set has one spelling`,
+      });
+    }
+  }
+  // §8.2's third rule, in the half this format can express. Not a sort: a document that is
+  // out of block order is refused, never rewritten, so an invalid history cannot be reordered
+  // into a valid-looking one.
+  for (let i = 1; i < document.ops.length; i += 1) {
+    const previous = document.ops[i - 1] as SnapshotOp;
+    const current = document.ops[i] as SnapshotOp;
+    if (current.block < previous.block) {
+      findings.push({
+        screen: 'canonical',
+        why:
+          `ops: entry ${i} is at block ${current.block} and follows block ${previous.block}. ` +
+          'The movement list is in chain order (10 §8.2), so one history has one spelling; two ' +
+          'orders would be two files and two pins, and every honest cross-check of the pair ' +
+          'would raise FE-PROV-004',
       });
     }
   }
@@ -811,7 +909,13 @@ export type Sha256 = (preimage: Uint8Array) => string;
 export interface SnapshotAdmission {
   /** The content pin obtained from the publisher, out of band. */
   readonly expectedPin: string;
-  /** The chain this client is on. Exact equality, as every other Bleavit binding gate is. */
+  /**
+   * The chain this client is on. **Only `genesisHash` is compared** — see {@link admitSnapshot}.
+   *
+   * The whole binding is carried rather than the hash alone so a caller passes the same
+   * `ChainBinding` it holds everywhere else, and so the two unused members are visibly
+   * *declined* here rather than absent from a type that could never have had them.
+   */
   readonly binding: ChainBinding;
 }
 
@@ -836,6 +940,27 @@ export interface SnapshotAdmission {
  * unpinned bytes tells the user something about a file nobody claims authorship of. Same shape
  * as the release self-check running its chain-spec comparison before its genesis comparison
  * (F10).
+ *
+ * ## The chain binding is `genesisHash` only, and the narrowing is the correction
+ *
+ * This screen used `equalBinding`, whose exact `specVersion`/`contractVersion` equality
+ * 10 §13.1 states **for the three handoff formats** — documents describing *one block*, where a
+ * runtime the client cannot decode makes the document unreadable. §8 states no chain binding
+ * for a snapshot at all, and a snapshot is the opposite shape: §6.4 assigns it *"deep history
+ * beyond 30 days … by design, not by omission"*, which is history that necessarily predates the
+ * current runtime. Under exact equality the **first runtime upgrade refuses every snapshot ever
+ * published**, and it refuses them with `FE-PROV-003`, whose recovery told the user to check
+ * their download — for a file that was never damaged.
+ *
+ * What a snapshot must still not be is a document about **another chain**: 10 §7 gives one
+ * local database per chain identity, so importing one would file another network's history
+ * under this one's. That is `genesisHash`, and it is the whole of the binding here.
+ *
+ * The two version fields are not silently dropped: they stay on the admitted document, where a
+ * caller reads them and renders the difference as an advisory line. A screen is a refusal, and
+ * a version difference is not a reason to refuse. Filed as PLAN.md · *Spec questions* SQ-610,
+ * because whether §8 wants a binding at all — and which fields — is 10's to say, not this
+ * module's; the conservative reading is in force until it answers.
  */
 export function admitSnapshot(text: string, admission: SnapshotAdmission, sha256: Sha256): SnapshotVerdict {
   const findings: SnapshotFinding[] = [];
@@ -854,8 +979,7 @@ export function admitSnapshot(text: string, admission: SnapshotAdmission, sha256
     }
     throw error;
   }
-  const canonical = serializeSnapshot(document);
-  const inCanonicalForm = canonical === text;
+  const inCanonicalForm = isCanonicalForm(document, text);
   if (!inCanonicalForm) {
     findings.push({
       screen: 'canonical',
@@ -867,26 +991,27 @@ export function admitSnapshot(text: string, admission: SnapshotAdmission, sha256
         'something other than these bytes.',
     });
   }
-  // Hash the serialization already in hand rather than building a third one. For any document
-  // that can be admitted the canonical form *is* the file, so `canonical` and a fresh
-  // `serializeSnapshot` inside `digestPreimage` are the same string — and at the 400 MB import
-  // ceiling an avoidable duplicate of it is the difference between a slow import and a dead
-  // tab. See the memory note on {@link admitSnapshot}.
-  const pin = sha256(preimageOfSerialized(canonical));
+  // Over the FILE's bytes, never over a re-serialization of what was parsed out of them. For a
+  // document in canonical form the two are the same string, which is exactly why hashing the
+  // re-serialization looked harmless — and for every other document it hashes something the
+  // publisher never shipped. Measured before the change: a file with one space added hashed to
+  // the publisher's pin and passed this screen, so the only thing standing between a mutated
+  // file and admission was the canonical screen beside it. The message also stopped being true
+  // ("the file hashes to …" named a hash the file does not have), which is the half a user acts
+  // on when they compare it against the publisher's page.
+  const pin = sha256(preimageOfSerialized(text));
   if (pin !== admission.expectedPin) {
     findings.push({
       screen: 'pin',
       why: `the file hashes to ${pin}; the publisher's pin is ${admission.expectedPin}`,
     });
   }
-  if (!equalBinding(document.binding, admission.binding)) {
+  if (document.binding.genesisHash !== admission.binding.genesisHash) {
     findings.push({
       screen: 'binding',
       why:
-        `this snapshot describes genesis ${document.binding.genesisHash} at spec ` +
-        `${document.binding.specVersion}/contract ${document.binding.contractVersion}; this ` +
-        `client is on ${admission.binding.genesisHash} at ${admission.binding.specVersion}/` +
-        `${admission.binding.contractVersion}`,
+        `this snapshot describes genesis ${document.binding.genesisHash}; this client is on ` +
+        `${admission.binding.genesisHash}`,
     });
   }
   findings.push(...checkCanonicalOrder(document));
@@ -895,17 +1020,586 @@ export function admitSnapshot(text: string, admission: SnapshotAdmission, sha256
   findings.push(...replay.findings);
   findings.push(...checkDerivedRows(document, replay));
   if (findings.length > 0) return reject(findings);
-  return { kind: 'admitted', document };
+  // The one construction site of the brand. An assertion rather than a literal because the
+  // phantom field has no runtime representation and cannot be written — same shape, and the
+  // same single-site discipline, as `chain-client`'s `Finalized<T>` mint (10 §2.1).
+  return { kind: 'admitted', document } as AdmittedSnapshot;
 }
 
-function reject(findings: readonly SnapshotFinding[]): SnapshotVerdict {
+/** Thrown to stop the walk in {@link isCanonicalForm}. Private, so nothing else can catch it. */
+const DIVERGED = Symbol('canonical form diverged');
+
+/**
+ * Is `text` exactly the canonical serialization of `document`?
+ *
+ * Answered **without building a second copy of the file**. `canonicalJson(document) === text` is
+ * the obvious form and allocates a whole second document to answer a question that fails at the
+ * first differing character; at §8.4's import ceiling that duplicate is the difference between a
+ * slow import and a tab that runs out of memory — a crash rather than a refusal. So the
+ * serializer emits into a comparator (`canonicalJsonInto`, which `handoff-envelope` added for
+ * exactly this consumer and which nothing used until now), the comparator walks an offset
+ * through the text it already holds, and the walk **aborts at the first divergence** — its own
+ * documented escape.
+ *
+ * `canonicalJson` is a thin wrapper over the same emitter, so there is still exactly one answer
+ * to *which bytes* (10 §13.1). A comparator over a second serializer would agree on the day it
+ * was written and diverge at the first field, and the symptom would be a correct document
+ * reported as corrupt.
+ *
+ * The trailing length check is not a formality: a text that is a strict **prefix** of the
+ * canonical form matches every emitted piece and is not the same file.
+ */
+function isCanonicalForm(document: SnapshotDocument, text: string): boolean {
+  let at = 0;
+  try {
+    canonicalJsonInto(document, (piece) => {
+      if (!text.startsWith(piece, at)) throw DIVERGED;
+      at += piece.length;
+    });
+  } catch (error) {
+    if (error === DIVERGED) return false;
+    throw error;
+  }
+  return at === text.length;
+}
+
+/**
+ * Which fixed remediation `FE-PROV-003` leads with, chosen from the findings.
+ *
+ * Precedence, and it is not arbitrary: **wrong chain wins**, because a document about another
+ * network will also fail whichever substantive screens happen to notice, and telling the user
+ * about a conservation defect in a file that was never about their chain sends them to the
+ * publisher with the wrong complaint. **Chain disagreement is next**, because a document that
+ * is internally consistent and contradicts the chain is the one case where the remediation is
+ * *do not trust this publisher* rather than *download it again*. Everything else is `integrity`.
+ */
+function causeOf(findings: readonly SnapshotFinding[]): SnapshotRejectionCause {
+  if (findings.some((finding) => finding.screen === 'binding')) return 'wrong-chain';
+  if (findings.some((finding) => finding.screen === 'spot-check')) return 'chain-disagreement';
+  return 'integrity';
+}
+
+function reject(findings: readonly SnapshotFinding[]): RejectedSnapshot {
   return {
     kind: 'rejected',
-    refusal: providerRefusal(
-      'FE-PROV-003',
+    refusal: snapshotRefusal(
+      causeOf(findings),
       findings.map((finding) => `[${finding.screen}] ${finding.why}`).join('; '),
     ),
     findings,
+  };
+}
+
+/**
+ * Reject a document that passed the file screens and then failed a chain comparison.
+ *
+ * Exported because {@link spotCheckSnapshot} runs **after** admission — it is asynchronous and
+ * `admitSnapshot` is not — so the streamed importer needs to produce the same refusal shape
+ * from findings raised outside this function. It is the same `reject`, not a second one.
+ */
+export function rejectSnapshot(findings: readonly SnapshotFinding[]): RejectedSnapshot {
+  return reject(findings);
+}
+
+// ------------------------------------------------------- §8.4's deterministic spot re-derivation
+
+/**
+ * The most blocks one re-derivation pass will ask about before it **stops and says so**.
+ *
+ * ## It is a work ceiling, and it is not the check's bound
+ *
+ * §8.4 mandates re-derivation *"for the covered blocks that fall inside light-client-reachable
+ * depth"* — every one of them, and it names no number. What decides reachability is the client,
+ * so the pass asks the injected checker and stops when the checker says it has left the window
+ * (see {@link spotCheckSnapshot}). This constant exists only so a pass over a document covering
+ * millions of blocks terminates.
+ *
+ * ## Why the previous constant was a defect rather than a small number
+ *
+ * It was `SPOT_CHECK_MAX_BLOCKS = 128` and the pass simply **stopped** there, silently, and
+ * admitted the document. 10 §4.2 states that peers *"prune state at ~256 blocks by default"*, so
+ * a client whose window is the documented one could re-derive roughly twice as many blocks as the
+ * pass ever asked about — and a forgery in the 129th-newest reachable block was never handed to
+ * the checker at all. A truncation that reports nothing is worse than a smaller check: the
+ * report said `compared: 128`, `findings: []`, and the mint labelled the rows `sampled: true`.
+ *
+ * ## The value, derived rather than picked
+ *
+ * `2 × 256`, where 256 is the peer pruning depth 10 §4.2 names. Any client whose reachable depth
+ * is at most that pruning depth finishes its walk before the ceiling, so the ceiling never
+ * truncates a documented configuration.
+ *
+ * ## Reaching it is a **disclosure**, and it stopped being a refusal on 2026-08-06
+ *
+ * It refused until then, and that was the fixed blocker's own defect class with a narrower
+ * trigger. Two live configurations reach the ceiling with nothing wrong with the file: a device
+ * more than {@link SPOT_CHECK_BLOCK_CEILING} blocks **behind** the document's newest covered
+ * block, which answers `above-window` all the way down; and a document with more than that many
+ * **reachable** covered blocks, for which the refusal was *permanent* — the remedy copy said
+ * *"try again when this device has caught up"* and catching up changes nothing.
+ *
+ * §8.4 gives `FE-PROV-003` three causes — a content-hash pin mismatch, malformed encoding, a
+ * failed internal-consistency check — and *"this device ran out of asks"* is none of them; the
+ * bullet above them names the depth limit as **disclosed**. So the pass reports
+ * {@link SpotCheckReach} `'ceiling'`, raises no finding, and the mint refuses to badge the rows
+ * `sampled` — the same shape `window-floor` already had, which is why no new primitive was
+ * needed. Whether an unfinished re-derivation should instead refuse is PLAN.md · *Spec
+ * questions* SQ-811, and SQ-770 (is *spot* exhaustive or sampled) is upstream of both.
+ */
+export const SPOT_CHECK_BLOCK_CEILING = 2 * 256;
+
+/** What the document claims happened at one block, as the checker will compare it. */
+export interface SpotClaim {
+  readonly block: number;
+  /**
+   * Every movement the document places at this block, canonically projected, in chain order.
+   *
+   * **Empty is a claim too**, and it is the one that matters: a covered block with no
+   * movements is the document asserting that nothing happened there. A checker handed only
+   * the blocks that carry movements could never catch an omission, which is the forgery a
+   * publisher produces by *deleting* rather than by inventing.
+   */
+  readonly movements: readonly string[];
+}
+
+/**
+ * Which side of the light client's reachable window an unreachable block fell on.
+ *
+ * ## It is a field rather than a comment, because the two sides are different outcomes
+ *
+ * §8.4 scopes re-derivation to *"the covered blocks that fall inside light-client-reachable
+ * depth"* and states the rest as a **disclosed** limit rather than a refusal. So the walk has to
+ * tell two situations apart, and with one undirected `out-of-reach` it could not:
+ *
+ * - **`below-window`** — the walk has descended past the bottom of what this device can read. The
+ *   window is one contiguous interval at the head (10 §4.2), so every older covered block is
+ *   unreachable too and the set §8.4 mandates is **finished**. This is the blind spot: the
+ *   document is admitted, `compared` may legitimately be `0`, and no finding is raised.
+ * - **`above-window`** — the block is ahead of this device's own head, which a document published
+ *   by a better-synced client produces at the top of its coverage. The reachable blocks are
+ *   *below* it, so the walk keeps descending.
+ *
+ * Until 2026-08-06 the loop guessed the side from whether anything had been compared yet, and for
+ * the ordinary deep-history case — every covered block below the window, which is exactly what
+ * 10 §6.4 assigns snapshots (*"deep history beyond 30 days is the province of snapshots"*) — it
+ * guessed **above**: it spent the whole {@link SPOT_CHECK_BLOCK_CEILING} asking about blocks whose
+ * answer was already known, hit the ceiling, and **refused a valid document** as an unfinished
+ * check. A 216,000-block snapshot was rejected with `FE-PROV-003`, which §8.4 gives to three
+ * causes and *"this device did not finish"* is not one of them.
+ *
+ * The checker is this device's own code (see {@link SnapshotSpotCheck}) and never the publisher's,
+ * so taking the side from it is not trusting the source: a light client knows its own head and its
+ * own pinned window, and the answer is a fact about this device rather than about the file.
+ */
+export type OutOfReachSide = 'above-window' | 'below-window';
+
+/** The two sides, as a value, so the runtime check below cannot drift from the type. */
+const OUT_OF_REACH_SIDES: readonly OutOfReachSide[] = Object.freeze([
+  'above-window',
+  'below-window',
+]);
+
+/**
+ * Reject a side that is not one of the two — the one field the whole repair turns on.
+ *
+ * Its two neighbours in {@link chainSpotCheck} (`extrinsicIndex`, `eventIndex`) are hardened at
+ * runtime and this was not, which left the asymmetry backwards: an injected reader is untyped at
+ * the boundary, so an out-of-enum `where` arrived as data and every consumer's `=== 'below-window'`
+ * test answered `false` — reading it as `above-window`, which walks the whole document, spends
+ * the ceiling and admits with `compared: 0`. A silent misread that ends in **admission** is the
+ * direction R-7 does not allow, and the two indices already show what the boundary is worth.
+ *
+ * It throws rather than defaulting, for the reason `spotCheckSnapshot` throws on any checker
+ * failure: this is the client's own code misbehaving, and a pass that continued would report a
+ * smaller comparison than it attempted.
+ */
+function requireOutOfReachSide(where: OutOfReachSide, source: string): OutOfReachSide {
+  if (!OUT_OF_REACH_SIDES.includes(where)) {
+    throw new RangeError(
+      `${source} answered out-of-reach with side ${JSON.stringify(where)}, which is neither ` +
+        '"above-window" nor "below-window". The two sides end the walk differently and an ' +
+        'unrecognised one reads as above-window — which descends the whole document, spends the ' +
+        'ceiling and admits it having compared nothing',
+    );
+  }
+  return where;
+}
+
+export type SpotVerdict =
+  /** The chain agrees, movement for movement, in order. */
+  | { readonly kind: 'agrees' }
+  /** The chain says something else. `derived` is what this device read. */
+  | { readonly kind: 'disagrees'; readonly derived: readonly string[] }
+  /**
+   * Outside light-client-reachable depth (§8.4's own condition). Evidence of nothing.
+   *
+   * `where` is **required**, per {@link OutOfReachSide}: the two sides end the walk differently,
+   * and a checker allowed to omit it is a checker whose answer this module has to infer.
+   */
+  | { readonly kind: 'out-of-reach'; readonly where: OutOfReachSide };
+
+/**
+ * Re-derive one covered block from chain state.
+ *
+ * Injected, in the same shape {@link RowCheck} already uses and for the same structural reason:
+ * `packages/providers` may not open a chain connection (10 §4.1), so the module that decides
+ * **which** blocks to re-derive cannot be the module that knows **how**. It also keeps the
+ * comparison honest — the checker returns what *it* read, and this module never learns a way to
+ * produce a chain value of its own.
+ */
+export type SnapshotSpotCheck = (claim: SpotClaim) => Promise<SpotVerdict>;
+
+/**
+ * The brand that makes *"the chain comparison ran over this document"* unassertable.
+ *
+ * Declared here and **not exported**, exactly as {@link AdmittedSnapshot}'s is, and for a defect
+ * one layer along from the one that brand closed. `admitSnapshot` certifies the **synchronous
+ * file screens**; §8.4 additionally mandates a chain comparison, and until 2026-08-06 the mint
+ * took a plain `{ compared, outOfReach, findings }` object. So any holder of an admitted document
+ * could write `{ compared: 1, outOfReach: 0, findings: [] }` and mint rows badged `sampled: true`
+ * — a claim that this device compared a block against the chain, made by a caller that never
+ * did. The brand means the only way to obtain one is to have run {@link spotCheckSnapshot}.
+ */
+declare const SPOT_CHECKED: unique symbol;
+
+/**
+ * How a re-derivation pass ended — §8.4's blind spot as a stated fact, not one inferred from a
+ * count.
+ *
+ * A caller cannot read it off `compared` and `outOfReach`. **Four** situations produce
+ * `compared: 0`, and they are not the same outcome: a document entirely below this device's
+ * window (the ordinary deep-history case), a document entirely above this device's head (this
+ * device is behind), a pass that ran out of ceiling before it compared anything, and a document
+ * covering nothing at all. A screen that had to guess between them would be guessing about the
+ * one sentence §8.4 makes normative UI copy.
+ *
+ * The arm count is the point of the type. It had three arms and four producing situations until
+ * 2026-08-06: a document wholly above this device's head, smaller than the ceiling, asked about
+ * every covered block, compared none, raised no finding — and returned `whole-document`, whose
+ * own description said the walk *"ran out of document, not out of window"*. It had run out of
+ * both. A screen keying on `whole-document` to mean *fully re-derived* was therefore wrong for
+ * a pass that verified nothing, in the case a device that is merely behind produces.
+ */
+export type SpotCheckReach =
+  /**
+   * Every covered block was asked about **and at least one was compared** — the walk ran out of
+   * document, not out of window.
+   *
+   * The only arm that means *fully re-derived*, and the only one a screen may read that way.
+   */
+  | 'whole-document'
+  /**
+   * The walk reached the bottom of this device's reachable window. §8.4's disclosed blind spot:
+   * everything below is covered by the document and unreachable here, the mandated set is
+   * finished, and `SAMPLING_GUARANTEE` is the fixed copy a screen shows about the remainder.
+   */
+  | 'window-floor'
+  /**
+   * Every covered block was asked about, every one answered `above-window`, and **nothing was
+   * compared** — the whole document sits ahead of this device's own head.
+   *
+   * Its own arm rather than `window-floor`, though the mandated set is vacuously finished in
+   * both, because the two disclose opposite things to a user. `window-floor` is permanent: that
+   * history is below the window and no amount of syncing brings it back, so the second-producer
+   * diff is the only cross-check there will ever be. This one is **transient**: the device is
+   * behind, and the same document re-checked after a sync compares blocks. Merging them would
+   * tell somebody their device can never check this history when the truth is that it has not
+   * caught up yet.
+   */
+  | 'above-window-only'
+  /**
+   * {@link SPOT_CHECK_BLOCK_CEILING} stopped the walk first — a **disclosure**, not a refusal.
+   *
+   * The mandated set is genuinely unfinished, so the mint refuses to badge the rows `sampled`;
+   * the document is still admitted, because *"this device ran out of asks"* is not one of
+   * §8.4's three `FE-PROV-003` causes. See {@link SPOT_CHECK_BLOCK_CEILING}.
+   */
+  | 'ceiling';
+
+export interface SpotCheckReport {
+  /**
+   * The document this pass ran over — the **identity** of it, not a copy.
+   *
+   * Carried because the brand alone proves that *a* pass happened, not that it happened over
+   * *this* file: a caller holding two documents could otherwise spot-check the honest one and
+   * mint the forged one with its report. {@link mintSnapshotRows} compares by reference against
+   * the admitted document, which only `admitSnapshot` produces, so the two halves cannot be
+   * taken from different files.
+   */
+  readonly document: SnapshotDocument;
+  /** Blocks the chain actually answered for. */
+  readonly compared: number;
+  /**
+   * Blocks the pass asked about and the light client could not reach. Not a pass, not a failure.
+   *
+   * It counts what was **asked**, which is not the number of unreachable covered blocks: the
+   * walk stops at the first block *below* the reachable window (see {@link spotCheckSnapshot}), so
+   * a snapshot of deep history reports **one** here rather than millions.
+   */
+  readonly outOfReach: number;
+  /**
+   * Why the walk ended. The half of §8.4's honest-limit statement that is per document.
+   *
+   * A `window-floor` pass with `compared: 0` is a complete, successful check of an empty mandated
+   * set — the ordinary deep-history case — and it is the value a screen pairs with
+   * `SAMPLING_GUARANTEE` so the user is told what was *not* checked rather than left to read
+   * silence as verification. `above-window-only` and `ceiling` are the two other ways a pass
+   * ends having verified nothing, and each discloses something different; only `whole-document`
+   * may be read as *fully re-derived*.
+   */
+  readonly reach: SpotCheckReach;
+  readonly findings: readonly SnapshotFinding[];
+  readonly [SPOT_CHECKED]: true;
+}
+
+/**
+ * §8.4's *"deterministic spot re-derivation for the covered blocks that fall inside
+ * light-client-reachable depth"*.
+ *
+ * This is the one screen in this module that compares the document against **the chain** rather
+ * than against itself, and it is a named mitigation in 14 TH-50. Everything else here is
+ * internal consistency, which a competent forger satisfies by construction; a shallow forgery —
+ * one inside the window the client can still read — is precisely what internal consistency
+ * cannot see and this can.
+ *
+ * Two properties are load-bearing:
+ *
+ * 1. **The claim carries the block's whole movement list, including when it is empty.** A
+ *    checker asked *"is this movement real"* can only catch fabrication. Asked *"is this the
+ *    complete set at this block"* it catches deletion too, and deletion is the cheaper forgery:
+ *    a publisher who drops one `redeem` produces a document that replays, reconciles and pins
+ *    perfectly while overstating a holder's balance forever.
+ * 2. **`out-of-reach` is neither a pass nor a failure.** The report counts it separately, and a
+ *    caller that treated a wholly-out-of-reach pass as clean would be reporting §8.4's stated
+ *    blind spot as a verification result — which is the exact claim 10 §2.3 and TH-50 decline
+ *    to make.
+ *
+ * A checker that throws aborts the pass rather than being swallowed. That is the opposite of
+ * {@link runSamplingRound}'s rule and the difference is the adversary: there, the reference is
+ * *provider-supplied*, so a publisher can plant one that reliably errors and discard the round's
+ * findings; here the block numbers come from coverage this module already validated, so a throw
+ * is the client's own failure and continuing past it would report a smaller comparison than was
+ * attempted.
+ *
+ * ## Where the walk stops, and why the checker decides it
+ *
+ * The pass walks **downward from the newest covered block**, because the reachable window is at
+ * the head (10 §4.2). It stops at the first `below-window` answer — the window is one contiguous
+ * interval, so leaving it downward means every older covered block is unreachable too, and asking
+ * is spending the user's device on a question with a known answer. That stop is a **completed**
+ * pass: the set §8.4 mandates is *"the covered blocks that fall inside light-client-reachable
+ * depth"*, and there are no more of those.
+ *
+ * An `above-window` answer does **not** stop it, and that asymmetry is the case a simpler rule
+ * gets wrong: a document whose newest covered block is ahead of this device's head answers
+ * unreachable at the top, and a pass that stopped there would compare nothing while the blocks a
+ * few positions down are perfectly readable.
+ *
+ * **The side comes from the checker rather than from the walk's own history**, and that is the
+ * blocker this shape exists to close. Inferring it from *"have we compared anything yet"* reads
+ * the ordinary deep-history document — every covered block below the window, which 10 §6.4
+ * assigns to snapshots by design — as the *above* case: it descends through the whole ceiling,
+ * refuses, and returns `FE-PROV-003` on a valid file. See {@link OutOfReachSide}.
+ *
+ * {@link SPOT_CHECK_BLOCK_CEILING} bounds the work, and hitting it is **disclosed** rather than
+ * refused (2026-08-06 — see that constant for the two configurations that reach it with nothing
+ * wrong with the file). The pass reports `reach: 'ceiling'`, raises no finding, and
+ * {@link mintSnapshotRows} declines to badge the rows `sampled`: a check that stopped early is
+ * not evidence, and §8.4's three `FE-PROV-003` causes do not include one about this device.
+ * Reaching the window floor is different again — nothing was left unasked there.
+ */
+export async function spotCheckSnapshot(
+  document: SnapshotDocument,
+  check: SnapshotSpotCheck,
+  ceiling: number = SPOT_CHECK_BLOCK_CEILING,
+): Promise<SpotCheckReport> {
+  if (!Number.isInteger(ceiling) || ceiling < 1) {
+    throw new RangeError(`the block ceiling must be a positive integer, got ${ceiling}`);
+  }
+  const byBlock = new Map<number, string[]>();
+  for (const op of document.ops) {
+    const at = byBlock.get(op.block);
+    if (at === undefined) byBlock.set(op.block, [projectOp(op)]);
+    else at.push(projectOp(op));
+  }
+  const findings: SnapshotFinding[] = [];
+  let compared = 0;
+  let outOfReach = 0;
+  let asked = 0;
+  let reach: SpotCheckReach = 'whole-document';
+  for (const block of coveredBlocksNewestFirst(document.coverage)) {
+    if (asked === ceiling) {
+      reach = 'ceiling';
+      break;
+    }
+    asked += 1;
+    const verdict = await check({ block, movements: byBlock.get(block) ?? [] });
+    if (verdict.kind === 'out-of-reach') {
+      outOfReach += 1;
+      // The checker says which side, and the sides end the walk differently: below the window
+      // every older covered block is unreachable too, so the mandated set is finished; above it,
+      // the reachable blocks are further down. Never inferred — see `OutOfReachSide`. Validated
+      // rather than trusted: an out-of-enum value would fall through to `continue` and read as
+      // `above-window`, which walks the whole document and admits it having compared nothing.
+      if (requireOutOfReachSide(verdict.where, `the spot check at block ${block}`) === 'below-window') {
+        reach = 'window-floor';
+        break;
+      }
+      continue;
+    }
+    compared += 1;
+    if (verdict.kind === 'disagrees') {
+      findings.push({
+        screen: 'spot-check',
+        why:
+          `block ${block}: this device re-derived ${verdict.derived.length} movement(s) from the ` +
+          `chain and the snapshot states ${(byBlock.get(block) ?? []).length}. Chain: ` +
+          `${canonicalJson(verdict.derived)}; snapshot: ${canonicalJson(byBlock.get(block) ?? [])}`,
+      });
+    }
+  }
+  // The fourth situation, distinguished after the walk because only then is it a fact: the loop
+  // ran out of document, every answer was `above-window`, and nothing was compared. `ceiling` and
+  // `window-floor` are already set by the loop and are not overwritten here.
+  if (reach === 'whole-document' && compared === 0 && outOfReach > 0) {
+    reach = 'above-window-only';
+  }
+  // The one construction site of the brand — an assertion, because the phantom field has no
+  // runtime representation. The local is typed, so every other field is still checked.
+  const report: Omit<SpotCheckReport, typeof SPOT_CHECKED> = {
+    document,
+    compared,
+    outOfReach,
+    reach,
+    findings,
+  };
+  return report as SpotCheckReport;
+}
+
+/** Every covered block, newest first — the reachable window is at the top (§4.2). */
+function* coveredBlocksNewestFirst(coverage: readonly SnapshotRange[]): Generator<number> {
+  const descending = [...coverage].sort((a, b) => b.toBlock - a.toBlock);
+  for (const range of descending) {
+    for (let block = range.toBlock; block >= range.fromBlock; block -= 1) yield block;
+  }
+}
+
+/**
+ * One movement as **this device** observed it on chain, with the position that orders it.
+ *
+ * The two indices are §8.2's chain order — *"block, then extrinsic, then event"* — and they are
+ * here rather than in {@link SnapshotOp} because the *file* cannot carry them (`bleavit.snapshot.v1`
+ * discards them, PLAN.md · *Spec questions* SQ-840). That asymmetry is what makes this comparison
+ * strictly stronger than any file screen: within a block, the document's order must match the
+ * chain's for every block this device can reach.
+ */
+export interface ObservedMovement {
+  /** The extrinsic that produced it, in the block's own numbering. */
+  readonly extrinsicIndex: number;
+  /** Its position among that extrinsic's events. */
+  readonly eventIndex: number;
+  readonly op: SnapshotOp;
+}
+
+export type BlockMovements =
+  | { readonly kind: 'movements'; readonly observed: readonly ObservedMovement[] }
+  /**
+   * Outside light-client-reachable depth (§8.4's own condition). Evidence of nothing.
+   *
+   * The reader states **which side** ({@link OutOfReachSide}) because only it knows: it holds the
+   * head and the pinned window, and the walk above it must not re-derive that from a count.
+   */
+  | { readonly kind: 'out-of-reach'; readonly where: OutOfReachSide };
+
+/**
+ * Read one block's ledger movements from chain state and events. Injected, because this package
+ * may not open a chain connection (10 §4.1) and may not name the chain SDK.
+ */
+export type BlockMovementRead = (block: number) => Promise<BlockMovements>;
+
+/**
+ * The adapter: a {@link SnapshotSpotCheck} that derives a block's movement list from what this
+ * device read, and compares it against what the document claims.
+ *
+ * ## Why this exists at all
+ *
+ * The same finding that produced `chainRowCheck` one module over, in its snapshot form: §8.4's
+ * spot re-derivation is a named 14 TH-50 mitigation, `SnapshotSpotCheck` was injected, and every
+ * caller in the repository was a test closure. Nothing turned chain state into a `SpotVerdict`,
+ * so the mitigation could not have reached a chain and no suite could have noticed — the gated
+ * property is that a **forged snapshot produces** a disagreement, not that the importer behaves
+ * given one.
+ *
+ * ## What it derives, and what it refuses to guess
+ *
+ * The reader supplies observations; this derives the **list**. Three rules, each of which the
+ * obvious implementation gets wrong in a way that reads as correct:
+ *
+ * 1. **Chain order is imposed here**, by sorting on `(extrinsicIndex, eventIndex)`. A reader that
+ *    returns events in the order a decoder happened to walk them would otherwise make an honest
+ *    document look reordered — and the comparison is order-sensitive because the replay is.
+ * 2. **Two observations at one position throw.** They cannot both be true, no tie-break here can
+ *    be right, and `app/tools/snapshot` refuses the identical shape on the producing side.
+ * 3. **An observation about another block throws.** It is the client's own defect, and the
+ *    projection includes the block number, so silently comparing it would surface as a
+ *    disagreement blamed on the publisher.
+ *
+ * A throw aborts the pass, per {@link spotCheckSnapshot}'s rule: these are this device's failures,
+ * and a pass that swallowed them would report a smaller comparison than it attempted.
+ *
+ * The projection is the **shared** {@link projectOp}, so this and the two-snapshot diff compare
+ * the same thing against their two different oracles.
+ */
+export function chainSpotCheck(read: BlockMovementRead): SnapshotSpotCheck {
+  return async (claim: SpotClaim): Promise<SpotVerdict> => {
+    const result = await read(claim.block);
+    // The side is carried through, never re-decided here: this adapter holds no head and no
+    // window, so any rule it applied would be a guess dressed as a derivation. Carried is not
+    // the same as trusted — it is validated against the union, exactly as the two indices below
+    // are validated, because it is the one field the whole repair turns on.
+    if (result.kind === 'out-of-reach') {
+      return {
+        kind: 'out-of-reach',
+        where: requireOutOfReachSide(
+          result.where,
+          `this device's block-movement reader at block ${claim.block}`,
+        ),
+      };
+    }
+    const seen = new Set<string>();
+    for (const movement of result.observed) {
+      if (!Number.isInteger(movement.extrinsicIndex) || movement.extrinsicIndex < 0) {
+        throw new RangeError(`an observed movement's extrinsic index must be a non-negative integer`);
+      }
+      if (!Number.isInteger(movement.eventIndex) || movement.eventIndex < 0) {
+        throw new RangeError(`an observed movement's event index must be a non-negative integer`);
+      }
+      if (movement.op.block !== claim.block) {
+        throw new RangeError(
+          `this device read a movement at block ${movement.op.block} while re-deriving block ` +
+            `${claim.block}; a movement carries the block it happened in and these disagree`,
+        );
+      }
+      const position = `${movement.extrinsicIndex}:${movement.eventIndex}`;
+      if (seen.has(position)) {
+        throw new RangeError(
+          `two movements were read at block ${claim.block} extrinsic ${movement.extrinsicIndex} ` +
+            `event ${movement.eventIndex}; one chain position holds one event and no tie-break ` +
+            'between them can be right',
+        );
+      }
+      seen.add(position);
+    }
+    const derived = [...result.observed]
+      .sort(
+        (left, right) =>
+          left.extrinsicIndex - right.extrinsicIndex || left.eventIndex - right.eventIndex,
+      )
+      .map((movement) => projectOp(movement.op));
+    const agrees =
+      derived.length === claim.movements.length &&
+      derived.every((movement, at) => movement === claim.movements[at]);
+    return agrees ? { kind: 'agrees' } : { kind: 'disagrees', derived };
   };
 }
 
@@ -919,13 +1613,43 @@ export interface SnapshotDisagreement {
 }
 
 export type DiffVerdict =
+  /** Jointly observed history was compared, and every movement matched. */
   | { readonly kind: 'agree'; readonly overlap: readonly SnapshotRange[] }
+  /**
+   * **Nothing was compared**, because the two documents share no covered block.
+   *
+   * Its own discriminant rather than an `agree` with an empty overlap, which is what this
+   * returned until 2026-08-06. The empty array was there and carried the whole fact, and a
+   * caller writing the obvious `if (verdict.kind === 'agree') showCrossChecked()` — the shape
+   * every other verdict in this package invites — turns two producers who have never covered
+   * one block into a cross-check that passed. §8.4 offers the two-snapshot diff as *"the only
+   * available cross-check"* for depth; reporting a vacuous one as agreement manufactures
+   * exactly the confidence it declines to offer, in the case where a forger picks the ranges.
+   */
+  | { readonly kind: 'no-overlap' }
   | {
       readonly kind: 'disagree';
       readonly refusal: ProviderRefusal;
       readonly overlap: readonly SnapshotRange[];
       readonly disagreements: readonly SnapshotDisagreement[];
     };
+
+/**
+ * One movement, canonically projected for comparison.
+ *
+ * Shared by the two-snapshot diff and {@link spotCheckSnapshot} deliberately: they compare the
+ * same thing against different oracles — a second producer, and the chain — and two projections
+ * would let a movement that differs by a field one of them omits read as equal to one of them.
+ */
+export function projectOp(op: SnapshotOp): string {
+  return canonicalJson(
+    op.kind === 'redeem'
+      ? [op.block, op.kind, op.vault, op.account, op.branch, op.amount]
+      : op.kind === 'transfer'
+        ? [op.block, op.kind, op.vault, op.account, op.to, op.branch, op.amount]
+        : [op.block, op.kind, op.vault, op.account, op.amount],
+  );
+}
 
 /**
  * The blocks **both** documents claim to have observed.
@@ -961,9 +1685,10 @@ function coverageIntersection(
  * publisher already enabled — would be manufacturing exactly the confidence §8.4 declines to
  * offer. So a disagreement leaves the disputed range as a labelled hole.
  *
- * Two snapshots with **no shared coverage** agree *vacuously*, reported as an empty overlap
- * rather than as a clean bill: two producers covering disjoint history have not cross-checked
- * anything, and "agree" with nothing compared is the shape a user reads as confirmation.
+ * Two snapshots with **no shared coverage** are reported as `no-overlap`, a third discriminant
+ * rather than an `agree` carrying an empty overlap array: two producers covering disjoint
+ * history have not cross-checked anything, and "agree" with nothing compared is the shape a
+ * user reads as confirmation.
  *
  * **The comparison is over ordered sequences, not a keyed map.** One account may perform the
  * same operation on the same vault twice in one block, and a map keyed by the movement's
@@ -975,21 +1700,11 @@ function coverageIntersection(
  */
 export function diffSnapshots(left: SnapshotDocument, right: SnapshotDocument): DiffVerdict {
   const overlap = coverageIntersection(left.coverage, right.coverage);
-  if (overlap.length === 0) return { kind: 'agree', overlap };
+  if (overlap.length === 0) return { kind: 'no-overlap' };
   const covered = (block: number): boolean =>
     overlap.some((range) => block >= range.fromBlock && block <= range.toBlock);
   const project = (document: SnapshotDocument): readonly string[] =>
-    document.ops
-      .filter((op) => covered(op.block))
-      .map((op) =>
-        canonicalJson(
-          op.kind === 'redeem'
-            ? [op.block, op.kind, op.vault, op.account, op.branch, op.amount]
-            : op.kind === 'transfer'
-              ? [op.block, op.kind, op.vault, op.account, op.to, op.branch, op.amount]
-              : [op.block, op.kind, op.vault, op.account, op.amount],
-        ),
-      );
+    document.ops.filter((op) => covered(op.block)).map(projectOp);
   const leftRows = project(left);
   const rightRows = project(right);
   const disagreements: SnapshotDisagreement[] = [];

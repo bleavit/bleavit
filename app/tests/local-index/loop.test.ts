@@ -20,10 +20,13 @@ import assert from 'node:assert/strict';
 import {
   EMPTY_COVERAGE,
   IngestLoopError,
+  addRange,
   ingestBlock,
   isVerifiedAt,
+  providerRange,
   runIngest,
 } from '@bleavit/local-index';
+import { selfRange } from '@bleavit/local-index/testing';
 import { nth } from './nth.ts';
 import type {
   BlockWrite,
@@ -40,11 +43,20 @@ const SELF: HeaderSource = { origin: 'self' };
 const OPERATOR: HeaderSource = { origin: 'operator', providerId: 'op-1' };
 
 
+const GENESIS = `0x${'a1'.repeat(32)}`;
+/** §6.3's hash-at-edge, varying with the block so an edge comparison can actually fail. */
+const blockHash = (n: number): string => `0x${n.toString(16).padStart(64, '0')}`;
+
 const scan = (
   number: number,
   { count = 2, watched = false }: { count?: number | undefined; watched?: boolean } = {},
 ): FinalizedBlockScan => ({
   number,
+  hash: blockHash(number),
+  specVersion: 3,
+  // 10 §9.2's buckets are aligned to the block's own instant, so the fixture derives one from
+  // the block rather than reading a clock: 6 s blocks, which is 02 §9's block time.
+  blockTimestampMs: number * 6_000,
   extrinsicCount: count,
   events: watched
     ? [
@@ -62,6 +74,10 @@ const ports = (over: Partial<LoopPorts> = {}): LoopPorts => ({
   fetchBodies: async () => [new Uint8Array([0]), new Uint8Array([1])],
   write: async () => {},
   now: () => 1_000,
+  genesisHash: GENESIS,
+  // *Cannot say* is the default, and it is the fail-safe answer: a client that cannot reach
+  // the chain keeps every range rather than emptying the index whenever the network is poor.
+  observeEdge: () => undefined,
   ...over,
 });
 
@@ -220,6 +236,9 @@ test('a scan with NO declared count still ingests — and the body becomes the a
   // a count, so `bodies.length !== undefined` (always true) was never evaluated.
   const noCount: FinalizedBlockScan = {
     number: 200,
+    hash: blockHash(200),
+    specVersion: 3,
+    blockTimestampMs: 1200000,
     events: [
       { phase: { kind: 'apply-extrinsic', index: 1 }, pallet: 'Balances', name: 'Transfer', accounts: ['alice'] },
     ],
@@ -236,6 +255,9 @@ test('an index beyond the FETCHED body is refused even with no declared count', 
   // making the count optional would have deleted the control rather than relocated it.
   const noCount: FinalizedBlockScan = {
     number: 201,
+    hash: blockHash(201),
+    specVersion: 3,
+    blockTimestampMs: 1206000,
     events: [
       { phase: { kind: 'apply-extrinsic', index: 7 }, pallet: 'Balances', name: 'Transfer', accounts: ['alice'] },
     ],
@@ -258,6 +280,9 @@ test('the index guard is >=, not > — index N against N extrinsics is out of ra
   // throwing.
   const atBoundary: FinalizedBlockScan = {
     number: 202,
+    hash: blockHash(202),
+    specVersion: 3,
+    blockTimestampMs: 1212000,
     events: [
       { phase: { kind: 'apply-extrinsic', index: 2 }, pallet: 'Balances', name: 'Transfer', accounts: ['alice'] },
     ],
@@ -271,10 +296,65 @@ test('the index guard is >=, not > — index N against N extrinsics is out of ra
   // way — which would silently drop the last extrinsic of every block.
   const lastValid: FinalizedBlockScan = {
     number: 203,
+    hash: blockHash(203),
+    specVersion: 3,
+    blockTimestampMs: 1218000,
     events: [
       { phase: { kind: 'apply-extrinsic', index: 1 }, pallet: 'Balances', name: 'Transfer', accounts: ['alice'] },
     ],
   };
   const ok = await ingestBlock(EMPTY_COVERAGE, lastValid, WATCHED, SELF, ports());
   assert.equal(ok.rowCount, 1);
+});
+
+test('the run reports the ranges nothing could CHECK, not only the ones it dropped', async () => {
+  // §6.3's last bullet is what decides what an absent report means: *"a caller is handed such
+  // ranges as the set that could not be checked … so a range that appears in neither the
+  // invalidated nor the unchecked set is one that genuinely passed."* `verifyRanges` computes
+  // both sets and `RunResult` carried only the first, so on the path that runs **every session** a
+  // provider range read to its caller as one the chain had agreed with.
+  //
+  // It is not an edge case. Since the `unverifiable` edge arm landed, a provider range is
+  // checkable for genesis and for nothing else, so **every** provider range verdicts `unchecked`
+  // by construction. `checkIndexAtBoot` forwarded it all along, which is the part worth naming:
+  // the boot report told the truth while the per-session path did not, about the same coverage.
+  const imported = providerRange('snapshot', 'pub-1', 1, 10, 1, {
+    kind: 'unverifiable',
+    genesisHash: GENESIS,
+    why: 'imported from a snapshot file, which carries no block hash',
+  });
+  const verified = selfRange(20, 30, 1, {
+    kind: 'checked',
+    genesisHash: GENESIS,
+    hash: blockHash(30),
+    specVersion: 3,
+  });
+  const coverage = addRange(addRange(EMPTY_COVERAGE, verified), imported);
+
+  const run = await runIngest(coverage, [scan(100)], WATCHED, SELF, ports({
+    // A chain that answers: the self range is genuinely checked and agrees, so it must appear in
+    // neither list. Without this arm the assertion below passes for the wrong reason — every
+    // range is unchecked when nothing can be observed.
+    observeEdge: (range) => ({ genesisHash: GENESIS, hash: blockHash(range.toBlock), specVersion: 3 }),
+  }));
+
+  assert.deepEqual([...run.invalidated], [], 'nothing disagreed, so nothing may be invalidated');
+  assert.equal(run.unchecked.length, 1, 'the provider range is in neither list, so it reads as passed');
+  assert.equal(nth(run.unchecked, 0, 'range').origin, 'snapshot');
+  assert.equal(
+    run.unchecked.some((range) => range.origin === 'self'),
+    false,
+    'a range the chain agreed with was reported as unchecked, which is the other wrong answer',
+  );
+
+  // ...and on the failure path too. A run that stops mid-way still made the checks before its
+  // first block, and a caller that learns nothing about them from a failed run is the same
+  // silence one branch over.
+  const stopped = await runIngest(coverage, [scan(101, { watched: true })], WATCHED, SELF, ports({
+    observeEdge: (range) => ({ genesisHash: GENESIS, hash: blockHash(range.toBlock), specVersion: 3 }),
+    fetchBodies: async () => { throw new Error('peer disconnected'); },
+  }));
+  assert.ok(stopped.stoppedAt instanceof IngestLoopError);
+  assert.equal(stopped.unchecked.length, 1, 'the failure path dropped the unchecked set');
+  assert.equal(nth(stopped.unchecked, 0, 'range').origin, 'snapshot');
 });

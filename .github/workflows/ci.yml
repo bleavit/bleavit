@@ -120,11 +120,29 @@ jobs:
         run: python3 tools/ci/check-plan-tables.py
       - name: Check spec-question batch index
         run: python3 tools/ci/check-spec-question-batches.py
+      - name: Unreadable client obligations expire with their spec question
+        # `rows.ts` declares the §11.8 reads 02 freezes no surface for, and a `blocking`
+        # entry CLOSES an operator control. The file said those declarations expire "by
+        # the row closing, not by somebody remembering to delete a comment" and nothing
+        # checked it: contract v28 resolved SQ-615/616/619 and three entries stayed, so
+        # the guardian console, the upgrade crank and the registry challenge panel could
+        # not be opened at all — and a screen that can never open is one nothing has
+        # exercised, so its suite had settled for asserting the refusal.
+        run: python3 tools/ci/check-unreadable-obligations.py
       - name: Dispatch-check mirror — 09 §1.2 ↔ 11 §11.5 (15 §4.8)
         # Both documents mandated this diff and both credited it to doc 15, which
         # mandated nothing (SQ-552). It must fail on a frontend precondition with no
         # backend check behind it — a client refusing an action the runtime accepts.
         run: python3 tools/ci/check-dispatch-mirror.py
+      - name: Execute reason codes — the client's names are the runtime's (11 §11.5)
+        # The dispatch mirror binds two documents; this binds the client's `ExecuteErrorCode`
+        # table to `pallet_execution_guard::Error<T>`. §11.5 requires each failure to block
+        # "with the same reason code the runtime would return", and four of the client's
+        # codes were names the runtime has never returned — `MeterExceeded` for
+        # `MetersBlocked`, `NotQueued` for `NotFound`/`Cancelled`, `VersionMismatch` for
+        # `StaleQueue`, and `GateSuspended` for `GuardianHold`. Renaming a union member
+        # together with its use site compiles cleanly, so `tsc` cannot see this.
+        run: python3 tools/ci/check-execute-error-codes.py
       - name: Client surface obligations — every 10/11 read names a frozen 02 surface
         # The inverse of every other surface gate. `check-chain-feed.py`, `surface:check`
         # and `test:mock-runtime` all verify that what IS declared agrees with the
@@ -605,6 +623,19 @@ jobs:
         working-directory: app
         run: pnpm run check:budget
 
+      - name: Budget-gate statistics and emitted-artifact bindings (10 §9.4)
+        # The two §9.4 gates whose defect could not be a wrong number. The render row
+        # publishes p50 AND p95 and the gate compared a three-run median against both, so
+        # one run in three could sit far over the hard-fail threshold with CI green; the
+        # chain-spec row budgets what a browser lazily fetches and the gate weighed the
+        # SOURCE paths, which no step ever copied into the bundle. Neither is visible to a
+        # threshold-binding checker — `check-frontend-budgets.py` proved both gates carried
+        # the published numbers, which they did. This suite drives the statistics on samples
+        # a Lighthouse run cannot be made to produce, and the chain-spec bindings over
+        # release trees it builds in a temp directory.
+        working-directory: app
+        run: pnpm run test:budgets
+
       - name: Foreign-chain feed vs the pinned Asset Hub runtime (02 §7.7, F4)
         # `check-chain-feed.py` cannot do this job: it reads metadata v15 obtained by
         # booting the runtime in `bleavit-node`, and a foreign runtime has neither the
@@ -646,6 +677,23 @@ jobs:
         # available, so the boundary has to survive to be rendered.
         working-directory: app
         run: pnpm run test:local-index
+
+      - name: No chart tier is readable as bare rows (10 §6.3, INV-FE-15)
+        # 10 §6.3: "Every history query returns data plus the coverage it came from — a
+        # CoveredResult<T>, never bare rows, because bare rows render as a complete
+        # series." That sentence was violated three review rounds running and every repair
+        # was a function nothing was obliged to call, because `db.candles1h.toArray()`
+        # typechecks, needs no cast, crosses no firewall edge and returns an array that
+        # looks exactly like a complete history. So the convention is made structural:
+        # outside `local-index` a chart tier may not be named at all, and inside it a
+        # reference must sit in a `coveredQuery(...)` or in one of two named modules that
+        # answer no history question (the §9.2 ladder and the §9.1 scan-time aggregate).
+        # AST-based, so a tier named in a comment, a string body or a type declaration is
+        # not a property access. The witness leg reads one fixture under both rules and
+        # requires the covered-read control to stay silent under the second — an exemption
+        # widened to "anything in the package" would otherwise pass every expectation.
+        working-directory: app
+        run: pnpm run check:covered-history && pnpm run check:covered-history:witness
 
       - name: Ingest scanner — the chain-client/local-index join (10 §6.5, F8)
         # The one module that turns a decoded `System.Events` blob into a
@@ -719,6 +767,25 @@ jobs:
         working-directory: app
         run: pnpm run check:render-provenance && pnpm run check:render-provenance:witness
 
+      - name: No VerificationStatus constructed outside the modules that own it (10 §2.1, §2.2)
+        # The construction gate, and it is the complement of the two above rather than a
+        # third spelling of them. `check:casts` matches `as Finalized<...>`; the render gate
+        # matches an object literal whose `status` initializer is a `.status` access. A status
+        # written out field by field is neither — it is not an assertion, it produces only a
+        # `Verified<T>`, and it compiles. All three controls were green over a helper copied
+        # into four modules, six of whose call sites badged something no read produced.
+        #
+        # The badge on screen is read off `status.kind` and `Verified<T>` carries no brand, so
+        # writing that discriminant is a complete provenance claim. `kind` is the discriminant
+        # of a closed union, which is what makes a rule over that one position complete —
+        # and what keeps it silent on comparisons, `switch` arms and type declarations.
+        #
+        # The witness leg is not optional: it requires a firing per declared line across all
+        # six statuses, and requires the negative controls to stay silent, because a gate that
+        # can only catch `verified-finalized` leaves the other five mintable.
+        working-directory: app
+        run: pnpm run check:provenance-mints && pnpm run check:provenance-mints:witness
+
       - name: No markup or code sinks anywhere in app source (11 §11.8.1)
         # Evidence is bytes an adversary chose, displayed inside the console operated by the
         # system's most privileged actors; 10 §13.2's imported documents are the same shape
@@ -754,6 +821,66 @@ jobs:
           # "bundle-size CI gate" since the reviewed design while no such gate
           # existed. Same step for the same reason as the line above.
           pnpm run check:bundle-budget
+          # 10 §9.4's two lazy-artifact size rows. The metadata half weighs the
+          # committed per-spec_version blobs an FE-P5 fallback would carry, against
+          # both §9.4's combined size and §9.3's blob count, and re-measures §9.3's
+          # own published blob figures. The chain-spec half weighs `dist/chain-specs/`
+          # — the EMITTED tree, which is why it lives in this step and not beside the
+          # source-tree gates: a declared source path is what the release is built
+          # from and a browser fetches none of it, so a release could pin a hash,
+          # name a file, be weighed and ship no chain spec at all. Declaration and
+          # emission are now bound in both directions, and every pinned role must be
+          # matched by an emitted file by SHA-256 — the comparison the client makes
+          # at boot. No spec is declared today, so that half additionally requires
+          # the readiness blocker to stand and the emitted tree to carry none either.
+          # The witness leg refuses a release for each of those bindings and admits a
+          # consistent one, so it cannot be satisfied by a checker that refuses
+          # everything.
+          pnpm run check:artifact-budget
+          pnpm run check:artifact-budget:witness
+          # 10 §9.4's first-meaningful-render row — Lighthouse over the tree the
+          # first line emitted, on §9.4's own reference hardware. Same step for
+          # the same reason. Chrome comes from the runner image (Google Chrome is
+          # preinstalled on ubuntu-24.04, verified against the image manifest,
+          # V-180); the gate FAILS rather than skipping when it cannot start one,
+          # because a skipped measurement is an unenforced budget. The witness is one
+          # further run against a 1 ms threshold that MUST be refused — the only thing
+          # that distinguishes a gate which measured and passed from one that stopped
+          # comparing, since both print the same green line.
+          pnpm run check:render-budget
+          pnpm run check:render-budget:witness
+          # F22, in the same step and for the same reason. The desktop shell embeds
+          # `dist/` and the assertion is that what it embeds IS the attested tree, so
+          # this reads the tree the two lines above just produced, against the
+          # `release.json` they just wrote. Three directions, and the third is the one a
+          # manifest-driven loop cannot see: a file in the tree that nothing signed.
+          # It also checks the shell's own configuration, because a byte-identity claim
+          # about `dist/` says nothing if the shell is set up to rewrite what it embeds —
+          # and a configured Tauri CSP does exactly that, re-serialising every embedded
+          # HTML file at build time.
+          pnpm run check:embedded-tree
+          # The witness leg is not ceremony here, it is the reason the gate is worth
+          # anything. Its first version passed with the self-check replaced by a
+          # hardcoded clean verdict, because 12 §1.2's publishability gate ran first and
+          # threw on every mutation — so the comparison this milestone is about was
+          # unreachable under a fully green run. It now requires each mutation to come
+          # back as an ENUMERATED FINDING of the right kind, which a throw cannot satisfy.
+          pnpm run check:embedded-tree:witness
+
+      - name: Platform adapter and the capability lattice (F22, app-code rule 10; 10 §10.1)
+        # The fail-closed lattice: an unproven capability is ABSENT and absence carries the
+        # sentence the dependent surface renders, never a boolean and never a silent
+        # fallback. Also the differential half of the embedded-tree assertion — the same
+        # corpus this suite reads is read in place by `crates/embedded-tree`'s own tests, so
+        # the build-time comparison and the one the shipped binary runs cannot drift apart.
+        # And the two deliberate RESTATEMENTS in `packages/platform` are bound here:
+        # `AttestationFinding` against `verify`'s `SelfCheckFinding`, and
+        # `transportCapabilities` against `llm-handoff`'s `TransportCapabilities`. Both are
+        # restated rather than imported because 10 §10.2 keeps `verify` and the handoff
+        # packages out of the tx unit's reference set, and a restatement nothing checks is
+        # two declarations drifting quietly.
+        working-directory: app
+        run: pnpm run test:platform
 
       - name: Release suite (12 §1, §5.2–§5.3; F11/F13)
         working-directory: app
@@ -785,6 +912,98 @@ jobs:
       - name: ...and the witness, because a checker that cannot fail reports success
         working-directory: app
         run: pnpm run check:smoldot-surface:witness
+
+  # F22 — the desktop shell's own cargo workspace (10 §10.1; 12 §1).
+  #
+  # A separate job, not extra steps on `app`, because it needs a Rust toolchain and the
+  # Tauri Linux system libraries and the `app` job needs neither. It is also a separate
+  # *workspace*: `app/Cargo.toml` is excluded from the repository root one so the Tauri
+  # dependency tree can never perturb the runtime's `=`-exact `polkadot-stable2606` pins
+  # (app-code rule 15), and the `rust` job above therefore never compiles any of this.
+  desktop-shell:
+    name: Desktop shell (F22)
+    runs-on: ubuntu-latest
+    env:
+      CARGO_INCREMENTAL: 0
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: app/.nvmrc
+      - name: Enable corepack (pnpm pin comes from packageManager)
+        working-directory: app
+        run: corepack enable && corepack install
+      - name: Install (frozen lockfile)
+        working-directory: app
+        run: pnpm install --frozen-lockfile
+      - name: Build the workspace project graph
+        # `release:build` runs Vite over `src/application`, whose imports resolve through
+        # each package's `dist/`. The `app` job gets those for free because it runs the
+        # whole suite first; this job does not, and a missing `dist/` surfaces as
+        # "Rolldown failed to resolve import" rather than as a missing build step.
+        working-directory: app
+        run: pnpm run build
+      - name: Build the attested release tree
+        # Not a convenience. `src-tauri/build.rs` compiles `release-out/release.json` in and
+        # panics with the command that produces it when it is absent, so **the desktop shell
+        # cannot be built without the attested release tree** — which is the property the
+        # milestone is about, expressed as a build dependency rather than a rule to remember.
+        working-directory: app
+        run: pnpm run release:build
+      - name: Install Tauri's Linux system libraries
+        # webkit2gtk 4.1 + GTK3 + libsoup3 are what `tauri`/`wry` link against on Linux.
+        # Pinned to the 4.1 line because Tauri 2 dropped 4.0 (01 §9 pins Tauri 2.x).
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            librsvg2-dev libsoup-3.0-dev patchelf
+      - uses: dtolnay/rust-toolchain@1.89.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app
+      - name: Formatting
+        working-directory: app
+        run: cargo fmt --all -- --check
+      - name: Clippy (warnings are errors)
+        working-directory: app
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: The startup assertion and its differential corpus
+        # `crates/embedded-tree` is deliberately pure — no Tauri, no window, no system
+        # library — because the comparison that decides whether the shell may start is the
+        # part that must be testable anywhere. Its corpus is
+        # `fixtures/self-check-cases.json`, read IN PLACE by these tests and by
+        # `app/tests/platform/embedded-tree.test.ts`, so the two implementations of one
+        # comparison cannot drift: a divergence turns one of them red.
+        working-directory: app
+        run: cargo test --workspace --locked
+      - name: The shell links, with the release tree embedded
+        working-directory: app
+        run: cargo build --locked -p bleavit-desktop
+      - name: ...and does not, without it
+        # The negative control for the build dependency above. A gate that only ever sees
+        # the release tree present cannot tell whether it is required; measured here by
+        # removing it and requiring the build to fail. `mv` rather than `rm`, so a later
+        # step on this runner still has the tree if one is ever added.
+        working-directory: app
+        run: |
+          set -euo pipefail
+          mv release-out ../release-out.stashed
+          if cargo build --locked -p bleavit-desktop 2> build-without-release.log; then
+            mv ../release-out.stashed release-out
+            echo "FAIL: the desktop shell built with no attested release tree to embed" >&2
+            exit 1
+          fi
+          mv ../release-out.stashed release-out
+          grep -q 'release:build' build-without-release.log || {
+            echo "FAIL: the build failed, but not with the message naming how to fix it" >&2
+            cat build-without-release.log >&2
+            exit 1
+          }
+          rm -f build-without-release.log
+          echo "the shell cannot be built without the attested release tree"
 
   environments:
     name: Environment definitions

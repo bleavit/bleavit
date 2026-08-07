@@ -20,12 +20,14 @@ import {
   CoverageError,
   EMPTY_COVERAGE,
   addRange,
+  asSharedCoverageRange,
+  boundarySet,
   holesIn,
   invalidateRange,
   isVerifiedAt,
   providerRange,
 } from '@bleavit/local-index';
-import type { Coverage, CoverageRange } from '@bleavit/local-index';
+import type { CoverageRange, CoverageRef, RangeEdge } from '@bleavit/local-index';
 // `selfRange` is test-only on purpose — see packages/local-index/src/testing.ts. Going
 // through it rather than writing `{ origin: 'self' }` here is not ceremony: the `self`
 // brand has no runtime representation, so an object literal is the exact capability the
@@ -46,16 +48,34 @@ import { selfRange } from '@bleavit/local-index/testing';
 const asRange = (record: Record<string, unknown>): CoverageRange => record as CoverageRange;
 
 /** The nth range, or a throw naming how many there were. */
-const rangeAt = (coverage: Coverage, n: number): CoverageRange => {
+const rangeAt = (coverage: CoverageRef, n: number): CoverageRange => {
   const range = coverage.ranges[n];
   if (range === undefined) throw new Error(`coverage holds ${coverage.ranges.length} range(s), not ${n + 1}`);
   return range;
 };
 
+/**
+ * §6.3's per-range edge facts. One chain for every range in this file, because
+ * `assertCanonical` refuses a coverage set spanning two genesis hashes — a set holding rows
+ * from two chains is the cross-chain contamination §7's database naming exists to prevent,
+ * arriving through an import instead of a shared database.
+ *
+ * The hash varies with the range's `toBlock` so a joined range's edge is checkable: keeping one
+ * hash for every block would make every edge comparison pass, which is the vacuous form of the
+ * check `verifyRange` exists to perform.
+ */
+export const GENESIS = `0x${'a1'.repeat(32)}`;
+export const edgeAt = (toBlock: number, specVersion = 3): RangeEdge => ({
+  kind: 'checked',
+  genesisHash: GENESIS,
+  hash: `0x${toBlock.toString(16).padStart(64, '0')}`,
+  specVersion,
+});
+
 const self = (fromBlock: number, toBlock: number, ingestedAt = 1): CoverageRange =>
-  selfRange(fromBlock, toBlock, ingestedAt);
+  selfRange(fromBlock, toBlock, ingestedAt, edgeAt(toBlock));
 const op = (fromBlock: number, toBlock: number, providerId = 'op-1', ingestedAt = 1): CoverageRange =>
-  providerRange('operator', providerId, fromBlock, toBlock, ingestedAt);
+  providerRange('operator', providerId, fromBlock, toBlock, ingestedAt, edgeAt(toBlock));
 
 test('same-provenance adjacent ranges join', () => {
   const c = addRange(addRange(EMPTY_COVERAGE, self(1, 10)), self(11, 20));
@@ -136,7 +156,7 @@ test('holesIn respects an explicit span wider than the ranges', () => {
 test('an unattributable range is refused', () => {
   // A non-`self` range with no provider is exactly the one a later reader would be
   // tempted to treat as verified.
-  assert.throws(() => addRange(EMPTY_COVERAGE, asRange({ fromBlock: 1, toBlock: 2, origin: 'operator', ingestedAt: 1 })), CoverageError);
+  assert.throws(() => addRange(EMPTY_COVERAGE, asRange({ fromBlock: 1, toBlock: 2, origin: 'operator', ingestedAt: 1, edge: edgeAt(2) })), CoverageError);
   assert.throws(() => addRange(EMPTY_COVERAGE, asRange({ ...self(1, 2), providerId: 'x' })), CoverageError);
 });
 
@@ -229,7 +249,7 @@ test('non-canonical coverage is refused rather than silently carried forward', (
   const touching = { ranges: [self(1, 10), self(11, 20)], holes: [] };
   assert.throws(() => addRange(touching, self(100, 110)), CoverageError);
 
-  const malformed = { ranges: [asRange({ fromBlock: 10, toBlock: 1, origin: 'self', ingestedAt: 1 })], holes: [] };
+  const malformed = { ranges: [asRange({ fromBlock: 10, toBlock: 1, origin: 'self', ingestedAt: 1, edge: edgeAt(1) })], holes: [] };
   assert.throws(() => addRange(malformed, self(100, 110)), CoverageError);
 });
 
@@ -270,7 +290,7 @@ test('holesIn refuses a malformed RANGE, not only a malformed span', () => {
   // The same fail-open one argument over: an inverted range covers nothing, the cursor
   // arithmetic steps straight over it, and the answer is `[]` — which means complete
   // coverage. Guarding only the span left this reachable.
-  const inverted = asRange({ fromBlock: 100, toBlock: 50, origin: 'self', ingestedAt: 1 });
+  const inverted = asRange({ fromBlock: 100, toBlock: 50, origin: 'self', ingestedAt: 1, edge: edgeAt(50) });
   assert.throws(() => holesIn([inverted]), CoverageError);
   assert.throws(() => holesIn([inverted], { fromBlock: 1, toBlock: 100 }), CoverageError);
 });
@@ -279,15 +299,15 @@ test('an unknown origin is refused rather than treated as provider data', () => 
   // `isVerifiedAt` asks whether the origin is `self`, so any other string reads as
   // "provider data" and is retained under a label 10 §6.2 does not define.
   assert.throws(
-    () => addRange(EMPTY_COVERAGE, asRange({ fromBlock: 1, toBlock: 5, origin: 'rpc', providerId: 'p', ingestedAt: 1 })),
+    () => addRange(EMPTY_COVERAGE, asRange({ fromBlock: 1, toBlock: 5, origin: 'rpc', providerId: 'p', ingestedAt: 1, edge: edgeAt(5) })),
     CoverageError,
   );
   assert.throws(
-    () => addRange(EMPTY_COVERAGE, asRange({ fromBlock: 1, toBlock: 5, origin: 'operator', providerId: '', ingestedAt: 1 })),
+    () => addRange(EMPTY_COVERAGE, asRange({ fromBlock: 1, toBlock: 5, origin: 'operator', providerId: '', ingestedAt: 1, edge: edgeAt(5) })),
     CoverageError,
   );
   assert.throws(
-    () => addRange(EMPTY_COVERAGE, asRange({ fromBlock: 1, toBlock: 5, origin: 'operator', providerId: 7, ingestedAt: 1 })),
+    () => addRange(EMPTY_COVERAGE, asRange({ fromBlock: 1, toBlock: 5, origin: 'operator', providerId: 7, ingestedAt: 1, edge: edgeAt(5) })),
     CoverageError,
   );
 });
@@ -326,7 +346,7 @@ test('the self brand is a compile-time control, and the runtime control is elsew
   // IndexedDB, most obviously — can write `{ origin: 'self' }` and `isVerifiedAt` agrees.
   // That is not fixable inside this module: no local artifact can prove it came from a
   // light client.
-  const forged = addRange(EMPTY_COVERAGE, asRange({ fromBlock: 1, toBlock: 10, origin: 'self', ingestedAt: 1 }));
+  const forged = addRange(EMPTY_COVERAGE, asRange({ fromBlock: 1, toBlock: 10, origin: 'self', ingestedAt: 1, edge: edgeAt(10) }));
   assert.equal(isVerifiedAt(forged, 5), true, 'the brand is erased at runtime, as branded types are');
 
   // What makes that harmless is INV-FE-7 plus the firewall: local storage is disposable and
@@ -341,4 +361,44 @@ test('the self brand is a compile-time control, and the runtime control is elsew
   const rule = config.slice(start, config.indexOf('name:', start + 10));
   assert.match(rule, /from[\s\S]*transaction-builder\|signing/, 'the rule no longer names the tx path');
   assert.match(rule, /to:[\s\S]*local-index/, 'the tx-path firewall no longer names local-index');
+});
+
+test('a range from another chain is refused where the caller can still act', () => {
+  // §6.3's genesis binding, checked on the way IN. `assertCanonical` refuses a two-chain set on
+  // every other entry point, and `addRange` was the one that could create one: the foreign range
+  // joined nothing, was appended, and the *next* mutation threw — so the index became unusable at
+  // a call site that had done nothing wrong, and the caller that could still have acted was gone.
+  const OTHER = `0x${'ff'.repeat(32)}`;
+  const foreign = providerRange('operator', 'op-1', 21, 30, 1, {
+    kind: 'checked',
+    genesisHash: OTHER,
+    hash: `0x${'ee'.repeat(32)}`,
+    specVersion: 3,
+  });
+  const mine = addRange(EMPTY_COVERAGE, self(1, 10));
+  assert.throws(() => addRange(mine, foreign), CoverageError);
+  // An empty set has no chain yet, so the first range establishes it rather than being refused.
+  assert.doesNotThrow(() => addRange(EMPTY_COVERAGE, foreign));
+});
+
+test('this module’s CoverageRange really is a NARROWING of the published shape', () => {
+  // Two `CoverageRange` types exist and they carry different fields: 10 §6.3 declares one with
+  // `ingestedAt` and a `RangeEdge`, while `@bleavit/shared-types` carries only the span and the
+  // provenance — because the render layer may not import this package (10 §10.1) and a badge
+  // needs nothing else. Nothing checked that the narrower shape stayed a *narrowing*, so a field
+  // renamed on one side would have been found by whichever consumer read it next, and for
+  // `origin` that means a badge silently unable to say who supplied a line.
+  //
+  // `asSharedCoverageRange` is an ordinary assignment, so the compiler is the checker and a
+  // divergence fails the **build**. This asserts the runtime half: the fields a badge reads
+  // survive the narrowing with their values intact. Whether §6.3 should publish one shape is
+  // SQ-765.
+  const range = providerRange('indexer', 'acme', 10, 20, 5, edgeAt(20));
+  const shared = asSharedCoverageRange(range);
+  assert.equal(shared.fromBlock, 10);
+  assert.equal(shared.toBlock, 20);
+  assert.equal(shared.origin, 'indexer');
+  assert.equal(shared.providerId, 'acme');
+  // The badge computes its boundary set from the shared shape alone, so the two must agree.
+  assert.deepEqual([...boundarySet([range])], ['indexer:acme']);
 });

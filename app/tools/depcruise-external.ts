@@ -56,6 +56,20 @@ export const EXTERNAL = (names: string): string => `^(${names})(/|$)|/node_modul
 export const CHAIN_SDK_PACKAGES = 'polkadot-api|smoldot|@polkadot-api/(?!descriptors($|/))[^/]+';
 
 /**
+ * The host and native SDKs 10 §10.1 names — `only-platform-touches-host-sdks`.
+ *
+ * Lifted out of the rule and shared with the witness for the reason this file exists: a
+ * witness carrying its own copy of a pattern proves the copy fires, not the rule. It matters
+ * more here than elsewhere, because **nothing in `app/` imports either package**. F22
+ * declined the permission 10 §10.1 grants — `packages/platform` reaches a host through an
+ * injected bridge, so the desktop shell can embed the published `dist/` byte for byte — and
+ * a forbidden rule with no real edge anywhere in the tree is precisely the shape that goes
+ * vacuous without anybody noticing. `tests/depcruise-witness/forbidden-external.ts` imports
+ * both spellings and MUST be reported.
+ */
+export const HOST_SDK_PACKAGES = '@tauri-apps|@parity/product-sdk';
+
+/**
  * The same trap, one layer in: a **workspace subpath export**.
  *
  * `@bleavit/signing/testing` resolves at build time through the package's `exports` map,

@@ -511,7 +511,26 @@ class RegistryGroundingTests(unittest.TestCase):
         # That asymmetry is the point of keeping the two counts separate: a
         # change that moves both is a new key, a change that moves only the
         # genesis count is an adoption, and the two need different scrutiny.
-        self.assertEqual(len(entries), 206)
+        #
+        # 206 -> 207 on 2026-08-07 with `EXECUTION_RETRY_WINDOW` (13 Section 2),
+        # and the genesis counters deliberately do NOT move with it. The value
+        # existed already, in two places and no values table: as the kernel
+        # constant `EXECUTION_RETRY_WINDOW_BLOCKS = 3 * BLOCKS_PER_DAY` and as
+        # "72 h" in 05 Section 2.1's T18/T23 transitions. It reached 13 when a
+        # client defect turned out to be a spec contradiction -- 09 Section
+        # 1.2(1) said the execute window was `maturity <= now <= grace_end`
+        # unqualified, while the guard admits a failed mandate through
+        # `failed_at + RETRY_WINDOW` INSTEAD of `grace_end`. A substitution, not
+        # an extension, so it is not monotone: a failure early in the grace
+        # window closes the door sooner and one near its end holds it open
+        # later.
+        #
+        # It is a kernel constant, not a seeded ParamKey, which is why only the
+        # total moves. By this counter's own rule that makes it a new key rather
+        # than an adoption -- and the scrutiny it earned was a dispatch-limit
+        # classification plus the test nobody had written, that `execute` itself
+        # refuses past the retry window (V-210).
+        self.assertEqual(len(entries), 207)
         self.assertEqual(len(json_keys), 113)
         self.assertEqual(len(classified_genesis), 113)
         self.assertEqual(len(model_bytes), 113)

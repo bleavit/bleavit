@@ -19,6 +19,7 @@ import {
   readDepositInputs,
   readWithdrawInputs,
   sudoActive,
+  withdrawBlocks,
 } from '@bleavit/features-tx';
 import type { FundingDecoders, FundingKeys, FundingReader } from '@bleavit/features-tx';
 import type { Finalized, StorageItem } from '@bleavit/chain-client';
@@ -148,6 +149,7 @@ test('each leg is stamped with ITS OWN pin, never the other leg’s', async () =
   // carry the Asset Hub chain and the Asset Hub block — a model whose leaves all shared one
   // pin would be a model that had silently mixed the two chains.
   const { inputs } = await readDepositInputs(pair(), KEYS, DECODERS, PARAMS);
+  assert.ok(inputs.assetHubBalance !== undefined, 'the Asset Hub balance decoded and is present');
   const status = inputs.assetHubBalance.status;
   assert.ok(status.kind === 'verified-finalized');
   assert.equal(status.chain, AH_CHAIN, 'the Asset Hub balance was stamped with the local chain');
@@ -227,25 +229,54 @@ test('an ABSENT Asset Hub account is a real zero balance, not a failure', async 
     DECODERS,
     PARAMS,
   );
-  assert.equal(inputs.assetHubBalance.value, 0n);
+  assert.equal(inputs.assetHubBalance?.value, 0n);
   assert.deepEqual(undecodable, []);
   assert.ok(depositBlocks(inputs).some((b) => b.check === 'Asset Hub balance'));
 });
 
-test('an UNDECODABLE balance reads as zero AND is reported', async () => {
-  // Zero is the direction that cannot overspend, and the `undecodable` row is what stops the
-  // zero being read as a fact about the account. Both halves matter: a silent zero is a guess
-  // (app-code rule 10), and a report with a plausible number beside it is worse.
+test('an UNDECODABLE balance is ABSENT — a zero here would be a badge nobody earned', async () => {
+  // The two failure states are different facts and the model now says so. An **absent**
+  // account is a real zero and keeps its badge (the test above); an **undecodable** record
+  // yields no value at all, because 10 §2.2 assigns `verified-finalized` "only to values read
+  // through smoldot with storage proofs checked" and a substituted `0n` is not one. Until this
+  // was fixed both produced a badged zero, and no screen could tell them apart.
+  //
+  // The safe direction is unchanged, which is the second half of the assertion: the deposit
+  // still blocks, and now it blocks on the absence rather than on a manufactured figure.
   const { inputs, undecodable } = await readDepositInputs(
     pair({ [`ah:assets:1337:${WHO}`]: 'bad', [`ah:system:${WHO}`]: 'viable' }),
     KEYS,
     DECODERS,
     PARAMS,
   );
-  assert.equal(inputs.assetHubBalance.value, 0n);
+  assert.equal(inputs.assetHubBalance, undefined);
   assert.equal(undecodable.length, 1);
   assert.match(undecodable[0]?.label ?? '', /Assets\.Account\(1337/);
   assert.equal(undecodable[0]?.rawHex, 'bad');
+  assert.ok(
+    depositBlocks(inputs).some((b) => b.check === 'Asset Hub balance'),
+    'an undecodable balance must still block the deposit',
+  );
+});
+
+test('an UNDECODABLE free balance is ABSENT, and withdraw blocks on the absence', async () => {
+  // The withdraw leg's copy of the same rule. The dust-remainder check is skipped too: a
+  // remainder arithmetic'd out of a balance nobody stated would name an exact figure the
+  // client cannot support.
+  const { inputs, undecodable } = await readWithdrawInputs(
+    reader(LOCAL_CHAIN, { [`local:usdc:${WHO}`]: 'bad' }, 7),
+    KEYS,
+    DECODERS,
+    { who: WHO, amount: 1n, localFee: 1n, minBalance: 10_000n, ledgerFrozen: false, destinationViable: undefined },
+  );
+  assert.equal(inputs.freeBalance, undefined);
+  assert.equal(undecodable.length, 1);
+  const blocks = withdrawBlocks(inputs);
+  assert.ok(blocks.some((b) => b.check === 'Free balance'));
+  assert.ok(
+    !blocks.some((b) => b.check === 'Remainder would be dusted'),
+    'a dust figure was computed from a balance the chain never stated',
+  );
 });
 
 test('assetHubReady needs the compat verdict AND a viable account — each alone is not enough', async () => {
@@ -287,6 +318,7 @@ test('withdraw reads on the LOCAL reader only — Asset Hub is not in its scope'
     DECODERS,
     { who: WHO, amount: 1n, localFee: 1n, minBalance: 10_000n, ledgerFrozen: false, destinationViable: undefined },
   );
+  assert.ok(inputs.freeBalance !== undefined, 'the free balance decoded and is present');
   assert.equal(inputs.freeBalance.value, 900_000n);
   const status = inputs.freeBalance.status;
   assert.ok(status.kind === 'verified-finalized');

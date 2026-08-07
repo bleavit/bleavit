@@ -69,13 +69,20 @@ const TX = '@bleavit/features-tx';
 const HANDOFF = '@bleavit/features-handoff';
 
 export const PENDING_SCREENS: Readonly<Record<string, PendingScreen>> = Object.freeze({
-  S2: { state: 'built-unwired', milestone: 'F7', component: `${TX}#ProposalDetail`, waitingOn: 'a live transport for its reader' },
-  S3: { state: 'not-built', milestone: 'F7b', component: `${TX}#MarketTrade` },
-  S4: { state: 'not-built', milestone: 'F7b', component: `${TX}#Positions` },
-  S5: { state: 'not-built', milestone: 'F7b', component: `${TX}#SubmitProposal` },
-  S6: { state: 'not-built', milestone: 'F7b', component: `${TX}#ExecutionQueue` },
-  S7: { state: 'not-built', milestone: 'F7b', component: `${TX}#WelfareDashboard` },
-  S8: { state: 'not-built', milestone: 'F7b', component: `${TX}#RecentSettlements` },
+  // F7b built these four screens' composition roots (`screen-composition.ts`), so their keys,
+  // decoders and call arguments now exist. What each is still waiting on is a **transport**,
+  // and that is a release-artifact gap rather than a code one: `tools/release/sources/
+  // release-sources.json` declares `chainSpecs: []` with both `chainSpecHashes` null, so this
+  // build commits no chain-spec bytes for any chain and nothing calls `startLightClient`.
+  // These entries therefore stay `built-unwired` — a composition root is not a runtime path,
+  // and moving a screen to wired on the strength of one would be a claim nothing can reach.
+  S2: { state: 'built-unwired', milestone: 'F7', component: `${TX}#ProposalDetail`, waitingOn: 'a live transport — its keys and decoders are built (F7b)' },
+  S3: { state: 'built-unwired', milestone: 'F7b', component: `${TX}#MarketTrade`, waitingOn: 'a live transport — its keys, decoders and quote arguments are built' },
+  S4: { state: 'built-unwired', milestone: 'F7b', component: `${TX}#Positions`, waitingOn: 'a live transport — its per-domain keys and decoders are built' },
+  S5: { state: 'built-unwired', milestone: 'F7b', component: `${TX}#SubmitProposal`, waitingOn: 'a live transport for its reader, and a chain surface for the per-funder intake rate limit' },
+  S6: { state: 'built-unwired', milestone: 'F7b', component: `${TX}#ExecutionQueue`, waitingOn: 'a live transport for its reader and a signer session' },
+  S7: { state: 'built-unwired', milestone: 'F7b', component: `${TX}#WelfareDashboard`, waitingOn: 'a live transport for its reader' },
+  S8: { state: 'built-unwired', milestone: 'F7b', component: `${TX}#RecentSettlements`, waitingOn: 'a live transport for its reader' },
   S9: { state: 'built-unwired', milestone: 'F16', component: `${TX}#ReferendaList`, waitingOn: 'a live transport for its reader' },
   S10: { state: 'built-unwired', milestone: 'F16', component: `${TX}#VoteForm`, waitingOn: 'a live transport and a signer session' },
   S11: { state: 'built-unwired', milestone: 'F16', component: `${TX}#OracleResolutionBallot`, waitingOn: 'a live transport and a signer session' },
@@ -88,10 +95,16 @@ export const PENDING_SCREENS: Readonly<Record<string, PendingScreen>> = Object.f
   S14: { state: 'built-unwired', milestone: 'F17', component: `${TX}#RegisterReporter`, waitingOn: 'a live transport and a signer session' },
   S15: { state: 'built-unwired', milestone: 'F17', component: `${TX}#PendingActions`, waitingOn: 'a live transport and a signer session' },
   S16: { state: 'built-unwired', milestone: 'F17', component: `${TX}#TreasuryStreams`, waitingOn: 'a live transport and a signer session' },
-  S17: { state: 'built-unwired', milestone: 'F17', component: `${TX}#UpgradeCrank`, waitingOn: 'a live transport and the FE-P10 outcome' },
+  // FE-P10 gates the **submit control**, not the screen. §11.8.4's own fallback says steps
+  // 1–3 — read the authorization, fetch the artifact, hash-verify it — ship regardless,
+  // with the verified blob handed to an operator CLI when in-browser submission fails, and
+  // *"verification stays in-browser even when submission cannot"*. Naming FE-P10 as what
+  // the screen waits on said the opposite, and would keep a working verification surface
+  // unwired for a prototype outcome it does not depend on.
+  S17: { state: 'built-unwired', milestone: 'F17', component: `${TX}#UpgradeCrank`, waitingOn: 'a live transport and a signer session' },
   S18: { state: 'built-unwired', milestone: 'F17', component: `${TX}#SnapshotCrank`, waitingOn: 'a live transport and a signer session' },
   S19: { state: 'built-unwired', milestone: 'F17', component: `${TX}#RegistryFiling`, waitingOn: 'a live transport and a signer session' },
-  S20: { state: 'not-built', milestone: 'F7b', component: `${TX}#Balances` },
+  S20: { state: 'built-unwired', milestone: 'F7b', component: `${TX}#Balances`, waitingOn: 'a live transport — its keys and decoders are built (F7b)' },
   S21: { state: 'built-unwired', milestone: 'F7', component: `${HANDOFF}#ShareContext`, waitingOn: 'the capsule export flow being wired to it' },
   S22: { state: 'built-unwired', milestone: 'F7', component: `${HANDOFF}#ImportReview`, waitingOn: 'the import and clamp flow being wired to it' },
 });

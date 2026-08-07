@@ -45,15 +45,25 @@ import type { Hash32, ReleaseIdentity, Sha256Hex, SpecVersionRange } from './ide
 
 export const RELEASE_SCHEMA = 'bleavit.app-release.v1';
 
+/**
+ * A refusal, shared by both readers below so the two verdicts cannot drift into two
+ * spellings of the same outcome.
+ */
+export interface ReleaseRefusal {
+  readonly kind: 'refused';
+  readonly reason: string;
+  readonly detail: string;
+}
+
 export type ReleaseDocumentVerdict =
   | { readonly kind: 'identity'; readonly identity: ReleaseIdentity }
-  | { readonly kind: 'refused'; readonly reason: string; readonly detail: string };
+  | ReleaseRefusal;
 
 const HASH32 = /^0x[0-9a-f]{64}$/;
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 const TXID = /^[A-Za-z0-9_-]{43}$/;
 
-function refuse(reason: string, detail: string): ReleaseDocumentVerdict {
+function refuse(reason: string, detail: string): ReleaseRefusal {
   return { kind: 'refused', reason, detail };
 }
 
@@ -80,6 +90,36 @@ function readHashMap(source: unknown, pattern: RegExp): Record<string, string> |
     out[key] = value;
   }
   return out;
+}
+
+export type PinnedFilesVerdict =
+  | { readonly kind: 'pins'; readonly perFileHashes: Readonly<Record<string, Sha256Hex>> }
+  | ReleaseRefusal;
+
+/**
+ * Read just the per-file pin map — the one field a *tree* can be compared against.
+ *
+ * Extracted from `parseReleaseDocument` rather than copied beside it, because F22's desktop
+ * shell needs exactly this and needs it **from a document the full parser refuses**: a
+ * per-commit build carries unresolved readiness blockers and no Arweave address, and the
+ * parser correctly refuses both (see the refusals in this file's header). Those refusals are
+ * about *publication state*; whether `perFileHashes` describes the tree that is about to be
+ * embedded is a different and independent question, and a second implementation of the pin
+ * reader is how the producer and the consumer came to disagree in the first place.
+ *
+ * The empty-map refusal lives here and therefore reaches every caller: a manifest pinning
+ * nothing makes any comparison over it report success having compared nothing.
+ */
+export function readPerFileHashes(document: unknown): PinnedFilesVerdict {
+  const perFileHashes = readHashMap(own(document, 'perFileHashes'), SHA256_HEX);
+  if (perFileHashes === undefined || Object.keys(perFileHashes).length === 0) {
+    return refuse(
+      'no-file-hashes',
+      'this record pins no file hashes, so a self-check over it would compare nothing and ' +
+        'report success',
+    );
+  }
+  return { kind: 'pins', perFileHashes };
 }
 
 /** Parse a served `release.json` into the identity the rest of this package consumes. */
@@ -122,14 +162,9 @@ export function parseReleaseDocument(document: unknown): ReleaseDocumentVerdict 
     return refuse('malformed-source-commit', 'the recorded source commit is not a git object id');
   }
 
-  const perFileHashes = readHashMap(own(document, 'perFileHashes'), SHA256_HEX);
-  if (perFileHashes === undefined || Object.keys(perFileHashes).length === 0) {
-    return refuse(
-      'no-file-hashes',
-      'this record pins no file hashes, so a self-check over it would compare nothing and ' +
-        'report success',
-    );
-  }
+  const pins = readPerFileHashes(document);
+  if (pins.kind === 'refused') return pins;
+  const { perFileHashes } = pins;
 
   // Keyed by `spec_version`, so the keys are converted rather than asserted: a key that is
   // not a spec version is refused here instead of sitting in the record as a hash for a

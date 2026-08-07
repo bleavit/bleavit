@@ -1,0 +1,5 @@
+# `unwrap_used`/`expect_used` are denied in `crates/embedded-tree` (see its Cargo.toml).
+# In a test an `unwrap` is an assertion about a fixture, not a decision taken on a user's
+# behalf, so it is admitted there and nowhere else.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true

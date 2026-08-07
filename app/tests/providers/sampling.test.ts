@@ -14,14 +14,20 @@ import assert from 'node:assert/strict';
 import {
   LADDER,
   PAGES_PER_SAMPLED_ROW,
-  ProviderDisabledError,
+  ProviderCannotServeError,
   afterProbe,
+  canServeReads,
   effectiveCoverage,
   livenessRefusal,
   probeDue,
   runSamplingRound,
   selectSample,
 } from '@bleavit/providers';
+import * as barrel from '@bleavit/providers';
+import * as testing from '@bleavit/providers/testing';
+import { runSamplingRoundAtRate, selectSampleAtRate } from '@bleavit/providers/testing';
+
+import { assertTestingSubpathIsQuarantined } from '../shared/testing-subpath.ts';
 import type { Provider, ProviderPage, RowVerdict, SampledRow } from '@bleavit/providers';
 
 const HEALTHY: Provider = { id: 'p1', kind: 'indexer', health: { kind: 'healthy' } };
@@ -223,10 +229,70 @@ test('the draw is over ROWS in the window, not over pages', () => {
   // Pages are not uniform in size, and drawing a page first then a row inside it would sample
   // a row on a 1-row page 40 times as often as a row on a 40-row page.
   const uneven: readonly ProviderPage[] = [pages(1, 1)[0]!, pages(1, 3)[0]!];
-  const selection = selectSample(uneven, () => 0.99, PAGES_PER_SAMPLED_ROW);
+  const selection = selectSample(uneven, () => 0.99);
   assert.equal(selection.rows.length, 1);
   assert.equal(selection.rows[0]?.page, 1);
   assert.equal(selection.rows[0]?.index, 2);
+});
+
+// --------------------------------------------------- the rate is not a caller's to choose
+
+test('the production entry points take NO rate argument', () => {
+  // §8.4 states 1-in-16 normatively and 14 TH-49's residual-risk arithmetic is computed from
+  // it, so a rate parameter on the production path is a control a caller switches off by
+  // passing a number: at a large enough rate every import forms one stratum, one row is
+  // compared, and every round still reports `clean`. Nothing fails; the sampler is off.
+  //
+  // Two halves, as with the required hash function. *Type level*: the directive is itself the
+  // assertion — if a third parameter ever came back, `tsc` reports it as unused and
+  // `check:types` goes red. *Runtime*: the arity catches a signature that grew an **optional**
+  // rate, which every existing call site still satisfies and no type error would reveal.
+  const uncallable: () => unknown = () =>
+    // @ts-expect-error the 1-in-16 rate is normative; the loosened form is behind /testing
+    selectSample(pages(64), () => 0, 1_000_000);
+  assert.equal(typeof uncallable, 'function');
+  assert.equal(selectSample.length, 2);
+  assert.equal(runSamplingRound.length, 4);
+});
+
+test('the loosened form is NOT reachable from the package barrel', () => {
+  // The other half of the control, and the half a dependency-cruiser rule cannot supply.
+  // `no-loosened-sampling-rate-in-production` forbids production code importing
+  // `@bleavit/providers/testing` — it says nothing about the barrel, so one line
+  // (`export { selectSampleAtRate } from './sampling.js'`) puts the rate back in every
+  // consumer's reach with no subpath import anywhere and the rule still green. Measured, not
+  // assumed: that mutation survived the whole gate set on 2026-08-06 until this test existed.
+  //
+  // It enumerated two names by hand until 2026-08-06, which is the same defect one level up: a
+  // third loosened export would have slipped past a test that lists what to look for. The shared
+  // helper takes the whole `/testing` **namespace**, so the quarantine covers whatever is in it.
+  // The same hole in `chain-client`, `local-index` and `signing` is closed by the same helper in
+  // their own suites.
+  assertTestingSubpathIsQuarantined(
+    {
+      packageName: '@bleavit/providers',
+      barrel,
+      testing,
+      barrelMustExport: ['selectSample', 'runSamplingRound'],
+    },
+    assert,
+  );
+});
+
+test('the loosened form still exists, and behaves — it is quarantined, not deleted', async () => {
+  // The stratification logic is untestable at a single rate, so the rate-taking form has to
+  // exist. `@bleavit/providers/testing` is where it lives, and
+  // `no-loosened-sampling-rate-in-production` is what stops production code importing it.
+  const selection = selectSampleAtRate(pages(64), () => 0, 32);
+  assert.equal(selection.strata, 2);
+  const round = await runSamplingRoundAtRate(HEALTHY, pages(64), async () => MATCH, () => 0, 32);
+  assert.equal(round.outcome, 'clean');
+  assert.equal(round.result.rowsChecked, 2);
+});
+
+test('a rate below 1 is refused rather than silently clamped', () => {
+  assert.throws(() => selectSampleAtRate(pages(4), () => 0, 0), RangeError);
+  assert.throws(() => selectSampleAtRate(pages(4), () => 0, 1.5), RangeError);
 });
 
 // ------------------------------------------------------------------ the round
@@ -243,8 +309,47 @@ test('a disabled provider cannot be sampled at all', async () => {
   };
   await assert.rejects(
     () => runSamplingRound(off, pages(16), async () => MATCH, () => 0),
-    ProviderDisabledError,
+    ProviderCannotServeError,
   );
+});
+
+test('the round is gated on `canServeReads`, which until now nothing anywhere called', async () => {
+  // The predicate documented itself as *"the one predicate a read path calls"* and had no caller
+  // in the repository: neither production entry point consulted it, so `unprobed` — a state added
+  // precisely so an unanswered source could not serve — stopped nothing. A round over one is a
+  // verdict about rows nobody was shown, exactly like the disabled case above.
+  const unprobed: Provider = { ...HEALTHY, health: { kind: 'unprobed' } };
+  assert.equal(canServeReads(unprobed), false);
+  await assert.rejects(
+    () => runSamplingRound(unprobed, pages(16), async () => MATCH, () => 0),
+    (error: unknown) =>
+      error instanceof ProviderCannotServeError && /nothing has answered for it yet/.test(error.message),
+  );
+
+  // And it is satisfiable, which is what makes it a gate rather than a wall: a caller holding
+  // pages the source served performed the request that produced them, so it advances §8.3's
+  // ladder from that outcome first. "Probe on enable" becomes structural instead of scheduled.
+  const answered = afterProbe(unprobed, FAST);
+  assert.equal(canServeReads(answered), true);
+  const round = await runSamplingRound(answered, pages(16), async () => MATCH, () => 0);
+  assert.equal(round.outcome, 'clean');
+});
+
+test('a FAILING provider still serves, because §8.3 says only Disabled stops reads', async () => {
+  // The narrowing this predicate used to make, found while wiring it in. §8.3's normative shape is
+  // one sentence: "`Failing` counts **consecutive** failures, so one timeout in a healthy series
+  // cannot ratchet the ladder; and only `Disabled` stops reads". Excluding `failing` here is that
+  // same ratchet one clause along — one timeout would have taken the source off every read path
+  // while the ladder itself still called it live, and no sampling round could then produce the
+  // success that resets the counter.
+  const failing = afterProbe(HEALTHY, FAILED);
+  assert.equal(failing.health.kind, 'failing');
+  assert.equal(canServeReads(failing), true);
+  const round = await runSamplingRound(failing, pages(16), async () => MATCH, () => 0);
+  assert.equal(round.outcome, 'clean');
+
+  // `slow` too, for the reason §8.3 states outright: a slow provider is an honest one.
+  assert.equal(canServeReads(afterProbe(HEALTHY, SLOW)), true);
 });
 
 test('every row matching is a clean round and leaves the provider alone', async () => {
@@ -306,7 +411,7 @@ test('a round where nothing was comparable is INCONCLUSIVE, not clean', async ()
   assert.deepEqual(round.provider, HEALTHY, 'and it is not disabled either: nothing was proven');
   assert.equal(round.result.unverifiable, 2);
   assert.equal(effectiveCoverage(round.result).checked, 0);
-  assert.equal(effectiveCoverage(round.result).meaningful, false);
+  assert.equal(effectiveCoverage(round.result).ratio, 0);
 });
 
 test('unverifiable rows count neither for nor against, and coverage says so', async () => {
@@ -323,7 +428,7 @@ test('unverifiable rows count neither for nor against, and coverage says so', as
   const coverage = effectiveCoverage(round.result);
   assert.equal(coverage.checked, 1);
   assert.equal(coverage.ofTotal, 4);
-  assert.equal(coverage.meaningful, false, 'one comparable row in four is weak evidence');
+  assert.equal(coverage.ratio, 0.25, 'one comparable row in four, reported as exactly that');
 });
 
 test('rows are checked sequentially, so a round is reproducible from its inputs', async () => {

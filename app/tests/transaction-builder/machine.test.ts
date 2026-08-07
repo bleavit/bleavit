@@ -24,16 +24,18 @@ import { dirname, resolve } from 'node:path';
 import {
   INITIAL_TX_SESSION,
   TX_TERMINAL_STATES,
+  declaredCoverageIds,
   evaluate,
   gate,
   reduce,
   txTransitionEdges,
 } from '@bleavit/transaction-builder';
 import type {
+  ClauseId,
+  DeclarableRowId,
   GatePassed,
   PreconditionResult,
   PreconditionRow,
-  PreconditionRowId,
   TxPreparation,
   TxSession,
   TxState,
@@ -64,11 +66,34 @@ const PREP: TxPreparation = {
   builtFor: BUILT_FOR,
   preparedAt: { chain: TEST_CHAIN, blockHash: `0x${'22'.repeat(32)}`, blockNumber: 99 },
   requires: ['P-1'],
+  feeAsset: 'USDC',
 };
 
-const okRow = (id: PreconditionRowId): PreconditionResult =>
+/**
+ * Every obligation a row imposes under this preparation's fee asset.
+ *
+ * A row is a *set of clauses*, and until the coverage check was expanded through this
+ * function one result naming `P-1` covered all of them — so a preparation could reach a
+ * signer having read one clause out of nine. The fixtures therefore build complete sets,
+ * because that is what the shipped gate demands.
+ */
+const coverageOf = (row: DeclarableRowId): readonly ClauseId[] =>
+  declaredCoverageIds(row, PREP.feeAsset);
+
+/** One obligation of a row, where a test needs an id rather than the set. */
+const firstOf = (row: DeclarableRowId): ClauseId => {
+  const [id] = coverageOf(row);
+  assert.ok(id, `${row} declares no obligations`);
+  return id;
+};
+
+const okRow = (id: ClauseId): PreconditionResult =>
   ({ id, ok: true, requirement: 'r', expected: 'e', actual: 'a', at: PIN });
-const failRow = (id: PreconditionRowId): PreconditionResult => ({ ...okRow(id), ok: false });
+const failRow = (id: ClauseId): PreconditionResult => ({ ...okRow(id), ok: false });
+
+/** A complete, all-passing read set for one row. */
+const covering = (row: DeclarableRowId = 'P-1'): readonly PreconditionResult[] =>
+  coverageOf(row).map(okRow);
 
 /** The gate proof a signing session carries, or a throw if the gate never opened. */
 function windowOf(session: TxSession): GatePassed {
@@ -78,7 +103,7 @@ function windowOf(session: TxSession): GatePassed {
 }
 
 /** Drive a session to AwaitingSignature the only way the machine allows. */
-function toAwaitingSignature(results: readonly PreconditionResult[] = [okRow('P-1')]): TxSession {
+function toAwaitingSignature(results: readonly PreconditionResult[] = covering()): TxSession {
   let s = reduce(INITIAL_TX_SESSION, { type: 'prepared', prep: PREP });
   s = reduce(s, { type: 'submit-requested' });
   return reduce(s, { type: 'gate-result', outcome: gate(PREP, PIN, BUILT_FOR, results) });
@@ -104,7 +129,7 @@ test('AwaitingSignature is reachable ONLY from Refreshing, and only with a passe
 
   // And from Refreshing, only a `proceed` outcome opens it.
   const refreshing: TxSession = { ...INITIAL_TX_SESSION, state: 'Refreshing', prep: PREP };
-  const blocked = gate(PREP, PIN, BUILT_FOR, [failRow('P-1')]);
+  const blocked = gate(PREP, PIN, BUILT_FOR, [failRow(firstOf('P-1'))]);
   assert.equal(reduce(refreshing, { type: 'gate-result', outcome: blocked }).state, 'Blocked');
   const bypasses = [
     { type: 'signed' },
@@ -132,9 +157,86 @@ test('a gate over zero reads is BLOCKED — it certifies nothing (adversarial re
 
 test('a declared row with no result blocks, naming the row', () => {
   const twoRows: TxPreparation = { ...PREP, requires: ['P-1', 'P-3'] };
-  const outcome = gate(twoRows, PIN, BUILT_FOR, [okRow('P-1')]);
+  const outcome = gate(twoRows, PIN, BUILT_FOR, [...covering('P-1')]);
   assert.equal(outcome.kind, 'blocked');
   assert.match(outcome.detail, /P-3/);
+});
+
+test('one result cannot cover a multi-clause row (Codex #3730437892)', () => {
+  // The defect: every clause of a row carried the **row's** id, and coverage compared row
+  // ids — so a single passing read satisfied the whole row. On `O-1` the registry check
+  // alone minted a signing window for a 100,000-USDC stake whose balance, whose stake amount
+  // and whose fee headroom were never evaluated.
+  const oneRow: TxPreparation = { ...PREP, requires: ['O-1'] };
+  const obligations = coverageOf('O-1');
+  assert.ok(obligations.length > 1, 'O-1 is no longer multi-clause — this test would be vacuous');
+  for (let i = 0; i < obligations.length; i += 1) {
+    const partial = obligations.filter((_, index) => index !== i).map(okRow);
+    const outcome = gate(oneRow, PIN, BUILT_FOR, partial);
+    assert.equal(outcome.kind, 'blocked', `O-1 passed without ${obligations[i]}`);
+    assert.match(outcome.detail, /never read at this block/);
+  }
+  // And the complete set opens, so the refusal above is coverage and not a gate that never
+  // opens for anything.
+  assert.equal(gate(oneRow, PIN, BUILT_FOR, obligations.map(okRow)).kind, 'proceed');
+});
+
+test('the fee asset selects which obligations a row has, and it comes from the preparation', () => {
+  // Fee headroom is a `System.Account` read in VIT and a `ForeignAssets` one in USDC, so the
+  // obligation set differs by currency. A gate that guessed would demand the wrong read or
+  // drop the clause entirely — which is a row that lost a precondition, reported as a row
+  // that passed.
+  const usdc = declaredCoverageIds('O-1', 'USDC');
+  const vit = declaredCoverageIds('O-1', 'VIT');
+  assert.equal(usdc.length, vit.length);
+  const inVit: TxPreparation = { ...PREP, requires: ['O-1'], feeAsset: 'VIT' };
+  assert.equal(gate(inVit, PIN, BUILT_FOR, vit.map(okRow)).kind, 'proceed');
+  // The clause ids agree (they share a `key`), so what differs is the surface behind them —
+  // asserted in `rows.test.ts`. What matters here is that the gate reads the preparation's
+  // own answer rather than assuming one.
+  assert.deepEqual([...usdc], [...vit]);
+});
+
+test('a malformed declaration blocks rather than throwing on the signing path', () => {
+  // `rowsFor` throws for an unknown row, and this runs from a click handler on the only edge
+  // to a signer: a thrown error there is an unhandled rejection that leaves the control in
+  // whatever state it was in. Fail closed, and say what happened.
+  // The argument is deliberately outside the signature — an untyped JavaScript caller is
+  // exactly who supplies a row id no table has, and the type system cannot reach them.
+  const untypedRow = (value: string): DeclarableRowId => value as DeclarableRowId;
+  const bogus: TxPreparation = { ...PREP, requires: [untypedRow('P-99')] };
+  const outcome = gate(bogus, PIN, BUILT_FOR, covering());
+  assert.equal(outcome.kind, 'blocked');
+  assert.match(outcome.detail, /could not be expanded into the reads they require/);
+});
+
+test('a gate proof names the preparation it was minted for (Codex #3730437885)', () => {
+  // `GatePassed` used to carry only a block and a result set, so it proved that *some* call
+  // to `gate()` succeeded and nothing about which bytes. An authentic window could then be
+  // paired with a different preparation and authorise it.
+  const outcome = gate(PREP, PIN, BUILT_FOR, covering());
+  assert.equal(outcome.kind, 'proceed');
+  assert.ok(outcome.kind === 'proceed');
+  assert.equal(outcome.passed.prep, PREP, 'the proof does not name what it proves');
+  assert.equal(outcome.passed.prep.scaleHex, PREP.scaleHex);
+});
+
+test('a proof for other bytes cannot open THIS session — the machine refuses the pairing', () => {
+  // The attack the field exists to stop: gate preparation A, dispatch its outcome into a
+  // session holding preparation B, and the signer opens against bytes no precondition was
+  // evaluated for.
+  const other: TxPreparation = { ...PREP, scaleHex: '0x0403ddeeff' };
+  const foreign = gate(other, PIN, BUILT_FOR, covering());
+  assert.equal(foreign.kind, 'proceed');
+  let s = reduce(INITIAL_TX_SESSION, { type: 'prepared', prep: PREP });
+  s = reduce(s, { type: 'submit-requested' });
+  const next = reduce(s, { type: 'gate-result', outcome: foreign });
+  assert.equal(next.state, 'Blocked', 'a proof for other bytes opened the signer');
+  assert.equal(next.signingWindow, undefined);
+  // The same event with this session's own proof does open it, so the refusal is the
+  // pairing's and not a machine that never proceeds.
+  const own = gate(PREP, PIN, BUILT_FOR, covering());
+  assert.equal(reduce(s, { type: 'gate-result', outcome: own }).state, 'AwaitingSignature');
 });
 
 test('a preparation declaring no rows at all is refused rather than trivially passing', () => {
@@ -149,7 +251,7 @@ test('a preparation declaring no rows at all is refused rather than trivially pa
 test('extra results beyond the declared set do not substitute for a missing one', () => {
   // A count-based coverage check would pass this: two declared, two supplied.
   const twoRows: TxPreparation = { ...PREP, requires: ['P-1', 'P-3'] };
-  const outcome = gate(twoRows, PIN, BUILT_FOR, [okRow('P-1'), okRow('P-7')]);
+  const outcome = gate(twoRows, PIN, BUILT_FOR, [...covering('P-1'), ...covering('P-7')]);
   assert.equal(outcome.kind, 'blocked');
   assert.match(outcome.detail, /P-3/);
 });
@@ -193,14 +295,14 @@ test('FE-TX-007 is checked before the preconditions, not alongside them', () => 
   // A runtime that changed under the preparation invalidates the *encoding*, so evaluating
   // rows against it would be decoding new metadata with old assumptions: every row could
   // pass and the bytes still be wrong.
-  const outcome = gate(PREP, PIN, { specVersion: 3, metadataHash: BUILT_FOR.metadataHash }, [failRow('P-1')]);
+  const outcome = gate(PREP, PIN, { specVersion: 3, metadataHash: BUILT_FOR.metadataHash }, [failRow(firstOf('P-1'))]);
   assert.equal(outcome.kind, 'blocked');
   assert.equal(outcome.code, 'FE-TX-007');
   assert.deepEqual(outcome.failed, [], 'precondition results leaked into a runtime-change block');
   assert.match(outcome.detail, /rebuilt rather than re-checked/);
 
   // A changed metadata hash at the same spec_version is equally disqualifying.
-  const rehashed = gate(PREP, PIN, { specVersion: 2, metadataHash: `0x${'cd'.repeat(32)}` }, [okRow('P-1')]);
+  const rehashed = gate(PREP, PIN, { specVersion: 2, metadataHash: `0x${'cd'.repeat(32)}` }, covering());
   assert.equal(rehashed.kind, 'blocked');
   assert.equal(rehashed.code, 'FE-TX-007');
 });
@@ -208,10 +310,10 @@ test('FE-TX-007 is checked before the preconditions, not alongside them', () => 
 test('a blocked gate returns to Draft with the preparation preserved (rule 5)', () => {
   let s = reduce(INITIAL_TX_SESSION, { type: 'prepared', prep: PREP });
   s = reduce(s, { type: 'submit-requested' });
-  s = reduce(s, { type: 'gate-result', outcome: gate(PREP, PIN, BUILT_FOR, [okRow('P-1'), failRow('P-2')]) });
+  s = reduce(s, { type: 'gate-result', outcome: gate(PREP, PIN, BUILT_FOR, [...covering(), failRow(firstOf('P-2'))]) });
   assert.equal(s.state, 'Blocked');
   assert.equal(s.lastError, 'FE-TX-004');
-  assert.deepEqual(s.failed.map((f) => f.id), ['P-2'], 'the diff view must carry only the failures');
+  assert.deepEqual(s.failed.map((f) => f.id), [firstOf('P-2')], 'the diff view must carry only the failures');
 
   const back = reduce(s, { type: 'edit' });
   assert.equal(back.state, 'Draft');
@@ -223,12 +325,12 @@ test('preconditions read at different blocks cannot authorise a signature (INV-F
   // Not a precondition failure — a defect in how the batch was read. Passing it would
   // certify a conjunction that was never simultaneously true.
   const elsewhere: PreconditionResult = {
-    ...okRow('P-3'),
+    ...okRow(firstOf('P-3')),
     at: { chain: TEST_CHAIN, blockHash: `0x${'99'.repeat(32)}`, blockNumber: 101 },
   };
-  const outcome = gate(PREP, PIN, BUILT_FOR, [okRow('P-1'), elsewhere]);
+  const outcome = gate(PREP, PIN, BUILT_FOR, [...covering(), elsewhere]);
   assert.equal(outcome.kind, 'blocked');
-  assert.deepEqual(outcome.failed.map((f) => f.id), ['P-3']);
+  assert.deepEqual(outcome.failed.map((f) => f.id), [firstOf('P-3')]);
   assert.match(outcome.detail, /does not describe one state/);
 });
 
@@ -248,7 +350,7 @@ test('a precondition is evaluated from a finalized read and reports both sides',
   // Rule 3: expected and actual both render. A gate that reported only "failed" leaves the
   // user unable to tell a stale form from a moved chain.
   const row: PreconditionRow<bigint> = {
-    id: 'P-1',
+    id: 'P-1/the account holds at least the trade cost',
     requirement: 'the account holds at least the trade cost',
     source: { kind: 'storage', key: '0xdead', query: 'value' },
     satisfiedBy: (v: bigint) => v >= 1000n,

@@ -40,10 +40,25 @@
  * A storage key is SCALE-encoded, and `packages/chain-client` is the only package permitted
  * to import `polkadot-api` (10 §10.1, app-code rule 13). So this module names the frozen
  * surfaces and receives the encoder, exactly as `readShellState` receives its decoders.
+ *
+ * ## Each leg's pin comes off its own read, and a failed decode has no pin at all
+ *
+ * The stamping helper this module used to carry — `finalizedAt(at, value)` — took the leg's
+ * `FinalizedBlockRef` and any value whatsoever, so keeping the two legs apart was a matter of
+ * passing the right first argument at each of its two call sites. `derive` removes the
+ * argument: it carries the pin of the read handed to it, so an Asset Hub figure can only be
+ * badged with the Asset Hub read that produced it.
+ *
+ * It also removes the second, quieter defect at those sites. Both passed `0n` on a decode
+ * failure and badged it `verified-finalized`, which 10 §2.2 assigns *"only to values read
+ * through smoldot with storage proofs checked"* — a substituted zero is not one, and it is
+ * not made one by the failure also appearing in `undecodable`. A balance that could not be
+ * decoded is now **absent**, and `depositBlocks`/`withdrawBlocks` block on the absence. The
+ * safe direction is unchanged; what changes is that the screen no longer shows a manufactured
+ * zero under a verified badge while doing it.
  */
 
-import type { Finalized, FinalizedBlockRef, StorageItem } from '@bleavit/chain-client';
-import type { Verified } from '@bleavit/shared-types';
+import { derive, type Finalized, type FinalizedBlockRef, type StorageItem } from '@bleavit/chain-client';
 import type { DepositInputs, WithdrawInputs } from './funding.js';
 
 /** A decode failure is data, not an exception — INV-FE-12, app-code rule 10. */
@@ -210,19 +225,6 @@ function firstValue(items: readonly StorageItem[]): string | undefined {
   return items[0]?.value;
 }
 
-/** Stamp a value with a reader's own pin. Each leg calls this with **its** reader. */
-function finalizedAt<T>(at: FinalizedBlockRef, value: T): Verified<T> {
-  return {
-    value,
-    status: {
-      kind: 'verified-finalized',
-      chain: at.chain,
-      blockHash: at.blockHash,
-      blockNumber: at.blockNumber,
-    },
-  };
-}
-
 /** What the caller must pin per release rather than this module inventing it. */
 export interface DepositReadParams {
   readonly who: string;
@@ -265,7 +267,6 @@ export async function readDepositInputs(
   params: DepositReadParams,
 ): Promise<DepositRead> {
   const undecodable: UndecodableRead[] = [];
-  const ah = readers.assetHub.at;
 
   // The caps arrive already stamped, because they are read by the same local reader through
   // the constitution surface rather than here. That makes them the one place a foreign-chain
@@ -283,9 +284,8 @@ export async function readDepositInputs(
     }
   }
 
-  const usdcRaw = firstValue(
-    (await readers.assetHub.storage(keys.assetHubUsdc(params.assetId, params.who))).value,
-  );
+  const usdcRead = await readers.assetHub.storage(keys.assetHubUsdc(params.assetId, params.who));
+  const usdcRaw = firstValue(usdcRead.value);
   const usdcDecoded =
     usdcRaw === undefined
       ? ({ ok: true, value: undefined } as const) // an absent account is a real zero balance
@@ -297,6 +297,11 @@ export async function readDepositInputs(
       reason: usdcDecoded.reason,
     });
   }
+  // An **absent** account is a real zero and stays badged; an **undecodable** one is absent
+  // from the model. The two look the same on the wire and are not the same fact.
+  const assetHubBalance = usdcDecoded.ok
+    ? derive(usdcRead, () => usdcDecoded.value?.balance ?? 0n)
+    : undefined;
 
   const accountRaw = firstValue((await readers.assetHub.storage(keys.assetHubAccount(params.who))).value);
   const accountDecoded =
@@ -326,10 +331,10 @@ export async function readDepositInputs(
 
   return {
     inputs: {
-      // The Asset Hub leg, stamped with the **Asset Hub** pin. A failed decode contributes 0
-      // rather than a guess, and `undecodable` is what says the figure is not to be believed
-      // — the balance check then blocks, which is the direction that cannot overspend.
-      assetHubBalance: finalizedAt(ah, usdcDecoded.ok ? (usdcDecoded.value?.balance ?? 0n) : 0n),
+      // The Asset Hub leg, carrying the **Asset Hub** read's own pin. A failed decode makes
+      // it absent, and `depositBlocks` blocks on the absence — the same direction the old
+      // substituted `0n` produced, minus the claim that the chain answered it.
+      assetHubBalance,
       amount: params.amount,
       assetHubFee: params.assetHubFee,
       minBalance: params.minBalance,
@@ -383,7 +388,8 @@ export async function readWithdrawInputs(
   params: WithdrawReadParams,
 ): Promise<WithdrawRead> {
   const undecodable: UndecodableRead[] = [];
-  const raw = firstValue((await reader.storage(keys.localFreeUsdc(params.who))).value);
+  const read = await reader.storage(keys.localFreeUsdc(params.who));
+  const raw = firstValue(read.value);
   const decoded =
     raw === undefined ? ({ ok: true, value: undefined } as const) : decoders.localFreeUsdc(raw);
   if (!decoded.ok) {
@@ -396,7 +402,9 @@ export async function readWithdrawInputs(
 
   return {
     inputs: {
-      freeBalance: finalizedAt(reader.at, decoded.ok ? (decoded.value?.balance ?? 0n) : 0n),
+      // Absent when the decode failed, for the reason the deposit leg gives. `withdrawBlocks`
+      // blocks on the absence rather than on a zero the chain never stated.
+      freeBalance: decoded.ok ? derive(read, () => decoded.value?.balance ?? 0n) : undefined,
       amount: params.amount,
       localFee: params.localFee,
       minBalance: params.minBalance,

@@ -2534,6 +2534,116 @@ fn t18_t23_retry_uses_same_committed_call_and_then_succeeds() {
     });
 }
 
+/// Queue a param mandate whose payload reverts, run it once so T18 stamps
+/// `failed_at`, and return the stamped block. The dispatch-failure flag is left
+/// set; a caller that wants the retry to land clears it.
+fn fail_once_and_stamp(pid: ProposalId) -> BlockNumber {
+    set_dispatch_failure(true);
+    assert_ok!(enqueue_calls(
+        pid,
+        futarchy_primitives::ProposalClass::Param,
+        vec![failing_call(55)],
+        vec![CallDomain::Param],
+    ));
+    run_to_maturity(pid);
+    assert_ok!(GuardPallet::execute(RuntimeOrigin::signed(keeper()), pid));
+    assert_eq!(pallet_test_dispatch::Value::<Test>::get(), 0);
+    Queue::<Test>::get(pid)
+        .and_then(|queued| queued.failed_at)
+        .expect("T18 stamps failed_at")
+}
+
+#[test]
+fn t23_execute_window_follows_failed_at_and_not_grace_end() {
+    // limit-coverage: EXECUTION_RETRY_WINDOW
+    //
+    // 09 §1.2(1): once T18 stamps `failed_at`, `execute` is admitted by
+    // `failed_at + EXECUTION_RETRY_WINDOW` (13 §2) **instead of** `grace_end`.
+    // The clock is substituted, not extended, so it is not monotone in the
+    // failure block and both directions have to be pinned separately.
+
+    // Direction 1 — the retry clock outlives `grace_end` (mock grace is 10
+    // blocks against a 43,200-block retry window). The boundary block itself is
+    // still admitted, and it is far past the grace deadline.
+    new_test_ext().execute_with(|| {
+        let failed_at = fail_once_and_stamp(1);
+        let grace_end = Queue::<Test>::get(1).expect("queued").grace_end;
+        let boundary = failed_at.saturating_add(RETRY_WINDOW);
+        assert!(
+            boundary > grace_end,
+            "direction 1 needs the retry clock to outlive grace_end"
+        );
+
+        set_dispatch_failure(false);
+        System::set_block_number(boundary.into());
+        assert_ok!(GuardPallet::execute(RuntimeOrigin::signed(keeper()), 1));
+        assert_eq!(pallet_test_dispatch::Value::<Test>::get(), 55);
+        assert!(!Queue::<Test>::contains_key(1));
+    });
+
+    // One block past the boundary the same mandate is refused. Nothing but the
+    // retry clock can say so: `grace_end` passed 43,190 blocks earlier and the
+    // attempt above succeeded regardless.
+    new_test_ext().execute_with(|| {
+        let failed_at = fail_once_and_stamp(1);
+        set_dispatch_failure(false);
+        System::set_block_number(
+            failed_at
+                .saturating_add(RETRY_WINDOW)
+                .saturating_add(1)
+                .into(),
+        );
+        assert_noop!(
+            GuardPallet::execute(RuntimeOrigin::signed(keeper()), 1),
+            Error::<Test>::GraceExpired
+        );
+        assert_eq!(pallet_test_dispatch::Value::<Test>::get(), 0);
+        assert!(Queue::<Test>::contains_key(1));
+    });
+
+    // Direction 2 — the non-monotone one. A grace window wider than the retry
+    // window makes the substitution close the door *earlier*, so the boundary
+    // block is admitted while `grace_end` is still far away.
+    new_test_ext().execute_with(|| {
+        Grace::set(RETRY_WINDOW.saturating_mul(2));
+        let failed_at = fail_once_and_stamp(1);
+        let grace_end = Queue::<Test>::get(1).expect("queued").grace_end;
+        let boundary = failed_at.saturating_add(RETRY_WINDOW);
+        assert!(
+            boundary < grace_end,
+            "direction 2 needs the retry clock to close inside grace"
+        );
+
+        set_dispatch_failure(false);
+        System::set_block_number(boundary.into());
+        assert_ok!(GuardPallet::execute(RuntimeOrigin::signed(keeper()), 1));
+        assert_eq!(pallet_test_dispatch::Value::<Test>::get(), 55);
+        assert!(!Queue::<Test>::contains_key(1));
+    });
+
+    // ... and one block later it is refused **while `now <= grace_end` still
+    // holds**. This is the state a client reading only `grace_end` reports as
+    // executable, walking a signer into a rejected extrinsic.
+    new_test_ext().execute_with(|| {
+        Grace::set(RETRY_WINDOW.saturating_mul(2));
+        let failed_at = fail_once_and_stamp(1);
+        let grace_end = Queue::<Test>::get(1).expect("queued").grace_end;
+        let now = failed_at.saturating_add(RETRY_WINDOW).saturating_add(1);
+        assert!(now <= grace_end, "the grace window must still be open here");
+
+        set_dispatch_failure(false);
+        System::set_block_number(now.into());
+        assert_noop!(
+            GuardPallet::execute(RuntimeOrigin::signed(keeper()), 1),
+            Error::<Test>::GraceExpired
+        );
+        assert_eq!(pallet_test_dispatch::Value::<Test>::get(), 0);
+        assert!(Queue::<Test>::contains_key(1));
+        assert_eq!(epoch_calls(), vec![EpochCall::Failed(1)]);
+        assert_ok!(GuardPallet::do_try_state());
+    });
+}
+
 #[test]
 fn t22_expiry_is_closed_during_retry_window_and_terminal_after_it() {
     new_test_ext().execute_with(|| {

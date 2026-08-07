@@ -44,6 +44,8 @@
  * ingesting" a fast, explicit answer instead of a hang.
  */
 
+import { chainTag } from './chain-tag.js';
+
 /** The Web Locks surface this module needs. Structural, so a test can supply its own. */
 export interface LockManagerLike {
   request(
@@ -67,9 +69,15 @@ export class IngestLockError extends Error {
  * streams; one global lock would let a tab indexing Paseo block a tab indexing Polkadot for
  * no reason. The scoping mirrors the database's, so the lock and the thing it guards cannot
  * disagree about what "one ingester" means.
+ *
+ * **Through `chainTag`, which validates.** This function sliced its argument and the database
+ * name validated its own, so the two derived the same suffix by different rules: an empty
+ * string produced the database refusal on one side and the lock name `fut-ingest@` on the
+ * other — a single global lock, held by whichever tab asked first, in the function whose whole
+ * purpose is one writer *per chain*. Mirroring the database's scoping means using its check.
  */
 export function ingestLockName(paraGenesisHash: string): string {
-  return `fut-ingest@${paraGenesisHash.slice(2, 10)}`;
+  return `fut-ingest@${chainTag(paraGenesisHash)}`;
 }
 
 export type LockOutcome<T> =

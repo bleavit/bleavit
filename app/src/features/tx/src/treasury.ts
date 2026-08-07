@@ -31,7 +31,7 @@
  * which is the enforceable form of that sentence.
  */
 
-import { combine, type Combined, type Verified } from '@bleavit/shared-types';
+import { combine, combine2, type Combined, type Verified } from '@bleavit/shared-types';
 
 export interface Stream {
   readonly id: Verified<string>;
@@ -154,6 +154,38 @@ export function claimBlocks(context: ClaimContext): readonly TreasuryBlock[] {
   return blocks;
 }
 
+/**
+ * `T_ins`, or the statement that it could not be obtained.
+ *
+ * ## The target has no published surface, and the type had claimed one
+ *
+ * `insuranceStanding` took `target: Verified<bigint>`, which asserts that somewhere a
+ * light-client read produces `T_ins`. Nothing does. 08 §1.2 defines it as
+ * `swept_residue_unreclaimed + min_balance` — *"an O(1) maintained counter"* inside the
+ * treasury pallet — and 02 §4's `NavView` publishes `insurance` and no target beside it,
+ * while 02 §7 freezes no `pallet-futarchy-treasury` storage at all and its closing rule
+ * requires every treasury consumer to bind `nav()` rather than raw state. So the only way a
+ * caller could have satisfied the old signature was by constructing the figure itself, and
+ * a classification against a self-supplied target is a classification against nothing
+ * (SQ-616).
+ *
+ * The repair is the shape `TriggerState` and `ChallengeWindow` already use: an explicit
+ * `unestablished` arm, so *"we could not obtain the target"* is a value a screen must
+ * handle rather than a case it silently renders as `at-target` — which is what an
+ * equality test against a fabricated zero would produce for an empty account, and reads as
+ * *this reserve is exactly sized* at the moment it holds nothing.
+ */
+export type InsuranceTarget =
+  | { readonly kind: 'read'; readonly value: Verified<bigint> }
+  | { readonly kind: 'unestablished'; readonly reason: string };
+
+/** The fixed reason, so every screen states the same gap in the same words. */
+export const INSURANCE_TARGET_UNREADABLE =
+  'The chain publishes the INSURANCE balance but not the liability it is sized against. ' +
+  '`T_ins` is a treasury-internal counter (08 §1.2) and the contract freezes no surface ' +
+  'carrying it, so this client can show what the account holds and cannot say whether that ' +
+  'is above or below what it owes (SQ-616).';
+
 /** Where `INSURANCE` stands against its derived target — never a bare balance. */
 export type InsuranceStanding =
   | { readonly kind: 'at-target' }
@@ -162,17 +194,31 @@ export type InsuranceStanding =
    * Above target between the overflow sweeps. Not a surplus, and not income: the excess
    * moves to `MAIN` automatically, so this is a transient rather than a trend.
    */
-  | { readonly kind: 'awaiting-overflow'; readonly excess: bigint };
+  | { readonly kind: 'awaiting-overflow'; readonly excess: bigint }
+  /** No target was obtainable, so there is no standing — see `InsuranceTarget`. */
+  | { readonly kind: 'unestablished'; readonly reason: string };
 
+/**
+ * Classify the balance against the target.
+ *
+ * `Combined` because the established case is derived from **two** reads: an `INSURANCE`
+ * balance verified at one block and a target verified at another describe no single state,
+ * and the classification would be a claim about neither. The unestablished case still
+ * carries the balance's own provenance — the screen is entitled to say at which block it
+ * observed the account, and only the comparison is withheld.
+ */
 export function insuranceStanding(
   balance: Verified<bigint>,
-  target: Verified<bigint>,
-): InsuranceStanding {
-  if (balance.value === target.value) return { kind: 'at-target' };
-  if (balance.value < target.value) {
-    return { kind: 'below-target', shortfall: target.value - balance.value };
+  target: InsuranceTarget,
+): Combined<InsuranceStanding> {
+  if (target.kind === 'unestablished') {
+    return combine({ kind: 'unestablished', reason: target.reason }, [balance.status]);
   }
-  return { kind: 'awaiting-overflow', excess: balance.value - target.value };
+  return combine2(balance, target.value, (held, sized): InsuranceStanding => {
+    if (held === sized) return { kind: 'at-target' };
+    if (held < sized) return { kind: 'below-target', shortfall: sized - held };
+    return { kind: 'awaiting-overflow', excess: held - sized };
+  });
 }
 
 /** In-bundle copy per standing. The `awaiting-overflow` one is the load-bearing sentence. */
@@ -190,6 +236,12 @@ export function insuranceCopy(standing: InsuranceStanding): string {
         'INSURANCE is above its target and the excess moves to MAIN automatically. This is ' +
         'not protocol income and not a surplus — protocol revenue routes entirely to MAIN, ' +
         'and this balance is a sized reserve rather than an earnings figure.'
+      );
+    case 'unestablished':
+      return (
+        `${standing.reason} A rising balance here is still not protocol income — revenue ` +
+        'routes entirely to MAIN — so nothing about this account may be read as earnings ' +
+        'whether or not the target is known.'
       );
   }
 }

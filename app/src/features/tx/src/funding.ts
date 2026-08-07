@@ -47,8 +47,20 @@ export interface FundingBlock {
 }
 
 export interface DepositInputs {
-  /** AH-side USDC, read on the Asset Hub connection at its own finalized block. */
-  readonly assetHubBalance: Verified<bigint>;
+  /**
+   * AH-side USDC, read on the Asset Hub connection at its own finalized block.
+   *
+   * `undefined` when the record was read and could not be decoded. It is deliberately not a
+   * substituted `0n`: 10 §2.2 assigns `verified-finalized` *"only to values read through
+   * smoldot with storage proofs checked"*, so a manufactured zero has no badge it may wear,
+   * and INV-FE-12 forbids guessing at an encoding rather than showing the raw bytes. The
+   * check below blocks on the absence, which is the direction the old zero produced anyway —
+   * what it did not do was stop the screen showing that zero as a chain answer.
+   *
+   * An **absent Asset Hub account** is a different fact and remains a badged `0n`: the chain
+   * did answer, and its answer is that the account holds nothing.
+   */
+  readonly assetHubBalance: Verified<bigint> | undefined;
   readonly amount: bigint;
   /** AH-side fee estimate, in the same units. */
   readonly assetHubFee: bigint;
@@ -93,7 +105,15 @@ export function depositBlocks(inputs: DepositInputs): readonly FundingBlock[] {
         'dusted rather than credited.',
     });
   }
-  if (inputs.assetHubBalance.value < inputs.amount + inputs.assetHubFee) {
+  if (inputs.assetHubBalance === undefined) {
+    blocks.push({
+      check: 'Asset Hub balance',
+      detail:
+        'Your Asset Hub USDC record was read but could not be decoded, so this client cannot ' +
+        'say whether it covers the amount plus the Asset Hub-side fee. The deposit is blocked ' +
+        'rather than checked against a balance nobody stated. The raw bytes are shown below.',
+    });
+  } else if (inputs.assetHubBalance.value < inputs.amount + inputs.assetHubFee) {
     blocks.push({
       check: 'Asset Hub balance',
       detail:
@@ -182,8 +202,14 @@ export function progressCopy(progress: DepositProgress): string {
 }
 
 export interface WithdrawInputs {
-  /** **Free** balance only — positions and holds excluded (§11.9.2). */
-  readonly freeBalance: Verified<bigint>;
+  /**
+   * **Free** balance only — positions and holds excluded (§11.9.2).
+   *
+   * `undefined` when the record could not be decoded, for the reason `DepositInputs`
+   * gives. The dust-remainder check is skipped too: a remainder computed from a balance
+   * nobody stated would name an exact figure the client cannot support.
+   */
+  readonly freeBalance: Verified<bigint> | undefined;
   readonly amount: bigint;
   readonly localFee: bigint;
   readonly minBalance: bigint;
@@ -194,24 +220,34 @@ export interface WithdrawInputs {
 
 export function withdrawBlocks(inputs: WithdrawInputs): readonly FundingBlock[] {
   const blocks: FundingBlock[] = [];
-  if (inputs.freeBalance.value < inputs.amount + inputs.localFee) {
+  if (inputs.freeBalance === undefined) {
     blocks.push({
       check: 'Free balance',
       detail:
-        'Your free USDC does not cover the amount plus this chain’s fee. Balance held ' +
-        'against positions does not count — it is not free to send.',
+        'Your USDC record was read but could not be decoded, so this client cannot say what ' +
+        'is free to send. The withdrawal is blocked rather than checked against a balance ' +
+        'nobody stated. The raw bytes are shown below.',
     });
-  }
-  const remainder = inputs.freeBalance.value - inputs.amount - inputs.localFee;
-  // A remainder between zero and `min_balance` would be dusted. A full withdrawal (exactly
-  // zero remainder) is fine, which is why this is a band and not a floor.
-  if (remainder > 0n && remainder < inputs.minBalance) {
-    blocks.push({
-      check: 'Remainder would be dusted',
-      detail:
-        `Leaving ${remainder} behind is below the minimum balance of ${inputs.minBalance}. ` +
-        'Withdraw slightly less, or withdraw everything.',
-    });
+  } else {
+    if (inputs.freeBalance.value < inputs.amount + inputs.localFee) {
+      blocks.push({
+        check: 'Free balance',
+        detail:
+          'Your free USDC does not cover the amount plus this chain’s fee. Balance held ' +
+          'against positions does not count — it is not free to send.',
+      });
+    }
+    const remainder = inputs.freeBalance.value - inputs.amount - inputs.localFee;
+    // A remainder between zero and `min_balance` would be dusted. A full withdrawal (exactly
+    // zero remainder) is fine, which is why this is a band and not a floor.
+    if (remainder > 0n && remainder < inputs.minBalance) {
+      blocks.push({
+        check: 'Remainder would be dusted',
+        detail:
+          `Leaving ${remainder} behind is below the minimum balance of ${inputs.minBalance}. ` +
+          'Withdraw slightly less, or withdraw everything.',
+      });
+    }
   }
   if (inputs.ledgerFrozen) {
     blocks.push({

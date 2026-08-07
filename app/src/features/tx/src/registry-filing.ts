@@ -220,6 +220,69 @@ export interface FilingBlock {
   readonly detail: string;
 }
 
+/**
+ * `registry.challenge` — §11.8.6's second row, and the bond half of it was never checked.
+ *
+ * The row reads *"filing within its 72 h challenge window (incl. watchtower-quorum
+ * extension state, displayed); **challenge bond balance**"*, and `mayChallenge` tested only
+ * the window. So the client offered a challenge to an account that cannot post the bond,
+ * and the chain refused it after the signature — the same failure direction `filingBlocks`
+ * exists to prevent one row above, left open on the row where the user has a deadline and
+ * one attempt inside it.
+ *
+ * ## Two things this mirrors deliberately, and one it adds
+ *
+ * The bond is **read**, never computed: 07 §7 scales it with the filing's value exactly as
+ * it scales the filing bond, so a constant baked in here would under-report after the first
+ * amendment. And an **indeterminate** window blocks rather than degrading — `mayChallenge`
+ * already refuses it, and repeating the refusal here means a caller that consults only this
+ * function reaches the same answer.
+ *
+ * What it adds is the evidence hash. §11.8.6's row does not list one and the runtime's
+ * `challenge_filing(epoch, filing_id, evidence_hash)` requires one, so a client following
+ * the row alone cannot encode the call at all. It is blocked on rather than defaulted,
+ * because there is no hash that means *no evidence*; the disagreement between the two
+ * documents is filed as SQ-617 rather than settled here.
+ */
+export interface ChallengeFilingInputs {
+  readonly kind: FilingKind;
+  /** From `challengeWindow` — its `indeterminate` arm blocks, never falls back. */
+  readonly windowOpen: boolean;
+  /** Why, when it is not open. Carried so this module states the window's own reason. */
+  readonly windowReason: string;
+  readonly freeUsdc: Verified<bigint>;
+  /** Value-scaled per 07 §7 — a read, never a constant this module knows. */
+  readonly challengeBond: Verified<bigint>;
+  /** `challenge_filing`'s third argument. Absent is a refusal, not a default. */
+  readonly evidenceHash: string | undefined;
+}
+
+export function challengeFilingBlocks(inputs: ChallengeFilingInputs): readonly FilingBlock[] {
+  const blocks: FilingBlock[] = [];
+  if (!inputs.windowOpen) {
+    blocks.push({ check: 'Challenge window', detail: inputs.windowReason });
+  }
+  if (inputs.freeUsdc.value < inputs.challengeBond.value) {
+    blocks.push({
+      check: 'Challenge bond',
+      detail:
+        'Your free USDC does not cover the challenge bond. The bond is value-scaled per the ' +
+        'filing it disputes, so it is read from chain state rather than fixed — challenging ' +
+        'a larger claim costs more.',
+    });
+  }
+  if (inputs.evidenceHash === undefined || inputs.evidenceHash.length === 0) {
+    blocks.push({
+      check: 'Evidence',
+      detail:
+        'A challenge needs an evidence hash. The call takes one as an argument, and a ' +
+        'challenge whose evidence nobody can fetch is adjudicated as absent — which loses ' +
+        'the bond you just posted.',
+    });
+  }
+  return blocks;
+}
+
 export function filingBlocks(inputs: FilingInputs): readonly FilingBlock[] {
   const blocks: FilingBlock[] = [];
   if (inputs.freeUsdc.value < inputs.filingBond.value) {

@@ -51,14 +51,27 @@
     "tests/transaction-builder/**/*.ts",
     "tests/screens/**/*.ts",
     "tests/release/**/*.ts",
+    "tests/budgets/**/*.ts",
     // The tools themselves, which are the thing the suites above exercise. `tools/release/`
     // decides what a release contains; leaving it unchecked while checking the suite that
     // reads it would put the type boundary on the wrong side of the artefact.
     "tools/*.ts",
     "tools/release/**/*.ts",
+    "tools/render-budget/**/*.ts",
     "tools/snapshot/**/*.ts",
     "tools/verify-release/**/*.ts",
-    "tests/snapshot/**/*.ts"
+    "tests/snapshot/**/*.ts",
+    // F22. `tools/desktop/` decides whether the desktop shell may embed a tree at all, so it
+    // belongs on the checked side of the boundary for the same reason `tools/release/` does.
+    // `tests/platform/` is where the two deliberate restatements in `packages/platform` are
+    // bound to the shapes they restate — a compile-time claim, and therefore worth nothing
+    // unless this project compiles it.
+    "tests/platform/**/*.ts",
+    "tools/desktop/**/*.ts",
+    // Shared test helpers. Included explicitly rather than left to be pulled in by whichever
+    // suite happens to import them first: a helper nobody type-checks is where an untyped
+    // assertion hides, and this one is the only assertion four packages share.
+    "tests/shared/**/*.ts"
   ],
   // `tests/descriptors/types/*-witness.ts` joins the same class as the firewall fixtures:
   // it is an anti-vacuity control that MUST fail `tsc`, and `compat.test.ts` compiles it

@@ -38,6 +38,11 @@ const event = (
 
 const block = (events: readonly IndexedEvent[], extrinsicCount = 4): FinalizedBlockScan => ({
   number: 100,
+  // §6.3's hash-at-edge and spec-version-at-edge, read from the header rather than derived —
+  // a hash computed from what was ingested would agree with itself by construction.
+  hash: `0x${'ab'.repeat(32)}`,
+  specVersion: 3,
+  blockTimestampMs: 600_000,
   extrinsicCount,
   events,
 });
