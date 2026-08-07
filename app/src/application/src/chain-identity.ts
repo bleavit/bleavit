@@ -28,7 +28,7 @@
  * genesis is pinned, that assertion fails and this function has to start returning it.
  */
 
-import type { IndexChainIdentity } from '@bleavit/features-analysis';
+import type { IndexChainIdentity, MetadataPins } from '@bleavit/features-analysis';
 
 /**
  * The parachain identity this release pins, or the reason it pins none.
@@ -43,5 +43,31 @@ export function releaseParaChain(): IndexChainIdentity {
     reason:
       'this release pins no Bleavit parachain, because none has been launched yet. A local ' +
       'history store belongs to exactly one chain, so there is none to open.',
+  };
+}
+
+/**
+ * The runtimes 10 §9.3 pins non-evictable, or the reason this client cannot name them — F14.
+ *
+ * §9.3: *"the current and next-authorized runtime's metadata are pinned non-evictable"*. Both
+ * are **chain facts**: the current `spec_version` comes from a runtime read and the
+ * next-authorized one from `ReleaseChannel`, and this client completes neither — nothing here
+ * starts a light client (F18's artifact remainder), so there is no reading to take them from.
+ *
+ * A pinned set is therefore *unnameable* rather than empty, and the distinction is the whole
+ * point of the union: empty means **every blob may be evicted**, which is precisely the value a
+ * client that has read nothing would otherwise supply, and it is what would let the first
+ * retention pass of an unsynced session discard the era the next block needs. What the
+ * `unnameable` arm pins instead is everything the cache holds — see `cachedSpecVersions`.
+ *
+ * A function rather than a constant, for the same reason `releaseParaChain` is one: it is a
+ * statement about *this build*, read at boot.
+ */
+export function releaseMetadataPins(): MetadataPins {
+  return {
+    kind: 'unnameable',
+    reason:
+      'this client has completed no chain read, so it cannot name the current or the ' +
+      'next-authorized runtime. Nothing cached is discarded on that guess.',
   };
 }

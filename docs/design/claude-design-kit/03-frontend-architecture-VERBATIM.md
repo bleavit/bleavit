@@ -1,12 +1,17 @@
 > **DERIVED COPY for design-tool context — DO NOT EDIT.**
 > Verbatim copy of `docs/architecture/10-frontend-architecture.md` (the source of truth),
-> regenerated 2026-08-07, picking up the new **§8.5 (the provider wire)** and §8.3's
-> `unprobed` paragraph — F24's R-1 rulings on SQ-612, SQ-613 and SQ-771. Two corrections
-> inside §8.5 landed the same day after an R-6 review: a snapshot states **heights and no
-> block hash** (§6.3 fixes that shape and refuses a provider range carrying one, so the
-> earlier text contradicted it), and a wrong-chain probe answer now **disables** rather
-> than counting as a failure — routed through the failure ladder it made the source
-> `Failing`, which serves, so answering gained it eligibility that not answering withheld.
+> regenerated 2026-08-07, picking up **§9.2's device-classification rule** and **§9.4's IndexedDB-growth row** — its enforcement column
+> now names where the §9.2 quota manager is actually run by the client and what binds its caps,
+> its four shares and §9.3's blob bounds to the cells published above them (F14). The manager
+> implemented every clause of §9.2 and no module in `app/src` reached it, so the row's *"quota
+> manager + tests"* enforced nothing on a running client. §9.2 gains the rule it never stated
+> for telling its two device classes apart — a client with no form-factor hint takes the
+> **mobile** cap and MUST NOT default to the desktop one (SQ-994) — and §9.4 records that the
+> pass is a writer, so it runs under §4.4's `fut-ingest` lock. The previous regeneration picked up the new
+> **§8.5 (the provider wire)** and §8.3's `unprobed` paragraph — F24's R-1 rulings on SQ-612,
+> SQ-613 and SQ-771 — with two §8.5 corrections from an R-6 review: a snapshot states
+> **heights and no block hash**, and a wrong-chain probe answer **disables** a source rather
+> than counting as a failure.
 > For upload to Claude Design. If this copy and the source ever differ, the source wins.
 > Regenerate by re-copying the source file.
 
@@ -578,7 +583,9 @@ A client cannot decline events, so that is the rate it must survive rather than 
 
 ### 9.2 Retention auto-tunes to budget (degrades depth, never correctness)
 
-Hard caps: **300 MB desktop / 75 MB mobile**. These are **client-local values owned by this section**: a browser storage quota is not a chain parameter, [13](13-parameters.md) is the chain registry, and the citation this line previously carried pointed at a document with no such row (SQ-557) — the rest of §9's budget values have always been owned here, and this line was the anomaly. Fixed internal shares (user-adjustable locally): raw samples 60%, candles 20%, events+archive 15%, metadata 5%. The quota manager computes retention from the *measured* ingest rate — there is no fixed "90 days" promise. Honest verified-depth table at the caps:
+Hard caps: **300 MB desktop / 75 MB mobile**. These are **client-local values owned by this section**: a browser storage quota is not a chain parameter, [13](13-parameters.md) is the chain registry, and the citation this line previously carried pointed at a document with no such row (SQ-557) — the rest of §9's budget values have always been owned here, and this line was the anomaly.
+
+**Which of the two a client is on is a decision this section does not state, so it is made fail-closed and said out loud.** A browser publishes one non-sniffing form-factor hint, `navigator.userAgentData.mobile`, and several engines publish none at all — so a client that cannot tell takes the **mobile** cap and discloses that it did. The direction is forced by this section's own title: applying the smaller cap to a laptop degrades depth, which §9.2 permits and the ladder below is built for, while applying the larger one to a phone spends four times the storage on the device least likely to have it and hands the eviction decision to the browser, which takes whichever rows it likes and writes no *"downsampled"* label. A client MUST NOT default to the desktop cap in the absence of a hint. Whether this section should state the classification itself, and whether *"user-adjustable locally"* above reaches the cap as well as the shares — which is what would give a misclassified desktop a remedy — is SQ-994. Fixed internal shares (user-adjustable locally): raw samples 60%, candles 20%, events+archive 15%, metadata 5%. The quota manager computes retention from the *measured* ingest rate — there is no fixed "90 days" promise. Honest verified-depth table at the caps:
 
 | Raw-sample depth (share: 180 MB desktop / 45 MB mobile) | Quietest slate (7 books) | Primary max (31 books) | + hosted, provisional (63 books) | + hosted, registry max (159 books) |
 |---|---|---|---|---|
@@ -628,7 +635,7 @@ Measured in CI (Lighthouse + Playwright timers) on reference hardware (desktop =
 | First **verified** current-state render | ≤ 30 s / 90 s desktop; ≤ 90 s / 240 s mobile — **hypothesis, FE-P4 gates release** | Playwright sync timer vs live testnet |
 | Finalized-head refresh work | ≤ 50 ms main-thread per head | perf marks |
 | Per-refresh storage-proof traffic | ≤ 512 KiB per pinned-block screen refresh **[VERIFY measured proof sizes — FE-P4]** | perf test |
-| IndexedDB growth | §9.2 caps (300 MB / 75 MB) with auto-tuned retention | quota manager + tests |
+| IndexedDB growth | §9.2 caps (300 MB / 75 MB) with auto-tuned retention | quota manager + tests. `app/packages/local-index/src/quota.ts` applies §9.2's ladder and `app/src/features/analysis/src/index-quota.ts` is where the client runs it — a manager the client never reaches holds no cap at all, which is what this row enforced until F14. The pass is a **writer**: it deletes rows and rewrites §9.2's `"downsampled"` label set wholesale, so it runs under §4.4's `fut-ingest` lock and a tab that cannot take it reports that rather than writing beside the tab that can. `tools/ci/check-frontend-budgets.py` binds the manager's two platform caps, its four internal shares and §9.3's blob bounds to the cells published above, and binds §9.1's per-row model to the one client module that names it: the package refuses to compile that figure in, because §9.1 labels it a modelling assumption and a module holding it would publish an assumption as a measurement. The device classification §9.2 does not state is made there, fail-closed, and is not repeated here (SQ-994) |
 | Memory, desktop (tab + worker) | ≤ 600 MB steady-state | Playwright memory probe |
 | Memory, mobile | ≤ 350 MB steady-state, **including a named 2× smoldot line: 2 × ≤ 120 MB instances [VERIFY per-instance footprint — FE-P3/P4]** for leader-handoff and follower-tx transients (§4.4) | memory probe incl. dual-instance scenario |
 | Mobile CPU | ≤ 15% avg of one core steady-state after sync | profiling budget, FE-P4 |

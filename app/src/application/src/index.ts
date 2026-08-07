@@ -55,4 +55,4 @@ export {
   type DegradationRow,
 } from './degradation.js';
 export { implementedScreens, unaccountedScreens } from './composition.js';
-export { releaseParaChain } from './chain-identity.js';
+export { releaseMetadataPins, releaseParaChain } from './chain-identity.js';

@@ -40,8 +40,10 @@ import {
   bootLocalIndex,
   cannotObserve,
   historyDisclosure,
+  retentionDisclosure,
   type DisclosureItem,
   type IndexBootState,
+  type RetentionOutcome,
 } from '@bleavit/features-analysis';
 import {
   EMPTY_COVERAGE,
@@ -215,8 +217,21 @@ const checked = (overrides: Partial<IndexBootReport> = {}): IndexBootState => ({
   report: report(overrides),
 });
 
-const renderBoot = (state: IndexBootState): string =>
-  renderToStaticMarkup(h(IndexBootDisclosure, { state }));
+/**
+ * The retention arm these boot-path cases are not about — F14.
+ *
+ * `IndexBootDisclosure` renders both statements in one panel, so every case here has to supply
+ * one. It is the `not-run` arm because that is what a case rendering only the boot report has
+ * honestly done: nothing measured this device's storage. `index-quota.test.ts` owns the applied
+ * arm, where there is a real database and a real pass behind the numbers.
+ */
+const NO_RETENTION: RetentionOutcome = {
+  kind: 'not-run',
+  reason: 'this case renders the boot report only and applied no storage budget',
+};
+
+const renderBoot = (state: IndexBootState, retention: RetentionOutcome = NO_RETENTION): string =>
+  renderToStaticMarkup(h(IndexBootDisclosure, { state, retention }));
 
 const renderHistory = (history: CoveredHistory<unknown>): string =>
   renderToStaticMarkup(h(CoveredHistoryDisclosure, { history }));
@@ -253,7 +268,15 @@ function everyItem(): readonly DisclosureItem[] {
     ],
     chartDiscard: CHART_DISCARD,
   });
-  return [...boot, ...history];
+  // F14's arms. The `applied` one carries a real `QuotaReport` and is exercised in
+  // `index-quota.test.ts` against a real database; the other three need no fixture, so the
+  // totality claim below covers them rather than skipping them as awkward.
+  const retention = [
+    ...retentionDisclosure(NO_RETENTION),
+    ...retentionDisclosure({ kind: 'deferred', reason: 'another tab holds the writer lock' }),
+    ...retentionDisclosure({ kind: 'interrupted', reason: 'the database closed mid-pass' }),
+  ];
+  return [...boot, ...history, ...retention];
 }
 
 // -------------------------------------------------- the reader exists, and it is complete
@@ -411,6 +434,12 @@ test('which slots are blocked is itself a claim, not an accident of what got wri
     'chart-rows-discarded': 'awaiting',
     'history-holes': 'stated',
     'history-downsampled': 'stated',
+    // F14. §9.2 supplies both the rule and the words for the retention pass — it states what
+    // the ladder degrades and what it never touches — and §4.4 supplies the deferred arm's, so
+    // no arm waits on a ruling.
+    'storage-retention-not-run': 'stated',
+    'storage-retention-deferred': 'stated',
+    'storage-retention-interrupted': 'stated',
   };
   const seen = new Map<string, string>();
   for (const item of everyItem()) seen.set(item.id, item.copy.kind);
@@ -703,7 +732,7 @@ test('the disclosure is rendered outside the outlet, so it is on every route', (
   // asserted is the unconditional one: the shell's first child, immediately before the outlet.
   assert.match(
     boot,
-    /<Shell[^>]*>\s*<IndexBootDisclosure state=\{[A-Za-z]+\} \/>\s*<Outlet/,
+    /<Shell[^>]*>\s*<IndexBootDisclosure state=\{[A-Za-z]+\} retention=\{[A-Za-z]+\} \/>\s*<Outlet/,
     'the disclosure is not the shell’s unconditional first child',
   );
 });

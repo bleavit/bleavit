@@ -40,17 +40,12 @@ import {
 } from '@bleavit/local-index';
 
 import type { IndexBootState } from './index-disclosure.js';
+// `IndexChainIdentity` was declared here until F14 and now lives in a leaf module, because
+// `index-quota.ts` needs it too and importing it from here closed a three-module cycle that
+// `tsc` accepts and `depcruise` does not — see `index-identity.ts`.
+import type { IndexChainIdentity } from './index-identity.js';
 
-/**
- * What this release knows about the chain whose index is being opened.
- *
- * A union rather than `string | undefined`, because the absent case has to carry **why**: a
- * disclosure that says *no local history this session* with no reason is the silent state
- * 10 §3.1's `MemoryOnly` label and 11 E9's *"a stated reason — never a silent one"* both forbid.
- */
-export type IndexChainIdentity =
-  | { readonly kind: 'pinned'; readonly paraGenesisHash: string }
-  | { readonly kind: 'unpinned'; readonly reason: string };
+export type { IndexChainIdentity };
 
 /** How the chain answered about a range's edge block, or `undefined` for *cannot say*. */
 export type RangeObserver = (range: CoverageRange) => RangeEdgeFacts | undefined;

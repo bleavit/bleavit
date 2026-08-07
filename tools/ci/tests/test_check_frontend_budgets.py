@@ -27,6 +27,8 @@ PRIMITIVES = ROOT / "crates" / "futarchy-primitives" / "src" / "lib.rs"
 BUNDLE_GATE = ROOT / "app" / "tools" / "check-bundle-budget.ts"
 ARTIFACT_GATE = ROOT / "app" / "tools" / "check-artifact-budget.ts"
 RENDER_GATE = ROOT / "app" / "tools" / "render-budget" / "check.ts"
+QUOTA_MANAGER = ROOT / "app" / "packages" / "local-index" / "src" / "quota.ts"
+QUOTA_CALLER = ROOT / "app" / "src" / "features" / "analysis" / "src" / "index-quota.ts"
 
 
 def run() -> subprocess.CompletedProcess[str]:
@@ -468,6 +470,117 @@ class FrontendBudgets(unittest.TestCase):
             "The gate takes **3 runs** per profile",
             "The gate takes **9 runs** per profile",
             "§9.4 states the render gate takes 9 runs per profile",
+        )
+
+    # --- §9.4's IndexedDB-growth row and the quota manager that enforces it ---------
+    #
+    # This row's enforcement column names *"quota manager + tests"* rather than a size gate
+    # over an artifact, so what its threshold has to be bound to is the retention module. Every
+    # case below is a way that binding can rot, and the last two are the ones that matter most:
+    # the manager can be right about every number and be reached by nothing.
+
+    def test_a_cap_read_as_MiB_is_the_over_grant_this_binding_exists_for(self) -> None:
+        """The `check-smoldot-budget.ts` defect, one module over: 300 MiB is 5 % more storage."""
+        self.assert_mutation_caught(
+            QUOTA_MANAGER,
+            "desktop: 300 * 1000 * 1000,",
+            "desktop: 300 * 1024 * 1024,",
+            "enforces 314572800 B via STORAGE_CAP_BYTES",
+        )
+
+    def test_a_mobile_cap_the_document_does_not_publish_fails(self) -> None:
+        self.assert_mutation_caught(
+            QUOTA_MANAGER,
+            "mobile: 75 * 1000 * 1000,",
+            "mobile: 150 * 1000 * 1000,",
+            "caps mobile local storage at 75 MB",
+        )
+
+    def test_a_share_table_that_left_the_document_behind_fails(self) -> None:
+        """The shares turn one cap into the four budgets the ladder actually compares against."""
+        self.assert_mutation_caught(
+            QUOTA_MANAGER,
+            "  rawSamples: 0.6,",
+            "  rawSamples: 0.7,",
+            "applies 0.7000 via QUOTA_SHARES.rawSamples",
+        )
+
+    def test_an_events_share_the_document_does_not_give_fails(self) -> None:
+        self.assert_mutation_caught(
+            QUOTA_MANAGER,
+            "  eventsAndArchive: 0.15,",
+            "  eventsAndArchive: 0.25,",
+            "gives 'events+archive' 15%",
+        )
+
+    def test_a_metadata_blob_count_past_9_3_fails(self) -> None:
+        self.assert_mutation_caught(
+            QUOTA_MANAGER,
+            "mobile: Object.freeze({ blobs: 3,",
+            "mobile: Object.freeze({ blobs: 4,",
+            "bounds the mobile metadata cache at 3 blobs",
+        )
+
+    def test_a_metadata_byte_bound_past_9_3_fails(self) -> None:
+        """Both halves are bound: at the measured blob size the count binds and bytes are headroom,
+        so a gate checking one would pass the 16 MB / 6 MB pair SQ-557 cut."""
+        self.assert_mutation_caught(
+            QUOTA_MANAGER,
+            "bytes: 15 * 1000 * 1000 }",
+            "bytes: 16 * 1000 * 1000 }",
+            "bounds the desktop metadata cache at 15 MB",
+        )
+
+    def test_a_client_row_model_that_is_not_9_1s_fails(self) -> None:
+        """§9.1 labels this a modelling assumption, so exactly one client module may name it."""
+        self.assert_mutation_caught(
+            QUOTA_CALLER,
+            "export const MODELLED_ROW_BYTES = 120;",
+            "export const MODELLED_ROW_BYTES = 100;",
+            "charges 100 B via MODELLED_ROW_BYTES",
+        )
+
+    def test_9_1s_row_model_cannot_move_on_its_own(self) -> None:
+        """The other direction of the same equality, and it fails one check earlier.
+
+        Every §9.1 byte rate and every §9.2 depth divides by this figure, so moving it in the
+        document is caught by the derivation before the client binding is reached. Asserted at
+        the message that really fires rather than at the one this pairing would prefer: a test
+        that named the binding's message would be claiming an ordering the gate does not have.
+        """
+        self.assert_mutation_caught(
+            FRONTEND,
+            "~120 B effective per row",
+            "~140 B effective per row",
+            "MB/day; derived",
+        )
+
+    def test_the_row_restating_9_2s_caps_must_restate_them_correctly(self) -> None:
+        """One document, one figure, two places — which drifts exactly like a doc and a gate do."""
+        self.assert_mutation_caught(
+            FRONTEND,
+            "| IndexedDB growth | §9.2 caps (300 MB / 75 MB)",
+            "| IndexedDB growth | §9.2 caps (400 MB / 75 MB)",
+            "restates §9.2's caps as 400 MB / 75 MB",
+        )
+
+    def test_a_quota_manager_no_client_module_runs_is_an_unenforced_row(self) -> None:
+        """The whole finding. Every number can be right while nothing applies any of them."""
+        self.assert_mutation_caught(
+            QUOTA_CALLER,
+            "await applyQuota(db, {",
+            "await applyQuotaX(db, {",
+            "does not call `applyQuota`",
+        )
+
+    def test_an_enforcement_column_that_names_no_call_site_fails(self) -> None:
+        """A named mechanism with no implementation is SQ-557's shape — §9.4's bundle row named a
+        *"bundle-size CI gate"* that did not exist for as long as the row did."""
+        self.assert_mutation_caught(
+            FRONTEND,
+            "`app/src/features/analysis/src/index-quota.ts` is where the client runs it",
+            "the client runs it somewhere",
+            "cannot locate",
         )
 
     # --- anti-vacuity: a parse that finds nothing must fail, not pass ---------------
