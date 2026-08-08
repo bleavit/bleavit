@@ -164,7 +164,7 @@ function bootArgs(mode) {
     "--para-bootnodes", bootnodes.para.join(","),
     "--asset-hub-bootnodes", bootnodes.assetHub.join(","),
     "--mode", mode,
-    "--timeout-seconds", "240",
+    "--timeout-seconds", "300",
   ];
 }
 

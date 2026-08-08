@@ -292,6 +292,28 @@ export async function startLightClientWith(
     return topology.para;
   });
 
+  /**
+   * The connection the opener actually builds — captured, because it is the only handle to
+   * the loop that retries.
+   *
+   * `getSmProvider` returns `getSyncProvider(...)`, and **every call to it constructs a fresh
+   * closure** with its own proxy, token, `stop()` and retry chain. So `provider(() => {})`
+   * disconnects a second, unrelated connection and leaves the real one running — which is
+   * exactly what an earlier version of this fix did, with a confident comment on top.
+   * Measured against the pinned packages: 131 factory calls in 300 ms, and 129 more in the
+   * 300 ms *after* the no-op disconnect, against 0 more after disconnecting this handle.
+   *
+   * There is no backoff to wait out, either: `consecutiveHalts` only increments on the
+   * `onHalt` path, so the `onReady(null)` path leaves the wait at 0 and the loop runs at
+   * roughly 430 iterations a second, `console.error`ing each one.
+   */
+  let opened: { disconnect: () => void } | undefined;
+  const capturing: typeof provider = (onMessage) => {
+    const connection = provider(onMessage);
+    opened = connection;
+    return connection;
+  };
+
   let transport: ChainHeadConnection;
   try {
     // The pin, not the probe. `startTopology` has already asserted the *probed* genesis
@@ -302,7 +324,7 @@ export async function startLightClientWith(
     // Raced against the latch, because the throw cannot reach here on its own — see
     // `newTopology`. `open()` would otherwise wait on a provider that retries forever.
     transport = await Promise.race([
-      ChainHeadConnection.open(asTransportProvider(provider), {
+      ChainHeadConnection.open(asTransportProvider(capturing), {
         chain: options.para.pinned.genesisHash,
       }),
       wrongChain,
@@ -318,9 +340,9 @@ export async function startLightClientWith(
     //
     // First, because the loop is what would otherwise re-add what the next two lines remove.
     try {
-      provider(() => {}).disconnect();
+      opened?.disconnect();
     } catch {
-      // A provider that never connected has nothing to release, which is the state wanted.
+      // A connection that never opened has nothing to release, which is the state wanted.
     }
     for (const topology of topologies) topology.stop();
     await client.terminate();
