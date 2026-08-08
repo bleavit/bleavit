@@ -22,9 +22,9 @@ consumer rather than agreed with. `app/fixtures/tree-digest-cases.json` is read 
 place by this module's tests and by `app/tests/release/repro-manifest.test.ts`, so the
 two implementations cannot drift apart quietly.
 
-## What it refuses, and the two refusals that are not about the files
+## What it refuses, and the refusals that are not about the files
 
-A gate that only compared the file maps would pass in three situations where it has
+A gate that only compared the file maps would pass in four situations where it has
 proved nothing:
 
   1. **The same environment twice.** "Two environments" that share every recorded axis
@@ -37,10 +37,32 @@ proved nothing:
      build-recipe digests are preconditions of the comparison, not part of it.
   3. **A self-consistent lie.** A manifest whose declared tree digest does not describe
      its own file map is not evidence about a build; it is evidence about a producer.
+  4. **Two different recipes, one variable at a time** (SQ-1009). 12 §1.1 lists
+     `SOURCE_DATE_EPOCH` in the deterministic-build recipe beside the Node pin and the
+     frozen lockfile, so the two environments must carry the *same* one. That makes it a
+     **recipe axis** rather than an environment axis, and the classification does two
+     things `RECIPE_AXES` below implements: it must be equal, and it can never satisfy
+     refusal 1 — an axis the recipe fixes cannot demonstrate that two environments were
+     independent.
+
+     The refusal has to name the *recipe*, not the bytes. Without it a legitimate recipe
+     violation arrives disguised as a file-level diff, and the cheapest way to make that
+     diff go away is to unset the variable — which is the failure the whole convention
+     exists to prevent, arriving through the gate meant to catch it. For the same reason
+     an absent value is refused rather than read as "not observable here": two `null`s
+     compare equal, so unsetting it on both sides would otherwise buy silence.
 
 When it does fail on the files, it names **every** differing path with both digests.
 A reproducibility gate that reports only "not identical" leaves the person who has to
 fix it with a whole tree to bisect.
+
+## What none of this proves
+
+Setting `SOURCE_DATE_EPOCH` does not make a clock-reading tool deterministic; it makes
+one that honours the convention deterministic, and a tool calling the clock in process
+ignores it. The byte-identical property still rests on the tree being clock-free, and
+this comparison is what tests that. Refusal 4 keeps the two environments honest about
+the recipe they claim to share — it is not a second proof of the same thing.
 """
 
 from __future__ import annotations
@@ -53,6 +75,13 @@ import sys
 from typing import Any
 
 SCHEMA = "bleavit.app-repro-manifest.v1"
+
+# Keys inside `environment.substantive` that 12 §1.1 fixes as part of the build **recipe**.
+# They live in that block because the producer reads them off the environment, which is what
+# the convention is; they are classified here because this is where the classification has
+# teeth. Each maps to the name an operator would set, so the failure names the thing to fix
+# rather than the JSON key it was recorded under.
+RECIPE_AXES = {"sourceDateEpoch": "SOURCE_DATE_EPOCH"}
 
 _SHA256_CHARS = set("0123456789abcdef")
 
@@ -126,12 +155,60 @@ def _environment(document: dict[str, Any], label: str) -> dict[str, Any]:
     return environment
 
 
+def compare_recipe_axes(a: dict[str, Any], b: dict[str, Any]) -> list[str]:
+    """Refusal 4 — the two environments built the same recipe (12 §1.1, SQ-1009).
+
+    Three ways this can fail, and only the first is the one people picture:
+
+      * the two values differ — a genuine recipe divergence, reported **as one**, because
+        the same divergence reported as "these files differ" invites the repair that
+        deletes the variable;
+      * one side recorded `null` — everywhere else in this manifest `null` means "not
+        observable here", which is an honest answer about a *machine*. It is not an
+        honest answer about a recipe: 12 §1.1 fixes this value, so an unset one is a
+        build that did not follow the recipe rather than a fact nobody could see;
+      * neither side recorded it at all — the version of the same repair that removes the
+        evidence instead of the disagreement. Two absent keys pass every equality test
+        ever written, so absence has to be the failure.
+    """
+    failures: list[str] = []
+    for axis, variable in sorted(RECIPE_AXES.items()):
+        left, right = a["substantive"].get(axis, ...), b["substantive"].get(axis, ...)
+        missing = [
+            environment["id"]
+            for environment, value in ((a, left), (b, right))
+            if value is ... or value is None
+        ]
+        if missing:
+            failures.append(
+                f"{' and '.join(missing)} recorded no {variable}; 12 §1.1 fixes it as part "
+                "of the deterministic-build recipe, and an unrecorded one is a build that "
+                "did not follow the recipe rather than an environment fact nobody could "
+                "observe (two absent values would compare equal and prove nothing)"
+            )
+            continue
+        if left != right:
+            failures.append(
+                f"the two environments built with different {variable} values "
+                f"({a['id']} {left!r}, {b['id']} {right!r}); 12 §1.1 fixes {variable} in the "
+                "build recipe, so this is a recipe divergence and not a file difference — "
+                "make the two environments agree on the value, never unset it to make the "
+                "resulting diff go away"
+            )
+    return failures
+
+
 def compare_environments(a: dict[str, Any], b: dict[str, Any]) -> tuple[list[str], list[str]]:
     """`(differing axis descriptions, failures)`.
 
     A difference counts only between two **known, unequal** values. A `null` on either
     side is "not observable here", and treating it as a difference would let an axis that
     one runner cannot report stand in for independence it never demonstrated.
+
+    `RECIPE_AXES` are excluded from the difference tally entirely. They are recorded in
+    the same block, but 12 §1.1 fixes them, so one of them differing is a defect rather
+    than evidence — and counting it would let the one axis that must never move be the
+    thing that satisfies "these are two environments".
     """
     failures: list[str] = []
     if a["id"] == b["id"]:
@@ -151,11 +228,15 @@ def compare_environments(a: dict[str, Any], b: dict[str, Any]) -> tuple[list[str
             f"(only in {a['id']}: {only_left or 'none'}; only in {b['id']}: {only_right or 'none'}); "
             "they were produced by different versions of the manifest tool"
         )
-        return [], failures
+        return [], failures + compare_recipe_axes(a, b)
+    failures.extend(compare_recipe_axes(a, b))
     differences = [
         f"{axis}: {left[axis]!r} vs {right[axis]!r}"
         for axis in sorted(left)
-        if left[axis] is not None and right[axis] is not None and left[axis] != right[axis]
+        if axis not in RECIPE_AXES
+        and left[axis] is not None
+        and right[axis] is not None
+        and left[axis] != right[axis]
     ]
     if not differences:
         failures.append(
@@ -197,6 +278,13 @@ def check(first: dict[str, Any], second: dict[str, Any]) -> tuple[list[str], lis
     report.append(f"environments: {left} vs {right}")
     for line in differences:
         report.append(f"  differ on {line}")
+    # Printed on the healthy path too: a recipe value the run agreed on is evidence, and a
+    # gate that only mentions it when it fails leaves a reader unable to tell "both carried
+    # the same epoch" from "nobody looked".
+    for axis, variable in sorted(RECIPE_AXES.items()):
+        shared = environment_a["substantive"].get(axis)
+        if shared is not None and shared == environment_b["substantive"].get(axis):
+            report.append(f"  agree on {variable}: {shared}")
 
     for label, document in ((left, first), (right, second)):
         files = _files(document, f"manifest {label}")

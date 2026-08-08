@@ -41,6 +41,13 @@
  * change at all in `tools/ci/check-release-reproducibility.py`. The comparator requires both
  * manifests to declare the same key set, which is what stops one side from manufacturing a
  * difference by simply not recording an axis.
+ *
+ * **One key in that block is a recipe fact rather than an environment axis.**
+ * 12 §1.1 names `SOURCE_DATE_EPOCH` as part of the deterministic-build recipe, so the two
+ * environments must carry the *same* one — and the comparator therefore both requires it to
+ * be equal and refuses to let it count towards the independence requirement above. Recorded
+ * here rather than beside `buildRecipeDigest` because an environment variable is what the
+ * convention is; classified there, because that is where the classification is enforced.
  */
 
 import { execFileSync } from 'node:child_process';
@@ -50,6 +57,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { perFileHashes, sha256, treeDigest } from './release-json.ts';
+import { SOURCE_DATE_EPOCH, resolveSourceDateEpoch } from './source-date-epoch.ts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const APP_ROOT = resolve(HERE, '../..');
@@ -79,6 +87,12 @@ export interface ReproEnvironment {
    * Axes that could change the emitted bytes. A `null` is "not observable here", never a
    * value: the comparator counts a difference only between two *known* unequal values, so an
    * unrecorded axis can neither prove independence nor be mistaken for proof of it.
+   *
+   * One key in here is not that kind of axis and the comparator classifies it separately:
+   * `sourceDateEpoch` is part of 12 §1.1's **recipe**, so the two environments must carry the
+   * same one, and it can never stand in for the independence the block otherwise exists to
+   * demonstrate. It is recorded here rather than beside `buildRecipeDigest` because it is
+   * read off the environment, which is what the convention is.
    */
   readonly substantive: Readonly<Record<string, string | number | null>>;
   /**
@@ -148,10 +162,13 @@ export function describeEnvironment(id: string, appRoot: string): ReproEnvironme
       // machine with a different count. Recorded because it can change bytes, not because it
       // is expected to.
       cpuCount: availableParallelism(),
-      // 12 §1.1 requires `SOURCE_DATE_EPOCH` fixed. Nothing in this pipeline sets it today
-      // and nothing in it reads a clock, so it records `null` on both sides — visible as a
-      // gap rather than absent from the evidence.
-      sourceDateEpoch: environmentValue('SOURCE_DATE_EPOCH'),
+      // 12 §1.1 requires `SOURCE_DATE_EPOCH` fixed, and `source-date-epoch.ts` now resolves
+      // and **exports** it — injected value first, the source commit's time otherwise — so
+      // this reads the value the build itself ran under rather than a second opinion about
+      // how to derive one. `main` resolves before describing, which is what makes that true;
+      // the consumer refuses a `null` here, because unsetting the variable is the cheapest
+      // way to make a recipe divergence look like agreement.
+      sourceDateEpoch: environmentValue(SOURCE_DATE_EPOCH),
     },
     incidental: {
       hostname: hostname(),
@@ -263,6 +280,11 @@ export function main(argv: readonly string[]): number {
     return 64;
   }
   const out = argumentValue(argv, '--out') ?? join(OUT, 'repro-manifest.json');
+  // Before the environment is described, so the recorded epoch is the resolved one. This runs
+  // in its own process — `release:build` and `release:manifest` are two commands — and the two
+  // agree because both resolve the same way from the same source, not because one told the
+  // other.
+  resolveSourceDateEpoch(REPO_ROOT);
   const files = collectReleaseFiles(DIST, OUT);
   const releaseJson: unknown = JSON.parse(readFileSync(join(OUT, 'release.json'), 'utf8'));
   assertReleaseJsonDescribesTree(files, releaseJson);

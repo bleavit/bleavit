@@ -1,0 +1,79 @@
+{
+  "what": "The strings 12 §1.1's SOURCE_DATE_EPOCH may and may not be, read IN PLACE by app/tests/release/source-date-epoch.test.ts and tools/release/tests/test_release_common.py (SQ-1009).",
+  "why": "Two release pipelines in one repository resolve this variable — app/tools/release/source-date-epoch.ts for the client and tools/release/release_common.py for the chain — and the ruling that added the first said to be consistent with the second. Consistency asserted in one language is a claim; this corpus is what makes it a test, in the same read-in-place shape as tree-digest-cases.json and self-check-cases.json.",
+  "scope": "Only strings the two must agree on. Python's int() additionally accepts digit-group underscores (1_2) and non-ASCII decimal digits, which the TypeScript parser refuses; that divergence is in the stricter direction, is asserted on the TypeScript side, and is deliberately not listed here — a corpus that carried it could only be satisfied by loosening the stricter half.",
+  "accepted": [
+    {
+      "raw": "1786017411",
+      "canonical": "1786017411",
+      "why": "The plain form: what `git show -s --format=%ct HEAD` prints and what CI would inject."
+    },
+    {
+      "raw": "0",
+      "canonical": "0",
+      "why": "The epoch's own zero is a legal fixed value, not an absent one. Refusing it would make the one timestamp that is unambiguously deliberate the one this pipeline cannot state."
+    },
+    {
+      "raw": "+1786017411",
+      "canonical": "1786017411",
+      "why": "int() permits a sign, so a signed value must not be a refusal here — it would fail one pipeline and pass the other on identical input."
+    },
+    {
+      "raw": "0001786017411",
+      "canonical": "1786017411",
+      "why": "Leading zeros are one spelling of one instant. Canonicalised rather than passed through, because the two-environment comparator tests this value for equality and two spellings would read as two recipes."
+    },
+    {
+      "raw": "  1786017411  ",
+      "canonical": "1786017411",
+      "why": "int() ignores surrounding whitespace, and a shell that exported a padded value stated an instant rather than a defect."
+    },
+    {
+      "raw": "18446744073709551616",
+      "canonical": "18446744073709551616",
+      "why": "2^64, well past 2^53. Parsed through BigInt on the TypeScript side for this reason: a Number would round it, and the rounded value is then what gets pinned and compared — V-74's shape, in a place where two different injected values could round into agreement."
+    }
+  ],
+  "refused": [
+    {
+      "raw": "-1",
+      "why": "Negative. int() accepts it and release_common.py then refuses it explicitly; a time before the epoch is not a build time."
+    },
+    {
+      "raw": "-1786017411",
+      "why": "The same refusal on a plausible-looking value, so the rule is not passing on the smallness of -1."
+    },
+    {
+      "raw": "",
+      "why": "Not an integer. The empty string is refused by the PARSER on both sides; treating an exported-but-empty variable as unset is the resolver's rule (and the shell's `[[ -z ]]`), one layer up, where deriving is the answer rather than accepting an empty value."
+    },
+    {
+      "raw": "   ",
+      "why": "Whitespace only, which is the same statement as the empty string in a shell that quoted something absent."
+    },
+    {
+      "raw": "12.0",
+      "why": "Seconds are whole. A parser accepting this would have to decide how to round, and every choice is a value nobody stated."
+    },
+    {
+      "raw": "1e3",
+      "why": "Exponent notation. JavaScript's Number would take it and Python's int() would not, which is exactly the direction a shared corpus exists to pin."
+    },
+    {
+      "raw": "0x6a3e",
+      "why": "Hexadecimal. int() is base 10 here, so a hex value must fail loudly rather than be read as some other number."
+    },
+    {
+      "raw": "abc",
+      "why": "Not a number at all — the shape a mistyped variable name or an unexpanded shell placeholder arrives in."
+    },
+    {
+      "raw": "1786017411 seconds",
+      "why": "A correct value with a unit attached. Refused rather than parsed leniently: a parser that took the leading digits would silently accept a document it half understood."
+    },
+    {
+      "raw": "nan",
+      "why": "Python's float() would take this and int() will not; neither pipeline may resolve a fixed epoch to a non-number."
+    }
+  ]
+}
