@@ -188,6 +188,36 @@ export default {
       },
     },
     {
+      name: 'no-node-light-client-in-the-bundle',
+      severity: 'error',
+      comment:
+        'app-code rule 13, F27. `@bleavit/chain-client/node-light-client` is a SECOND way to ' +
+        'start a light client, for drill harnesses under Node. It lives inside `chain-client` ' +
+        'so the smoldot import stays where the rule can see it — but that is not sufficient on ' +
+        'its own, and an earlier comment in `pnpm-workspace.yaml` wrongly claimed workspace ' +
+        'membership confined it: membership confines a ROOT dependency, not a subpath export, ' +
+        'and ten packages already declare `@bleavit/chain-client`. ' +
+        '`only-chain-client-opens-a-chain-connection` cannot fire on it either, because a ' +
+        'caller needs no forbidden external import — `startNodeLightClient` takes only ' +
+        '`BundledChain`s. Note the contrast with `./light-client`, which is safe by typing: ' +
+        'its `SmoldotClientFactory` must return a real smoldot `Client`, which an outside ' +
+        'caller cannot construct. This one hands out the capability outright, so it needs the ' +
+        'same explicit bar the four `*/testing` subpaths carry.\n\n' +
+        '**Proven in scope, and the witness suite cannot prove it.** This rule\'s `from` is ' +
+        '`^(src|packages)/`, and `tests/depcruise-witness` is outside it — a witness module ' +
+        'placed there fires `witness-could-not-resolve` instead, which would report success ' +
+        'about a different rule. It was verified by importing the subpath from ' +
+        '`src/features/tx/src/` and observing this rule name in the error, then removing the ' +
+        'probe. Re-run that probe if the rule is ever edited.',
+      from: { path: '^(src|packages)/', pathNot: '^tests/' },
+      to: {
+        path: WORKSPACE_SUBPATH(
+          '@bleavit/chain-client/node-light-client',
+          'packages/chain-client/dist/node-light-client',
+        ),
+      },
+    },
+    {
       name: 'no-mock-signer-in-the-bundle',
       severity: 'error',
       comment:

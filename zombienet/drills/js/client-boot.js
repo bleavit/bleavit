@@ -20,13 +20,19 @@
 // boundary, and it is drawn where the two module systems already stop — this file gathers
 // chain facts through the `zombie` global and hands them to the app's own entry points.
 //
-// ## The specs handed to smoldot are the RAW ones, and the ones zombienet spawned are not
+// ## The specs come from the SPAWNED network, not from `zombienet/specs/out/`
 //
-// The pinned zombienet schedules a parachain only from a PLAIN spec; smoldot accepts raw
-// specs only and `chain-spec.ts` refuses anything else. `generate-relay-specs.sh` emits
-// both forms from one generation for that reason (F27). Using the plain spec here fails
-// inside `addChain` as a chain that never finalises, which is indistinguishable from slow
-// sync — so the raw path is asserted before anything is started.
+// This is the correction the first real run forced, and it is not a detail. Zombienet
+// rewrites the specs it is given before it boots them — it injects validator session keys
+// into the relay genesis and registers the parachains — so the file the generator wrote and
+// the chain zombienet is running have **different genesis hashes**. Pinning the generated
+// spec while reading the genesis off a spawned node produces exactly the mismatch the
+// identity check exists to catch, and the client refuses to boot (correctly).
+//
+// Zombienet writes its effective specs into the network directory, already **raw** and
+// already carrying the spawned bootnodes: `<netdir>/paseo-local.json`,
+// `<netdir>/<paraId>-paseo-local.json`. Those are the bytes the chain is actually running,
+// so those are the bytes the pin must cover.
 const fs = require("fs");
 const path = require("path");
 const { spawnSync } = require("child_process");
@@ -34,17 +40,31 @@ const { spawnSync } = require("child_process");
 const ROOT = process.cwd();
 const OUT = path.join(ROOT, "target", "env");
 const PIN_FILE = path.join(OUT, "client-boot-pin.json");
-const SPECS = path.join(ROOT, "zombienet", "specs", "out");
-
 const RELAY_NODE = "relay-alice";
 const PARA_NODE = "bleavit-collator-1";
 const ASSET_HUB_NODE = "asset-hub-collator-1";
 
-const RAW = {
-  relay: path.join(SPECS, "paseo-local-raw.json"),
-  para: path.join(SPECS, "bleavit-drill-raw.json"),
-  assetHub: path.join(SPECS, "asset-hub-paseo-local-raw.json"),
-};
+// Zombienet's `-d` directory, which the runner passes and which holds `zombie.json`.
+// Resolved from the network spec rather than assumed, so a caller that moves it still works.
+function networkDir(networkInfo) {
+  const spec = networkInfo?.networkSpecPath ?? networkInfo?.tmpDir ?? process.env.ZOMBIE_DIR;
+  if (typeof spec === "string" && spec.length > 0) {
+    return spec.endsWith(".json") ? path.dirname(spec) : spec;
+  }
+  throw new Error(
+    "cannot locate the spawned network directory; zombienet writes the effective chain specs " +
+      "there and the generated specs in zombienet/specs/out/ are a DIFFERENT chain (see header)",
+  );
+}
+
+function spawnedSpecs(networkInfo) {
+  const dir = networkDir(networkInfo);
+  return {
+    relay: path.join(dir, "paseo-local.json"),
+    para: path.join(dir, "4242-paseo-local.json"),
+    assetHub: path.join(dir, "1000-paseo-local.json"),
+  };
+}
 
 function requireRawSpec(role, file) {
   if (!fs.existsSync(file)) {
@@ -103,9 +123,10 @@ function run(label, argv, timeoutSeconds) {
 }
 
 async function buildPin(networkInfo) {
-  for (const [role, file] of Object.entries(RAW)) requireRawSpec(role, file);
   fs.mkdirSync(OUT, { recursive: true, mode: 0o700 });
-
+  const RAW = spawnedSpecs(networkInfo);
+  fs.writeFileSync(path.join(OUT, "client-boot-specs.json"), JSON.stringify(RAW, null, 2), { mode: 0o600 });
+  for (const [role, file] of Object.entries(RAW)) requireRawSpec(role, file);
   const relay = await chainFacts(networkInfo, RELAY_NODE);
   const para = await chainFacts(networkInfo, PARA_NODE);
   const assetHub = await chainFacts(networkInfo, ASSET_HUB_NODE);
@@ -154,6 +175,18 @@ async function boot() {
   if (report.compat === "unestablished") {
     throw new Error(`the classifier ran without a chain: ${JSON.stringify(report)}`);
   }
+  // **The lattice, not the wrapper.** `CompatVerdict.kind` is `classified | unestablished`,
+  // so asserting `!== "unestablished"` says only that a chain answered — which the finalized
+  // head below already proves. 10 §5.2's verdict is the MODE, and a `read-only-incompatible`
+  // runtime is `classified`: a leg that stopped at the wrapper would pass on the regression
+  // it exists to catch.
+  if (report.compatMode !== "full") {
+    throw new Error(
+      `10 §5.2 classified this runtime as ${JSON.stringify(report.compatMode)}, not "full". ` +
+        `The drill spec is built from this repository's own runtime, so anything else means ` +
+        `the frozen critical surface and the runtime disagree: ${JSON.stringify(report)}`,
+    );
+  }
   if (typeof report.finalizedHash !== "string" || !report.finalizedHash.startsWith("0x")) {
     throw new Error(`no finalized head was delivered: ${JSON.stringify(report)}`);
   }
@@ -170,6 +203,16 @@ async function wrongChain() {
     throw new Error(
       `the refusal compared a value with itself (${report.expected}); the corrupted pin never ` +
         "reached the identity check, so this leg witnesses nothing",
+    );
+  }
+  // The refusal must be about the PARACHAIN pin this leg corrupted. `startTopology` asserts
+  // the relay first, so a stale relay pin also raises FE-BOOT-003 — and a leg that accepted
+  // it would report the control witnessed while never reaching the byte it flipped. `boot.ts`
+  // refuses that case; this is the second side of the same binding, kept here so the drill
+  // cannot be satisfied by a harness that stopped making it.
+  if (report.role !== "para" || report.observed !== report.uncorrupted) {
+    throw new Error(
+      `the refusal was not about the corrupted parachain pin: ${JSON.stringify(report)}`,
     );
   }
   console.log(`wrong-chain refused: expected ${report.expected}, observed ${report.observed}`);

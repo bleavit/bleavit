@@ -116,6 +116,14 @@ export interface DrillReport {
   readonly genesisHash: string;
   readonly specVersion: number | undefined;
   readonly compat: string;
+  /**
+   * 10 §5.2's lattice — `full` / `restricted` / `read-only-incompatible`.
+   *
+   * `CompatVerdict.kind` is only `classified | unestablished`, so recording it alone discards
+   * the verdict: a `read-only-incompatible` runtime is `classified`, and a drill asserting
+   * only that would pass on exactly the regression it exists to catch.
+   */
+  readonly compatMode: string | undefined;
   readonly assetHub: string | undefined;
   readonly finalizedHash: string;
 }
@@ -173,9 +181,15 @@ async function bootAndClassify(
   const client: LightClient = await startNodeLightClient({
     relay: bundled(document.relay),
     para: bundled(document.para),
-    // Both chains' peers in one list — `startTopology` applies the union to each spec it
-    // dials, and a peer that does not serve a chain is simply not useful for it.
-    extraBootnodes: [...bootnodes.relay, ...bootnodes.para],
+    // **All three chains' peers**, and the Asset Hub entry is the one that was missing until
+    // the R-6 review found it: it was collected, passed on the command line, parsed here and
+    // then dropped, so the Asset Hub chain was dialled with peers that do not serve it. That
+    // is a sufficient explanation for an `unavailable` verdict on its own, so the earlier
+    // genesis-size reading of that verdict was not established.
+    //
+    // `withExtraBootnodes` applies the union to every spec it dials, and a peer that does not
+    // serve a chain is simply not useful for it.
+    extraBootnodes: [...bootnodes.relay, ...bootnodes.para, ...bootnodes.assetHub],
   });
 
   try {
@@ -218,6 +232,7 @@ async function bootAndClassify(
           genesisHash: document.para.pinned.genesisHash,
           specVersion: runtime?.specVersion,
           compat: compat.kind,
+          compatMode: compat.kind === 'classified' ? compat.classification.mode : undefined,
           assetHub: `unavailable: no genesis answer within ${timeoutSeconds}s`,
           finalizedHash,
         };
@@ -243,6 +258,7 @@ async function bootAndClassify(
       genesisHash: document.para.pinned.genesisHash,
       specVersion: runtime?.specVersion,
       compat: compat.kind,
+      compatMode: compat.kind === 'classified' ? compat.classification.mode : undefined,
       assetHub,
       finalizedHash,
     };
@@ -314,13 +330,29 @@ export async function main(argv: readonly string[], boot: BootFn = bootAndClassi
     await boot(corrupted, bootnodes, timeoutSeconds);
   } catch (error) {
     if (error instanceof WrongChainError) {
+      // **Bound to the pin this leg mutated.** `startTopology` asserts the RELAY identity
+      // first, so a relay mismatch — a stale spec, a respawned network — produces a
+      // `WrongChainError` too, and a leg that accepted any of them would report FE-BOOT-003
+      // witnessed while the corrupted parachain pin was never reached. That is the same
+      // shape as a check that cannot fail, which is what this milestone exists to find.
+      const corruptedPara = corrupted.para.pinned.genesisHash;
+      if (error.expected !== corruptedPara) {
+        throw new DrillBootError(
+          `the identity check fired on a chain this leg did not corrupt: it expected ` +
+            `${error.expected}, and the corrupted parachain pin is ${corruptedPara}. The relay ` +
+            'is asserted first, so this is most likely a relay pin that no longer matches the ' +
+            'spawned network — re-read the specs from the network directory.',
+        );
+      }
       return `${JSON.stringify(
         {
           mode: 'wrong-chain',
           refused: true,
           code: error.code,
+          role: 'para',
           expected: error.expected,
           observed: error.observed,
+          uncorrupted: document.para.pinned.genesisHash,
         },
         null,
         2,

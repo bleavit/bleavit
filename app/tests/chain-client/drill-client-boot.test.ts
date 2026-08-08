@@ -67,8 +67,15 @@ test('the corrupted genesis is still a well-formed hash', () => {
   assert.match(corrupted, /^0x[0-9a-f]{64}$/i);
 });
 
-test('flipping is reversible, so exactly one nibble moved', () => {
-  assert.equal(corruptGenesis(corruptGenesis(GENESIS)).slice(0, -1), GENESIS.slice(0, -1));
+test('only the last nibble moves, and it always moves', () => {
+  // Named for what it checks. It is NOT an involution — '3' flips to '0', which flips to '1'
+  // — and an earlier name claimed reversibility while asserting a prefix against itself.
+  for (const tail of ['0', '1', '3', 'f']) {
+    const hash = `${GENESIS.slice(0, -1)}${tail}`;
+    const flipped = corruptGenesis(hash);
+    assert.equal(flipped.slice(0, -1), hash.slice(0, -1), 'a byte other than the last moved');
+    assert.notEqual(flipped, hash, `${tail} was left unchanged`);
+  }
 });
 
 test('an unknown mode is refused rather than defaulting to boot', async () => {
@@ -119,7 +126,8 @@ test('the wrong-chain leg fails when the client boots anyway', async () => {
     chain: 'bleavit_local_drills',
     genesisHash: GENESIS,
     specVersion: 2,
-    compat: 'full',
+    compat: 'classified',
+    compatMode: 'full',
     assetHub: undefined,
     finalizedHash: GENESIS,
   };
@@ -160,12 +168,13 @@ test('the identity refusal is accepted, and it carries both hashes', async () =>
 
 test('the boot leg passes the corrupted pin, never the original', async () => {
   let seen: string | undefined;
-  await assert.rejects(() =>
-    main(['--pin', pinDocument(), '--mode', 'wrong-chain'], async (document) => {
-      seen = document.para.pinned.genesisHash;
-      throw new WrongChainError(GENESIS as `0x${string}`, seen as `0x${string}`);
-    }),
-  ).catch(() => undefined);
+  // `main` RESOLVES on a WrongChainError whose expectation matches the corrupted pin, so an
+  // `assert.rejects` here would always fail — and an earlier version hid that with a trailing
+  // `.catch(() => undefined)`, which made the expectation inert. Awaited plainly instead.
+  await main(['--pin', pinDocument(), '--mode', 'wrong-chain'], async (document) => {
+    seen = document.para.pinned.genesisHash;
+    throw new WrongChainError(seen as `0x${string}`, corruptGenesis(GENESIS) as `0x${string}`);
+  });
   assert.notEqual(seen, GENESIS, 'the wrong-chain leg booted the uncorrupted pin');
   assert.equal(seen, corruptGenesis(GENESIS));
 });
@@ -227,4 +236,20 @@ test('a relay spec is still refused for declaring a relay, under either spelling
       `a relay spec declaring ${key} was accepted`,
     );
   }
+});
+
+test('a refusal about a chain this leg did not corrupt is rejected', async () => {
+  // The blocker the R-6 review found. `startTopology` asserts the RELAY identity first, so a
+  // stale relay pin raises `WrongChainError` too — and a leg that accepted any of them would
+  // report FE-BOOT-003 witnessed while the corrupted parachain pin was never reached. That is
+  // a check that cannot fail, which is the exact defect class this milestone exists to find.
+  const someOtherChain = '0x1111111111111111111111111111111111111111111111111111111111111111';
+  await assert.rejects(
+    () =>
+      main(['--pin', pinDocument(), '--mode', 'wrong-chain'], async () => {
+        throw new WrongChainError(someOtherChain as `0x${string}`, GENESIS as `0x${string}`);
+      }),
+    (error: unknown) =>
+      error instanceof DrillBootError && /did not corrupt/.test(error.message),
+  );
 });
