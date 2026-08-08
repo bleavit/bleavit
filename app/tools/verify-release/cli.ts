@@ -170,6 +170,21 @@ function integerOption(argv: readonly string[], flag: string): number | undefine
  * command keeps no dependency on the build tools it verifies. */
 const TXID = /^[A-Za-z0-9_-]{43}$/;
 
+/**
+ * A transaction id as the caller may type it, reduced to the 43 bytes everything else uses.
+ *
+ * 12 §1.3 publishes the verification command with the `ar://` scheme —
+ * `--release-json ar://<release-json-txid>` — and the id was interpolated into the gateway
+ * URL verbatim, so the spec's own literal command requested `ar%3A//<txid>` and could not
+ * resolve. Accepting the scheme here rather than at each use site keeps the manifest binding
+ * below comparing two ids of the same form: `--arweave ar://<m>` against a document that
+ * pins the bare `<m>` is the same manifest, and refusing it would be a second defect wearing
+ * the first one's clothes.
+ */
+function bareTxid(value: string): string {
+  return value.startsWith('ar://') ? value.slice('ar://'.length) : value;
+}
+
 function assertTxid(value: string, what: string): string {
   if (!TXID.test(value)) {
     throw new Error(`${what} is not a 43-character base64url Arweave transaction id: ${value}`);
@@ -249,13 +264,17 @@ function credentials(argv: readonly string[], document: unknown, field: string, 
 
 async function compareCommand(argv: readonly string[]): Promise<number> {
   const local = option(argv, '--local');
-  const manifestTxid = option(argv, '--arweave');
-  const releaseJsonTxid = option(argv, '--release-json');
+  const manifestArg = option(argv, '--arweave');
+  const releaseJsonArg = option(argv, '--release-json');
   const transcriptPath = option(argv, '--transcript');
   const gatewayConfigPath = option(argv, '--gateways');
-  if (local === undefined || manifestTxid === undefined || releaseJsonTxid === undefined) {
+  if (local === undefined || manifestArg === undefined || releaseJsonArg === undefined) {
     throw new Error('compare needs --local <dir>, --arweave <manifest-txid> and --release-json <txid>');
   }
+  // Normalised once, before any use: the shape check, the gateway URL and the manifest
+  // binding must all see the same id, or accepting `ar://` in one place breaks it in another.
+  const manifestTxid = assertTxid(bareTxid(manifestArg), '--arweave');
+  const releaseJsonTxid = assertTxid(bareTxid(releaseJsonArg), '--release-json');
   if ((transcriptPath === undefined) === (gatewayConfigPath === undefined)) {
     throw new Error(
       'compare needs exactly one of --transcript <path> (replay, what the suite runs) or ' +

@@ -240,6 +240,37 @@ test('a manifest the release does not pin is refused, however well its bytes mat
   assert.match(String(result.thrown?.message), /never authorized/);
 });
 
+test('12 §1.3’s published command runs — the ar:// scheme is accepted, not interpolated', async () => {
+  // §1.3 prints the verification command with the scheme:
+  //
+  //     ./tools/verify-release compare --local dist/ --arweave <manifest-txid> \
+  //         --release-json ar://<release-json-txid> --require-attestations 2
+  //
+  // and the value went into the gateway URL verbatim, so the spec's own copy-pasted line
+  // requested `ar%3A//<txid>`. A verifier following the published instructions saw what looked
+  // like a missing transaction rather than a malformed request — the worst shape for a command
+  // whose entire job is telling someone whether to trust the bytes they are about to run.
+  const withScheme = compareArgv({ channel: releaseChannel('clean.bin', 4, 0n) }).map(
+    (arg, index, all) => {
+      const flag = all[index - 1];
+      return flag === '--arweave' || flag === '--release-json' ? `ar://${arg}` : arg;
+    },
+  );
+  const result = await run(withScheme);
+  assert.equal(result.thrown, undefined, result.thrown?.message);
+  assert.match(result.out, /VERDICT: MATCH$/m);
+  assert.equal(result.code, 0);
+});
+
+test('stripping the scheme does not stop a malformed id being refused', async () => {
+  // Anti-vacuity for the test above: `bareTxid` removes a prefix and nothing else, so the
+  // 43-character shape check must still run on what is left. A normaliser that quietly
+  // accepted anything would make the pair above pass for the wrong reason.
+  const result = await run(compareArgv({ arweave: 'ar://not-a-real-transaction-id' }));
+  assert.equal(result.code, undefined, `expected a refusal; got exit ${String(result.code)}`);
+  assert.match(String(result.thrown?.message), /--arweave is not a 43-character base64url/);
+});
+
 test('a gateway serving a file nobody signed is reported, not passed over', async () => {
   // Nothing the release pins is missing or altered on `beta`; it serves one extra payload and
   // lists it in its own copy of the manifest. A fetch loop driven by the signed map cannot
