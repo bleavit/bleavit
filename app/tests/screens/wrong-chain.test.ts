@@ -155,21 +155,59 @@ test('the rendered screen carries the code, the role and both hashes', () => {
   assert.match(text, /not the Bleavit chain/);
 });
 
+/**
+ * Anything a person could act on: a control tag, an interactive ARIA role, or an event
+ * handler set as an attribute.
+ *
+ * The first version of this listed four tag names and checked them against a tree the
+ * implementation builds only from `section`, `h1` and `p`. It could not fail without an
+ * unrelated rewrite, and it passed on a clickable `div`, on a `section` carrying
+ * `role="button"`, and on an `onclick` that reloads the page — every plausible way this
+ * screen would actually grow an escape hatch. A test that cannot fail is the defect class
+ * this milestone exists to find, so it is not one this file gets to contain.
+ */
+const INTERACTIVE_TAGS = new Set(['button', 'a', 'form', 'input', 'select', 'textarea', 'dialog']);
+const INTERACTIVE_ROLES = new Set(['button', 'link', 'menuitem', 'tab', 'checkbox', 'switch']);
+
+function escapeHatches(element: FakeElement): string[] {
+  const found: string[] = [];
+  if (INTERACTIVE_TAGS.has(element.tag)) found.push(`<${element.tag}>`);
+  for (const [name, value] of Object.entries(element.attributes)) {
+    if (name === 'role' && INTERACTIVE_ROLES.has(value)) found.push(`role="${value}"`);
+    if (name.startsWith('on')) found.push(`${name}=`);
+    if (name === 'href' || name === 'tabindex') found.push(`${name}=`);
+  }
+  return [...found, ...element.children.flatMap(escapeHatches)];
+}
+
 test('the screen offers no way to continue — §3.1 gives this state no outgoing edge', () => {
   // `WrongChain --> [*]`, and §4.1 restates it as "no override". A chain that is not Bleavit
   // answers every read consistently, so a retry or a dismiss would put another chain's figures
   // under these labels. Asserted on the rendered tree, because that is where a control would be.
   const host = fakeHost([]);
   renderTerminalChainMismatch(host, new WrongChainError(PINNED, SYNCED));
-  const tags = new Set<string>();
-  const walk = (element: FakeElement): void => {
-    tags.add(element.tag);
-    for (const child of element.children) walk(child);
-  };
-  for (const child of host.children) walk(child);
-  for (const control of ['button', 'a', 'form', 'input']) {
-    assert.equal(tags.has(control), false, `the terminal screen rendered a <${control}>`);
-  }
+  assert.deepEqual(host.children.flatMap(escapeHatches), []);
+});
+
+test('the escape-hatch check fires — the witness for the case above', () => {
+  // Without this, the assertion above is a function returning an empty array for reasons
+  // nobody has checked. Three shapes, because each defeats a different lazy version of the
+  // check: a tag list, a role-blind tag list, and one that never looks at attributes.
+  const host = fakeHost([]);
+  const clickable = host.ownerDocument.createElement('div');
+  clickable.setAttribute('role', 'button');
+  const handler = host.ownerDocument.createElement('div');
+  handler.setAttribute('onclick', 'location.reload()');
+  const link = host.ownerDocument.createElement('a');
+  link.setAttribute('href', '#retry');
+  host.append(clickable, handler, link);
+
+  assert.deepEqual(host.children.flatMap(escapeHatches).sort(), [
+    '<a>',
+    'href=',
+    'onclick=',
+    'role="button"',
+  ]);
 });
 
 test('a boot failure that is NOT a wrong chain is re-thrown', () => {

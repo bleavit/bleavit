@@ -92,7 +92,7 @@ export function screenForHash(hash: string, handoffEnabled: boolean): string {
  * caller *asked* for, and the unmount is what it turned out to owe.
  */
 export interface BootedShell {
-  /** 10 §3.2's release-worker state, as `registerReleaseWorker` reported it. */
+  /** 12 §5.2's release-worker state, as `registerReleaseWorker` reported it. */
   readonly worker: WorkerStatus;
   /** Tear the mounted tree down. Safe to call once; React's own `unmount` clears the container. */
   readonly unmount: () => void;

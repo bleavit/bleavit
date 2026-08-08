@@ -208,12 +208,13 @@ async function bootAndClassify(
       const leg = bundled(document.assetHub);
       stage('attaching Asset Hub');
       // **Bounded, and the bound is a finding rather than a convenience.** `connectAssetHub`
-      // awaits a genesis probe on a chain smoldot is still initialising, and it carries no
-      // deadline of its own — so a foreign chain that never answers leaves the caller waiting
-      // forever. 11 E17 requires the deposit flow to be *"blocked with diagnostics"*, and an
-      // unbounded await is not that: it renders as a spinner that never resolves. Filed as a
-      // spec question rather than fixed in the client, because whether §7.7's fail-closed
-      // direction implies a client-side deadline is a ruling, not an implementation choice.
+      // awaits a genesis probe on a chain smoldot is still initialising, and a foreign chain
+      // that never answers would leave the caller waiting forever. 11 E17 requires the deposit
+      // flow to be *"blocked with diagnostics"*, and an unbounded await is not that: it renders
+      // as a spinner that never resolves. **This was fixed in the client** rather than left as
+      // a spec question — `assetHubConnector.connect` takes a `deadlineMs` and abandons the
+      // attempt at it, detaching the chain and closing any transport that lands afterwards.
+      // The bound below is this harness's own, because a drill must fail rather than hang.
       //
       // The Asset Hub genesis is ~189k raw entries (a 79 MB spec), and smoldot warns that a
       // large `genesis.raw` slows initialisation substantially — so the honest bound here is

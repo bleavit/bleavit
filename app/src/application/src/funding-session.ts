@@ -209,15 +209,6 @@ export async function openWithdrawLeg<T extends ChainHeadTransport>(
 }
 
 /**
- * S12's leg — attach Asset Hub, open a reader over each chain, pair them.
- *
- * Order is load-bearing: **Asset Hub first**. It is the leg that can refuse, and refusing
- * before the local reader is opened means a blocked deposit costs no local read and pins no
- * local block. The reverse order would open a reader whose block is then held for however long
- * the Asset Hub sync takes, and `FinalizedReader`'s pin is only readable while the transport
- * still holds that block.
- */
-/**
  * How long the deposit leg waits for the Asset Hub connection — 11 E17; 02 §7.7. F27.
  *
  * **The obligation is on the client, and it was unmet.** E17's `F:` row requires *"AH
@@ -253,6 +244,15 @@ export async function openWithdrawLeg<T extends ChainHeadTransport>(
  */
 export const ASSET_HUB_CONNECT_DEADLINE_MS = 120_000;
 
+/**
+ * S12's leg — attach Asset Hub, open a reader over each chain, pair them.
+ *
+ * Order is load-bearing: **Asset Hub first**. It is the leg that can refuse, and refusing
+ * before the local reader is opened means a blocked deposit costs no local read and pins no
+ * local block. The reverse order would open a reader whose block is then held for however long
+ * the Asset Hub sync takes, and `FinalizedReader`'s pin is only readable while the transport
+ * still holds that block.
+ */
 export async function openDepositLeg<T extends ChainHeadTransport>(
   deps: DepositLegDeps<T>,
 ): Promise<DepositLeg> {
