@@ -163,6 +163,21 @@ impl_runtime_apis! {
             <<Runtime as pallet_conditional_ledger::Config<()>>::ReservedProtocolDestinations
                 as frame_support::traits::Contains<AccountId>>::contains(&AccountId::new(who))
         }
+
+        fn bond_quote(
+            request: futarchy_primitives::BondQuoteRequest,
+        ) -> Option<futarchy_primitives::BondQuoteView> {
+            crate::views::bond_quote(request)
+        }
+
+        fn treasury_streams(
+            who: futarchy_primitives::AccountId,
+        ) -> futarchy_primitives::BoundedVec<
+            futarchy_primitives::StreamView,
+            { futarchy_primitives::bounds::MAX_TREASURY_STREAMS },
+        > {
+            crate::views::treasury_streams(who)
+        }
     }
 
     impl futarchy_runtime_api::TelemetryApi<Block> for Runtime {

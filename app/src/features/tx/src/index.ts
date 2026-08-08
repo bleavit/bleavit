@@ -155,6 +155,9 @@ export {
 export {
   POWER_FIELDS,
   UNRATIFIED_CONSEQUENCE,
+  DEPEG_TRIGGER_UNAVAILABLE,
+  PLAYBOOK_TRIGGERS,
+  TRIGGER_READS,
   allowanceRemaining,
   approvalBlocks,
   mayActivatePlaybook,
@@ -169,8 +172,10 @@ export {
   type GuardianBlock,
   type GuardianPower,
   type PendingAction,
+  type PlaybookId,
   type PlaybookTrigger,
   type PowerArguments,
+  type ProposalTrigger,
   type ProposeInputs,
   type RatificationEvent,
   type RatificationEventVariant,
@@ -179,7 +184,9 @@ export {
   type ApprovedCall,
 } from './guardian.js';
 export {
+  CLAIMABLE_IS_A_LOWER_BOUND,
   INSURANCE_TARGET_UNREADABLE,
+  STREAM_CLAIMS_NOT_WIRED,
   claimBlocks,
   claimableNow,
   insuranceCopy,
@@ -279,6 +286,7 @@ export {
 export { NavPanel } from './operator-consoles.js';
 export {
   RegistryInstanceCollisionError,
+  FILING_BOND_IS_A_QUOTE,
   admitRegistryWindowEvent,
   challengeFilingBlocks,
   filingBlocks,
@@ -287,6 +295,7 @@ export {
   type FilingBlock,
   type FilingInputs,
   type FilingKind,
+  type FrozenSpecVersions,
   type RawEvent,
   type RegistryInstances,
   type RegistryWindowEvent,
@@ -294,20 +303,26 @@ export {
 } from './registry-filing.js';
 export {
   P13_CHECK_KEYS,
-  REPORT_BOND_NOT_ESTABLISHED,
   UnimplementedClauseError,
   challengeBlocks,
   p13Predicate,
   escalationConsequence,
   reportBlocks,
-  reportBondFloor,
   type ChallengeInputs,
   type OracleRound,
   type ReportBlock,
-  type ReportBondFloor,
   type ReportCheck,
   type ReportInputs,
 } from './oracle-reporting.js';
+export {
+  BOND_QUOTE_IS_A_QUOTE,
+  BOND_QUOTE_UNDETERMINABLE,
+  bondQuoteRefusal,
+  coversBond,
+  type BondQuote,
+  type BondQuoteRequestKind,
+  type BondQuoteState,
+} from './bond-quote.js';
 export { DepositForm, DepositTracker, WithdrawForm } from './funding-screens.js';
 export {
   LEDGER_PALLET,

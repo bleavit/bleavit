@@ -87,9 +87,16 @@ const SURFACES: readonly (readonly [string, string, string])[] = [
   ['storage.constitution.release_channel.json', 'Constitution', 'ReleaseChannel'],
   ['storage.conviction_voting.class_locks_for.json', 'ConvictionVoting', 'ClassLocksFor'],
   ['storage.conviction_voting.voting_for.json', 'ConvictionVoting', 'VotingFor'],
+  // Contract v29: the frozen per-cohort MetricSpec bindings 11 §11.8.6's O-8 reads for its
+  // `spec_version` clause. A `Blake2_128Concat` map on `EpochId`, so a prefix read.
+  ['storage.epoch.cohort_schedules.json', 'Epoch', 'CohortSchedules'],
   ['storage.epoch.cohorts.json', 'Epoch', 'Cohorts'],
   ['storage.epoch.epoch_of.json', 'Epoch', 'EpochOf'],
   ['storage.epoch.intake_queue.json', 'Epoch', 'IntakeQueue'],
+  // Contract v29 (SQ-730): the target-keyed pending-VOID latch. It answers two of
+  // 11 §11.8.2's eight `PlaybookTrigger` variants under different predicates —
+  // `contains_key(target)` for `OracleDeadlock`, non-empty for `VoidInFlight`.
+  ['storage.epoch.pending_oracle_voids.json', 'Epoch', 'PendingOracleVoids'],
   ['storage.epoch.proposals.json', 'Epoch', 'Proposals'],
   ['storage.epoch.recent_cohort_summaries.json', 'Epoch', 'RecentCohortSummaries'],
   ['storage.epoch.resource_locks.json', 'Epoch', 'ResourceLocks'],
@@ -120,6 +127,10 @@ const SURFACES: readonly (readonly [string, string, string])[] = [
   ['storage.identity.usdc_asset.json', 'ForeignAssets', 'Asset'],
   ['storage.identity.usdc_metadata.json', 'ForeignAssets', 'Metadata'],
   ['storage.ledger.baseline_vaults.json', 'ConditionalLedger', 'BaselineVaults'],
+  // Contract v29 (SQ-730): the I-4 drift latch a `PB-LEDGER-FREEZE` activation is
+  // admissible under. A `StorageValue`, so its **complete** key is the 32-byte
+  // `twox128(pallet) ++ twox128(item)` — see the count note below.
+  ['storage.ledger.ledger_drifted.json', 'ConditionalLedger', 'LedgerDrifted'],
   ['storage.ledger.position_totals.json', 'ConditionalLedger', 'PositionTotals'],
   ['storage.ledger.positions.json', 'ConditionalLedger', 'Positions'],
   ['storage.ledger.vaults.json', 'ConditionalLedger', 'Vaults'],
@@ -260,6 +271,16 @@ test('the corpus is 75 prefixes and exactly 2 full keys — measured, not assume
   // are prefix reads, so the single-entry pair is unchanged and this suite's reach is the
   // same one hasher on the same two key types it always was. The count is re-pinned rather
   // than relaxed: a number that moves whenever the corpus does asserts nothing.
+  //
+  // 75 -> 78 at contract v29, which froze `Epoch.PendingOracleVoids` and
+  // `ConditionalLedger.LedgerDrifted` for 11 §11.8.2's trigger table (SQ-730) and
+  // `Epoch.CohortSchedules` for §11.8.6's O-8 `spec_version` clause. **All three land in the
+  // `prefixes` bucket, and one of them is not a prefix at all**: `LedgerDrifted` is a
+  // `StorageValue`, so it carries no hasher and no key, and its *complete* key is exactly
+  // the 32-byte `twox128(pallet) ++ twox128(item)` this suite calls a prefix. The
+  // classification below is by **length**, which cannot tell the two apart — so the
+  // hasher-coverage claim this suite makes is unchanged by v29 rather than widened by it,
+  // and saying so here is what stops the growing number from reading as growing reach.
   const prefixes: string[] = [];
   const full: { file: string; key: string }[] = [];
   for (const [file] of SURFACES) {
@@ -268,7 +289,7 @@ test('the corpus is 75 prefixes and exactly 2 full keys — measured, not assume
       else full.push({ file, key });
     }
   }
-  assert.equal(prefixes.length, 75, 'the number of recorded map-prefix reads changed');
+  assert.equal(prefixes.length, 78, 'the number of recorded map-prefix reads changed');
   assert.equal(full.length, 2, 'the number of recorded single-entry reads changed');
   assert.deepEqual(
     full.map((f) => f.file).sort(),

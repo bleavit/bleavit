@@ -37,8 +37,12 @@
  *    call to row is asserted here against `OPERATOR_SURFACE_ROWS` — which covers the two
  *    §11.8.1 calls whose rows are §11.5's (`oracle.report`/`oracle.challenge` ⇒ P-13/P-14) as
  *    well as the nine `O-n` ones. **An absent preparation is refused rather than waived**, and
- *    the check reads `window.prep` — the preparation the proof was minted for — rather than
- *    whatever the session happens to be carrying.
+ *    the check reads `window.prep` — the preparation the proof was minted for — falling back
+ *    to `session.prep` only when no proof exists yet, since a session with no window has no
+ *    minted preparation to read. This note said `window.prep` while the code passed
+ *    `session.prep` unconditionally (corrected 2026-08-07): the two agreed in practice only
+ *    because refusal 1a rejects a window minted for a different preparation, so the weaker
+ *    read was covered by a *neighbouring* check rather than by itself.
  * 1a. **The proof must be this session's.** `TxSession` is structural, so a hand-assembled
  *    one can pair an authentic window with somebody else's preparation. `reduce` refuses that
  *    pairing on the way in; this states the same rule at the consumer.
@@ -116,20 +120,21 @@ export interface OperatorGate {
  * nothing had ever named. There is no state in which offering a privileged operator control
  * with no prepared transaction behind it is correct, so it is a block with its own sentence.
  */
+function noPreparationBlock(call: OperatorSurfaceCall): OperatorBlock {
+  return {
+    check: 'Prepared transaction',
+    detail:
+      `There is no prepared transaction for ${call}, so there are no bytes for this control ` +
+      'to submit and nothing for the gate to have checked. A control offered here would be ' +
+      'authorising an unnamed transaction.',
+  };
+}
+
 function declarationBlock(
   call: OperatorSurfaceCall,
   row: RowId,
-  prep: TxPreparation | undefined,
+  prep: TxPreparation,
 ): OperatorBlock | undefined {
-  if (prep === undefined) {
-    return {
-      check: 'Prepared transaction',
-      detail:
-        `There is no prepared transaction for ${call}, so there are no bytes for this control ` +
-        'to submit and nothing for the gate to have checked. A control offered here would be ' +
-        'authorising an unnamed transaction.',
-    };
-  }
   if (prep.requires.includes(row)) return undefined;
   return {
     check: 'Declared precondition row',
@@ -178,8 +183,24 @@ export function operatorGate(
   // it used to produce a `ready` control regardless, since `declarationBlock` treated an
   // absent preparation as *nothing to disagree with*. A session whose window was minted for
   // a *different* preparation holds genuine evidence about bytes it is not going to sign.
-  const mismatch = declarationBlock(call, row, session.prep);
-  if (mismatch !== undefined) blocks.push(mismatch);
+  //
+  // The **row** check reads the window's preparation where one exists, which is what this
+  // module's note has always claimed and what the code did not do: `window.prep` is the
+  // preparation the proof was minted for, so it is the one whose declared rows the gate
+  // really verified, and it is the one whose bytes `operatorSubmit` hands the submitter.
+  // `session.prep` is the fallback for a session with no proof yet.
+  //
+  // The **absence** refusal stays keyed on `session.prep` and is checked first, because the
+  // two questions are different: a session carrying no preparation is one `reduce` never
+  // produced, and answering it with the window's bytes would let a hand-assembled session
+  // borrow somebody else's transaction to satisfy a check about its own.
+  const declared = window?.prep ?? session.prep;
+  if (session.prep === undefined || declared === undefined) {
+    blocks.push(noPreparationBlock(call));
+  } else {
+    const mismatch = declarationBlock(call, row, declared);
+    if (mismatch !== undefined) blocks.push(mismatch);
+  }
   // `reduce` already refuses to enter `AwaitingSignature` with a foreign proof, so this is
   // the same rule stated where a hand-assembled session — `TxSession` is structural — would
   // otherwise slip past it.

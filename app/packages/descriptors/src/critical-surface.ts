@@ -1,5 +1,5 @@
 /**
- * GENERATED — do not edit. Source: `tools/release/surface-manifest.json` (contract v28).
+ * GENERATED — do not edit. Source: `tools/release/surface-manifest.json` (contract v29).
  * Regenerate: `pnpm -C app run surface:generate`; verified by `pnpm -C app run surface:check`.
  *
  * 10 §5.2's `CRITICAL_SURFACE`: every runtime API, storage item, constant and event the
@@ -29,7 +29,7 @@ export interface CriticalSurfaceEntry {
   readonly citation: string;
 }
 
-export const INTEGRATION_CONTRACT_VERSION = 28;
+export const INTEGRATION_CONTRACT_VERSION = 29;
 
 /** Manifest entries with no metadata surface to probe (raw fixed-layout key, chain properties). */
 export const UNPROBED_MANIFEST_ENTRIES = 2;
@@ -46,6 +46,7 @@ export const UNPROBED_MANIFEST_ENTRIES = 2;
  */
 export type SurfaceId =
   | "api.account_positions"
+  | "api.bond_quote"
   | "api.decision_stats"
   | "api.epoch_status"
   | "api.execution_queue"
@@ -58,6 +59,7 @@ export type SurfaceId =
   | "api.quote"
   | "api.recent_cohorts"
   | "api.service_positions"
+  | "api.treasury_streams"
   | "api.welfare_current"
   | "constant.attestor.att_min_members"
   | "constant.attestor.att_quorum"
@@ -270,9 +272,11 @@ export type SurfaceId =
   | "storage.constitution.phase_flags"
   | "storage.conviction_voting.class_locks_for"
   | "storage.conviction_voting.voting_for"
+  | "storage.epoch.cohort_schedules"
   | "storage.epoch.cohorts"
   | "storage.epoch.epoch_of"
   | "storage.epoch.intake_queue"
+  | "storage.epoch.pending_oracle_voids"
   | "storage.epoch.proposals"
   | "storage.epoch.recent_cohort_summaries"
   | "storage.epoch.resource_locks"
@@ -299,6 +303,7 @@ export type SurfaceId =
   | "storage.incident_registry.closed_at"
   | "storage.incident_registry.filings"
   | "storage.ledger.baseline_vaults"
+  | "storage.ledger.ledger_drifted"
   | "storage.ledger.position_totals"
   | "storage.ledger.positions"
   | "storage.ledger.vaults"
@@ -336,6 +341,7 @@ export type SurfaceId =
 
 export const CRITICAL_SURFACE: readonly CriticalSurfaceEntry[] = [
   { id: "api.account_positions", compatGroup: "apis", pallet: "FutarchyApi", member: "account_positions", required: true, citation: "02 §3" },
+  { id: "api.bond_quote", compatGroup: "apis", pallet: "FutarchyApi", member: "bond_quote", required: true, citation: "02 §3; 07 §6.1, §7; 11 §11.5 P-13, §11.8.6 O-8" },
   { id: "api.decision_stats", compatGroup: "apis", pallet: "FutarchyApi", member: "decision_stats", required: true, citation: "02 §3" },
   { id: "api.epoch_status", compatGroup: "apis", pallet: "FutarchyApi", member: "epoch_status", required: true, citation: "02 §3" },
   { id: "api.execution_queue", compatGroup: "apis", pallet: "FutarchyApi", member: "execution_queue", required: true, citation: "02 §3" },
@@ -348,6 +354,7 @@ export const CRITICAL_SURFACE: readonly CriticalSurfaceEntry[] = [
   { id: "api.quote", compatGroup: "apis", pallet: "FutarchyApi", member: "quote", required: true, citation: "02 §3" },
   { id: "api.recent_cohorts", compatGroup: "apis", pallet: "FutarchyApi", member: "recent_cohorts", required: true, citation: "02 §3" },
   { id: "api.service_positions", compatGroup: "apis", pallet: "FutarchyApi", member: "service_positions", required: true, citation: "02 §3; 02 §7.1" },
+  { id: "api.treasury_streams", compatGroup: "apis", pallet: "FutarchyApi", member: "treasury_streams", required: true, citation: "02 §3; 11 §11.8.3" },
   { id: "api.welfare_current", compatGroup: "apis", pallet: "FutarchyApi", member: "welfare_current", required: true, citation: "02 §3" },
   { id: "constant.attestor.att_min_members", compatGroup: "constants", pallet: "Attestor", member: "AttMinMembers", required: true, citation: "02 §9" },
   { id: "constant.attestor.att_quorum", compatGroup: "constants", pallet: "Attestor", member: "AttQuorum", required: true, citation: "02 §9" },
@@ -560,9 +567,11 @@ export const CRITICAL_SURFACE: readonly CriticalSurfaceEntry[] = [
   { id: "storage.constitution.phase_flags", compatGroup: "query", pallet: "Constitution", member: "PhaseFlags", required: true, citation: "02 §7.3" },
   { id: "storage.conviction_voting.class_locks_for", compatGroup: "query", pallet: "ConvictionVoting", member: "ClassLocksFor", required: true, citation: "02 §7.6" },
   { id: "storage.conviction_voting.voting_for", compatGroup: "query", pallet: "ConvictionVoting", member: "VotingFor", required: true, citation: "02 §7.6" },
+  { id: "storage.epoch.cohort_schedules", compatGroup: "query", pallet: "Epoch", member: "CohortSchedules", required: true, citation: "02 §7.1; 11 §11.8.6" },
   { id: "storage.epoch.cohorts", compatGroup: "query", pallet: "Epoch", member: "Cohorts", required: true, citation: "02 §7.1" },
   { id: "storage.epoch.epoch_of", compatGroup: "query", pallet: "Epoch", member: "EpochOf", required: true, citation: "02 §7.1" },
   { id: "storage.epoch.intake_queue", compatGroup: "query", pallet: "Epoch", member: "IntakeQueue", required: true, citation: "02 §7.1" },
+  { id: "storage.epoch.pending_oracle_voids", compatGroup: "query", pallet: "Epoch", member: "PendingOracleVoids", required: true, citation: "02 §7.1; 11 §11.8.2" },
   { id: "storage.epoch.proposals", compatGroup: "query", pallet: "Epoch", member: "Proposals", required: true, citation: "02 §7.1" },
   { id: "storage.epoch.recent_cohort_summaries", compatGroup: "query", pallet: "Epoch", member: "RecentCohortSummaries", required: true, citation: "02 §7.1" },
   { id: "storage.epoch.resource_locks", compatGroup: "query", pallet: "Epoch", member: "ResourceLocks", required: true, citation: "02 §7.1" },
@@ -589,6 +598,7 @@ export const CRITICAL_SURFACE: readonly CriticalSurfaceEntry[] = [
   { id: "storage.incident_registry.closed_at", compatGroup: "query", pallet: "IncidentRegistry", member: "ClosedAt", required: true, citation: "02 §7.4 registry closure; 11 §11.8.6" },
   { id: "storage.incident_registry.filings", compatGroup: "query", pallet: "IncidentRegistry", member: "Filings", required: true, citation: "02 §7.4 registry filings; 11 §11.8.6" },
   { id: "storage.ledger.baseline_vaults", compatGroup: "query", pallet: "ConditionalLedger", member: "BaselineVaults", required: true, citation: "02 §7.4" },
+  { id: "storage.ledger.ledger_drifted", compatGroup: "query", pallet: "ConditionalLedger", member: "LedgerDrifted", required: true, citation: "02 §7.4; 11 §11.8.2" },
   { id: "storage.ledger.position_totals", compatGroup: "query", pallet: "ConditionalLedger", member: "PositionTotals", required: true, citation: "02 §7.4" },
   { id: "storage.ledger.positions", compatGroup: "query", pallet: "ConditionalLedger", member: "Positions", required: true, citation: "02 §7.4" },
   { id: "storage.ledger.vaults", compatGroup: "query", pallet: "ConditionalLedger", member: "Vaults", required: true, citation: "02 §7.4" },

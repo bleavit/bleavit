@@ -154,13 +154,19 @@ test('every frozen surface entry has a fixture, and every fixture a manifest ent
   assert.ok(expected.size >= 200, `frozen surface shrank to ${expected.size} entries — a smaller manifest passes this suite by covering less`);
 });
 
-test('all thirteen frozen FutarchyApi methods are callable via chainHead', () => {
+test('all sixteen frozen FutarchyApi methods are callable via chainHead', () => {
   // 02 §3 freezes exactly these. The list is written out rather than derived from the
   // fixtures so that losing one is a failure here and not a quieter corpus.
+  //
+  // It read *thirteen* while the manifest held fourteen: `is_reserved_protocol_destination`
+  // arrived at contract v25 and was never added, so the one method this list existed to
+  // protect was the one it did not cover. Both the list and the count below now carry
+  // v29's sixteen.
   const methods = [
-    'account_positions', 'decision_stats', 'epoch_status', 'execution_queue',
-    'hosted_report', 'nav', 'open_oracle_rounds', 'params', 'proposal_summaries',
-    'quote', 'recent_cohorts', 'service_positions', 'welfare_current',
+    'account_positions', 'bond_quote', 'decision_stats', 'epoch_status', 'execution_queue',
+    'hosted_report', 'is_reserved_protocol_destination', 'nav', 'open_oracle_rounds',
+    'params', 'proposal_summaries', 'quote', 'recent_cohorts', 'service_positions',
+    'treasury_streams', 'welfare_current',
   ];
   const runtime = createMockRuntime(bundle);
   for (const method of methods) {
@@ -170,7 +176,7 @@ test('all thirteen frozen FutarchyApi methods are callable via chainHead', () =>
     assert.equal(presence.present, true, `${surface}: ${presence.detail}`);
     assert.equal(presence.layout_matches, true, `${surface}: ${presence.detail}`);
   }
-  assert.equal(methods.length, 13, '02 §3 freezes thirteen methods');
+  assert.equal(methods.length, 16, '02 §3 freezes sixteen methods');
 });
 
 test('FE-R1 bounds are exactly 02 §9\'s frozen values', () => {
@@ -181,7 +187,7 @@ test('FE-R1 bounds are exactly 02 §9\'s frozen values', () => {
     'constant.epoch.max_intake_queue': 64n,            // IntakeQueue
     'constant.ledger.max_positions_per_account': 64n,  // MaxPositionsPerAccount
     'constant.identity.ss58_prefix': 7777n,
-    'constant.identity.contract_version': 28n,         // INTEGRATION_CONTRACT_VERSION (v28: the 11 §11.8 operator reads)
+    'constant.identity.contract_version': 29n,         // INTEGRATION_CONTRACT_VERSION (v29: bond_quote, treasury_streams, the §11.8.2 trigger reads)
     'constant.market.max_live_markets': 196n,
     'constant.market.max_stored_markets': 2240n,
     'constant.market.max_live_external_markets': 128n,
@@ -206,9 +212,27 @@ test('both ledger domains are served separately and neither is merged (11 §11.2
   const primary = [...bundle.fixtures.keys()].filter((s) => s.startsWith('storage.ledger.'));
   const service = [...bundle.fixtures.keys()].filter((s) => s.startsWith('storage.service_ledger.'));
   assert.ok(primary.length > 0 && service.length > 0, 'both ledger instances must be recorded');
-  // The same item names on both sides — two instances of one pallet, not one merged view.
+  // The **position and vault** items are the same on both sides — two instances of one
+  // pallet, not one merged view. That is the symmetry 11 §11.2a rests on.
+  //
+  // `ledger_drifted` is a deliberate primary-only exception, and naming it here is the
+  // point rather than an escape: contract v29 freezes `ConditionalLedger.LedgerDrifted`
+  // alone (02 §7.4) because it is the I-4 latch a `PB-LEDGER-FREEZE` activation is
+  // admissible under, and 06 §6.3's instance-scope note (I-37) makes that playbook and its
+  // freeze the **primary** domain — the service instance evaluates its own I-4 status and
+  // neither latch can admit or refuse the other domain. A blanket symmetry assertion would
+  // have read that as a missing service surface and demanded a freeze the spec refuses.
+  const PRIMARY_ONLY = Object.freeze(['ledger_drifted']);
   const strip = (p: readonly string[]): string[] => p.map((s) => s.split('.').slice(2).join('.')).sort();
-  assert.deepEqual(strip(primary), strip(service), 'the two ledger instances expose different items');
+  const shared = strip(primary).filter((item) => !PRIMARY_ONLY.includes(item));
+  assert.deepEqual(shared, strip(service), 'the two ledger instances expose different items');
+  // Anti-vacuity in both directions: the exception must be *real* on the primary side and
+  // must *not* have quietly appeared on the service side, or the filter above would be
+  // hiding a genuine asymmetry rather than declaring a known one.
+  for (const item of PRIMARY_ONLY) {
+    assert.ok(strip(primary).includes(item), `${item} is declared primary-only but is not frozen at all`);
+    assert.ok(!strip(service).includes(item), `${item} is declared primary-only and the service instance now has it`);
+  }
 
   assert.ok(bundle.fixtures.has('api.account_positions'), 'primary domain position view');
   assert.ok(bundle.fixtures.has('api.service_positions'), 'service domain position view');

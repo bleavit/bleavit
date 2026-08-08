@@ -1,9 +1,20 @@
 > **DERIVED COPY for design-tool context — DO NOT EDIT.**
 > Verbatim copy of `docs/architecture/10-frontend-architecture.md` (the source of truth),
-<<<<<<< HEAD
-> regenerated 2026-08-07, picking up **§9.2's device-classification rule** and **§9.4's IndexedDB-growth row** — its enforcement column
+> regenerated 2026-08-07, carrying three changes that landed the same day. From **F1**:
+> §5.2's rewritten depth paragraph, now that FE-P5 is resolved. What bounds historical
+> depth is **hash acquisition, not state retrieval** — `chain_getBlockHash(height)`
+> returns `null` for every height except `0` and the best block — and §5.2 gains two
+> traps for the compatibility classifier and for any capability probe, the first being
+> that `rpc_methods` returns the raw macro-generated list of all 88 names including the
+> 25 that are not implemented. From integration
+> contract **v29**: §9.3's re-measured metadata blob, whose two runtime-API methods, two
+> `NavView` appends and two frozen storage items grew the committed `metadata.scale` to
+> **472,998 B** raw. The rounded 0.15 MB gz figure did not move, so §9.4's metadata row is
+> unchanged — which is the point of publishing a rounded measurement against a bound the
+> blob *count* actually binds. From **F14**: **§9.2's device-classification rule** and
+> **§9.4's IndexedDB-growth row** — its enforcement column
 > now names where the §9.2 quota manager is actually run by the client and what binds its caps,
-> its four shares and §9.3's blob bounds to the cells published above them (F14). The manager
+> its four shares and §9.3's blob bounds to the cells published above them. The manager
 > implemented every clause of §9.2 and no module in `app/src` reached it, so the row's *"quota
 > manager + tests"* enforced nothing on a running client. §9.2 gains the rule it never stated
 > for telling its two device classes apart — a client with no form-factor hint takes the
@@ -15,26 +26,6 @@
 > than counting as a failure.
 > For upload to Claude Design. If this copy and the source ever differ, the source wins.
 > Regenerate by re-copying the source file.
-=======
-> regenerated 2026-08-07, picking up F1's prototype-gate resolutions. Three of them
-> change what a designer must assume. §2.3 no longer softens its own fee rule: a fee
-> estimate is `Finalized<T>` unconditionally, because FE-P1 confirmed PAPI answers it
-> at the finalized block. §4.2's opening claim was **false** and is corrected —
-> smoldot does implement the legacy read group, and what bounds depth is the refusal
-> to map a height to a hash, not a missing method. §4.4 now states why SharedWorker
-> cannot host the shipped worker. The §12 gate table records **four** gates closed and
-> **six** half-closed, of **twelve** — the summary said five of eleven against a
-> twelve-row table until F1's R-6 review, and FE-P9's row called its D-Bulletin
-> triggers unstateable when `git show` prints them from a superseded file this
-> repository still carries. Both are corrected, and §12 now quotes T1–T4 verbatim.
-> Two more a designer must assume: §9.4 gains an `FE-FEE-001..002` error family, and
-> its metadata budget row no longer calls the blobs a *"fallback"*, because FE-P5
-> made them required. The previous pass picked up the §2.3 verb ruling: the
-> deep-history cross-check is one the UI *"supports and **recommends**"* in both §2.3
-> and §8.4, where §2.3 said *"discloses"* until then and a client shipping one fixed
-> string could satisfy only one of the two. For upload to Claude Design. If this copy
-> and the source ever differ, the source wins. Regenerate by re-copying the source file.
->>>>>>> 8c1d8ba3 (feat(app,docs): F1 — eight prototype gates move, and none needed its own experiment (F1))
 
 # 10 — Frontend Architecture
 
@@ -647,7 +638,7 @@ What is genuinely not achievable at any depth is a chain-wide trade tape (§9.1)
 
 ### 9.3 Metadata blobs bounded (F-medium: metadata blobs)
 
-`metadataCache` (historical SCALE metadata for per-era decode; **measured 0.15 MB gz** per blob — DEFLATE level 9 over the committed 470,546 B `metadata.scale`, against the "~1–2 MB" this section previously assumed): bounded at **≤ 8 blobs / ≤ 15 MB desktop, ≤ 3 blobs / ≤ 3.75 MB mobile**. Those byte bounds are §9.2's metadata share exactly; the previous 16 MB / 6 MB caps **exceeded their own share** in both cases (SQ-557), which is a bound that cannot bind. At the measured blob size the **count** limit is what actually binds and the byte limit is headroom against metadata growth — eight blobs are ~1.2 MB. This cell read 0.14 MB until `app/tools/check-artifact-budget.ts` re-measured it: the blob is 147,008 B, which is 0.15 MB at the two decimals this figure is published to (it read 146,946 B over a 469,581 B blob until contract v28's six frozen operator reads grew the metadata; the rounded gz figure did not move, so §9.4's metadata row is unchanged), and a *measured* value has to round rather than truncate because §9.4's metadata row is derived from it. LRU-evicted; the current and next-authorized runtime's metadata are pinned non-evictable. Eviction of a blob needed by old undecoded rows is acceptable: those rows already carry the raw-bytes "pending decoder" state (§6.5) and re-fetch/re-ship paths exist (FE-P5). Release-shipped blobs (the FE-P5 fallback) count against the same bound **and against the §9.4 bundle row**, which they previously did not have.
+`metadataCache` (historical SCALE metadata for per-era decode; **measured 0.15 MB gz** per blob — DEFLATE level 9 over the committed 472,998 B `metadata.scale`, against the "~1–2 MB" this section previously assumed): bounded at **≤ 8 blobs / ≤ 15 MB desktop, ≤ 3 blobs / ≤ 3.75 MB mobile**. Those byte bounds are §9.2's metadata share exactly; the previous 16 MB / 6 MB caps **exceeded their own share** in both cases (SQ-557), which is a bound that cannot bind. At the measured blob size the **count** limit is what actually binds and the byte limit is headroom against metadata growth — eight blobs are ~1.2 MB. This cell read 0.14 MB until `app/tools/check-artifact-budget.ts` re-measured it: the blob is 147,926 B, which is 0.15 MB at the two decimals this figure is published to (it read 146,946 B over a 469,581 B blob before contract v28's six frozen operator reads, and 147,008 B over a 470,546 B blob before v29's two runtime-API methods, two `NavView` appends and two frozen storage items; the rounded gz figure has not moved through either, so §9.4's metadata row is unchanged — which is the point of publishing a *rounded* measurement against a bound the count actually binds), and a *measured* value has to round rather than truncate because §9.4's metadata row is derived from it. LRU-evicted; the current and next-authorized runtime's metadata are pinned non-evictable. Eviction of a blob needed by old undecoded rows is acceptable: those rows already carry the raw-bytes "pending decoder" state (§6.5) and re-fetch/re-ship paths exist (FE-P5). Release-shipped blobs (the FE-P5 fallback) count against the same bound **and against the §9.4 bundle row**, which they previously did not have.
 
 ### 9.4 Budget table
 

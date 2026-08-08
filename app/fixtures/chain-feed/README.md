@@ -46,7 +46,7 @@ already pin.
 `state_getMetadata` is the **legacy** RPC: it returns **v14** regardless of what the
 runtime supports, and v14 predates the runtime-APIs section entirely. A v14 blob
 therefore cannot describe a single one of
-[02 §3](../../../docs/architecture/02-integration-contract.md)'s frozen thirteen
+[02 §3](../../../docs/architecture/02-integration-contract.md)'s frozen
 `FutarchyApi` methods — which is the whole reason 02 §11 publishes this artifact.
 
 This runtime advertises **14, 15 and 16**; v15 carries **19 runtime APIs including

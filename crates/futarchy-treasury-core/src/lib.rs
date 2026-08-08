@@ -22,6 +22,14 @@ pub const VIT: Balance = futarchy_primitives::currency::VIT;
 pub const DEFAULT_VIT_SUPPLY: Balance = futarchy_primitives::currency::VIT_TOTAL_SUPPLY;
 pub const MAX_BUDGET_LINES: usize = 32;
 pub const MAX_STREAMS: usize = 128;
+// The contract surface bounds `treasury_streams()` by the same register
+// (02 §3, contract v29). `futarchy-primitives` cannot import this crate — the
+// dependency runs the other way — so the two names are bound here, where the
+// value lives, rather than left to agree by coincidence.
+const _: () = assert!(
+    MAX_STREAMS as u32 == futarchy_primitives::bounds::MAX_TREASURY_STREAMS,
+    "02 §3's treasury_streams() bound must equal MAX_STREAMS"
+);
 pub const MAX_PENDING_OUTFLOWS: usize = 64;
 pub const MAX_POL_COMMITMENTS: usize = 196;
 pub const TRS_CAP_PROPOSAL_BPS: u32 = 500;
@@ -827,10 +835,12 @@ impl Treasury {
         let s = self.streams[idx];
         ensure!(s.recipient == who, Error::NotRecipient);
         ensure!(!s.cancelled, Error::AlreadyCancelled);
-        let vested = vested_amount(s.total, s.start, s.duration, now);
-        let claimable = vested.checked_sub(s.claimed).ok_or(Error::Overflow)?;
+        let claimable = stream_claimable_at(&s, now)?;
         ensure!(claimable > 0, Error::StreamNotClaimable);
-        self.streams[idx].claimed = vested;
+        // `claimed + claimable == vested(now)` exactly, by the definition of
+        // `stream_claimable_at`; the checked add keeps the arithmetic total
+        // rather than trusting that identity.
+        self.streams[idx].claimed = s.claimed.checked_add(claimable).ok_or(Error::Overflow)?;
         self.events.push(Event::StreamClaimed {
             id,
             recipient: who,
@@ -1584,6 +1594,27 @@ pub fn vested_amount(
             .saturating_div(duration as Balance)
     }
 }
+/// 11 §11.8.3's *"claimable now"* — the exact amount [`Treasury::claim_stream`]
+/// would pay for `stream` at `now`, before it advances `claimed`.
+///
+/// It is a single function rather than a rule stated twice because it is both a
+/// dispatch quantity and a published one: 02 §3's `treasury_streams` fills
+/// `StreamView.claimable_now` from here, and `claim_stream` pays from here.
+/// A second implementation would be a second answer to *"what will I receive?"*.
+///
+/// Zero for a cancelled stream, for one that has not started, and for one that
+/// is fully claimed — three different reasons a claim is refused, all of which
+/// this quantity reports as nothing to claim. The vesting division floors, so
+/// the figure never overstates what the recipient is owed (08 §1.4).
+pub fn stream_claimable_at(stream: &Stream, now: BlockNumber) -> Result<Balance, Error> {
+    if stream.cancelled {
+        return Ok(0);
+    }
+    vested_amount(stream.total, stream.start, stream.duration, now)
+        .checked_sub(stream.claimed)
+        .ok_or(Error::Overflow)
+}
+
 fn sum(v: &[Balance]) -> Balance {
     v.iter().copied().fold(0, Balance::saturating_add)
 }

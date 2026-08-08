@@ -13,16 +13,32 @@
  * component handed the raw field could render a trend line; one handed *"at target"* or
  * *"below its target by X"* cannot.
  *
- * ## Claimable is computed client-side, so it is computed carefully
+ * ## Claimable is **read**, not computed (contract v29)
  *
- * §11.8.3's precondition is *"claimable amount (linear vesting, computed client-side from
- * stream fields at B′) > 0 and displayed"*. Integer arithmetic on `bigint` throughout —
- * the same discipline `packages/protocol` follows — because a stream's last unit is
- * somebody's money and a float would round it away.
+ * §11.8.3 used to say *"claimable amount (linear vesting, computed client-side from stream
+ * fields at B′)"* over *"stream storage per 02"* — and 02 froze no `pallet-futarchy-treasury`
+ * storage at all, while §7.6's closing rule required every treasury consumer to bind `nav()`,
+ * which publishes only the `stream_remainders` aggregate. So the console's central read was
+ * unbuildable and this tier shipped closed under SQ-601.
  *
- * A stream **before its start** and a stream **fully claimed** both yield zero, and they are
- * *different* states: one is "not yet", the other is "nothing left". `claimableNow` returns
- * the amount and the reason, so a screen can say which.
+ * `FutarchyApi.treasury_streams(caller)` answers it, and it needed **no exception** to §7.6:
+ * that rule forbids binding *raw storage*, and a published runtime-API projection is not raw
+ * storage — `nav()` is itself one. The row therefore keeps 11 §11.4 rule 2's exact-chain-read
+ * property, which an exception would have given up.
+ *
+ * The vesting arithmetic is gone rather than kept as a cross-check. It floors **against the
+ * claimant** (08 §1.4), and a client rounding the other way would show a payout the chain
+ * will not make; the chain computes the figure from the same function `claim_stream` pays
+ * from, so a second implementation here would be a second answer about somebody's money.
+ *
+ * What survives is the *classification*. Zero has three causes — cancelled, not started,
+ * fully claimed — and a screen showing a bare zero for all three tells a recipient the wrong
+ * thing to do. `claimableNow` still returns an amount **and a reason**; it now derives the
+ * reason from the published fields instead of deriving the amount.
+ *
+ * The figure is monotone to inclusion: vesting never decreases and `claimed` moves only on a
+ * claim, so a displayed amount can only understate what a later claim pays. Cancellation is
+ * the one discontinuity, and it is a B′ re-read.
  *
  * ## The screen reads `NavView` and nothing else
  *
@@ -33,14 +49,22 @@
 
 import { combine, combine2, type Combined, type Verified } from '@bleavit/shared-types';
 
+/**
+ * 02 §4's `StreamView`, as the client holds it (contract v29).
+ *
+ * `duration` rather than an end block, and `claimableNow` rather than a derived amount:
+ * both are the published fields. A projection that renamed or recomputed either would be
+ * the client re-deriving what the chain answered.
+ */
 export interface Stream {
   readonly id: Verified<string>;
-  readonly recipient: Verified<string>;
   readonly total: Verified<bigint>;
   readonly claimed: Verified<bigint>;
   readonly startBlock: Verified<number>;
-  readonly endBlock: Verified<number>;
+  readonly duration: Verified<number>;
   readonly cancelled: Verified<boolean>;
+  /** The chain's own answer: exactly what `claim_stream` would pay at the block it was read. */
+  readonly claimableNow: Verified<bigint>;
 }
 
 export type ClaimableReason =
@@ -48,7 +72,11 @@ export type ClaimableReason =
   | 'not-started'
   | 'fully-claimed'
   | 'cancelled'
-  /** `end <= start` is not a stream, and vesting it would divide by zero. */
+  /**
+   * A zero-length schedule. Retained after contract v29 moved the arithmetic on chain,
+   * because the *reason* is still a client classification and this one is real chain state
+   * worth reporting rather than a division the client no longer performs.
+   */
   | 'malformed';
 
 export interface Claimable {
@@ -57,57 +85,80 @@ export interface Claimable {
 }
 
 /**
- * Linear vesting to `now`, in integer arithmetic.
+ * Which of the four states this stream is in, and the amount the chain says is claimable.
  *
- * `floor` throughout and against the claimant, per R-7's rounding rule: a recipient is
- * never credited a unit the schedule has not yet released.
+ * ## The amount is the chain's; only the classification is ours
  *
- * ## The figure is derived from six reads, so it carries their combined provenance
+ * `StreamView.claimable_now` is what `claim_stream` would pay, computed by the runtime from
+ * the same function the call pays from (02 §4). This function does **no** vesting arithmetic:
+ * it reports that amount and says which of the four reasons applies, so a screen can tell
+ * *not yet* from *nothing left* from *cancelled*.
  *
- * `total`, `claimed`, `startBlock`, `endBlock`, `cancelled` and `now`. Returning a bare
- * number left every call site to pick a status for it, and both call sites picked
- * `claimed`'s — which renders the claimable amount with a **verified** badge even when one
- * of the other five came from a provider, and asserts a figure true of no single block when
- * they were read at different ones. That is INV-FE-1 reached by arithmetic, and it is the
- * exact defect `check-render-provenance`'s rule B exists to catch (it caught this one).
+ * ## It still carries combined provenance, and for the same reason
  *
- * So the result is `Combined<Claimable>`: no stronger than its weakest input, and refused
- * outright across blocks. This is somebody's money, and R-7 says the client states what the
- * chain will do or states that it cannot.
+ * The classification reads `claimableNow`, `cancelled`, `startBlock`, `duration` and `now`.
+ * Returning a bare value left every call site to pick a status, and both picked one input's
+ * — rendering a figure with a **verified** badge when another input came from a provider, and
+ * asserting something true of no single block when they were read at different ones. That is
+ * INV-FE-1 reached by combination, which `check-render-provenance`'s rule B exists to catch.
  */
 export function claimableNow(stream: Stream, now: Verified<number>): Combined<Claimable> {
   const provenance = [
-    stream.total.status,
+    stream.claimableNow.status,
     stream.claimed.status,
     stream.startBlock.status,
-    stream.endBlock.status,
+    stream.duration.status,
     stream.cancelled.status,
     now.status,
   ];
   const claimable = (value: Claimable) => combine(value, provenance);
 
   if (stream.cancelled.value) return claimable({ amount: 0n, reason: 'cancelled' });
-  if (stream.endBlock.value <= stream.startBlock.value) {
-    // Not a schedule. Returning zero with a *reason* beats dividing by zero, and beats
-    // returning the whole total, which is what a "treat it as instant" reading would do.
+  if (stream.duration.value <= 0) {
+    // Not a schedule. The chain's own `vested_amount` divides by `duration`, so a zero here
+    // is state worth surfacing rather than a number to render.
     return claimable({ amount: 0n, reason: 'malformed' });
   }
   if (now.value <= stream.startBlock.value) return claimable({ amount: 0n, reason: 'not-started' });
-
-  const elapsed = BigInt(Math.min(now.value, stream.endBlock.value) - stream.startBlock.value);
-  const span = BigInt(stream.endBlock.value - stream.startBlock.value);
-  const vested = (stream.total.value * elapsed) / span; // floors — against the claimant
-  const remaining = vested - stream.claimed.value;
-  if (remaining <= 0n) {
+  if (stream.claimableNow.value <= 0n) {
     // Distinguished from `not-started`: one is "not yet", the other is "nothing left", and
     // a screen showing a bare zero for both tells a recipient the wrong thing to do.
     return claimable({ amount: 0n, reason: 'fully-claimed' });
   }
-  return claimable({ amount: remaining, reason: 'claimable' });
+  return claimable({ amount: stream.claimableNow.value, reason: 'claimable' });
 }
+
+/**
+ * 02 §4's required disclosure for a claimable figure.
+ *
+ * It is a **lower** bound at inclusion rather than an estimate either way, and saying so is
+ * the difference between a recipient who retries and one who reports a discrepancy.
+ */
+export const CLAIMABLE_IS_A_LOWER_BOUND =
+  'This is what the chain would pay at the block shown. Vesting only moves forward, so a ' +
+  'claim included later pays at least this much — never less, unless the stream is cancelled ' +
+  'in between, which is re-checked before you sign.';
 
 export interface ClaimContext {
   readonly stream: Stream;
+  /**
+   * `NavView.streamClaimsWired` — whether this runtime can pay a claim at all.
+   *
+   * Required rather than optional, and checked **before** the stream's own state: an
+   * unwired runtime refuses every claim with `OutflowCustodyUnwired` (08 §1.4's A9
+   * follow-up), so a control opened on `claimableNow` alone is refused after the
+   * signature every single time. An optional field would default to *"assume it works"*,
+   * which is the fail-open direction on a control this section exists to make safe.
+   */
+  readonly streamClaimsWired: Verified<boolean>;
+  /**
+   * Whether this stream came from **this caller's** `treasury_streams(who)` answer.
+   *
+   * The projection is per caller, so presence in it *is* the exists-and-is-yours check
+   * (11 §11.8.3). It stays an explicit field rather than an assumption because a screen can
+   * hold a stream from a stale reader or from another account's panel, and "I read it from
+   * the right call" is precisely the claim that must not be implicit.
+   */
   readonly callerIsRecipient: boolean;
   readonly now: Verified<number>;
 }
@@ -121,14 +172,32 @@ const CLAIM_REASON_COPY: Readonly<Record<Exclude<ClaimableReason, 'claimable'>, 
   Object.freeze({
     cancelled: 'This stream was cancelled, so nothing further vests from it.',
     malformed:
-      'This stream’s end block is not after its start block, so no vesting schedule can be ' +
+      'This stream’s vesting duration is not positive, so no vesting schedule can be ' +
       'derived from it. Nothing is claimable, and this is chain state worth reporting.',
     'not-started': 'This stream has not started vesting yet.',
     'fully-claimed': 'Everything vested so far has already been claimed.',
   });
 
+/**
+ * The refusal an unwired runtime earns, in words that name the runtime.
+ *
+ * Deliberately not phrased as a problem with the stream: the entitlement is real, it is
+ * vesting, and nothing about it is wrong. What is missing is the treasury's payout leg.
+ */
+export const STREAM_CLAIMS_NOT_WIRED =
+  'This runtime cannot pay a stream claim yet: the treasury’s real-asset payout leg is ' +
+  'not wired, so every claim is refused on chain rather than moving funds. Your ' +
+  'entitlement is unaffected and keeps vesting — the amount shown is what will be ' +
+  'claimable once the payout leg lands.';
+
 export function claimBlocks(context: ClaimContext): readonly TreasuryBlock[] {
   const blocks: TreasuryBlock[] = [];
+  // First, because it is the refusal that applies to every stream at once. Reporting a
+  // per-stream reason on a runtime that can pay none of them tells a recipient to fix
+  // something about their stream, which is the wrong instruction.
+  if (!context.streamClaimsWired.value) {
+    blocks.push({ check: 'Payout leg', detail: STREAM_CLAIMS_NOT_WIRED });
+  }
   if (!context.callerIsRecipient) {
     blocks.push({
       check: 'Recipient',
@@ -157,23 +226,24 @@ export function claimBlocks(context: ClaimContext): readonly TreasuryBlock[] {
 /**
  * `T_ins`, or the statement that it could not be obtained.
  *
- * ## The target has no published surface, and the type had claimed one
+ * ## The target is published as `NavView.insurance_target` (contract v29, SQ-602)
  *
- * `insuranceStanding` took `target: Verified<bigint>`, which asserts that somewhere a
- * light-client read produces `T_ins`. Nothing does. 08 §1.2 defines it as
- * `swept_residue_unreclaimed + min_balance` — *"an O(1) maintained counter"* inside the
- * treasury pallet — and 02 §4's `NavView` publishes `insurance` and no target beside it,
- * while 02 §7 freezes no `pallet-futarchy-treasury` storage at all and its closing rule
- * requires every treasury consumer to bind `nav()` rather than raw state. So the only way a
- * caller could have satisfied the old signature was by constructing the figure itself, and
- * a classification against a self-supplied target is a classification against nothing
- * (SQ-616).
+ * `insuranceStanding` once took `target: Verified<bigint>` while nothing produced one: 08
+ * §1.2 defines `T_ins` as `swept_residue_unreclaimed + min_balance`, an O(1) counter inside
+ * the treasury pallet, and 02 §4's `NavView` published `insurance` with no target beside it.
+ * The only way to satisfy that signature was to construct the figure, and a classification
+ * against a self-supplied target is a classification against nothing — the INV-FE-1 defect.
  *
- * The repair is the shape `TriggerState` and `ChallengeWindow` already use: an explicit
- * `unestablished` arm, so *"we could not obtain the target"* is a value a screen must
- * handle rather than a case it silently renders as `at-target` — which is what an
- * equality test against a fabricated zero would produce for an empty account, and reads as
- * *this reserve is exactly sized* at the moment it holds nothing.
+ * v29 appends the field, so the `read` arm is now reachable from an ordinary `nav()` read.
+ * The `unestablished` arm **stays**, and not as a vestige: a `nav()` that did not answer must
+ * not fall back to an equality test against a fabricated zero, which renders as *this reserve
+ * is exactly sized* at the moment it holds nothing. It is the shape `TriggerState` and
+ * `ChallengeWindow` use for the same reason.
+ *
+ * One reading the field does not license: the gap between `insurance` and the target is not
+ * a measured shortfall. 08 §1.2's archived-claims decrement is unspecified in v1, so `T_ins`
+ * is a deliberate over-estimate and the account is expected to sit below it — which is why
+ * `below-target`'s copy says where it refills from rather than calling it a deficit.
  */
 export type InsuranceTarget =
   | { readonly kind: 'read'; readonly value: Verified<bigint> }
@@ -181,10 +251,9 @@ export type InsuranceTarget =
 
 /** The fixed reason, so every screen states the same gap in the same words. */
 export const INSURANCE_TARGET_UNREADABLE =
-  'The chain publishes the INSURANCE balance but not the liability it is sized against. ' +
-  '`T_ins` is a treasury-internal counter (08 §1.2) and the contract freezes no surface ' +
-  'carrying it, so this client can show what the account holds and cannot say whether that ' +
-  'is above or below what it owes (SQ-616).';
+  'The treasury view did not answer, so this client can show what the INSURANCE account ' +
+  'holds but not the liability it is sized against. The target is published as part of ' +
+  '`nav()` (02 §4), and without that read the comparison is withheld rather than guessed.';
 
 /** Where `INSURANCE` stands against its derived target — never a bare balance. */
 export type InsuranceStanding =

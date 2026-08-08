@@ -3309,3 +3309,313 @@ fn a_rebate_payout_does_not_double_count_deferred_main_credit() {
         assert_ok!(Treasury::do_try_state());
     });
 }
+
+// ---- `treasury_streams`' projection (02 §3 contract v29; 11 §11.8.3) --------
+//
+// SQ-601. The projection and the payment must be one answer to "what will I
+// receive?": `streams_for` fills `StreamView.claimable_now` from
+// `futarchy_treasury_core::stream_claimable_at`, and `claim_stream` pays from
+// the same function. These tests bind the two, and pin the three states that
+// all report zero for different reasons.
+
+/// The amount `claim_stream` would pay `who` for `stream` at the mock's current
+/// block, read through the same function both the projection and the dispatch
+/// use.
+fn claimable_now(id: u64) -> u128 {
+    let stream = Treasury::treasury()
+        .streams
+        .into_iter()
+        .find(|stream| stream.id == id)
+        .expect("the stream exists");
+    futarchy_treasury_core::stream_claimable_at(&stream, System::block_number() as u32)
+        .expect("the mock fixture never overflows")
+}
+
+/// The `claimed` cursor of one stream, straight out of storage.
+fn claimed(id: u64) -> u128 {
+    crate::State::<Test>::get()
+        .streams
+        .into_iter()
+        .find(|stream| stream.id == id)
+        .expect("the stream exists")
+        .claimed
+}
+
+/// The amount the last `StreamClaimed` event reports for `id` — what the
+/// recipient is actually paid, as opposed to what the projection promised.
+fn last_claimed_event_amount(id: u64) -> u128 {
+    System::events()
+        .iter()
+        .rev()
+        .find_map(|record| match &record.event {
+            RuntimeEvent::Treasury(Event::StreamClaimed {
+                id: claimed_id,
+                amount,
+                ..
+            }) if *claimed_id == id => Some(*amount),
+            _ => None,
+        })
+        .expect("a successful claim emits its amount")
+}
+
+/// 02 §3 / 11 §11.8.3: the projection is **per caller**. It returns exactly the
+/// streams whose recipient is `who`, ordered by id, and no other recipient's.
+///
+/// The stored vector is deliberately reversed before the read: `Treasury.streams`
+/// is a push-ordered `Vec`, so a projection that simply filtered would appear
+/// ordered by accident. Reversing separates "ordered by id" from "in storage
+/// order", which is what 02 §3's stable projection has to mean.
+#[test]
+fn v29_streams_for_returns_only_the_callers_rows_ordered_by_id() {
+    funded_ext().execute_with(|| {
+        for recipient in [2u8, 3, 2, 3] {
+            assert_ok!(Treasury::open_stream(
+                to(),
+                BudgetLine::OpsCollators,
+                acc(recipient),
+                300_000 * USDC,
+                0,
+                100,
+            ));
+        }
+        let mut state = Treasury::treasury();
+        assert_eq!(
+            state.streams.iter().map(|s| s.id).collect::<Vec<_>>(),
+            vec![0, 1, 2, 3],
+        );
+        state.streams.reverse();
+        crate::Pallet::<Test>::seed(&state);
+
+        let mine = Treasury::streams_for(&acc(2));
+        assert_eq!(
+            mine.iter().map(|(stream, _)| stream.id).collect::<Vec<_>>(),
+            vec![0, 2],
+            "the projection is ordered by id, not by storage position",
+        );
+        assert!(
+            mine.iter().all(|(stream, _)| stream.recipient == [2u8; 32]),
+            "every returned row belongs to the caller",
+        );
+
+        let theirs = Treasury::streams_for(&acc(3));
+        assert_eq!(
+            theirs
+                .iter()
+                .map(|(stream, _)| stream.id)
+                .collect::<Vec<_>>(),
+            vec![1, 3],
+        );
+        // The two projections partition the register: no id is shared, and
+        // together they account for every stream.
+        assert!(mine
+            .iter()
+            .all(|(stream, _)| !theirs.iter().any(|(other, _)| other.id == stream.id)));
+        assert_eq!(
+            mine.len() + theirs.len(),
+            Treasury::treasury().streams.len()
+        );
+
+        // A caller with no streams gets nothing, not somebody else's rows.
+        assert!(Treasury::streams_for(&acc(9)).is_empty());
+    });
+}
+
+/// The paired `claimable_now` is the amount `claim_stream` then actually pays,
+/// and paying it advances `claimed` by exactly that much
+/// (`claimed_after == claimed_before + claimable_before`).
+///
+/// Asserted twice, at two points on the vesting curve, because a projection that
+/// happened to agree once could still be a second implementation of the rule.
+#[test]
+fn v29_streams_for_claimable_now_is_what_claim_stream_pays() {
+    funded_ext().execute_with(|| {
+        assert_ok!(Treasury::open_stream(
+            to(),
+            BudgetLine::OpsCollators,
+            acc(2),
+            300_000 * USDC,
+            10,
+            100,
+        ));
+
+        for block in [60u64, 77] {
+            System::set_block_number(block);
+            let projected = Treasury::streams_for(&acc(2));
+            assert_eq!(projected.len(), 1);
+            let (row, promised) = projected[0];
+            assert_eq!(row.id, 0);
+            assert!(promised > 0, "the fixture must have something to claim");
+            // The projection is the shared function's answer, not a second one.
+            assert_eq!(promised, claimable_now(0));
+
+            let claimed_before = claimed(0);
+            assert_ok!(Treasury::claim_stream(RuntimeOrigin::signed(acc(2)), 0));
+
+            assert_eq!(
+                last_claimed_event_amount(0),
+                promised,
+                "the payment must be the promised amount, to the base unit",
+            );
+            assert_eq!(
+                claimed(0),
+                claimed_before + promised,
+                "claimed_after == claimed_before + claimable_before",
+            );
+            // Immediately after a claim there is nothing left at this block, so
+            // the projection cannot promise the same money twice.
+            assert_eq!(Treasury::streams_for(&acc(2))[0].1, 0);
+        }
+        assert_ok!(Treasury::do_try_state());
+    });
+}
+
+/// Zero is reported for three different states — cancelled, not yet started,
+/// fully claimed — and the *stream fields* still tell them apart. A client shows
+/// three different things; the amount is nothing in all three.
+#[test]
+fn v29_streams_for_reports_zero_for_cancelled_unstarted_and_fully_claimed() {
+    funded_ext().execute_with(|| {
+        // id 0: cancelled while genuinely half vested, so the zero is the
+        // cancellation and not the arithmetic.
+        assert_ok!(Treasury::open_stream(
+            to(),
+            BudgetLine::OpsCollators,
+            acc(2),
+            300_000 * USDC,
+            0,
+            100,
+        ));
+        // id 1: starts in the future.
+        assert_ok!(Treasury::open_stream(
+            to(),
+            BudgetLine::OpsCollators,
+            acc(2),
+            300_000 * USDC,
+            1_000,
+            100,
+        ));
+        // id 2: fully vested and fully claimed.
+        assert_ok!(Treasury::open_stream(
+            to(),
+            BudgetLine::OpsCollators,
+            acc(2),
+            300_000 * USDC,
+            0,
+            10,
+        ));
+
+        System::set_block_number(50);
+        assert!(
+            claimable_now(0) > 0,
+            "id 0 must be claimable before it is cancelled",
+        );
+        assert_ok!(Treasury::cancel_stream(to(), 0));
+        assert_ok!(Treasury::claim_stream(RuntimeOrigin::signed(acc(2)), 2));
+
+        let rows = Treasury::streams_for(&acc(2));
+        assert_eq!(
+            rows.iter().map(|(stream, _)| stream.id).collect::<Vec<_>>(),
+            vec![0, 1, 2],
+        );
+        assert!(
+            rows.iter().all(|(_, claimable)| *claimable == 0),
+            "all three states report nothing to claim",
+        );
+
+        let now = System::block_number() as u32;
+        let (cancelled, _) = rows[0];
+        assert!(cancelled.cancelled);
+        assert!(
+            cancelled.start <= now && cancelled.claimed < cancelled.total,
+            "a cancelled stream is distinguishable by its flag alone",
+        );
+        let (unstarted, _) = rows[1];
+        assert!(!unstarted.cancelled);
+        assert!(unstarted.start > now);
+        assert_eq!(unstarted.claimed, 0);
+        let (spent, _) = rows[2];
+        assert!(!spent.cancelled);
+        assert!(spent.start <= now);
+        assert_eq!(spent.claimed, spent.total);
+
+        // And the dispatch refuses all three, each for its own reason.
+        assert_noop!(
+            Treasury::claim_stream(RuntimeOrigin::signed(acc(2)), 0),
+            Error::<Test>::AlreadyCancelled
+        );
+        for id in [1u64, 2] {
+            assert_noop!(
+                Treasury::claim_stream(RuntimeOrigin::signed(acc(2)), id),
+                Error::<Test>::StreamNotClaimable
+            );
+        }
+    });
+}
+
+/// `stream_claimable_at` and `claim_stream` cannot disagree — walked across the
+/// vesting boundaries, not sampled in the middle.
+///
+/// The boundaries are where a projection drifts from a payment: the block before
+/// `start`, `start` itself (nothing has vested yet), the first vesting block, the
+/// last block inside the window, the exact end block, and past it. At every one
+/// of them the promise and the payment must be the same number, and a promise of
+/// zero must be a refusal rather than a zero-value payment.
+#[test]
+fn v29_stream_claimable_at_and_claim_stream_cannot_disagree_at_the_boundaries() {
+    funded_ext().execute_with(|| {
+        const START: u64 = 10;
+        const DURATION: u64 = 100;
+        const TOTAL: u128 = 300_000 * USDC;
+        assert_ok!(Treasury::open_stream(
+            to(),
+            BudgetLine::OpsCollators,
+            acc(2),
+            TOTAL,
+            START,
+            DURATION,
+        ));
+
+        for block in [
+            START - 1,
+            START,
+            START + 1,
+            START + DURATION - 1,
+            START + DURATION,
+            START + DURATION + 1,
+        ] {
+            System::set_block_number(block);
+            let promised = claimable_now(0);
+            assert_eq!(
+                Treasury::streams_for(&acc(2))[0].1,
+                promised,
+                "the published figure is the shared function's answer at {block}",
+            );
+            let claimed_before = claimed(0);
+
+            if promised == 0 {
+                assert_noop!(
+                    Treasury::claim_stream(RuntimeOrigin::signed(acc(2)), 0),
+                    Error::<Test>::StreamNotClaimable
+                );
+                assert_eq!(claimed(0), claimed_before);
+            } else {
+                assert_ok!(Treasury::claim_stream(RuntimeOrigin::signed(acc(2)), 0));
+                assert_eq!(last_claimed_event_amount(0), promised);
+                assert_eq!(
+                    claimed(0),
+                    claimed_before + promised,
+                    "the cursor advances by exactly the promised amount at {block}",
+                );
+            }
+            // Vesting floors against the claimant, so the cursor never runs past
+            // the total (08 §1.4).
+            assert!(claimed(0) <= TOTAL);
+        }
+
+        // The whole stream is disbursed once the window has elapsed, and not one
+        // base unit more.
+        assert_eq!(claimed(0), TOTAL);
+        assert_eq!(claimable_now(0), 0);
+        assert_ok!(Treasury::do_try_state());
+    });
+}

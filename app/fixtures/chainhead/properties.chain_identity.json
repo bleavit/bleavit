@@ -1,1 +1,1 @@
-{"headers":{"pinned_block":"0x2da61cb931cfeea3a07b7a3e304130dbe95358375f0f59d297373cd4dc82741e"},"requests":[{"method":"system_properties","params":[],"response":{"ss58Format":7777,"tokenDecimals":12,"tokenSymbol":"VIT"}}],"surface":"properties.chain_identity"}
+{"headers":{"pinned_block":"0x5e34e8ec217e9243ce8acd64ca4388e12c2ed4651ac4b0ca752d907885542c26"},"requests":[{"method":"system_properties","params":[],"response":{"ss58Format":7777,"tokenDecimals":12,"tokenSymbol":"VIT"}}],"surface":"properties.chain_identity"}
