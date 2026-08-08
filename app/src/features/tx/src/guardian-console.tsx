@@ -47,15 +47,17 @@ import {
   UNRATIFIED_CONSEQUENCE,
   allowanceRemaining,
   approvalBlocks,
+  meterFor,
+  pendingPowerName,
+  playbookAdvisory,
   proposalBlocks,
-  proposeFormBlocks,
   ratificationCopy,
+  triggerRefusal,
   type ActionRatification,
-  type AllowanceMeter,
   type ApprovalContext,
   type GuardianPower,
   type PendingAction,
-  type ProposalTrigger,
+  type PendingPower,
   type ProposeInputs,
 } from './guardian.js';
 import { EvidencePanel } from './operator-consoles.js';
@@ -71,6 +73,45 @@ const POWER_LABEL: Readonly<Record<GuardianPower, string>> = Object.freeze({
   activate_playbook: 'a playbook activation',
   suspend_on_gate: 'a suspension on the gate',
 });
+
+/**
+ * What a pending action's decoded power *acts on* — §11.8.2's `target` column.
+ *
+ * Derived from the one decoded value rather than taken as a second string beside the power
+ * name. The two used to travel separately (`power: Verified<string>`, `target:
+ * Verified<string>`), which is how a row could name one action and describe another — and
+ * why the approve flow had nothing to evaluate its trigger against.
+ */
+function PowerTarget({ power }: { readonly power: PendingPower }): ReactNode {
+  switch (power.kind) {
+    case 'pause_intake':
+      return <Count datum={power.until} name="until block" />;
+    case 'delay_once':
+    case 'force_rerun':
+      return <Identifier datum={power.pid} />;
+    case 'activate_playbook':
+      return (
+        <>
+          <Identifier datum={power.id} />
+          <Phrase datum={power.trigger} />
+          <Count datum={power.expiry} name="expires" />
+          {power.target === undefined ? null : <Count datum={power.target} name="cohort" />}
+        </>
+      );
+    case 'suspend_on_gate':
+      // Rendered as a sentence, not as an empty cell: `SuspendOnGate` carries no fields, and
+      // a blank reads as a decode that dropped something.
+      return <>the execution queue (this power takes no arguments)</>;
+    case 'undecodable':
+      return <Undecodable label="Power" rawHex={power.rawHex} reason={power.reason} />;
+  }
+}
+
+/** The power's own name, or the honest absence of one. Never a guess (10 §5.4). */
+function powerText(power: PendingPower): string {
+  const name = pendingPowerName(power);
+  return name === undefined ? 'could not be decoded' : name;
+}
 
 /**
  * §11.8.2's pending-actions list.
@@ -131,10 +172,12 @@ export function PendingActions({
             >
               <Identifier datum={action.actionId} />
             </button>,
-            <Identifier datum={action.power} key={`p-${action.actionId.value}`} />,
+            // The power name is release copy for a decoded variant — it says which fields
+            // exist, and each of those fields carries its own badge in the next cell.
+            <span key={`p-${action.actionId.value}`}>{powerText(action.power)}</span>,
             // A power without its target is not actionable: "delay_once" does not say what
             // is being delayed, and a guardian cannot weigh a re-run without its cohort.
-            <Identifier datum={action.target} key={`tg-${action.actionId.value}`} />,
+            <PowerTarget power={action.power} key={`tg-${action.actionId.value}`} />,
             // The hash **and** the resolved document, per §11.8.2. The hash always shows —
             // it is what a reader checks a document against elsewhere when this device
             // cannot fetch one — and the document's absence renders as a stated fact rather
@@ -209,6 +252,37 @@ export function RatificationTracker({
   );
 }
 
+/**
+ * §11.12 E20's fourth V-facet item — *"trigger-condition status"* — and its F-facet.
+ *
+ * Rendered on **every** approval, including the ones where no condition applies, because
+ * *"this action depends on no on-chain condition"* and *"its condition holds"* are different
+ * facts and a panel that showed the second only would leave the first indistinguishable from
+ * a status nobody computed.
+ */
+function ConditionStatus({ context }: { readonly context: ApprovalContext }): ReactNode {
+  const evidence = context.condition;
+  if (evidence.kind === 'no-condition') {
+    return (
+      <Notice severity="info" heading="Trigger condition">
+        This action depends on no on-chain trigger condition. Its preconditions are the
+        allowance and the action’s own state.
+      </Notice>
+    );
+  }
+  const refusal = triggerRefusal(evidence.reading);
+  return (
+    <Notice
+      severity={refusal === undefined ? 'info' : 'danger'}
+      heading={`Trigger condition — ${evidence.reading.subject.trigger}`}
+    >
+      {refusal ??
+        'This action’s on-chain condition is active. The chain re-checks it at the threshold ' +
+          'approval, so it must still hold when the fifth signature lands.'}
+    </Notice>
+  );
+}
+
 export function ApproveAction({
   context,
   session,
@@ -220,14 +294,44 @@ export function ApproveAction({
 }): ReactNode {
   const blocks = approvalBlocks(context);
   const gate = operatorGate('guardian.approve_action', session, blocks);
+  const power = pendingPowerName(context.action.power);
+  const advisory =
+    context.action.power.kind === 'activate_playbook'
+      ? playbookAdvisory(context.action.power.id.value)
+      : undefined;
   return (
     <Panel title="Approve action" subject={<Identifier datum={context.action.actionId} />}>
       <Field label="Power">
-        <Identifier datum={context.action.power} />
+        <span>{powerText(context.action.power)}</span>
       </Field>
       <Field label="Target">
-        <Identifier datum={context.action.target} />
+        <PowerTarget power={context.action.power} />
       </Field>
+
+      {/* E20's V-facet, third item. The runtime charges the allowance inside `dispatch`, which
+          `approve_action` reaches only at the threshold approval — so the approver who meets an
+          exhausted meter is the fifth one, and until 2026-08-08 they were shown no meter at
+          all. Absent for an undecodable power, because there is no power to meter. */}
+      {power === undefined ? null : (
+        <Field label={`Allowance remaining for ${power}`}>
+          <Derived
+            combined={allowanceRemaining(meterFor(context.allowances, power))}
+            render={(remaining) => String(remaining)}
+          />
+          <Count datum={context.allowances[power].limit} name="of" />
+        </Field>
+      )}
+
+      {/* E20's V-facet, fourth item, and its F-facet. */}
+      <ConditionStatus context={context} />
+
+      {/* 06 §6.2's empty admissible call set, stated rather than blocked — see
+          `MIGRATION_NO_ACTION_FOLLOWS`. */}
+      {advisory === undefined ? null : (
+        <Notice severity="caution" heading="What this activation can dispatch">
+          {advisory}
+        </Notice>
+      )}
       {/* §11.8.2 wants the *resolved* justification document, under §11.8.1's evidence
           rules: re-hashed before rendering, and unavailable-or-mismatched stated rather than
           silently omitted. The hash always shows — it is what a reader checks a document
@@ -289,49 +393,60 @@ export function ApproveAction({
  * like one that failed to load, on a screen where the next click is a privileged signature.
  */
 export function ProposeAction({
-  meter,
   inputs,
-  trigger,
   session,
   onPropose,
 }: {
-  readonly meter: AllowanceMeter;
-  /** The power's own arguments and the justification hash — see `PowerArguments`. */
-  readonly inputs: ProposeInputs;
   /**
-   * What this caller states about the trigger. **Required**, and the other four powers say
-   * `{ kind: 'no-trigger-power' }` rather than omitting it.
+   * The whole proposal — power, arguments, allowance meter and evidence — plus the
+   * justification hash. **One prop**, and that is the repair.
    *
-   * It was optional, and an omitted trigger on an `activate_playbook` form produced an empty
-   * block list and a `ready` control — a guardian signature offered on an emergency
-   * activation whose condition was never evaluated. See `ProposalTrigger`.
+   * It was three (`meter`, `inputs`, `trigger`), and every disagreement between them reached
+   * `ready`: a `pause_intake` meter titled the panel *"Propose a pause on intake"* and listed
+   * `until (block)` while `inputs.args` prepared a playbook activation, and an evaluated
+   * `GateBreach` reading sat beside an argument set naming `LedgerDrift` with nothing
+   * comparing the two. `GuardianProposal` keys all of it on one power, so there is no second
+   * place a power, a trigger or a cohort can be named.
    */
-  readonly trigger: ProposalTrigger;
+  readonly inputs: ProposeInputs;
   readonly session: TxSession;
   readonly onPropose: (window: GatePassed) => void;
 }): ReactNode {
   // The model owns every reason — the screen re-deriving them was how the two lists drifted
   // apart in the first place, and a button enabled on the screen's own weaker test is the
   // failure that matters.
-  const blocks = [...proposalBlocks(meter, trigger), ...proposeFormBlocks(inputs)];
+  const blocks = proposalBlocks(inputs);
   const gate = operatorGate('guardian.propose_action', session, blocks);
-  const fields = POWER_FIELDS[meter.power];
+  const proposal = inputs.proposal;
+  const fields = POWER_FIELDS[proposal.power];
+  const advisory =
+    proposal.power === 'activate_playbook' ? playbookAdvisory(proposal.id) : undefined;
   // `power` is a release-defined literal — which form the user opened — not a chain read, so
   // it belongs in the title. Borrowing the meter's status for it would claim the chain told
-  // us which button was pressed.
+  // us which button was pressed. It now comes from the proposal rather than from a meter, so
+  // the title and the prepared call cannot describe different actions.
   return (
-    <Panel title={`Propose ${POWER_LABEL[meter.power]}`}>
+    <Panel title={`Propose ${POWER_LABEL[proposal.power]}`}>
       {/* Unconditional, and at the top: the moment it matters is while deciding. */}
       <Notice severity="caution" heading="What happens to you if this is not ratified">
         {UNRATIFIED_CONSEQUENCE}
       </Notice>
 
+      {/* 06 §6.2's empty admissible call set for PB-MIGRATION, and PB-DEPEG's unavailable
+          trigger. Stated, never a block: the chain accepts the activation, so refusing it
+          here would be this client refusing an action the runtime would run. */}
+      {advisory === undefined ? null : (
+        <Notice severity="caution" heading="What this activation can dispatch">
+          {advisory}
+        </Notice>
+      )}
+
       <Field label="Allowance remaining">
         <Derived
-          combined={allowanceRemaining(meter)}
+          combined={allowanceRemaining(proposal.meter)}
           render={(remaining) => String(remaining)}
         />
-        <Count datum={meter.limit} name="of" />
+        <Count datum={proposal.meter.limit} name="of" />
       </Field>
 
       {fields.length === 0 ? (
