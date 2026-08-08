@@ -44,8 +44,14 @@
  *   --relay      zombienet/specs/out/paseo-local-raw.json           --relay-genesis 0x… \
  *   --para       zombienet/specs/out/bleavit-drill-raw.json         --para-genesis  0x… \
  *   [--asset-hub zombienet/specs/out/asset-hub-paseo-local-raw.json --asset-hub-genesis 0x…] \
+ *   [--asset-hub-genesis-head 0x…  --asset-hub-light-out /tmp/drill/asset-hub-light.json] \
  *   [--out /tmp/drill/dev-pin.json]
  * ```
+ *
+ * The `--asset-hub-genesis-head` / `--asset-hub-light-out` pair trims the Asset Hub genesis to
+ * the state root it hashes to and pins **that** file — 23.6 s of smoldot initialisation
+ * becomes 3 ms for the same genesis hash. See {@link lightChainSpec}; the header comes from
+ * `polkadot-parachain export-genesis-head --chain <that same raw spec>`.
  *
  * **Those paths were wrong until 2026-08-08 (F27) and could not have worked.** They named
  * `deploy/chain-specs/out/paseo-local.json` and `asset-hub-local.json`, which nothing
@@ -88,6 +94,100 @@ export class DevPinError extends Error {
 }
 
 const HASH = /^0x[0-9a-f]{64}$/i;
+
+/**
+ * The genesis **state root**, decoded out of a SCALE-encoded genesis header — F18.
+ *
+ * The header comes from `polkadot-parachain export-genesis-head --chain <raw spec>`, which
+ * builds the genesis trie from **the spec file's own bytes** and prints the resulting header.
+ * That provenance is the whole reason this is not read from the running node: the light
+ * client's genesis check compares what smoldot computes against the pin, and the pin is read
+ * off the node — so deriving the state root from the node as well would make both sides of
+ * `assertGenesisIdentity` one reading of one source, which is the defect
+ * `zombienet/drills/js/client-boot.js` already refuses in the other direction by never taking
+ * the pin from smoldot.
+ *
+ * A header is `parent_hash [32] ++ number (compact) ++ state_root [32] ++ extrinsics_root [32]
+ * ++ digest`. Both leading fields are **asserted** rather than skipped: a genesis header has a
+ * zero parent and number 0, so a header for any other block — the easy mistake, since
+ * `export-genesis-head` and `chain_getHeader` differ only in which block they are asked about
+ * — is refused here instead of producing a spec anchored on the wrong state.
+ */
+export function genesisStateRoot(headerHex: string): string {
+  if (!/^0x[0-9a-f]*$/i.test(headerHex) || headerHex.length % 2 !== 0) {
+    throw new DevPinError(`the genesis header ${JSON.stringify(headerHex)} is not a hex byte string`);
+  }
+  const bytes = Uint8Array.from(
+    (headerHex.slice(2).match(/../g) ?? []).map((pair) => Number.parseInt(pair, 16)),
+  );
+  if (bytes.length < 33) {
+    throw new DevPinError(`the genesis header is ${bytes.length} bytes; a header cannot be shorter than 97`);
+  }
+  if (bytes.subarray(0, 32).some((byte) => byte !== 0)) {
+    throw new DevPinError(
+      'the header declares a non-zero parent hash, so it is not a genesis header. ' +
+        'Export it with `export-genesis-head`, not from a block the chain has since produced.',
+    );
+  }
+
+  // Compact<u32>, decoded rather than assumed one byte: the assumption is right for block 0
+  // and silently wrong for every other block, which is exactly the confusion asserted against.
+  const flag = (bytes[32] ?? 0) & 0b11;
+  const width = flag === 0b00 ? 1 : flag === 0b01 ? 2 : flag === 0b10 ? 4 : 0;
+  if (width === 0) {
+    throw new DevPinError('the header block number is a big-integer compact, so it is not block 0');
+  }
+  let number = 0;
+  for (let i = width - 1; i >= 0; i -= 1) number = number * 256 + (bytes[32 + i] ?? 0);
+  number = Math.floor(number / 4);
+  if (number !== 0) {
+    throw new DevPinError(`the header is for block ${number}, not genesis; its state root is not the genesis root`);
+  }
+
+  const start = 32 + width;
+  if (bytes.length < start + 32) {
+    throw new DevPinError('the header ends before its state root');
+  }
+  return `0x${[...bytes.subarray(start, start + 32)].map((b) => b.toString(16).padStart(2, '0')).join('')}`;
+}
+
+/**
+ * Replace a raw genesis map with the state root it hashes to — F18, **development only**.
+ *
+ * smoldot accepts both forms and says so itself (`chain-spec.ts` · `genesisFormOf` quotes the
+ * pinned binary's own diagnostic). The dev Asset Hub spec is 79.4 MB and ~189k genesis
+ * entries, and building that trie costs smoldot **23.6 s of uninterrupted CPU** in a
+ * single-threaded worker that is also syncing the relay and the parachain. The trimmed form
+ * costs 3 ms and yields the identical genesis hash — measured on this pair, not assumed.
+ *
+ * It stays a *development* transformation for the reason this whole file exists: a release
+ * pins bytes an operator can reproduce from a published artifact, and a spec this tool
+ * rewrote is not that. {@link refuseReleasePath} governs where the result may be written.
+ *
+ * Applied to a **parachain** spec only. The caller enforces that (`buildDevPin` refuses a
+ * relay pinned this way through `pinRole`), and the reason is finality: see `genesisFormOf`.
+ */
+export function lightChainSpec(chainSpec: string, stateRootHash: string): string {
+  if (!HASH.test(stateRootHash)) {
+    throw new DevPinError(`the genesis state root ${JSON.stringify(stateRootHash)} is not a 32-byte hex string`);
+  }
+  let spec: Record<string, unknown>;
+  try {
+    spec = JSON.parse(chainSpec) as Record<string, unknown>;
+  } catch (error) {
+    throw new DevPinError(`the chain spec being trimmed is not valid JSON: ${String(error)}`);
+  }
+  const genesis = spec['genesis'];
+  if (typeof genesis !== 'object' || genesis === null || typeof (genesis as Record<string, unknown>)['raw'] !== 'object') {
+    throw new DevPinError(
+      'the chain spec being trimmed carries no `genesis.raw` map, so there is nothing to ' +
+        'replace and the supplied state root would be an unchecked assertion about it',
+    );
+  }
+  // Everything else is kept verbatim — `bootNodes` above all, which zombienet writes into the
+  // spawned spec and without which `startTopology` has nothing to dial.
+  return `${JSON.stringify({ ...spec, genesis: { stateRootHash } }, null, 2)}\n`;
+}
 
 /**
  * The paths a development pin may never be written to.
@@ -154,15 +254,32 @@ async function pinRole(input: RoleInput): Promise<{ pinned: DevPinRole; chainSpe
     throw new DevPinError(`the ${input.role} chain spec declares no string \`id\``);
   }
 
+  // The same two forms `chain-spec.ts` · `genesisFormOf` admits, restated rather than
+  // imported for the reason the relay reader below gives: this tool runs before anything is
+  // built. The relay/parachain asymmetry is restated too — a relay anchored on a bare state
+  // root has no other chain to derive finality from.
   const genesis = spec['genesis'];
-  const isRaw =
-    typeof genesis === 'object' &&
-    genesis !== null &&
-    typeof (genesis as Record<string, unknown>)['raw'] === 'object';
-  if (!isRaw) {
+  const fields = typeof genesis === 'object' && genesis !== null ? (genesis as Record<string, unknown>) : {};
+  const hasRaw = typeof fields['raw'] === 'object' && fields['raw'] !== null;
+  const stateRoot = fields['stateRootHash'];
+  const hasStateRoot = typeof stateRoot === 'string' && HASH.test(stateRoot);
+  if (hasRaw && hasStateRoot) {
     throw new DevPinError(
-      `the ${input.role} chain spec (${id}) is not a raw spec; smoldot accepts only raw chain ` +
-        'specifications, and it reports the difference as a chain that never finalises',
+      `the ${input.role} chain spec (${id}) declares both \`genesis.raw\` and ` +
+        '`genesis.stateRootHash`; the two need not describe the same state',
+    );
+  }
+  if (!hasRaw && !hasStateRoot) {
+    throw new DevPinError(
+      `the ${input.role} chain spec (${id}) declares neither a \`genesis.raw\` map nor a ` +
+        '32-byte `genesis.stateRootHash`; smoldot accepts no third form, and it reports the ' +
+        'difference as a chain that never finalises',
+    );
+  }
+  if (hasStateRoot && input.kind === 'relay') {
+    throw new DevPinError(
+      `the relay spec (${id}) is anchored on a bare \`genesis.stateRootHash\`; a relay ` +
+        'establishes its own finality from genesis storage, so it would sync and never finalize',
     );
   }
 
@@ -296,10 +413,42 @@ export async function main(argv: readonly string[]): Promise<string> {
     return { chainSpec: readFileSync(path, 'utf8'), genesisHash };
   };
   const assetHubPath = argOf(argv, 'asset-hub');
+  let assetHub = assetHubPath === undefined ? undefined : role('asset-hub');
+
+  /**
+   * `--asset-hub-genesis-head` + `--asset-hub-light-out`: trim before pinning — F18.
+   *
+   * The pin must cover **the bytes smoldot is handed**, so the trim happens here rather than
+   * in the harness: writing the light spec and pinning the untrimmed one would ship a
+   * `sha256` no file matches, and `verifyBundledChainSpec` would refuse the boot for a
+   * packaging reason that reads like a substituted spec.
+   *
+   * Both flags or neither. A caller that supplied a header and no destination would get a
+   * pin over bytes that exist only in this process.
+   */
+  const genesisHead = argOf(argv, 'asset-hub-genesis-head');
+  const lightOut = argOf(argv, 'asset-hub-light-out');
+  if ((genesisHead === undefined) !== (lightOut === undefined)) {
+    throw new DevPinError(
+      '--asset-hub-genesis-head and --asset-hub-light-out are used together: the first says ' +
+        'what the trimmed spec is anchored on, the second is where the bytes this pin covers ' +
+        'are written',
+    );
+  }
+  if (genesisHead !== undefined && lightOut !== undefined) {
+    if (assetHub === undefined) {
+      throw new DevPinError('--asset-hub-genesis-head was given without --asset-hub');
+    }
+    const chainSpec = lightChainSpec(assetHub.chainSpec, genesisStateRoot(genesisHead));
+    refuseReleasePath(lightOut);
+    writeFileSync(lightOut, chainSpec);
+    assetHub = { chainSpec, genesisHash: assetHub.genesisHash };
+  }
+
   const document = await buildDevPin({
     relay: role('relay'),
     para: role('para'),
-    ...(assetHubPath === undefined ? {} : { assetHub: role('asset-hub') }),
+    ...(assetHub === undefined ? {} : { assetHub }),
   });
   const text = `${JSON.stringify(document, null, 2)}\n`;
 

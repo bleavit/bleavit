@@ -384,12 +384,18 @@ importers:
 
   tests/chain-client:
     dependencies:
+      '@bleavit/application':
+        specifier: workspace:*
+        version: link:../../src/application
       '@bleavit/chain-client':
         specifier: workspace:*
         version: link:../../packages/chain-client
       '@bleavit/descriptors':
         specifier: workspace:*
         version: link:../../packages/descriptors
+      '@bleavit/features-tx':
+        specifier: workspace:*
+        version: link:../../src/features/tx
       '@bleavit/mock-runtime':
         specifier: workspace:*
         version: link:../../packages/mock-runtime
@@ -664,9 +670,18 @@ importers:
       '@bleavit/chain-client':
         specifier: workspace:*
         version: link:../../packages/chain-client
+      '@bleavit/descriptors':
+        specifier: workspace:*
+        version: link:../../packages/descriptors
+      '@bleavit/features-tx':
+        specifier: workspace:*
+        version: link:../../src/features/tx
       '@bleavit/shared-types':
         specifier: workspace:*
         version: link:../../packages/shared-types
+      '@polkadot-api/descriptors':
+        specifier: workspace:*
+        version: link:../../packages/papi-descriptors
 
   tools/render-budget:
     dependencies:

@@ -1,11 +1,11 @@
 > **DERIVED COPY for design-tool context — DO NOT EDIT.**
 > Verbatim copy of `docs/architecture/10-frontend-architecture.md` (the source of truth),
-> regenerated 2026-08-08 at integration contract **v30**, which re-measured §9.3's metadata
-> blob once more: the four guardian allowance constants and the two frozen playbook reads
-> grew the committed `metadata.scale` to **473,749 B** raw and **148,175 B** gz. The rounded
-> 0.15 MB figure has now held across three contract bumps, so §9.4's metadata row is again
-> unchanged — the *count* bound is what binds at this blob size. Nothing else in this
-> document moved. The 2026-08-07 regeneration note follows, unchanged. From **F1**:
+> regenerated 2026-08-08 for F18: §4.1 now states **which genesis form a bundled chain spec
+> carries**, and that the two roles differ — a relay needs `genesis.raw` or a `lightSyncState`
+> checkpoint, a parachain or foreign spec may carry a bare `genesis.stateRootHash`. Measured
+> against the pinned client, the two forms yield the same genesis hash while `addChain` takes
+> 23,644 ms on a 79.4 MB raw spec and 3 ms on the state-root form.
+> regenerated 2026-08-07, carrying three changes that landed the same day. From **F1**:
 > §5.2's rewritten depth paragraph, now that FE-P5 is resolved. What bounds historical
 > depth is **hash acquisition, not state retrieval** — `chain_getBlockHash(height)`
 > returns `null` for every height except `0` and the best block — and §5.2 gains two
@@ -221,6 +221,8 @@ Orthogonal session flags, all combinable with any compat mode: `Degraded` (peer/
 ### 4.1 Topology
 
 Unchanged: one smoldot instance hosting the relay light client (GRANDPA warp sync from a per-release checkpoint) and the parachain client (`potentialRelayChains` linkage); parachain finality derives from relay-finalized para-inclusion; storage read via proofs. PAPI `createClient(getSmProvider(...))`, typed API from committed descriptors. Bundled hash-pinned chain specs; genesis identity check per §3.1 (`WrongChain` on mismatch, no override).
+
+**Which genesis form a bundled spec carries is normative, and the two roles differ (added 2026-08-08, F18).** A chain spec states its genesis either as the full `genesis.raw` storage map or as a bare `genesis.stateRootHash`, and the pinned client accepts both — measured against `smoldot@3.3.2`, the two forms yield the **same** genesis hash, while `addChain` takes 23,644 ms on a 79.4 MB `raw` Asset Hub spec and 3 ms on the state-root form. The published light specs a release pins for foreign chains use the second, so a client that admitted only `raw` could not load the very artifact [02](02-integration-contract.md) §7.7 pins. Never both at once. The asymmetry: a **relay** spec MUST carry `genesis.raw` or a `lightSyncState` checkpoint, because it is the root of finality and a bare state root gives a light client nothing to verify against; a **parachain** or foreign spec may carry either, since its finality derives from relay-finalized para-inclusion. The identity check is unaffected either way — it compares the pinned genesis hash, which both forms produce identically.
 
 ### 4.2 What smoldot can and cannot serve — stated plainly
 

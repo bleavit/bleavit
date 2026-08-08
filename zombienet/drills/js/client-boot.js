@@ -1,16 +1,31 @@
-// F27 / 15 §4.8 — boot the canonical client's real light client against this topology.
+// F27 / F18 / 15 §4.8 — the canonical client's real light client, against this topology.
 //
-// Three legs, run in order by `14-client-boot.zndsl`:
+// Four legs, run in order by `14-client-boot.zndsl`:
 //
-//   pin          read each chain's genesis hash and listen addresses, then build the
-//                development pin with `app/tools/dev-chain-pin.ts`
+//   pin          read each chain's genesis hash and listen addresses, trim the Asset Hub
+//                genesis to its state root, then build the development pin with
+//                `app/tools/dev-chain-pin.ts`
 //   boot         start smoldot, sync relay + parachain, classify both runtimes
-//   wrong-chain  the same with one byte of the parachain genesis pin flipped, which
+//   funding      open 11 §11.9's withdraw and deposit legs over the live chains and read
+//                the four frozen surfaces behind them (F18)
+//   wrong-chain  the same boot with one byte of the parachain genesis pin flipped, which
 //                MUST be refused (10 §3.1 FE-BOOT-003, terminal, no override)
+//
+// The legs are independent — `wrong-chain` boots a client that refuses and leaves nothing
+// behind — and `funding` runs **before** it deliberately. `wrong-chain` is red for a client
+// defect that has nothing to do with either read leg (SQ-1026: `WrongChainError` is raised
+// inside `getSmProvider`'s chain factory, which PAPI retries indefinitely, so the terminal
+// refusal never reaches the caller). Zombienet stops at the first failing assertion, so a
+// refusal leg placed ahead of the read legs would make every later leg unreachable — the
+// results of legs that do pass would be hidden by a defect they do not share.
 //
 // The third leg is not a formality. `boot` alone proves that a boot happened; the
 // identity check is what stops every downstream read being honestly verified against
 // the wrong chain, and a run in which it never fires witnesses nothing about it.
+//
+// Neither is the fourth. `openWithdrawLeg`/`openDepositLeg` had no production caller and no
+// live caller, so the two 02 §7.7 Asset Hub reads, the two local reads and the four keys behind
+// them had never been built from real metadata and answered by a real chain.
 //
 // ## Why this shells out
 //
@@ -36,29 +51,40 @@
 const fs = require("fs");
 const path = require("path");
 const { spawnSync } = require("child_process");
+// Every decision this file makes, with no I/O around it — see that module's header. It exists
+// because both of this harness's shipped defects were decisions, and a decision that also
+// performs its own I/O cannot be exercised before a release-tier drill run.
+const rules = require("./client-boot-rules.js");
 
 const ROOT = process.cwd();
 const OUT = path.join(ROOT, "target", "env");
 const PIN_FILE = path.join(OUT, "client-boot-pin.json");
+const ASSET_HUB_LIGHT = path.join(OUT, "client-boot-asset-hub-light.json");
 const RELAY_NODE = "relay-alice";
 const PARA_NODE = "bleavit-collator-1";
 const ASSET_HUB_NODE = "asset-hub-collator-1";
+const PARACHAIN_BINARY = path.join(ROOT, "zombienet", "bin", "polkadot-parachain");
 
-// Zombienet's `-d` directory, which the runner passes and which holds `zombie.json`.
-// Resolved from the network spec rather than assumed, so a caller that moves it still works.
-function networkDir(networkInfo) {
-  const spec = networkInfo?.networkSpecPath ?? networkInfo?.tmpDir ?? process.env.ZOMBIE_DIR;
-  if (typeof spec === "string" && spec.length > 0) {
-    return spec.endsWith(".json") ? path.dirname(spec) : spec;
-  }
-  throw new Error(
-    "cannot locate the spawned network directory; zombienet writes the effective chain specs " +
-      "there and the generated specs in zombienet/specs/out/ are a DIFFERENT chain (see header)",
-  );
-}
+/**
+ * The three figures the funding leg cannot read from any chain — 02 §8; 11 §11.9.
+ *
+ * `amount` and the two fee estimates are a user's transaction intent; `min_balance` is a 02 §8
+ * release pin whose normative home is 13. None of the four frozen surfaces carries any of them,
+ * and `app/tools/drill-client/funding.ts` requires all four with no defaults for that reason —
+ * so they are stated here, once, where a person reading the drill can see what the run assumed.
+ * The report keeps them under `driverInputs`, never beside the reads.
+ */
+const FUNDING_INPUTS = {
+  // 1 USDC, in the 6-decimal base units 02 §8 pins.
+  amount: "1000000",
+  assetHubFee: "0",
+  localFee: "0",
+  // 10^4 = 1 cent — 02 §8's `min_balance`, normative value in 13.
+  usdcMinBalance: "10000",
+};
 
 function spawnedSpecs(networkInfo) {
-  const dir = networkDir(networkInfo);
+  const dir = rules.networkDir(networkInfo, process.env);
   return {
     relay: path.join(dir, "paseo-local.json"),
     para: path.join(dir, "4242-paseo-local.json"),
@@ -131,20 +157,6 @@ async function chainFacts(networkInfo, nodeName) {
  */
 function systemNode() {
   const pinned = fs.readFileSync(path.join(ROOT, "app", ".nvmrc"), "utf8").trim();
-  const floor = pinned.split(".").map((part) => Number.parseInt(part, 10));
-  if (floor.length !== 3 || floor.some(Number.isNaN)) {
-    throw new Error(`app/.nvmrc does not hold an x.y.z version: ${JSON.stringify(pinned)}`);
-  }
-
-  const admissible = (version) => {
-    const got = version.replace(/^v/, "").split(".").map((part) => Number.parseInt(part, 10));
-    if (got.length !== 3 || got.some(Number.isNaN) || got[0] !== floor[0]) return false;
-    for (let i = 0; i < 3; i += 1) {
-      if (got[i] !== floor[i]) return got[i] > floor[i];
-    }
-    return true;
-  };
-
   const tried = [];
   for (const dir of (process.env.PATH ?? "").split(path.delimiter)) {
     if (dir === "") continue;
@@ -166,9 +178,8 @@ function systemNode() {
     const answer = (probe.stdout ?? "").trim();
     const [version, packaged] = answer.split(" ");
     tried.push(`${candidate} -> ${answer || `no answer (status ${probe.status})`}`);
-    if (probe.status !== 0 || version === undefined) continue;
-    if (packaged !== "undefined") continue;
-    if (admissible(version)) return candidate;
+    if (probe.status !== 0 || version === undefined || packaged === undefined) continue;
+    if (rules.admissibleNode(pinned, version, packaged)) return candidate;
   }
 
   throw new Error(
@@ -200,6 +211,45 @@ function run(label, argv, timeoutSeconds) {
   return result.stdout;
 }
 
+/**
+ * The Asset Hub genesis **header**, built from the spawned spec's own bytes — F18.
+ *
+ * `export-genesis-head` reads the raw spec, builds the genesis trie and prints the header the
+ * chain started from. Two things make this the right source rather than the convenient one:
+ *
+ *  - It is **offline and derived from the file**, not read from the running node. The pin's
+ *    genesis hash is read from the node, and smoldot recomputes its own from the state root in
+ *    the spec — so `assertGenesisIdentity` still compares two independent derivations. Taking
+ *    the state root from `chain_getHeader(0)` instead would make both sides one reading of one
+ *    source, which is the defect this harness already refuses in the other direction by never
+ *    taking the pin from smoldot.
+ *  - It is the **same binary** that runs the chain, so a spec it cannot build a genesis for is
+ *    a spec no collator could have booted.
+ *
+ * Measured on this topology: 4.1 s here, against 23.6 s of uninterrupted smoldot CPU per
+ * `addChain` of the untrimmed 79.4 MB spec — and the deposit path adds a **second** chain
+ * handle for 10 §5.2's probe, so the cost was paid twice.
+ */
+function assetHubGenesisHead(specFile) {
+  const probe = spawnSync(PARACHAIN_BINARY, ["export-genesis-head", "--chain", specFile], {
+    cwd: ROOT,
+    encoding: "utf8",
+    timeout: 600_000,
+    maxBuffer: 16 * 1024 * 1024,
+  });
+  if (probe.error) throw new Error(`export-genesis-head: ${probe.error.message}`);
+  if (probe.status !== 0) {
+    throw new Error(`export-genesis-head exited ${probe.status}\n--- stderr ---\n${probe.stderr}`);
+  }
+  const header = (probe.stdout ?? "").trim();
+  if (!rules.looksLikeGenesisHeader(header)) {
+    throw new Error(
+      `export-genesis-head did not print a genesis header (zero parent, block 0): ${header.slice(0, 120)}`,
+    );
+  }
+  return header;
+}
+
 async function buildPin(networkInfo) {
   fs.mkdirSync(OUT, { recursive: true, mode: 0o700 });
   const RAW = spawnedSpecs(networkInfo);
@@ -208,11 +258,17 @@ async function buildPin(networkInfo) {
   const relay = await chainFacts(networkInfo, RELAY_NODE);
   const para = await chainFacts(networkInfo, PARA_NODE);
   const assetHub = await chainFacts(networkInfo, ASSET_HUB_NODE);
+  const assetHubHead = assetHubGenesisHead(RAW.assetHub);
 
   // The genesis hashes come from the NODES, never from smoldot's own
   // `chainSpec_v1_genesisHash`. That value is what `assertGenesisIdentity` compares
   // against, so deriving the pin from it would compare a reading with itself and pass
   // for any chain at all — including the corrupted-pin leg below.
+  //
+  // `--asset-hub-genesis-head` / `--asset-hub-light-out` trim the Asset Hub genesis to the
+  // state root it hashes to and pin **that** file. The genesis hash smoldot computes is
+  // unchanged — verified against this pair before the flags were added — and the chain the pin
+  // describes is still the chain the node is running, because that half comes from the node.
   run(
     "dev-chain-pin",
     [
@@ -220,9 +276,11 @@ async function buildPin(networkInfo) {
       "--relay", RAW.relay, "--relay-genesis", relay.genesisHash,
       "--para", RAW.para, "--para-genesis", para.genesisHash,
       "--asset-hub", RAW.assetHub, "--asset-hub-genesis", assetHub.genesisHash,
+      "--asset-hub-genesis-head", assetHubHead,
+      "--asset-hub-light-out", ASSET_HUB_LIGHT,
       "--out", PIN_FILE,
     ],
-    120,
+    600,
   );
 
   fs.writeFileSync(
@@ -237,14 +295,33 @@ function reportPath(mode) {
   return path.join(OUT, `client-boot-report-${mode}.json`);
 }
 
-function bootArgs(mode) {
+function bootnodeArgs() {
   const bootnodes = JSON.parse(fs.readFileSync(path.join(OUT, "client-boot-bootnodes.json"), "utf8"));
   return [
-    "app/tools/drill-client/boot.ts",
-    "--pin", PIN_FILE,
     "--relay-bootnodes", bootnodes.relay.join(","),
     "--para-bootnodes", bootnodes.para.join(","),
     "--asset-hub-bootnodes", bootnodes.assetHub.join(","),
+  ];
+}
+
+function bootArgs(mode) {
+  if (mode === "funding") {
+    return [
+      "app/tools/drill-client/funding.ts",
+      "--pin", PIN_FILE,
+      ...bootnodeArgs(),
+      "--amount", FUNDING_INPUTS.amount,
+      "--asset-hub-fee", FUNDING_INPUTS.assetHubFee,
+      "--local-fee", FUNDING_INPUTS.localFee,
+      "--usdc-min-balance", FUNDING_INPUTS.usdcMinBalance,
+      "--timeout-seconds", "300",
+      "--report", reportPath(mode),
+    ];
+  }
+  return [
+    "app/tools/drill-client/boot.ts",
+    "--pin", PIN_FILE,
+    ...bootnodeArgs(),
     "--mode", mode,
     "--timeout-seconds", "300",
     "--report", reportPath(mode),
@@ -267,60 +344,34 @@ function reportOf(label, mode, timeoutSeconds) {
   const file = reportPath(mode);
   fs.rmSync(file, { force: true });
   const stdout = run(label, bootArgs(mode), timeoutSeconds);
-  if (!fs.existsSync(file)) {
-    throw new Error(`${label} exited 0 but wrote no report to ${file}\n--- stdout ---\n${stdout}`);
-  }
+  if (!fs.existsSync(file)) throw rules.missingReportError(label, file, stdout);
   return JSON.parse(fs.readFileSync(file, "utf8"));
 }
 
 async function boot() {
-  const report = reportOf("client boot", "boot", 840);
-  // `unestablished` is what the classifier returns when no chain was connected, so a
-  // report carrying it is a boot that did not happen wearing a verdict's clothes.
-  if (report.compat === "unestablished") {
-    throw new Error(`the classifier ran without a chain: ${JSON.stringify(report)}`);
-  }
-  // **The lattice, not the wrapper.** `CompatVerdict.kind` is `classified | unestablished`,
-  // so asserting `!== "unestablished"` says only that a chain answered — which the finalized
-  // head below already proves. 10 §5.2's verdict is the MODE, and a `read-only-incompatible`
-  // runtime is `classified`: a leg that stopped at the wrapper would pass on the regression
-  // it exists to catch.
-  if (report.compatMode !== "full") {
-    throw new Error(
-      `10 §5.2 classified this runtime as ${JSON.stringify(report.compatMode)}, not "full". ` +
-        `The drill spec is built from this repository's own runtime, so anything else means ` +
-        `the frozen critical surface and the runtime disagree: ${JSON.stringify(report)}`,
-    );
-  }
-  if (typeof report.finalizedHash !== "string" || !report.finalizedHash.startsWith("0x")) {
-    throw new Error(`no finalized head was delivered: ${JSON.stringify(report)}`);
-  }
+  const report = rules.assertBootReport(reportOf("client boot", "boot", 840));
   console.log(`client boot: ${JSON.stringify(report)}`);
   return 1;
 }
 
 async function wrongChain() {
-  const report = reportOf("wrong-chain refusal", "wrong-chain", 540);
-  if (report.refused !== true || report.code !== "FE-BOOT-003") {
-    throw new Error(`the corrupted pin was not refused as FE-BOOT-003: ${JSON.stringify(report)}`);
-  }
-  if (report.expected === report.observed) {
-    throw new Error(
-      `the refusal compared a value with itself (${report.expected}); the corrupted pin never ` +
-        "reached the identity check, so this leg witnesses nothing",
-    );
-  }
-  // The refusal must be about the PARACHAIN pin this leg corrupted. `startTopology` asserts
-  // the relay first, so a stale relay pin also raises FE-BOOT-003 — and a leg that accepted
-  // it would report the control witnessed while never reaching the byte it flipped. `boot.ts`
-  // refuses that case; this is the second side of the same binding, kept here so the drill
-  // cannot be satisfied by a harness that stopped making it.
-  if (report.role !== "para" || report.observed !== report.uncorrupted) {
-    throw new Error(
-      `the refusal was not about the corrupted parachain pin: ${JSON.stringify(report)}`,
-    );
-  }
+  const report = rules.assertWrongChainReport(reportOf("wrong-chain refusal", "wrong-chain", 540));
   console.log(`wrong-chain refused: expected ${report.expected}, observed ${report.observed}`);
+  return 1;
+}
+
+/**
+ * The 11 §11.9 funding read path, against both live chains — F18.
+ *
+ * A **blocked deposit is a pass** and a blocked withdraw is not; `assertFundingReport` carries
+ * the whole rule and says why. The verdict, the two chains and every key are printed, because
+ * the value of this leg is what it read rather than that it finished.
+ */
+async function funding() {
+  const report = rules.assertFundingReport(reportOf("funding read path", "funding", 900));
+  console.log(`funding withdraw: ${JSON.stringify(report.withdraw)}`);
+  console.log(`funding deposit: ${JSON.stringify(report.deposit)}`);
+  console.log(`funding inputs: ${JSON.stringify(report.driverInputs)}`);
   return 1;
 }
 
@@ -329,7 +380,8 @@ async function run_(nodeName, networkInfo, args) {
   if (leg === "pin") return buildPin(networkInfo);
   if (leg === "boot") return boot();
   if (leg === "wrong-chain") return wrongChain();
-  throw new Error(`unknown leg ${JSON.stringify(leg)}; expected pin, boot or wrong-chain`);
+  if (leg === "funding") return funding();
+  throw new Error(`unknown leg ${JSON.stringify(leg)}; expected pin, boot, wrong-chain or funding`);
 }
 
 module.exports = { run: run_ };

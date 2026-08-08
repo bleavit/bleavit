@@ -46,6 +46,7 @@ import { WrongChainError, type BundledChain } from '@bleavit/chain-client';
 import { startNodeLightClient } from '@bleavit/chain-client/node-light-client';
 import type { LightClient } from '@bleavit/chain-client/light-client';
 import { classifyChain, classifyAssetHubFor } from '@bleavit/application';
+import { assetHubLabel } from './foreign-label.ts';
 
 /** The `bleavit.dev-chain-pin.v1` document `app/tools/dev-chain-pin.ts` writes. */
 interface DevPinRole {
@@ -207,49 +208,45 @@ async function bootAndClassify(
     if (document.assetHub !== undefined) {
       const leg = bundled(document.assetHub);
       stage('attaching Asset Hub');
-      // **Bounded, and the bound is a finding rather than a convenience.** `connectAssetHub`
-      // awaits a genesis probe on a chain smoldot is still initialising, and a foreign chain
-      // that never answers would leave the caller waiting forever. 11 E17 requires the deposit
-      // flow to be *"blocked with diagnostics"*, and an unbounded await is not that: it renders
-      // as a spinner that never resolves. **This was fixed in the client** rather than left as
-      // a spec question — `assetHubConnector.connect` takes a `deadlineMs` and abandons the
-      // attempt at it, detaching the chain and closing any transport that lands afterwards.
-      // The bound below is this harness's own, because a drill must fail rather than hang.
+      // **The connector's own bound, not a race around it** — F18, 2026-08-08. This used to
+      // `Promise.race` `connectAssetHub()` against a timer, which is the exact anti-pattern
+      // `assetHubConnector`'s header records: a wrapper can only abandon the *wait*, so the
+      // attach kept running, the connector kept it as the answer to every later `connect`, and
+      // E17's `R: retry AH sync` could never start a new one. `connect` takes a `deadlineMs`
+      // and abandons the work — detaching the chain and closing any transport the abandoned
+      // attempt goes on to open — so passing it down is both correct and simpler.
       //
-      // The Asset Hub genesis is ~189k raw entries (a 79 MB spec), and smoldot warns that a
-      // large `genesis.raw` slows initialisation substantially — so the honest bound here is
-      // generous, and a timeout is reported as `unavailable` rather than as a failure.
-      const connection = await Promise.race([
-        client.connectAssetHub(leg),
-        new Promise<'timed-out'>((resolve) =>
-          setTimeout(() => resolve('timed-out'), timeoutSeconds * 1000),
-        ),
-      ]);
-      if (connection === 'timed-out') {
-        stage(`Asset Hub did not attach within ${timeoutSeconds}s`);
-        return {
-          mode: 'boot',
-          chain: document.para.pinned.id,
-          genesisHash: document.para.pinned.genesisHash,
-          specVersion: runtime?.specVersion,
-          compat: compat.kind,
-          compatMode: compat.kind === 'classified' ? compat.classification.mode : undefined,
-          assetHub: `unavailable: no genesis answer within ${timeoutSeconds}s`,
-          finalizedHash,
-        };
-      }
+      // It also fixes the **diagnosis**, which the race got wrong. The timeout arm reported
+      // *"no genesis answer within 300s"*, and the genesis probe was not what it was waiting
+      // for: with the trimmed spec `addChain` and the probe are milliseconds, and what takes
+      // the time is `openTransport` waiting for Asset Hub's **first finalized block**, which
+      // derives from relay-finalized para-inclusion and therefore cannot arrive until the relay
+      // has synced. Measured in the same run on 2026-08-08: this leg still reported unavailable
+      // at one minute of network age, while the `funding` leg attached the same chain and read
+      // it at block 49 six minutes later. Reporting the connector's own sentence is what stops
+      // the next reader spending a day on genesis size again.
+      const connection = await client.connectAssetHub(leg, { deadlineMs: timeoutSeconds * 1000 });
       if (connection.kind !== 'attached') {
-        assetHub = `not-attached: ${connection.kind}`;
+        stage(`Asset Hub did not attach: ${connection.kind}`);
+        assetHub = `${connection.kind}: ${connection.reason}`;
       } else {
         stage('classifying Asset Hub (02 §7.7)');
+        // **The pin's label, not the connected spec's id** — F18. `classifyForeign` finds its
+        // pin with `pins.find((p) => p.label === chainLabel)`, and a label naming no pin yields
+        // `unreachable`: *"this release pins no `<label>` runtime"*. This call passed
+        // `document.assetHub.pinned.id`, which on any development topology is
+        // `asset-hub-paseo-local` and matches nothing — so a chain that attached, synced and
+        // answered was classified as unreachable, and the `wrong-chain` verdict that is the
+        // true one never appeared. `assetHubLabel()` reads the label off the pin list.
         const foreign = await classifyAssetHubFor(
           client,
           leg,
-          document.assetHub.pinned.id,
+          assetHubLabel(),
           connection.transport.finalizedRuntime(),
           () => connection.transport.finalizedRuntime(),
         );
-        assetHub = foreign.kind;
+        assetHub =
+          foreign.kind === 'classified' ? `${foreign.kind}: ${foreign.classification.mode}` : foreign.kind;
       }
     }
 

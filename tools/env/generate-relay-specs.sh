@@ -249,9 +249,13 @@ fi
 #
 # Two consumers want the same chains in two forms, and neither accepts the other's.
 # The pinned zombienet schedules a parachain only from a PLAIN spec (see the note above
-# the PB-MIGRATION block), while smoldot accepts raw specs only — `chain-spec.ts` refuses
-# a non-raw spec outright, because `addChain` reports the difference as a chain that never
+# the PB-MIGRATION block), while smoldot accepts a `genesis.raw` map or a
+# `genesis.stateRootHash` and no third form — `chain-spec.ts` refuses a spec carrying
+# neither outright, because `addChain` reports the difference as a chain that never
 # finalises, which on screen and in a drill log is indistinguishable from slow sync.
+# These files are emitted in the raw form; drill 14 trims its Asset Hub copy to the state
+# root at drill time (`app/tools/dev-chain-pin.ts --asset-hub-light-out`), against the spec
+# ZOMBIENET spawned rather than this one, which is a different chain.
 #
 # Until F27 the only conversion here was the Bleavit one, for Chopsticks, so the relay and
 # Asset Hub existed in plain form alone and no light client could have been pointed at this
@@ -274,7 +278,7 @@ from pathlib import Path
 
 spec = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
 if not isinstance(spec.get("genesis", {}).get("raw"), dict):
-    raise SystemExit(f"{sys.argv[1]} is not a raw spec; smoldot accepts only raw specifications")
+    raise SystemExit(f"{sys.argv[1]} is not a raw spec; this generator emits the raw form")
 PY
 done
 
