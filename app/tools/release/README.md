@@ -12,7 +12,7 @@ This directory sits under `app/` deliberately: the repository root already has a
 ```bash
 pnpm -C app run release:build              # build dist/ and run every gate over it
 pnpm -C app run release:check              # re-run the gates over an existing tree
-node tools/release/build.mjs --check --production   # additionally refuse while blockers stand
+node tools/release/build.ts --check --production   # additionally refuse while blockers stand
 pnpm -C app run release:manifest -- --environment <id>   # publish this environment's digests
 ```
 
@@ -76,6 +76,15 @@ Nothing in the emitted policy is authored. An allowlist somebody can *write* is 
 somebody can add a host to, and 12 §5.1 names the failure: "a vendor host is exactly the
 kind of entry that arrives one release at a time".
 
+**The two descriptor sets are read from their feeds, never declared here.** Bleavit's comes
+from `app/fixtures/chain-feed/` and the Asset Hub set 12 §1.1 requires from
+`app/fixtures/foreign-chain-feed/` — the same artifacts `.papi/polkadot-api.json` generates
+descriptors from and `foreign:check` gates. Both are **re-hashed** rather than copied out of
+the neighbouring `runtime-info.json`: INV-FE-11 makes these *pins*, and a pin taken from a
+sibling record pins that record's opinion of a blob rather than the blob. The Asset Hub set
+was a hand-declared field until F11 wired it, which is how it stayed empty while its
+artifacts sat committed in the tree.
+
 ## Readiness blockers, not silence
 
 Several pins cannot exist before genesis — no production genesis hash, no seated bootnode
@@ -84,6 +93,19 @@ emitting `null` and hoping, `release.json` carries a **`readiness` block naming 
 unresolved blocker**, and `--production` exits non-zero while any remain. This is the same
 shape the chain-side `tools/release/` uses, and it keeps the pipeline exercised on every
 commit — a release pipeline that only runs at a tag is one first debugged during a release.
+
+**Every blocker expires mechanically, and its stated cause has to expire with it.** The
+condition is always a property the build re-derives — an operator list that is no longer
+empty, a pin that is now well-shaped, a feed that now carries a runtime — so no blocker
+needs deleting by hand. The cause is the half that rotted: the Asset Hub descriptor blocker
+read "blocked on SQ-587" for three days after that question was ruled *and* after every
+artifact it waited on had landed, because neither side can see the other — the pipeline
+cannot know a question closed, and PLAN.md cannot know who cites it.
+`tools/ci/check-release-blocker-citations.py` binds the two: every `SQ-nnn` appearing
+anywhere under this directory must be a PLAN.md spec-question row that is still **open**.
+The breadth is deliberate — the stale claim sat in a doc comment as well as in the emitted
+string — and the cost is that this directory may not carry a closed question as history.
+Record a ruling in PLAN.md's decision log, which is what reads it back.
 
 ## What is deliberately not here
 

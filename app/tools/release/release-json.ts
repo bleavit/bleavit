@@ -40,6 +40,49 @@ export interface ChainFeedPins {
   readonly contractVersion: number;
 }
 
+/** The `fixtures/foreign-chain-feed/<chain>/<spec_version>/runtime-info.json` fields read here. */
+interface ForeignRuntimeInfo {
+  readonly schema?: unknown;
+  readonly label?: unknown;
+  readonly relay?: unknown;
+  readonly core_version?: { readonly spec_version?: unknown };
+  readonly metadata?: { readonly sha256?: unknown };
+}
+
+/**
+ * What a release pins about the foreign chain its funding leg reads — 12 §1.1, §1.6.
+ *
+ * `network` is the **relay** whose Asset Hub this release targets, not a chain name: 12 §1.6
+ * monitors Asset Hub `spec_version` "on both networks", and 08 §2.5 / 09 §6.3 open HRMP to
+ * Paseo's Asset Hub at Phase 2 and Polkadot's at Phase 3 — so which one a release pins is a
+ * property of the relay it targets.
+ */
+export interface ForeignFeedPins {
+  readonly network: string | null;
+  /** `spec_version` → sha256 of the descriptor metadata. Bare hex, as the Bleavit map is. */
+  readonly descriptorMetadataHashes: Record<string, string>;
+}
+
+const FOREIGN_INFO_SCHEMA = 'bleavit.foreign-runtime-info.v1';
+
+/**
+ * The one label the release format has a slot for.
+ *
+ * `release.json` carries a single `assetHub` block, so a foreign chain the feed pins under
+ * any other label has nowhere in the document to live. Publishing it *as* the Asset Hub set
+ * would be a mislabel a consumer cannot detect, and dropping it silently would be worse, so
+ * the reader refuses instead of doing either. Kept as a literal rather than imported from
+ * `packages/descriptors` because this tool runs over the source tree and must not acquire a
+ * build-order dependency on the package graph — the same reason `check-foreign-feed.ts`
+ * parses `foreign.ts` rather than importing it.
+ */
+const FOREIGN_SLOT_LABEL = 'Asset Hub';
+
+/** `0x…` or bare, normalised to the bare hex `Sha256Hex` this document publishes. */
+function bareHex(value: unknown): string {
+  return typeof value === 'string' && value.startsWith('0x') ? value.slice(2) : String(value ?? '');
+}
+
 export class ReleaseJsonError extends Error {
   constructor(message: string) {
     super(message);
@@ -213,6 +256,105 @@ export function readChainFeed(feedDir: string): ChainFeedPins {
     throw new ReleaseJsonError('no runtime in the feed declares an integration contract version');
   }
   return { specVersionRange: { primary, recovery }, descriptorMetadataHashes, contractVersion };
+}
+
+/**
+ * The Asset Hub descriptor set, read from the committed foreign chain feed — 12 §1.1, §1.6.
+ *
+ * 12 §1.1 requires `release.json` to record descriptor metadata hashes **"including the Asset
+ * Hub descriptor set"**, and §1.6 explains why it is a separate set rather than a row in the
+ * Bleavit map: Asset Hub upgrades ride the Fellowship's schedule, ship through the expedited
+ * lane, and a stale Asset Hub set degrades only the funding flow.
+ *
+ * **Derived, never declared.** The hashes already exist as committed artifacts — the feed at
+ * `fixtures/foreign-chain-feed/` is what `.papi/polkadot-api.json` generates descriptors
+ * from and what `FOREIGN_CHAIN_PINS` is checked against — so copying them into
+ * `release-sources.json` by hand would create a second home for a value that has one, and
+ * the copy that rots is always the one nothing reads back (app-code rule 7). It also removes
+ * the failure this reader replaced: the set was a hand-declared field nobody had filled, so
+ * `release.json` published an empty Asset Hub map while the artifacts sat in the tree.
+ *
+ * **Re-hashed, not copied**, for the reason `readChainFeed` gives: INV-FE-11 makes this a
+ * *pin*, and a pin taken from a sibling JSON file pins that file's opinion of a blob rather
+ * than the blob.
+ *
+ * An absent or empty feed returns empty and is **not** an error here: a release targeting a
+ * relay whose Asset Hub this repository has not pinned is a state the rollout explicitly has
+ * (08 §2.5), and `classifyForeign` reports it as `unreachable` with the deposit leg blocked.
+ * The caller turns it into a named readiness blocker.
+ */
+export function readForeignChainFeed(feedDir: string): ForeignFeedPins {
+  const empty: ForeignFeedPins = { network: null, descriptorMetadataHashes: {} };
+  let chainDirs: string[];
+  try {
+    chainDirs = readdirSync(feedDir)
+      .filter((entry) => statSync(join(feedDir, entry)).isDirectory())
+      .sort();
+  } catch {
+    return empty;
+  }
+  const [chain, ...extra] = chainDirs;
+  if (chain === undefined) return empty;
+  if (extra.length > 0) {
+    throw new ReleaseJsonError(
+      `the foreign chain feed carries ${chainDirs.length} chains (${chainDirs.join(', ')}) and ` +
+        'release.json has one foreign slot. A release pins the Asset Hub of the relay it ' +
+        'targets (08 §2.5), so choosing between them here would be a property of directory ' +
+        'order rather than of anything anyone decided.',
+    );
+  }
+
+  const chainPath = join(feedDir, chain);
+  const versions = readdirSync(chainPath)
+    .filter((entry) => /^[0-9]+$/.test(entry) && statSync(join(chainPath, entry)).isDirectory())
+    .sort();
+  if (versions.length === 0) return empty;
+
+  const descriptorMetadataHashes: Record<string, string> = {};
+  let network: string | null = null;
+  for (const version of versions) {
+    const dir = join(chainPath, version);
+    const where = `foreign-chain-feed/${chain}/${version}`;
+    const info = JSON.parse(readFileSync(join(dir, 'runtime-info.json'), 'utf8')) as ForeignRuntimeInfo;
+    if (info.schema !== FOREIGN_INFO_SCHEMA) {
+      throw new ReleaseJsonError(`${where}: schema is ${JSON.stringify(info.schema)}`);
+    }
+    if (info.label !== FOREIGN_SLOT_LABEL) {
+      throw new ReleaseJsonError(
+        `${where}: the feed pins ${JSON.stringify(info.label)}, and release.json has a slot ` +
+          `only for ${JSON.stringify(FOREIGN_SLOT_LABEL)}. Publishing it under that name would ` +
+          'mislabel a chain the funding leg never reads.',
+      );
+    }
+    // The directory name is the selector a consumer resolves a `spec_version` through, so a
+    // directory disagreeing with the runtime inside it hands out the wrong artifact while
+    // every internal check still passes — the rule both feeds already carry.
+    if (String(info.core_version?.spec_version) !== version) {
+      throw new ReleaseJsonError(
+        `${where}: declares spec_version ${String(info.core_version?.spec_version)}`,
+      );
+    }
+    const measured = sha256(readFileSync(join(dir, 'metadata.scale')));
+    const declared = bareHex(info.metadata?.sha256);
+    if (declared !== measured) {
+      throw new ReleaseJsonError(
+        `${where}: runtime-info.json declares metadata sha256 ${declared} but metadata.scale ` +
+          `hashes to ${measured}`,
+      );
+    }
+    descriptorMetadataHashes[version] = measured;
+
+    const relay = typeof info.relay === 'string' ? info.relay : null;
+    if (relay === null) throw new ReleaseJsonError(`${where}: declares no relay`);
+    if (network === null) network = relay;
+    else if (network !== relay) {
+      throw new ReleaseJsonError(
+        `${where}: the feed's runtimes disagree on the relay (${network} vs ${relay}); a ` +
+          'release targets one',
+      );
+    }
+  }
+  return { network, descriptorMetadataHashes };
 }
 
 /** Assemble the document. `arweaveManifestTxId` is null here by construction — 12 §1.2's
