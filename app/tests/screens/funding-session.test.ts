@@ -21,7 +21,8 @@ import { fileURLToPath } from 'node:url';
 import { bleavit, assethub_paseo } from '@polkadot-api/descriptors';
 import { fundingArtifacts, openDepositLeg, openWithdrawLeg } from '@bleavit/application';
 import type { FundingArtifacts, FundingPins } from '@bleavit/application';
-import { loadCodecs, loadMetadata } from '@bleavit/chain-client';
+import { assetHubConnector, loadCodecs, loadMetadata } from '@bleavit/chain-client';
+import type { SmoldotChainLike } from '@bleavit/chain-client';
 import { SameChainError, readDepositInputs, readWithdrawInputs } from '@bleavit/features-tx';
 import type { FundingDecoders, FundingKeys, FundingReader } from '@bleavit/features-tx';
 import type {
@@ -598,4 +599,59 @@ test('withdraw is unaffected by a classifier that rejects, because it never call
     artifacts: ARTIFACTS,
   });
   assert.equal(withdraw.kind, 'ready');
+});
+
+test('an Asset Hub that never answers blocks the flow with diagnostics, rather than hanging', async () => {
+  // 11 E17's `F:` row — *"AH connection unavailable ⇒ flow blocked with diagnostics (never a
+  // blind 'send anyway')"* — and 02 §7.7's *"blocks the funding flow with diagnostics"*.
+  // `connectAssetHub` carried no deadline of its own: `attachAssetHub`'s genesis probe loops
+  // on `nextJsonRpcResponse()` with no timer, so an Asset Hub that never answers produced
+  // neither *blocked* nor *diagnostics* — it rendered as a spinner that never resolves.
+  // Observed against a live topology, where a ~189k-entry genesis kept the probe pending past
+  // five minutes. F27.
+  //
+  // **Composed over the real connector**, because that is where the bound lives. It moved
+  // there once it was clear that a timer wrapped around the call abandons only the wait: the
+  // attach kept running, the connector kept it as the answer to every later connect, and
+  // E17's `R: retry AH sync` could never start a new one. A fake `connectAssetHub` honouring
+  // `deadlineMs` itself would test the fake and would have gone on passing through that.
+  //
+  // The attach below never settles, which is the whole point: without the bound this test
+  // would time out rather than fail, and a timing-out test is how this repository has
+  // repeatedly ended up asserting nothing.
+  const connector = assetHubConnector<SmoldotChainLike, ReturnType<typeof assetHubTransport>>({
+    attach: () => new Promise(() => {}),
+    openTransport: async () => assetHubTransport(),
+    closeTransport: () => {},
+  });
+  const leg = await openDepositLeg({
+    local: transport(LOCAL_CHAIN),
+    openReader,
+    artifacts: ARTIFACTS,
+    pins: PINS,
+    classifyAssetHub: classifiesFull,
+    connectAssetHub: (assetHub, options) => connector.connect(assetHub, options),
+    assetHubDeadlineMs: 25,
+  });
+  assert.equal(leg.kind, 'blocked');
+  assert.ok(leg.kind === 'blocked' && /did not complete within/.test(leg.reason), leg.kind === 'blocked' ? leg.reason : '');
+  // The diagnosis must name the Asset Hub, not merely report a failure: an operator reading
+  // "the connection failed" cannot tell a slow second chain from a broken deposit path.
+  assert.ok(leg.kind === 'blocked' && /Asset Hub/.test(leg.reason));
+  assert.ok(leg.kind === 'blocked' && /nothing else in the app is affected/i.test(leg.reason));
+});
+
+test('a deadline that is not reached leaves the leg untouched', async () => {
+  // The negative control. A bound that blocked a healthy connection would be worse than none,
+  // and a test that only ever sees the timeout cannot tell the two apart.
+  const leg = await openDepositLeg({
+    local: transport(LOCAL_CHAIN),
+    openReader,
+    artifacts: ARTIFACTS,
+    pins: PINS,
+    classifyAssetHub: classifiesFull,
+    connectAssetHub: async () => attached(assetHubTransport()),
+    assetHubDeadlineMs: 10_000,
+  });
+  assert.equal(leg.kind, 'ready');
 });

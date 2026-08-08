@@ -58,6 +58,7 @@
     "tools/*.ts",
     "tools/release/**/*.ts",
     "tools/render-budget/**/*.ts",
+    "tools/drill-client/**/*.ts",
     "tools/snapshot/**/*.ts",
     "optional/indexer/**/*.ts",
     "tools/verify-release/**/*.ts",

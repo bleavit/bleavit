@@ -2,9 +2,15 @@
  * Connecting the Asset Hub leg — 11 §11.9.1, E17.
  *
  * `topology.test.ts` covers attaching the *chain*; this covers turning an attached chain into
- * a *connection*, which is a separate step with its own two ways of going wrong. Both are
- * silent, which is why the sequencing was lifted out of `light-client.ts` — the one module in
- * the package no test executes — into a form that takes its transport by injection.
+ * a *connection*, which is a separate step with its own three ways of going wrong. All three
+ * are silent, which is why the sequencing was lifted out of `light-client.ts` — the one module
+ * in the package no test executes — into a form that takes its transport by injection.
+ *
+ * The third was found last and is the one this file could most easily have gone on missing:
+ * every test below awaited its first `connect` before issuing the second, so all of them
+ * described a connector between attempts and none described one **during** an attempt. That is
+ * the state E17's *"retry AH sync"* acts on by construction, since the deposit leg stops
+ * waiting long before a cold Asset Hub finishes syncing.
  *
  * Neither rule is about smoldot, so neither needs it. What is *not* covered here is
  * everything below that seam: that `getSmProvider` really does refuse a repeated chain, and
@@ -197,6 +203,214 @@ test('close() closes the transport and leaves the chain to the topology', async 
 
   connector.close(); // idempotent
   assert.deepEqual(closed, ['transport']);
+});
+
+/** A promise whose settlement this file controls, so an attach can be held open. */
+function deferred<V>(): {
+  readonly promise: Promise<V>;
+  readonly resolve: (value: V) => void;
+  readonly reject: (error: unknown) => void;
+} {
+  let resolve!: (value: V) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<V>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
+test('a connect that arrives while one is IN FLIGHT joins it', async () => {
+  // The idempotence test above proves the *second* connect reuses the first — but only once
+  // the first has finished. During the attach the cache is still empty, so the guard did not
+  // apply and the whole sequence ran again: another chain added, another genesis probe,
+  // another follow subscription. The last one to finish wrote the cache, so every earlier
+  // transport became unreachable and `close()` could never reach it.
+  const chain = fakeChain('ah');
+  const gate = deferred<AssetHubLeg<FakeChain>>();
+  let attaches = 0;
+  const opens: FakeChain[] = [];
+  const connector = assetHubConnector<FakeChain, string>({
+    attach: () => {
+      attaches += 1;
+      return gate.promise;
+    },
+    openTransport: async (c) => {
+      opens.push(c);
+      return `transport-${opens.length}`;
+    },
+    closeTransport: () => {},
+  });
+
+  const first = connector.connect(BUNDLE);
+  const second = connector.connect(BUNDLE);
+  assert.equal(attaches, 1, 'the second connect started a second attach while one was running');
+
+  gate.resolve(attachedLeg(chain, []));
+  const [a, b] = await Promise.all([first, second]);
+  assert.equal(opens.length, 1, 'the second connect opened a second follow subscription');
+  assert.ok(a.kind === 'attached' && b.kind === 'attached', 'a joined connect did not attach');
+  assert.equal(a.transport, b.transport, 'the two callers hold different transports');
+});
+
+test('a deadline ABANDONS the attempt — it does not merely stop waiting', async () => {
+  // The join is only safe if there is a way out of it. Without one, a shared attempt that
+  // never settles pins the slot for the life of the connector, and E17's `R: retry AH sync`
+  // can never start anything again — a control reporting a failure it cannot recover from,
+  // which is worse than the unbounded wait it replaced. `probeGenesisHash` loops with no
+  // timer and a real Asset Hub genesis probe has been observed pending past five minutes, so
+  // this is the ordinary case.
+  const chain = fakeChain('ah');
+  const gate = deferred<AssetHubLeg<FakeChain>>();
+  const detached: FakeChain[] = [];
+  let attaches = 0;
+  const connector = assetHubConnector<FakeChain, string>({
+    attach: () => {
+      attaches += 1;
+      return attaches === 1 ? gate.promise : Promise.resolve(attachedLeg(chain, detached));
+    },
+    openTransport: async () => 'transport',
+    closeTransport: () => {},
+  });
+
+  const first = await connector.connect(BUNDLE, { deadlineMs: 20 });
+  assert.equal(first.kind, 'unavailable');
+  assert.ok(first.kind === 'unavailable' && /did not complete within 20ms/.test(first.reason));
+
+  // The slot is clear, so this really is a new attempt rather than a renewed wait on the old.
+  const retry = await connector.connect(BUNDLE);
+  assert.equal(attaches, 2, 'the retry rejoined an attempt that had already been given up on');
+  assert.equal(retry.kind, 'attached');
+
+  // And when the abandoned attach finally lands, it takes its own chain back down instead of
+  // displacing the connection the retry established.
+  gate.resolve(attachedLeg(fakeChain('abandoned'), detached));
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(
+    detached.map((each) => each.label),
+    ['abandoned'],
+    'the abandoned attempt left its chain syncing with nothing reading it',
+  );
+});
+
+test('close() abandons an attach that is still running', async () => {
+  // `close()` used to be a no-op against an in-flight attach: it returned at `open ===
+  // undefined`, the attempt then ran to completion, installed a live transport nothing had
+  // asked for, and served it to every later connect. The join widened that to every joiner.
+  const gate = deferred<AssetHubLeg<FakeChain>>();
+  const detached: FakeChain[] = [];
+  const closed: string[] = [];
+  const connector = assetHubConnector<FakeChain, string>({
+    attach: () => gate.promise,
+    openTransport: async () => 'transport',
+    closeTransport: (t) => {
+      closed.push(t);
+    },
+  });
+
+  const joined = connector.connect(BUNDLE);
+  connector.close();
+  gate.resolve(attachedLeg(fakeChain('late'), detached));
+
+  assert.equal((await joined).kind, 'unavailable', 'a closed connector still handed out a leg');
+  assert.deepEqual(detached.map((each) => each.label), ['late'], 'the late chain was left syncing');
+  // No transport is opened at all: the attempt finds itself abandoned at the first of its two
+  // checkpoints, before it would have opened one. Closing something never opened is the
+  // failure mode this assertion exists to keep out.
+  assert.deepEqual(closed, [], 'a transport was opened for a connector that had been closed');
+});
+
+test('close() while the TRANSPORT is opening closes the one that lands', async () => {
+  // The attempt's second checkpoint. Here the chain has already attached and the follow
+  // subscription is in flight, so there is a real transport to lose — and losing it is exactly
+  // the leak `close()` was supposed to prevent and could not reach.
+  const chain = fakeChain('ah');
+  const detached: FakeChain[] = [];
+  const closed: string[] = [];
+  const opening = deferred<string>();
+  const connector = assetHubConnector<FakeChain, string>({
+    attach: async () => attachedLeg(chain, detached),
+    openTransport: () => opening.promise,
+    closeTransport: (t) => {
+      closed.push(t);
+    },
+  });
+
+  const joined = connector.connect(BUNDLE);
+  // Let the attach resolve so the attempt is parked inside `openTransport`, then close.
+  await Promise.resolve();
+  await Promise.resolve();
+  connector.close();
+  opening.resolve('transport');
+
+  assert.equal((await joined).kind, 'unavailable');
+  assert.deepEqual(closed, ['transport'], 'the transport that landed after close() was left open');
+  assert.deepEqual(detached, [chain], 'its chain was left syncing with nothing reading it');
+});
+
+test('a bound that is not reached leaves the connection alone', async () => {
+  // The negative control. A bound that refused a healthy connection would be worse than no
+  // bound, and a suite that only ever sees the timeout cannot tell the two apart.
+  const chain = fakeChain('ah');
+  const connector = assetHubConnector<FakeChain, string>({
+    attach: async () => attachedLeg(chain, []),
+    openTransport: async () => 'transport',
+    closeTransport: () => {},
+  });
+  const connection = await connector.connect(BUNDLE, { deadlineMs: 10_000 });
+  assert.ok(connection.kind === 'attached', 'a healthy connect was refused by its own bound');
+  assert.equal(connection.transport, 'transport');
+});
+
+test('a shared attempt that REFUSES is not remembered, so the next connect starts again', async () => {
+  // The in-flight slot must clear on every settlement, not just on success. A refusal held in
+  // it would turn "retry AH sync" into a button that replays one failure for the rest of the
+  // session — the same defect the retryability test above guards, one layer up.
+  const chain = fakeChain('ah');
+  const gate = deferred<AssetHubLeg<FakeChain>>();
+  let attaches = 0;
+  const connector = assetHubConnector<FakeChain, string>({
+    attach: () => {
+      attaches += 1;
+      return attaches === 1 ? gate.promise : Promise.resolve(attachedLeg(chain, []));
+    },
+    openTransport: async () => 'transport',
+    closeTransport: () => {},
+  });
+
+  const first = connector.connect(BUNDLE);
+  const joined = connector.connect(BUNDLE);
+  gate.resolve({ kind: 'unavailable', reason: 'Asset Hub is not reachable from here.' });
+  assert.equal((await first).kind, 'unavailable');
+  assert.equal((await joined).kind, 'unavailable', 'the joined caller got a different answer');
+
+  const third = await connector.connect(BUNDLE);
+  assert.equal(attaches, 2, 'a refusal was remembered as if it were in flight');
+  assert.equal(third.kind, 'attached');
+});
+
+test('an attach that THROWS clears the in-flight slot', async () => {
+  // `assetHubConnector` never throws — every failure is an arm — so a throw means the attach
+  // path itself broke. It must not leave a rejected promise cached as the answer to every
+  // later connect, which is the shape a naive `inFlight` assignment produces.
+  const chain = fakeChain('ah');
+  let attaches = 0;
+  const connector = assetHubConnector<FakeChain, string>({
+    attach: () => {
+      attaches += 1;
+      return attaches === 1
+        ? Promise.reject(new Error('the topology was stopped mid-attach'))
+        : Promise.resolve(attachedLeg(chain, []));
+    },
+    openTransport: async () => 'transport',
+    closeTransport: () => {},
+  });
+
+  await assert.rejects(connector.connect(BUNDLE), /stopped mid-attach/);
+  const second = await connector.connect(BUNDLE);
+  assert.equal(attaches, 2, 'a thrown attach was cached as the answer to every later connect');
+  assert.equal(second.kind, 'attached');
 });
 
 test('close() then connect() opens a fresh transport rather than the closed one', async () => {

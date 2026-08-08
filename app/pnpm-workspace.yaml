@@ -29,6 +29,14 @@ packages:
   # start a process would sit inside the reach of the packages 10 §10.1 keeps thin.
   # Confined here, `import 'lighthouse'` is unresolvable everywhere else in `app/`.
   - 'tools/render-budget'
+  # `tools/drill-client` (F27; 15 §4.8) is a member for the same reason — Lighthouse-style
+  # confinement of a heavy dependency graph. **It is NOT what stops `src/` reaching
+  # `@bleavit/chain-client/node-light-client`, and an earlier version of this comment said it
+  # was.** Membership confines a *root dependency*; a *subpath export* of a package ten
+  # workspace members already declare is reachable from all of them. The bar is the explicit
+  # dependency-cruiser rule `no-node-light-client-in-the-bundle`, with its witness module —
+  # the same shape the four `*/testing` subpaths carry, and for the same reason.
+  - 'tools/drill-client'
   # `optional/indexer` (10 §8.2/§8.5.2, F24) is a member for the same reason as `tools/snapshot`,
   # and it is the reference implementation §8.2 names by path. It imports the canonical serializer
   # from `@bleavit/providers` rather than writing its own, because a server with its own serializer

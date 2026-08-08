@@ -78,7 +78,27 @@ export function screenForHash(hash: string, handoffEnabled: boolean): string {
   return screenFor(hash, handoffEnabled).id;
 }
 
-export async function boot(container: Element): Promise<WorkerStatus> {
+/**
+ * What a mounted shell hands back to its one caller.
+ *
+ * `unmount` used to be dropped on the floor — `mountTree` returns it and the call site ignored
+ * the value. That was invisible until F27 gave 10 §3.1's `WrongChain` a screen: the terminal
+ * state replaces the tree, and `container.replaceChildren()` under a live React root deletes
+ * nodes the root still believes it owns. React does not notice at the moment of deletion; it
+ * notices at the next render against that container, which is the worst place to find out.
+ *
+ * So the handle is returned, and the terminal path calls it before it writes. This is also why
+ * the return is a record rather than the bare `WorkerStatus`: the worker status is what the
+ * caller *asked* for, and the unmount is what it turned out to owe.
+ */
+export interface BootedShell {
+  /** 12 §5.2's release-worker state, as `registerReleaseWorker` reported it. */
+  readonly worker: WorkerStatus;
+  /** Tear the mounted tree down. Safe to call once; React's own `unmount` clears the container. */
+  readonly unmount: () => void;
+}
+
+export async function boot(container: Element): Promise<BootedShell> {
   const handoffEnabled = true;
   const hash = globalThis.location?.hash ?? '';
   const active = screenForHash(hash, handoffEnabled);
@@ -130,7 +150,7 @@ export async function boot(container: Element): Promise<WorkerStatus> {
     pins: releaseMetadataPins(),
     now: Math.floor(Date.now() / 1000),
   });
-  mountTree(
+  const unmount = mountTree(
     container,
     <Shell chain={initialChainState()} handoffEnabled={handoffEnabled} activeScreen={active}>
       <IndexBootDisclosure state={indexState} retention={retention} />
@@ -139,6 +159,54 @@ export async function boot(container: Element): Promise<WorkerStatus> {
   );
   // Registered after the tree is up: a release-worker failure must not stop the app
   // rendering, since the verification panel is one of the things that still renders when
-  // smoldot never starts (10 §3.2).
-  return registerReleaseWorker();
+  // smoldot never starts (12 §5.2).
+  try {
+    return { worker: await registerReleaseWorker(), unmount };
+  } catch (error) {
+    // **The guarantee that a rejected `boot` never left a tree behind is enforced here,
+    // where the mount is, rather than asserted at the call site.** It was true by accident:
+    // `registerReleaseWorker` happens to catch everything, so nothing after the mount could
+    // reject. Both comments above record that `bootLocalIndex` and `enforceStorageBudget`
+    // must move *after* the first paint, and on the day they do, an unmounted-but-rendered
+    // tree would come back — with the terminal screen clearing a container React still owns,
+    // which is the exact defect this file was changed to fix.
+    unmount();
+    throw error;
+  }
+}
+
+/**
+ * Boot the shell, connect the chain, and route a terminal failure to its screen.
+ *
+ * This is the whole of `main.ts`'s job, moved into a file a test can import. `main.ts` reads
+ * `document` at module scope, so nothing can import it — which was a fair trade while it held
+ * two calls and no logic, and stopped being one when 10 §3.1's terminal state needed the mount
+ * handle threaded from `boot` to the `.catch`. That thread is what carries `FE-BOOT-003` to a
+ * screen, and leaving it there would have made it the one part of the boot path no suite could
+ * execute, in a milestone whose subject is checks that quietly stopped checking.
+ *
+ * Every collaborator is injected and none is defaulted, for the reason `chain-session.ts` gives
+ * about `start`: `connectAndClassify` reaches PAPI and `@polkadot-api/descriptors`, and a
+ * default here would load both into every Node suite that imports this package.
+ */
+export interface ShellDeps<C> {
+  /** Usually {@link boot}. */
+  readonly mount: (container: C) => Promise<BootedShell>;
+  /** Usually `connectAndClassify` from `chain-boot.ts`. */
+  readonly connect: () => Promise<unknown>;
+  /** Usually `handleTerminalBootFailure`. Re-throws anything that is not a wrong chain. */
+  readonly onFailure: (container: C, error: unknown, unmount?: () => void) => void;
+}
+
+export async function startShell<C>(container: C, deps: ShellDeps<C>): Promise<void> {
+  // `undefined` until the mount resolves, and that is a real state rather than a missing case:
+  // a `mount` that rejects never mounted, so there is nothing for the terminal screen to take
+  // down. The failure this carries is raised later, by `connect`.
+  let unmount: (() => void) | undefined;
+  try {
+    unmount = (await deps.mount(container)).unmount;
+    await deps.connect();
+  } catch (error) {
+    deps.onFailure(container, error, unmount);
+  }
 }

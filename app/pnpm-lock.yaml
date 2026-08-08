@@ -656,6 +656,18 @@ importers:
         specifier: workspace:*
         version: link:../../packages/verify
 
+  tools/drill-client:
+    dependencies:
+      '@bleavit/application':
+        specifier: workspace:*
+        version: link:../../src/application
+      '@bleavit/chain-client':
+        specifier: workspace:*
+        version: link:../../packages/chain-client
+      '@bleavit/shared-types':
+        specifier: workspace:*
+        version: link:../../packages/shared-types
+
   tools/render-budget:
     dependencies:
       chrome-launcher:

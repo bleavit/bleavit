@@ -129,7 +129,12 @@ export interface WithdrawLegDeps<T extends ChainHeadTransport> {
 
 export interface DepositLegDeps<T extends ChainHeadTransport> extends WithdrawLegDeps<T> {
   /** Usually `client.connectAssetHub`. Attaches the chain lazily, on entering the flow (E17). */
-  readonly connectAssetHub: (assetHub: BundledChain) => Promise<AssetHubConnection<T>>;
+  readonly connectAssetHub: (
+    assetHub: BundledChain,
+    options?: { readonly deadlineMs?: number },
+  ) => Promise<AssetHubConnection<T>>;
+  /** Overrides {@link ASSET_HUB_CONNECT_DEADLINE_MS}. Injected so a suite drives the boundary. */
+  readonly assetHubDeadlineMs?: number;
   readonly pins: FundingPins;
   /**
    * 10 §5.2's **foreign** verdict — usually `classifyAssetHubFor` from `compat-boot.ts`.
@@ -204,6 +209,42 @@ export async function openWithdrawLeg<T extends ChainHeadTransport>(
 }
 
 /**
+ * How long the deposit leg waits for the Asset Hub connection — 11 E17; 02 §7.7. F27.
+ *
+ * **The obligation is on the client, and it was unmet.** E17's `F:` row requires *"AH
+ * connection unavailable ⇒ flow blocked with diagnostics (never a blind 'send anyway')"*, and
+ * 02 §7.7 requires an unavailable Asset Hub surface to *"block the funding flow with
+ * diagnostics"*. `connectAssetHub` carries no deadline of its own — `attachAssetHub`'s genesis
+ * probe loops on `nextJsonRpcResponse()` with no timer — so an Asset Hub that never answers
+ * produced neither *blocked* nor *diagnostics*: it rendered as a spinner that never resolves.
+ * Observed against a live topology, where Asset Hub's ~189k-entry genesis kept the probe
+ * pending past five minutes.
+ *
+ * A **UI** timeout, on `COMPAT_PULL_DEADLINE_MS`'s stated grounds rather than by analogy: 10
+ * §5.4's no-hardcode rule governs values the chain publishes, and there is no `Params` key, no
+ * metadata constant and nowhere to read a client-side deadline from. Longer than the compat
+ * pull because this one covers a **cold chain add** — a second smoldot chain syncing from
+ * scratch — where that one covers a metadata read on a chain already synced.
+ *
+ * Injectable, so a suite drives the boundary without waiting on it.
+ *
+ * ## The value is here; the bound is not
+ *
+ * This module owns *how long a deposit screen may sit unanswered*, and that is all it owns.
+ * The bound itself is applied inside `assetHubConnector.connect`, because a timer wrapped
+ * around the call can only abandon the **wait** — a promise has no cancel, so the attach kept
+ * running, the connector kept it as the answer to every later `connect`, and E17's `R: retry
+ * AH sync` could never start a new one. Satisfying E17's *"blocked with diagnostics"* while
+ * disabling its recovery action is worse than the unbounded wait it replaced.
+ *
+ * So the number is passed down rather than enforced here, and the connector abandons the work
+ * it is bounding: it detaches the chain and closes any transport the abandoned attempt goes on
+ * to open. Timing out and retrying is the expected path on a cold Asset Hub, not the unlucky
+ * one, which is why that behaviour lives where a suite can hold two calls open and prove it.
+ */
+export const ASSET_HUB_CONNECT_DEADLINE_MS = 120_000;
+
+/**
  * S12's leg — attach Asset Hub, open a reader over each chain, pair them.
  *
  * Order is load-bearing: **Asset Hub first**. It is the leg that can refuse, and refusing
@@ -217,7 +258,9 @@ export async function openDepositLeg<T extends ChainHeadTransport>(
 ): Promise<DepositLeg> {
   let connection: AssetHubConnection<T>;
   try {
-    connection = await deps.connectAssetHub(deps.pins.assetHub);
+    connection = await deps.connectAssetHub(deps.pins.assetHub, {
+      deadlineMs: deps.assetHubDeadlineMs ?? ASSET_HUB_CONNECT_DEADLINE_MS,
+    });
   } catch (error) {
     // `assetHubConnector` never throws — every failure is an arm. A throw therefore means the
     // connector was replaced or the attach path itself failed, and it must still not take down

@@ -59,6 +59,7 @@ REQUIRED_DRILLS = {
     "11-client-return-channel-absent.zndsl": "15 §4.7; 16 §12; I-36",
     "12-client-report-pull.zndsl": "15 §4.7; 16 §12; I-36",
     "13-client-ingress-negative-matrix.zndsl": "15 §4.7; 16 §12; 09 §6.5",
+    "14-client-boot.zndsl": "15 §4.7/§4.8; 10 §3.1/§4.1/§4.3/§5.2",
 }
 
 # SQ-567 — HRMP channels are opened after both paras produce blocks, never at

@@ -37,12 +37,48 @@ import { getSmProvider } from 'polkadot-api/sm-provider';
 import { startFromWorker } from 'polkadot-api/smoldot/from-worker';
 
 import type { HexString } from '@bleavit/shared-types';
+import { WrongChainError } from './chain-spec.js';
 import { ChainHeadConnection, type JsonRpcProviderLike } from './transport.js';
 import type { CompatProvider } from './compat.js';
 import {
   assetHubConnector,
+  type AssetHubConnectOptions,
   type AssetHubConnection as AssetHubLegConnection,
 } from './asset-hub.js';
+
+/**
+ * How long a teardown waits for smoldot to terminate before giving up on it — F27.
+ *
+ * `worker.terminate()` cannot interrupt a worker thread that is inside a long synchronous WASM
+ * computation, which is why `app/tools/drill-client/boot.ts` bounds the same call and takes
+ * this value. Here it matters more than it does there: on the wrong-chain path the `await` sits
+ * **between the failure and the `throw`**, so an unbounded one keeps 10 §3.1's terminal state
+ * from ever reaching a screen — a state whose entire purpose is to render one sentence.
+ *
+ * An unfinished teardown is a better thing to abandon than to wait for. By this point the
+ * chains are removed and the provider is disconnected, so whatever is still running holds no
+ * reference this client will use again.
+ */
+const TERMINATE_DEADLINE_MS = 15_000;
+
+/**
+ * Terminate, and **never** let the teardown replace the failure that caused it.
+ *
+ * Resolves on rejection as well as on the bound. `await client.terminate()` would have thrown
+ * the teardown's error in place of the `WrongChainError` the caller is about to raise, which
+ * turns `FE-BOOT-003` — a diagnosis naming two genesis hashes — into whatever smoldot said
+ * while shutting down.
+ */
+async function terminateWithin(terminate: () => Promise<unknown>, ms: number): Promise<void> {
+  await new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    const done = (): void => {
+      clearTimeout(timer);
+      resolve();
+    };
+    terminate().then(done, done);
+  });
+}
 import {
   startTopology,
   type AssetHubLeg,
@@ -97,7 +133,10 @@ export interface LightClient {
    * a console warning rather than an error, so a second provider over the same `Chain` would
    * yield a transport connected to nothing while reporting no failure.
    */
-  connectAssetHub(assetHub: BundledChain): Promise<AssetHubConnection>;
+  connectAssetHub(
+    assetHub: BundledChain,
+    options?: AssetHubConnectOptions,
+  ): Promise<AssetHubConnection>;
   /**
    * A provider for **this chain**, for 10 §5.2's compat probe — not for reading.
    *
@@ -188,19 +227,98 @@ async function probeGenesisHash(chain: RealSmoldotChain): Promise<HexString> {
  * de-duplicating themselves.
  */
 export async function startLightClient(options: LightClientOptions): Promise<LightClient> {
-  const client = startFromWorker(options.worker);
+  return startLightClientWith({
+    relay: options.relay,
+    para: options.para,
+    ...(options.extraBootnodes === undefined ? {} : { extraBootnodes: options.extraBootnodes }),
+    startClient: () => startFromWorker(options.worker),
+  });
+}
+
+/**
+ * How the smoldot client is obtained — the one line of `startLightClient` that is about the
+ * **host** rather than about this chain. F27.
+ *
+ * `polkadot-api` ships two worker pairs and they are not interchangeable.
+ * `smoldot/worker` assigns a bare `onmessage`, which exists in a `DedicatedWorkerGlobalScope`
+ * and not in Node, where loading it raises `ReferenceError: onmessage is not defined`; and
+ * `startFromWorker` sets `worker.onmessage` on what Node gives it, an `EventEmitter` with no
+ * such accessor, so the assignment succeeds as an inert own property and the client **hangs
+ * with no error**. That second half is why this is a seam rather than a `typeof` check: the
+ * browser path does not fail loudly off-browser, it fails silently.
+ *
+ * The Node pair (`smoldot/from-node-worker` + `smoldot/node-worker`) is in the same pinned
+ * package, and both return smoldot's own `Client` — so everything below this line is shared
+ * and neither host gets a second implementation of the topology, the identity check or the
+ * teardown. `./node-light-client` supplies the Node factory and is the only module that names
+ * `node:worker_threads`, so a browser bundle never sees it.
+ */
+export type SmoldotClientFactory = () => RealSmoldotClient;
+
+/** {@link LightClientOptions} with the worker replaced by the factory that produces a client. */
+export interface HostedLightClientOptions {
+  readonly relay: BundledChain;
+  readonly para: BundledChain;
+  /** 10 §4.3 expert setting; local-only, never remote-configured. */
+  readonly extraBootnodes?: readonly string[];
+  readonly startClient: SmoldotClientFactory;
+}
+
+/** {@link startLightClient}, for a host that has its own way to start smoldot. */
+export async function startLightClientWith(
+  options: HostedLightClientOptions,
+): Promise<LightClient> {
+  const client = options.startClient();
   const topologies: Topology<RealSmoldotChain>[] = [];
   let latest: Topology<RealSmoldotChain> | undefined;
 
+  /**
+   * The wrong-chain latch — SQ-1026, found by the first run against a real chain (F27).
+   *
+   * 10 §3.1 makes `FE-BOOT-003` terminal with no override, and every layer was written as
+   * though it were: `WrongChainError` exists, `startTopology` throws it, this function
+   * re-throws, and `chain-session.ts` carries `if (error instanceof WrongChainError) throw
+   * error;`. **None of it ran.** `getSmProvider` treats its chain factory as retryable and
+   * calls it again on failure, forever — so the throw never left the factory. Measured
+   * against a live topology with one byte of the parachain pin flipped: **265 raises in a
+   * single run, none propagated**, `ChainHeadConnection.open` never settled, and
+   * `chain-session.ts`'s branch was unreachable code.
+   *
+   * The retry is right for what PAPI can see — a dial that failed is worth retrying. It is
+   * wrong for this one error, and only this one: a chain that is not this chain will still
+   * not be this chain on the next attempt, so retrying is not merely useless but harmful.
+   * It re-adds two chains per attempt and keeps a client dialling a chain it has already
+   * proved it must refuse.
+   *
+   * So the latch does two things the factory alone cannot. It **fails fast** on every later
+   * call, which stops the re-dialling; and it **rejects a promise the opener races**, which
+   * is what carries the error across a boundary PAPI will not let a throw cross.
+   */
+  let terminal: WrongChainError | undefined;
+  let latchTerminal: (error: WrongChainError) => void = () => {};
+  const wrongChain = new Promise<never>((_resolve, reject) => {
+    latchTerminal = reject;
+  });
+
   const newTopology = async (): Promise<Topology<RealSmoldotChain>> => {
-    const topology = await startTopology(asTopologyClient(client), {
-      relay: options.relay,
-      para: options.para,
-      genesisHashOf: probeGenesisHash,
-      ...(options.extraBootnodes === undefined ? {} : { extraBootnodes: options.extraBootnodes }),
-    });
-    topologies.push(topology);
-    return topology;
+    // Fail fast rather than re-dial. See the latch above.
+    if (terminal !== undefined) throw terminal;
+    try {
+      const topology = await startTopology(asTopologyClient(client), {
+        relay: options.relay,
+        para: options.para,
+        genesisHashOf: probeGenesisHash,
+        ...(options.extraBootnodes === undefined ? {} : { extraBootnodes: options.extraBootnodes }),
+      });
+      topologies.push(topology);
+      return topology;
+    } catch (error) {
+      if (error instanceof WrongChainError) {
+        terminal = error;
+        latchTerminal(error);
+      }
+      throw error;
+    }
   };
 
   const provider = getSmProvider(async () => {
@@ -212,6 +330,28 @@ export async function startLightClient(options: LightClientOptions): Promise<Lig
     return topology.para;
   });
 
+  /**
+   * The connection the opener actually builds — captured, because it is the only handle to
+   * the loop that retries.
+   *
+   * `getSmProvider` returns `getSyncProvider(...)`, and **every call to it constructs a fresh
+   * closure** with its own proxy, token, `stop()` and retry chain. So `provider(() => {})`
+   * disconnects a second, unrelated connection and leaves the real one running — which is
+   * exactly what an earlier version of this fix did, with a confident comment on top.
+   * Measured against the pinned packages: 131 factory calls in 300 ms, and 129 more in the
+   * 300 ms *after* the no-op disconnect, against 0 more after disconnecting this handle.
+   *
+   * There is no backoff to wait out, either: `consecutiveHalts` only increments on the
+   * `onHalt` path, so the `onReady(null)` path leaves the wait at 0 and the loop runs at
+   * roughly 430 iterations a second, `console.error`ing each one.
+   */
+  let opened: { disconnect: () => void } | undefined;
+  const capturing: typeof provider = (onMessage) => {
+    const connection = provider(onMessage);
+    opened = connection;
+    return connection;
+  };
+
   let transport: ChainHeadConnection;
   try {
     // The pin, not the probe. `startTopology` has already asserted the *probed* genesis
@@ -219,12 +359,31 @@ export async function startLightClient(options: LightClientOptions): Promise<Lig
     // pin makes the identity every read carries something the release chose, rather than
     // something the chain reported. If they ever disagree the topology has already
     // thrown, so this cannot be the quieter of two answers.
-    transport = await ChainHeadConnection.open(asTransportProvider(provider), {
-      chain: options.para.pinned.genesisHash,
-    });
+    // Raced against the latch, because the throw cannot reach here on its own — see
+    // `newTopology`. `open()` would otherwise wait on a provider that retries forever.
+    transport = await Promise.race([
+      ChainHeadConnection.open(asTransportProvider(capturing), {
+        chain: options.para.pinned.genesisHash,
+      }),
+      wrongChain,
+    ]);
   } catch (error) {
+    // **Disconnect the provider, not only the chains.** `ChainHeadConnection.open` never
+    // settled on this path, so its own `disconnect()` never runs — and `getSmProvider` sits
+    // above a retrying sync provider that keeps calling the chain factory and `console.error`s
+    // each refusal. Stopping the topologies removes the chains it would dial but not the loop
+    // that keeps asking, so a state 10 §3.1 calls **terminal** was leaving an unbounded busy
+    // loop behind it. Found by the F27 R-6 review; `topology.ts` states the principle this
+    // half-kept.
+    //
+    // First, because the loop is what would otherwise re-add what the next two lines remove.
+    try {
+      opened?.disconnect();
+    } catch {
+      // A connection that never opened has nothing to release, which is the state wanted.
+    }
     for (const topology of topologies) topology.stop();
-    await client.terminate();
+    await terminateWithin(() => client.terminate(), TERMINATE_DEADLINE_MS);
     throw error;
   }
 
@@ -257,7 +416,7 @@ export async function startLightClient(options: LightClientOptions): Promise<Lig
   return {
     transport,
     topology,
-    connectAssetHub: (bundled) => assetHub.connect(bundled),
+    connectAssetHub: (bundled, connectOptions) => assetHub.connect(bundled, connectOptions),
     compatProvider() {
       let created: Topology<RealSmoldotChain> | undefined;
       return {
@@ -307,7 +466,7 @@ export async function startLightClient(options: LightClientOptions): Promise<Lig
       transport.close();
       assetHub.close();
       for (const each of topologies) each.stop();
-      await client.terminate();
+      await terminateWithin(() => client.terminate(), TERMINATE_DEADLINE_MS);
     },
   };
 }

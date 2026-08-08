@@ -1,0 +1,11 @@
+{
+  "name": "@bleavit/drill-client",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@bleavit/application": "workspace:*",
+    "@bleavit/chain-client": "workspace:*",
+    "@bleavit/shared-types": "workspace:*"
+  }
+}
