@@ -135,8 +135,11 @@ const AH_RUNTIME: RuntimeVersionReport = {
 /** The Asset Hub fake, which answers Asset Hub's runtime and never this chain's. */
 const assetHubTransport = (): FakeTransport => transport(AH_CHAIN, AH_RUNTIME);
 
+const AH_CODE_HASH = `0x${'a5c0'.repeat(16)}`;
+
 const classifiesFull = async (): Promise<ForeignVerdict> => ({
   kind: 'classified',
+  codeHash: AH_CODE_HASH,
   classification: {
     domain: 'foreign',
     chain: 'Asset Hub',
@@ -492,6 +495,7 @@ test('a restricted Asset Hub leaves the leg READY and fails the precondition row
   // "blocked with diagnostics, never a blind send anyway".
   const restricted: ForeignVerdict = {
     kind: 'classified',
+    codeHash: AH_CODE_HASH,
     classification: {
       domain: 'foreign',
       chain: 'Asset Hub',
@@ -560,4 +564,38 @@ test('an unreachable Asset Hub blocks before any verdict is asked for', async ()
   // Nothing to classify: the connector's own reason is what the user is shown, and a verdict
   // computed here would be one about a chain that never answered.
   assert.equal(asked, 0);
+});
+
+test('a classifier that REJECTS blocks the leg — it never becomes a rejected openDepositLeg', async () => {
+  // Reproduced before it was fixed: PAPI computes compat on property access, so a runtime its
+  // metadata layer cannot map throws *inside* the probe. `classifyAssetHubFor` returning a
+  // verdict for every arm it knows about is not the same as being unable to throw, and
+  // unwrapped that rejection propagated out of here — the deposit screen never rendered at
+  // all, with no diagnostics and no row. E17 asks for the flow *blocked with diagnostics*.
+  const leg = await openDepositLeg({
+    local: transport(LOCAL_CHAIN),
+    openReader,
+    artifacts: ARTIFACTS,
+    pins: PINS,
+    classifyAssetHub: async () => {
+      throw new Error('the Asset Hub compat object came apart');
+    },
+    connectAssetHub: async () => attached(assetHubTransport()),
+  });
+  assert.equal(leg.kind, 'blocked');
+  assert.ok(leg.kind === 'blocked');
+  assert.match(leg.reason, /came apart/);
+  // Named as an Asset Hub problem, and only an Asset Hub problem — §11.9.2's rule that no
+  // failure of the deposit leg may present to the user as "funding is down".
+  assert.match(leg.reason, /Deposits are unavailable/);
+  assert.match(leg.reason, /nothing else in the app is affected/);
+});
+
+test('withdraw is unaffected by a classifier that rejects, because it never calls one', async () => {
+  const withdraw = await openWithdrawLeg({
+    local: transport(LOCAL_CHAIN),
+    openReader,
+    artifacts: ARTIFACTS,
+  });
+  assert.equal(withdraw.kind, 'ready');
 });

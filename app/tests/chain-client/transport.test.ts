@@ -722,9 +722,26 @@ test('two upgrades finalized in one batch leave the LATER one standing', async (
   connection.close();
 });
 
-test('the announced-runtime map is bounded by the pin window, like the other two caches', async () => {
+test('an announced upgrade SURVIVES the pin window, and the map is still bounded', async () => {
+  // **This test replaces one that demonstrated a defect and read it as a feature.** The first
+  // version announced 40 blocks, watched the runtime map fall to zero as the pin window
+  // trimmed it, and asserted the zero — which is boundedness, and is also the eviction of an
+  // upgrade that had not finalized yet. Reproduced end to end: after a finality stall spanning
+  // the window, `finalizedRuntime()` kept reporting the **pre-upgrade** `spec_version`, so the
+  // classifier would call the old runtime `full` against a live upgraded chain and leave
+  // signing enabled. Both properties are asserted here, and the survival one comes first.
+  const upgrade: HexString = `0x${'77'.repeat(32)}`;
   const mock = runtime();
   const { provider, state } = recordedProvider(mock, {
+    onFollow({ id, emit, followEvent }) {
+      emit({ jsonrpc: '2.0', id, result: 'subscription-1' });
+      followEvent({
+        event: 'initialized',
+        finalizedBlockHashes: [mock.pinnedBlock() as HexString],
+        finalizedBlockRuntime: validRuntime(2),
+      } as never);
+      return true;
+    },
     intercept(request, { emit }) {
       if (request.method !== 'chainHead_v1_header') return false;
       emit({ jsonrpc: '2.0', id: request.id, result: `0x${'11'.repeat(32)}08${'00'.repeat(64)}` });
@@ -733,23 +750,86 @@ test('the announced-runtime map is bounded by the pin window, like the other two
   });
   const connection = await ChainHeadConnection.open(provider, { chain: TEST_CHAIN });
 
-  const announced: HexString[] = [];
+  state.followEvent({ event: 'newBlock', blockHash: upgrade, newRuntime: validRuntime(3) } as never);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  // A finality stall far longer than the 16-block pin window.
+  const stalled: HexString[] = [];
   for (let i = 0; i < 40; i += 1) {
     const hash = `0x${i.toString(16).padStart(2, '0').repeat(32)}` as HexString;
-    announced.push(hash);
-    state.followEvent({ event: 'newBlock', blockHash: hash, newRuntime: validRuntime(2) } as never);
+    stalled.push(hash);
+    state.followEvent({ event: 'newBlock', blockHash: hash } as never);
   }
   await new Promise((resolve) => setTimeout(resolve, 0));
-  // Not vacuous: the window already trimmed 40 down to 16, so the map is non-empty and
-  // bounded by the same window rather than by nothing. A test that only checked the final
-  // zero would pass against an implementation that never wrote to the map at all.
-  const held = connection.runtimeCacheCountForTest();
-  assert.ok(held > 0, 'no runtime was recorded at all — this assertion would be vacuous');
-  assert.ok(held <= 16, `the announced-runtime map grew past the pin window (${held})`);
-  // A map fed once per runtime upgrade is sparse, and sparse is not bounded: it is trimmed
-  // with the pins that carry it, which is the only bound that depends on nothing a caller does.
-  state.followEvent({ event: 'finalized', finalizedBlockHashes: [], prunedBlockHashes: announced });
+  assert.equal(
+    connection.runtimeCacheCountForTest(),
+    1,
+    'the pending upgrade was evicted by the pin window',
+  );
+
+  // Finality catches up. The upgrade must be adopted, not lost.
+  state.followEvent({ event: 'finalized', finalizedBlockHashes: [upgrade], prunedBlockHashes: [] });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(connection.finalizedRuntime()?.specVersion, 3, 'a stalled upgrade was lost');
+  // Promoted entries leave, so surviving the window is not the same as accumulating forever.
+  assert.equal(connection.runtimeCacheCountForTest(), 0);
+
+  // The other exit: a pruned block's runtime never happened.
+  state.followEvent({ event: 'newBlock', blockHash: stalled[0]!, newRuntime: validRuntime(4) } as never);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(connection.runtimeCacheCountForTest(), 1);
+  state.followEvent({ event: 'finalized', finalizedBlockHashes: [], prunedBlockHashes: [stalled[0]!] });
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(connection.runtimeCacheCountForTest(), 0);
+  assert.equal(connection.finalizedRuntime()?.specVersion, 3, 'a pruned runtime was adopted');
+  connection.close();
+});
+
+test('past the cap the connection reports NO runtime rather than the one it still holds', async () => {
+  // The cap cannot be a trim. The oldest entry is the upgrade that has waited longest to
+  // finalize, so evicting it is the defect above with an extra step — what survives is the
+  // runtime on its way out. So the map is cleared and nothing is reported until a `finalized`
+  // event proves one, which is silence rather than a stale positive.
+  const mock = runtime();
+  const { provider, state } = recordedProvider(mock, {
+    onFollow({ id, emit, followEvent }) {
+      emit({ jsonrpc: '2.0', id, result: 'subscription-1' });
+      followEvent({
+        event: 'initialized',
+        finalizedBlockHashes: [mock.pinnedBlock() as HexString],
+        finalizedBlockRuntime: validRuntime(2),
+      } as never);
+      return true;
+    },
+    intercept(request, { emit }) {
+      if (request.method !== 'chainHead_v1_header') return false;
+      emit({ jsonrpc: '2.0', id: request.id, result: `0x${'11'.repeat(32)}08${'00'.repeat(64)}` });
+      return true;
+    },
+  });
+  const connection = await ChainHeadConnection.open(provider, { chain: TEST_CHAIN });
+  assert.equal(connection.finalizedRuntime()?.specVersion, 2);
+
+  const last: HexString = `0x${'ff'.repeat(32)}`;
+  for (let i = 0; i < 300; i += 1) {
+    const hash = `0x${i.toString(16).padStart(4, '0').repeat(16)}` as HexString;
+    state.followEvent({ event: 'newBlock', blockHash: hash, newRuntime: validRuntime(3 + i) } as never);
+  }
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.ok(connection.runtimeUncertainForTest(), 'the cap was never reached — this is vacuous');
+  assert.equal(connection.runtimeCacheCountForTest() <= 256, true);
+  assert.equal(
+    connection.finalizedRuntime(),
+    undefined,
+    'a runtime was reported after announcements were dropped',
+  );
+
+  // And it recovers: a finalized block whose runtime is known settles the question.
+  state.followEvent({ event: 'newBlock', blockHash: last, newRuntime: validRuntime(9) } as never);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  state.followEvent({ event: 'finalized', finalizedBlockHashes: [last], prunedBlockHashes: [] });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(connection.finalizedRuntime()?.specVersion, 9);
+  assert.equal(connection.runtimeUncertainForTest(), false);
   connection.close();
 });

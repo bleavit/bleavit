@@ -257,14 +257,28 @@ export async function openDepositLeg<T extends ChainHeadTransport>(
 
   // The 02 §7.7 probe, **after** the readers, and the order is the same argument E17 makes
   // about the connection: the reader's transport is where the runtime version comes from, so
-  // there is nothing to classify against until it has reported a finalized block. It never
-  // throws — `classifyAssetHubFor` returns a verdict for every arm, including the ones where
-  // the probe itself failed — and a `restricted` or `unsupported` Asset Hub leaves this leg
-  // `ready` so §11.9.1's row can fail on screen rather than the screen not existing.
-  const foreign = await deps.classifyAssetHub(
-    deps.pins.assetHub,
-    connection.transport.finalizedRuntime(),
-  );
+  // there is nothing to classify against until it has reported a finalized block. A
+  // `restricted` or `unsupported` Asset Hub leaves this leg `ready`, so §11.9.1's row can fail
+  // on screen rather than the screen not existing.
+  //
+  // **Wrapped, so this leg can only be `ready` or `blocked`.** `classifyAssetHubFor` returns a
+  // verdict for every arm it knows about, and that is not the same as being unable to reject:
+  // PAPI computes compat on *property access*, so a runtime its metadata layer cannot map
+  // throws inside the probe rather than inside the pull. Unwrapped, that rejection propagated
+  // out of `openDepositLeg` and the deposit screen never rendered at all — no diagnostics, no
+  // row, nothing (reproduced, not reasoned). E17 wants the flow *blocked with diagnostics*, so
+  // an injected classifier that throws becomes a blocked leg carrying what it threw.
+  let foreign: ForeignVerdict;
+  try {
+    foreign = await deps.classifyAssetHub(deps.pins.assetHub, connection.transport.finalizedRuntime());
+  } catch (error) {
+    return {
+      kind: 'blocked',
+      reason:
+        `The Asset Hub compatibility check could not be completed: ${because(error)}. Deposits ` +
+        'are unavailable; nothing else in the app is affected (02 §7.7, 11 E17).',
+    };
+  }
 
   // Throws `SameChainError` rather than blocking — see this module's header.
   return {

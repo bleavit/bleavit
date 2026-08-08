@@ -20,6 +20,8 @@ import assert from 'node:assert/strict';
 import {
   CRITICAL_SURFACE,
   FOREIGN_SURFACE,
+  ForeignProbeCoverageError,
+  ProbeCoverageError,
   SUPPORTED_RUNTIMES,
   type AnyCompatHelper,
   type CompatSurface,
@@ -78,24 +80,31 @@ function surfaceOver(
   return groups;
 }
 
+const CODE_HASH = `0x${'c0de'.repeat(16)}`;
+
 function pulled(compat: CompatSurface, closed: { count: number }): PulledSurface {
   return {
     compat,
+    codeHash: CODE_HASH,
     close: () => {
       closed.count += 1;
     },
   };
 }
 
+/** The runtime re-read after the pull. Steady by default — a moving one is the test's subject. */
+const steady = (report: RuntimeVersionReport) => (): RuntimeVersionReport => report;
+
 /* ------------------------------------------------------------------ the local verdict */
 
 test('a supported runtime with every surface intact classifies `full` and permits signing', async () => {
   const closed = { count: 0 };
-  const roles: string[] = [];
+  const keys: string[] = [];
   const verdict = await classifyLocalRuntime({
     runtime: runtime(PRIMARY.specVersion),
-    pullFor: async (role) => {
-      roles.push(role);
+    runtimeNow: steady(runtime(PRIMARY.specVersion)),
+    pullFor: async (descriptorKey) => {
+      keys.push(descriptorKey);
       return pulled(surfaceOver(CRITICAL_SURFACE), closed);
     },
   });
@@ -105,27 +114,32 @@ test('a supported runtime with every surface intact classifies `full` and permit
   assert.equal(verdict.classification.proven.length, CRITICAL_SURFACE.length);
   assert.ok(verdictAllowsSigning(verdict));
   assert.ok(verdictProvesSurface(verdict, CRITICAL_SURFACE[0]!.id));
-  // The descriptor set is chosen by the chain: a primary runtime is probed with the primary
-  // set, never with whichever one happened to be imported first.
-  assert.deepEqual(roles, ['primary']);
+  // The descriptor set is chosen by the chain, and named by the **committed `descriptorKey`**
+  // rather than by the role — 10 §5.1 makes the artifact a per-`spec_version` fact, and a
+  // role-keyed lookup is correct only while the table happens to be one primary and one
+  // recovery.
+  assert.deepEqual(keys, [PRIMARY.descriptorKey]);
+  // And the verdict names the runtime it examined, not only the label it was given.
+  assert.equal(verdict.codeHash, CODE_HASH);
   // The transient client is always closed — a second `chainHead_follow` left open for the
   // life of the tab is the resource this seam exists to avoid.
   assert.equal(closed.count, 1);
 });
 
 test('the paired recovery runtime is probed with the recovery descriptors, not the primary set', async () => {
-  const roles: string[] = [];
+  const keys: string[] = [];
   const verdict = await classifyLocalRuntime({
     runtime: runtime(RECOVERY.specVersion),
-    pullFor: async (role) => {
-      roles.push(role);
+    runtimeNow: steady(runtime(RECOVERY.specVersion)),
+    pullFor: async (descriptorKey) => {
+      keys.push(descriptorKey);
       return pulled(surfaceOver(CRITICAL_SURFACE), { count: 0 });
     },
   });
   // 10 §5.1 / B16: recovery can become current under `OnlyInherents`, so it is a live-capable
   // entry. A client that fell back to the primary set here would compare the recovery runtime
   // against descriptors that do not describe it, and report the difference as a broken chain.
-  assert.deepEqual(roles, ['recovery']);
+  assert.deepEqual(keys, [RECOVERY.descriptorKey]);
   assert.ok(verdict.kind === 'classified' && verdict.classification.mode === 'full');
 });
 
@@ -133,6 +147,7 @@ test('a broken surface is `restricted` and names itself — it is never `read-on
   const broken = CRITICAL_SURFACE[3]!;
   const verdict = await classifyLocalRuntime({
     runtime: runtime(PRIMARY.specVersion),
+    runtimeNow: steady(runtime(PRIMARY.specVersion)),
     pullFor: async () => pulled(surfaceOver(CRITICAL_SURFACE, [broken.id]), { count: 0 }),
   });
   assert.ok(verdict.kind === 'classified');
@@ -151,6 +166,7 @@ test('an absent surface is refused rather than skipped, so it cannot pass by not
   const absent = CRITICAL_SURFACE[7]!;
   const verdict = await classifyLocalRuntime({
     runtime: runtime(PRIMARY.specVersion),
+    runtimeNow: steady(runtime(PRIMARY.specVersion)),
     pullFor: async () => pulled(surfaceOver(CRITICAL_SURFACE, [], [absent.id]), { count: 0 }),
   });
   assert.ok(verdict.kind === 'classified');
@@ -164,6 +180,7 @@ test('an unsupported spec_version is `read-only-incompatible` and is never probe
   let pulls = 0;
   const verdict = await classifyLocalRuntime({
     runtime: runtime(999_999),
+    runtimeNow: steady(runtime(999_999)),
     pullFor: async () => {
       pulls += 1;
       return pulled(surfaceOver(CRITICAL_SURFACE), { count: 0 });
@@ -182,6 +199,7 @@ test('a runtime the client could not read is `unestablished` — never a default
   let pulls = 0;
   const verdict = await classifyLocalRuntime({
     runtime: undefined,
+    runtimeNow: () => undefined,
     pullFor: async () => {
       pulls += 1;
       return pulled(surfaceOver(CRITICAL_SURFACE), { count: 0 });
@@ -199,6 +217,7 @@ test('a runtime the client could not read is `unestablished` — never a default
 test('a failed pull is `unestablished`, not a synthesised `restricted` with every surface disabled', async () => {
   const verdict = await classifyLocalRuntime({
     runtime: runtime(PRIMARY.specVersion),
+    runtimeNow: steady(runtime(PRIMARY.specVersion)),
     pullFor: async () => {
       throw new Error('the metadata request timed out');
     },
@@ -211,29 +230,131 @@ test('a failed pull is `unestablished`, not a synthesised `restricted` with ever
   assert.ok(!verdict.reason.includes('is absent from this runtime'));
 });
 
-test('the transient client is closed even when the classifier itself throws', async () => {
+test('a probe that throws is `unestablished`, and the transient client is still closed', async () => {
+  // **PAPI computes compat on property access**, so every failure its metadata layer can have
+  // on a runtime it cannot map happens *inside* the probe rather than inside the pull. The
+  // first version of this suite asserted the rejection propagated, which is what shipped —
+  // and `openDepositLeg` rejected with it, so the deposit screen never rendered at all. E17
+  // wants the flow blocked *with diagnostics*, so the throw is now a verdict.
+  const closed = { count: 0 };
+  const verdict = await classifyLocalRuntime({
+    runtime: runtime(PRIMARY.specVersion),
+    runtimeNow: steady(runtime(PRIMARY.specVersion)),
+    pullFor: async () =>
+      pulled(
+        new Proxy(surfaceOver(CRITICAL_SURFACE), {
+          get() {
+            throw new Error('the compat object came apart mid-probe');
+          },
+        }) as CompatSurface,
+        closed,
+      ),
+  });
+  assert.equal(verdict.kind, 'unestablished');
+  assert.ok(verdict.kind === 'unestablished' && verdict.reason.includes('came apart mid-probe'));
+  assert.equal(closed.count, 1, 'a throw past the pull must still close the transient client');
+});
+
+test('a release-manifest defect stays LOUD — it is not a chain that could not be read', async () => {
+  // The one exception to the catch above. A coverage error means this release's own frozen
+  // surface list and its own probe disagree about how many entries exist, which is a
+  // packaging defect in the artifact the client shipped; reporting it as *"the chain could
+  // not be read"* would hide a broken release behind a message about somebody else's network.
+  //
+  // **Stated honestly: this cannot currently happen in production.** `classifyLocalRuntime`
+  // hands `probeCriticalSurface` and `classify` the same default `CRITICAL_SURFACE`, so the
+  // two lists cannot diverge and the coverage refusal is unreachable from here. The
+  // classification of the error is still real and still worth pinning — it is what decides
+  // whether a future caller passing a narrowed surface gets a loud failure or a polite one —
+  // so it is exercised directly rather than through a production path that cannot produce it.
   const closed = { count: 0 };
   await assert.rejects(
     () =>
       classifyLocalRuntime({
         runtime: runtime(PRIMARY.specVersion),
-        // A surface carrying nothing at all: the probe reports every entry `incompatible`,
-        // which classifies. To reach `classify`'s own throw the *probe list* must be short,
-        // which only a surface argument can do — so this drives the coverage refusal through
-        // a surface whose group lookup throws instead.
+        runtimeNow: steady(runtime(PRIMARY.specVersion)),
         pullFor: async () =>
           pulled(
             new Proxy(surfaceOver(CRITICAL_SURFACE), {
               get() {
-                throw new Error('the compat object came apart mid-probe');
+                throw new ProbeCoverageError('2 of 200 entries were never probed');
               },
             }) as CompatSurface,
             closed,
           ),
       }),
-    /came apart mid-probe/,
+    ProbeCoverageError,
   );
-  assert.equal(closed.count, 1, 'a throw past the pull must still close the transient client');
+  assert.equal(closed.count, 1, 'the transient client leaked while a manifest defect was reported');
+});
+
+test('the label is refused when the runtime moves while it is being examined', async () => {
+  // `runtime` is read from the transport before the pull; the surface comes from a *separate*
+  // client at *its* finalized head. Nothing binds them, so an upgrade landing inside that
+  // window would stamp a `full` verdict with the `spec_version` of a runtime that is no longer
+  // current — the stale-runtime defect arriving from the other side.
+  const verdict = await classifyLocalRuntime({
+    runtime: runtime(PRIMARY.specVersion),
+    runtimeNow: () => runtime(RECOVERY.specVersion),
+    pullFor: async () => pulled(surfaceOver(CRITICAL_SURFACE), { count: 0 }),
+  });
+  assert.equal(verdict.kind, 'unestablished');
+  assert.ok(verdict.kind === 'unestablished' && verdict.reason.includes('changed while'));
+});
+
+test('a runtime swap that keeps the spec_version is refused too', async () => {
+  // 02 §13 rule 7: `transaction_version` and the contract counter are **independent**. A
+  // `spec_version`-only comparison agrees across exactly the swap it exists to notice.
+  const before = runtime(PRIMARY.specVersion);
+  const verdict = await classifyLocalRuntime({
+    runtime: before,
+    runtimeNow: () => ({ ...before, transactionVersion: before.transactionVersion + 1 }),
+    pullFor: async () => pulled(surfaceOver(CRITICAL_SURFACE), { count: 0 }),
+  });
+  assert.equal(verdict.kind, 'unestablished');
+  assert.ok(verdict.kind === 'unestablished' && verdict.reason.includes('transaction_version'));
+});
+
+test('a runtime that stops being readable mid-check is refused, not assumed unchanged', async () => {
+  const verdict = await classifyLocalRuntime({
+    runtime: runtime(PRIMARY.specVersion),
+    runtimeNow: () => undefined,
+    pullFor: async () => pulled(surfaceOver(CRITICAL_SURFACE), { count: 0 }),
+  });
+  assert.equal(verdict.kind, 'unestablished');
+});
+
+test('a pull that never answers is abandoned at the deadline rather than awaited forever', async () => {
+  // `getStaticApis` waits for its own client's first finalized block, so a second chain handle
+  // that never syncs leaves the promise pending for the life of the tab — the deposit leg
+  // never settles, the screen never renders, and the caller's release never runs. The deadline
+  // is what makes the signal a deadline rather than one that defaults to never.
+  const seen: AbortSignal[] = [];
+  const verdict = await classifyLocalRuntime({
+    runtime: runtime(PRIMARY.specVersion),
+    runtimeNow: steady(runtime(PRIMARY.specVersion)),
+    deadlineMs: 5,
+    pullFor: async (_key, signal) => {
+      seen.push(signal);
+      return new Promise<PulledSurface>((_resolve, reject) => {
+        // `AbortSignal.timeout`'s own timer is deliberately unref'd, so with nothing else
+        // pending Node exits before it fires and the test is cancelled rather than run. That
+        // is the documented behaviour of the production path — a deadline must not hold a tab
+        // open — so the *test* supplies the liveness instead of the subject being changed.
+        const keepAlive = setTimeout(() => undefined, 1_000);
+        signal.addEventListener('abort', () => {
+          clearTimeout(keepAlive);
+          const abort = new Error('Abort Error');
+          abort.name = 'AbortError';
+          reject(abort);
+        });
+      });
+    },
+  });
+  assert.equal(seen.length, 1, 'no signal reached the pull');
+  assert.equal(seen[0]?.aborted, true);
+  assert.equal(verdict.kind, 'unestablished');
+  assert.ok(verdict.kind === 'unestablished' && verdict.reason.includes('gave up'));
 });
 
 /* ---------------------------------------------------------------- the foreign verdict */
@@ -254,6 +375,7 @@ test('Asset Hub with every frozen surface intact classifies `full`, and the depo
     chainLabel: AH_PIN.label,
     genesisHash: AH_PIN.genesisHash,
     runtime: ahRuntime(),
+    runtimeNow: () => ahRuntime(),
     pull: async () => pulled(surfaceOver(FOREIGN_SURFACE), closed),
     pins: [AH_PIN],
   });
@@ -280,6 +402,7 @@ test('the frozen AH **call** is probed, and losing it blocks the deposit', async
     chainLabel: AH_PIN.label,
     genesisHash: AH_PIN.genesisHash,
     runtime: ahRuntime(),
+    runtimeNow: () => ahRuntime(),
     pull: async () => pulled(surfaceOver(FOREIGN_SURFACE, [call.id]), { count: 0 }),
     pins: [AH_PIN],
   });
@@ -300,6 +423,7 @@ test('a wrong chain is terminal, keeps the observed genesis, and is never probed
     chainLabel: AH_PIN.label,
     genesisHash: observed,
     runtime: ahRuntime(),
+    runtimeNow: () => ahRuntime(),
     pull: async () => {
       pulls += 1;
       return pulled(surfaceOver(FOREIGN_SURFACE), { count: 0 });
@@ -309,10 +433,16 @@ test('a wrong chain is terminal, keeps the observed genesis, and is never probed
   assert.ok(verdict.kind === 'classified');
   assert.equal(verdict.classification.mode, 'wrong-chain');
   assert.match(assetHubBlockReason(verdict) ?? '', /retrying will not change this/);
-  // Identity before compatibility: a compat verdict computed against the wrong chain
-  // describes a runtime the app was never talking to.
-  assert.equal(pulls, 1, 'the pull is attempted only because identity is judged inside classifyForeign');
+  // **Identity before compatibility, and before the probe.** The first version pulled a
+  // surface from the wrong chain and then discarded it, and this line pinned that as
+  // `pulls === 1` — a suite agreeing with a defect the subject's own docstring described.
+  // `foreign.ts`'s ordering exists because *"a spec_version verdict computed against the wrong
+  // chain describes a runtime this app was never talking to"*, and computing one in order to
+  // throw it away still spends a connection and a metadata fetch on a refused chain.
+  assert.equal(pulls, 0, 'a surface was pulled from a chain this release has already refused');
   assert.equal(assetHubCompatible(verdict), false);
+  // No probe means no examined runtime to name, which the verdict says rather than implies.
+  assert.equal(verdict.codeHash, undefined);
 });
 
 test('an Asset Hub that was never reached is `unreachable` and is never probed', async () => {
@@ -321,6 +451,7 @@ test('an Asset Hub that was never reached is `unreachable` and is never probed',
     chainLabel: AH_PIN.label,
     genesisHash: undefined,
     runtime: undefined,
+    runtimeNow: () => undefined,
     pull: async () => {
       pulls += 1;
       return pulled(surfaceOver(FOREIGN_SURFACE), { count: 0 });
@@ -338,6 +469,7 @@ test('an Asset Hub runtime this release has no descriptors for is `unsupported`,
     chainLabel: AH_PIN.label,
     genesisHash: AH_PIN.genesisHash,
     runtime: ahRuntime(9_999_999),
+    runtimeNow: () => ahRuntime(9_999_999),
     pull: async () => pulled(surfaceOver(FOREIGN_SURFACE), { count: 0 }),
     pins: [AH_PIN],
   });
@@ -352,6 +484,7 @@ test('an Asset Hub probe that fails is `unestablished`, and the deposit row carr
     chainLabel: AH_PIN.label,
     genesisHash: AH_PIN.genesisHash,
     runtime: ahRuntime(),
+    runtimeNow: () => ahRuntime(),
     pull: async () => {
       throw new Error('the Asset Hub metadata request failed');
     },
@@ -363,6 +496,74 @@ test('an Asset Hub probe that fails is `unestablished`, and the deposit row carr
   // 02 §7.7's direction: it blocks deposits and says so, and it says nothing about the rest
   // of the app — the case where "the rest of the app is fine" is most tempting to omit.
   assert.match(assetHubBlockReason(verdict) ?? '', /nothing else in the app is affected/);
+});
+
+test('an Asset Hub PROBE that throws is `unestablished` too — not only a failing pull', async () => {
+  // The foreign half of the same defect, and the half a suite is most likely to miss: the
+  // other tests here fail the **pull**, which is a different code path from the probe. PAPI
+  // computes compat on property access, so an Asset Hub runtime its metadata layer cannot map
+  // throws inside `probeForeignSurface`, after the pull has already succeeded. Unwrapped, that
+  // rejection reached `openDepositLeg` and the deposit screen never rendered.
+  const closed = { count: 0 };
+  const verdict = await classifyAssetHub({
+    chainLabel: AH_PIN.label,
+    genesisHash: AH_PIN.genesisHash,
+    runtime: ahRuntime(),
+    runtimeNow: () => ahRuntime(),
+    pull: async () =>
+      pulled(
+        new Proxy(surfaceOver(FOREIGN_SURFACE), {
+          get() {
+            throw new Error('the Asset Hub compat object came apart');
+          },
+        }) as CompatSurface,
+        closed,
+      ),
+    pins: [AH_PIN],
+  });
+  assert.equal(verdict.kind, 'unestablished');
+  assert.match(assetHubBlockReason(verdict) ?? '', /came apart/);
+  assert.match(assetHubBlockReason(verdict) ?? '', /nothing else in the app is affected/);
+  assert.equal(assetHubCompatible(verdict), false);
+  assert.equal(closed.count, 1, 'the transient Asset Hub client leaked when the probe threw');
+});
+
+test('an Asset Hub manifest defect stays loud on the foreign path as well', async () => {
+  const closed = { count: 0 };
+  await assert.rejects(
+    () =>
+      classifyAssetHub({
+        chainLabel: AH_PIN.label,
+        genesisHash: AH_PIN.genesisHash,
+        runtime: ahRuntime(),
+        runtimeNow: () => ahRuntime(),
+        pull: async () =>
+          pulled(
+            new Proxy(surfaceOver(FOREIGN_SURFACE), {
+              get() {
+                throw new ForeignProbeCoverageError('1 of 3 frozen Asset Hub surfaces was never probed');
+              },
+            }) as CompatSurface,
+            closed,
+          ),
+        pins: [AH_PIN],
+      }),
+    ForeignProbeCoverageError,
+  );
+  assert.equal(closed.count, 1);
+});
+
+test('a foreign runtime that moves mid-check is refused rather than labelled', async () => {
+  const verdict = await classifyAssetHub({
+    chainLabel: AH_PIN.label,
+    genesisHash: AH_PIN.genesisHash,
+    runtime: ahRuntime(),
+    runtimeNow: () => ahRuntime(2004003),
+    pull: async () => pulled(surfaceOver(FOREIGN_SURFACE), { count: 0 }),
+    pins: [AH_PIN],
+  });
+  assert.equal(verdict.kind, 'unestablished');
+  assert.match(assetHubBlockReason(verdict) ?? '', /changed while/);
 });
 
 test('the identity-only verdict is the same call, for a caller that never got a probe', async () => {
@@ -380,6 +581,7 @@ test('an unpinned foreign chain is `unreachable` — a release that pins nothing
     chainLabel: 'Asset Hub',
     genesisHash: AH_PIN.genesisHash,
     runtime: ahRuntime(),
+    runtimeNow: () => ahRuntime(),
     pull: async () => pulled(surfaceOver(FOREIGN_SURFACE), { count: 0 }),
     pins: [],
   });
@@ -392,12 +594,14 @@ test('an unpinned foreign chain is `unreachable` — a release that pins nothing
 test('the local and foreign verdicts are different types and neither answers for the other', async () => {
   const local = await classifyLocalRuntime({
     runtime: runtime(PRIMARY.specVersion),
+    runtimeNow: steady(runtime(PRIMARY.specVersion)),
     pullFor: async () => pulled(surfaceOver(CRITICAL_SURFACE), { count: 0 }),
   });
   const foreign = await classifyAssetHub({
     chainLabel: AH_PIN.label,
     genesisHash: AH_PIN.genesisHash,
     runtime: ahRuntime(),
+    runtimeNow: () => ahRuntime(),
     pull: async () => pulled(surfaceOver(FOREIGN_SURFACE, FOREIGN_SURFACE.map((e) => e.id)), { count: 0 }),
     pins: [AH_PIN],
   });

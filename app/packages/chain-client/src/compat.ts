@@ -81,6 +81,19 @@ export type ChainCompatSurface<D extends ChainDefinition> = Awaited<
 /** A pulled compat surface and the client it came from, which the caller must close. */
 export interface OpenCompatSurface<D extends ChainDefinition> {
   readonly compat: ChainCompatSurface<D>;
+  /**
+   * The `:code` hash of the runtime this surface actually describes — `StaticApis.id`.
+   *
+   * Read from the pinned implementation rather than assumed: PAPI assigns `id: ctx.codeHash`,
+   * and `codeHash` is the node's hash of the `:code` storage value at the block the runtime
+   * context was built for. So it is chain state, it is identical for any two clients looking
+   * at the same runtime, and it changes exactly when the runtime does.
+   *
+   * It is here because the classifier labels its verdict with a `spec_version` read from a
+   * **different** connection. Without an identifier for the runtime that was examined, that
+   * label is an assertion nothing checks.
+   */
+  readonly codeHash: string;
   /** Destroy the transient client. Idempotent; safe after a failure. */
   close(): void;
 }
@@ -95,6 +108,21 @@ export interface OpenCompatSurface<D extends ChainDefinition> {
  * best-block runtime would enable signing against a runtime the chain may still reorg away.
  * Passing `"best"` is not offered.
  *
+ * **`signal` is required, with no default, and that is a resource rule rather than a style.**
+ * `getStaticApis` resolves through `firstValueFromWithSignal(chainHead.getRuntimeContext$(…),
+ * signal)`, and the runtime context arrives only once the client's own follow subscription
+ * reports a finalized block. A second Asset Hub handle that never syncs therefore leaves this
+ * promise **pending forever**: the deposit leg never settles, the screen never renders, the
+ * caller's `finally` never runs, and the smoldot chain it opened goes on syncing with nothing
+ * reading it. An optional signal is a deadline that defaults to *never*, which is the
+ * `assertCheckable` defect this repository has now met three times.
+ *
+ * Two properties of PAPI's abort path, both read from the pinned source and both easy to get
+ * wrong: it rejects with a plain `Error` whose `name` is `AbortError` — **not** a
+ * `DOMException`, so `instanceof DOMException` never matches — and it attaches its listener
+ * *after* subscribing, so an **already-aborted** signal never rejects at all. Never hand this
+ * a spent signal; hand it one with time left.
+ *
  * **Throws rather than returning a verdict**, deliberately. This module cannot tell a
  * network failure from a runtime it cannot decode, and inventing a `CompatMode` for either
  * would be exactly the fabricated probe result 10 §5.2 refuses. The caller turns the throw
@@ -104,6 +132,7 @@ export interface OpenCompatSurface<D extends ChainDefinition> {
 export async function openCompatSurface<D extends ChainDefinition>(
   provider: CompatProvider,
   descriptors: D,
+  signal: AbortSignal,
 ): Promise<OpenCompatSurface<D>> {
   const client = createClient(provider);
   let closed = false;
@@ -113,8 +142,9 @@ export async function openCompatSurface<D extends ChainDefinition>(
     client.destroy();
   };
   try {
-    const { compat } = await client.getTypedApi(descriptors).getStaticApis();
-    return { compat, close };
+    // `at` is left at PAPI's default of `"finalized"` — see this function's header.
+    const { compat, id } = await client.getTypedApi(descriptors).getStaticApis({ signal });
+    return { compat, codeHash: id, close };
   } catch (error) {
     close();
     throw error;

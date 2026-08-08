@@ -27,7 +27,6 @@
  * about which set describes which chain.
  */
 
-import type { RuntimeRole } from '@bleavit/descriptors';
 import type { LightClient } from '@bleavit/chain-client/light-client';
 import type { BundledChain, RuntimeVersionReport } from '@bleavit/chain-client';
 // Type-only, therefore erased: naming this file's provider type loads no PAPI module.
@@ -40,6 +39,7 @@ import {
   classifyLocalRuntime,
   foreignIdentityVerdict,
   type CompatVerdict,
+  type DescriptorKey,
   type ForeignVerdict,
   type PulledSurface,
 } from './compat-session.js';
@@ -67,27 +67,33 @@ import {
  */
 async function pullBleavitSurface(
   provider: CompatProvider,
-  role: RuntimeRole,
+  descriptorKey: DescriptorKey,
+  signal: AbortSignal,
 ): Promise<PulledSurface> {
   const [{ openCompatSurface }, descriptors] = await Promise.all([
     import('@bleavit/chain-client/compat'),
     import('@polkadot-api/descriptors'),
   ]);
   // 10 §5.1's per-`spec_version` commitment, and B16's pair: recovery is a live-capable
-  // entry, so the role decides the artifact and there is no arm that falls back to primary.
-  const set = role === 'recovery' ? descriptors.bleavit_recovery : descriptors.bleavit;
+  // entry. Keyed by the committed `descriptorKey` rather than by the role — a total switch,
+  // so a third runtime in `SUPPORTED_RUNTIMES` fails to compile here instead of silently
+  // being probed with whichever set the `else` branch named.
+  const set = descriptorKey === 'bleavit_recovery' ? descriptors.bleavit_recovery : descriptors.bleavit;
   // `compat` is PAPI's `ChainCompatSurface<typeof set>`; the return type is the probe's
   // structural `CompatSurface`. Nothing is cast — see this function's header.
-  return openCompatSurface(provider, set);
+  return openCompatSurface(provider, set, signal);
 }
 
 /** The same, for 02 §7.7's per-release foreign pin. */
-async function pullAssetHubSurface(provider: CompatProvider): Promise<PulledSurface> {
+async function pullAssetHubSurface(
+  provider: CompatProvider,
+  signal: AbortSignal,
+): Promise<PulledSurface> {
   const [{ openCompatSurface }, descriptors] = await Promise.all([
     import('@bleavit/chain-client/compat'),
     import('@polkadot-api/descriptors'),
   ]);
-  return openCompatSurface(provider, descriptors.assethub_paseo);
+  return openCompatSurface(provider, descriptors.assethub_paseo, signal);
 }
 
 /**
@@ -103,10 +109,23 @@ async function pullAssetHubSurface(provider: CompatProvider): Promise<PulledSurf
  * every transaction-critical read is taken at.
  */
 export async function classifyChain(client: LightClient): Promise<CompatVerdict> {
-  return classifyLocalRuntime({
-    runtime: client.transport.finalizedRuntime(),
-    pullFor: (role) => pullBleavitSurface(client.compatProvider(), role),
-  });
+  // One handle for the whole classification, released whatever happens. It is not created
+  // until a pull is actually attempted — the `read-only-incompatible` short-circuit never
+  // opens a connection, which is the point of deciding the `spec_version` first.
+  let handle: { release(): void } | undefined;
+  try {
+    return await classifyLocalRuntime({
+      runtime: client.transport.finalizedRuntime(),
+      runtimeNow: () => client.transport.finalizedRuntime(),
+      pullFor: (descriptorKey, signal) => {
+        const opened = client.compatProvider();
+        handle = opened;
+        return pullBleavitSurface(opened.provider, descriptorKey, signal);
+      },
+    });
+  } finally {
+    handle?.release();
+  }
 }
 
 /**
@@ -138,6 +157,14 @@ export async function classifyAssetHubFor(
    * reason rather than a guess, which is 02 §7.7's fail-closed direction.
    */
   runtime: RuntimeVersionReport | undefined,
+  /**
+   * The same reading, taken again after the probe — see `CompatProbeDeps.runtimeNow`.
+   *
+   * A closure rather than a second value, because the whole point is that it is read *after*
+   * the surface is in hand. Passing a number here would be passing the same observation twice
+   * and calling it a comparison.
+   */
+  runtimeNow: () => RuntimeVersionReport | undefined = () => runtime,
 ): Promise<ForeignVerdict> {
   const handle = await client.assetHubCompatProvider(assetHub);
   if (handle.kind !== 'attached') {
@@ -151,14 +178,16 @@ export async function classifyAssetHubFor(
     );
   }
 
+  const attached = handle;
   try {
     return await classifyAssetHub({
       chainLabel,
-      genesisHash: handle.genesisHash,
+      genesisHash: attached.genesisHash,
       runtime,
-      pull: () => pullAssetHubSurface(handle.provider),
+      runtimeNow,
+      pull: (signal) => pullAssetHubSurface(attached.provider, signal),
     });
   } finally {
-    handle.release();
+    attached.release();
   }
 }
