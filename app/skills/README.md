@@ -72,7 +72,7 @@ counting the family as covered — both are tested where they live, in
 `app/tests/intents` and `app/tests/contexts`.
 
 Every example is judged against a fixed context, published so a reader can reproduce a
-verdict: genesis `0x91b171bb…ce90c3`, `spec_version` 2, contract version 29, chain height
+verdict: genesis `0x91b171bb…ce90c3`, `spec_version` 2, contract version 30, chain height
 1,000,000.
 
 The two version numbers are **read from the release**, not typed into the generator, and

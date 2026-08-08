@@ -6945,13 +6945,80 @@ fn metadata_exposes_only_allowed_attestor_and_guardian_constants() {
                         .collect::<Vec<_>>(),
                     // `PlaybookFreezeWindowBlocks` (B1b) is a genuine kernel
                     // value, the class 02 §9(2) admits; the Params-driven
-                    // constants stay removed (B10).
+                    // constants stay removed (B10). The four allowance limits
+                    // join at contract v30 — 06 §5.2's table, exposed because
+                    // `Allowances` stores the *used* counters alone and
+                    // 11 §11.8.2 makes the remainder a precondition.
                     vec![
                         "GuardianSeats",
                         "GuardianThreshold",
                         "GuardianBond",
                         "PlaybookFreezeWindowBlocks",
+                        "DelayOnceAllowancePerEpoch",
+                        "ForceRerunAllowancePerEpoch",
+                        "PauseIntakeAllowanceWindowEpochs",
+                        "PauseIntakeAllowance",
                     ]
+                );
+
+                // 02 §9's *Value source* column is the claim under test: each
+                // constant re-exports the `guardian_core` kernel value rather
+                // than re-declaring a number. Decoding the published bytes is
+                // what makes this a check on the accessor — a mis-typed or
+                // hand-written value fails here, where a name-only assertion
+                // would pass.
+                let guardian_constant = |name: &str| {
+                    guardian
+                        .constants
+                        .iter()
+                        .find(|constant| constant.name == name)
+                        .unwrap_or_else(|| panic!("02 §9 freezes Guardian::{name}"))
+                };
+                for (name, expected) in [
+                    (
+                        "DelayOnceAllowancePerEpoch",
+                        pallet_guardian::guardian_core::DELAY_ONCE_ALLOWANCE_PER_EPOCH,
+                    ),
+                    (
+                        "ForceRerunAllowancePerEpoch",
+                        pallet_guardian::guardian_core::FORCE_RERUN_ALLOWANCE_PER_EPOCH,
+                    ),
+                    (
+                        "PauseIntakeAllowance",
+                        pallet_guardian::guardian_core::PAUSE_INTAKE_ALLOWANCE,
+                    ),
+                ] {
+                    let constant = guardian_constant(name);
+                    assert_eq!(
+                        u8::decode(&mut &constant.value[..])
+                            .unwrap_or_else(|_| panic!("Guardian::{name} is a u8")),
+                        expected,
+                        "Guardian::{name} must publish the guardian-core kernel value"
+                    );
+                }
+                let window = guardian_constant("PauseIntakeAllowanceWindowEpochs");
+                assert_eq!(
+                    u32::decode(&mut &window.value[..])
+                        .expect("Guardian::PauseIntakeAllowanceWindowEpochs is an EpochId (u32)"),
+                    pallet_guardian::guardian_core::PAUSE_INTAKE_ALLOWANCE_WINDOW_EPOCHS,
+                );
+
+                // The independent half: 06 §5.2's allowance table states the
+                // numbers, and the assertions above would agree with a kernel
+                // constant that had itself drifted. These four literals are the
+                // spec's, and they are pinned here because 13 §1 makes the row
+                // entrenched with no amendment path — a moved value is a
+                // specification change, not a tuning.
+                assert_eq!(
+                    (
+                        pallet_guardian::guardian_core::DELAY_ONCE_ALLOWANCE_PER_EPOCH,
+                        pallet_guardian::guardian_core::FORCE_RERUN_ALLOWANCE_PER_EPOCH,
+                        pallet_guardian::guardian_core::PAUSE_INTAKE_ALLOWANCE,
+                        pallet_guardian::guardian_core::PAUSE_INTAKE_ALLOWANCE_WINDOW_EPOCHS,
+                    ),
+                    (2u8, 1u8, 1u8, 4u32),
+                    "06 §5.2: delay_once 2/epoch, force_rerun 1/epoch, \
+                     pause_intake 1 per 4-epoch window"
                 );
 
                 for pallet_name in ["IncidentRegistry", "MilestoneRegistry"] {

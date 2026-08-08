@@ -9,7 +9,7 @@ use core::convert::TryFrom;
 use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 
-pub const INTEGRATION_CONTRACT_VERSION: u32 = 29;
+pub const INTEGRATION_CONTRACT_VERSION: u32 = 30;
 
 pub type Balance = u128;
 pub type ProposalId = u64;
@@ -2123,7 +2123,26 @@ mod tests {
         // table cites (SQ-730). Neither was frozen, and `PhaseFlags` bit 5 does not
         // substitute for the second: it tracks the applied *effect*, so it is clear at
         // the moment an activation is proposed.
-        assert_eq!(INTEGRATION_CONTRACT_VERSION, 29);
+        //
+        // v30 is the first of these bumps whose missing surface is a **constant**.
+        // 11 §11.8.2 makes "allowance remaining for the power" a precondition of
+        // `guardian.propose_action`, and 02 §7.4 freezes `Guardian.Allowances` — which
+        // stores the **used** counters alone. No constant published the limits, so the
+        // only client that could satisfy that row was one that invented them, which
+        // 15 §2's INV-FE-1 forbids. §9 therefore gains four Guardian constants
+        // (`DelayOnceAllowancePerEpoch`, `ForceRerunAllowancePerEpoch`,
+        // `PauseIntakeAllowance`, `PauseIntakeAllowanceWindowEpochs`); 13 §1's note that
+        // their exposure was "unresolved" is corrected, and the row stays entrenched.
+        //
+        // §7.4 also freezes `Guardian.PlaybookRegistered` and `Guardian.ActivePlaybooks`.
+        // `PlaybookNotRegistered` and `PlaybookAlreadyActive` are raised inside
+        // `approve_action` on the **dispatching** approval, so a client blind to them
+        // walks a council through four signatures to a guaranteed revert on the fifth.
+        //
+        // `spec_version` does not move: no runtime is deployed, and that counter's
+        // contract is about a replacement image on a live chain. v13, v21 and v23 each
+        // added metadata constants at `spec_version` 2 for the same reason.
+        assert_eq!(INTEGRATION_CONTRACT_VERSION, 30);
     }
 
     #[test]

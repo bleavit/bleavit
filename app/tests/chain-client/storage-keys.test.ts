@@ -5,7 +5,7 @@
  *
  * **`app/fixtures/chainhead/`** holds storage requests *issued against the built runtime* by the
  * F2 recorder, so each recorded key is what that runtime actually answered to. Counted rather
- * than assumed (V-159): **67 key items across 65 files — 65 map prefixes and 2 full keys.** The
+ * than assumed (V-159): **82 key items across 80 files — 80 map prefixes and 2 full keys.** The
  * recorder reads whole maps with `descendantsValues`, so nearly everything here is a bare
  * 32-byte prefix; the two exceptions are single-entry `value` reads of
  * `ForeignAssets.{Asset,Metadata}(usdcLocation)`, and those *do* carry a real
@@ -112,10 +112,12 @@ const SURFACES: readonly (readonly [string, string, string])[] = [
   ['storage.execution_guard.queue.json', 'ExecutionGuard', 'Queue'],
   ['storage.execution_guard.ratifications.json', 'ExecutionGuard', 'Ratifications'],
   ['storage.foreign_assets.account.json', 'ForeignAssets', 'Account'],
+  ['storage.guardian.active_playbooks.json', 'Guardian', 'ActivePlaybooks'],
   ['storage.guardian.allowances.json', 'Guardian', 'Allowances'],
   ['storage.guardian.approvals.json', 'Guardian', 'Approvals'],
   ['storage.guardian.members.json', 'Guardian', 'Members'],
   ['storage.guardian.pending_actions.json', 'Guardian', 'PendingActions'],
+  ['storage.guardian.playbook_registered.json', 'Guardian', 'PlaybookRegistered'],
   ['storage.incident_registry.ack_records.json', 'IncidentRegistry', 'AckRecords'],
   ['storage.incident_registry.closed_at.json', 'IncidentRegistry', 'ClosedAt'],
   ['storage.incident_registry.filings.json', 'IncidentRegistry', 'Filings'],
@@ -257,7 +259,7 @@ test('the table covers EVERY recorded storage surface, not a chosen subset', () 
   assert.equal(named.size, SURFACES.length, 'the table names a fixture twice');
 });
 
-test('the corpus is 75 prefixes and exactly 2 full keys — measured, not assumed (V-159)', () => {
+test('the corpus is 80 prefixes and exactly 2 full keys — measured, not assumed (V-159)', () => {
   // What the corpus actually contains, counted. An earlier version of this suite asserted
   // that *every* recorded key was a 32-byte prefix; that was false, and it passed only
   // because it inspected the first request per file. Two files record a second,
@@ -281,6 +283,13 @@ test('the corpus is 75 prefixes and exactly 2 full keys — measured, not assume
   // classification below is by **length**, which cannot tell the two apart — so the
   // hasher-coverage claim this suite makes is unchanged by v29 rather than widened by it,
   // and saying so here is what stops the growing number from reading as growing reach.
+  //
+  // 78 -> 80 at contract v30, which froze `Guardian.PlaybookRegistered` and
+  // `Guardian.ActivePlaybooks` for the two refusals 11 §11.8.2's approve row carries. The
+  // same caveat applies once more and for both directions of the pair: `ActivePlaybooks` is
+  // a `StorageValue` whose complete key *is* the 32-byte prefix, while `PlaybookRegistered`
+  // is a real `Blake2_128Concat` map the recorder read with `descendantsValues` — so its
+  // hasher is still never exercised here. Reach is unchanged again.
   const prefixes: string[] = [];
   const full: { file: string; key: string }[] = [];
   for (const [file] of SURFACES) {
@@ -289,7 +298,7 @@ test('the corpus is 75 prefixes and exactly 2 full keys — measured, not assume
       else full.push({ file, key });
     }
   }
-  assert.equal(prefixes.length, 78, 'the number of recorded map-prefix reads changed');
+  assert.equal(prefixes.length, 80, 'the number of recorded map-prefix reads changed');
   assert.equal(full.length, 2, 'the number of recorded single-entry reads changed');
   assert.deepEqual(
     full.map((f) => f.file).sort(),
