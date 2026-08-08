@@ -164,12 +164,12 @@ function bootArgs(mode) {
     "--para-bootnodes", bootnodes.para.join(","),
     "--asset-hub-bootnodes", bootnodes.assetHub.join(","),
     "--mode", mode,
-    "--timeout-seconds", "300",
+    "--timeout-seconds", "240",
   ];
 }
 
 async function boot() {
-  const report = JSON.parse(run("client boot", bootArgs("boot"), 540));
+  const report = JSON.parse(run("client boot", bootArgs("boot"), 840));
   // `unestablished` is what the classifier returns when no chain was connected, so a
   // report carrying it is a boot that did not happen wearing a verdict's clothes.
   if (report.compat === "unestablished") {

@@ -96,3 +96,9 @@ export {
   type WithdrawLeg,
   type WithdrawLegDeps,
 } from './funding-session.js';
+export {
+  handleTerminalBootFailure,
+  renderTerminalChainMismatch,
+  terminalChainMismatch,
+  type TerminalChainMismatch,
+} from './wrong-chain.js';

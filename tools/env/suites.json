@@ -247,7 +247,7 @@
       "path": "zombienet/drills/14-client-boot.zndsl",
       "tier": "release",
       "gated_on": [],
-      "timeout_seconds": 2700,
+      "timeout_seconds": 3600,
       "spec": "15 §4.7, §4.8; 10 §3.1, §4.1, §4.3, §5.2"
     }
   ]

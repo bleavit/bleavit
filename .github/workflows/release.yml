@@ -197,6 +197,27 @@ jobs:
         run: tools/env/fetch-binaries.sh
       - name: Generate local relay and parachain specs
         run: tools/env/generate-relay-specs.sh
+      - name: Build the client, for drill 14 (F27)
+        # **Drill 14's subject under test is `app/` build output**, and this job had no `pnpm`
+        # step at all — so a release-tier suite that shells out to `node
+        # app/tools/drill-client/boot.ts` would fail on unresolved workspace links, and under
+        # 15 §5's tiering rule a failing release-tier suite BLOCKS evidence emission. Found by
+        # the F27 R-6 review before it ever ran on a tag.
+        #
+        # `--frozen-lockfile` and `tsc -b` rather than a dev server: the drill imports through
+        # each package's `dist/`, so a source-only checkout is invisible to it.
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: app/.nvmrc
+      - name: Enable corepack (pnpm pin comes from packageManager)
+        working-directory: app
+        run: corepack enable && corepack install
+      - name: Install the client workspace (frozen lockfile)
+        working-directory: app
+        run: pnpm install --frozen-lockfile
+      - name: Build the client workspace project graph
+        working-directory: app
+        run: pnpm run build
       - name: Pre-warm pinned Chopsticks package
         shell: bash
         run: source tools/env/pins.env && npx --yes "@acala-network/chopsticks@${CHOPSTICKS_VERSION}" --help >/dev/null

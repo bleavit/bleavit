@@ -308,6 +308,20 @@ export async function startLightClientWith(
       wrongChain,
     ]);
   } catch (error) {
+    // **Disconnect the provider, not only the chains.** `ChainHeadConnection.open` never
+    // settled on this path, so its own `disconnect()` never runs — and `getSmProvider` sits
+    // above a retrying sync provider that keeps calling the chain factory and `console.error`s
+    // each refusal. Stopping the topologies removes the chains it would dial but not the loop
+    // that keeps asking, so a state 10 §3.1 calls **terminal** was leaving an unbounded busy
+    // loop behind it. Found by the F27 R-6 review; `topology.ts` states the principle this
+    // half-kept.
+    //
+    // First, because the loop is what would otherwise re-add what the next two lines remove.
+    try {
+      provider(() => {}).disconnect();
+    } catch {
+      // A provider that never connected has nothing to release, which is the state wanted.
+    }
     for (const topology of topologies) topology.stop();
     await client.terminate();
     throw error;
