@@ -166,6 +166,7 @@ export {
   isMetered,
   mayActivatePlaybook,
   meterFor,
+  obligationSubjectOf,
   pendingPowerName,
   playbookAdvisory,
   proposalBlocks,

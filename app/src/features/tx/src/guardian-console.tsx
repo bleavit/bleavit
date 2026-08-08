@@ -49,6 +49,7 @@ import {
   approvalBlocks,
   isMetered,
   meterFor,
+  obligationSubjectOf,
   pendingPowerName,
   playbookAdvisory,
   proposalBlocks,
@@ -294,7 +295,12 @@ export function ApproveAction({
   readonly onApprove: (window: GatePassed) => void;
 }): ReactNode {
   const blocks = approvalBlocks(context);
-  const gate = operatorGate('guardian.approve_action', session, blocks);
+  const gate = operatorGate(
+    'guardian.approve_action',
+    session,
+    blocks,
+    obligationSubjectOf(context.action.power),
+  );
   const power = pendingPowerName(context.action.power);
   const advisory =
     context.action.power.kind === 'activate_playbook'

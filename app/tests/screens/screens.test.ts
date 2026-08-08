@@ -4238,9 +4238,15 @@ test('a blocked approval lists EVERY reason, not the first', () => {
   // **Three more arrived on 2026-08-08 and they are not model blocks**: `O-3` declares two
   // `blocking` and one `stated` unreadable obligation (SQ-1030, SQ-1022) for the three
   // refusals that live one frame above `check_and_consume` — `PlaybookNotRegistered`,
-  // `PlaybookAlreadyActive` and `TooManyReviews`. Two render as `Not readable at B′` and the
-  // caveat list renders all three. They are listed here rather than filtered out, because the
-  // property under test is that **every** reason reaches the screen.
+  // `PlaybookAlreadyActive` and `TooManyReviews`. They are listed here rather than filtered
+  // out, because the property under test is that **every** reason reaches the screen.
+  //
+  // **One of the two was scoped away later the same day** (Codex review of #287). This
+  // fixture activates `PB-ORACLE-VOID`, and `guardian_core::dispatch` refuses re-activation
+  // for `PB-LEDGER-FREEZE` alone — so that obligation says nothing about this action and
+  // renders no notice. One `Not readable at B′` remains: the registration read, which every
+  // `ActivatePlaybook` really does reach. The caveat list still names all three, because a
+  // caveat is a statement about the row and not about this action.
   assert.deepEqual(
     headings.sort(),
     [
@@ -4248,10 +4254,57 @@ test('a blocked approval lists EVERY reason, not the first', () => {
       'Expiry',
       'Membership',
       'Not readable at B′',
-      'Not readable at B′',
       'Trigger condition — OracleDeadlock',
       'What this client cannot check here',
     ],
+  );
+});
+
+test('an approval is not blocked by a condition its own dispatch never reads', () => {
+  // The defect Codex found on #287: `O-3` is one row for all five guardian powers, and its
+  // two blocking obligations were spliced in for every one of them. The runtime guards both
+  // behind `if let GuardianPower::ActivatePlaybook`, so approving a `pause_intake` was
+  // refused for a condition its dispatch never evaluates — the client refusing what the
+  // chain would accept, which is the failure 09 §1.2's mirror exists to prevent.
+  //
+  // Rendered rather than asserted on the model, because the model was already right about
+  // `approvalBlocks`; what was wrong was the gate above it, and only a render proves the
+  // notice is gone from the screen a guardian actually sees.
+  const notReadable = (context: ApprovalContext): number => {
+    const html = renderToStaticMarkup(
+      h(ApproveAction, { context, session: readySession('O-3'), onApprove: noSubmit }),
+    );
+    return [...html.matchAll(/<strong class="notice__heading">Not readable at B′<\/strong>/g)].length;
+  };
+
+  // A metered power: neither obligation applies.
+  assert.equal(
+    notReadable(
+      APPROVE({
+        action: { ...ACTION_ROW(), power: { kind: 'pause_intake', until: finalized(9_000) } },
+        condition: { kind: 'no-condition' },
+      }),
+    ),
+    0,
+    'a pause_intake approval is closed by a playbook condition it never reaches',
+  );
+
+  // The one playbook whose re-activation dispatch refuses: both obligations apply.
+  assert.equal(
+    notReadable(
+      APPROVE_ROW({
+        action: {
+          ...ACTION_ROW(),
+          power: PLAYBOOK_POWER({
+            id: finalized<PlaybookId>('PB-LEDGER-FREEZE'),
+            trigger: finalized<PlaybookTrigger>('LedgerDrift'),
+            target: undefined,
+          }),
+        },
+      }),
+    ),
+    2,
+    'PB-LEDGER-FREEZE lost the re-activation obligation that is scoped to it alone',
   );
 });
 

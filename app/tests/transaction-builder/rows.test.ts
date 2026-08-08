@@ -1174,6 +1174,69 @@ test('an unreadable obligation names an OPEN spec question, and blocking ones cl
   );
 });
 
+test('O-3’s blocking obligations are scoped to the arms the pallet guards them behind', () => {
+  // A row is one id for a whole call. `guardian.approve_action` is `O-3` for all five
+  // powers, and both of `O-3`'s blocking obligations were attached to the row — so
+  // `operatorGate` closed the approve control for `pause_intake`, `delay_once`,
+  // `force_rerun` and `suspend_on_gate`, whose dispatch never reads either condition.
+  //
+  // That is the inverse of the defect this list exists to prevent, and it is not the
+  // harmless direction: 09 §1.2's mirror is about a client refusing what the runtime would
+  // accept, and four of five guardian powers could not be approved at all.
+  //
+  // The scope is asserted against the **pallet**, not restated from the client. If a future
+  // change widens either runtime check to every power, this fails and says to unscope the
+  // obligation — which is the only way a declaration and the code it describes can be kept
+  // from drifting apart in silence.
+  const pallet = readFileSync(join(REPO, 'pallets/guardian/src/lib.rs'), 'utf8');
+  const core = readFileSync(join(REPO, 'crates/guardian-core/src/lib.rs'), 'utf8');
+  assert.match(
+    pallet,
+    /if let GuardianPower::ActivatePlaybook \{ id, \.\. \} = action\.power \{\s*ensure!\(\s*PlaybookRegistered::<T>::get\(id\),/,
+    'approve_action no longer guards PlaybookRegistered behind ActivatePlaybook — rescope O-3',
+  );
+  assert.match(
+    core,
+    /if self\.active_playbooks\.iter\(\)\.any\(\|p\| p\.id == id\) \{\s*ensure!\(\s*!matches!\(id, PlaybookId::LedgerFreeze\),/,
+    'dispatch no longer narrows PlaybookAlreadyActive to LedgerFreeze — rescope O-3',
+  );
+
+  // No subject: both stand. A caller that cannot name the power has not shown the narrow
+  // obligations do not apply, and dropping one on that would be fail-open.
+  assert.equal(blockingObligationsFor('O-3').length, 2);
+
+  // The four powers whose dispatch reads neither condition.
+  for (const power of ['pause_intake', 'delay_once', 'force_rerun', 'suspend_on_gate'] as const) {
+    assert.deepEqual(
+      blockingObligationsFor('O-3', { power }),
+      [],
+      `${power} approvals are blocked by a condition its dispatch never evaluates`,
+    );
+  }
+
+  // `ActivatePlaybook` reads the registration for every playbook, and the active-record
+  // refusal for `PB-LEDGER-FREEZE` alone — so the count differs by exactly one.
+  const depeg = blockingObligationsFor('O-3', { power: 'activate_playbook', playbook: 'PB-DEPEG' });
+  assert.equal(depeg.length, 1, 'PB-DEPEG renews in place; only the registration read applies');
+  assert.match(depeg[0]?.requirement ?? '', /registered on this chain/);
+  assert.equal(
+    blockingObligationsFor('O-3', {
+      power: 'activate_playbook',
+      playbook: 'PB-LEDGER-FREEZE',
+    }).length,
+    2,
+    'PB-LEDGER-FREEZE is the one playbook dispatch refuses to re-activate',
+  );
+
+  // Scoping narrows which actions an obligation speaks about. It must not quietly demote
+  // one: every O-3 entry that was blocking is still blocking for the powers it covers.
+  assert.equal(
+    unreadableObligationsFor('O-3').filter((entry) => entry.disposition === 'blocking').length,
+    2,
+    'an obligation was softened rather than scoped',
+  );
+});
+
 test('the welfare snapshot crank is in P-15’s staleness table', () => {
   // §11.8.5 binds it to row P-15 by name — "otherwise 'no-op — nothing to crank' (row
   // P-15)" — while `CrankCall` listed six members and this was not one. `crankStaleness`

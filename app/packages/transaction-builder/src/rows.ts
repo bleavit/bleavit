@@ -725,6 +725,40 @@ export const CRANK_CALLS = Object.keys(CRANK_STALENESS) as readonly CrankCall[];
  * the way the limit-coverage registry and the monitoring seams do — by the row closing,
  * not by somebody remembering to delete a comment.
  */
+/**
+ * The guardian power an obligation is scoped to, when it is scoped to one at all.
+ *
+ * A row is coarser than a dispatch. `guardian.approve_action` is one row, `O-3`, for all
+ * five powers — but the runtime does not evaluate one set of conditions for all five, and
+ * two of `O-3`'s obligations are guarded in the pallet by a `if let GuardianPower::…` arm.
+ * Attaching those to the row unconditionally closes the approve control for powers whose
+ * dispatch never reads the condition at all, which refuses what the chain would accept.
+ * That is the failure `check-dispatch-mirror.py` exists to prevent, arriving through the
+ * one door that checker does not watch.
+ *
+ * The literals are repeated here rather than imported: `guardian.ts` imports `SurfaceId`
+ * from this package, so the dependency runs the other way and an import would close a
+ * cycle. The repetition is not free-floating — the console passes its own `GuardianPower`
+ * and `PlaybookId` values straight into `blockingObligationsFor`, so a rename on either
+ * side stops compiling rather than silently unscoping an obligation.
+ */
+export interface ObligationScope {
+  readonly power:
+    | 'pause_intake'
+    | 'delay_once'
+    | 'force_rerun'
+    | 'activate_playbook'
+    | 'suspend_on_gate';
+  /** Narrower still: the one playbook whose dispatch reads the condition. */
+  readonly playbook?:
+    | 'PB-DEPEG'
+    | 'PB-MIGRATION'
+    | 'PB-ORACLE-VOID'
+    | 'PB-HALT-INTAKE'
+    | 'PB-RESERVE'
+    | 'PB-LEDGER-FREEZE';
+}
+
 export interface UnreadableObligation {
   readonly row: RowId;
   /** The condition §11.8 requires, in the words the user is shown. */
@@ -734,6 +768,14 @@ export interface UnreadableObligation {
   /** The open PLAN.md spec-question id. */
   readonly specQuestion: string;
   readonly disposition: 'stated' | 'blocking';
+  /**
+   * The dispatch arm that reads this condition, when only one does.
+   *
+   * `undefined` means the row's whole call reads it, which is the common case and stays
+   * the default. A scope narrows *which* pending actions the obligation speaks about — it
+   * never widens, and it never softens the obligation for the actions it does cover.
+   */
+  readonly scope?: ObligationScope;
 }
 
 const unread = (
@@ -742,7 +784,14 @@ const unread = (
   reason: string,
   specQuestion: string,
   disposition: 'stated' | 'blocking',
-): UnreadableObligation => ({ row, requirement, reason, specQuestion, disposition });
+  scope?: ObligationScope,
+): UnreadableObligation =>
+  // The key is omitted rather than set to `undefined`: `exactOptionalPropertyTypes` is on,
+  // so "absent" and "present and undefined" are different types here, and only the first
+  // one means *this obligation is not scoped*.
+  scope === undefined
+    ? { row, requirement, reason, specQuestion, disposition }
+    : { row, requirement, reason, specQuestion, disposition, scope };
 
 /**
  * Fee headroom in the **selected** asset — 11 §11.3, applied to every operator row.
@@ -1252,9 +1301,11 @@ const UNREADABLE: Partial<Readonly<Record<RowId, readonly UnreadableObligation[]
       '`approve_action` reads `Guardian.PlaybookRegistered[id]` **after** counting the fifth ' +
         'approval and refuses with `PlaybookNotRegistered`, and 02 §7.4 freezes no surface ' +
         'for that map. Replaced by an ordinary clause over the frozen read when SQ-1030 ' +
-        'closes; blocking until then, because the refusal costs a 5-of-7 signature.',
+        'closes; blocking until then, because the refusal costs a 5-of-7 signature. Scoped ' +
+        'to `ActivatePlaybook`, which is the arm the pallet guards it behind.',
       'SQ-1030',
       'blocking',
+      { power: 'activate_playbook' },
     ),
     unread(
       'O-3',
@@ -1262,9 +1313,12 @@ const UNREADABLE: Partial<Readonly<Record<RowId, readonly UnreadableObligation[]
       '`dispatch` refuses re-activation of PB-LEDGER-FREEZE while a record for it is in ' +
         '`Guardian.ActivePlaybooks` (`PlaybookAlreadyActive`) — it renews only through a ' +
         'values referendum, 06 §6.3 — and 02 §7.4 freezes no surface for that map. Replaced ' +
-        'by an ordinary clause over the frozen read when SQ-1030 closes.',
+        'by an ordinary clause over the frozen read when SQ-1030 closes. Scoped to ' +
+        '`ActivatePlaybook{ id: LedgerFreeze }`: `guardian_core::dispatch` refuses ' +
+        're-activation for that playbook alone, and every other playbook renews in place.',
       'SQ-1030',
       'blocking',
+      { power: 'activate_playbook', playbook: 'PB-LEDGER-FREEZE' },
     ),
     unread(
       'O-3',
@@ -1291,9 +1345,29 @@ export function unreadableObligationsFor(id: RowId): readonly UnreadableObligati
   return UNREADABLE[id] ?? [];
 }
 
-/** The obligations that close a control rather than being stated beside it. */
-export function blockingObligationsFor(id: RowId): readonly UnreadableObligation[] {
-  return unreadableObligationsFor(id).filter((entry) => entry.disposition === 'blocking');
+/**
+ * The obligations that close a control rather than being stated beside it.
+ *
+ * `subject` is the pending action the control would act on. Omitting it keeps **every**
+ * blocking obligation, which is the conservative reading and the right default: a caller
+ * that cannot say which power it is approving has not shown that the narrow ones do not
+ * apply, and an obligation dropped on an unproven premise is the fail-open shape this
+ * whole list exists to prevent. The guardian console omits it precisely once — when the
+ * pending power is `undecodable` — and that is the case where blocking is correct.
+ *
+ * A scoped obligation is dropped only on a positive match failure: the subject names a
+ * power, and it is not the power the pallet guards the condition behind.
+ */
+export function blockingObligationsFor(
+  id: RowId,
+  subject?: ObligationScope,
+): readonly UnreadableObligation[] {
+  return unreadableObligationsFor(id).filter((entry) => {
+    if (entry.disposition !== 'blocking') return false;
+    if (entry.scope === undefined || subject === undefined) return true;
+    if (entry.scope.power !== subject.power) return false;
+    return entry.scope.playbook === undefined || entry.scope.playbook === subject.playbook;
+  });
 }
 
 /** 11 §11.5's table, as data. */

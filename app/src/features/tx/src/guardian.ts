@@ -58,7 +58,7 @@
  */
 
 import { combine2, type Combined, type Verified } from '@bleavit/shared-types';
-import type { SurfaceId } from '@bleavit/transaction-builder';
+import type { ObligationScope, SurfaceId } from '@bleavit/transaction-builder';
 import type { EvidenceState } from './evidence.js';
 
 /** The five powers §11.8.2 names. Closed, so a form cannot invent a sixth. */
@@ -204,6 +204,25 @@ export type PendingPower =
 /** The power a decoded pending action names, or `undefined` when it could not be decoded. */
 export function pendingPowerName(power: PendingPower): GuardianPower | undefined {
   return power.kind === 'undecodable' ? undefined : power.kind;
+}
+
+/**
+ * The same power, as the scope `blockingObligationsFor` matches row obligations against.
+ *
+ * `undefined` for an undecodable power, and that is the whole point of returning it rather
+ * than throwing: an obligation scoped to `ActivatePlaybook` must still close the control
+ * when nobody can say whether this action *is* an `ActivatePlaybook`. Scoping narrows an
+ * obligation on evidence, never on the absence of it.
+ *
+ * The playbook id rides along because one of `O-3`'s two conditions is narrower than the
+ * power — `guardian_core::dispatch` refuses re-activation for `PB-LEDGER-FREEZE` alone.
+ */
+export function obligationSubjectOf(power: PendingPower): ObligationScope | undefined {
+  if (power.kind === 'undecodable') return undefined;
+  if (power.kind === 'activate_playbook') {
+    return { power: power.kind, playbook: power.id.value };
+  }
+  return { power: power.kind };
 }
 
 export interface PendingAction {

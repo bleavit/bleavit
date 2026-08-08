@@ -60,6 +60,7 @@ import {
   OPERATOR_SURFACE_ROWS,
   blockingObligationsFor,
   unreadableObligationsFor,
+  type ObligationScope,
   type OperatorSurfaceCall,
   type RowId,
   type UnreadableObligation,
@@ -169,12 +170,23 @@ export function operatorGate(
   call: OperatorSurfaceCall,
   session: TxSession,
   local: readonly OperatorBlock[],
+  subject?: ObligationScope,
 ): OperatorGate {
   const row = OPERATOR_SURFACE_ROWS[call];
   const unreadable = unreadableObligationsFor(row);
   const window = session.signingWindow;
+  // `subject` narrows the row's blocking obligations to the ones the pending action's
+  // dispatch actually evaluates. A row is one id for a whole call, but the pallet guards
+  // two of `O-3`'s conditions behind `if let GuardianPower::ActivatePlaybook` — so
+  // splicing them in unconditionally closed the approve control for `pause_intake`,
+  // `delay_once`, `force_rerun` and `suspend_on_gate`, whose dispatch never reads either
+  // one. Refusing what the chain would accept is the mirror image of the fail-open defect
+  // this gate was built for, and it is just as wrong.
+  //
+  // Omitted by every caller whose row has no scoped obligation, and by the guardian
+  // console when the pending power did not decode — see `blockingObligationsFor`.
   const blocks: OperatorBlock[] = [
-    ...blockingObligationsFor(row).map(obligationBlock),
+    ...blockingObligationsFor(row, subject).map(obligationBlock),
     ...local,
   ];
   // **The session must name the transaction, and the proof must be that transaction's.**
