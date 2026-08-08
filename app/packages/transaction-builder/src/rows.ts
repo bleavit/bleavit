@@ -797,6 +797,22 @@ const O2: readonly PreconditionClause[] = [
  * `Guardian.PendingActions` and `Guardian.Approvals` in 02 §7.4 (SQ-616). Until they were
  * frozen this row carried a `blocking` unreadable obligation instead, which closed S15
  * outright.
+ *
+ * **The condition clauses are §11.12 E20's, not the approve row's, and that is a live
+ * disagreement (SQ-1019).** §11.8.2's approve row lists four preconditions and no trigger;
+ * E20 — titled *"Guardian approval"* — requires *"allowance meters, trigger-condition
+ * status"* in its V-facet and blocks on an inactive condition in its F-facet. Both are
+ * normative and neither cites the other. This row is written against E20, because E20 says
+ * *"not active **at B′**"* and a condition evaluated anywhere other than a declared clause is
+ * one evaluated at whatever block the console happened to hold. The runtime agrees with E20's
+ * direction: `propose_action` validates nothing, and `check_and_consume` — the allowance
+ * charge and the `TriggerInactive` refusal both — runs inside `dispatch`, which
+ * `approve_action` reaches at the **threshold** approval. If §11.8.2's row is authoritative
+ * instead, these clauses and `approvalBlocks`' condition arm become a display obligation.
+ *
+ * The trigger items are the same seven O-4 declares and for the same reason: the row is fixed,
+ * so a preparation cannot narrow its clause list to whichever trigger the action it opened
+ * happens to name.
  */
 const O3: readonly PreconditionClause[] = [
   clause('O-3', 'you are a guardian', 'storage.guardian.members', 'storage', 'acting', { key: 'member' }),
@@ -808,6 +824,21 @@ const O3: readonly PreconditionClause[] = [
   // §11.8.2: playbooks are preimage-committed enumerated batches, "decoded and displayed,
   // never summarized away".
   clause('O-3', 'the enumerated call batch’s preimage is noted', 'storage.preimage.preimage_for', 'storage', 'chain', { key: 'batch-preimage' }),
+  // E20's V-facet, third item: the allowance `check_and_consume` charges at the threshold
+  // approval, so the approver it refuses is the fifth one.
+  clause('O-3', 'this action’s power still has allowance', 'storage.guardian.allowances', 'storage', 'acting', { key: 'allowance' }),
+  // E20's V-facet fourth item and its F-facet — §11.8.2's own trigger table, read at B′.
+  clause('O-3', 'the dead-man and reserve-health trigger flags are read at B′', 'storage.constitution.phase_flags', 'storage', 'chain', { key: 'trigger-phase-flags' }),
+  clause('O-3', 'the gate-breach trigger flag for the current epoch is read at B′', 'storage.welfare.gate_breach_flags', 'storage', 'chain', { key: 'trigger-gate-breach' }),
+  clause('O-3', 'the current epoch the gate-breach flag is keyed to', 'storage.epoch.epoch_of', 'storage', 'chain', { key: 'trigger-epoch' }),
+  clause('O-3', 'the migration-halt trigger is read at B′', 'storage.execution_guard.migration_halt', 'storage', 'chain', { key: 'trigger-migration-halt' }),
+  clause('O-3', 'the pending-VOID latch, for this cohort and chain-wide', 'storage.epoch.pending_oracle_voids', 'storage', 'chain', { key: 'trigger-pending-void' }),
+  clause('O-3', 'the I-4 ledger-drift latch is read at B′', 'storage.ledger.ledger_drifted', 'storage', 'chain', { key: 'trigger-ledger-drift' }),
+  // The rest of `check_and_consume`, which runs inside `dispatch` and therefore falls on the
+  // **threshold** approver — the same two reads O-4 declares, and for the same reason
+  // (SQ-1018). Evaluating the trigger and not these would be the reported instance again.
+  clause('O-3', 'the longest hold this chain admits is read at B′', 'constant.guardian.playbook_freeze_window_blocks', 'constant', 'chain', { key: 'hold-window' }),
+  clause('O-3', 'the proposal a rerun action names is in a state that admits it', 'storage.epoch.proposals', 'storage', 'chain', { key: 'rerun-state' }),
   ...feeHeadroom('O-3'),
 ];
 
@@ -844,6 +875,17 @@ const O4: readonly PreconditionClause[] = [
   // **Not** `PhaseFlags` bit 5, which is the applied freeze effect and is clear at the
   // moment an activation is proposed (02 §7.4, contract v29; 06 §6.3).
   clause('O-4', 'the I-4 ledger-drift latch is read at B′', 'storage.ledger.ledger_drifted', 'storage', 'chain', { key: 'trigger-ledger-drift' }),
+  // **The two clauses §11.8.2's propose row does not list, and `check_and_consume` enforces
+  // (SQ-1018).** The row closes its precondition list at *"allowance remaining for the power"*
+  // plus the activation trigger, while `guardian_core::check_and_consume` also refuses
+  // `PauseIntake.until` and `ActivatePlaybook.expiry` outside `[now, now + HOLD_MAX_BLOCKS]`
+  // (`DurationTooLong`) and both rerun powers on the proposal's state and its spent-rerun flags
+  // (`NotRerunnable`, `AlreadyRerun`). Every input is a frozen surface — `HOLD_MAX_BLOCKS` is
+  // `Guardian.PlaybookFreezeWindowBlocks`, and `RuntimeGuardianStatus::status` reads nothing but
+  // `Epoch.Proposals` — so the fail-closed reading is implementable rather than an obligation
+  // with no surface, and whether the *row* should carry them is the question raised.
+  clause('O-4', 'the longest hold this chain admits is read at B′', 'constant.guardian.playbook_freeze_window_blocks', 'constant', 'chain', { key: 'hold-window' }),
+  clause('O-4', 'the proposal a rerun power names is in a state that admits it', 'storage.epoch.proposals', 'storage', 'chain', { key: 'rerun-state' }),
   ...feeHeadroom('O-4'),
 ];
 
