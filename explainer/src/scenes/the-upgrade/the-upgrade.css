@@ -1,0 +1,72 @@
+/*
+ * Scene-local rules for the upgrade.
+ *
+ * Two of these are semantic rather than cosmetic:
+ *
+ *  - `.up-panel--major` gives a rule down the leading edge of the two panels a
+ *    reader must not skim: the ordering correction, and the pre-committed
+ *    repair. The first is the mistake almost everybody makes on this subject,
+ *    and the second is the idea the scene exists to hand over. Both would be
+ *    lost in a run of equal-weight panels.
+ *  - `.up-phase-name` prints the phase's name under its number inside the same
+ *    row header. The number alone is a label nobody can hold in their head
+ *    ("what was phase 5 again?"), and a separate column for it would push the
+ *    three columns that carry the actual content off a narrow screen.
+ */
+
+.up-panel--major {
+  border-left: 2px solid var(--accent);
+  padding-left: calc(var(--sp-4) - 2px);
+}
+
+.up-table th[scope='row'] {
+  background: var(--well);
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: var(--t-caption);
+  font-weight: 600;
+  color: var(--ink);
+  white-space: normal;
+  vertical-align: top;
+}
+
+.up-table th[scope='row'].mono {
+  font-family: var(--font-mono);
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.up-table th[scope='row'].numeric {
+  font-family: var(--font-mono);
+  white-space: normal;
+}
+
+.up-table td {
+  vertical-align: top;
+}
+
+.up-phase-name {
+  display: block;
+  margin-top: 2px;
+  font-family: var(--font-sans);
+  font-size: var(--t-micro);
+  line-height: var(--lh-micro);
+  font-weight: 500;
+  color: var(--ink-2);
+}
+
+/* The phase table has four columns and one of them is a sentence. It scrolls
+   inside the panel rather than dropping a column, because the column a narrow
+   layout would drop is "what a passing market causes" — the only one that
+   answers the question the panel is titled with. */
+.up-scroll {
+  overflow-x: auto;
+}
+
+.up-chiprow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  align-items: center;
+  margin: 0 0 var(--sp-3);
+}

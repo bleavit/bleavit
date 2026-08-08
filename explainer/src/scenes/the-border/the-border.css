@@ -1,0 +1,65 @@
+/*
+ * Scene-local rules only, and every one of them scoped to `.border-rail`.
+ * Scene stylesheets are bundled globally, so an unscoped selector here would
+ * reach into every other scene's rail.
+ *
+ * Two of these carry meaning rather than decoration:
+ *
+ *  - `.border-shape` keeps an XCM instruction name in its frozen spelling and
+ *    never tints it. A refused shape is not an alarm — most of what the wall
+ *    turns away is ordinary traffic addressed to a chain that does not want it —
+ *    so the refusal is carried by the surrounding words and by the table it is
+ *    in, never by colour.
+ *  - `.border-table` row headers read as data rather than as column headings.
+ *    The design system styles `th` as uppercase micro type, which is right for a
+ *    column and unreadable for a twenty-character instruction name.
+ */
+
+.border-rail .border-table th[scope='row'] {
+  background: var(--well);
+  color: var(--ink);
+  font-size: var(--t-caption);
+  font-weight: 500;
+  text-transform: none;
+  letter-spacing: 0;
+  padding: var(--sp-2);
+  vertical-align: top;
+  white-space: normal;
+}
+
+.border-rail .border-table th[scope='row'].numeric {
+  font-family: var(--font-mono);
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+
+/* Instruction names are chain identifiers, not prose: mono keeps them greppable
+   against the runtime, and normal case keeps them true to their own spelling. */
+.border-rail .border-shape {
+  font-family: var(--font-mono);
+  font-size: var(--t-micro);
+  line-height: var(--lh-micro);
+  white-space: normal;
+  word-break: break-word;
+}
+
+/* The instruction tables are wider than a rail at small sizes. They scroll in
+   their own box rather than pushing the page sideways. */
+.border-rail .border-scroll {
+  overflow-x: auto;
+}
+
+.border-rail .border-chiprow {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: center;
+  flex-wrap: wrap;
+  margin: 0 0 var(--sp-3);
+}
+
+/* An absent bound is a real state — doc 13 prints "—" where a row has no
+   ceiling — so it is drawn as an em dash in the secondary ink rather than left
+   blank, which would read as a value nobody filled in. */
+.border-rail .border-absent {
+  color: var(--ink-3);
+}

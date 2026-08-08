@@ -1,0 +1,85 @@
+/*
+ * Scene-local rules for the hosted question service.
+ *
+ * Two of these are semantic rather than cosmetic:
+ *
+ *  - `.svc-phase` keeps a lifecycle state in its frozen capitalised spelling and
+ *    never colours it. `Voided` is the ordinary, healthy failure edge — every
+ *    trader is paid back at par — so tinting it as an alarm would misteach the
+ *    one state a reader most needs to feel neutral about.
+ *  - `.svc-formula` is monospaced because the tariff is an expression a customer
+ *    has to be able to evaluate before registering, not a sentence about one.
+ *    It is deliberately not the page's body face: a line a reader is expected to
+ *    reproduce should look like a line to reproduce.
+ */
+
+.svc-table th[scope='row'] {
+  background: var(--well);
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: var(--t-caption);
+  font-weight: 500;
+  color: var(--ink);
+  white-space: normal;
+  vertical-align: top;
+}
+
+.svc-table th[scope='row'].mono {
+  font-family: var(--font-mono);
+  color: var(--ink-2);
+}
+
+.svc-table th[scope='row'].numeric {
+  font-family: var(--font-mono);
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+
+.svc-table td {
+  vertical-align: top;
+}
+
+/* The third column of the lifecycle table is the exact reading, and it is
+   supposed to sit behind the plain one rather than beside it as an equal. */
+.svc-detail {
+  font-size: var(--t-micro);
+  line-height: var(--lh-micro);
+  color: var(--ink-2);
+}
+
+.svc-phase {
+  font-family: var(--font-mono);
+  font-size: var(--t-caption);
+  color: var(--ink);
+  white-space: nowrap;
+}
+
+.svc-formula {
+  font-family: var(--font-mono);
+  font-size: var(--t-caption);
+  line-height: var(--lh-body);
+  color: var(--ink);
+  background: var(--well);
+  border: 1px solid var(--line);
+  padding: var(--sp-2) var(--sp-3);
+  margin: 0 0 var(--sp-3);
+  overflow-x: auto;
+  max-width: none;
+}
+
+.svc-list {
+  margin: var(--sp-2) 0 0;
+  padding-left: var(--sp-4);
+  max-width: 66ch;
+}
+
+.svc-list li {
+  font-size: var(--t-caption);
+  line-height: var(--lh-caption);
+  color: var(--ink-2);
+  margin-bottom: var(--sp-2);
+}
+
+.svc-list li strong {
+  color: var(--ink);
+}

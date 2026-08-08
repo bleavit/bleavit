@@ -1,0 +1,144 @@
+/*
+ * Scene-local rules for the decision gauntlet.
+ *
+ * Three of these are semantic rather than cosmetic:
+ *
+ *  - `.gauntlet-shortname` prints the canvas label of a check inside its rail
+ *    row. The diagram has to say "4 Ruin veto" to be readable at a glance and the
+ *    rail has to say `Gate veto`, which is the name the specification uses; this
+ *    line is the join between them, and without it the two vocabularies would
+ *    look like two different lists.
+ *
+ *  - `.gauntlet-chip-reason` removes the chip's uppercase transform so a
+ *    `RejectReason` keeps its camel case and stays greppable against doc 02's
+ *    frozen variant names. It carries no colour of its own, so an ordinary
+ *    `Reject(...)` chip renders in exactly the ink an Adopt chip does — rejection
+ *    is the ordinary healthy answer of a market that looked and found no
+ *    improvement. Colour arrives only from the chip class the scene pairs it
+ *    with, and `.chip--safety` is spent on the three refusals
+ *    `protocol/lifecycle.ts` classifies as safety states (the two gate vetoes and
+ *    a process hold) and on nothing else.
+ *  - `.gauntlet-step--unreached` dims a step that was never evaluated. An
+ *    unevaluated check must read as weaker than a satisfied one, never as equal.
+ */
+
+.gauntlet-outcome {
+  font-size: var(--t-sub);
+  line-height: var(--lh-sub);
+  font-weight: 600;
+  margin: 0 0 var(--sp-2);
+}
+
+.gauntlet-chiprow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  align-items: center;
+  margin: 0 0 var(--sp-3);
+}
+
+.gauntlet-chip-reason {
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+/* Row headers keep the plate so a table does not look torn along its left edge. */
+.gauntlet-table th[scope='row'] {
+  background: var(--well);
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: var(--t-caption);
+  font-weight: 500;
+  color: var(--ink);
+  white-space: normal;
+  vertical-align: top;
+}
+
+.gauntlet-table th[scope='row'].numeric {
+  font-family: var(--font-mono);
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+
+/* The checklist row: the spec name, the canvas label, then what it guards
+   against — three lines, because a reader scanning the table is asking "what is
+   this check for?" and should not have to open a drawer to find out. */
+.gauntlet-check {
+  display: block;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.gauntlet-shortname {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: var(--t-micro);
+  color: var(--ink-3);
+}
+
+.gauntlet-check__guards {
+  display: block;
+  margin-top: 2px;
+  font-size: var(--t-caption);
+  line-height: var(--lh-caption);
+  color: var(--ink-2);
+}
+
+.gauntlet-steps {
+  list-style: none;
+  margin: var(--sp-4) 0 0;
+  padding: 0;
+}
+
+.gauntlet-step {
+  padding: var(--sp-3) 0;
+  border-top: 1px solid var(--ink-3);
+}
+
+.gauntlet-step:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.gauntlet-step--unreached .gauntlet-step__name,
+.gauntlet-step--unreached .gauntlet-step__guards {
+  color: var(--ink-2);
+}
+
+.gauntlet-step__name {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: baseline;
+  margin: 0 0 var(--sp-1);
+}
+
+.gauntlet-step__n {
+  font-family: var(--font-mono);
+  font-size: var(--t-caption);
+  color: var(--ink-2);
+  min-width: 1.8em;
+  flex: none;
+}
+
+.gauntlet-step__guards,
+.gauntlet-step__aside {
+  font-size: var(--t-caption);
+  line-height: var(--lh-caption);
+  color: var(--ink-2);
+  margin: 0 0 var(--sp-2);
+  max-width: 66ch;
+}
+
+.gauntlet-step__verdict {
+  margin: 0 0 var(--sp-2);
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  align-items: baseline;
+}
+
+.gauntlet-absent {
+  font-family: var(--font-mono);
+  font-size: var(--t-caption);
+  color: var(--ink-2);
+}

@@ -1,0 +1,85 @@
+/*
+ * Scene-local rules only, and every one of them scoped to `.epoch-rail`.
+ * Scene stylesheets are bundled globally, so an unscoped selector here would
+ * reach into every other scene's rail.
+ */
+
+/* The registry writes the constitution in ratios, so the fraction column has to
+   print a true diagonal fraction. The selector has to reach the inner readout
+   span: `[data-role='readout']` re-asserts tabular figures on every <Value>, and
+   an ancestor `.kernel-fraction` would otherwise lose to it. */
+.epoch-rail .kernel-fraction [data-role='readout'] {
+  font-variant-numeric: diagonal-fractions;
+  font-feature-settings: 'frac' 1, 'tnum' 1;
+}
+
+/* `<Value>` is an inline-flex, `white-space: nowrap` chip, which is right for a
+   number and wrong for the four spec-quoted *sentences* this rail carries through
+   it (the Work column, the epoch-length verdict, both capacity verdicts). They
+   still need provenance, so they stay `<Value>`s and get told to behave like
+   text; otherwise the rail scrolls sideways. */
+.epoch-rail .value.is-prose {
+  display: inline;
+  white-space: normal;
+}
+
+/* Row headers keep their semantics but must read as data cells: the design
+   system styles `th` for column headers, which are uppercase micro type. */
+.epoch-rail tbody th[scope='row'] {
+  background: var(--well);
+  color: var(--ink);
+  font-size: var(--t-caption);
+  text-transform: none;
+  letter-spacing: -0.006em;
+  padding: var(--sp-2);
+  vertical-align: top;
+  white-space: normal;
+}
+
+.epoch-rail .epoch-now {
+  display: flex;
+  gap: var(--sp-4);
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.epoch-rail .epoch-now__grid {
+  flex: 1 1 220px;
+  min-width: 0;
+}
+
+/* The current phase is marked by a rule on the row's leading edge, never by a
+   tint: a phase is neither good nor bad, it is only where the clock is. */
+.epoch-rail .epoch-phases tr[data-current='true'] > :first-child {
+  box-shadow: inset 2px 0 0 var(--ink);
+}
+
+.epoch-rail .epoch-work {
+  color: var(--ink-2);
+}
+
+.epoch-rail .epoch-defs {
+  margin: 0;
+  font-size: var(--t-caption);
+}
+
+.epoch-rail .epoch-defs dt {
+  font-weight: 600;
+  margin-top: var(--sp-2);
+}
+
+.epoch-rail .epoch-defs dd {
+  margin: 2px 0 0;
+  color: var(--ink-2);
+}
+
+.epoch-rail .epoch-pair {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+
+.epoch-rail .epoch-sep {
+  color: var(--ink-3);
+}

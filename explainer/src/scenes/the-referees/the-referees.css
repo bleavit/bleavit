@@ -1,0 +1,184 @@
+/*
+ * Scene-local rules for the referees.
+ *
+ * Three of these carry meaning rather than decoration:
+ *
+ *  - `.ref-code` keeps every call and parameter key in its frozen spelling and
+ *    never changes colour. These strings are the ones an auditor greps for, so
+ *    a stylesheet that prettified them would break the only thing they are for.
+ *  - `.ref-warn` marks the one paragraph on this screen a reader must not skim:
+ *    the verdict word `upheld` means the *attestation* stood, not the challenge.
+ *    Read the other way round, every outcome in that panel inverts — so it gets
+ *    a rule down its leading edge, the same weight the execution guard gives to
+ *    recoverable-versus-terminal.
+ *  - `.ref-prohibition` is a list of things that cannot happen. It is set in the
+ *    same weight as the powers above it on purpose: an absence rendered as a
+ *    footnote reads as an oversight, and this absence is the design.
+ */
+
+.ref-lede2 {
+  margin: var(--sp-3) 0 var(--sp-4);
+  font-size: var(--t-caption);
+  line-height: var(--lh-caption);
+  color: var(--ink-2);
+  max-width: 66ch;
+}
+
+.ref-para {
+  margin: 0 0 var(--sp-3);
+  font-size: var(--t-caption);
+  line-height: var(--lh-caption);
+  color: var(--ink-2);
+  max-width: 70ch;
+}
+
+.ref-para--tight {
+  margin-bottom: 0;
+}
+
+.ref-para strong {
+  color: var(--ink);
+}
+
+.ref-warn {
+  border-left: 2px solid var(--ink);
+  padding-left: calc(var(--sp-4) - 2px);
+}
+
+.ref-subhead {
+  font-size: var(--t-micro);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-2);
+  margin: var(--sp-4) 0 var(--sp-2);
+}
+
+.ref-caption {
+  caption-side: bottom;
+  text-align: left;
+  padding: var(--sp-2) var(--sp-2) 0;
+  font-size: var(--t-micro);
+  line-height: var(--lh-micro);
+  color: var(--ink-2);
+  max-width: 70ch;
+}
+
+.ref-table th[scope='row'] {
+  background: var(--well);
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: var(--t-caption);
+  font-weight: 500;
+  color: var(--ink);
+  white-space: normal;
+  vertical-align: top;
+}
+
+.ref-table td {
+  vertical-align: top;
+}
+
+/* The word the drawing uses, then the word behind the door. Both are on the
+   canvas, so the table has to print both or the picture has no key. */
+.ref-door {
+  display: block;
+  color: var(--ink);
+}
+
+.ref-behind {
+  display: block;
+  font-size: var(--t-micro);
+  line-height: var(--lh-micro);
+  color: var(--ink-2);
+}
+
+.ref-code {
+  font-family: var(--font-mono);
+  font-size: var(--t-micro);
+  line-height: var(--lh-micro);
+  color: var(--ink-2);
+  overflow-wrap: anywhere;
+}
+
+.ref-plain {
+  display: block;
+  color: var(--ink);
+}
+
+.ref-bound {
+  display: block;
+  margin-top: 2px;
+  font-size: var(--t-micro);
+  line-height: var(--lh-micro);
+  color: var(--ink-2);
+}
+
+.ref-allowance {
+  font-family: var(--font-mono);
+  font-size: var(--t-micro);
+  white-space: nowrap;
+  color: var(--ink-2);
+}
+
+.ref-facts {
+  margin: 0 0 var(--sp-3);
+}
+
+.ref-fact {
+  padding: var(--sp-2) 0;
+  border-top: 1px solid var(--ink-3);
+}
+
+.ref-fact dt {
+  font-size: var(--t-micro);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-2);
+  margin-bottom: 2px;
+}
+
+.ref-fact dd {
+  margin: 0;
+  font-size: var(--t-caption);
+  line-height: var(--lh-caption);
+  color: var(--ink);
+}
+
+.ref-notes {
+  margin: var(--sp-3) 0 0;
+}
+
+.ref-note {
+  padding: var(--sp-2) 0;
+  border-top: 1px solid var(--ink-3);
+}
+
+.ref-note dt {
+  font-size: var(--t-caption);
+  font-weight: 600;
+  color: var(--ink);
+  margin-bottom: 2px;
+}
+
+.ref-note dd {
+  margin: 0;
+  font-size: var(--t-caption);
+  line-height: var(--lh-caption);
+  color: var(--ink-2);
+  max-width: 70ch;
+}
+
+.ref-list {
+  margin: 0 0 var(--sp-3);
+  padding-left: var(--sp-4);
+}
+
+.ref-prohibition {
+  margin-bottom: var(--sp-2);
+  font-size: var(--t-caption);
+  line-height: var(--lh-caption);
+  color: var(--ink);
+  max-width: 70ch;
+}
