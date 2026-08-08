@@ -122,6 +122,23 @@ export interface Attestation {
   readonly keyId: string;
   readonly organization?: unknown;
   readonly valid: boolean;
+  /**
+   * The keyring generation this attestor key belongs to (§2.1).
+   *
+   * Required, and required for the same reason `countReleaseSignatures` reads it: §5.2 has the
+   * monitor verify *"the minisign signatures and ≥ 2 attestations against the current keyring
+   * generation"*, so an attestation carrying none cannot be counted against one. It was absent
+   * until 2026-08-08, which made §2.3's revocation rule unreachable for attestors — see
+   * `countAttestations`.
+   */
+  readonly generation: number;
+  /**
+   * Why it did not verify, when it did not — the same field `ReleaseSignature` carries, for
+   * the same reason. *"The attestation signature does not verify"* is the wrong sentence for
+   * an attestation by a key the registry never published, and an operator told the bytes are
+   * wrong goes and checks bytes that are intact.
+   */
+  readonly why?: string | undefined;
 }
 
 /** Why one signature or attestation did not count. Reported, never merely subtracted. */
@@ -193,13 +210,50 @@ export function countReleaseSignatures(
 /**
  * Count attestations by **organization**, per §1.4 gate 2's "different
  * organizations/infrastructure". Two attestations from one org is one reproduction.
+ *
+ * ## The keyring is a parameter, and it was missing
+ *
+ * §2.3 point 2 names the three verifications a revoked key must be invalid for: *"self-check,
+ * update verification, **attestation counting**"*. Until 2026-08-08 this function took no
+ * keyring at all, so a revoked attestor key kept counting toward gate 2 — the one credential
+ * class where §2.3's own sentence spells the requirement out. The sibling implementation in
+ * `tools/monitoring/attestation_monitor.py` applies the bitmask to release keys and attestor
+ * keys alike, so the two disagreed and only one was right.
+ *
+ * The keyring is **required** rather than optional for the reason this repository has closed
+ * three times over: an optional keyring is a revocation check that defaults off, and a caller
+ * that forgets it gets a verdict, not a type error.
  */
-export function countAttestations(attestations: readonly Attestation[]): AttestationCount {
+export function countAttestations(
+  attestations: readonly Attestation[],
+  keyring: Keyring,
+): AttestationCount {
+  if (!Number.isInteger(keyring?.generation)) {
+    throw new VerifyError('the keyring declares no generation; §2.1 carries it as a u32');
+  }
+  const revoked = new Set<string>(keyring.revokedKeyIds ?? []);
   const organizations = new Set<string>();
   const rejected: RejectedCredential[] = [];
   for (const attestation of attestations) {
     if (!attestation.valid) {
-      rejected.push({ keyId: attestation.keyId, why: 'the attestation signature does not verify' });
+      rejected.push({
+        keyId: attestation.keyId,
+        why: attestation.why ?? 'the attestation signature does not verify',
+      });
+      continue;
+    }
+    if (attestation.generation !== keyring.generation) {
+      // §5.2: attestations are verified against the *current* keyring generation. An
+      // attestation under a previous one reproduces a build against a keyring this release
+      // did not publish.
+      rejected.push({
+        keyId: attestation.keyId,
+        why: `attested under keyring generation ${attestation.generation}, not the current ${keyring.generation}`,
+      });
+      continue;
+    }
+    if (revoked.has(attestation.keyId)) {
+      rejected.push({ keyId: attestation.keyId, why: 'the key is marked revoked in ReleaseChannel' });
       continue;
     }
     if (typeof attestation.organization !== 'string' || attestation.organization.trim().length === 0) {
@@ -223,6 +277,16 @@ export interface VerdictInputs {
   readonly keyring: Keyring;
   readonly attestations: readonly Attestation[];
   readonly minimumSignatures?: number;
+  /**
+   * §1.3's `--require-attestations N`, held to the same rule as the signature minimum.
+   *
+   * §1.4 states that rule about a deployment's minimum: it MAY require more, MUST state its
+   * minimum explicitly rather than inherit one silently, and MUST NOT configure fewer. The
+   * sentence sits in the release-signature paragraph, and the flag that makes an attestation
+   * minimum configurable is §1.3's — so a configurable minimum with no floor under it would
+   * be the one place a release could be told to accept a single reproduction.
+   */
+  readonly minimumAttestations?: number;
 }
 
 export interface Verdict {
@@ -238,6 +302,7 @@ export function releaseVerdict({
   keyring,
   attestations,
   minimumSignatures = SIGNATURE_FLOOR,
+  minimumAttestations = ATTESTATION_FLOOR,
 }: VerdictInputs): Verdict {
   if (minimumSignatures < SIGNATURE_FLOOR) {
     // §1.4: "A deployment MAY require more and MUST state its minimum explicitly rather than
@@ -247,9 +312,15 @@ export function releaseVerdict({
         'may require more and must not configure fewer',
     );
   }
+  if (minimumAttestations < ATTESTATION_FLOOR) {
+    throw new VerifyError(
+      `a minimum of ${minimumAttestations} attestation(s) is below 12 §1.4 gate 2's floor of ` +
+        `${ATTESTATION_FLOOR}; a deployment may require more and must not configure fewer`,
+    );
+  }
   const failures: string[] = [];
   const sigs = countReleaseSignatures(signatures, keyring);
-  const atts = countAttestations(attestations);
+  const atts = countAttestations(attestations, keyring);
 
   if (!selfCheck.ok) {
     failures.push(
@@ -263,9 +334,9 @@ export function releaseVerdict({
         `(12 §1.4). Rejected: ${sigs.rejected.map((r) => `${r.keyId} — ${r.why}`).join('; ') || 'none'}`,
     );
   }
-  if (atts.independentOrganizations < ATTESTATION_FLOOR) {
+  if (atts.independentOrganizations < minimumAttestations) {
     failures.push(
-      `${atts.independentOrganizations} independent attesting organization(s); ${ATTESTATION_FLOOR} required ` +
+      `${atts.independentOrganizations} independent attesting organization(s); ${minimumAttestations} required ` +
         '(12 §1.4 gate 2 — builders in different organizations/infrastructure)',
     );
   }

@@ -1,0 +1,26 @@
+{
+  "schema": "bleavit.app-release.v1",
+  "arweaveManifestTxId": "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM",
+  "keyringGeneration": 4,
+  "perFileHashes": {
+    "index.html": "c5b52b3954cd2bd3d3c1fa019c569c69692b997d6943056c60aed3177d47d7b2",
+    "assets/app.js": "17d407d29ed5a6adbf766c0633777306289e205b11f363dbe69e9c9b27b10411",
+    "assets/logo.png": "289c77a179831309c3d4505952b0e5ff6bb91c0b4c6f68a9da8b1ed6d38c5e64"
+  },
+  "release_signatures": [
+    {
+      "txid": "S1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "txid": "S2bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  ],
+  "attestations": [
+    {
+      "txid": "A1ccccccccccccccccccccccccccccccccccccccccc"
+    },
+    {
+      "txid": "A2ddddddddddddddddddddddddddddddddddddddddd"
+    }
+  ]
+}

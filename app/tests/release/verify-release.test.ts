@@ -13,11 +13,14 @@ import assert from 'node:assert/strict';
 import type { ReleaseIdentity } from '@bleavit/verify';
 import { runSelfCheck } from '@bleavit/verify';
 
+import type { Population } from '../../tools/verify-release/registry.ts';
 import {
   DISJOINT_PAIRS,
+  KEYED_POPULATIONS,
   RegistryError,
   checkControllerQuorum,
   checkDisjointness,
+  keyringFor,
   operatorsIn,
   parseRegistry,
 } from '../../tools/verify-release/registry.ts';
@@ -43,8 +46,29 @@ const att = (keyId: string, organization: unknown, over: Partial<Attestation> = 
   keyId,
   organization,
   valid: true,
+  generation: 3,
   ...over,
 });
+
+/** A registry entry with every field the schema requires, so a test states only what it varies. */
+const who = (
+  id: string,
+  population: Population,
+  operator: string,
+  over: Partial<Record<string, unknown>> = {},
+): Record<string, unknown> => ({
+  id,
+  population,
+  operator,
+  organization: `${operator} Ltd`,
+  ...(population === 'release-signer' || population === 'attestor'
+    ? { generation: 3, revocationIndex: REVOCATION.next() }
+    : {}),
+  ...over,
+});
+
+/** Hands out a fresh revocation index per entry: 02 §12 gives one bit to one key. */
+const REVOCATION = { value: 0, next(): number { this.value += 1; return this.value - 1; } };
 
 /** The first element, with the reason it had to be there — `[0]` on an empty list is not a
  * failing assertion, it is a `TypeError` blamed on the harness. */
@@ -106,13 +130,13 @@ test('a keyring with no generation is refused rather than defaulted', () => {
 test('attestations are counted by organization, not by signature', () => {
   // §1.4 gate 2: "builders in different organizations/infrastructure". Two attestations from
   // one org is one reproduction, and independence is the entire claim.
-  assert.equal(countAttestations([att('A', 'acme'), att('B', 'acme')]).independentOrganizations, 1);
-  assert.equal(countAttestations([att('A', 'acme'), att('B', 'globex')]).independentOrganizations, 2);
+  assert.equal(countAttestations([att('A', 'acme'), att('B', 'acme')], KEYRING).independentOrganizations, 1);
+  assert.equal(countAttestations([att('A', 'acme'), att('B', 'globex')], KEYRING).independentOrganizations, 2);
 });
 
 test('an attestation with no declared organization is refused, not counted', () => {
   // It cannot be shown independent of any other.
-  const counted = countAttestations([att('A', 'acme'), att('B', '  ')]);
+  const counted = countAttestations([att('A', 'acme'), att('B', '  ')], KEYRING);
   assert.equal(counted.independentOrganizations, 1);
   assert.match(first(counted.rejected, 'rejection').why, /independence is unshowable/);
 });
@@ -196,11 +220,11 @@ test('disjointness is evaluated over operators — the key-id reading would pass
   // That is why §2.2 point 1 requires the operator mapping before point 2 can mean anything.
   const entries = parseRegistry({
     entries: [
-      { id: 'RWQ-1', population: 'release-signer', operator: 'Ada' },
-      { id: 'RWQ-2', population: 'release-signer', operator: 'Grace' },
-      { id: 'ar://ANT-1', population: 'arns-controller', operator: 'Ada' },
-      { id: 'ar://ANT-2', population: 'arns-controller', operator: 'Linus' },
-      { id: 'mon-1', population: 'monitor-operator', operator: 'Grace' },
+      who('RWQ-1', 'release-signer', 'Ada'),
+      who('RWQ-2', 'release-signer', 'Grace'),
+      who('ar://ANT-1', 'arns-controller', 'Ada'),
+      who('ar://ANT-2', 'arns-controller', 'Linus'),
+      who('mon-1', 'monitor-operator', 'Grace'),
     ],
   });
   const { violations } = checkDisjointness(entries);
@@ -215,9 +239,9 @@ test('a monitor operator who is also an ArNS controller is a violation', () => {
   // their own repoint is not an independent observer.
   const entries = parseRegistry({
     entries: [
-      { id: 'RWQ-1', population: 'release-signer', operator: 'Ada' },
-      { id: 'ar://ANT-1', population: 'arns-controller', operator: 'Linus' },
-      { id: 'mon-1', population: 'monitor-operator', operator: 'Linus' },
+      who('RWQ-1', 'release-signer', 'Ada'),
+      who('ar://ANT-1', 'arns-controller', 'Linus'),
+      who('mon-1', 'monitor-operator', 'Linus'),
     ],
   });
   const { violations } = checkDisjointness(entries);
@@ -228,10 +252,10 @@ test('a monitor operator who is also an ArNS controller is a violation', () => {
 test('attestors may overlap release signers — §2.2 separates two populations, not four', () => {
   const entries = parseRegistry({
     entries: [
-      { id: 'RWQ-1', population: 'release-signer', operator: 'Ada' },
-      { id: 'ATT-1', population: 'attestor', operator: 'Ada' },
-      { id: 'ar://ANT-1', population: 'arns-controller', operator: 'Linus' },
-      { id: 'mon-1', population: 'monitor-operator', operator: 'Grace' },
+      who('RWQ-1', 'release-signer', 'Ada'),
+      who('ATT-1', 'attestor', 'Ada'),
+      who('ar://ANT-1', 'arns-controller', 'Linus'),
+      who('mon-1', 'monitor-operator', 'Grace'),
     ],
   });
   assert.deepEqual(checkDisjointness(entries).violations, []);
@@ -242,9 +266,7 @@ test('an empty population is reported separately from a clean separation', () =>
   // Disjointness between an empty set and anything passes. Passing because a population is
   // empty is not the same claim as passing because two populations do not overlap, and only
   // the second is the control working.
-  const entries = parseRegistry({
-    entries: [{ id: 'RWQ-1', population: 'release-signer', operator: 'Ada' }],
-  });
+  const entries = parseRegistry({ entries: [who('RWQ-1', 'release-signer', 'Ada')] });
   const { violations, empty } = checkDisjointness(entries);
   assert.deepEqual(violations, []);
   assert.equal(empty.length, 2);
@@ -257,7 +279,7 @@ test('a key with no operator is refused, because it is invisible to the check', 
     RegistryError,
   );
   assert.throws(
-    () => parseRegistry({ entries: [{ id: 'RWQ-1', population: 'release-signer', operator: '   ' }] }),
+    () => parseRegistry({ entries: [who('RWQ-1', 'release-signer', 'Ada', { operator: '   ' })] }),
     RegistryError,
   );
   assert.throws(() => parseRegistry({ entries: [] }), RegistryError);
@@ -268,10 +290,120 @@ test('a key with no operator is refused, because it is invisible to the check', 
 });
 
 test('single-key ANT custody is refused outright (12 §4.2)', () => {
-  const one = parseRegistry({ entries: [{ id: 'ar://ANT-1', population: 'arns-controller', operator: 'Linus' }] });
+  const one = parseRegistry({ entries: [who('ar://ANT-1', 'arns-controller', 'Linus')] });
   assert.equal(checkControllerQuorum(one).length, 1);
   assert.match(first(checkControllerQuorum(one), 'quorum finding'), /3-of-5/);
   assert.equal(operatorsIn(one, 'arns-controller').size, 1);
-  const none = parseRegistry({ entries: [{ id: 'RWQ-1', population: 'release-signer', operator: 'Ada' }] });
+  const none = parseRegistry({ entries: [who('RWQ-1', 'release-signer', 'Ada')] });
   assert.match(first(checkControllerQuorum(none), 'quorum finding'), /launch blocks/);
+});
+
+test('an unknown field is refused, because a misspelled one is a silently absent one', () => {
+  // `organisation` would leave the entry with no organization at all, and §1.4 gate 2 counts
+  // by that field — so the silent reading of a typo is "independent of nobody".
+  assert.throws(
+    () => parseRegistry({ entries: [who('RWQ-1', 'release-signer', 'Ada', { organisation: 'Acme' })] }),
+    RegistryError,
+  );
+});
+
+test('an entry with no organization is refused, because independence is unshowable', () => {
+  assert.throws(
+    () => parseRegistry({ entries: [who('RWQ-1', 'release-signer', 'Ada', { organization: '  ' })] }),
+    RegistryError,
+  );
+});
+
+test('a keyring generation belongs to minisign keys and to nothing else', () => {
+  // §2.1 tags keyrings by generation and §2.2 point 1 lists ANT controller addresses in the
+  // same registry. A generation on an address is a claim §2.1 does not make.
+  assert.deepEqual([...KEYED_POPULATIONS], ['release-signer', 'attestor']);
+  assert.throws(
+    () => parseRegistry({ entries: [who('RWQ-1', 'release-signer', 'Ada', { generation: undefined })] }),
+    RegistryError,
+  );
+  assert.throws(
+    () => parseRegistry({ entries: [who('RWQ-1', 'release-signer', 'Ada', { revocationIndex: undefined })] }),
+    RegistryError,
+  );
+  assert.throws(
+    () => parseRegistry({ entries: [who('ar://ANT-1', 'arns-controller', 'Linus', { generation: 3 })] }),
+    RegistryError,
+  );
+  assert.throws(
+    () => parseRegistry({ entries: [who('RWQ-1', 'release-signer', 'Ada', { revocationIndex: 64 })] }),
+    RegistryError,
+  );
+});
+
+test('one revocation bit cannot name two keys', () => {
+  // 02 §12 indexes `revoked_key_bits` into the generation's published keyring, so two keys at
+  // one index means revoking either revokes both and a verifier cannot say which was meant.
+  assert.throws(
+    () =>
+      parseRegistry({
+        entries: [
+          who('RWQ-1', 'release-signer', 'Ada', { revocationIndex: 0 }),
+          who('RWQ-2', 'release-signer', 'Grace', { revocationIndex: 0 }),
+        ],
+      }),
+    RegistryError,
+  );
+  // The same index in a different generation is a different keyring and is admissible.
+  assert.equal(
+    parseRegistry({
+      entries: [
+        who('RWQ-1', 'release-signer', 'Ada', { revocationIndex: 0, generation: 3 }),
+        who('RWQ-2', 'release-signer', 'Grace', { revocationIndex: 0, generation: 4 }),
+      ],
+    }).length,
+    2,
+  );
+});
+
+test('the revocation bitmask resolves to key ids through the published registry', () => {
+  // §2.3 sets a bit; `countReleaseSignatures` excludes a key id. Without this resolution the
+  // caller would have to name the revoked keys itself, which is the caller's word again.
+  const entries = parseRegistry({
+    entries: [
+      who('RWQ-1', 'release-signer', 'Ada', { revocationIndex: 0, generation: 3 }),
+      who('RWQ-2', 'release-signer', 'Grace', { revocationIndex: 5, generation: 3 }),
+    ],
+  });
+  assert.deepEqual(keyringFor(entries, 3, 0n).revokedKeyIds, []);
+  assert.deepEqual(keyringFor(entries, 3, 1n << 5n).revokedKeyIds, ['RWQ-2']);
+  assert.deepEqual(keyringFor(entries, 3, 0b100001n).revokedKeyIds, ['RWQ-1', 'RWQ-2']);
+  // A bit no key claims is a disagreement between the chain and the registry, not a skip.
+  assert.throws(() => keyringFor(entries, 3, 1n << 9n), RegistryError);
+  assert.throws(() => keyringFor(entries, 3, 1n << 64n), RegistryError);
+});
+
+test('a revoked attestor key stops counting, which §2.3 names in as many words', () => {
+  // §2.3 point 2 lists the three verifications a revoked key must be invalid for: self-check,
+  // update verification and **attestation counting**. Until this landed `countAttestations`
+  // took no keyring, so the one it spells out was the one it could not perform.
+  const revoked: Keyring = { generation: 3, revokedKeyIds: ['A'] };
+  assert.equal(countAttestations([att('A', 'acme'), att('B', 'globex')], KEYRING).independentOrganizations, 2);
+  const counted = countAttestations([att('A', 'acme'), att('B', 'globex')], revoked);
+  assert.equal(counted.independentOrganizations, 1);
+  assert.ok(first(counted.rejected, 'rejection').why.includes('marked revoked'));
+});
+
+test('an attestation from a previous keyring generation does not count', () => {
+  // §5.2 verifies attestations "against the current keyring generation".
+  const counted = countAttestations([att('A', 'acme', { generation: 2 }), att('B', 'globex')], KEYRING);
+  assert.equal(counted.independentOrganizations, 1);
+  assert.match(first(counted.rejected, 'rejection').why, /generation 2, not the current 3/);
+});
+
+test('a deployment may require more attestations and may not configure fewer', () => {
+  const inputs = {
+    selfCheck: cleanCheck,
+    signatures: [sig('K1'), sig('K2')],
+    keyring: KEYRING,
+    attestations: [att('A', 'acme'), att('B', 'globex')],
+  };
+  assert.equal(releaseVerdict({ ...inputs, minimumAttestations: 2 }).ok, true);
+  assert.equal(releaseVerdict({ ...inputs, minimumAttestations: 3 }).ok, false);
+  assert.throws(() => releaseVerdict({ ...inputs, minimumAttestations: 1 }), VerifyError);
 });

@@ -56,9 +56,10 @@ an organization cannot be paged.
 Roles may be held by the same person **except** where [12 §2.2](../../docs/architecture/12-release-and-operations.md)
 forbids it: ArNS controllers and release signers must be disjoint over natural persons, and
 attestation-monitor operators must not be ArNS controllers. Those three populations are
-declared in [`app/tools/release/sources/signers.json`](../../app/tools/release/sources/signers.json)
-and checked by `pnpm -C app run signers:audit`, not here — a second list of the same people
-is a second list to keep in step.
+declared in [`app/tools/release/sources/signers.json`](../../app/tools/release/sources/signers.json),
+published for people in [`SIGNERS.md`](../../SIGNERS.md), and checked by
+`pnpm -C app run signers:audit` and `python3 tools/deploy/check-signers.py`, not here — a second
+list of the same people is a second list to keep in step.
 
 ## Bootnode program (12 §6.2)
 

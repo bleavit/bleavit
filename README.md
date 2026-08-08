@@ -43,6 +43,7 @@ rollout that removes `sudo` at Phase 4.
 | [`PLAN.md`](PLAN.md) | Implementation roadmap, milestone status, session log — the living source of "where are we" |
 | [`AGENTS.md`](AGENTS.md) | Operating manual + rules for all coding agents (and useful for humans) |
 | [`CLAUDE.md`](CLAUDE.md) | Claude Code wiring: skills, subagents, hooks |
+| [`SIGNERS.md`](SIGNERS.md) | The 12 §2.2 signer registry: every release key, ANT controller and attestor key mapped to a named holder and organization. Empty until the key ceremony, and reported as unseated rather than as a clean separation |
 | `.claude/` | Automation: session-context injection, skills, subagents, path-scoped rules, and Stop-hook guards for PLAN.md freshness and README's pinned lines |
 | `.codex/` | Codex CLI session playbooks mirroring the skills |
 | [`Cargo.toml`](Cargo.toml), [`rust-toolchain.toml`](rust-toolchain.toml), [`.github/workflows/ci.yml`](.github/workflows/ci.yml), [`tools/ci/rust-workspace-gates.sh`](tools/ci/rust-workspace-gates.sh), [`tools/ci/check-doc-links.py`](tools/ci/check-doc-links.py) | M0 bootstrap: Rust workspace manifest, pinned toolchain components, CI skeleton, and local gate scripts; B8 added [`tools/ci/supply-chain-gates.sh`](tools/ci/supply-chain-gates.sh) (pinned cargo-audit + lockfile gates, annotated exceptions in `.cargo/audit.toml`) and the kernel-change full-sweep workflow [`sweep.yml`](.github/workflows/sweep.yml) |
