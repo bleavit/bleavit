@@ -33,6 +33,7 @@ import {
   levelName,
   pairedRuntime,
   probeCriticalSurface,
+  probeForeignSurface,
   runtimeFor,
   surfaceIsProven,
 } from '@bleavit/descriptors';
@@ -45,6 +46,8 @@ import type {
 } from '@bleavit/descriptors';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
+/** `app/` — the root the committed artifacts and the pinned packages both hang off. */
+const APP_ROOT = resolve(HERE, '..', '..');
 const MANIFEST: SurfaceManifest = JSON.parse(
   readFileSync(resolve(HERE, '..', '..', '..', 'tools', 'release', 'surface-manifest.json'), 'utf8'),
 );
@@ -326,7 +329,7 @@ function compatSurface(overrides: Readonly<Record<string, CompatOverride>> = {})
   });
   const groups: {
     [K in keyof CompatSurface]: Record<string, Record<string, AnyCompatHelper>>;
-  } = { apis: {}, query: {}, constants: {}, event: {} };
+  } = { apis: {}, query: {}, constants: {}, event: {}, tx: {} };
   for (const entry of CRITICAL_SURFACE) {
     const raw = overrides[entry.id];
     const over = raw === 'absent' || raw === undefined ? undefined : raw;
@@ -416,3 +419,185 @@ test('the binding can fail — a divergent shape is rejected', () => {
   assert.equal(ok, false, 'a deliberately wrong shape compiled — the binding proves nothing');
   assert.match(output, /TS2(322|345|739|741)/, output);
 });
+
+/* ------------------- PAPI's own absence behaviour, pinned executably (F26 review, minor 11) */
+
+/**
+ * **The fail-closed guarantee this whole classifier rests on is PAPI's, not ours.**
+ *
+ * `probeCriticalSurface` treats a missing helper as `incompatible`, and that branch is
+ * **unreachable** against a real compat object: `compat[group][pallet][member]` is a proxy
+ * path that always returns a helper. So what actually makes an absent surface fail closed is
+ * PAPI answering `Incompatible` for an entry the runtime does not have — an assumption
+ * `probe.ts` recorded in prose and nothing executed. Everything downstream (INV-FE-12's
+ * *"an unproven capability is absent"*, `classify`'s named disabled surfaces, the deposit
+ * row) is built on it.
+ *
+ * It is pinned **offline, over the committed artifacts**, by crossing them: the `bleavit`
+ * descriptor set is compared against **Asset Hub's** metadata, where `Epoch`,
+ * `ConditionalLedger` and `FutarchyApi` genuinely do not exist. That is a real absence
+ * produced by two files this release already ships, not a fixture asserting itself.
+ *
+ * It reaches two module-internal paths (`compatibility/compatibility.js`,
+ * `observable-client`'s `create-metadata-ctx.js`) because `getStaticApis()` needs a client
+ * and this must run with no node. Neither carries a compatibility promise, which is the
+ * point: a bump that moves them fails **here**, loudly, rather than moving the meaning of
+ * every verdict silently.
+ */
+/**
+ * What `getSyncHelpers` returns, at the shape this repository reads it as.
+ *
+ * Declared as `CompatSurface` rather than a loose record, so the offline construction below is
+ * itself a check that PAPI's six groups still satisfy the probe's structural type — the same
+ * binding `compat-boot.ts` makes on the production path, made here without a chain.
+ */
+type CompatGroups = CompatSurface & Record<string, Record<string, Record<string, AnyCompatHelper>>>;
+
+/**
+ * Read a pallet's declared member names out of a descriptor set.
+ *
+ * Takes `unknown` so the shape is narrowed once, here, with a single assertion. The generated
+ * descriptors have a real PAPI type that does not overlap a plain record, and widening through
+ * `as unknown as` at each call site is exactly what `check:casts` bans across `app/`.
+ */
+function declaredMembers(declared: unknown, group: string, pallet: string): readonly string[] {
+  const groups = declared as Record<string, Record<string, Record<string, unknown>> | undefined>;
+  return Object.keys(groups[group]?.[pallet] ?? {});
+}
+
+async function crossedCompat(): Promise<CompatGroups> {
+  const papi = resolve(
+    APP_ROOT,
+    'node_modules/.pnpm/polkadot-api@2.1.8_esbuild@0.28.1_rxjs@7.8.2/node_modules/polkadot-api/dist/src',
+  );
+  const observable = resolve(
+    APP_ROOT,
+    'node_modules/.pnpm/@polkadot-api+observable-client@0.18.7_rxjs@7.8.2/node_modules/@polkadot-api/observable-client/dist',
+  );
+  const { createCompatHelpers } = (await import(`${papi}/compatibility/compatibility.js`)) as {
+    createCompatHelpers: (d: unknown) => { getSyncHelpers: (ctx: unknown) => Promise<CompatGroups> };
+  };
+  const { createRuntimeCtx } = (await import(`${observable}/utils/create-metadata-ctx.js`)) as {
+    createRuntimeCtx: (meta: unknown, raw: Uint8Array, codeHash: string) => unknown;
+  };
+  const bindings = await import('@polkadot-api/substrate-bindings');
+  const { bleavit } = await import('@polkadot-api/descriptors');
+
+  const raw = new Uint8Array(
+    readFileSync(join(APP_ROOT, 'fixtures/foreign-chain-feed/asset-hub-paseo/2004002/metadata.scale')),
+  );
+  const assetHubRuntime = createRuntimeCtx(
+    bindings.unifyMetadata(bindings.metadata.dec(raw)),
+    raw,
+    `0x${'00'.repeat(32)}`,
+  );
+  return createCompatHelpers(bleavit).getSyncHelpers(assetHubRuntime);
+}
+
+test('PAPI reports a surface the runtime does not have as incompatible — in every probed group', async () => {
+  const compat = await crossedCompat();
+  const { bleavit } = await import('@polkadot-api/descriptors');
+  const declared = await bleavit.descriptors;
+  // Names taken from the descriptor set itself rather than written here, so the test cannot
+  // drift from the artifact it is about.
+  const txName = declaredMembers(declared, 'tx', 'Epoch')[0];
+  const eventName = declaredMembers(declared, 'events', 'Epoch')[0];
+  const apiName = declaredMembers(declared, 'apis', 'FutarchyApi')[0];
+  assert.ok(txName && eventName && apiName, 'the bleavit descriptors declare no Epoch/FutarchyApi entries');
+
+  const absent: readonly [string, AnyCompatHelper][] = [
+    ['query', compat['query']!['Epoch']!['EpochOf']!],
+    ['constants', compat['constants']!['Epoch']!['RecentCohorts']!],
+    ['tx', compat['tx']!['Epoch']![txName]!],
+    ['event', compat['event']!['Epoch']![eventName]!],
+    ['apis', compat['apis']!['FutarchyApi']![apiName]!],
+  ];
+
+  for (const [group, helper] of absent) {
+    // Always an object: the `helper === undefined` branch in `helperFor` is unreachable here
+    // and guards a hand-built surface only. Stated as an assertion so the dead branch is
+    // known-dead rather than believed-live.
+    assert.ok(helper, `${group} returned no helper at all`);
+    assert.equal(helper.isCompatible(), false, `${group} reported an absent surface as compatible`);
+  }
+
+  // **Through the production probe**, not through a local restatement of `levelOf`. An earlier
+  // draft asserted the levels with a copy of that rule written in this file, which agrees with
+  // the subject by construction: a mutant returning `identical` for every flat helper — the
+  // shape an absent `tx` has — passed the whole suite. `probeForeignSurface` takes a surface
+  // list, so the absent members can be probed as if they were frozen ones.
+  const probes = probeForeignSurface(compat, [
+    { id: 'x.Epoch.EpochOf', kind: 'storage', compatGroup: 'query', pallet: 'Epoch', member: 'EpochOf', citation: 'F26 review, minor 11' },
+    { id: 'x.Epoch.tx', kind: 'call', compatGroup: 'tx', pallet: 'Epoch', member: txName, citation: 'F26 review, minor 11' },
+  ]);
+  for (const probe of probes) {
+    assert.equal(probe.compatible, false, probe.id);
+    // The level is what `restricted` mode renders as a reason, and the flat-vs-split read is
+    // exactly what `levelOf` decides. A wrong read here reports an absent surface as
+    // `identical` beside a `false` verdict — two statements about one surface that disagree.
+    assert.equal(probe.level, 'incompatible', probe.id);
+  }
+});
+
+test('the absent-entry SHAPE differs per group, and `tx` is the flat one', async () => {
+  // `getCompatibilityHelper` builds `inOutIncompat` and then returns `result.args` for `tx`,
+  // `result.value` for constants/events, and the whole `{args, value}` object only for
+  // storage/apis/view. So an absent `tx` — 02 §7.7's frozen Asset Hub **call** is one — has
+  // no `args` property and its level must be read off the top. `probe.ts` said `inOutIncompat`
+  // for all six until this test was written.
+  const compat = await crossedCompat();
+  const { bleavit } = await import('@polkadot-api/descriptors');
+  const txName = declaredMembers(await bleavit.descriptors, 'tx', 'Epoch')[0]!;
+
+  const flat = compat['tx']!['Epoch']![txName]! as { level?: number; args?: unknown };
+  assert.equal('args' in flat, false, 'an absent `tx` helper carried an `args` side');
+  assert.equal(flat.level, 0);
+
+  const split = compat['query']!['Epoch']!['EpochOf']! as {
+    level?: number;
+    args: { level: number };
+    value: { level: number };
+  };
+  assert.equal(split.level, undefined, 'an absent storage helper grew a top-level `level`');
+  assert.equal(split.args.level, 0);
+  assert.equal(split.value.level, 0);
+});
+
+test('a surface the runtime DOES have is compatible — the control that stops the test above passing on nothing', async () => {
+  // Without this, "everything is incompatible" would satisfy the two tests above perfectly,
+  // including against a compat construction that had failed and was answering `incompatible`
+  // for every name.
+  const papi = resolve(
+    APP_ROOT,
+    'node_modules/.pnpm/polkadot-api@2.1.8_esbuild@0.28.1_rxjs@7.8.2/node_modules/polkadot-api/dist/src',
+  );
+  const observable = resolve(
+    APP_ROOT,
+    'node_modules/.pnpm/@polkadot-api+observable-client@0.18.7_rxjs@7.8.2/node_modules/@polkadot-api/observable-client/dist',
+  );
+  const { createCompatHelpers } = (await import(`${papi}/compatibility/compatibility.js`)) as {
+    createCompatHelpers: (d: unknown) => { getSyncHelpers: (ctx: unknown) => Promise<CompatGroups> };
+  };
+  const { createRuntimeCtx } = (await import(`${observable}/utils/create-metadata-ctx.js`)) as {
+    createRuntimeCtx: (meta: unknown, raw: Uint8Array, codeHash: string) => unknown;
+  };
+  const bindings = await import('@polkadot-api/substrate-bindings');
+  const { bleavit } = await import('@polkadot-api/descriptors');
+
+  const raw = new Uint8Array(readFileSync(join(APP_ROOT, 'fixtures/chain-feed/2/metadata.scale')));
+  const ownRuntime = createRuntimeCtx(
+    bindings.unifyMetadata(bindings.metadata.dec(raw)),
+    raw,
+    `0x${'00'.repeat(32)}`,
+  );
+  const compat = await createCompatHelpers(bleavit).getSyncHelpers(ownRuntime);
+  const helper = compat['query']!['Epoch']!['EpochOf']!;
+  assert.equal(helper.isCompatible(), true, 'this release cannot read its own committed runtime');
+  const [probe] = probeForeignSurface(compat, [
+    { id: 'x.Epoch.EpochOf', kind: 'storage', compatGroup: 'query', pallet: 'Epoch', member: 'EpochOf', citation: 'F26 review, minor 11' },
+  ]);
+  assert.equal(probe?.level, 'identical');
+  assert.equal(probe?.compatible, true);
+});
+
+

@@ -16,12 +16,14 @@
   },
   "dependencies": {
     "@bleavit/chain-client": "workspace:*",
+    "@bleavit/descriptors": "workspace:*",
     "@bleavit/features-analysis": "workspace:*",
     "@bleavit/features-handoff": "workspace:*",
     "@bleavit/features-tx": "workspace:*",
     "@bleavit/platform": "workspace:*",
     "@bleavit/shared-types": "workspace:*",
     "@bleavit/ui": "workspace:*",
-    "@bleavit/verify": "workspace:*"
+    "@bleavit/verify": "workspace:*",
+    "@polkadot-api/descriptors": "workspace:*"
   }
 }

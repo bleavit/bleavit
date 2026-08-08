@@ -98,12 +98,15 @@ export const PENDING_SCREENS: Readonly<Record<string, PendingScreen>> = Object.f
   // exists for drills and is deliberately not a release pin (ruled 2026-08-07): a release
   // pinned to `bleavit_dev` would verify successfully about a chain that is not Bleavit.
   //
-  // They stay listed apart because their remainders differ even now. Deposit additionally
-  // needs 10 §5.2's **foreign** verdict, which `readDepositInputs` requires and nothing
-  // produces — `classifyForeign` needs a probe of every 02 §7.7 surface through a typed API,
-  // and no module constructs `createClient` yet. Withdraw needs none of that, by §11.9.2.
-  S12: { state: 'built-unwired', milestone: 'F18', component: `${TX}#DepositForm`, waitingOn: 'a pinned chain to boot against, and a producer for the Asset Hub compatibility verdict — its two-chain reader pair is wired (openDepositLeg)' },
-  S13: { state: 'built-unwired', milestone: 'F18', component: `${TX}#WithdrawForm`, waitingOn: 'a pinned chain to boot against — its reader is wired (openWithdrawLeg) and needs this chain alone' },
+  // They stay listed apart because their remainders differed. Deposit additionally needed
+  // 10 §5.2's **foreign** verdict, which `readDepositInputs` requires and nothing produced —
+  // `classifyForeign` needs a probe of every 02 §7.7 surface through a typed API, and no
+  // module constructed `createClient`. **F26 built that**: `compat.ts` holds the client,
+  // `compat-boot.ts` supplies the descriptor sets and the second Asset Hub chain handle the
+  // probe needs, and `openDepositLeg` classifies. So the two rows now wait on the same one
+  // thing, and the sentence says so rather than carrying a blocker that has been closed.
+  S12: { state: 'built-unwired', milestone: 'F18', component: `${TX}#DepositForm`, waitingOn: 'a pinned chain to boot against — its two-chain reader pair and its Asset Hub compatibility verdict are wired (openDepositLeg, F26)' },
+  S13: { state: 'built-unwired', milestone: 'F18', component: `${TX}#WithdrawForm`, waitingOn: 'a pinned chain to boot against — its reader is wired (openWithdrawLeg) and needs this chain alone, with no Asset Hub verdict at all (§11.9.2)' },
   S14: { state: 'built-unwired', milestone: 'F17', component: `${TX}#RegisterReporter`, waitingOn: 'a live transport and a signer session' },
   S15: { state: 'built-unwired', milestone: 'F17', component: `${TX}#PendingActions`, waitingOn: 'a live transport and a signer session' },
   S16: { state: 'built-unwired', milestone: 'F17', component: `${TX}#TreasuryStreams`, waitingOn: 'a live transport and a signer session' },

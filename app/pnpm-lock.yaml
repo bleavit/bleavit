@@ -233,6 +233,9 @@ importers:
       '@bleavit/chain-client':
         specifier: workspace:*
         version: link:../../packages/chain-client
+      '@bleavit/descriptors':
+        specifier: workspace:*
+        version: link:../../packages/descriptors
       '@bleavit/features-analysis':
         specifier: workspace:*
         version: link:../features/analysis
@@ -254,6 +257,9 @@ importers:
       '@bleavit/verify':
         specifier: workspace:*
         version: link:../../packages/verify
+      '@polkadot-api/descriptors':
+        specifier: workspace:*
+        version: link:../../packages/papi-descriptors
 
   src/features/analysis:
     dependencies:
@@ -547,6 +553,9 @@ importers:
       '@bleavit/contexts':
         specifier: workspace:*
         version: link:../../packages/contexts
+      '@bleavit/descriptors':
+        specifier: workspace:*
+        version: link:../../packages/descriptors
       '@bleavit/features-handoff':
         specifier: workspace:*
         version: link:../../src/features/handoff

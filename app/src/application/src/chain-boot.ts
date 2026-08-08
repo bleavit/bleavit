@@ -28,6 +28,8 @@
 import type { LightClient } from '@bleavit/chain-client/light-client';
 import { releaseChainSpecs, releaseWorkerSource } from './chain-identity.js';
 import { startChainSession, type ChainSession } from './chain-session.js';
+import { classifyChain } from './compat-boot.js';
+import type { CompatVerdict } from './compat-session.js';
 
 /**
  * Start this release's light client, or report why there is none.
@@ -47,4 +49,37 @@ export async function connectChain(): Promise<ChainSession<LightClient>> {
       return startLightClient(options);
     },
   });
+}
+
+/**
+ * Connect, then run 10 §5.2's classifier over whatever answered — 10 §3.1's `CompatCheck`.
+ *
+ * The two steps are one function because the ordering between them is the ruling
+ * `light-client.ts` records: the transport is up and serving before anything asks about
+ * metadata compatibility, so an undecodable runtime becomes a **verdict** rather than a
+ * failure to construct a client. Splitting them and leaving the second to a caller is how
+ * that ordering becomes a convention instead of a shape.
+ *
+ * A session that never started has no runtime to classify and says so. It is deliberately
+ * **not** `read-only-incompatible`: that mode is a claim about a `spec_version` this release
+ * ships no descriptors for, and reporting it for a client that never connected would send a
+ * user to *"load a newer release"* for a missing chain spec or a missing worker.
+ */
+export async function connectAndClassify(): Promise<{
+  readonly session: ChainSession<LightClient>;
+  readonly compat: CompatVerdict;
+}> {
+  const session = await connectChain();
+  if (session.kind !== 'started') {
+    return {
+      session,
+      compat: {
+        kind: 'unestablished',
+        reason:
+          `No chain was connected, so no runtime has been checked: ${session.reasons.join(' ')} ` +
+          'Everything that does not need the chain still renders (10 §3.2).',
+      },
+    };
+  }
+  return { session, compat: await classifyChain(session.client) };
 }

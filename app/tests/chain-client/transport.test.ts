@@ -546,3 +546,290 @@ test('a finalized hash is emitted while it is still pinned', async () => {
   assert.ok(firstSeen !== undefined && firstSeen > 0, 'the hash was announced-and-pinned before the listener ran');
   connection.close();
 });
+
+/* -------------------------------------------- the finalized runtime (10 §5.2's input, F26) */
+
+/** `chainHead_v1_follow`'s `RuntimeEvent`, at the field names smoldot's serialiser uses. */
+const validRuntime = (specVersion: number) => ({
+  type: 'valid',
+  spec: {
+    specName: 'bleavit',
+    implName: 'bleavit',
+    authoringVersion: 1,
+    specVersion,
+    implVersion: 0,
+    transactionVersion: 1,
+    apis: [],
+  },
+});
+
+test('the recorded corpus establishes no runtime, and that is reported as absent', async () => {
+  // The recorder never captured `finalizedBlockRuntime`, so the honest answer over the
+  // transcripts is `undefined`. Asserted rather than left implicit, because `undefined` is
+  // what the classifier fails closed on and a suite that never saw it would not notice the
+  // field being dropped on the way through.
+  const mock = runtime();
+  const { provider } = recordedProvider(mock);
+  const connection = await ChainHeadConnection.open(provider, { chain: TEST_CHAIN });
+  assert.equal(connection.finalizedRuntime(), undefined);
+  connection.close();
+});
+
+test('the runtime of the initialized finalized block is read off the follow event', async () => {
+  const mock = runtime();
+  const { provider } = recordedProvider(mock, {
+    onFollow({ id, emit, followEvent }) {
+      emit({ jsonrpc: '2.0', id, result: 'subscription-1' });
+      followEvent({
+        event: 'initialized',
+        finalizedBlockHashes: [mock.pinnedBlock() as HexString],
+        finalizedBlockRuntime: validRuntime(2),
+      } as never);
+      return true;
+    },
+  });
+  const connection = await ChainHeadConnection.open(provider, { chain: TEST_CHAIN });
+  const reported = connection.finalizedRuntime();
+  assert.ok(reported, 'the runtime the node reported was dropped');
+  assert.equal(reported.specVersion, 2);
+  assert.equal(reported.specName, 'bleavit');
+  assert.equal(reported.transactionVersion, 1);
+  connection.close();
+});
+
+test('an `invalid` runtime is absent — the TYPE TAG decides, not whether a spec came with it', async () => {
+  // The node saying it could not build the runtime is not a `spec_version`. A classifier
+  // handed a half-report would classify a chain against a runtime nobody has.
+  //
+  // The `spec` is deliberately **well-formed and complete** here, which is the whole test: a
+  // reader that only checked whether the fields were present would accept this and report
+  // `specVersion: 2` for a block whose runtime the node says it could not construct. Omitting
+  // the spec would let that reader pass — a mutant flipping the `type` check survived exactly
+  // that fixture.
+  const mock = runtime();
+  const { provider } = recordedProvider(mock, {
+    onFollow({ id, emit, followEvent }) {
+      emit({ jsonrpc: '2.0', id, result: 'subscription-1' });
+      followEvent({
+        event: 'initialized',
+        finalizedBlockHashes: [mock.pinnedBlock() as HexString],
+        finalizedBlockRuntime: {
+          ...validRuntime(2),
+          type: 'invalid',
+          error: 'could not compile the runtime',
+        },
+      } as never);
+      return true;
+    },
+  });
+  const connection = await ChainHeadConnection.open(provider, { chain: TEST_CHAIN });
+  assert.equal(connection.finalizedRuntime(), undefined);
+  connection.close();
+});
+
+test('a runtime event with an unknown type tag is absent too', async () => {
+  // Neither `valid` nor `invalid`: the JSON-RPC spec's `RuntimeEvent` may grow a variant, and
+  // an unknown one is something this client cannot interpret. Fail closed on it rather than
+  // reading whatever fields happen to be there.
+  const mock = runtime();
+  const { provider } = recordedProvider(mock, {
+    onFollow({ id, emit, followEvent }) {
+      emit({ jsonrpc: '2.0', id, result: 'subscription-1' });
+      followEvent({
+        event: 'initialized',
+        finalizedBlockHashes: [mock.pinnedBlock() as HexString],
+        finalizedBlockRuntime: { ...validRuntime(2), type: 'someFutureVariant' },
+      } as never);
+      return true;
+    },
+  });
+  const connection = await ChainHeadConnection.open(provider, { chain: TEST_CHAIN });
+  assert.equal(connection.finalizedRuntime(), undefined);
+  connection.close();
+});
+
+test('a runtime announced on an unfinalized block is NOT reported until that block finalizes', async () => {
+  // The property that decides whether the app may sign early. `newRuntime` arrives on a
+  // block that can still be reorged away; promoting it there would classify — and enable
+  // signing — against a runtime the chain never adopted.
+  const upgraded: HexString = `0x${'77'.repeat(32)}`;
+  const mock = runtime();
+  const { provider, state } = recordedProvider(mock, {
+    onFollow({ id, emit, followEvent }) {
+      emit({ jsonrpc: '2.0', id, result: 'subscription-1' });
+      followEvent({
+        event: 'initialized',
+        finalizedBlockHashes: [mock.pinnedBlock() as HexString],
+        finalizedBlockRuntime: validRuntime(2),
+      } as never);
+      return true;
+    },
+    intercept(request, { emit }) {
+      if (request.method !== 'chainHead_v1_header' || request.params[1] !== upgraded) return false;
+      emit({ jsonrpc: '2.0', id: request.id, result: `0x${'11'.repeat(32)}08${'00'.repeat(64)}` });
+      return true;
+    },
+  });
+  const connection = await ChainHeadConnection.open(provider, { chain: TEST_CHAIN });
+
+  state.followEvent({ event: 'newBlock', blockHash: upgraded, newRuntime: validRuntime(3) } as never);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(connection.finalizedRuntime()?.specVersion, 2, 'a best-block runtime was promoted');
+
+  state.followEvent({ event: 'finalized', finalizedBlockHashes: [upgraded], prunedBlockHashes: [] });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(connection.finalizedRuntime()?.specVersion, 3, 'the finalized upgrade was not adopted');
+  connection.close();
+});
+
+test('two upgrades finalized in one batch leave the LATER one standing', async () => {
+  // Order, not map-iteration order: the announcements arrive in insertion order and the
+  // chain's order is the only one that decides which runtime is current.
+  const first: HexString = `0x${'81'.repeat(32)}`;
+  const second: HexString = `0x${'82'.repeat(32)}`;
+  const mock = runtime();
+  const { provider, state } = recordedProvider(mock, {
+    onFollow({ id, emit, followEvent }) {
+      emit({ jsonrpc: '2.0', id, result: 'subscription-1' });
+      followEvent({
+        event: 'initialized',
+        finalizedBlockHashes: [mock.pinnedBlock() as HexString],
+        finalizedBlockRuntime: validRuntime(2),
+      } as never);
+      return true;
+    },
+    intercept(request, { emit }) {
+      if (request.method !== 'chainHead_v1_header') return false;
+      emit({ jsonrpc: '2.0', id: request.id, result: `0x${'11'.repeat(32)}08${'00'.repeat(64)}` });
+      return true;
+    },
+  });
+  const connection = await ChainHeadConnection.open(provider, { chain: TEST_CHAIN });
+
+  // Announced newest-first, so an implementation that took "the last entry it knows about"
+  // rather than walking the finalized list in order reports 3 instead of 4.
+  state.followEvent({ event: 'newBlock', blockHash: second, newRuntime: validRuntime(4) } as never);
+  state.followEvent({ event: 'newBlock', blockHash: first, newRuntime: validRuntime(3) } as never);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  state.followEvent({
+    event: 'finalized',
+    finalizedBlockHashes: [first, second],
+    prunedBlockHashes: [],
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(connection.finalizedRuntime()?.specVersion, 4);
+  connection.close();
+});
+
+test('an announced upgrade SURVIVES the pin window, and the map is still bounded', async () => {
+  // **This test replaces one that demonstrated a defect and read it as a feature.** The first
+  // version announced 40 blocks, watched the runtime map fall to zero as the pin window
+  // trimmed it, and asserted the zero — which is boundedness, and is also the eviction of an
+  // upgrade that had not finalized yet. Reproduced end to end: after a finality stall spanning
+  // the window, `finalizedRuntime()` kept reporting the **pre-upgrade** `spec_version`, so the
+  // classifier would call the old runtime `full` against a live upgraded chain and leave
+  // signing enabled. Both properties are asserted here, and the survival one comes first.
+  const upgrade: HexString = `0x${'77'.repeat(32)}`;
+  const mock = runtime();
+  const { provider, state } = recordedProvider(mock, {
+    onFollow({ id, emit, followEvent }) {
+      emit({ jsonrpc: '2.0', id, result: 'subscription-1' });
+      followEvent({
+        event: 'initialized',
+        finalizedBlockHashes: [mock.pinnedBlock() as HexString],
+        finalizedBlockRuntime: validRuntime(2),
+      } as never);
+      return true;
+    },
+    intercept(request, { emit }) {
+      if (request.method !== 'chainHead_v1_header') return false;
+      emit({ jsonrpc: '2.0', id: request.id, result: `0x${'11'.repeat(32)}08${'00'.repeat(64)}` });
+      return true;
+    },
+  });
+  const connection = await ChainHeadConnection.open(provider, { chain: TEST_CHAIN });
+
+  state.followEvent({ event: 'newBlock', blockHash: upgrade, newRuntime: validRuntime(3) } as never);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  // A finality stall far longer than the 16-block pin window.
+  const stalled: HexString[] = [];
+  for (let i = 0; i < 40; i += 1) {
+    const hash = `0x${i.toString(16).padStart(2, '0').repeat(32)}` as HexString;
+    stalled.push(hash);
+    state.followEvent({ event: 'newBlock', blockHash: hash } as never);
+  }
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(
+    connection.runtimeCacheCountForTest(),
+    1,
+    'the pending upgrade was evicted by the pin window',
+  );
+
+  // Finality catches up. The upgrade must be adopted, not lost.
+  state.followEvent({ event: 'finalized', finalizedBlockHashes: [upgrade], prunedBlockHashes: [] });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(connection.finalizedRuntime()?.specVersion, 3, 'a stalled upgrade was lost');
+  // Promoted entries leave, so surviving the window is not the same as accumulating forever.
+  assert.equal(connection.runtimeCacheCountForTest(), 0);
+
+  // The other exit: a pruned block's runtime never happened.
+  state.followEvent({ event: 'newBlock', blockHash: stalled[0]!, newRuntime: validRuntime(4) } as never);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(connection.runtimeCacheCountForTest(), 1);
+  state.followEvent({ event: 'finalized', finalizedBlockHashes: [], prunedBlockHashes: [stalled[0]!] });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(connection.runtimeCacheCountForTest(), 0);
+  assert.equal(connection.finalizedRuntime()?.specVersion, 3, 'a pruned runtime was adopted');
+  connection.close();
+});
+
+test('past the cap the connection reports NO runtime rather than the one it still holds', async () => {
+  // The cap cannot be a trim. The oldest entry is the upgrade that has waited longest to
+  // finalize, so evicting it is the defect above with an extra step — what survives is the
+  // runtime on its way out. So the map is cleared and nothing is reported until a `finalized`
+  // event proves one, which is silence rather than a stale positive.
+  const mock = runtime();
+  const { provider, state } = recordedProvider(mock, {
+    onFollow({ id, emit, followEvent }) {
+      emit({ jsonrpc: '2.0', id, result: 'subscription-1' });
+      followEvent({
+        event: 'initialized',
+        finalizedBlockHashes: [mock.pinnedBlock() as HexString],
+        finalizedBlockRuntime: validRuntime(2),
+      } as never);
+      return true;
+    },
+    intercept(request, { emit }) {
+      if (request.method !== 'chainHead_v1_header') return false;
+      emit({ jsonrpc: '2.0', id: request.id, result: `0x${'11'.repeat(32)}08${'00'.repeat(64)}` });
+      return true;
+    },
+  });
+  const connection = await ChainHeadConnection.open(provider, { chain: TEST_CHAIN });
+  assert.equal(connection.finalizedRuntime()?.specVersion, 2);
+
+  const last: HexString = `0x${'ff'.repeat(32)}`;
+  for (let i = 0; i < 300; i += 1) {
+    const hash = `0x${i.toString(16).padStart(4, '0').repeat(16)}` as HexString;
+    state.followEvent({ event: 'newBlock', blockHash: hash, newRuntime: validRuntime(3 + i) } as never);
+  }
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.ok(connection.runtimeUncertainForTest(), 'the cap was never reached — this is vacuous');
+  assert.equal(connection.runtimeCacheCountForTest() <= 256, true);
+  assert.equal(
+    connection.finalizedRuntime(),
+    undefined,
+    'a runtime was reported after announcements were dropped',
+  );
+
+  // And it recovers: a finalized block whose runtime is known settles the question.
+  state.followEvent({ event: 'newBlock', blockHash: last, newRuntime: validRuntime(9) } as never);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  state.followEvent({ event: 'finalized', finalizedBlockHashes: [last], prunedBlockHashes: [] });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(connection.finalizedRuntime()?.specVersion, 9);
+  assert.equal(connection.runtimeUncertainForTest(), false);
+  connection.close();
+});

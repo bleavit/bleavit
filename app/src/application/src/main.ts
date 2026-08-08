@@ -10,10 +10,17 @@
  */
 
 import { boot } from './boot.js';
-import { connectChain } from './chain-boot.js';
+import { connectAndClassify } from './chain-boot.js';
 
 const mount = document.getElementById('app');
 // The chain connection is started **after** the tree is up, for the reason the release worker
 // is registered after it (10 §3.2): the verification panel, the docs and the whole handoff
 // surface render when smoldot never starts, so nothing that renders may wait on it.
-if (mount) void boot(mount).then(connectChain);
+//
+// `connectAndClassify` rather than `connectChain`: 10 §3.1 puts `CompatCheck` between the
+// first finalized head and every healthy terminal state, so a client that connected and never
+// classified has skipped the state that decides whether it may sign. The verdict is not yet
+// rendered — that needs the re-render path `boot.tsx` records as F7's remainder, and this
+// build starts no chain to have a verdict about — so what this line buys today is that the
+// classifier has a production caller and the whole path compiles as one piece.
+if (mount) void boot(mount).then(connectAndClassify);

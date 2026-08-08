@@ -47,23 +47,51 @@ export const FOREIGN_SURFACE = [
   {
     id: 'assethub.Assets.Account',
     kind: 'storage',
+    compatGroup: 'query',
+    pallet: 'Assets',
+    member: 'Account',
     citation: '02 §7.7; 11 §11.9.1 — "AH USDC balance ≥ amount + AH-side fees"',
   },
   {
     id: 'assethub.System.Account',
     kind: 'storage',
+    compatGroup: 'query',
+    pallet: 'System',
+    member: 'Account',
     citation: '02 §7.7; 11 §11.9.1 — AH-side existential and fee viability',
   },
   {
     id: 'assethub.PolkadotXcm.limited_reserve_transfer_assets',
     kind: 'call',
+    compatGroup: 'tx',
+    pallet: 'PolkadotXcm',
+    member: 'limited_reserve_transfer_assets',
     citation: '02 §7.7; 11 §11.9.1 — the deposit leg',
   },
 ] as const satisfies readonly ForeignSurfaceEntry[];
 
+/**
+ * One frozen Asset Hub surface, and the three coordinates a PAPI compat lookup needs.
+ *
+ * **The coordinates are written down, never parsed out of the `id`.** The ids above are
+ * `assethub.Pallet.Member` and splitting on dots would reproduce them — until a member name
+ * contains one, or a chain prefix gains a second segment, at which point the lookup misses
+ * and a missed lookup reports `incompatible`. That is fail-closed and therefore silent: the
+ * deposit leg would be blocked by a parser rather than by Asset Hub, and the reason string
+ * would say the surface is absent from a runtime that has it.
+ *
+ * `kind` stays beside `compatGroup` and is not derived from it. `kind` is the 02 §7.7 fact —
+ * *this row is a storage read / this row is a dispatchable* — and `compatGroup` is PAPI's
+ * name for where the helper lives. They agree today; the day PAPI renames a group, exactly
+ * one of them changes.
+ */
 export interface ForeignSurfaceEntry {
   readonly id: string;
   readonly kind: 'storage' | 'call';
+  /** Where `(await api.getStaticApis()).compat` keeps this surface's helper. */
+  readonly compatGroup: 'query' | 'tx';
+  readonly pallet: string;
+  readonly member: string;
   readonly citation: string;
 }
 

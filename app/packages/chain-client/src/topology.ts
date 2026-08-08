@@ -151,9 +151,35 @@ export interface Topology<C extends SmoldotChainLike = SmoldotChainLike> {
    * have to be caught by every call site and turned back into exactly this, and one call site
    * that let it propagate would take down a screen for a leg that only blocks deposits.
    */
-  attachAssetHub(assetHub: BundledChain): Promise<AssetHubLeg<C>>;
+  attachAssetHub(assetHub: BundledChain, options?: AttachOptions): Promise<AssetHubLeg<C>>;
   /** Remove every chain this topology added, including an attached Asset Hub. Idempotent. */
   stop(): void;
+}
+
+/** How `attachAssetHub` treats the leg it already holds. */
+export interface AttachOptions {
+  /**
+   * Return the cached leg when one is open. Default `true` — today's behaviour.
+   *
+   * **`false` exists for exactly one caller, and the reason is a constraint of PAPI's
+   * smoldot provider rather than a preference.** `getSmProvider` keeps a `WeakSet` of the
+   * chains it has been handed and refuses a repeat with a console warning, and its
+   * `disconnect` calls `chain.remove()` — so a smoldot `Chain` object serves **one**
+   * JSON-RPC connection, ever, and closing that connection takes the chain with it. The
+   * deposit leg needs two: the `ChainHeadConnection` that reads balances, and the transient
+   * PAPI client 10 §5.2 requires to probe the 02 §7.7 surfaces. One handle cannot serve
+   * both, and the cache is what stops a second existing.
+   *
+   * It is **not** a second light client. smoldot de-duplicates identical chains internally —
+   * the same property `light-client.ts` already relies on where its provider factory builds
+   * a fresh topology per connection — so the second handle costs a lookup and shares the
+   * running sync service rather than starting one.
+   *
+   * An uncached leg is **not** remembered, so the caller owns it and MUST `detach()` it.
+   * Caching it would displace the connection the user is reading from, and detaching the
+   * cached one instead would tear down the deposit screen to answer a question about it.
+   */
+  readonly reuse?: boolean;
 }
 
 /** Add the user's bootnodes to an already-verified spec, never replacing the bundled set. */
@@ -259,12 +285,17 @@ export async function startTopology<C extends SmoldotChainLike>(
   /** The Asset Hub chain, once attached. See `attach` for why only success is remembered. */
   let attached: Extract<AssetHubLeg<C>, { kind: 'attached' }> | undefined;
 
-  async function attach(relayChain: C, assetHub: BundledChain): Promise<AssetHubLeg<C>> {
+  async function attach(
+    relayChain: C,
+    assetHub: BundledChain,
+    attachOptions?: AttachOptions,
+  ): Promise<AssetHubLeg<C>> {
+    const reuse = attachOptions?.reuse ?? true;
     // **Success is cached, failure is not**, and each half has its own reason. A user who
     // leaves the funding flow and comes back must not add a second chain; and a leg that
     // failed must be retryable, because E17's recovery action is literally *"retry AH sync"*
     // — a cached failure would make that button do nothing for the rest of the session.
-    if (attached !== undefined) return attached;
+    if (reuse && attached !== undefined) return attached;
 
     const blocked = (reason: string): AssetHubLeg<C> => ({
       kind: 'unavailable',
@@ -347,7 +378,7 @@ export async function startTopology<C extends SmoldotChainLike>(
       };
     }
 
-    attached = {
+    const leg: Extract<AssetHubLeg<C>, { kind: 'attached' }> = {
       kind: 'attached',
       chain,
       spec: assetHubSpec,
@@ -358,10 +389,16 @@ export async function startTopology<C extends SmoldotChainLike>(
         // stale leg — detached, then re-entered, so a newer chain is live — would otherwise
         // clear the cache on unmount and leave that newer chain running unreferenced, while
         // the next entry into the flow added a third. Both chains sync; neither is reachable.
+        //
+        // This is also what makes an uncached leg safe to detach: it is not the cached one,
+        // so detaching it never disturbs the connection the deposit screen is reading from.
         if (attached?.chain === chain) attached = undefined;
       },
     };
-    return attached;
+    // An uncached leg is deliberately not remembered — see `AttachOptions.reuse`. It stays
+    // in `added`, so `stop()` still reaches it if the caller never detaches.
+    if (reuse) attached = leg;
+    return leg;
   }
 
   try {
@@ -382,7 +419,7 @@ export async function startTopology<C extends SmoldotChainLike>(
       para: paraChain,
       relaySpec,
       paraSpec,
-      attachAssetHub: (assetHub) => attach(relayChain, assetHub),
+      attachAssetHub: (assetHub, how) => attach(relayChain, assetHub, how),
       stop,
     };
   } catch (error) {

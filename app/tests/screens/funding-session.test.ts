@@ -29,8 +29,12 @@ import type {
   BundledChain,
   ChainHeadTransport,
   FinalizedBlockRef,
+  RuntimeVersionReport,
   StorageItem,
 } from '@bleavit/chain-client';
+import { FOREIGN_SURFACE } from '@bleavit/descriptors';
+import { assetHubCompatible } from '@bleavit/application';
+import type { ForeignVerdict } from '@bleavit/application';
 import { finalize } from '@bleavit/chain-client/testing';
 import type { HexString } from '@bleavit/shared-types';
 
@@ -52,10 +56,11 @@ interface FakeTransport extends ChainHeadTransport {
   readonly chain: HexString;
 }
 
-function transport(chain: HexString): FakeTransport {
+function transport(chain: HexString, runtime: RuntimeVersionReport = LOCAL_RUNTIME): FakeTransport {
   const at: FinalizedBlockRef = { chain, blockHash: BLOCK, blockNumber: 7 };
   return {
     chain,
+    finalizedRuntime: () => runtime,
     async pinnedBlock() {
       return at;
     },
@@ -95,6 +100,57 @@ const DECODERS: FundingDecoders = {
 
 const ARTIFACTS: FundingArtifacts = { keys: KEYS, decoders: DECODERS };
 
+/**
+ * The verdict producer, as the leg injects it — `classifyAssetHubFor` in production.
+ *
+ * A default of `full` rather than "omitted": F26 made this a **required** dep precisely so a
+ * suite cannot leave 11 §11.9.1's first precondition row unstated, which is the state the
+ * whole client was in before it (`assetHubCompatible` was an argument nobody supplied). What
+ * each test varies is the verdict, never whether one exists.
+ */
+/**
+ * The two chains' runtimes, varied **independently**.
+ *
+ * Not one constant shared by both fakes, and not one derived from the other: welding two
+ * properties into one fixture is what let a chain-comparing mutant pass a whole suite before
+ * (V-155). Here the property under test is *which connection's runtime the foreign verdict is
+ * classified against*, and a `transport()` helper that answered the same runtime for both
+ * chains would make `deps.local.finalizedRuntime()` and `connection.transport.finalizedRuntime()`
+ * indistinguishable — measured: that fixture let exactly that mutant survive.
+ */
+const LOCAL_RUNTIME: RuntimeVersionReport = {
+  specName: 'bleavit',
+  specVersion: 2,
+  implVersion: 0,
+  transactionVersion: 1,
+};
+
+const AH_RUNTIME: RuntimeVersionReport = {
+  specName: 'asset-hub-paseo',
+  specVersion: 2004002,
+  implVersion: 0,
+  transactionVersion: 16,
+};
+
+/** The Asset Hub fake, which answers Asset Hub's runtime and never this chain's. */
+const assetHubTransport = (): FakeTransport => transport(AH_CHAIN, AH_RUNTIME);
+
+const AH_CODE_HASH = `0x${'a5c0'.repeat(16)}`;
+
+const classifiesFull = async (): Promise<ForeignVerdict> => ({
+  kind: 'classified',
+  codeHash: AH_CODE_HASH,
+  classification: {
+    domain: 'foreign',
+    chain: 'Asset Hub',
+    mode: 'full',
+    specVersion: AH_RUNTIME.specVersion,
+    disabled: [],
+    proven: FOREIGN_SURFACE.map((entry) => entry.id),
+    reason: undefined,
+  },
+});
+
 const attached = (t: FakeTransport): AssetHubConnection<FakeTransport> => ({
   kind: 'attached',
   transport: t,
@@ -109,7 +165,8 @@ test('the deposit leg pairs one reader per chain, each on its own', async () => 
     openReader,
     artifacts: ARTIFACTS,
     pins: PINS,
-    connectAssetHub: async () => attached(transport(AH_CHAIN)),
+    classifyAssetHub: classifiesFull,
+    connectAssetHub: async () => attached(assetHubTransport()),
   });
   assert.ok(leg.kind === 'ready', leg.kind === 'blocked' ? leg.reason : '');
   assert.equal(leg.readers.local.at.chain, LOCAL_CHAIN);
@@ -135,9 +192,10 @@ test('the bundle handed to the connector is the release pin, not something recon
     openReader,
     artifacts: ARTIFACTS,
     pins: PINS,
+    classifyAssetHub: classifiesFull,
     connectAssetHub: async (bundle) => {
       seen.push(bundle);
-      return attached(transport(AH_CHAIN));
+      return attached(assetHubTransport());
     },
   });
   assert.deepEqual(seen, [AH_BUNDLE]);
@@ -156,6 +214,7 @@ test('a refused Asset Hub leg blocks deposit with the connector’s OWN reason',
       openReader,
       artifacts: ARTIFACTS,
       pins: PINS,
+      classifyAssetHub: classifiesFull,
       connectAssetHub: async () => refusal,
     });
     assert.ok(leg.kind === 'blocked');
@@ -172,6 +231,7 @@ test('a connector that THROWS still only blocks the deposit', async () => {
     openReader,
     artifacts: ARTIFACTS,
     pins: PINS,
+    classifyAssetHub: classifiesFull,
     connectAssetHub: async () => {
       throw new Error('the topology was already torn down');
     },
@@ -194,9 +254,10 @@ test('Asset Hub is contacted BEFORE a local block is pinned', async () => {
     },
     artifacts: ARTIFACTS,
     pins: PINS,
+    classifyAssetHub: classifiesFull,
     connectAssetHub: async () => {
       order.push('connect');
-      return attached(transport(AH_CHAIN));
+      return attached(assetHubTransport());
     },
   });
   assert.deepEqual(order, ['connect', 'reader:assetHub', 'reader:local']);
@@ -214,7 +275,8 @@ test('an unreadable chain names WHICH chain could not be read', async () => {
     openReader: failing,
     artifacts: ARTIFACTS,
     pins: PINS,
-    connectAssetHub: async () => attached(transport(AH_CHAIN)),
+    classifyAssetHub: classifiesFull,
+    connectAssetHub: async () => attached(assetHubTransport()),
   });
   assert.ok(ah.kind === 'blocked');
   assert.match(ah.reason, /Asset Hub could not be read/);
@@ -227,7 +289,8 @@ test('an unreadable chain names WHICH chain could not be read', async () => {
     },
     artifacts: ARTIFACTS,
     pins: PINS,
-    connectAssetHub: async () => attached(transport(AH_CHAIN)),
+    classifyAssetHub: classifiesFull,
+    connectAssetHub: async () => attached(assetHubTransport()),
   });
   assert.ok(local.kind === 'blocked');
   assert.match(local.reason, /This chain could not be read/);
@@ -241,11 +304,12 @@ test('two readers on one chain THROW rather than blocking politely', async () =>
   await assert.rejects(
     () =>
       openDepositLeg({
-        local: transport(AH_CHAIN),
+        local: assetHubTransport(),
         openReader,
         artifacts: ARTIFACTS,
         pins: PINS,
-        connectAssetHub: async () => attached(transport(AH_CHAIN)),
+        classifyAssetHub: classifiesFull,
+        connectAssetHub: async () => attached(assetHubTransport()),
       }),
     SameChainError,
   );
@@ -282,6 +346,7 @@ test('withdraw is unaffected while every Asset Hub path is failing', async () =>
   const deposit = await openDepositLeg({
     ...deps,
     pins: PINS,
+    classifyAssetHub: classifiesFull,
     connectAssetHub: async () => ({ kind: 'unavailable', reason: 'Asset Hub is down' }),
   });
   const withdraw = await openWithdrawLeg(deps);
@@ -375,4 +440,162 @@ test('the artifacts carry the injected USDC Location through to the key', async 
     artifacts.keys.localFreeUsdc(decode(1) as string).toLowerCase(),
     published.key.toLowerCase(),
   );
+});
+
+/* ------------------------------------ the foreign verdict the leg now produces (F26) */
+
+test('the deposit leg carries a computed foreign verdict — the input nothing used to supply', async () => {
+  const leg = await openDepositLeg({
+    local: transport(LOCAL_CHAIN),
+    openReader,
+    artifacts: ARTIFACTS,
+    pins: PINS,
+    classifyAssetHub: classifiesFull,
+    connectAssetHub: async () => attached(assetHubTransport()),
+  });
+  assert.ok(leg.kind === 'ready', leg.kind === 'blocked' ? leg.reason : '');
+  // Before F26 this value was a required argument of `readDepositInputs` with no producer
+  // anywhere in the client, which is why S12 was `built-unwired` on a code gap rather than
+  // on a missing chain. It is a read now.
+  assert.equal(assetHubCompatible(leg.foreign), true);
+  const read = await readDepositInputs(leg.readers, KEYS, DECODERS, {
+    who: '5Grw',
+    assetId: 1337,
+    amount: 1n,
+    assetHubFee: 0n,
+    minBalance: 0n,
+    xcmHealthy: true,
+    assetHubCompatible: assetHubCompatible(leg.foreign),
+  });
+  assert.equal(read.inputs.assetHubReady, true);
+});
+
+test('the verdict is classified against the READER’s runtime, not the probe handle’s', async () => {
+  const seen: (RuntimeVersionReport | undefined)[] = [];
+  await openDepositLeg({
+    local: transport(LOCAL_CHAIN),
+    openReader,
+    artifacts: ARTIFACTS,
+    pins: PINS,
+    classifyAssetHub: async (_bundle, runtime) => {
+      seen.push(runtime);
+      return classifiesFull();
+    },
+    connectAssetHub: async () => attached(assetHubTransport()),
+  });
+  // The verdict and the precondition reads must describe one block. A probe subscription's
+  // own head would be a verdict about a block nothing else in the flow used.
+  assert.deepEqual(seen, [AH_RUNTIME]);
+});
+
+test('a restricted Asset Hub leaves the leg READY and fails the precondition row instead', async () => {
+  // §11.9.1 makes "AH connection synced & descriptors compatible" a precondition **row**, and
+  // a row is something the user is shown failing. Turning it into `blocked` would produce a
+  // screen that never renders and a diagnosis nobody sees — the opposite of E17's
+  // "blocked with diagnostics, never a blind send anyway".
+  const restricted: ForeignVerdict = {
+    kind: 'classified',
+    codeHash: AH_CODE_HASH,
+    classification: {
+      domain: 'foreign',
+      chain: 'Asset Hub',
+      mode: 'restricted',
+      specVersion: AH_RUNTIME.specVersion,
+      disabled: [
+        {
+          id: 'assethub.PolkadotXcm.limited_reserve_transfer_assets',
+          level: 'incompatible',
+          reason: 'the deposit call is absent from this Asset Hub runtime',
+        },
+      ],
+      proven: [],
+      reason: 'Deposits are disabled (02 §7.7 fails closed on an unverified surface).',
+    },
+  };
+  const leg = await openDepositLeg({
+    local: transport(LOCAL_CHAIN),
+    openReader,
+    artifacts: ARTIFACTS,
+    pins: PINS,
+    classifyAssetHub: async () => restricted,
+    connectAssetHub: async () => attached(assetHubTransport()),
+  });
+  assert.equal(leg.kind, 'ready');
+  assert.ok(leg.kind === 'ready');
+  assert.equal(assetHubCompatible(leg.foreign), false);
+
+  const read = await readDepositInputs(leg.readers, KEYS, DECODERS, {
+    who: '5Grw',
+    assetId: 1337,
+    amount: 1n,
+    assetHubFee: 0n,
+    minBalance: 0n,
+    xcmHealthy: true,
+    assetHubCompatible: assetHubCompatible(leg.foreign),
+  });
+  assert.equal(read.inputs.assetHubReady, false);
+});
+
+test('withdraw takes no verdict and cannot be given one — §11.9.2 in a signature', async () => {
+  // The deposit and withdraw dependency sets stay disjoint. This is the same assertion
+  // `readWithdrawInputs` earns by taking no Asset Hub reader, one layer out: an Asset Hub
+  // compatibility problem must never present to the user as "funding is down".
+  const deps = { local: transport(LOCAL_CHAIN), openReader, artifacts: ARTIFACTS };
+  const withdraw = await openWithdrawLeg(deps);
+  assert.equal(withdraw.kind, 'ready');
+  // @ts-expect-error — there is no `classifyAssetHub` field on the withdraw leg's deps.
+  assert.equal(deps.classifyAssetHub, undefined);
+});
+
+test('an unreachable Asset Hub blocks before any verdict is asked for', async () => {
+  let asked = 0;
+  const leg = await openDepositLeg({
+    local: transport(LOCAL_CHAIN),
+    openReader,
+    artifacts: ARTIFACTS,
+    pins: PINS,
+    classifyAssetHub: async () => {
+      asked += 1;
+      return classifiesFull();
+    },
+    connectAssetHub: async () => ({ kind: 'unavailable', reason: 'Asset Hub never synced.' }),
+  });
+  assert.equal(leg.kind, 'blocked');
+  // Nothing to classify: the connector's own reason is what the user is shown, and a verdict
+  // computed here would be one about a chain that never answered.
+  assert.equal(asked, 0);
+});
+
+test('a classifier that REJECTS blocks the leg — it never becomes a rejected openDepositLeg', async () => {
+  // Reproduced before it was fixed: PAPI computes compat on property access, so a runtime its
+  // metadata layer cannot map throws *inside* the probe. `classifyAssetHubFor` returning a
+  // verdict for every arm it knows about is not the same as being unable to throw, and
+  // unwrapped that rejection propagated out of here — the deposit screen never rendered at
+  // all, with no diagnostics and no row. E17 asks for the flow *blocked with diagnostics*.
+  const leg = await openDepositLeg({
+    local: transport(LOCAL_CHAIN),
+    openReader,
+    artifacts: ARTIFACTS,
+    pins: PINS,
+    classifyAssetHub: async () => {
+      throw new Error('the Asset Hub compat object came apart');
+    },
+    connectAssetHub: async () => attached(assetHubTransport()),
+  });
+  assert.equal(leg.kind, 'blocked');
+  assert.ok(leg.kind === 'blocked');
+  assert.match(leg.reason, /came apart/);
+  // Named as an Asset Hub problem, and only an Asset Hub problem — §11.9.2's rule that no
+  // failure of the deposit leg may present to the user as "funding is down".
+  assert.match(leg.reason, /Deposits are unavailable/);
+  assert.match(leg.reason, /nothing else in the app is affected/);
+});
+
+test('withdraw is unaffected by a classifier that rejects, because it never calls one', async () => {
+  const withdraw = await openWithdrawLeg({
+    local: transport(LOCAL_CHAIN),
+    openReader,
+    artifacts: ARTIFACTS,
+  });
+  assert.equal(withdraw.kind, 'ready');
 });

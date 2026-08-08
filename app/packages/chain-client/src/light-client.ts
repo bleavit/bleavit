@@ -17,6 +17,15 @@
  * `read-only-incompatible` classifier cannot see it — the app would fail to construct a
  * client instead of booting into `ReadOnlyIncompatible` and telling the user why.
  *
+ * **That ruling still holds, and F26 kept it by moving the *provider* rather than the
+ * client.** `createClient` lives in `compat.ts`, behind its own subpath export, and nothing
+ * on the read path imports it. What this module now hands out is the two things only it can
+ * supply — a provider for this chain, and a *second* Asset Hub chain handle — so the compat
+ * client is built **above** the transport, after it is already serving reads. The ordering
+ * the ruling protects is structural rather than remembered: `startLightClient` returns a
+ * working `LightClient` whether or not anybody ever asks for a compat surface, and an
+ * undecodable runtime fails in a function whose result is a value.
+ *
  * **Honest limit.** Everything below the structural seam — that smoldot actually syncs,
  * that browser-WSS peers are reachable (FE-P4), that the follow subscription behaves as
  * specified against a real node — is *not* verified by any test in this repository. It is
@@ -29,12 +38,14 @@ import { startFromWorker } from 'polkadot-api/smoldot/from-worker';
 
 import type { HexString } from '@bleavit/shared-types';
 import { ChainHeadConnection, type JsonRpcProviderLike } from './transport.js';
+import type { CompatProvider } from './compat.js';
 import {
   assetHubConnector,
   type AssetHubConnection as AssetHubLegConnection,
 } from './asset-hub.js';
 import {
   startTopology,
+  type AssetHubLeg,
   type BundledChain,
   type SmoldotClientLike,
   type Topology,
@@ -87,8 +98,58 @@ export interface LightClient {
    * yield a transport connected to nothing while reporting no failure.
    */
   connectAssetHub(assetHub: BundledChain): Promise<AssetHubConnection>;
+  /**
+   * A provider for **this chain**, for 10 §5.2's compat probe — not for reading.
+   *
+   * A **fresh handle per call**, each over its own topology, and both halves matter.
+   * `getSmProvider` refuses a chain it has already been handed with a console warning rather
+   * than an error, so sharing the transport's provider would eventually yield a client
+   * connected to nothing and reporting success. And a topology this call created is a
+   * topology this call must give back — hence `release()`, not a bare provider.
+   */
+  compatProvider(): CompatProviderHandle;
+  /**
+   * A provider for a **second, transient** Asset Hub chain handle — 02 §7.7's compat probe.
+   *
+   * Separate from `connectAssetHub` because one smoldot `Chain` serves one JSON-RPC
+   * connection and closing it removes the chain (see `AttachOptions.reuse`). The deposit leg
+   * needs the reader *and* the probe, so it needs two handles; this is the second, and
+   * `release()` returns it. `release()` never touches the connection the reader holds.
+   *
+   * Returns the leg's refusal instead of a provider when the chain does not attach — the
+   * same arms `connectAssetHub` reports, so a `wrong-chain` verdict stays `wrong-chain`
+   * rather than becoming "the probe failed".
+   */
+  assetHubCompatProvider(assetHub: BundledChain): Promise<AssetHubCompatProvider>;
   stop(): Promise<void>;
 }
+
+/**
+ * A transient handle for a compat probe: a provider, and the way to give it back.
+ *
+ * `release()` is not optional politeness. The factory behind this provider adds **two** chains
+ * — relay and parachain, because 10 §3.1 says a parachain client cannot run without a relay
+ * client — while `getSmProvider`'s `disconnect` removes only the one chain it was handed. So a
+ * probe that merely destroyed its PAPI client would leave a relay light client syncing with
+ * nothing reading it, once per probe, and 10 §3.2 re-runs the classifier on **every**
+ * `CodeUpdated`.
+ */
+export interface CompatProviderHandle {
+  readonly provider: CompatProvider;
+  /** Stop the topology this provider created. Idempotent. */
+  release(): void;
+}
+
+/** A transient Asset Hub handle for the compat probe, or the leg's own reason for refusing. */
+export type AssetHubCompatProvider =
+  | {
+      readonly kind: 'attached';
+      readonly provider: CompatProvider;
+      readonly genesisHash: HexString;
+      /** Remove this handle. Never affects the reader's handle. */
+      release(): void;
+    }
+  | Exclude<AssetHubLeg<RealSmoldotChain>, { kind: 'attached' }>;
 
 /**
  * Ask a raw smoldot chain for its genesis hash.
@@ -131,7 +192,7 @@ export async function startLightClient(options: LightClientOptions): Promise<Lig
   const topologies: Topology<RealSmoldotChain>[] = [];
   let latest: Topology<RealSmoldotChain> | undefined;
 
-  const provider = getSmProvider(async () => {
+  const newTopology = async (): Promise<Topology<RealSmoldotChain>> => {
     const topology = await startTopology(asTopologyClient(client), {
       relay: options.relay,
       para: options.para,
@@ -139,6 +200,11 @@ export async function startLightClient(options: LightClientOptions): Promise<Lig
       ...(options.extraBootnodes === undefined ? {} : { extraBootnodes: options.extraBootnodes }),
     });
     topologies.push(topology);
+    return topology;
+  };
+
+  const provider = getSmProvider(async () => {
+    const topology = await newTopology();
     latest = topology;
     // The transport follows the **parachain**. The relay client exists so parachain
     // finality is derivable from relay-finalized para-inclusion (§4.1); nothing reads
@@ -192,6 +258,51 @@ export async function startLightClient(options: LightClientOptions): Promise<Lig
     transport,
     topology,
     connectAssetHub: (bundled) => assetHub.connect(bundled),
+    compatProvider() {
+      let created: Topology<RealSmoldotChain> | undefined;
+      return {
+        // **Not** through `asTransportProvider`. That binding narrows to the read layer's
+        // deliberately wider `JsonRpcProviderLike`, which PAPI's `createClient` does not
+        // accept — the width flows the wrong way through the callback (see `compat.ts`). The
+        // compat client is handed the provider PAPI's own type describes, unmodified.
+        provider: getSmProvider(async () => {
+          const topology = await newTopology();
+          created = topology;
+          return topology.para;
+        }),
+        release() {
+          if (created === undefined) return;
+          // **Stops the whole topology, not just the para chain.** `getSmProvider`'s
+          // `disconnect` removes only the chain it was handed, and this factory adds two —
+          // relay and para. Handing out the *transport's* provider instead, as the first
+          // version did, leaked a relay `Chain` and a `Topology` entry per probe, and 10 §3.2
+          // re-runs the classifier on **every** `CodeUpdated`. A transient client whose
+          // transience is only partial is worse than a persistent one, because nothing counts
+          // the remainder.
+          created.stop();
+          const at = topologies.indexOf(created);
+          if (at >= 0) topologies.splice(at, 1);
+          created = undefined;
+        },
+      };
+    },
+    async assetHubCompatProvider(bundled) {
+      // `reuse: false` — a second handle beside the reader's, never the reader's own. See
+      // `AttachOptions.reuse` for why one handle cannot serve both.
+      const leg = await topology.attachAssetHub(bundled, { reuse: false });
+      if (leg.kind !== 'attached') return leg;
+      return {
+        kind: 'attached',
+        // Built here and only here, after `attachAssetHub`'s genesis probe has already run
+        // on this chain — `probeGenesisHash` drives `nextJsonRpcResponse()` directly, and a
+        // provider attached first would race it for every response.
+        provider: getSmProvider(async () => leg.chain),
+        genesisHash: leg.genesisHash,
+        release: () => {
+          leg.detach();
+        },
+      };
+    },
     async stop() {
       transport.close();
       assetHub.close();

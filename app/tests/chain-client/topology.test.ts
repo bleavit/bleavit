@@ -599,3 +599,69 @@ test('every Asset Hub refusal says deposits alone are affected', async () => {
   assert.match(refused(leg).reason, /Deposits are unavailable/);
   assert.match(refused(leg).reason, /nothing else in the app is affected/);
 });
+
+/* ------------------------------- the second handle 10 §5.2's foreign probe needs (F26) */
+
+test('reuse:false yields a SECOND handle beside the cached one, without displacing it', async () => {
+  // Why this exists at all: `getSmProvider` keeps a `WeakSet` of the chains it has been
+  // handed and its `disconnect` calls `chain.remove()`, so one smoldot `Chain` serves one
+  // JSON-RPC connection, ever. The deposit leg needs two — the reader that fetches balances
+  // and the transient PAPI client that probes the 02 §7.7 surfaces — and the cache is what
+  // stopped a second existing. It is not a second light client: smoldot de-duplicates
+  // identical chain specs internally, which is the same property the local provider factory
+  // already relies on when it rebuilds a whole topology per connection.
+  const specs = await pair();
+  const { client, calls } = fakeClient();
+  const topology = await start(client, specs);
+
+  const reader = attached(await topology.attachAssetHub(await assetHubBundle()));
+  const probe = attached(await topology.attachAssetHub(await assetHubBundle(), { reuse: false }));
+  assert.notEqual(probe.chain, reader.chain, 'the probe was handed the reader’s own chain');
+  assert.equal(calls.length, 4);
+
+  // Still the same identity and the same verified spec — an uncached attach must not be a
+  // way around `verifyBundledChainSpec` or the genesis check.
+  assert.equal(probe.genesisHash, reader.genesisHash);
+  assert.equal(probe.spec.id, reader.spec.id);
+});
+
+test('an uncached leg is not remembered, so releasing it never disturbs the reader', async () => {
+  const specs = await pair();
+  const { client, calls, removed } = fakeClient();
+  const topology = await start(client, specs);
+
+  const reader = attached(await topology.attachAssetHub(await assetHubBundle()));
+  const probe = attached(await topology.attachAssetHub(await assetHubBundle(), { reuse: false }));
+  probe.detach();
+
+  assert.ok(removed.includes(probe.chain), 'the probe handle was left syncing with nothing reading it');
+  assert.equal(removed.includes(reader.chain), false, 'releasing the probe took down the deposit reader');
+
+  // The cache still points at the reader: a caller re-entering the flow gets the connection
+  // it already has, not a third chain.
+  const again = attached(await topology.attachAssetHub(await assetHubBundle()));
+  assert.equal(again.chain, reader.chain);
+  assert.equal(calls.length, 4, 'the probe’s release cleared the cache and added another chain');
+});
+
+test('an uncached leg is still owned by stop(), even if the caller never releases it', async () => {
+  const specs = await pair();
+  const { client, removed } = fakeClient();
+  const topology = await start(client, specs);
+
+  const probe = attached(await topology.attachAssetHub(await assetHubBundle(), { reuse: false }));
+  topology.stop();
+  assert.ok(removed.includes(probe.chain), 'an unreleased probe handle outlived its topology');
+});
+
+test('reuse:false does not become the default by omission', async () => {
+  // The direction that would be silent: every entry into the funding flow adding a chain.
+  const specs = await pair();
+  const { client, calls } = fakeClient();
+  const topology = await start(client, specs);
+
+  await topology.attachAssetHub(await assetHubBundle());
+  await topology.attachAssetHub(await assetHubBundle(), {});
+  await topology.attachAssetHub(await assetHubBundle(), { reuse: true });
+  assert.equal(calls.length, 3, 'an omitted or empty option added a chain');
+});

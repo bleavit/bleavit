@@ -24,7 +24,7 @@
 
 import type { ChainId, HexString } from '@bleavit/shared-types';
 import type { FinalizedBlockRef } from './provenance.js';
-import type { ChainHeadTransport, StorageItem } from './reads.js';
+import type { ChainHeadTransport, RuntimeVersionReport, StorageItem } from './reads.js';
 
 /* ------------------------------------------------------------------ provider shape */
 
@@ -161,6 +161,28 @@ interface PendingOperation {
   reject: (error: Error) => void;
 }
 
+/**
+ * Read a `RuntimeEvent` — `{ type: "valid", spec } | { type: "invalid", error }`.
+ *
+ * An `invalid` runtime yields `undefined` rather than a partly-filled report, and so does a
+ * `valid` one whose numbers are not numbers. Both are the same decision: 10 §5.2 refuses an
+ * unprobed surface, and a `spec_version` this client could not read is the same kind of
+ * absence one layer up — the classifier must say *"I could not establish the runtime"*,
+ * never guess a version and then classify a chain against it.
+ */
+function runtimeReport(event: unknown): RuntimeVersionReport | undefined {
+  if (typeof event !== 'object' || event === null) return undefined;
+  const runtime = event as { type?: unknown; spec?: unknown };
+  if (runtime.type !== 'valid') return undefined;
+  if (typeof runtime.spec !== 'object' || runtime.spec === null) return undefined;
+  const spec = runtime.spec as Record<string, unknown>;
+  const { specName, specVersion, implVersion, transactionVersion } = spec;
+  if (typeof specName !== 'string') return undefined;
+  if (typeof specVersion !== 'number' || typeof implVersion !== 'number') return undefined;
+  if (typeof transactionVersion !== 'number') return undefined;
+  return { specName, specVersion, implVersion, transactionVersion };
+}
+
 export interface ChainHeadConnectionOptions {
   /**
    * Which chain this connection follows — its genesis hash (F18).
@@ -215,12 +237,45 @@ export class ChainHeadConnection implements ChainHeadTransport {
   readonly #operations = new Map<string, PendingOperation>();
   readonly #orphanEvents = new Map<string, Record<string, unknown>[]>();
   readonly #headerNumbers = new Map<string, number>();
+  /**
+   * Runtimes announced for blocks that are not yet finalized.
+   *
+   * **Not trimmed with the pin window, and that is the whole of the repair for a defect that
+   * reported a positive verdict about a runtime it had not examined.** The first version
+   * deleted alongside `#headerNumbers` in `#unpin`, which `#trimPins` calls once the pinned
+   * set exceeds `PIN_WINDOW`. A `newRuntime` announced on a block that then took more than
+   * sixteen further announcements to finalize — an ordinary finality stall — was evicted, so
+   * the `finalized` handler found nothing to promote and **kept the pre-upgrade runtime**.
+   * The client would then classify the *old* `spec_version` as `full` against a live upgraded
+   * runtime and leave signing enabled, and 10 §5.2's mitigation could not help: `FE-TX-007`
+   * re-reads the live runtime version and would read the same poisoned value.
+   *
+   * An entry therefore leaves only when its block's fate is known — promoted on `finalized`,
+   * dropped on `prunedBlockHashes` — which are the two events that make it meaningless. It is
+   * fed once per runtime *change*, not once per block, so in ordinary operation it holds at
+   * most the upgrades in flight, which is one.
+   *
+   * It is still capped, because "sparse" is not "bounded" and a node chooses what it
+   * announces (the same argument `#bufferOrphan` makes about remote-controlled growth). The
+   * cap **fails closed** rather than evicting: see {@link ChainHeadConnection.finalizedRuntime}.
+   */
+  readonly #runtimeAt = new Map<string, RuntimeVersionReport>();
+  /**
+   * Set when announcements were dropped, so no runtime can be reported until one is proven.
+   *
+   * The alternative — dropping the oldest and carrying on — is the defect above with an extra
+   * step: the dropped entry is the upgrade, and what survives is the runtime that is no longer
+   * current. Silence is the only safe answer to *"an upgrade may have been announced and this
+   * client did not keep it"*, and it clears the moment a `finalized` event proves a runtime.
+   */
+  #runtimeUncertain = false;
   readonly #pinWindow: number;
   readonly #chain: ChainId;
   #pinnedOrder: HexString[] = [];
   #nextId = 1;
   #subscription: string | undefined;
   #finalized: HexString | undefined;
+  #finalizedRuntime: RuntimeVersionReport | undefined;
 
   readonly #finalizedListeners = new Set<(hash: HexString) => void>();
   #initialized: ((hash: HexString) => void) | undefined;
@@ -315,6 +370,38 @@ export class ChainHeadConnection implements ChainHeadTransport {
   /** How many block numbers are cached. Bound assertion only. */
   headerCacheCountForTest(): number {
     return this.#headerNumbers.size;
+  }
+
+  /** How many announced runtimes are held. Bound assertion only. */
+  runtimeCacheCountForTest(): number {
+    return this.#runtimeAt.size;
+  }
+
+  /** Whether announcements were dropped, so nothing may be reported. Assertion only. */
+  runtimeUncertainForTest(): boolean {
+    return this.#runtimeUncertain;
+  }
+
+  /**
+   * The runtime of the **finalized** head, or `undefined` if none has been established.
+   *
+   * Finalized, never best. 10 §4.2 rule 1 makes a `chainHead` result exactly as trustworthy
+   * as the block it is pinned to, and this figure decides whether the app may sign — so it
+   * takes the same rule every transaction-critical read takes. A runtime announced on a
+   * `newBlock` is held aside and only becomes this connection's answer once that block is
+   * reported finalized; before then the client would be classifying against a runtime that
+   * may still be reorged away, which is exactly the direction that enables signing early.
+   *
+   * `undefined` is a real answer and callers must fail closed on it — a follow opened with
+   * `withRuntime: false`, an `invalid` runtime, or a subscription that has not initialized
+   * all produce it, and none of them means *"the runtime is fine"*.
+   */
+  finalizedRuntime(): RuntimeVersionReport | undefined {
+    // Uncertainty outranks the last known answer. Announcements were dropped, so an upgrade
+    // may have been among them, and the runtime held here would then be the one that is no
+    // longer current — the shape that let a stale `spec_version` be classified `full`.
+    if (this.#runtimeUncertain) return undefined;
+    return this.#finalizedRuntime;
   }
 
   async pinnedBlock(): Promise<FinalizedBlockRef> {
@@ -506,6 +593,31 @@ export class ChainHeadConnection implements ChainHeadTransport {
    * and dropping the oldest is safe: a dropped orphan can only ever fail a read, never
    * complete one wrongly.
    */
+  /**
+   * Hold a runtime announced on an unfinalized block, or refuse to hold any.
+   *
+   * The cap is not a trim. Evicting the oldest entry is precisely the defect this whole
+   * mechanism was rewritten to remove — the oldest entry is the upgrade that has been waiting
+   * longest to finalize, so dropping it is dropping the one announcement that matters and
+   * keeping the runtime that is on its way out. When the cap is reached the connection
+   * therefore stops claiming to know the runtime at all, and says so through
+   * {@link ChainHeadConnection.finalizedRuntime}, until a `finalized` event proves one.
+   *
+   * The bound is generous on purpose: reaching it needs a node announcing a runtime *change*
+   * on hundreds of blocks without finalizing any of them, which is a hostile or broken node
+   * rather than a stalled chain. An ordinary finality stall holds one entry, however long it
+   * lasts, which is exactly what a pin-window trim got wrong.
+   */
+  #recordAnnouncedRuntime(hash: HexString, runtime: RuntimeVersionReport): void {
+    const MAX_ANNOUNCED_RUNTIMES = 256;
+    if (!this.#runtimeAt.has(hash) && this.#runtimeAt.size >= MAX_ANNOUNCED_RUNTIMES) {
+      this.#runtimeAt.clear();
+      this.#runtimeUncertain = true;
+      return;
+    }
+    this.#runtimeAt.set(hash, runtime);
+  }
+
   #bufferOrphan(operationId: string, event: Record<string, unknown>): void {
     const MAX_ORPHAN_OPERATIONS = 32;
     if (
@@ -546,6 +658,13 @@ export class ChainHeadConnection implements ChainHeadTransport {
         const hash = (hashes?.at(-1) ?? event['finalizedBlockHash']) as HexString | undefined;
         if (hash === undefined) return;
         this.#finalized = hash;
+        // The runtime of the block this event finalizes. `initialized` is the only event
+        // that reports a runtime for an already-finalized block, so it is the only one that
+        // may set this directly — and it is authoritative, so it also settles any earlier
+        // uncertainty. (A `stop` and re-follow replays `initialized`, which is the path by
+        // which a connection that gave up on knowing recovers.)
+        this.#finalizedRuntime = runtimeReport(event['finalizedBlockRuntime']);
+        this.#runtimeUncertain = false;
         this.#announcePinned(hashes ?? [hash]);
         this.#initialized?.(hash);
         this.#initialized = undefined;
@@ -556,7 +675,17 @@ export class ChainHeadConnection implements ChainHeadTransport {
         // Announced blocks are pinned by the node whether or not we ever read at them,
         // so they have to enter the window; dropping them here would leak the majority
         // of pins, since most blocks are announced and never finalized-and-read.
-        this.#announcePinned([event['blockHash'] as HexString | undefined]);
+        const announced = event['blockHash'] as HexString | undefined;
+        this.#announcePinned([announced]);
+        // A runtime **change** at an unfinalized block. Held aside, never promoted here:
+        // this block may still be reorged away, and a classifier reading it would decide
+        // signing against a runtime the chain never adopted. Held until the block is
+        // *finalized* or *pruned* — never until it merely leaves the pin window, which is
+        // what evicted a stalled upgrade and left the old runtime standing.
+        if (announced !== undefined) {
+          const announcedRuntime = runtimeReport(event['newRuntime']);
+          if (announcedRuntime !== undefined) this.#recordAnnouncedRuntime(announced, announcedRuntime);
+        }
         this.#trimPins();
         return;
       }
@@ -565,6 +694,23 @@ export class ChainHeadConnection implements ChainHeadTransport {
         const hash = hashes?.at(-1) as HexString | undefined;
         if (hash !== undefined) this.#finalized = hash;
         this.#announcePinned(hashes ?? []);
+        // Promote an announced runtime once its block is finalized. **In order**, so a
+        // batch that finalizes two upgrades leaves the later one standing; taking the last
+        // *known* entry instead would depend on iteration order of a map, which is the
+        // insertion order of announcements and not the order of the chain.
+        //
+        // The entry is dropped as it is promoted: its block's fate is now known, which is
+        // the only thing that made it worth keeping.
+        for (const finalizedHash of hashes ?? []) {
+          const promoted = this.#runtimeAt.get(finalizedHash);
+          if (promoted === undefined) continue;
+          this.#runtimeAt.delete(finalizedHash);
+          this.#finalizedRuntime = promoted;
+          // A promotion is proof of the runtime at a finalized block, so it settles whatever
+          // the drop above left unknown. Without this, one overflow would leave the client
+          // read-only for the rest of the session even after the chain answered the question.
+          this.#runtimeUncertain = false;
+        }
         // Every hash, in order — see `onFinalized`. Emitted **after** `#announcePinned` so a
         // listener that immediately reads at one finds it pinned; that is the whole of the
         // ordering requirement. It is deliberately not claimed that emission must precede
@@ -573,9 +719,14 @@ export class ChainHeadConnection implements ChainHeadTransport {
         for (const finalizedHash of hashes ?? []) {
           for (const listener of this.#finalizedListeners) listener(finalizedHash);
         }
+        // A pruned block is not on the chain, so a runtime announced on it never happened.
+        // This is the other half of the `#runtimeAt` lifetime, and the only other place an
+        // entry may leave: fate known, entry gone.
+        const pruned = (event['prunedBlockHashes'] as HexString[] | undefined) ?? [];
+        for (const prunedHash of pruned) this.#runtimeAt.delete(prunedHash);
         // Pruned blocks are unreadable from this moment regardless, so releasing them is
         // free; keeping them was pure accumulation.
-        this.#unpin((event['prunedBlockHashes'] as HexString[] | undefined) ?? []);
+        this.#unpin(pruned);
         this.#trimPins();
         return;
       }

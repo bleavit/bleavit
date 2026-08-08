@@ -10,6 +10,7 @@
     "@bleavit/application": "workspace:*",
     "@bleavit/chain-client": "workspace:*",
     "@bleavit/contexts": "workspace:*",
+    "@bleavit/descriptors": "workspace:*",
     "@bleavit/features-handoff": "workspace:*",
     "@bleavit/features-tx": "workspace:*",
     "@bleavit/handoff-envelope": "workspace:*",
