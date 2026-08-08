@@ -45,6 +45,40 @@ import {
   type AssetHubConnectOptions,
   type AssetHubConnection as AssetHubLegConnection,
 } from './asset-hub.js';
+
+/**
+ * How long a teardown waits for smoldot to terminate before giving up on it — F27.
+ *
+ * `worker.terminate()` cannot interrupt a worker thread that is inside a long synchronous WASM
+ * computation, which is why `app/tools/drill-client/boot.ts` bounds the same call and takes
+ * this value. Here it matters more than it does there: on the wrong-chain path the `await` sits
+ * **between the failure and the `throw`**, so an unbounded one keeps 10 §3.1's terminal state
+ * from ever reaching a screen — a state whose entire purpose is to render one sentence.
+ *
+ * An unfinished teardown is a better thing to abandon than to wait for. By this point the
+ * chains are removed and the provider is disconnected, so whatever is still running holds no
+ * reference this client will use again.
+ */
+const TERMINATE_DEADLINE_MS = 15_000;
+
+/**
+ * Terminate, and **never** let the teardown replace the failure that caused it.
+ *
+ * Resolves on rejection as well as on the bound. `await client.terminate()` would have thrown
+ * the teardown's error in place of the `WrongChainError` the caller is about to raise, which
+ * turns `FE-BOOT-003` — a diagnosis naming two genesis hashes — into whatever smoldot said
+ * while shutting down.
+ */
+async function terminateWithin(terminate: () => Promise<unknown>, ms: number): Promise<void> {
+  await new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    const done = (): void => {
+      clearTimeout(timer);
+      resolve();
+    };
+    terminate().then(done, done);
+  });
+}
 import {
   startTopology,
   type AssetHubLeg,
@@ -349,7 +383,7 @@ export async function startLightClientWith(
       // A connection that never opened has nothing to release, which is the state wanted.
     }
     for (const topology of topologies) topology.stop();
-    await client.terminate();
+    await terminateWithin(() => client.terminate(), TERMINATE_DEADLINE_MS);
     throw error;
   }
 
@@ -432,7 +466,7 @@ export async function startLightClientWith(
       transport.close();
       assetHub.close();
       for (const each of topologies) each.stop();
-      await client.terminate();
+      await terminateWithin(() => client.terminate(), TERMINATE_DEADLINE_MS);
     },
   };
 }
