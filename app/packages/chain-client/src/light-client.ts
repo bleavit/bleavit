@@ -283,21 +283,46 @@ export type SmProviderFactory = typeof getSmProvider;
  * and an empty registry. `topologies` is passed in because `stop()` walks the same array and
  * a released topology must leave it — a handle that stopped a topology and left it listed
  * would have it stopped twice on teardown.
+ *
+ * ## Release is latched, because the same leak is reachable one race later
+ *
+ * The probe that leaks is the **slow** one, and a slow probe is the one still inside
+ * `newTopology()` when the deadline fires. `compat-session.ts` abandons a pull after
+ * `COMPAT_PULL_DEADLINE_MS`, `classifyChain`'s `finally` releases immediately, and the pinned
+ * SDK cancels nothing: `getSmProvider`'s teardown is `() => { isRunning = false; }`, so every
+ * in-flight `getChain()` still resolves and still runs `track()`. Worse, `sm-provider` then
+ * calls `resolvedChain.remove()` on what it was handed — the **parachain alone** — so the
+ * relay chain and the `Topology` go on syncing with nothing reading them.
+ *
+ * A `track()` that only appended would therefore file those topologies under a handle whose
+ * one `release()` has already run, and `compat-boot.ts` never calls it twice. That is the
+ * original leak restored on exactly the path it was found on. So a topology arriving after
+ * release is not recorded but **given back at once**, which is the only answer that does not
+ * depend on somebody calling `release()` again.
  */
 export function transientTopologies<T extends { stop(): void }>(
   registry: T[],
 ): { track(topology: T): void; releaseAll(): void } {
   const mine: T[] = [];
+  let released = false;
+  const giveBack = (topology: T): void => {
+    topology.stop();
+    const at = registry.indexOf(topology);
+    if (at >= 0) registry.splice(at, 1);
+  };
   return {
     track(topology: T): void {
+      // Arrived after the release it should have been part of — see the header. Stopping it
+      // here is what keeps this handle's accounting total rather than merely early.
+      if (released) {
+        giveBack(topology);
+        return;
+      }
       mine.push(topology);
     },
     releaseAll(): void {
-      for (const topology of mine.splice(0)) {
-        topology.stop();
-        const at = registry.indexOf(topology);
-        if (at >= 0) registry.splice(at, 1);
-      }
+      released = true;
+      for (const topology of mine.splice(0)) giveBack(topology);
     },
   };
 }
@@ -503,6 +528,10 @@ export async function startLightClientWith(
           // the remainder.
           //
           // And **all** of them, for the same reason one layer up: see `transientTopologies`.
+          // Including the ones that are not here yet. This runs from `classifyChain`'s
+          // `finally`, so a pull abandoned at its deadline releases while the factory above
+          // is still awaiting `newTopology()` — the handle latches and stops those on
+          // arrival, because nothing calls this a second time.
           created.releaseAll();
         },
       };

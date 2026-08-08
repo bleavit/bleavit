@@ -93,6 +93,67 @@ test('releasing twice is a no-op, and one handle never releases another', () => 
   assert.deepEqual(registry, []);
 });
 
+test('a topology tracked after release is stopped at once, never left running', () => {
+  // **The late `track()`** — the same leak, one race later, and the case this handle is most
+  // likely to meet in production rather than least.
+  //
+  // `compatProvider()`'s factory is `async () => { const topology = await newTopology();
+  // created.track(topology); return topology.para; }`, and the pull it feeds carries
+  // `COMPAT_PULL_DEADLINE_MS`. When the deadline fires first, `classifyChain`'s `finally`
+  // calls `release()` while every in-flight `newTopology()` is still awaiting
+  // `startTopology` — which is exactly what a slow or unreachable chain produces, the very
+  // condition the deadline exists for.
+  //
+  // The pinned SDK does not cancel those calls. `getSmProvider`'s teardown is
+  // `() => { isRunning = false; }` and nothing more; the pending factory promise still
+  // resolves, and `sm-provider` then runs `resolvedChain.remove()`, which removes the
+  // **parachain alone**. The relay chain and the `Topology` survive, and `track()` files
+  // them under a handle whose one `release()` has already run and will not run again — so
+  // they sync unreferenced until `LightClient.stop()`. A handle that closes the first leak
+  // and leaves this one open has not closed the leak.
+  //
+  // Three late arrivals, for the reason the first case states: `getSmProvider` re-invokes
+  // the factory on every halt and on `onReady(null)`, so several are in flight at once, and
+  // a latch that handled only the newest passes at two if the assertion names the last one.
+  const survivor = topology('the reader');
+  const registry: FakeTopology[] = [survivor];
+  const handle = transientTopologies(registry);
+  const early = topology('before the deadline');
+  registry.push(early);
+  handle.track(early);
+
+  handle.releaseAll(); // the deadline fires and `classifyChain`'s `finally` runs
+
+  const late = [topology('first late'), topology('second late'), topology('third late')];
+  for (const each of late) {
+    registry.push(each); // `newTopology()` pushed it before returning
+    handle.track(each);
+  }
+
+  assert.deepEqual(
+    late.map((t) => [t.name, t.stopped]),
+    [
+      ['first late', 1],
+      ['second late', 1],
+      ['third late', 1],
+    ],
+    'a topology that arrived after release was left running',
+  );
+  assert.deepEqual(registry, [survivor], 'a late topology stayed in the shared registry');
+  assert.equal(early.stopped, 1, 'the released topology was stopped again');
+  assert.equal(survivor.stopped, 0, 'a late arrival stopped the reader topology');
+
+  // And teardown must still not double-stop what this handle already stopped.
+  handle.releaseAll();
+  for (const each of registry) each.stop(); // what `LightClient.stop()` does
+  assert.deepEqual(
+    late.map((t) => t.stopped),
+    [1, 1, 1],
+    'a late topology was stopped twice',
+  );
+  assert.equal(survivor.stopped, 1, 'the reader topology was not stopped by teardown');
+});
+
 test('two handles account separately, which is what makes a per-call handle safe', () => {
   // `compatProvider()` returns a fresh handle per call and 10 §3.2 re-classifies on every
   // `CodeUpdated`, so two handles are live whenever one probe outlives the start of another.
