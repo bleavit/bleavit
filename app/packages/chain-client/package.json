@@ -21,6 +21,10 @@
     "./testing": {
       "types": "./dist/testing.d.ts",
       "default": "./dist/testing.js"
+    },
+    "./node-light-client": {
+      "types": "./dist/node-light-client.d.ts",
+      "default": "./dist/node-light-client.js"
     }
   },
   "scripts": {

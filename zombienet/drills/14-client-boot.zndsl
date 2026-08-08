@@ -1,0 +1,14 @@
+Description: F27 — the canonical client boots a real light client against the relay + Bleavit + Asset Hub topology, classifies both runtimes (10 §5.2), and refuses a corrupted genesis pin (10 §3.1 FE-BOOT-003). 15 §4.8's Zombienet row.
+Network: ./zombienet/networks/bleavit-xcm.toml
+Creds: config
+
+relay-alice: is up within 60 seconds
+bleavit-collator-1: is up within 120 seconds
+asset-hub-collator-1: is up within 120 seconds
+bleavit-collator-1: parachain 4242 is registered within 300 seconds
+asset-hub-collator-1: parachain 1000 is registered within 300 seconds
+bleavit-collator-1: reports block height is at least 2 within 300 seconds
+asset-hub-collator-1: reports block height is at least 2 within 300 seconds
+bleavit-collator-1: js-script ./js/client-boot.js with "pin" within 300 seconds
+bleavit-collator-1: js-script ./js/client-boot.js with "boot" within 600 seconds
+bleavit-collator-1: js-script ./js/client-boot.js with "wrong-chain" within 600 seconds

@@ -188,7 +188,48 @@ async function probeGenesisHash(chain: RealSmoldotChain): Promise<HexString> {
  * de-duplicating themselves.
  */
 export async function startLightClient(options: LightClientOptions): Promise<LightClient> {
-  const client = startFromWorker(options.worker);
+  return startLightClientWith({
+    relay: options.relay,
+    para: options.para,
+    ...(options.extraBootnodes === undefined ? {} : { extraBootnodes: options.extraBootnodes }),
+    startClient: () => startFromWorker(options.worker),
+  });
+}
+
+/**
+ * How the smoldot client is obtained — the one line of `startLightClient` that is about the
+ * **host** rather than about this chain. F27.
+ *
+ * `polkadot-api` ships two worker pairs and they are not interchangeable.
+ * `smoldot/worker` assigns a bare `onmessage`, which exists in a `DedicatedWorkerGlobalScope`
+ * and not in Node, where loading it raises `ReferenceError: onmessage is not defined`; and
+ * `startFromWorker` sets `worker.onmessage` on what Node gives it, an `EventEmitter` with no
+ * such accessor, so the assignment succeeds as an inert own property and the client **hangs
+ * with no error**. That second half is why this is a seam rather than a `typeof` check: the
+ * browser path does not fail loudly off-browser, it fails silently.
+ *
+ * The Node pair (`smoldot/from-node-worker` + `smoldot/node-worker`) is in the same pinned
+ * package, and both return smoldot's own `Client` — so everything below this line is shared
+ * and neither host gets a second implementation of the topology, the identity check or the
+ * teardown. `./node-light-client` supplies the Node factory and is the only module that names
+ * `node:worker_threads`, so a browser bundle never sees it.
+ */
+export type SmoldotClientFactory = () => RealSmoldotClient;
+
+/** {@link LightClientOptions} with the worker replaced by the factory that produces a client. */
+export interface HostedLightClientOptions {
+  readonly relay: BundledChain;
+  readonly para: BundledChain;
+  /** 10 §4.3 expert setting; local-only, never remote-configured. */
+  readonly extraBootnodes?: readonly string[];
+  readonly startClient: SmoldotClientFactory;
+}
+
+/** {@link startLightClient}, for a host that has its own way to start smoldot. */
+export async function startLightClientWith(
+  options: HostedLightClientOptions,
+): Promise<LightClient> {
+  const client = options.startClient();
   const topologies: Topology<RealSmoldotChain>[] = [];
   let latest: Topology<RealSmoldotChain> | undefined;
 

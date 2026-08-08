@@ -85,6 +85,47 @@ export async function chainSpecHash(text: string): Promise<HexString> {
 }
 
 /**
+ * The relay a spec declares, under either spelling — F27, 2026-08-08.
+ *
+ * **This reader accepted only `relayChain` until F27, and no chain spec this repository
+ * produces carries that key.** Substrate renames `ClientSpec`'s own fields to camelCase, but
+ * a parachain's relay and para id come from Cumulus's `Extensions` struct, which is **not**
+ * renamed — so `chain-spec-builder` emits `relay_chain` and `para_id`, in the drill specs and
+ * in `deploy/chain-specs/out/` alike. `tools/deploy/validate-chain-spec.py` has always read
+ * `relay_chain` and agreed with the artifacts; this file did not, so `verifyBundledChainSpec`
+ * would have thrown *"declares no relayChain"* on **every** genuine parachain spec, including
+ * the production one.
+ *
+ * Nothing caught it because every fixture in this package is hand-written with the spelling
+ * this function used to require — the reader and its tests agreed with each other and with
+ * nothing else.
+ *
+ * **smoldot honours `relay_chain`, verified rather than assumed** (R-2): the pinned
+ * `smoldot@3.3.2` was handed the generated spec with `potentialRelayChains: []` and answered
+ * `AddChainError: Couldn't find relevant relay chain` — it looked for the declared relay and
+ * refused when none was supplied. Its own `public-types.d.ts` documents `relayChain`, so both
+ * spellings reach the same code path there and this reader must be no narrower than the
+ * client it feeds.
+ *
+ * Neither spelling is preferred and a spec carrying **both** is refused rather than resolved:
+ * two declarations of the one fact are a spec that has been edited, and picking a winner is
+ * how a client ends up dialling the relay the other key named.
+ */
+export function relayChainOf(spec: Record<string, unknown>): string | undefined {
+  const camel = spec['relayChain'];
+  const snake = spec['relay_chain'];
+  if (typeof camel === 'string' && typeof snake === 'string' && camel !== snake) {
+    throw new ChainSpecIntegrityError(
+      `chain spec declares two different relay chains (relayChain=${JSON.stringify(camel)}, ` +
+        `relay_chain=${JSON.stringify(snake)}); it has been edited, and either key could be the ` +
+        'one a client acts on',
+    );
+  }
+  if (typeof camel === 'string') return camel;
+  return typeof snake === 'string' ? snake : undefined;
+}
+
+/**
  * Verify a bundled chain spec against its release pin, and return the fields the topology
  * needs.
  *
@@ -134,7 +175,7 @@ export async function verifyBundledChainSpec(
     );
   }
 
-  const relayChain = typeof spec['relayChain'] === 'string' ? spec['relayChain'] : undefined;
+  const relayChain = relayChainOf(spec);
   if (pinned.kind === 'para') {
     // smoldot resolves a parachain's relay by matching this string against the `id` of a
     // chain in `potentialRelayChains`. If it does not match, the linkage silently fails

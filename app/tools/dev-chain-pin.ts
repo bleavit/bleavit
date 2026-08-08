@@ -41,11 +41,20 @@
  *
  * ```sh
  * node app/tools/dev-chain-pin.ts \
- *   --relay      deploy/chain-specs/out/paseo-local.json      --relay-genesis 0x… \
- *   --para       deploy/chain-specs/out/bleavit-dev.json      --para-genesis  0x… \
- *   [--asset-hub deploy/chain-specs/out/asset-hub-local.json  --asset-hub-genesis 0x…] \
+ *   --relay      zombienet/specs/out/paseo-local-raw.json           --relay-genesis 0x… \
+ *   --para       zombienet/specs/out/bleavit-drill-raw.json         --para-genesis  0x… \
+ *   [--asset-hub zombienet/specs/out/asset-hub-paseo-local-raw.json --asset-hub-genesis 0x…] \
  *   [--out /tmp/drill/dev-pin.json]
  * ```
+ *
+ * **Those paths were wrong until 2026-08-08 (F27) and could not have worked.** They named
+ * `deploy/chain-specs/out/paseo-local.json` and `asset-hub-local.json`, which nothing
+ * produces — `generate-chain-specs.sh` writes only `bleavit-dev.json` and
+ * `bleavit-local.json` there — and both of those are **plain**, so `pinRole`'s own raw check
+ * refuses them. The specs that exist in raw form come from `tools/env/generate-relay-specs.sh`,
+ * which emits a `-raw.json` beside each plain one precisely so the zombienet spawn and the
+ * light client can each have the form they accept. `zombienet/drills/js/client-boot.js` runs
+ * this command with those arguments, so the usage block and its one caller now agree.
  *
  * With no `--out` the document goes to stdout. The shape is what
  * `ChainSpecs`/`FundingPins` need: one `{ pinned, chainSpec }` per role, so a harness reads
@@ -157,7 +166,23 @@ async function pinRole(input: RoleInput): Promise<{ pinned: DevPinRole; chainSpe
     );
   }
 
-  const relayChain = spec['relayChain'];
+  // Both spellings, for the reason `chain-spec.ts`'s `relayChainOf` records: Cumulus emits
+  // `relay_chain`, so a camelCase-only reader refuses every spec this repository produces.
+  // Read here rather than imported, because this tool is deliberately dependency-free — it
+  // runs before anything is built, from a drill helper that shells out to it.
+  const camelRelay = spec['relayChain'];
+  const snakeRelay = spec['relay_chain'];
+  if (
+    typeof camelRelay === 'string' &&
+    typeof snakeRelay === 'string' &&
+    camelRelay !== snakeRelay
+  ) {
+    throw new DevPinError(
+      `the ${input.role} chain spec (${id}) declares two different relay chains ` +
+        `(relayChain=${JSON.stringify(camelRelay)}, relay_chain=${JSON.stringify(snakeRelay)})`,
+    );
+  }
+  const relayChain = typeof camelRelay === 'string' ? camelRelay : snakeRelay;
   if (input.kind === 'relay' && typeof relayChain === 'string') {
     throw new DevPinError(
       `the relay spec (${id}) declares a relayChain (${relayChain}); it would be treated as a parachain`,

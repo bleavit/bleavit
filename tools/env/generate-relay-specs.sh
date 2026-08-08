@@ -245,6 +245,39 @@ if [[ ! -s "$out/bleavit-drill-raw.json" ]] || ! python3 -m json.tool "$out/blea
   exit 1
 fi
 
+# Raw specs for the LIGHT CLIENT — F27; 10 §4.1.
+#
+# Two consumers want the same chains in two forms, and neither accepts the other's.
+# The pinned zombienet schedules a parachain only from a PLAIN spec (see the note above
+# the PB-MIGRATION block), while smoldot accepts raw specs only — `chain-spec.ts` refuses
+# a non-raw spec outright, because `addChain` reports the difference as a chain that never
+# finalises, which on screen and in a drill log is indistinguishable from slow sync.
+#
+# Until F27 the only conversion here was the Bleavit one, for Chopsticks, so the relay and
+# Asset Hub existed in plain form alone and no light client could have been pointed at this
+# topology at all. Both files are emitted from the same generation, so the pair cannot drift.
+for chain in paseo-local asset-hub-paseo-local coretime-paseo-local; do
+  rm -f "$out/$chain-raw.json"
+  "$builder" --chain-spec-path "$out/$chain-raw.json" \
+    convert-to-raw "$out/$chain.json"
+  if [[ ! -s "$out/$chain-raw.json" ]] || ! python3 -m json.tool "$out/$chain-raw.json" >/dev/null; then
+    rm -f "$out/$chain-raw.json"
+    echo "chain-spec-builder did not produce valid raw JSON for $chain" >&2
+    exit 1
+  fi
+  # The refusal `chain-spec.ts` makes, made here — one generation earlier, where the
+  # message can name the artifact rather than the sync.
+  python3 - "$out/$chain-raw.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+spec = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+if not isinstance(spec.get("genesis", {}).get("raw"), dict):
+    raise SystemExit(f"{sys.argv[1]} is not a raw spec; smoldot accepts only raw specifications")
+PY
+done
+
 # PB-MIGRATION drill staging — 09 §3.2; SQ-274. Produce a PLAIN drill spec that
 # additionally seeds `pallet_execution_guard::MigrationHalt = true` via the
 # guard's `migration_halt` genesis field. It must be a plain (not raw) spec so

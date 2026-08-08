@@ -776,6 +776,40 @@ class RunEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(RUNNER.EvidenceError, "assigned to both"):
             RUNNER.require_free_zombienet_ports(self.root, [suite])
 
+    def test_two_topologies_may_pin_the_same_port(self) -> None:
+        # The regression this checker shipped with (F27, 2026-08-08). One
+        # `configured` map spanned every selected network, so any two topologies
+        # pinning one port collided — and every tier selection did, which meant
+        # no Zombienet suite ever reached a spawn through this runner.
+        #
+        # Sharing is correct here. The runner spawns one network, runs its drill,
+        # terminates the process group and removes the directory before the next
+        # begins, so two topologies never hold a port at the same moment. It is
+        # also *required*: `validate-environments.py` pins KEEPER_RPC_PORT = 19944
+        # and fails a keeper-bearing topology whose first collator pins anything
+        # else, so the two checkers contradicted each other.
+        second = self.root / "zombienet" / "networks" / "bleavit-second.toml"
+        second.write_text(
+            (self.root / "zombienet" / "networks" / "bleavit-local.toml").read_text(
+                encoding="utf-8"
+            ),
+            encoding="utf-8",
+        )
+        drill = self.root / "zombienet" / "drills" / "03-keeper-loss.zndsl"
+        drill.write_text(
+            "Network: ./zombienet/networks/bleavit-second.toml\n", encoding="utf-8"
+        )
+        suites = [
+            suite
+            for suite in RUNNER.load_manifest(self.root)
+            if suite.identifier in {"01-smoke", "03-keeper-loss"}
+        ]
+        self.assertEqual(len(suites), 2)
+
+        # Both topologies pin rpc_port 19944. Accepted — and the bind probe still
+        # runs, over the deduplicated set, so an occupied port is still refused.
+        RUNNER.require_free_zombienet_ports(self.root, suites)
+
     def test_gated_suite_is_skipped_then_attempted_when_included(self) -> None:
         suites_path = self.root / "tools" / "env" / "suites.json"
         suites = json.loads(suites_path.read_text(encoding="utf-8"))

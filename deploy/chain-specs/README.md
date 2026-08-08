@@ -81,10 +81,22 @@ with:
 
 ```sh
 node app/tools/dev-chain-pin.ts \
-  --relay <relay-spec.json> --relay-genesis 0x… \
-  --para  deploy/chain-specs/out/bleavit-dev.json --para-genesis 0x… \
+  --relay zombienet/specs/out/paseo-local-raw.json   --relay-genesis 0x… \
+  --para  zombienet/specs/out/bleavit-drill-raw.json --para-genesis  0x… \
   --out   <a scratch path>
 ```
+
+**The specs must be the raw ones, and this section named plain ones until F27.**
+smoldot accepts raw chain specifications only, while the pinned Zombienet
+schedules a parachain only from a plain one, so
+[`tools/env/generate-relay-specs.sh`](../../tools/env/generate-relay-specs.sh)
+emits both forms from a single generation. The plain files this directory
+produces (`bleavit-dev.json`, `bleavit-local.json`) are therefore not usable
+here — the tool refuses them, by the same check the client makes at boot.
+
+Drill 14 (`zombienet/drills/14-client-boot.zndsl`) runs exactly this command
+against a spawned network, so the documented invocation and the executed one are
+the same one.
 
 Two rules govern it, and both are structural rather than remembered.
 

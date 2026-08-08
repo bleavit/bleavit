@@ -436,7 +436,34 @@ def validate_prerequisites(
 
 
 def require_free_zombienet_ports(root: Path, suites: list[Suite]) -> None:
-    configured: dict[int, str] = {}
+    """Refuse a fixed-port assignment a spawn cannot honour.
+
+    **The duplicate scope is one topology file, and that is the fix rather than the
+    original shape (2026-08-08, F27).** Until then one ``configured`` map spanned every
+    selected network, so two topologies pinning the same port collided — and every tier
+    selection did. Proven by execution rather than by reading: ``--tier release`` raised on
+    ``bleavit-local.toml`` against ``bleavit-migration.toml``, ``--tier g1`` on
+    ``bleavit-fast.toml`` against ``bleavit-fast-coretime.toml``, and the whole set on the
+    latter pair, so **no Zombienet suite has ever reached a spawn through this runner**. The
+    ports and this checker landed in the same commit (``5688da12``, 2026-07-20).
+
+    Two facts make the cross-file reading wrong rather than merely strict:
+
+    1. **The runner spawns one network at a time.** Each suite runs ``spawn``, then
+       ``test``, then terminates the process group and removes the network directory before
+       the next begins. Two topologies never hold a port at the same moment, so sharing one
+       is not a conflict — it is the sequential reuse the design already relies on.
+    2. **The other checker requires the sharing.** ``validate-environments.py`` pins
+       ``KEEPER_RPC_PORT = 19944`` and ``KEEPER_NODE_URL = "ws://127.0.0.1:19944"`` as
+       constants and fails a keeper-bearing topology whose first collator pins anything
+       else. So one tool demanded the value four topologies share and the other refused it;
+       the contradiction, not the number, is the defect.
+
+    Within one file a repeat is still a real conflict — those nodes *do* run together — and
+    both existing tests exercise exactly that case, passing a single suite. The bind probe
+    keeps its whole-selection scope: the box must have every fixed port free, whenever each
+    one is claimed.
+    """
     network_paths: set[Path] = set()
     for suite in suites:
         try:
@@ -448,11 +475,14 @@ def require_free_zombienet_ports(root: Path, suites: list[Suite]) -> None:
             raise EvidenceError(f"15 §4.7: {suite.path} has no Network header")
         network_paths.add(root / Path(match.group(1).removeprefix("./")))
 
+    probes: dict[int, str] = {}
     for path in sorted(network_paths):
         try:
             topology = path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as error:
             raise EvidenceError(f"15 §4.7: cannot inspect {path}: {error}") from error
+        # Per file — see this function's docstring.
+        configured: dict[int, str] = {}
         for key, raw_port in ZOMBIENET_FIXED_PORT.findall(topology):
             port = int(raw_port.replace("_", ""), 0)
             label = f"{path.relative_to(root)} {key}"
@@ -465,8 +495,9 @@ def require_free_zombienet_ports(root: Path, suites: list[Suite]) -> None:
                     f"{previous} and {label}"
                 )
             configured[port] = label
+            probes.setdefault(port, label)
 
-    for port, label in configured.items():
+    for port, label in probes.items():
         try:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
                 probe.bind(("127.0.0.1", port))

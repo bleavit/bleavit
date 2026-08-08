@@ -29,6 +29,12 @@ packages:
   # start a process would sit inside the reach of the packages 10 §10.1 keeps thin.
   # Confined here, `import 'lighthouse'` is unresolvable everywhere else in `app/`.
   - 'tools/render-budget'
+  # `tools/drill-client` (F27; 15 §4.8) is a member for the same reason, and it is the
+  # sharpest instance of it: what it reaches is `@bleavit/chain-client/node-light-client`,
+  # a SECOND way to start a light client. Declared at the root that import would resolve
+  # from every package by the parent-directory walk, which is exactly the reach app-code
+  # rule 13 exists to deny. Confined here it is unresolvable everywhere else in `app/`.
+  - 'tools/drill-client'
   # `optional/indexer` (10 §8.2/§8.5.2, F24) is a member for the same reason as `tools/snapshot`,
   # and it is the reference implementation §8.2 names by path. It imports the canonical serializer
   # from `@bleavit/providers` rather than writing its own, because a server with its own serializer
