@@ -43,6 +43,32 @@ export interface TerminalChainMismatch {
   readonly observed: string;
 }
 
+/**
+ * The DOM this screen writes through, described structurally rather than imported.
+ *
+ * Same reason `topology.ts` describes smoldot structurally instead of importing it: what can be
+ * got wrong here is an **order** — tear the React root down, *then* replace the children — and
+ * an order is worth checking without a DOM implementation. This workspace carries none, and
+ * `check:casts` bans outright the `as unknown as` that a fake `Element` would otherwise need,
+ * so a wide parameter type would have left the ordering permanently untested.
+ *
+ * The claim that a real `Element` satisfies this is proved by the compiler at the site that
+ * matters: `main.ts` passes `document.getElementById('app')`. Nothing here asserts it in prose.
+ */
+export interface TerminalHost {
+  readonly ownerDocument: { createElement(tag: string): TerminalElement };
+  replaceChildren(): void;
+  append(child: unknown): void;
+}
+
+/** One element of the terminal screen. See {@link TerminalHost} for why this is structural. */
+export interface TerminalElement {
+  textContent: string | null;
+  readonly dataset: Record<string, string | undefined>;
+  setAttribute(name: string, value: string): void;
+  append(...children: unknown[]): void;
+}
+
 export function terminalChainMismatch(error: WrongChainError): TerminalChainMismatch {
   return {
     code: 'FE-BOOT-003',
@@ -64,9 +90,32 @@ export function terminalChainMismatch(error: WrongChainError): TerminalChainMism
  * Written against `Element` and plain DOM rather than the render layer, because it must work
  * when the render layer is part of what failed — and because it is called from `main.ts`,
  * whose whole rule is that it holds no logic.
+ *
+ * **`unmount` is not optional politeness.** `replaceChildren()` deletes the DOM a React root
+ * still owns, and React finds out at its next render against this container rather than at the
+ * deletion — so the failure surfaces somewhere else entirely, in a state whose whole purpose is
+ * that nothing further happens. Tearing the root down first makes the replacement the last
+ * thing that touches this element, which is what *terminal* has to mean in the DOM and not
+ * only in the state machine. It is optional in the **type** because `boot` can reject before
+ * it mounts anything, and then there is genuinely no tree to take down.
  */
-export function renderTerminalChainMismatch(container: Element, error: WrongChainError): void {
+export function renderTerminalChainMismatch(
+  container: TerminalHost,
+  error: WrongChainError,
+  unmount?: () => void,
+): void {
   const state = terminalChainMismatch(error);
+  // Before `replaceChildren`, and guarded: an unmount that throws must not cost the user the
+  // one screen that explains why the session stopped. React's own `unmount` already empties
+  // the container, so the call below is what makes this correct for a container it never held.
+  if (unmount !== undefined) {
+    try {
+      unmount();
+    } catch {
+      // Deliberately swallowed. There is no state left to protect and no later render to
+      // corrupt — this is the last thing the client does.
+    }
+  }
   container.replaceChildren();
 
   const section = container.ownerDocument.createElement('section');
@@ -95,7 +144,11 @@ export function renderTerminalChainMismatch(container: Element, error: WrongChai
  * non-terminal states with their own renderable surfaces, and a `not-started` session is a
  * value rather than a throw.
  */
-export function handleTerminalBootFailure(container: Element, error: unknown): void {
+export function handleTerminalBootFailure(
+  container: TerminalHost,
+  error: unknown,
+  unmount?: () => void,
+): void {
   if (!(error instanceof WrongChainError)) throw error;
-  renderTerminalChainMismatch(container, error);
+  renderTerminalChainMismatch(container, error, unmount);
 }

@@ -129,7 +129,10 @@ export interface WithdrawLegDeps<T extends ChainHeadTransport> {
 
 export interface DepositLegDeps<T extends ChainHeadTransport> extends WithdrawLegDeps<T> {
   /** Usually `client.connectAssetHub`. Attaches the chain lazily, on entering the flow (E17). */
-  readonly connectAssetHub: (assetHub: BundledChain) => Promise<AssetHubConnection<T>>;
+  readonly connectAssetHub: (
+    assetHub: BundledChain,
+    options?: { readonly deadlineMs?: number },
+  ) => Promise<AssetHubConnection<T>>;
   /** Overrides {@link ASSET_HUB_CONNECT_DEADLINE_MS}. Injected so a suite drives the boundary. */
   readonly assetHubDeadlineMs?: number;
   readonly pins: FundingPins;
@@ -233,45 +236,31 @@ export async function openWithdrawLeg<T extends ChainHeadTransport>(
  * scratch — where that one covers a metadata read on a chain already synced.
  *
  * Injectable, so a suite drives the boundary without waiting on it.
+ *
+ * ## The value is here; the bound is not
+ *
+ * This module owns *how long a deposit screen may sit unanswered*, and that is all it owns.
+ * The bound itself is applied inside `assetHubConnector.connect`, because a timer wrapped
+ * around the call can only abandon the **wait** — a promise has no cancel, so the attach kept
+ * running, the connector kept it as the answer to every later `connect`, and E17's `R: retry
+ * AH sync` could never start a new one. Satisfying E17's *"blocked with diagnostics"* while
+ * disabling its recovery action is worse than the unbounded wait it replaced.
+ *
+ * So the number is passed down rather than enforced here, and the connector abandons the work
+ * it is bounding: it detaches the chain and closes any transport the abandoned attempt goes on
+ * to open. Timing out and retrying is the expected path on a cold Asset Hub, not the unlucky
+ * one, which is why that behaviour lives where a suite can hold two calls open and prove it.
  */
 export const ASSET_HUB_CONNECT_DEADLINE_MS = 120_000;
-
-class AssetHubTimeout extends Error {
-  constructor(ms: number) {
-    super(
-      `the Asset Hub connection did not complete within ${Math.round(ms / 1000)}s. It is a ` +
-        'second light client syncing from scratch, so this is what an unreachable or very ' +
-        'slow Asset Hub looks like from here.',
-    );
-    this.name = 'AssetHubTimeout';
-  }
-}
-
-function withDeadline<V>(work: Promise<V>, ms: number): Promise<V> {
-  return new Promise<V>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new AssetHubTimeout(ms)), ms);
-    work.then(
-      (value) => {
-        clearTimeout(timer);
-        resolve(value);
-      },
-      (error: unknown) => {
-        clearTimeout(timer);
-        reject(error instanceof Error ? error : new Error(String(error)));
-      },
-    );
-  });
-}
 
 export async function openDepositLeg<T extends ChainHeadTransport>(
   deps: DepositLegDeps<T>,
 ): Promise<DepositLeg> {
   let connection: AssetHubConnection<T>;
   try {
-    connection = await withDeadline(
-      deps.connectAssetHub(deps.pins.assetHub),
-      deps.assetHubDeadlineMs ?? ASSET_HUB_CONNECT_DEADLINE_MS,
-    );
+    connection = await deps.connectAssetHub(deps.pins.assetHub, {
+      deadlineMs: deps.assetHubDeadlineMs ?? ASSET_HUB_CONNECT_DEADLINE_MS,
+    });
   } catch (error) {
     // `assetHubConnector` never throws — every failure is an arm. A throw therefore means the
     // connector was replaced or the attach path itself failed, and it must still not take down

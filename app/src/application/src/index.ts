@@ -7,7 +7,7 @@ export {
   setPinned,
   type WorkerStatus,
 } from './release-worker.js';
-export { boot, screenForHash } from './boot.js';
+export { boot, screenForHash, startShell, type BootedShell, type ShellDeps } from './boot.js';
 export {
   INVENTORY_IDS,
   SCREENS,
@@ -101,4 +101,6 @@ export {
   renderTerminalChainMismatch,
   terminalChainMismatch,
   type TerminalChainMismatch,
+  type TerminalElement,
+  type TerminalHost,
 } from './wrong-chain.js';

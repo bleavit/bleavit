@@ -40,7 +40,7 @@
  * The report goes to stdout as one JSON object. Exit 0 means the mode's expectation held.
  */
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 
 import { WrongChainError, type BundledChain } from '@bleavit/chain-client';
 import { startNodeLightClient } from '@bleavit/chain-client/node-light-client';
@@ -372,7 +372,23 @@ export async function main(argv: readonly string[], boot: BootFn = bootAndClassi
 }
 
 if (process.argv[1] !== undefined && import.meta.url.endsWith(process.argv[1].replace(/\\/g, '/'))) {
-  process.stdout.write(await main(process.argv.slice(2)));
+  const argv = process.argv.slice(2);
+  const report = await main(argv);
+  /**
+   * **`--report` exists because stdout is a shared channel and the report is not the only
+   * thing on it.** The drill used to parse this process's whole stdout as JSON, which worked
+   * exactly as long as nothing else wrote a byte. smoldot's log callback does, from a worker
+   * thread whose `console` is this process's stdout, and the leg then failed with
+   * `Unexpected token s in JSON at position 1` — a message that names neither smoldot nor
+   * logging nor the boot it had just completed. The run had taken 348 seconds and succeeded.
+   *
+   * So the report gets a channel nothing else can write to, and stdout goes back to being
+   * what it is: where a person reads what happened. The failure mode becomes *the report file
+   * was not written*, which points at the step that did not finish.
+   */
+  const reportPath = argOf(argv, 'report');
+  if (reportPath !== undefined) writeFileSync(reportPath, report, { mode: 0o600 });
+  process.stdout.write(report);
   // Explicit, for the reason the bounded teardown above gives: a live smoldot worker thread
   // keeps the event loop alive, so a run that has already produced its report would otherwise
   // hang instead of exiting — and a drill that hangs after passing reads as one that failed.

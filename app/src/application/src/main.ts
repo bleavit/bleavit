@@ -9,11 +9,11 @@
  * `index.ts` does NOT re-export this file. That is the rule the split exists to keep.
  */
 
-import { boot } from './boot.js';
+import { boot, startShell } from './boot.js';
 import { connectAndClassify } from './chain-boot.js';
 import { handleTerminalBootFailure } from './wrong-chain.js';
 
-const mount = document.getElementById('app');
+const root = document.getElementById('app');
 // The chain connection is started **after** the tree is up, for the reason the release worker
 // is registered after it (10 §3.2): the verification panel, the docs and the whole handoff
 // surface render when smoldot never starts, so nothing that renders may wait on it.
@@ -31,8 +31,16 @@ const mount = document.getElementById('app');
 // rendering while the client had proved it is on the wrong chain. `handleTerminalBootFailure`
 // re-throws anything else, so this stays one declared state's screen rather than the place
 // boot failures go quiet.
-if (mount) {
-  void boot(mount)
-    .then(connectAndClassify)
-    .catch((error: unknown) => handleTerminalBootFailure(mount, error));
+//
+// **The sequencing lives in `startShell`, not here**, and that is this file's own rule being
+// kept rather than an extra indirection. Threading the mount handle from `boot` to the terminal
+// screen briefly put a mutable local and a three-argument forward in a module no test can
+// import — which would have left the plumbing that carries `FE-BOOT-003` to a screen as the one
+// part of the boot path nothing could execute.
+if (root) {
+  void startShell(root, {
+    mount: boot,
+    connect: connectAndClassify,
+    onFailure: handleTerminalBootFailure,
+  });
 }

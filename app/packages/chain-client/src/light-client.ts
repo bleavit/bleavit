@@ -42,6 +42,7 @@ import { ChainHeadConnection, type JsonRpcProviderLike } from './transport.js';
 import type { CompatProvider } from './compat.js';
 import {
   assetHubConnector,
+  type AssetHubConnectOptions,
   type AssetHubConnection as AssetHubLegConnection,
 } from './asset-hub.js';
 import {
@@ -98,7 +99,10 @@ export interface LightClient {
    * a console warning rather than an error, so a second provider over the same `Chain` would
    * yield a transport connected to nothing while reporting no failure.
    */
-  connectAssetHub(assetHub: BundledChain): Promise<AssetHubConnection>;
+  connectAssetHub(
+    assetHub: BundledChain,
+    options?: AssetHubConnectOptions,
+  ): Promise<AssetHubConnection>;
   /**
    * A provider for **this chain**, for 10 §5.2's compat probe — not for reading.
    *
@@ -378,7 +382,7 @@ export async function startLightClientWith(
   return {
     transport,
     topology,
-    connectAssetHub: (bundled) => assetHub.connect(bundled),
+    connectAssetHub: (bundled, connectOptions) => assetHub.connect(bundled, connectOptions),
     compatProvider() {
       let created: Topology<RealSmoldotChain> | undefined;
       return {

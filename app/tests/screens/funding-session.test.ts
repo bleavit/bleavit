@@ -21,7 +21,8 @@ import { fileURLToPath } from 'node:url';
 import { bleavit, assethub_paseo } from '@polkadot-api/descriptors';
 import { fundingArtifacts, openDepositLeg, openWithdrawLeg } from '@bleavit/application';
 import type { FundingArtifacts, FundingPins } from '@bleavit/application';
-import { loadCodecs, loadMetadata } from '@bleavit/chain-client';
+import { assetHubConnector, loadCodecs, loadMetadata } from '@bleavit/chain-client';
+import type { SmoldotChainLike } from '@bleavit/chain-client';
 import { SameChainError, readDepositInputs, readWithdrawInputs } from '@bleavit/features-tx';
 import type { FundingDecoders, FundingKeys, FundingReader } from '@bleavit/features-tx';
 import type {
@@ -609,16 +610,27 @@ test('an Asset Hub that never answers blocks the flow with diagnostics, rather t
   // Observed against a live topology, where a ~189k-entry genesis kept the probe pending past
   // five minutes. F27.
   //
-  // The promise below never settles, which is the whole point: without the bound this test
+  // **Composed over the real connector**, because that is where the bound lives. It moved
+  // there once it was clear that a timer wrapped around the call abandons only the wait: the
+  // attach kept running, the connector kept it as the answer to every later connect, and
+  // E17's `R: retry AH sync` could never start a new one. A fake `connectAssetHub` honouring
+  // `deadlineMs` itself would test the fake and would have gone on passing through that.
+  //
+  // The attach below never settles, which is the whole point: without the bound this test
   // would time out rather than fail, and a timing-out test is how this repository has
   // repeatedly ended up asserting nothing.
+  const connector = assetHubConnector<SmoldotChainLike, ReturnType<typeof assetHubTransport>>({
+    attach: () => new Promise(() => {}),
+    openTransport: async () => assetHubTransport(),
+    closeTransport: () => {},
+  });
   const leg = await openDepositLeg({
     local: transport(LOCAL_CHAIN),
     openReader,
     artifacts: ARTIFACTS,
     pins: PINS,
     classifyAssetHub: classifiesFull,
-    connectAssetHub: () => new Promise(() => {}),
+    connectAssetHub: (assetHub, options) => connector.connect(assetHub, options),
     assetHubDeadlineMs: 25,
   });
   assert.equal(leg.kind, 'blocked');
