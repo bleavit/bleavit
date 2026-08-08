@@ -47,6 +47,7 @@ import {
   UNRATIFIED_CONSEQUENCE,
   allowanceRemaining,
   approvalBlocks,
+  isMetered,
   meterFor,
   pendingPowerName,
   playbookAdvisory,
@@ -311,8 +312,10 @@ export function ApproveAction({
       {/* E20's V-facet, third item. The runtime charges the allowance inside `dispatch`, which
           `approve_action` reaches only at the threshold approval — so the approver who meets an
           exhausted meter is the fifth one, and until 2026-08-08 they were shown no meter at
-          all. Absent for an undecodable power, because there is no power to meter. */}
-      {power === undefined ? null : (
+          all. Absent for an undecodable power, because there is no power to meter — and absent
+          for the two powers 06 §5.2 does not meter, because a figure rendered there would be a
+          budget the chain does not keep (see `MeteredPower`). */}
+      {power === undefined || !isMetered(power) ? null : (
         <Field label={`Allowance remaining for ${power}`}>
           <Derived
             combined={allowanceRemaining(meterFor(context.allowances, power))}
@@ -325,10 +328,11 @@ export function ApproveAction({
       {/* E20's V-facet, fourth item, and its F-facet. */}
       <ConditionStatus context={context} />
 
-      {/* 06 §6.2's empty admissible call set, stated rather than blocked — see
-          `MIGRATION_NO_ACTION_FOLLOWS`. */}
+      {/* 06 §6.2's empty admissible call set, which blocks — see `MIGRATION_NO_ACTION_FOLLOWS`.
+          The sentence is rendered beside the playbook as well as carried in the block list,
+          because a guardian deciding needs it here rather than in a list of reasons. */}
       {advisory === undefined ? null : (
-        <Notice severity="caution" heading="What this activation can dispatch">
+        <Notice severity="danger" heading="What this activation can dispatch">
           {advisory}
         </Notice>
       )}
@@ -433,21 +437,29 @@ export function ProposeAction({
       </Notice>
 
       {/* 06 §6.2's empty admissible call set for PB-MIGRATION, and PB-DEPEG's unavailable
-          trigger. Stated, never a block: the chain accepts the activation, so refusing it
-          here would be this client refusing an action the runtime would run. */}
+          trigger. **Both are refusals**, and this notice is the sentence beside the playbook
+          it is about — `proposalBlocks` carries the same sentence in the block list, which is
+          what closes the control. The comment here used to claim the chain accepts a
+          PB-MIGRATION activation; 06 §6.2 says the extrinsic reverts and nothing is
+          recorded. */}
       {advisory === undefined ? null : (
-        <Notice severity="caution" heading="What this activation can dispatch">
+        <Notice severity="danger" heading="What this activation can dispatch">
           {advisory}
         </Notice>
       )}
 
-      <Field label="Allowance remaining">
-        <Derived
-          combined={allowanceRemaining(proposal.meter)}
-          render={(remaining) => String(remaining)}
-        />
-        <Count datum={proposal.meter.limit} name="of" />
-      </Field>
+      {/* Only the three metered powers have a figure to show (06 §5.2; `MeteredPower`). The
+          other two arms carry no meter at all, so there is nothing here to render rather than
+          a zero standing in for a budget the chain does not keep. */}
+      {proposal.power === 'activate_playbook' || proposal.power === 'suspend_on_gate' ? null : (
+        <Field label="Allowance remaining">
+          <Derived
+            combined={allowanceRemaining(proposal.meter)}
+            render={(remaining) => String(remaining)}
+          />
+          <Count datum={proposal.meter.limit} name="of" />
+        </Field>
+      )}
 
       {fields.length === 0 ? (
         <Notice severity="info" heading="This power takes no arguments">

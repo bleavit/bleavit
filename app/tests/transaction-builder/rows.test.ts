@@ -1031,6 +1031,46 @@ test('O-4 declares every readable trigger item, not the one the form happens to 
   assert.deepEqual(unreadableObligationsFor('O-4'), []);
 });
 
+test('m9 — the pending-action COUNT is a propose obligation, so O-4 declares it (SQ-1022)', () => {
+  // SQ-1022's own text says the count is readable and points at O-3 for the declaration. But
+  // `guardian_core::propose_action` is what refuses on `pending.len() >= 64`, so the count is
+  // a **propose**-side precondition and O-3 is the approve row — which declares
+  // `PendingActions` because an approval reads the action itself, not because anybody counts.
+  // The clause was therefore declared on the row that does not need it and missing from the
+  // one that does, and `clauseGroupsFor` reports an undeclared read as vacuously passed.
+  const o4 = rowsFor('O-4', 'USDC').find((clause) => clause.key === 'pending-count');
+  assert.ok(o4 !== undefined, 'O-4 does not read the pending-action queue');
+  assert.equal(o4.surface, 'storage.guardian.pending_actions');
+  assert.equal(o4.subject, 'chain');
+  // O-3 keeps its own, for its own reason — the action, not the count.
+  const o3 = rowsFor('O-3', 'USDC').find(
+    (clause) => clause.surface === 'storage.guardian.pending_actions',
+  );
+  assert.ok(o3 !== undefined, 'O-3 stopped reading the action it is approving');
+  assert.equal(o3.key, 'pending');
+});
+
+test('m10 — the allowance is a GLOBAL StorageValue, so its clause is chain-scoped on both rows', () => {
+  // `pallet_guardian` declares `Allowances: StorageValue<_, AllowanceState>` — one value with
+  // no account key at all, and the counters inside it are per power and per epoch, never per
+  // guardian. Both rows marked it `subject: 'acting'`, so `accountForClause` resolved an
+  // account for a read that has none: a proxy or multisig wrapper silently changed which key
+  // a keyless read was attributed to, and a refresh could then compare two different answers
+  // to a question that has exactly one.
+  for (const row of ['O-3', 'O-4'] as const) {
+    const allowance = rowsFor(row, 'USDC').find((clause) => clause.key === 'allowance');
+    assert.ok(allowance !== undefined, `${row} declares no allowance clause`);
+    assert.equal(allowance.surface, 'storage.guardian.allowances');
+    assert.equal(allowance.subject, 'chain', `${row}'s allowance clause resolves an account`);
+    // Anti-vacuity: the same row still has genuinely account-scoped clauses, so this is not a
+    // sweep that made every subject `chain`.
+    assert.ok(
+      rowsFor(row, 'USDC').some((clause) => clause.subject === 'acting'),
+      `${row} has no acting-scoped clause left, so the subject check proves nothing`,
+    );
+  }
+});
+
 test('P-13 splits "round open" from "report window not elapsed"', () => {
   // §11.5 writes them with a semicolon between them, and they come apart on a live round: a
   // round still open whose report window has elapsed refuses the report, and one collapsed
@@ -1087,16 +1127,20 @@ test('an unreadable obligation names an OPEN spec question, and blocking ones cl
   );
   // `stated` is §11.8.1's SQ-564 posture — the transaction is offered and the gap is named.
   assert.ok(all.some((entry) => entry.disposition === 'stated'));
-  // **`blocking` is empty at contract v29, and that is asserted rather than assumed.** Every
-  // one of the four rows that carried one (SQ-598, SQ-601, SQ-730, SQ-731) got a published
-  // read, so INV-FE-12's arm has nothing left to close. The arm itself is not dead code — it
-  // is exercised in `tests/screens`, where `operatorGate` is driven over the declarations and
-  // asserted to close exactly the rows that declare one — but a `blocking` entry appearing
-  // here again must be a deliberate act, so this states the current fact and its reason.
+  // **`blocking` was empty at contract v29 and is two entries again since 2026-08-08**, both
+  // on `O-3` and both citing SQ-1030. It is asserted rather than assumed, because a blocking
+  // entry closes an operator control and appearing here must be a deliberate act.
+  //
+  // The reason is `approve_action`'s own last frame: it reads
+  // `Guardian.PlaybookRegistered[id]` and `dispatch` reads `Guardian.ActivePlaybooks`, both
+  // **after** the fifth approval is counted, and 02 §7.4 freezes neither. The difference from
+  // the v28 defect this test was rewritten for is that these cite an **open** question rather
+  // than one PLAN.md had already resolved — which is what the status check above is for, and
+  // what retires them the day the freeze lands.
   assert.deepEqual(
     all.filter((entry) => entry.disposition === 'blocking').map((entry) => entry.row),
-    [],
-    'a blocking obligation is back; contract v29 published a read for every row that had one',
+    ['O-3', 'O-3'],
+    'the blocking set changed; every entry closes an operator control, so this is deliberate',
   );
   // Each retired row's replacement read is present, so "no obligation" is not "no check".
   // O-6 (SQ-615, contract v28): §11.8.4 steps 1 and 4 became ordinary clauses.

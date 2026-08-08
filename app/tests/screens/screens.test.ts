@@ -132,6 +132,7 @@ import {
   challengeBlocks,
   escalationConsequence,
   filingBlocks,
+  INCIDENT_CLASSES,
   reportBlocks,
   BOND_QUOTE_IS_A_QUOTE,
   BOND_QUOTE_UNDETERMINABLE,
@@ -167,6 +168,7 @@ import {
   PLAYBOOK_TRIGGERS,
   guardianCall,
   guardianStatus,
+  isMetered,
   meterFor,
   pendingPowerName,
   playbookAdvisory,
@@ -202,7 +204,9 @@ import {
   OPERATOR_SURFACE_ROWS,
   declaredCoverageIds,
   gate,
+  operatorRowsFor,
   rowsFor,
+  unreadableObligationsFor,
 } from '@bleavit/transaction-builder';
 import type {
   ClauseId,
@@ -218,9 +222,9 @@ import type {
   AllowanceMeter,
   ConditionEvidence,
   DispatchEvidence,
-  GuardianPower,
   GuardianProposal,
   HoldHorizon,
+  MeteredPower,
   PendingPower,
   ProposalStateName,
   ProposeInputs,
@@ -257,6 +261,8 @@ import type {
   Stream,
   ArtifactSource,
   ChallengeFilingInputs,
+  EpochClosure,
+  FrozenSpecVersions,
   EvidenceState,
   FetchProgress,
   FilingInputs,
@@ -1571,9 +1577,8 @@ const UNDETERMINABLE: BondQuoteState = { kind: 'undeterminable' };
 /** The call did not answer. A different state with a different remedy. */
 const UNREAD_QUOTE: BondQuoteState = { kind: 'unread', reason: 'the state call timed out' };
 
-/** §11.8.6 row 1's inputs — the clean path, so a refusal elsewhere is not this fixture. */
-const FILING = (over: Partial<FilingInputs> = {}): FilingInputs => ({
-  kind: 'incident',
+/** What both instances carry — the clean path, so a refusal elsewhere is not this fixture. */
+const FILING_BASE = () => ({
   freeUsdc: finalized(10_000_000n),
   filingBond: QUOTED(1_000_000n, 40_000_000n),
   filingsUsed: finalized(1),
@@ -1581,10 +1586,25 @@ const FILING = (over: Partial<FilingInputs> = {}): FilingInputs => ({
   // §11.8.6's frozen-version clause (contract v29): the version the filing names, and the
   // set `Epoch.CohortSchedules[epoch].specs` says the live cohorts committed to.
   specVersion: 3,
-  frozenSpecVersions: { kind: 'read', versions: finalized([2, 3]) },
-  evidenceHash: '0xevidence',
-  ...over,
+  frozenSpecVersions: { kind: 'read', versions: finalized([2, 3]) } as FrozenSpecVersions,
+  // `registry_core::file`'s `AlreadyFinal` — read from `ClosedAt[epoch][spec_version]`.
+  epochClosed: { kind: 'open' } as EpochClosure,
+  evidenceHash: '0xevidence' as string | undefined,
 });
+
+/**
+ * §11.8.6 row 1's inputs, per instance.
+ *
+ * Two builders rather than one with a `kind` override, because `FilingInputs` is a union on
+ * the instance and the class type differs across the arms (`validate_class`): a single
+ * `Partial<FilingInputs>` would let a milestone fixture carry `S2`, which is the value the
+ * union exists to make unbuildable.
+ */
+const FILING = (over: Partial<Extract<FilingInputs, { kind: 'incident' }>> = {}): FilingInputs =>
+  ({ ...FILING_BASE(), kind: 'incident', class: 'S2', ...over });
+const MILESTONE_FILING = (
+  over: Partial<Extract<FilingInputs, { kind: 'milestone' }>> = {},
+): FilingInputs => ({ ...FILING_BASE(), kind: 'milestone', class: { scope: 1 }, ...over });
 
 /** A fee the account covers — the neutral case, so a refusal elsewhere is not this one. */
 const COVERED_FEE = (): UpgradeFeeInputs => ({
@@ -2737,13 +2757,18 @@ const inactiveAt = (trigger: PlaybookTrigger, cohort?: number): TriggerState =>
 const unread = (trigger: PlaybookTrigger, reason = 'the storage read failed'): TriggerState =>
   ({ kind: 'unread', subject: subject(trigger), reason });
 
-/** Every power's allowance from the one `Guardian.Allowances` value (02 §7.4). */
+/**
+ * Every **metered** power's allowance from the one `Guardian.Allowances` value (02 §7.4).
+ *
+ * Three entries, not five: `AllowanceState` carries counters for exactly these powers and
+ * `check_and_consume` charges nothing for `activate_playbook` or `suspend_on_gate` (06 §5.2).
+ * Adding either back is a compile error, which is the point — see the firewall fixture
+ * `guardian-meter-on-an-unmetered-power.ts`.
+ */
 const ALLOWANCES = (used = 0, limit = 3): AllowanceBook => ({
   pause_intake: { used: finalized(used), limit: finalized(limit) },
   delay_once: { used: finalized(used), limit: finalized(limit) },
   force_rerun: { used: finalized(used), limit: finalized(limit) },
-  activate_playbook: { used: finalized(used), limit: finalized(limit) },
-  suspend_on_gate: { used: finalized(used), limit: finalized(limit) },
 });
 
 /** An approval context whose condition is, by default, the live one the action names. */
@@ -2776,8 +2801,8 @@ const gateReading = (kind: 'active' | 'inactive' | 'unread' = 'active'): Trigger
   return { kind: 'unread', subject: { trigger: 'GateBreach' }, reason: 'the storage read failed' };
 };
 
-/** A meter narrowed to one power — the shape `GuardianProposal`'s arms demand. */
-const METER = <P extends GuardianPower>(power: P, used = 0, limit = 3): AllowanceMeter<P> =>
+/** A meter narrowed to one metered power — the shape `GuardianProposal`'s arms demand. */
+const METER = <P extends MeteredPower>(power: P, used = 0, limit = 3): AllowanceMeter<P> =>
   ({ power, used: finalized(used), limit: finalized(limit) });
 
 /** A `Epoch.Proposals` reading that admits both rerun powers. */
@@ -2789,7 +2814,6 @@ const RERUNNABLE = (state: ProposalStateName = 'Queued'): RerunState => ({
 const ACTIVATION = (over: Partial<Extract<GuardianProposal, { power: 'activate_playbook' }>> = {}):
   GuardianProposal => ({
   power: 'activate_playbook',
-  meter: { power: 'activate_playbook', used: finalized(0), limit: finalized(3) },
   id: 'PB-HALT-INTAKE',
   trigger: active('GateBreach'),
   expiry: 9_000,
@@ -2799,6 +2823,21 @@ const ACTIVATION = (over: Partial<Extract<GuardianProposal, { power: 'activate_p
 
 const PROPOSE = (proposal: GuardianProposal = ACTIVATION()): ProposeInputs =>
   ({ proposal, justificationHash: '0xj' });
+
+/**
+ * The two playbooks this release refuses whatever the pairing says, and their triggers.
+ *
+ * Both refusals are 06 §6.2's and both are release-fixed rather than chain-read, and they are
+ * still different facts with different remedies: `PB-DEPEG` has no on-chain condition that can
+ * set its trigger (`TRIGGER_READS.DepegMedian` is empty), while `PB-MIGRATION`'s condition is
+ * perfectly readable and its **admissible call set** is empty — *"a fifth approval reaching it
+ * fails closed, the whole extrinsic reverts, and nothing is recorded"*.
+ *
+ * Written as data because three tests enumerate the whole 6 × 8 pairing space and a literal
+ * `id === 'PB-DEPEG'` in each of them is three places to forget the second one.
+ */
+const RELEASE_REFUSED_PLAYBOOKS = new Set<PlaybookId>(['PB-DEPEG', 'PB-MIGRATION']);
+const RELEASE_REFUSED_TRIGGERS = new Set<PlaybookTrigger>(['DepegMedian', 'MigrationHalt']);
 
 test('an unread trigger is treated exactly as an inactive one', () => {
   // E20: playbooks are admissible only under VERIFIED triggers. Collapsing "could not
@@ -2866,7 +2905,7 @@ test('the encoded call is DERIVED, so `target` follows the runtime’s two-sided
   }
   // The other four powers encode their own arguments and nothing else.
   assert.deepEqual(
-    guardianCall({ power: 'suspend_on_gate', meter: METER('suspend_on_gate'), gate: gateReading() }),
+    guardianCall({ power: 'suspend_on_gate', gate: gateReading() }),
     { power: 'suspend_on_gate' },
   );
   assert.deepEqual(
@@ -3038,6 +3077,193 @@ test('B1 — the three powers with no condition say so, and saying it wrongly is
   assert.match(nth(omitted, 0, 'block').detail, /never evaluated/);
 });
 
+test('B2 — the approve flow refuses a MISPAIRED playbook (BadPlaybookTrigger), which nothing checked', () => {
+  // The blocker of 2026-08-08. `check_and_consume` raises `BadPlaybookTrigger` at the
+  // **threshold** approval (`crates/guardian-core/src/lib.rs`), and `approvalBlocks` →
+  // `conditionBlocks` asked only whether the reading's subject equalled the action's named
+  // trigger and whether that trigger was active. It never asked whether the named **playbook**
+  // admits the trigger at all.
+  //
+  // That is reachable, and by the shortest path there is: `propose_action` validates nothing
+  // on chain, so a mispaired action created by any other tool sits in `Guardian.PendingActions`
+  // for three days looking approvable — with a live, correctly-subjected trigger reading beside
+  // it, which is exactly what makes the old check pass.
+  //
+  // `PLAYBOOK_TRIGGERS` was already in the same module and the *propose* side already consulted
+  // it. Only the approve side, the one flow that inspects somebody else's bytes, did not.
+  const mispaired = ACTION({
+    power: PLAYBOOK_POWER({
+      id: finalized<PlaybookId>('PB-RESERVE'),
+      trigger: finalized<PlaybookTrigger>('GateBreach'),
+      target: undefined,
+    }),
+  });
+  const blocks = approvalBlocks(
+    APPROVE({ action: mispaired, condition: { kind: 'trigger', reading: active('GateBreach') } }),
+  );
+  assert.deepEqual(blocks.map((b) => b.check), ['Trigger']);
+  assert.match(nth(blocks, 0, 'block').detail, /PB-RESERVE is not activated by the GateBreach condition/);
+  // It names the cost, because "propose it again" is the only remedy — an approval cannot
+  // repair the pairing, and a guardian told only "refused" would keep signing.
+  assert.match(nth(blocks, 0, 'block').detail, /threshold approval/);
+  assert.match(nth(blocks, 0, 'block').detail, /needs proposing again/);
+
+  // The whole 6 × 8 space, so this is the rule and not one fixture. Every unlawful pairing is
+  // refused; every lawful one is not refused *for this reason*.
+  for (const [id, triggers] of Object.entries(PLAYBOOK_TRIGGERS) as [PlaybookId, readonly PlaybookTrigger[]][]) {
+    for (const trigger of DOC_TRIGGERS) {
+      const action = ACTION({
+        power: PLAYBOOK_POWER({
+          id: finalized<PlaybookId>(id),
+          trigger: finalized<PlaybookTrigger>(trigger),
+          target: trigger === 'OracleDeadlock' ? finalized(42) : undefined,
+        }),
+      });
+      const checks = approvalBlocks(
+        APPROVE({ action, condition: { kind: 'trigger', reading: active(trigger, 42) } }),
+      ).map((b) => b.check);
+      assert.equal(
+        checks.includes('Trigger'),
+        !triggers.includes(trigger),
+        `${id}/${trigger} pairing verdict is wrong: ${checks.join(', ')}`,
+      );
+    }
+  }
+});
+
+test('B2 — the approve flow refuses a stray cohort target (BadPlaybookTarget), the other half', () => {
+  // `check_and_consume`: `(OracleVoid, Some(_))` or `(not OracleVoid, None)`, and anything else
+  // is `BadPlaybookTarget` — again at the threshold approval. The client's *propose* side
+  // cannot build the wrong shape (`guardianCall` derives `target` from the reading's own
+  // subject), which is exactly why the approve side needs the check: it reads bytes this
+  // client did not build.
+  const strayTarget = ACTION({
+    power: PLAYBOOK_POWER({
+      id: finalized<PlaybookId>('PB-HALT-INTAKE'),
+      trigger: finalized<PlaybookTrigger>('GateBreach'),
+      target: finalized(42),
+    }),
+  });
+  const blocks = approvalBlocks(
+    APPROVE({ action: strayTarget, condition: { kind: 'trigger', reading: active('GateBreach') } }),
+  );
+  assert.deepEqual(blocks.map((b) => b.check), ['Cohort target']);
+  assert.match(nth(blocks, 0, 'block').detail, /PB-HALT-INTAKE carries a cohort target \(42\)/);
+  assert.match(nth(blocks, 0, 'block').detail, /only PB-ORACLE-VOID takes/);
+
+  // The lawful VOID carries one and is clean, so the check is about the pairing rather than
+  // about targets in general.
+  assert.deepEqual(approvalBlocks(APPROVE_ROW()), []);
+
+  // The mirror — a VOID with NO target — is refused by `subjectMismatch` rather than here,
+  // because the remedy differs: there is no question to ask on its behalf at all, and the
+  // map's non-emptiness is the substitution 11 §11.8.2 forbids.
+  const noTarget = approvalBlocks(
+    APPROVE({
+      action: ACTION({
+        power: PLAYBOOK_POWER({
+          id: finalized<PlaybookId>('PB-ORACLE-VOID'),
+          trigger: finalized<PlaybookTrigger>('OracleDeadlock'),
+          target: undefined,
+        }),
+      }),
+      condition: { kind: 'trigger', reading: active('OracleDeadlock', 7) },
+    }),
+  );
+  assert.deepEqual(noTarget.map((b) => b.check), ['Trigger condition']);
+
+  // And both halves report together when both are wrong, because they have different fixes.
+  const both = approvalBlocks(
+    APPROVE({
+      action: ACTION({
+        power: PLAYBOOK_POWER({
+          id: finalized<PlaybookId>('PB-RESERVE'),
+          trigger: finalized<PlaybookTrigger>('GateBreach'),
+          target: finalized(42),
+        }),
+      }),
+      condition: { kind: 'trigger', reading: active('GateBreach') },
+    }),
+  );
+  assert.deepEqual(both.map((b) => b.check), ['Trigger', 'Cohort target']);
+});
+
+test('M4 — the two powers the chain does NOT meter are not refused on a meter (06 §5.2)', () => {
+  // 06 §5.2's Allowance column gives `activate_playbook` "per-playbook" and `suspend_on_gate`
+  // "condition-gated". Neither is a counter, and `guardian_core::check_and_consume` charges no
+  // allowance for either — its `ActivatePlaybook` arm checks expiry, pairing, target and
+  // trigger, and its `SuspendOnGate` arm checks the gate flag alone.
+  //
+  // `AllowanceBook` was a total record over all five powers and `allowanceBlocks` ran
+  // unconditionally, so a supplied `used >= limit` refused a lawful activation: a client
+  // refusing what the runtime accepts, which 15 §4.8's mirror rule forbids in those words.
+  //
+  // The chain's own storage says the same thing in its shape — `AllowanceState` is
+  // `{ delay_used_this_epoch, force_rerun_used_this_epoch, pause_window_start,
+  //    pause_used_in_window }`.
+  const exhausted = ALLOWANCES(3, 3);
+  assert.deepEqual(Object.keys(exhausted).sort(), ['delay_once', 'force_rerun', 'pause_intake']);
+  assert.equal(isMetered('pause_intake'), true);
+  assert.equal(isMetered('delay_once'), true);
+  assert.equal(isMetered('force_rerun'), true);
+  assert.equal(isMetered('activate_playbook'), false);
+  assert.equal(isMetered('suspend_on_gate'), false);
+
+  // Approve: an exhausted book blocks neither unmetered power.
+  assert.deepEqual(approvalBlocks(APPROVE({ allowances: exhausted })), []);
+  const suspend = ACTION({ power: { kind: 'suspend_on_gate' } });
+  assert.deepEqual(
+    approvalBlocks(
+      APPROVE({
+        action: suspend,
+        allowances: exhausted,
+        condition: { kind: 'trigger', reading: active('GateBreach') },
+        dispatch: { kind: 'not-applicable' },
+      }),
+    ),
+    [],
+  );
+  // …and the anti-vacuity control: the same exhausted book DOES block a metered power, so the
+  // book is genuinely exhausted rather than the check being switched off.
+  const pause = ACTION({ power: { kind: 'pause_intake', until: finalized(50_000) } });
+  assert.deepEqual(
+    approvalBlocks(
+      APPROVE({ action: pause, condition: { kind: 'no-condition' }, allowances: exhausted }),
+    ).map((b) => b.check),
+    ['Allowance'],
+  );
+
+  // Propose: the unmetered arms carry no meter field at all, so the refusal is not merely
+  // skipped — there is no value to skip it on. The compiler is the other half of this check
+  // (`tests/firewall/fixtures/guardian-meter-on-an-unmetered-power.ts`).
+  assert.deepEqual(proposalBlocks(PROPOSE(ACTIVATION())), []);
+  assert.deepEqual(
+    proposalBlocks(PROPOSE({ power: 'suspend_on_gate', gate: gateReading() })),
+    [],
+  );
+
+  // And the console renders no meter for them, because a figure there is a budget the chain
+  // does not keep — the field is absent rather than showing a zero or a fabricated limit.
+  const activationHtml = renderToStaticMarkup(
+    h(ApproveAction, { context: APPROVE_ROW(), session: readySession('O-3'), onApprove: noSubmit }),
+  );
+  assert.ok(!fieldPresent(activationHtml, 'Allowance remaining for activate_playbook'), activationHtml);
+  assert.ok(!/Allowance remaining/.test(activationHtml), activationHtml);
+  const proposeHtml = renderToStaticMarkup(
+    h(ProposeAction, { inputs: PROPOSE(), session: readySession('O-4'), onPropose: noSubmit }),
+  );
+  assert.ok(!/Allowance remaining/.test(proposeHtml), proposeHtml);
+  // Anti-vacuity for the render: a metered power still shows its meter.
+  const meteredHtml = renderToStaticMarkup(
+    h(ProposeAction, {
+      inputs: PROPOSE({ power: 'pause_intake', meter: METER('pause_intake'), until: 5_000, horizon: HORIZON }),
+      session: readySession('O-4'),
+      onPropose: noSubmit,
+    }),
+  );
+  assert.ok(fieldPresent(meteredHtml, 'Allowance remaining'), meteredHtml);
+});
+
 test('M3 — `suspend_on_gate` is condition-gated on the APPROVE side too (06 §5.2)', () => {
   // `check_and_consume` refuses it with `TriggerInactive` when no hard-gate breach flag is
   // set, and that runs at the threshold approval like every other dispatch check.
@@ -3067,9 +3293,14 @@ test('the approve flow evaluates EVERY dispatch condition, not only the trigger'
   // `DurationTooLong`, `NotRerunnable` and `AlreadyRerun` unevaluated would be the reported
   // instance fixed and the class left open.
   //
-  // 1. The allowance the chain charges at dispatch.
+  // 1. The allowance the chain charges at dispatch — on a **metered** power. `pause_intake` is
+  // one of the three `AllowanceState` really counts; see the M4 test below for the two it does
+  // not, where an exhausted book must NOT block.
+  const pause = ACTION({ power: { kind: 'pause_intake', until: finalized(50_000) } });
   assert.deepEqual(
-    approvalBlocks(APPROVE({ allowances: ALLOWANCES(3, 3) })).map((b) => b.check),
+    approvalBlocks(
+      APPROVE({ action: pause, condition: { kind: 'no-condition' }, allowances: ALLOWANCES(3, 3) }),
+    ).map((b) => b.check),
     ['Allowance'],
   );
   // 2. The hold window, against the activation's own expiry.
@@ -3150,19 +3381,35 @@ test('M1 — the approve surface renders the allowance meter and the trigger sta
   // E20's V-facet is four items: "pending action with decoded enumerated call batch, m-of-7
   // progress, allowance meters, trigger-condition status". The last two were rendered
   // nowhere, and both are what the runtime charges at the fifth approval.
+  //
+  // The meter is rendered for a **metered** power (06 §5.2 meters three of the five). The
+  // first version of this test asserted `Allowance remaining for activate_playbook`, which was
+  // a figure for a counter the chain does not keep — see the M4 test below.
+  const delay = ACTION({ power: { kind: 'delay_once', pid: finalized('p7') } });
   const html = renderToStaticMarkup(
+    h(ApproveAction, {
+      context: APPROVE({
+        action: delay,
+        condition: { kind: 'no-condition' },
+        dispatch: { kind: 'rerun', proposal: RERUNNABLE('Queued') },
+      }),
+      session: readySession('O-3'),
+      onApprove: noSubmit,
+    }),
+  );
+  assert.ok(fieldPresent(html, 'Allowance remaining for delay_once'), html);
+  // The trigger status renders on the activation row, where there is a condition to report.
+  const activation = renderToStaticMarkup(
     h(ApproveAction, { context: APPROVE_ROW(), session: readySession('O-3'), onApprove: noSubmit }),
   );
-  assert.ok(fieldPresent(html, 'Allowance remaining for activate_playbook'), html);
-  assert.match(html, /Trigger condition — OracleDeadlock/);
-  assert.match(html, /re-checks it at the threshold approval/);
+  assert.match(activation, /Trigger condition — OracleDeadlock/);
+  assert.match(activation, /re-checks it at the threshold approval/);
   // The meter is the one for THIS action's power, looked up rather than supplied — so a
   // console cannot show a different power's budget beside a privileged signature.
   const book = ALLOWANCES(1, 4);
   assert.deepEqual(meterFor(book, 'delay_once'), { power: 'delay_once', ...book.delay_once });
   // And the batch, the progress and the control are all still there, so this is an addition.
   assert.ok(fieldPresent(html, 'Approvals so far'), html);
-  assert.ok(!buttonDisabled(html, 'Approve'), html);
 });
 
 test('an overrun allowance reads as zero remaining, never as negative headroom', () => {
@@ -3227,8 +3474,9 @@ test('the unratified-action consequence names the guardian own bond', () => {
 test('a proposal is blocked by allowance and by trigger independently', () => {
   assert.deepEqual(proposalBlocks(PROPOSE()), []);
   assert.deepEqual(
-    proposalBlocks(PROPOSE(ACTIVATION({ meter: METER('activate_playbook', 2, 2) })))
-      .map((b) => b.check),
+    proposalBlocks(
+      PROPOSE({ power: 'pause_intake', meter: METER('pause_intake', 2, 2), until: 5_000, horizon: HORIZON }),
+    ).map((b) => b.check),
     ['Allowance'],
   );
   assert.deepEqual(
@@ -3312,7 +3560,7 @@ test('M3 — `suspend_on_gate` is condition-gated, and the only reachable state 
   // block, so the only state this power could reach asserted that no condition applied — a
   // control that could reach `ready` with the runtime's own precondition unevaluated.
   const gated = (gate: TriggerState<'GateBreach'>): GuardianProposal =>
-    ({ power: 'suspend_on_gate', meter: METER('suspend_on_gate'), gate });
+    ({ power: 'suspend_on_gate', gate });
   assert.deepEqual(proposalBlocks(PROPOSE(gated(gateReading()))), []);
   for (const reading of [gateReading('inactive'), gateReading('unread')] as const) {
     const blocks = proposalBlocks(PROPOSE(gated(reading)));
@@ -3406,29 +3654,79 @@ test('the propose control CANNOT reach ready on an unevaluated trigger', () => {
   assert.ok(!buttonDisabled(live, 'Propose'), live);
 });
 
-test('M2 — PB-MIGRATION renders its trigger honestly and says no action follows (06 §6.2)', () => {
-  // 11 §11.8.2's `MigrationHalt` row: "§6.2 gives this playbook an **empty** admissible call
-  // set on the pinned SDK line, so an active trigger still admits no dispatchable activation:
-  // the client renders the trigger honestly and states that no guardian action follows from
-  // it". No string under `app/src/` said so until 2026-08-08.
+test('M2 REVERSED — PB-MIGRATION BLOCKS on propose and on approve; "stated, never blocked" was wrong', () => {
+  // **This test pinned the opposite claim until 2026-08-08, and the claim was false.** It
+  // asserted `proposalBlocks` returned `[]` and the Propose control opened, on the reasoning
+  // that "the runtime accepts the activation (`check_and_consume` knows nothing about the call
+  // set)". `check_and_consume` is not the last word. 06 §6.2 is normative and exact:
+  //
+  //   "A playbook row whose admissible call set is empty has no dispatchable activation: a
+  //    fifth approval reaching it fails closed, the whole extrinsic reverts, and nothing is
+  //    recorded."
+  //
+  // The runtime implements it. `approve_action` runs inside `with_storage_layer` and calls
+  // `EffectDispatcher::dispatch`, which reaches `playbook_calls(Migration, …)` —
+  // `Err("PB-MIGRATION cursor retry has no EmergencyPlaybook-safe runtime call")`
+  // (`runtime/bleavit-runtime/src/configs.rs`). So the fifth signature buys a revert.
+  //
+  // Admitting the *propose* "to preserve the record that a council wanted to act" does not
+  // survive the same sentence: **nothing is recorded**. Walking five of seven guardians to a
+  // guaranteed revert is what §11.4 rule 1 exists to prevent.
   assert.equal(playbookAdvisory('PB-MIGRATION'), MIGRATION_NO_ACTION_FOLLOWS);
   assert.match(MIGRATION_NO_ACTION_FOLLOWS, /empty admissible call set/);
-  assert.match(MIGRATION_NO_ACTION_FOLLOWS, /no guardian action follows from it/);
+  assert.match(MIGRATION_NO_ACTION_FOLLOWS, /the whole extrinsic reverts and nothing is recorded/);
   // Every other playbook but the unavailable one carries no advisory, so this is a statement
   // about PB-MIGRATION rather than a banner on the screen.
   assert.equal(playbookAdvisory('PB-HALT-INTAKE'), undefined);
   assert.equal(playbookAdvisory('PB-DEPEG'), DEPEG_TRIGGER_UNAVAILABLE);
 
-  // **Stated, never blocked**: the runtime accepts the activation (`check_and_consume` knows
-  // nothing about the call set), so refusing it here would be this client refusing an action
-  // the chain would run — the same defect as offering one it would not.
+  // 1. Propose blocks, with the empty-call-set sentence as the reason.
   const migration = ACTIVATION({ id: 'PB-MIGRATION', trigger: active('MigrationHalt') });
-  assert.deepEqual(proposalBlocks(PROPOSE(migration)), []);
+  const proposeBlocks = proposalBlocks(PROPOSE(migration));
+  assert.deepEqual(proposeBlocks.map((b) => b.check), ['Trigger condition']);
+  assert.equal(nth(proposeBlocks, 0, 'block').detail, MIGRATION_NO_ACTION_FOLLOWS);
   const html = renderToStaticMarkup(
     h(ProposeAction, { inputs: PROPOSE(migration), session: readySession('O-4'), onPropose: noSubmit }),
   );
-  assert.ok(!buttonDisabled(html, 'Propose'), html);
+  assert.ok(buttonDisabled(html, 'Propose'), html);
   assert.ok(html.includes(MIGRATION_NO_ACTION_FOLLOWS), html);
+
+  // 2. Approve blocks too, and it must: `propose_action` validates nothing on chain, so a
+  // PB-MIGRATION action created by any other tool sits in `PendingActions` for three days.
+  const pending = ACTION({
+    power: PLAYBOOK_POWER({
+      id: finalized<PlaybookId>('PB-MIGRATION'),
+      trigger: finalized<PlaybookTrigger>('MigrationHalt'),
+      target: undefined,
+    }),
+  });
+  const approve = approvalBlocks(
+    APPROVE({ action: pending, condition: { kind: 'trigger', reading: active('MigrationHalt') } }),
+  );
+  assert.deepEqual(approve.map((b) => b.check), ['Trigger condition']);
+  assert.equal(nth(approve, 0, 'block').detail.startsWith(MIGRATION_NO_ACTION_FOLLOWS), true);
+
+  // 3. `mayActivatePlaybook` agrees, because it is derived from the same decision rather than
+  // being a second switch — the property `triggerRefusal`'s own note claims.
+  assert.equal(mayActivatePlaybook(active('MigrationHalt')), false);
+  assert.equal(mayActivatePlaybook(inactiveAt('MigrationHalt')), false);
+
+  // 4. **The refusal is keyed on the trigger and the fact is about the playbook**, and those
+  // are the same thing only because `PLAYBOOK_TRIGGERS` binds them one-to-one. Asserted rather
+  // than assumed: if the map ever grew, this refusal would be keyed to the wrong thing and
+  // this assertion is what says so.
+  assert.deepEqual(PLAYBOOK_TRIGGERS['PB-MIGRATION'], ['MigrationHalt']);
+  assert.deepEqual(
+    (Object.entries(PLAYBOOK_TRIGGERS) as [PlaybookId, readonly PlaybookTrigger[]][])
+      .filter(([, triggers]) => triggers.includes('MigrationHalt'))
+      .map(([id]) => id),
+    ['PB-MIGRATION'],
+  );
+
+  // 5. Anti-vacuity: the *readable* half is unchanged. `MigrationHalt` still has a frozen read
+  // behind it, so this is not the `DepegMedian` "no read at all" refusal wearing another name.
+  assert.deepEqual(TRIGGER_READS.MigrationHalt, ['storage.execution_guard.migration_halt']);
+  assert.notEqual(nth(proposeBlocks, 0, 'block').detail, DEPEG_TRIGGER_UNAVAILABLE);
 });
 
 // ------------------------------------------------ S16 treasury streams (F17)
@@ -3936,9 +4234,24 @@ test('a blocked approval lists EVERY reason, not the first', () => {
   //
   // The fourth heading is E20's trigger-condition status, which renders on **every** approval
   // including the clean ones — see the test below.
+  //
+  // **Three more arrived on 2026-08-08 and they are not model blocks**: `O-3` declares two
+  // `blocking` and one `stated` unreadable obligation (SQ-1030, SQ-1022) for the three
+  // refusals that live one frame above `check_and_consume` — `PlaybookNotRegistered`,
+  // `PlaybookAlreadyActive` and `TooManyReviews`. Two render as `Not readable at B′` and the
+  // caveat list renders all three. They are listed here rather than filtered out, because the
+  // property under test is that **every** reason reaches the screen.
   assert.deepEqual(
     headings.sort(),
-    ['Already approved', 'Expiry', 'Membership', 'Trigger condition — OracleDeadlock'],
+    [
+      'Already approved',
+      'Expiry',
+      'Membership',
+      'Not readable at B′',
+      'Not readable at B′',
+      'Trigger condition — OracleDeadlock',
+      'What this client cannot check here',
+    ],
   );
 });
 
@@ -4414,12 +4727,27 @@ test('the approve flow renders every call in the batch, decoded', () => {
   assert.ok(!/\bhidden\b/.test(nth(list, 1, 'capture')), `the batch list is hidden: ${nth(list, 0, 'capture')}`);
   assert.ok(!/aria-hidden="true"/.test(nth(list, 1, 'capture')), `the batch list is aria-hidden: ${nth(list, 0, 'capture')}`);
   assert.ok(!/display:\s*none/.test(nth(list, 1, 'capture')), `the batch list is display:none: ${nth(list, 0, 'capture')}`);
-  // **And the control opens.** Until contract v28 froze `Guardian.PendingActions` this row
-  // carried a blocking unreadable obligation, so this assertion read `buttonDisabled` and
-  // matched `SQ-616` — a test that could pass with the batch rendering nothing at all,
-  // because the refusal came from somewhere else entirely. A decoded batch on a live session
-  // is the case S15 exists for, and it is the case nothing had ever exercised.
-  assert.ok(!buttonDisabled(html, 'Approve'), html);
+  // **The model opens; the row is closed by a declared obligation, and the two are asserted
+  // separately.** They used to be one assertion — `!buttonDisabled` — and that is exactly the
+  // shape that made this test worthless before contract v28: with a blocking obligation in
+  // place the button is disabled whatever the batch does, so a test reading only the button
+  // passes with the batch rendering nothing at all.
+  //
+  // O-3 carries two `blocking` obligations again since 2026-08-08 (SQ-1030 —
+  // `Guardian.PlaybookRegistered` and `Guardian.ActivePlaybooks` are not frozen in 02 §7.4),
+  // so the button is disabled and this is what must be checked instead: the **model** finds
+  // nothing wrong, and no reason on screen is the batch's.
+  assert.deepEqual(
+    approvalBlocks(
+      APPROVE({
+        action: ACTION({ calls: [CALL('Constitution', 'set_param'), CALL('Epoch', 'force_rerun')] }),
+      }),
+    ),
+    [],
+    'a decoded batch on a clean context must produce no model block',
+  );
+  assert.ok(buttonDisabled(html, 'Approve'), html);
+  assert.ok(/SQ-1030/.test(html), 'the control is closed without naming the question that closes it');
   assert.ok(!/SQ-616/.test(html), 'a resolved spec question is still closing this control');
   assert.ok(!/Empty batch|Undecodable call/.test(html), `the batch itself must not block: ${html}`);
 });
@@ -4909,8 +5237,7 @@ test('a filing is blocked by bond, bounds and evidence independently', () => {
 
   // An EMPTY hash is not a hash. Checking only for `undefined` let `''` through, which is
   // what an unfilled form field actually produces — the mutation that survived first pass.
-  const empty = filingBlocks(FILING({
-    kind: 'milestone',
+  const empty = filingBlocks(MILESTONE_FILING({
     freeUsdc: finalized(1_000n),
     filingBond: QUOTED(100n, 4_000n),
     filingsUsed: finalized(0),
@@ -4918,6 +5245,108 @@ test('a filing is blocked by bond, bounds and evidence independently', () => {
     evidenceHash: '',
   }));
   assert.deepEqual(empty.map((b) => b.check), ['Evidence']);
+});
+
+test('M7 — a filing behind a CLOSED epoch is refused (AlreadyFinal), which nothing evaluated', () => {
+  // `registry_core::file` refuses when this instance already holds an aggregate for
+  // `(epoch, spec_version)`: "a closed-out `(epoch, version)` aggregate is terminal (07 §7):
+  // late filings must not land behind an already-derived welfare input". `filingBlocks`
+  // evaluated none of `file`'s five refusals and O-8 declared no clause for any of them, so a
+  // filer could be walked to a **bonded** signature the chain reverts.
+  //
+  // The read is exact rather than a proxy: `ClosedAt` is the same `(epoch, spec_version)`
+  // double map, written by `close_epoch` in the same call that pushes the aggregate and
+  // removed by `reap_epoch` in the same call that removes it. It has been frozen since
+  // contract v28 (02 §7.4) and O-9 already cited it.
+  assert.deepEqual(filingBlocks(FILING()), [], 'the clean fixture must name an open epoch');
+  const closed = filingBlocks(FILING({ epochClosed: { kind: 'closed', at: finalized(88_000) } }));
+  assert.deepEqual(closed.map((b) => b.check), ['Epoch closed']);
+  assert.match(nth(closed, 0, 'block').detail, /closed out at block 88,?000/);
+  assert.match(nth(closed, 0, 'block').detail, /terminal/);
+  // The version is named, because a sibling version's close says nothing about this one —
+  // the map is keyed on the pair and the core's `ensure!` scopes to the pair too.
+  assert.match(nth(closed, 0, 'block').detail, /MetricSpec version 3/);
+
+  // An unread answer fails closed and says which silence it is, exactly as the frozen-spec
+  // clause does: retrying a read and choosing another epoch are different remedies.
+  const unread = filingBlocks(
+    FILING({ epochClosed: { kind: 'unread', reason: 'the storage read failed' } }),
+  );
+  assert.deepEqual(unread.map((b) => b.check), ['Epoch closed']);
+  assert.match(nth(unread, 0, 'block').detail, /could not read/);
+  assert.match(nth(unread, 0, 'block').detail, /the storage read failed/);
+  assert.notEqual(nth(unread, 0, 'block').detail, nth(closed, 0, 'block').detail);
+
+  // Both instances, because the two allocators close independently and O-8's clause is
+  // per-instance for exactly that reason.
+  assert.deepEqual(filingBlocks(MILESTONE_FILING()), []);
+  assert.deepEqual(
+    filingBlocks(MILESTONE_FILING({ epochClosed: { kind: 'closed', at: finalized(1) } }))
+      .map((b) => b.check),
+    ['Epoch closed'],
+  );
+
+  // The row declares it, so the gate re-reads it at B′ rather than trusting this model — and
+  // it names **this instance's** map, since the two registries close separately.
+  for (const instance of ['incident', 'milestone'] as const) {
+    const rows = operatorRowsFor(instance)['O-8'];
+    const clause = rows.find((entry) => entry.key === 'not-final');
+    assert.ok(clause !== undefined, `O-8/${instance} declares no not-final clause`);
+    assert.equal(clause.surface, `storage.${instance}_registry.closed_at`);
+    assert.equal(clause.subject, 'chain');
+  }
+});
+
+test('M7 — the filing CLASS is the instance’s own, and the wrong one cannot be built', () => {
+  // `registry_core::validate_class` admits `S1 | S2 | S3` on Incident and `Scope(_)` on
+  // Milestone, and refuses anything else with `InvalidClass` — after the bond is committed.
+  // `FilingInputs` carried no `class` at all, so the model could not describe two of `file`'s
+  // five arguments and the check had nothing to run on.
+  //
+  // The repair is the union rather than a predicate: `FilingInputs` is keyed on the instance
+  // and the arms take disjoint class types, so `InvalidClass` is not a value that exists. The
+  // compiler is the test — `tests/firewall/fixtures/registry-filing-class-for-the-wrong-
+  // instance.ts` is the executable half.
+  const incident = FILING({ class: 'S1' });
+  assert.equal(incident.kind === 'incident' ? incident.class : undefined, 'S1');
+  const milestone = MILESTONE_FILING({ class: { scope: 4 } });
+  assert.deepEqual(milestone.kind === 'milestone' ? milestone.class : undefined, { scope: 4 });
+  // Every admissible incident class is offered and nothing else is, so a form built from this
+  // list cannot present a class the chain refuses.
+  assert.deepEqual([...INCIDENT_CLASSES], ['S1', 'S2', 'S3']);
+  for (const severity of INCIDENT_CLASSES) {
+    assert.deepEqual(filingBlocks(FILING({ class: severity })), [], `${severity} must be filable`);
+  }
+  // …and the screen renders it. A value the model carries and no screen shows is V-169's
+  // shape — `FilingKind` was threaded everywhere and read by nobody — so the two arguments
+  // the filer chooses are on the panel, next to the bond they commit.
+  const html = renderToStaticMarkup(
+    h(RegistryFilingForm, {
+      inputs: FILING({ class: 'S3' }),
+      decimals: 6,
+      symbol: 'USDC',
+      evidence: EVIDENCE_FIXTURE,
+      session: readySession('O-8'),
+      onFile: noSubmit,
+    }),
+  );
+  assert.ok(fieldPresent(html, 'Class'), html);
+  assert.match(html, /<span>S3<\/span>/);
+  assert.ok(fieldPresent(html, 'MetricSpec version this filing names'), html);
+  const milestoneHtml = renderToStaticMarkup(
+    h(RegistryFilingForm, {
+      inputs: MILESTONE_FILING({ class: { scope: 7 } }),
+      decimals: 6,
+      symbol: 'USDC',
+      evidence: EVIDENCE_FIXTURE,
+      session: readySession('O-8'),
+      onFile: noSubmit,
+    }),
+  );
+  assert.match(milestoneHtml, /<span>Scope 7<\/span>/);
+  // The two instances never show each other's class vocabulary.
+  assert.ok(!/<span>S3<\/span>/.test(milestoneHtml), milestoneHtml);
+  assert.ok(!/Scope /.test(html), html);
 });
 
 test('O-8 refuses a spec_version no live cohort froze, and refuses an unread set', () => {
@@ -5229,7 +5658,7 @@ test('both non-quoted arms block P-13 and O-8, in different sentences, with no f
   assert.match(nth(filingUndeterminable, 0, 'block').detail, /stays closed/);
   // …and the milestone instance gets its own arm rather than the incident one by default,
   // because `filingBlocks` routes on the instance it was given.
-  const milestoneUndeterminable = filingBlocks(FILING({ kind: 'milestone', filingBond: UNDETERMINABLE }));
+  const milestoneUndeterminable = filingBlocks(MILESTONE_FILING({ filingBond: UNDETERMINABLE }));
   assert.equal(
     nth(milestoneUndeterminable, 0, 'block').detail,
     BOND_QUOTE_UNDETERMINABLE['milestone-filing'],
@@ -5642,13 +6071,21 @@ test('an unverifiable withdraw destination warns in its own words, and does not 
 /**
  * The §11.8 calls whose row this release can actually read end to end.
  *
- * It was seven and it is now **eleven — every operator surface call there is**. Contract v28
- * froze the guardian pending-action pair, the two upgrade items and the registry's three
- * maps (SQ-615/616/619); contract v29 published the last four reads §11.8 requires and
- * nothing carried — `api.bond_quote` for the report and filing bonds (SQ-598/SQ-731),
- * `api.treasury_streams` for the per-stream claim (SQ-601), and the two storage latches
- * behind §11.8.2's trigger table (SQ-730). So `oracle.report`, `registry.file`,
- * `futarchy_treasury.claim_stream` and `guardian.propose_action` join the list.
+ * It was seven, then eleven — every operator surface call there is — and it is now **ten**.
+ * Contract v28 froze the guardian pending-action pair, the two upgrade items and the
+ * registry's three maps (SQ-615/616/619); contract v29 published the last four reads §11.8
+ * requires and nothing carried — `api.bond_quote` for the report and filing bonds
+ * (SQ-598/SQ-731), `api.treasury_streams` for the per-stream claim (SQ-601), and the two
+ * storage latches behind §11.8.2's trigger table (SQ-730).
+ *
+ * **`guardian.approve_action` left the list on 2026-08-08**, and that is a real regression in
+ * reach rather than a bookkeeping change. `approve_action` refuses on
+ * `Guardian.PlaybookRegistered[id]` and on `Guardian.ActivePlaybooks` **after** counting the
+ * fifth approval, 02 §7.4 freezes neither, and INV-FE-12's lattice makes an unproven
+ * capability absent. The cost is exactly what this file's own note warns of — a screen that
+ * cannot open is a screen nothing exercises end to end — so the tests below check the model
+ * and the gate separately rather than folding both into one `buttonDisabled` assertion, and
+ * the entry expires mechanically when SQ-1030 closes.
  *
  * A list rather than a derivation, deliberately: derived from `UNREADABLE` it would agree
  * with whatever that file says and could never disagree with it. The binding between the two
@@ -5660,7 +6097,6 @@ const OPENABLE_CALLS = [
   'welfare.record_snapshot',
   'oracle.challenge',
   'oracle.report',
-  'guardian.approve_action',
   'guardian.propose_action',
   'futarchy_treasury.claim_stream',
   'system.apply_authorized_upgrade',
@@ -5743,10 +6179,29 @@ test('every row whose central read 02 does not freeze is CLOSED, with its id nam
     [...OPENABLE_CALLS].sort(),
     Object.keys(OPERATOR_SURFACE_ROWS).filter((call) => !blocking.includes(call)).sort(),
   );
-  assert.deepEqual(blocking, [], `contract v29 retired every blocking obligation: ${blocking}`);
-  // Anti-vacuity for the `stated` half, which must survive the blocking set emptying:
-  // O-1's two SQ-564 conditions are still surfaced, and they still do not close a control.
+  // **One control is closed again, and by a question raised rather than one left behind.**
+  // `approve_action` refuses on `Guardian.PlaybookRegistered[id]` and `ActivePlaybooks` after
+  // the fifth approval is counted, and 02 §7.4 freezes neither (SQ-1030). The difference from
+  // the v28 defect this test was rewritten for is the whole point of the mechanical expiry:
+  // that one cited questions PLAN.md had already resolved, and this one cites an open row that
+  // `check-unreadable-obligations.py` will fail on the day it closes.
+  assert.deepEqual(blocking, ['guardian.approve_action'], `unexpected blocking set: ${blocking}`);
+  // Anti-vacuity for the `stated` half: O-1's two SQ-564 conditions are still surfaced, and
+  // they still do not close a control. O-3's `stated` SQ-1022 entry is NOT in this list — the
+  // loop `continue`s on a blocked row — so it is asserted directly below rather than being
+  // silently uncovered while the row is shut.
   assert.deepEqual(stated, ['SQ-564', 'SQ-564'], 'the stated obligations stopped being carried');
+  const guardian = unreadableObligationsFor('O-3');
+  assert.deepEqual(
+    guardian.map((entry) => [entry.specQuestion, entry.disposition]),
+    [['SQ-1030', 'blocking'], ['SQ-1030', 'blocking'], ['SQ-1022', 'stated']],
+  );
+  // `TooManyReviews` is `stated` on purpose and the reasoning is asserted, not just the flag:
+  // neither the count (`Guardian.ReviewDeadlines`) nor the bound (128) is readable, so closing
+  // the control on it would refuse what the chain accepts — the mirror-rule defect. Naming it
+  // is the point; an unenumerated shape is how this class survived its first fix.
+  assert.match(nth(guardian, 2, 'obligation').reason, /TooManyReviews/);
+  assert.match(nth(guardian, 2, 'obligation').reason, /refuse what the chain accepts/);
 });
 
 test('a preparation declaring somebody else’s row is refused, not gated against it', () => {
@@ -6494,7 +6949,7 @@ test('each power renders its OWN arguments, and the empty one says so', () => {
   assert.equal(POWER_FIELDS.activate_playbook.length, 4);
   const empty = renderToStaticMarkup(
     h(ProposeAction, {
-      inputs: PROPOSE({ power: 'suspend_on_gate', meter: METER('suspend_on_gate'), gate: gateReading() }),
+      inputs: PROPOSE({ power: 'suspend_on_gate', gate: gateReading() }),
       session: readySession('O-4'), onPropose: noSubmit,
     }),
   );
@@ -6513,7 +6968,7 @@ test('the propose form refuses a missing justification', () => {
   // to approve something with no stated reason.
   assert.deepEqual(
     proposalBlocks({
-      proposal: { power: 'suspend_on_gate', meter: METER('suspend_on_gate'), gate: gateReading() },
+      proposal: { power: 'suspend_on_gate', gate: gateReading() },
       justificationHash: undefined,
     }).map((block) => block.check),
     ['Justification'],
@@ -6542,11 +6997,13 @@ test('the cohort-target rule keys on the PLAYBOOK, and it is now unbreakable (co
         id === 'PB-ORACLE-VOID',
         `${id}/${trigger} builds a call the chain answers BadPlaybookTarget`,
       );
-      // `PB-DEPEG` is the one lawful pairing that is still refused, and by the OTHER control:
-      // `TRIGGER_READS.DepegMedian` is empty, so no read can have established it (06 §6.2).
+      // Two lawful pairings are still refused, each by a different release-fixed control and
+      // neither by the pairing itself: `TRIGGER_READS.DepegMedian` is empty, so no read can
+      // have established `PB-DEPEG`; and `PB-MIGRATION`'s admissible call set is empty, so its
+      // fifth approval reverts the whole extrinsic (06 §6.2, both).
       assert.deepEqual(
         proposalBlocks(PROPOSE(ACTIVATION({ id, trigger: active(trigger, 7) }))).map((b) => b.check),
-        id === 'PB-DEPEG' ? ['Trigger condition'] : [],
+        RELEASE_REFUSED_PLAYBOOKS.has(id) ? ['Trigger condition'] : [],
       );
     }
   }
@@ -6572,19 +7029,21 @@ test('a playbook is refused under a trigger it does not accept — BadPlaybookTr
     for (const trigger of DOC_TRIGGERS) {
       const blocks = propose(id, trigger).map((block) => block.check);
       if (triggers.has(trigger)) {
-        // `PB-DEPEG`/`DepegMedian` is lawful and still refused, by `TRIGGER_READS`: the
-        // variant has no read, so no client can have established it (06 §6.2).
+        // Two lawful pairings are refused by a release-fixed control rather than by the
+        // pairing: `PB-DEPEG`/`DepegMedian` because the variant has no read at all, and
+        // `PB-MIGRATION`/`MigrationHalt` because the playbook's admissible call set is empty
+        // and its fifth approval reverts the whole extrinsic (06 §6.2, both).
         assert.deepEqual(
           blocks,
-          id === 'PB-DEPEG' ? ['Trigger condition'] : [],
+          RELEASE_REFUSED_PLAYBOOKS.has(id) ? ['Trigger condition'] : [],
           `${id} refused its own trigger ${trigger}`,
         );
       } else {
-        // `DepegMedian` carries a second, independent refusal wherever it appears — it has no
-        // read at all — and the two are reported together because they have different fixes.
+        // `DepegMedian` and `MigrationHalt` each carry a second, independent refusal wherever
+        // they appear, and the two are reported together because they have different fixes.
         assert.deepEqual(
           blocks,
-          trigger === 'DepegMedian' ? ['Trigger condition', 'Trigger'] : ['Trigger'],
+          RELEASE_REFUSED_TRIGGERS.has(trigger) ? ['Trigger condition', 'Trigger'] : ['Trigger'],
           `${id} accepted the foreign trigger ${trigger}`,
         );
       }

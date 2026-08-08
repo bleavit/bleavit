@@ -282,28 +282,55 @@ export interface AllowanceReading {
 }
 
 /**
- * Every power's allowance, from the one storage value that carries them all.
+ * The three powers the chain meters — 06 §5.2's Allowance column, read as a counter.
  *
- * A **total** record rather than a single meter, so the meter for an action is *looked up by
- * the action's own power* instead of supplied beside it. That is the B3 repair in its general
+ * **Two of the five are not metered and were metered here anyway.** §5.2 gives
+ * `activate_playbook` *"per-playbook"* and `suspend_on_gate` *"condition-gated"*; neither is a
+ * count against a budget, and `guardian_core::check_and_consume` charges no allowance for
+ * either — its `ActivatePlaybook` arm checks the expiry, the pairing, the target and the
+ * trigger, and its `SuspendOnGate` arm checks the gate flag alone. The chain's own storage says
+ * the same thing in its shape: `AllowanceState` is
+ * `{ delay_used_this_epoch, force_rerun_used_this_epoch, pause_window_start, pause_used_in_window }`
+ * — four fields for three powers, and no field for the other two.
+ *
+ * `AllowanceBook` was a total record over all five and `allowanceBlocks` ran unconditionally,
+ * so a supplied `used >= limit` refused a lawful activation. That is a client refusing what the
+ * runtime accepts, which 15 §4.8's mirror rule forbids in exactly those words — the same defect
+ * as offering one it would not, pointing the other way.
+ *
+ * Narrowing the type is the repair rather than an `if`: the unmetered arms of
+ * `GuardianProposal` now have no `meter` field at all, so the old shape does not compile.
+ */
+export type MeteredPower = 'pause_intake' | 'delay_once' | 'force_rerun';
+
+/** Whether a power is one the chain counts. One predicate, so no call site re-derives it. */
+export function isMetered(power: GuardianPower): power is MeteredPower {
+  return power === 'pause_intake' || power === 'delay_once' || power === 'force_rerun';
+}
+
+/**
+ * Every **metered** power's allowance, from the one storage value that carries them all.
+ *
+ * A record rather than a single meter, so the meter for an action is *looked up by the
+ * action's own power* instead of supplied beside it. That is the B3 repair in its general
  * form: the console used to render `POWER_FIELDS[meter.power]` while validating a different
  * power's arguments, and a panel titled *"Propose a pause on intake"* prepared a playbook
  * activation. There is now no second place a power can be named.
  *
- * `Guardian.Allowances` is a single storage value (`AllowanceState`), so requiring all five
+ * `Guardian.Allowances` is a single storage value (`AllowanceState`), so requiring all three
  * costs one read — and §11.8.2's propose row asks for *"allowance meters displayed"*, plural.
  */
-export type AllowanceBook = Readonly<Record<GuardianPower, AllowanceReading>>;
+export type AllowanceBook = Readonly<Record<MeteredPower, AllowanceReading>>;
 
 /** Remaining allowance for a power, and whether a proposal fits under it. */
-export interface AllowanceMeter<P extends GuardianPower = GuardianPower> {
+export interface AllowanceMeter<P extends MeteredPower = MeteredPower> {
   readonly power: P;
   readonly used: Verified<number>;
   readonly limit: Verified<number>;
 }
 
-/** The meter for one power. Derived from the book, never written beside the call. */
-export function meterFor<P extends GuardianPower>(
+/** The meter for one metered power. Derived from the book, never written beside the call. */
+export function meterFor<P extends MeteredPower>(
   book: AllowanceBook,
   power: P,
 ): AllowanceMeter<P> {
@@ -428,7 +455,11 @@ function dispatchBlocks(context: ApprovalContext): readonly GuardianBlock[] {
   // power nobody could read would be noise on top of a refusal.
   if (power.kind === 'undecodable') return [];
   const name: GuardianPower = power.kind;
-  const blocks: GuardianBlock[] = [...allowanceBlocks(meterFor(context.allowances, name))];
+  // Only the three metered powers are charged — see `MeteredPower`. Running this on all five
+  // let a supplied `used >= limit` refuse an activation the chain would have dispatched.
+  const blocks: GuardianBlock[] = isMetered(name)
+    ? [...allowanceBlocks(meterFor(context.allowances, name))]
+    : [];
   const evidence = context.dispatch;
   const wrongKind = (needed: string): readonly GuardianBlock[] => [
     {
@@ -488,6 +519,61 @@ function conditionBlocks(
       },
     ];
   }
+  return [...playbookBlocks(power), ...triggerConditionBlocks(power, evidence)];
+}
+
+/**
+ * `BadPlaybookTrigger` and `BadPlaybookTarget`, evaluated on the flow that can meet them.
+ *
+ * The propose flow has checked the pairing since 2026-08-08 and the approve flow checked
+ * neither — which is the wrong way round, because **`propose_action` validates nothing on
+ * chain** (`guardian-core/src/lib.rs`). Both refusals fall on the *threshold* approver, inside
+ * `check_and_consume`, so a mispaired action created by any other tool sits in
+ * `Guardian.PendingActions` for three days looking approvable, and the five signatures spent
+ * on it buy a revert.
+ *
+ * The client's own propose flow cannot produce either shape — `guardianCall` derives `trigger`
+ * and `target` from the evaluated reading — so these are checks on **somebody else's**
+ * bytes, which is exactly what an approval is.
+ *
+ * The two-sided target rule has three halves and only one of them lives here. `Some` on a
+ * non-VOID playbook is refused below; `None` on `PB-ORACLE-VOID` is refused by
+ * `subjectMismatch`, because `requiredCondition` gives it the unaskable `UNNAMED_COHORT`; and
+ * a target naming the *wrong* cohort is refused there too. Splitting them is deliberate — the
+ * remedies differ, and one sentence for three states says nothing useful about any of them.
+ */
+function playbookBlocks(power: Exclude<PendingPower, { kind: 'undecodable' }>): readonly GuardianBlock[] {
+  if (power.kind !== 'activate_playbook') return [];
+  const blocks: GuardianBlock[] = [];
+  const id = power.id.value;
+  const named = power.trigger.value;
+  if (!PLAYBOOK_TRIGGERS[id].includes(named)) {
+    blocks.push({
+      check: 'Trigger',
+      detail:
+        `${id} is not activated by the ${named} condition, and this action pairs them. Each ` +
+        'playbook answers a specific failure and the chain refuses any other pairing at the ' +
+        'threshold approval, so the five signatures before yours bought a revert and yours ' +
+        'would too. It cannot be repaired by approving — it needs proposing again.',
+    });
+  }
+  if (id !== 'PB-ORACLE-VOID' && power.target !== undefined) {
+    blocks.push({
+      check: 'Cohort target',
+      detail:
+        `${id} carries a cohort target (${power.target.value}), and only PB-ORACLE-VOID takes ` +
+        'one. The chain refuses any other playbook with a target at the threshold approval, ' +
+        'so this action cannot execute whatever its condition says.',
+    });
+  }
+  return blocks;
+}
+
+/** The trigger half of `check_and_consume`, against the evidence supplied. */
+function triggerConditionBlocks(
+  power: Exclude<PendingPower, { kind: 'undecodable' }>,
+  evidence: ConditionEvidence,
+): readonly GuardianBlock[] {
   const required = requiredCondition(power);
   if (required === undefined) {
     // The mirror, and it blocks for the same reason the missing one does. Evidence supplied for
@@ -693,22 +779,44 @@ export const DEPEG_TRIGGER_UNAVAILABLE =
  * The one playbook whose trigger is live and whose call set is empty (06 §6.2; 11 §11.8.2).
  *
  * §11.8.2's `MigrationHalt` row: *"§6.2 gives this playbook an **empty** admissible call set
- * on the pinned SDK line, so an active trigger still admits no dispatchable activation: the
- * client renders the trigger honestly and states that no guardian action follows from it"*.
+ * on the pinned SDK line, so an active trigger still admits no dispatchable activation"*.
  *
- * It is **stated, never a block**. The runtime accepts the activation — `check_and_consume`
- * validates the expiry, the pairing, the target and the trigger, and knows nothing about the
- * call set — so refusing it here would be a client refusing an action the chain would run,
- * which is the same defect as offering one it would not. What the operator needs is the fact,
- * not a closed control.
+ * **It blocks, on both flows, and the comment that used to stand here said the opposite.**
+ * That comment claimed the runtime accepts the activation and that refusing it would be this
+ * client refusing an action the chain would run. The runtime does not accept it. 06 §6.2 is
+ * normative and exact: *"A playbook row whose admissible call set is empty has no dispatchable
+ * activation: a fifth approval reaching it fails closed, the whole extrinsic reverts, and
+ * nothing is recorded."* The runtime implements that — `playbook_calls(Migration, …)` returns
+ * `Err("PB-MIGRATION cursor retry has no EmergencyPlaybook-safe runtime call")`
+ * (`runtime/bleavit-runtime/src/configs.rs`), reached through
+ * `approve_action` → `EffectDispatcher::dispatch` inside a `with_storage_layer`, so the
+ * approval that gets there is reverted whole.
+ *
+ * Admitting the *propose* to preserve the record that a council wanted to act does not
+ * survive the same sentence: **nothing is recorded**, so there is no record to preserve, and
+ * walking five of seven guardians to a guaranteed revert is what §11.4 rule 1 exists to
+ * prevent. The condition is release-fixed on the pinned SDK line and needs no chain read, so
+ * it sits beside `DEPEG_TRIGGER_UNAVAILABLE` in `triggerRefusal` — one place, consulted by the
+ * propose flow, the approve flow and `mayActivatePlaybook` alike.
+ *
+ * The trigger itself is still rendered honestly: `storage.execution_guard.migration_halt` is a
+ * real read and `MigrationHalt` is a real condition. What the refusal says is that no guardian
+ * action follows from it.
  */
 export const MIGRATION_NO_ACTION_FOLLOWS =
   'The migration-halt playbook has an empty admissible call set on this runtime line, so ' +
-  'activating it dispatches nothing. The trigger is reported exactly as it stands and no ' +
-  'guardian action follows from it — an execution halt is handled by the upgrade path, not ' +
-  'by this playbook (06 §6.2).';
+  'activating it dispatches nothing. The chain does not accept the activation either: the ' +
+  'fifth approval fails closed, the whole extrinsic reverts and nothing is recorded (06 ' +
+  '§6.2). An execution halt is handled by the upgrade path, not by this playbook.';
 
-/** What an operator must be told about a playbook beyond whether its trigger holds. */
+/**
+ * What an operator must be told about a playbook beyond whether its trigger holds.
+ *
+ * Both sentences are also refusals — `triggerRefusal` returns each one for the playbook's own
+ * trigger — so this is the *rendered* form of a block rather than an advisory beside an open
+ * control. It stays a separate function because a console shows the sentence next to the
+ * playbook it is about, while the block list is one flat set of reasons for the whole action.
+ */
 export function playbookAdvisory(id: PlaybookId): string | undefined {
   if (id === 'PB-MIGRATION') return MIGRATION_NO_ACTION_FOLLOWS;
   if (id === 'PB-DEPEG') return DEPEG_TRIGGER_UNAVAILABLE;
@@ -741,8 +849,16 @@ export const PLAYBOOK_TRIGGERS: Readonly<Record<PlaybookId, readonly PlaybookTri
  * client believing whatever it was handed, on the action that costs a 5-of-7 signature.
  */
 export function triggerRefusal(trigger: TriggerState): string | undefined {
-  const reads = TRIGGER_READS[triggerOf(trigger)];
+  const named = triggerOf(trigger);
+  const reads = TRIGGER_READS[named];
   if (reads.length === 0) return DEPEG_TRIGGER_UNAVAILABLE;
+  // 06 §6.2's empty admissible call set, beside the empty read list and for the same kind of
+  // reason: both are fixed by this release rather than read from the chain, and both make the
+  // activation one the runtime refuses. `PLAYBOOK_TRIGGERS` binds `MigrationHalt` to
+  // `PB-MIGRATION` and to nothing else, and `PB-MIGRATION` to `MigrationHalt` and to nothing
+  // else, so refusing the trigger refuses exactly that playbook — a bijection the suite
+  // asserts, because if the map ever grew this refusal would be keyed to the wrong thing.
+  if (named === 'MigrationHalt') return MIGRATION_NO_ACTION_FOLLOWS;
   switch (trigger.kind) {
     case 'active':
       return undefined;
@@ -1208,7 +1324,11 @@ export type GuardianProposal =
     }
   | {
       readonly power: 'activate_playbook';
-      readonly meter: AllowanceMeter<'activate_playbook'>;
+      /**
+       * **No meter.** 06 §5.2's Allowance column reads *"per-playbook"* for this power and
+       * `check_and_consume` charges nothing — see `MeteredPower`. A meter here was a refusal
+       * the chain does not make.
+       */
       readonly id: PlaybookId;
       /**
        * The reading this client performed. Its subject **is** the call's `trigger` argument,
@@ -1220,8 +1340,7 @@ export type GuardianProposal =
     }
   | {
       readonly power: 'suspend_on_gate';
-      readonly meter: AllowanceMeter<'suspend_on_gate'>;
-      /** 06 §5.2's condition, and only that one can be written here. */
+      /** No meter either — 06 §5.2 reads *"condition-gated"*, and the condition is below. */
       readonly gate: TriggerState<'GateBreach'>;
     };
 
@@ -1305,15 +1424,19 @@ export function proposalBlocks(inputs: ProposeInputs): readonly GuardianBlock[] 
     });
   }
   const proposal = inputs.proposal;
-  blocks.push(...allowanceBlocks(proposal.meter));
+  // The allowance is charged **per metered power**, and only three of the five are metered
+  // (`MeteredPower`). It used to be charged unconditionally over a five-power book, which
+  // refused a lawful activation on a counter the chain does not keep.
   switch (proposal.power) {
     case 'pause_intake':
+      blocks.push(...allowanceBlocks(proposal.meter));
       blocks.push(
         ...horizonBlocks('The block this pause runs to', proposal.until, proposal.horizon),
       );
       break;
     case 'delay_once':
     case 'force_rerun':
+      blocks.push(...allowanceBlocks(proposal.meter));
       blocks.push(...rerunBlocks(proposal.power, proposal.pid, proposal.proposal));
       break;
     case 'activate_playbook': {

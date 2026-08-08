@@ -826,7 +826,14 @@ const O3: readonly PreconditionClause[] = [
   clause('O-3', 'the enumerated call batch’s preimage is noted', 'storage.preimage.preimage_for', 'storage', 'chain', { key: 'batch-preimage' }),
   // E20's V-facet, third item: the allowance `check_and_consume` charges at the threshold
   // approval, so the approver it refuses is the fifth one.
-  clause('O-3', 'this action’s power still has allowance', 'storage.guardian.allowances', 'storage', 'acting', { key: 'allowance' }),
+  //
+  // **`subject: 'chain'`, not `'acting'`.** `pallet_guardian` declares
+  // `Allowances: StorageValue<_, AllowanceState>` — one global value with no account key at
+  // all, and the counters inside it are per *power* and per *epoch*, never per guardian. An
+  // `acting` subject makes `accountForClause` resolve an account for a read that has none,
+  // which is a proxy or multisig wrapper silently changing which key a keyless read is
+  // attributed to.
+  clause('O-3', 'this action’s power still has allowance', 'storage.guardian.allowances', 'storage', 'chain', { key: 'allowance' }),
   // E20's V-facet fourth item and its F-facet — §11.8.2's own trigger table, read at B′.
   clause('O-3', 'the dead-man and reserve-health trigger flags are read at B′', 'storage.constitution.phase_flags', 'storage', 'chain', { key: 'trigger-phase-flags' }),
   clause('O-3', 'the gate-breach trigger flag for the current epoch is read at B′', 'storage.welfare.gate_breach_flags', 'storage', 'chain', { key: 'trigger-gate-breach' }),
@@ -860,7 +867,17 @@ const O3: readonly PreconditionClause[] = [
  */
 const O4: readonly PreconditionClause[] = [
   clause('O-4', 'you are a guardian', 'storage.guardian.members', 'storage', 'acting', { key: 'member' }),
-  clause('O-4', 'this power’s allowance has room', 'storage.guardian.allowances', 'storage', 'acting', { key: 'allowance' }),
+  // `Guardian.Allowances` is a global `StorageValue` with no account key — see the same
+  // clause on O-3 for why `subject` is `'chain'`.
+  clause('O-4', 'this power’s allowance has room', 'storage.guardian.allowances', 'storage', 'chain', { key: 'allowance' }),
+  // **The propose-side bound, which is this row's own and was declared on the approve row
+  // instead (SQ-1022).** `guardian_core::propose_action` refuses when `pending.len() >= 64`,
+  // so the count is a *propose* precondition; O-3 declared `PendingActions` because an
+  // approval reads the action itself, and the count clause had nowhere to live. It is
+  // readable and the bound is not, which is what SQ-1022 asks about — the clause declares the
+  // half that exists rather than leaving the whole read undeclared, since `clauseGroupsFor`
+  // reports an undeclared read as vacuously passed.
+  clause('O-4', 'the pending-action queue is read at B′', 'storage.guardian.pending_actions', 'storage', 'chain', { key: 'pending-count' }),
   // §11.8.2's trigger table, one clause per readable variant.
   // `DeadMan` (bit 6) and `ReserveHealth` (bit 7) share this item with different bits.
   clause('O-4', 'the dead-man and reserve-health trigger flags are read at B′', 'storage.constitution.phase_flags', 'storage', 'chain', { key: 'trigger-phase-flags' }),
@@ -1004,6 +1021,16 @@ const REGISTRY_SURFACE = {
 
 const o8For = (instance: RegistryInstance): readonly PreconditionClause[] => [
   clause('O-8', 'this registry instance has room for another filing this epoch', REGISTRY_SURFACE[instance].filings, 'storage', 'chain', { key: 'occupancy' }),
+  // **`registry_core::file`'s `AlreadyFinal`, which nothing evaluated (2026-08-08).**
+  // `file` refuses when this instance already holds an aggregate for `(epoch, spec_version)`:
+  // *"a closed-out `(epoch, version)` aggregate is terminal (07 §7): late filings must not
+  // land behind an already-derived welfare input"*. The client can read exactly that —
+  // `ClosedAt` is the **same double map, keyed the same way**, written by `close_epoch` in the
+  // same call that pushes the aggregate and removed by `reap_epoch` in the same call that
+  // removes it, so its presence is the core's own condition rather than a proxy for it.
+  // Contract v28 froze it and O-9 already cites it; O-8 read it nowhere, which for a bonded
+  // call means posting a bond into an epoch the chain has closed.
+  clause('O-8', 'this epoch is not already closed at the MetricSpec version this filing names', REGISTRY_SURFACE[instance].closedAt, 'storage', 'chain', { key: 'not-final' }),
   // Contract v29 (SQ-731) — the same read P-13 makes, one pallet over. The request enum
   // names the *instance* (`IncidentFiling` / `MilestoneFiling`), which is why this clause
   // needs no per-instance surface: the two share one method, and a `None` answer is
@@ -1164,6 +1191,41 @@ export const OPERATOR_SURFACE_ROWS: Readonly<Record<OperatorSurfaceCall, RowId>>
  * which this bump froze). What remains here is what a *stated* obligation is for: a
  * condition the specification requires, this release genuinely cannot evaluate, and which
  * costs at most one refused transaction to learn.
+ *
+ * ## `O-3`'s three new entries, and why two of them close the control (2026-08-08)
+ *
+ * The 2026-08-08 re-review found the guardian class still open **one frame above**
+ * `check_and_consume`: in `dispatch`, in the pallet, and in the effect dispatcher. Three
+ * refusals live there, all falling on the threshold approver, and none of them was declared:
+ *
+ * - **`PlaybookNotRegistered`** (`pallets/guardian/src/lib.rs`) — `approve_action` checks
+ *   `PlaybookRegistered::<T>::get(id)` *after* the fifth approval is counted.
+ * - **`PlaybookAlreadyActive`** (`crates/guardian-core/src/lib.rs`) — `dispatch` refuses
+ *   re-activation of `PB-LEDGER-FREEZE` when a record for it is already in
+ *   `ActivePlaybooks`, because that playbook renews only through a values referendum
+ *   (06 §6.3) while every other one renews in place.
+ * - **`TooManyReviews`** — `dispatch` refuses at 128 open review records.
+ *
+ * `Guardian.PlaybookRegistered` and `Guardian.ActivePlaybooks` are not frozen in 02 §7.4
+ * (SQ-1030), so the first two are declared `blocking`: nothing in §11.8 licenses collecting
+ * a 5-of-7 signature on a condition this client cannot read, and INV-FE-12's lattice makes an
+ * unproven capability *absent*. They are **replaced by ordinary clauses over the frozen reads
+ * the moment SQ-1030 closes** — the same way O-3's own SQ-616 entry was retired at contract
+ * v28 — and `check-unreadable-obligations.py` expires them mechanically rather than by
+ * somebody remembering.
+ *
+ * `TooManyReviews` is `stated`, and the difference is not a severity dial. Its bound (128) has
+ * no frozen constant and its count (`Guardian.ReviewDeadlines`) is not frozen either, so it is
+ * strictly less readable than SQ-1022's `TooManyPending`, where at least the count is. Closing
+ * the approve control on a bound this far from reachable would refuse what the chain accepts —
+ * the mirror-rule defect — so it is **enumerated** instead. Enumerating it is the whole point:
+ * an unenumerated shape is how this class survived its first fix.
+ *
+ * `TooManyActivePlaybooks` sits on the same `ensure!` as `PlaybookAlreadyActive` and is
+ * **unreachable**, so it gets no entry: `dispatch` upserts by id, there are exactly six
+ * `PlaybookId` values, and the bound is six — so the length check can only fail if a seventh
+ * id existed. Declaring it would be an obligation with no reachable failure behind it, which
+ * makes the list harder to read without making the client safer.
  */
 const UNREADABLE: Partial<Readonly<Record<RowId, readonly UnreadableObligation[]>>> = {
   'O-1': [
@@ -1180,6 +1242,39 @@ const UNREADABLE: Partial<Readonly<Record<RowId, readonly UnreadableObligation[]
       'permissionless entry is not closed by the §3 saturation clause',
       'The same store, and the same reason. The dispatch error is `ReporterRecordsSaturated`.',
       'SQ-564',
+      'stated',
+    ),
+  ],
+  'O-3': [
+    unread(
+      'O-3',
+      'this playbook is registered on this chain',
+      '`approve_action` reads `Guardian.PlaybookRegistered[id]` **after** counting the fifth ' +
+        'approval and refuses with `PlaybookNotRegistered`, and 02 §7.4 freezes no surface ' +
+        'for that map. Replaced by an ordinary clause over the frozen read when SQ-1030 ' +
+        'closes; blocking until then, because the refusal costs a 5-of-7 signature.',
+      'SQ-1030',
+      'blocking',
+    ),
+    unread(
+      'O-3',
+      'no PB-LEDGER-FREEZE record is already active',
+      '`dispatch` refuses re-activation of PB-LEDGER-FREEZE while a record for it is in ' +
+        '`Guardian.ActivePlaybooks` (`PlaybookAlreadyActive`) — it renews only through a ' +
+        'values referendum, 06 §6.3 — and 02 §7.4 freezes no surface for that map. Replaced ' +
+        'by an ordinary clause over the frozen read when SQ-1030 closes.',
+      'SQ-1030',
+      'blocking',
+    ),
+    unread(
+      'O-3',
+      'the chain has room for another retrospective review record',
+      '`dispatch` refuses at 128 open review records (`TooManyReviews`). Neither half is ' +
+        'readable: `Guardian.ReviewDeadlines` is not frozen and no constant publishes the ' +
+        'bound — strictly worse than SQ-1022, where the count at least is. Stated rather ' +
+        'than blocking, because closing the approve control on a bound this far from ' +
+        'reachable would refuse what the chain accepts.',
+      'SQ-1022',
       'stated',
     ),
   ],

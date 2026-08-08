@@ -763,6 +763,18 @@ export function RegistryFilingForm({
       <Field label="Your free balance">
         <Amount datum={inputs.freeUsdc} decimals={decimals} symbol={symbol} />
       </Field>
+      {/* `file`'s second and fifth arguments, rendered as plain text because both are form
+          values rather than chain reads — the same reason the panel title is not badged. They
+          are here because a value the model carries and no screen shows is the shape this
+          client keeps finding (V-169): the class decides what the claim *is*, and the version
+          decides what it is scored against. The admissible class set is the instance's own —
+          `validate_class` — and the union makes the other instance's set unbuildable. */}
+      <Field label="Class">
+        <span>{inputs.kind === 'incident' ? inputs.class : `Scope ${inputs.class.scope}`}</span>
+      </Field>
+      <Field label="MetricSpec version this filing names">
+        <span>{String(inputs.specVersion)}</span>
+      </Field>
       <Field label="Filings this epoch">
         <Count datum={inputs.filingsUsed} />
         <Count datum={inputs.filingsBound} name="of" />

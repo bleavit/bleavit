@@ -70,6 +70,31 @@
  * posts the filing's own stored `bond` (07 §7, I-28), which the chain priced when the filing
  * was created. A bond that already exists has been priced; one that does not has not — the
  * same asymmetry P-13 has against P-14.
+ *
+ * ## `file` refuses on five conditions and this module evaluated none of them (2026-08-08)
+ *
+ * `registry_core::file` raises `WindowClosed`, `AlreadyFinal`, `InvalidClass`,
+ * `MilestoneTargetUnset` and `TooManyLiveEpochs`. `filingBlocks` checked the bond, the
+ * occupancy, the frozen spec version and the evidence hash — none of those five — and O-8
+ * declared no clause for any of them. The model could not even *describe* the call: `class`
+ * and `points` are two of `file`'s five arguments and `FilingInputs` carried neither.
+ *
+ * Two are closed here, each by the strongest available means:
+ *
+ * - **`AlreadyFinal`** is a plain read, because `ClosedAt` is the same `(epoch, spec_version)`
+ *   double map `close_epoch` writes in the same call that pushes the terminal aggregate. It is
+ *   frozen (02 §7.4, contract v28) and O-9 already cited it; O-8 did not.
+ * - **`InvalidClass`** is made unrepresentable rather than checked — see `FilingInputs`. The
+ *   two instances take disjoint class types, so a milestone filing carrying `S2` does not
+ *   typecheck.
+ *
+ * Three stay open and are named rather than hidden (SQ-1031): the **filing window**
+ * (`WindowClosed`, from `Epoch::filing_window_end(epoch)`, which no frozen surface publishes),
+ * the **milestone target** (`MilestoneTargetUnset`, from `Epoch::milestone_target(epoch,
+ * spec_version)`, likewise), and `TooManyLiveEpochs` (whose count is `FilingCount`'s key set
+ * and whose bound is a kernel constant with no metadata home). `points` also stays absent from
+ * the model, because nothing in `file` gates on it — it is the claim's magnitude, not a
+ * precondition — but a form that cannot express it cannot encode the call either.
  */
 
 import type { Verified } from '@bleavit/shared-types';
@@ -238,8 +263,30 @@ export type FrozenSpecVersions =
   | { readonly kind: 'read'; readonly versions: Verified<readonly number[]> }
   | { readonly kind: 'unread'; readonly reason: string };
 
-export interface FilingInputs {
-  readonly kind: FilingKind;
+/**
+ * `file`'s second argument — `registry_core::FilingClass`, and **the instance decides it**.
+ *
+ * `validate_class` admits `S1 | S2 | S3` on the Incident instance and `Scope(_)` on the
+ * Milestone one, and nothing else (`InvalidClass`). That is not a check written here: the two
+ * instances take two disjoint argument types, so `FilingInputs` is a union on `kind` and a
+ * milestone filing carrying `S2` is not a value that exists. A predicate would have been the
+ * weaker half of the same rule — `InvalidClass` is refused at dispatch, after the bond is
+ * committed, and this client is the thing that decides what to encode.
+ *
+ * `Scope` carries a `u8` on chain. It is modelled as its own object rather than as a bare
+ * number so an incident class and a milestone scope can never be mistaken for one another by
+ * a caller writing a literal.
+ */
+export type IncidentClass = 'S1' | 'S2' | 'S3';
+export interface MilestoneClass {
+  readonly scope: number;
+}
+
+/** The three incident severities, as data — so a form offers exactly the admissible set. */
+export const INCIDENT_CLASSES: readonly IncidentClass[] = Object.freeze(['S1', 'S2', 'S3']);
+
+/** What every filing carries whichever instance it is against. */
+interface FilingInputsBase {
   readonly freeUsdc: Verified<bigint>;
   /**
    * `file`'s fifth argument, as the filer supplies it. A form value, not a chain read.
@@ -261,9 +308,36 @@ export interface FilingInputs {
   /** Current occupancy and its bound, both read. */
   readonly filingsUsed: Verified<number>;
   readonly filingsBound: Verified<number>;
+  /**
+   * Whether this instance has already closed out `(epoch, spec_version)` — `AlreadyFinal`.
+   *
+   * A read of `ClosedAt[epoch][spec_version]`, which `close_epoch` writes in the same call
+   * that pushes the aggregate `registry_core::file` tests. `unread` is its own arm for the
+   * reason every arm like it exists here: a read that did not land is not the same fact as
+   * *"this epoch is open"*, and treating it as the second posts a bond into an epoch the
+   * chain has closed.
+   */
+  readonly epochClosed: EpochClosure;
   /** The evidence hash the filer supplies. Absent is a refusal, not a default. */
   readonly evidenceHash: string | undefined;
 }
+
+/** `ClosedAt[epoch][spec_version]`, read — 07 §7's terminal aggregate (02 §7.4, v28). */
+export type EpochClosure =
+  | { readonly kind: 'open' }
+  | { readonly kind: 'closed'; readonly at: Verified<number> }
+  | { readonly kind: 'unread'; readonly reason: string };
+
+/**
+ * §11.8.6 row 1's inputs, keyed on the instance being filed to.
+ *
+ * A union rather than a `kind` field beside an unconstrained class, so `validate_class`'s rule
+ * is the shape rather than a check: `InvalidClass` cannot be built. That matters more here
+ * than it would elsewhere, because the refusal lands after the bond is committed.
+ */
+export type FilingInputs =
+  | (FilingInputsBase & { readonly kind: 'incident'; readonly class: IncidentClass })
+  | (FilingInputsBase & { readonly kind: 'milestone'; readonly class: MilestoneClass });
 
 export interface FilingBlock {
   readonly check: string;
@@ -379,6 +453,29 @@ export function filingBlocks(inputs: FilingInputs): readonly FilingBlock[] {
         `No live cohort in this epoch froze MetricSpec version ${inputs.specVersion}. A ` +
         'filing is scored against the version its cohort committed to, so one naming any ' +
         'other version is refused on chain and the bond is posted for nothing.',
+    });
+  }
+  // `registry_core::file`'s `AlreadyFinal`, which nothing evaluated until 2026-08-08. A
+  // closed-out `(epoch, version)` aggregate is terminal (07 §7), so a filing behind one is
+  // refused — after the bond has been committed, which is what makes an unevaluated check
+  // expensive here rather than merely wrong.
+  if (inputs.epochClosed.kind === 'unread') {
+    blocks.push({
+      check: 'Epoch closed',
+      detail:
+        `This client could not read whether this epoch has already been closed out at ` +
+        `MetricSpec version ${inputs.specVersion} (${inputs.epochClosed.reason}). A closed ` +
+        'epoch is terminal and a filing behind one is refused on chain, so the control stays ' +
+        'closed rather than posting a bond on a check that did not run.',
+    });
+  } else if (inputs.epochClosed.kind === 'closed') {
+    blocks.push({
+      check: 'Epoch closed',
+      detail:
+        `This epoch was closed out at block ${inputs.epochClosed.at.value} for MetricSpec ` +
+        `version ${inputs.specVersion}, and a close is terminal: the welfare input has ` +
+        'already been derived, so a filing now cannot land behind it and the chain refuses ' +
+        'it. A sibling version’s close would say nothing about this one.',
     });
   }
   if (inputs.filingsUsed.value >= inputs.filingsBound.value) {

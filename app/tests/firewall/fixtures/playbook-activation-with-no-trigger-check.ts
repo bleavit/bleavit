@@ -22,17 +22,18 @@
 // `inputs.proposal` — the union has no arm without the reading — rather than on the whole
 // argument; the screen still cannot reach a rendering.
 import { ProposeAction } from '@bleavit/features-tx';
-import type { AllowanceMeter, HoldHorizon } from '@bleavit/features-tx';
+import type { HoldHorizon } from '@bleavit/features-tx';
 import type { GatePassed, TxSession } from '@bleavit/transaction-builder';
 
-declare const meter: AllowanceMeter<'activate_playbook'>;
 declare const horizon: HoldHorizon;
 declare const session: TxSession;
 declare const onPropose: (window: GatePassed) => void;
 
+// No `meter` here since 2026-08-08: 06 §5.2 does not meter this power, so the arm has no such
+// field and including one would make this fixture fail for the wrong reason.
 export const panel = ProposeAction({
   inputs: {
-    proposal: { power: 'activate_playbook', meter, id: 'PB-HALT-INTAKE', expiry: 9_000, horizon },
+    proposal: { power: 'activate_playbook', id: 'PB-HALT-INTAKE', expiry: 9_000, horizon },
     justificationHash: '0xj',
   },
   session,
