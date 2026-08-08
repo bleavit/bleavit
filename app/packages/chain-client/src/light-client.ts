@@ -37,6 +37,7 @@ import { getSmProvider } from 'polkadot-api/sm-provider';
 import { startFromWorker } from 'polkadot-api/smoldot/from-worker';
 
 import type { HexString } from '@bleavit/shared-types';
+import { WrongChainError } from './chain-spec.js';
 import { ChainHeadConnection, type JsonRpcProviderLike } from './transport.js';
 import type { CompatProvider } from './compat.js';
 import {
@@ -233,15 +234,53 @@ export async function startLightClientWith(
   const topologies: Topology<RealSmoldotChain>[] = [];
   let latest: Topology<RealSmoldotChain> | undefined;
 
+  /**
+   * The wrong-chain latch — SQ-1026, found by the first run against a real chain (F27).
+   *
+   * 10 §3.1 makes `FE-BOOT-003` terminal with no override, and every layer was written as
+   * though it were: `WrongChainError` exists, `startTopology` throws it, this function
+   * re-throws, and `chain-session.ts` carries `if (error instanceof WrongChainError) throw
+   * error;`. **None of it ran.** `getSmProvider` treats its chain factory as retryable and
+   * calls it again on failure, forever — so the throw never left the factory. Measured
+   * against a live topology with one byte of the parachain pin flipped: **265 raises in a
+   * single run, none propagated**, `ChainHeadConnection.open` never settled, and
+   * `chain-session.ts`'s branch was unreachable code.
+   *
+   * The retry is right for what PAPI can see — a dial that failed is worth retrying. It is
+   * wrong for this one error, and only this one: a chain that is not this chain will still
+   * not be this chain on the next attempt, so retrying is not merely useless but harmful.
+   * It re-adds two chains per attempt and keeps a client dialling a chain it has already
+   * proved it must refuse.
+   *
+   * So the latch does two things the factory alone cannot. It **fails fast** on every later
+   * call, which stops the re-dialling; and it **rejects a promise the opener races**, which
+   * is what carries the error across a boundary PAPI will not let a throw cross.
+   */
+  let terminal: WrongChainError | undefined;
+  let latchTerminal: (error: WrongChainError) => void = () => {};
+  const wrongChain = new Promise<never>((_resolve, reject) => {
+    latchTerminal = reject;
+  });
+
   const newTopology = async (): Promise<Topology<RealSmoldotChain>> => {
-    const topology = await startTopology(asTopologyClient(client), {
-      relay: options.relay,
-      para: options.para,
-      genesisHashOf: probeGenesisHash,
-      ...(options.extraBootnodes === undefined ? {} : { extraBootnodes: options.extraBootnodes }),
-    });
-    topologies.push(topology);
-    return topology;
+    // Fail fast rather than re-dial. See the latch above.
+    if (terminal !== undefined) throw terminal;
+    try {
+      const topology = await startTopology(asTopologyClient(client), {
+        relay: options.relay,
+        para: options.para,
+        genesisHashOf: probeGenesisHash,
+        ...(options.extraBootnodes === undefined ? {} : { extraBootnodes: options.extraBootnodes }),
+      });
+      topologies.push(topology);
+      return topology;
+    } catch (error) {
+      if (error instanceof WrongChainError) {
+        terminal = error;
+        latchTerminal(error);
+      }
+      throw error;
+    }
   };
 
   const provider = getSmProvider(async () => {
@@ -260,9 +299,14 @@ export async function startLightClientWith(
     // pin makes the identity every read carries something the release chose, rather than
     // something the chain reported. If they ever disagree the topology has already
     // thrown, so this cannot be the quieter of two answers.
-    transport = await ChainHeadConnection.open(asTransportProvider(provider), {
-      chain: options.para.pinned.genesisHash,
-    });
+    // Raced against the latch, because the throw cannot reach here on its own — see
+    // `newTopology`. `open()` would otherwise wait on a provider that retries forever.
+    transport = await Promise.race([
+      ChainHeadConnection.open(asTransportProvider(provider), {
+        chain: options.para.pinned.genesisHash,
+      }),
+      wrongChain,
+    ]);
   } catch (error) {
     for (const topology of topologies) topology.stop();
     await client.terminate();
