@@ -17,6 +17,10 @@
       "status": 200,
       "body_utf8": "{\n  \"schema\": \"bleavit.app-release.v1\",\n  \"arweaveManifestTxId\": \"MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM\",\n  \"keyringGeneration\": 4,\n  \"perFileHashes\": {\n    \"index.html\": \"c5b52b3954cd2bd3d3c1fa019c569c69692b997d6943056c60aed3177d47d7b2\",\n    \"assets/app.js\": \"17d407d29ed5a6adbf766c0633777306289e205b11f363dbe69e9c9b27b10411\",\n    \"assets/logo.png\": \"289c77a179831309c3d4505952b0e5ff6bb91c0b4c6f68a9da8b1ed6d38c5e64\"\n  },\n  \"release_signatures\": [\n    {\n      \"txid\": \"S1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n    },\n    {\n      \"txid\": \"S2bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"\n    }\n  ],\n  \"attestations\": [\n    {\n      \"txid\": \"A1ccccccccccccccccccccccccccccccccccccccccc\"\n    },\n    {\n      \"txid\": \"A2ddddddddddddddddddddddddddddddddddddddddd\"\n    }\n  ]\n}\n"
     },
+    "https://alpha.example/raw/MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM": {
+      "status": 200,
+      "body_utf8": "{\n  \"manifest\": \"arweave/paths\",\n  \"version\": \"0.2.0\",\n  \"index\": {\n    \"path\": \"index.html\"\n  },\n  \"paths\": {\n    \"assets/app.js\": {\n      \"id\": \"PATH0zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\"\n    },\n    \"assets/logo.png\": {\n      \"id\": \"PATH1zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\"\n    },\n    \"index.html\": {\n      \"id\": \"PATH2zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\"\n    }\n  }\n}\n"
+    },
     "https://alpha.example/raw/S1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
       "status": 200,
       "body_utf8": "untrusted comment: signature from the bleavit fixture keyring\nRUQREREREREREeXIGP54qabo9mUY4NosGW8ml8ENN08oZAtBLHYjvrH4ajHaeHp1t9Hr5yVfB/nTqa+D+mYyroQhNF6fhcJXygU=\ntrusted comment: bleavit release fixture\nr3nsPD7Yzfc7y/O5pitGBwvGqCYeR24IPOL0O6TputKOoDCvjdGsyoyQUG9U/Qm/0a8i1jw0AQjwHzk5bwHpAQ==\n"
@@ -48,6 +52,10 @@
     "https://beta.example/raw/RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR": {
       "status": 200,
       "body_utf8": "{\n  \"schema\": \"bleavit.app-release.v1\",\n  \"arweaveManifestTxId\": \"MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM\",\n  \"keyringGeneration\": 4,\n  \"perFileHashes\": {\n    \"index.html\": \"c5b52b3954cd2bd3d3c1fa019c569c69692b997d6943056c60aed3177d47d7b2\",\n    \"assets/app.js\": \"17d407d29ed5a6adbf766c0633777306289e205b11f363dbe69e9c9b27b10411\",\n    \"assets/logo.png\": \"289c77a179831309c3d4505952b0e5ff6bb91c0b4c6f68a9da8b1ed6d38c5e64\"\n  },\n  \"release_signatures\": [\n    {\n      \"txid\": \"S1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"\n    },\n    {\n      \"txid\": \"S2bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\"\n    }\n  ],\n  \"attestations\": [\n    {\n      \"txid\": \"A1ccccccccccccccccccccccccccccccccccccccccc\"\n    },\n    {\n      \"txid\": \"A2ddddddddddddddddddddddddddddddddddddddddd\"\n    }\n  ]\n}\n"
+    },
+    "https://beta.example/raw/MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM": {
+      "status": 200,
+      "body_utf8": "{\n  \"manifest\": \"arweave/paths\",\n  \"version\": \"0.2.0\",\n  \"index\": {\n    \"path\": \"index.html\"\n  },\n  \"paths\": {\n    \"assets/app.js\": {\n      \"id\": \"PATH0zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\"\n    },\n    \"assets/logo.png\": {\n      \"id\": \"PATH1zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\"\n    },\n    \"index.html\": {\n      \"id\": \"PATH2zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\"\n    }\n  }\n}\n"
     },
     "https://beta.example/raw/S1aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {
       "status": 200,

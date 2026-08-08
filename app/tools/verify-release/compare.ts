@@ -198,6 +198,103 @@ export async function fetchTransaction(
   return response.body;
 }
 
+/** What one gateway's copy of the path manifest says the release contains. */
+export interface ManifestEnumeration {
+  /** Every path the manifest lists, sorted. Empty when it could not be read. */
+  readonly paths: readonly string[];
+  /** Why it could not be read. A finding carried into the verdict, never a silent skip. */
+  readonly failure?: string;
+}
+
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Ask a gateway what the manifest lists, rather than deriving the list from the signed map.
+ *
+ * This is the only way the **unexpected** served file can ever be seen. `runSelfCheck` reports
+ * three finding kinds and the third one — a file that was served and nobody signed — is the
+ * one a manifest-driven loop structurally cannot reach: derive the fetch list from
+ * `perFileHashes` and every path you fetch is a path the release signed, so the branch that
+ * exists to catch an injected payload can never fire. A gateway serving an extra file was
+ * therefore reported clean.
+ *
+ * Reading the manifest is not a guess about gateway behaviour: `tools/monitoring/attestation_monitor.py`
+ * — the §5.2 monitor, the second independent implementation of this check — already fetches the
+ * manifest through its own `raw_url` template and compares its `paths` set against the signed
+ * map. This does the same thing through the same kind of operator-configured template, so the
+ * two cannot answer the question differently.
+ *
+ * A manifest that cannot be read returns **no paths and a failure**, never a silent empty list:
+ * an unreadable manifest means this gateway was not checked for extra files, and the failure is
+ * carried into `crossGatewayFindings` so the verdict cannot come back clean on it.
+ */
+export async function fetchManifestPaths(
+  get: GatewayGet,
+  gateway: Gateway,
+  manifestTxid: string,
+): Promise<ManifestEnumeration> {
+  let body: Uint8Array;
+  try {
+    body = await fetchTransaction(get, gateway, manifestTxid);
+  } catch (error) {
+    return {
+      paths: [],
+      failure: `${gateway.name} would not serve the path manifest ${manifestTxid}, so it was not checked for files nobody signed: ${message(error)}`,
+    };
+  }
+  let document: unknown;
+  try {
+    document = JSON.parse(Buffer.from(body).toString('utf8'));
+  } catch (error) {
+    return {
+      paths: [],
+      failure: `${gateway.name} served a path manifest that is not JSON: ${message(error)}`,
+    };
+  }
+  const paths = isRecord(document) ? document['paths'] : undefined;
+  if (!isRecord(paths) || Object.keys(paths).length === 0) {
+    return {
+      paths: [],
+      failure: `${gateway.name} served a path manifest with no paths object, so the files it lists are unknown`,
+    };
+  }
+  const names: string[] = [];
+  for (const name of Object.keys(paths)) {
+    if (name.length === 0 || name.split('/').includes('..')) {
+      return {
+        paths: [],
+        failure: `${gateway.name}'s path manifest lists ${JSON.stringify(name)}, which is not a release-relative path`,
+      };
+    }
+    names.push(name);
+  }
+  return { paths: names.sort() };
+}
+
+/**
+ * One gateway's served tree, over the union of what the release signed and what it lists.
+ *
+ * The union is what makes both directions of divergence reachable. The signed paths catch a
+ * file that was altered or withheld; the manifest's own paths catch the file that was added.
+ * Fetching only the intersection — which is what deriving the list from `perFileHashes` does —
+ * leaves the second class invisible.
+ */
+export async function fetchGatewayTree(
+  get: GatewayGet,
+  gateway: Gateway,
+  manifestTxid: string,
+  signedPaths: readonly string[],
+): Promise<ServedTree> {
+  const enumerated = await fetchManifestPaths(get, gateway, manifestTxid);
+  const paths = [...new Set([...signedPaths, ...enumerated.paths])].sort();
+  const tree = await fetchServedTree(get, gateway, manifestTxid, paths);
+  return enumerated.failure === undefined
+    ? tree
+    : { ...tree, failures: [...tree.failures, enumerated.failure] };
+}
+
 /**
  * Where two gateways disagree about one path.
  *

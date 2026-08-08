@@ -29,6 +29,26 @@
  * `0` — when it produced a verdict with a condition it could not check, because 12 §2.3
  * requires it to warn loudly when it cannot reach a node, and a tool whose exit code is the
  * same either way makes the loud part unwritable.
+ *
+ * ## What `compare` binds, and why each binding is here
+ *
+ * Four of them, and each one exists because its absence made some check unable to report the
+ * thing it was written for. `tests/release/verify-release-cli.test.ts` drives them as the
+ * command rather than through a re-implementation of it, which is how they stayed absent.
+ *
+ * 1. **The manifest fetched is the manifest the release pins.** 12 §1.2 records `M` in
+ *    `release.json` and says the CLI checks both addresses. Without the comparison, pointing
+ *    `--arweave` at any other manifest serving the same bytes printed `MATCH` for a content
+ *    address the release never authorized.
+ * 2. **The served tree is the union of the signed map and what the manifest lists.** Derive
+ *    the fetch list from `perFileHashes` alone and every path fetched is a path the release
+ *    signed, so `runSelfCheck`'s **unexpected** finding — the injected payload — can never
+ *    fire.
+ * 3. **`ReleaseChannel` is decoded field by field at 02 §12's frozen offsets**, and its
+ *    keyring generation must agree with the release's and with the published keyring's.
+ * 4. **Credentials are named, not inferred.** The producer cannot carry its own signature
+ *    transaction ids, so they come from 12 §1.4 gate 4's release notes as `--signature` and
+ *    `--attestation` (see `credentials` below for why the other reading is unfillable).
  */
 
 import { readFileSync } from 'node:fs';
@@ -38,7 +58,7 @@ import { fileURLToPath } from 'node:url';
 import { readPerFileHashes } from '@bleavit/verify';
 
 import type { Gateway, GatewayGet, SignatureBlob } from './compare.ts';
-import { compareRelease, fetchServedTree, fetchTransaction, hashDirectory } from './compare.ts';
+import { compareRelease, fetchGatewayTree, fetchTransaction, hashDirectory } from './compare.ts';
 import { liveGateway, readTranscript, transcriptGateway } from './gateway.ts';
 import { checkControllerQuorum, checkDisjointness, parseRegistry } from './registry.ts';
 import type { FileHashes } from './verdict.ts';
@@ -145,14 +165,25 @@ function integerOption(argv: readonly string[], flag: string): number | undefine
   return Number(value);
 }
 
+/** An Arweave transaction id: 43 base64url characters. The shape `arweave.ts` writes and
+ * `tools/monitoring/attestation_monitor.py` reads, restated here rather than imported so this
+ * command keeps no dependency on the build tools it verifies. */
+const TXID = /^[A-Za-z0-9_-]{43}$/;
+
+function assertTxid(value: string, what: string): string {
+  if (!TXID.test(value)) {
+    throw new Error(`${what} is not a 43-character base64url Arweave transaction id: ${value}`);
+  }
+  return value;
+}
+
 /**
  * The transaction ids `release.json` names for its signatures and attestations.
  *
  * The field names are the ones `tools/monitoring/attestation_monitor.py` already reads, so the
  * two independent implementations of this check cannot drift into two spellings. They remain
- * O1-provisional. Absence is not an error here: it produces zero credentials, the floors are
- * unmet, and the verdict refuses — which is the right outcome for a release that published no
- * signatures at all.
+ * O1-provisional, and **this repository's producer cannot fill them** — see `credentials`
+ * below, which is why they are one source here rather than the only one.
  */
 function signatureTxids(document: unknown, field: string): string[] {
   const rows = isRecord(document) ? document[field] : undefined;
@@ -163,9 +194,57 @@ function signatureTxids(document: unknown, field: string): string[] {
     if (typeof txid !== 'string' || txid.length === 0) {
       throw new Error(`release.json ${field} carries a row with no txid`);
     }
-    txids.push(txid);
+    txids.push(assertTxid(txid, `release.json ${field} txid`));
   }
   return txids;
+}
+
+/**
+ * Every credential transaction of one population, from both places one can come from.
+ *
+ * ## Why the document alone was never enough
+ *
+ * `buildReleaseJson` emits `signingKeyIds` and `keyringGeneration` and **no credential
+ * arrays**, so a `compare` that read only the document counted zero signatures and zero
+ * attestations for every genuine release — whatever was actually published — and printed
+ * `MISMATCH` by arithmetic that had nothing to do with the release. The counting ran against
+ * the constructed fixture and nothing else.
+ *
+ * ## And why adding the arrays to the producer would not fix it
+ *
+ * It is the `releaseTxid` defect again, and this time the circularity is the signature's.
+ * 12 §2.1 has the release keys sign `release.json`'s hash, and `compareRelease` verifies each
+ * one against the **served bytes**. A signature transaction exists only after those bytes are
+ * final, so patching its id back into the document changes the bytes it signs and invalidates
+ * every signature over them. The field would ship empty in every real deployment, exactly as
+ * `releaseTxid` shipped `null`.
+ *
+ * ## Where they really come from
+ *
+ * 12 §1.4 gate 4 publishes them: *"release notes list the immutable TXID, attestation TXIDs,
+ * and the multi-gateway URL set"*. So they are operator-supplied, like `--arweave` and
+ * `--release-json` already are, and a verifier reading the release notes has them. The
+ * document-embedded arrays stay as a second source, because that is the provisional contract
+ * the §5.2 monitor reads and the two must not drift into two spellings.
+ *
+ * Zero credentials still refuses — by counting, at the floors — but it says so in its own
+ * words first, so "this release published no signatures" and "you named none" are never the
+ * same line.
+ */
+function credentials(argv: readonly string[], document: unknown, field: string, flag: string): string[] {
+  const named = [
+    ...signatureTxids(document, field),
+    ...options(argv, flag).map((txid) => assertTxid(txid, flag)),
+  ];
+  const merged = [...new Set(named)];
+  if (merged.length === 0) {
+    console.error(
+      `NONE NAMED  no ${field} were named, so ${field.replace('_', ' ')} are counted over zero. ` +
+        `12 §1.4 gate 4 publishes each transaction id in the release notes; pass every one as ` +
+        `${flag} <txid>. This is a refusal for want of inputs, not a release that published none.`,
+    );
+  }
+  return merged;
 }
 
 async function compareCommand(argv: readonly string[]): Promise<number> {
@@ -214,21 +293,65 @@ async function compareCommand(argv: readonly string[]): Promise<number> {
     throw new Error('the served release.json declares no keyringGeneration (12 §2.1)');
   }
 
+  // **The manifest the release signed, not the one the caller typed.** 12 §1.2 pins `M` in
+  // `release.json` and says the verification CLI checks both addresses. Fetching the tree from
+  // `--arweave` without comparing it to the pin verifies a content address the release never
+  // authorized: point the command at any other manifest that serves the same bytes at the
+  // signed paths and it printed MATCH.
+  const pinnedManifest = isRecord(document) ? document['arweaveManifestTxId'] : undefined;
+  if (typeof pinnedManifest !== 'string' || !TXID.test(pinnedManifest)) {
+    throw new Error(
+      'the served release.json pins no arweaveManifestTxId (12 §1.2), so there is no address ' +
+        'the tree fetched here can be checked against. A document with `null` there is a build ' +
+        'output rather than a published release.',
+    );
+  }
+  if (pinnedManifest !== manifestTxid) {
+    throw new Error(
+      `--arweave names the manifest ${manifestTxid} and the served release.json pins ` +
+        `${pinnedManifest} (12 §1.2). Comparing against the first would verify a content ` +
+        'address this release never authorized, however well its bytes matched.',
+    );
+  }
+
   const paths = Object.keys(pins.perFileHashes);
   const servedTrees = [];
   for (const gateway of gateways) {
-    servedTrees.push(await fetchServedTree(get, gateway, manifestTxid, paths));
+    // Over the union of the signed map and what each gateway's manifest lists, so a served
+    // file nobody signed is reported instead of being unreachable by construction.
+    servedTrees.push(await fetchGatewayTree(get, gateway, manifestTxid, paths));
   }
 
-  const blobs = async (field: string): Promise<SignatureBlob[]> => {
+  const blobs = async (field: string, flag: string): Promise<SignatureBlob[]> => {
     const out: SignatureBlob[] = [];
-    for (const txid of signatureTxids(document, field)) {
+    for (const txid of credentials(argv, document, field, flag)) {
       out.push({ source: txid, text: Buffer.from(await fetchTransaction(get, first, txid)).toString('utf8') });
     }
     return out;
   };
 
+  const channel = readReleaseChannel(option(argv, '--release-channel'));
+  if (channel !== undefined && channel.keyringGeneration !== generation) {
+    // §2.3 point 1 bumps the generation and sets the bit in one write, so the two documents
+    // disagreeing means one of them is not describing this release — and the revocation bits
+    // would then be indexed into a keyring nobody published.
+    throw new Error(
+      `the ReleaseChannel record names keyring generation ${String(channel.keyringGeneration)} ` +
+        `and the served release.json names ${String(generation)} (12 §2.1, §2.3). The revocation ` +
+        'bitmask indexes into the generation it was written for, so counting it against another ' +
+        'one revokes whichever keys happen to sit at those indices.',
+    );
+  }
   const keyringPath = option(argv, '--keyring');
+  const keyring = keyringPath === undefined ? undefined : readKeyring(keyringPath);
+  if (keyring !== undefined && keyring.generation !== generation) {
+    throw new Error(
+      `${String(keyringPath)} publishes keyring generation ${String(keyring.generation)} and ` +
+        `this release names ${String(generation)} (12 §2.1). Old keyrings are retained to verify ` +
+        'historical releases, so verifying against the wrong one is a silent success.',
+    );
+  }
+
   const report = compareRelease({
     releaseJsonBytes,
     perFileHashes: pins.perFileHashes,
@@ -236,12 +359,10 @@ async function compareCommand(argv: readonly string[]): Promise<number> {
     servedTrees,
     entries: publishedRegistry(option(argv, '--registry') ?? REGISTRY),
     generation,
-    ...(revokedKeyBits(option(argv, '--release-channel')) === undefined
-      ? {}
-      : { revokedKeyBits: revokedKeyBits(option(argv, '--release-channel')) }),
-    publicKeys: keyringPath === undefined ? {} : readKeyring(keyringPath),
-    releaseSignatures: await blobs('release_signatures'),
-    attestations: await blobs('attestations'),
+    ...(channel === undefined ? {} : { revokedKeyBits: channel.revokedKeyBits }),
+    publicKeys: keyring?.keys ?? {},
+    releaseSignatures: await blobs('release_signatures', '--signature'),
+    attestations: await blobs('attestations', '--attestation'),
     ...(integerOption(argv, '--min-signatures') === undefined
       ? {}
       : { minimumSignatures: integerOption(argv, '--min-signatures') }),
@@ -315,9 +436,26 @@ function readGatewayConfig(path: string): readonly Gateway[] {
   });
 }
 
-/** `{ "<keyId>": "<minisign public key text>" }` — the published keyring (12 §2.1). */
-function readKeyring(path: string): Record<string, string> {
+/** The published keyring (12 §2.1): its generation, and key id to minisign public-key text. */
+interface PublishedKeyring {
+  readonly generation: number;
+  readonly keys: Record<string, string>;
+}
+
+/**
+ * `{ "generation": N, "keys": { "<keyId>": "<minisign public key text>" } }`.
+ *
+ * The generation is required rather than optional. 12 §2.1 tags every keyring by generation
+ * precisely because old ones are retained to verify historical releases, so a keyring file
+ * that does not say which one it is cannot be checked against the release it is verifying —
+ * and verifying a current release against a superseded keyring succeeds silently.
+ */
+function readKeyring(path: string): PublishedKeyring {
   const document: unknown = JSON.parse(readFileSync(path, 'utf8'));
+  const generation = isRecord(document) ? document['generation'] : undefined;
+  if (typeof generation !== 'number' || !Number.isInteger(generation)) {
+    throw new Error(`${path} declares no keyring generation (12 §2.1); it cannot be bound to a release`);
+  }
   const keys = isRecord(document) ? document['keys'] : undefined;
   if (!isRecord(keys) || Object.keys(keys).length === 0) {
     throw new Error(`${path} publishes no keys; a keyring nobody is in verifies nothing`);
@@ -327,26 +465,65 @@ function readKeyring(path: string): Record<string, string> {
     if (typeof text !== 'string') throw new Error(`${path}: key ${keyId} is not a public-key packet`);
     out[keyId] = text;
   }
-  return out;
+  return { generation, keys: out };
+}
+
+/** 02 §12's frozen layout, named so the offsets appear once and cite their owner. */
+const KEYRING_GENERATION_OFFSET = 152;
+const REVOKED_KEY_BITS_OFFSET = 156;
+const RELEASE_CHANNEL_BYTES = 168;
+
+/** The two `ReleaseChannel` fields this command reads. */
+interface ReleaseChannelFields {
+  readonly keyringGeneration: number;
+  readonly revokedKeyBits: bigint;
 }
 
 /**
- * `ReleaseChannel.revoked_key_bits` from a raw 168-byte record (02 §12, offsets 152..159).
+ * `keyring_generation` and `revoked_key_bits` from a raw 168-byte record — 02 §12.
+ *
+ * Two adjacent fields at two frozen offsets, and reading them as one is not a rounding error:
+ *
+ * | 152 | 4 | `keyring_generation: u32` LE |
+ * | 156 | 8 | `revoked_key_bits: u64` LE   |
+ *
+ * A single `u64` at 152 yields `generation + (low32(revoked_key_bits) << 32)`, which is wrong
+ * in both directions at once. **The generation becomes revocation bits** — generation 4 reads
+ * as bit 2 set, so a healthy channel revoking nobody revokes whichever key sits at index 2 —
+ * and **the mask loses its top four bytes**, so every revocation above index 31 is discarded.
+ * 02 §12 closes with the rule this obeys: the layout MUST NEVER change and readers parse by
+ * offset, never by SCALE metadata. So parse by offset, one field at a time.
  *
  * Read from a file rather than from a node, because §1.3 asks for the revocation set *when a
  * node is reachable* and this tool must run with no infrastructure. `undefined` means it was
  * not read, which `compareRelease` reports as an unchecked condition rather than as clean.
  */
-function revokedKeyBits(path: string | undefined): bigint | undefined {
+function readReleaseChannel(path: string | undefined): ReleaseChannelFields | undefined {
   if (path === undefined) return undefined;
   const bytes = readFileSync(path);
-  if (bytes.length < 168) {
-    throw new Error(`a ReleaseChannel record is at least 168 bytes (02 §12), got ${String(bytes.length)}`);
+  if (bytes.length < RELEASE_CHANNEL_BYTES) {
+    throw new Error(
+      `a ReleaseChannel record is at least ${String(RELEASE_CHANNEL_BYTES)} bytes (02 §12), ` +
+        `got ${String(bytes.length)}`,
+    );
   }
-  return bytes.readBigUInt64LE(152);
+  return {
+    keyringGeneration: bytes.readUInt32LE(KEYRING_GENERATION_OFFSET),
+    revokedKeyBits: bytes.readBigUInt64LE(REVOKED_KEY_BITS_OFFSET),
+  };
 }
 
-async function main(argv: readonly string[]): Promise<number> {
+/**
+ * Exported so a suite can drive the command itself rather than a re-implementation of it.
+ *
+ * It is not a convenience. Every one of this file's four defects — a manifest never bound to
+ * the one the release pins, a served tree that could not contain an unexpected file, two
+ * `ReleaseChannel` fields decoded as one, and credentials only a fixture could supply — lived
+ * in `compareCommand` and in nothing else, while `tests/release/compare.test.ts` exercised
+ * `compare.ts` through a helper that reproduced the CLI's *intent*. A test of a copy of the
+ * caller cannot see a defect in the caller.
+ */
+export async function main(argv: readonly string[]): Promise<number> {
   const [command, ...rest] = argv;
   switch (command) {
     case 'signers':
@@ -369,7 +546,11 @@ async function main(argv: readonly string[]): Promise<number> {
       '                              (--transcript <path> | --gateways <config.json>)\n' +
       '                              [--keyring <path>] [--release-channel <path>]\n' +
       '                              [--registry <path>] [--min-signatures N]\n' +
-      '                              [--require-attestations N]',
+      '                              [--require-attestations N]\n' +
+      '                              [--signature <txid>]... [--attestation <txid>]...\n' +
+      '\n' +
+      '--signature and --attestation name the credential transactions 12 §1.4 gate 4 publishes\n' +
+      'in the release notes. Repeat each flag once per transaction.',
   );
   return 64;
 }

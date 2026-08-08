@@ -29,9 +29,35 @@ operator configuration, exactly as `tools/monitoring/attestation_monitor.py` alr
 |---|---|
 | `honest.json` | Two gateways, both serving the signed tree correctly |
 | `tampered-gateway.json` | The same, except `beta` serves an altered `assets/app.js` |
-| `release.json` | The release document both transcripts serve, kept beside them for readability |
+| `refused-status.json` | The same, except `beta` answers 404 with the **correct** bytes |
+| `release.json` | The release document those transcripts serve, kept beside them for readability |
 | `registry.json` | A 12 §2.2 registry with **fictional** holders, for these tests only |
-| `keyring.json` | The matching public keys, key id to minisign packet |
+| `keyring.json` | The matching public keys, key id to minisign packet, tagged generation 4 |
+
+### The CLI family
+
+`tests/release/verify-release-cli.test.ts` drives `verify-release compare` as the command,
+rather than through a helper that reproduces what the command does. The transcripts above
+serve a **hand-written** release document, and four defects lived behind them for exactly that
+reason: the counting only ever ran against a document shape this repository does not produce.
+
+| File | What it is |
+|---|---|
+| `cli-release.json` | The document `tools/release/release-json.ts` really builds, patched as 12 §1.2's second pass patches it. It names **no** signature or attestation transactions, because it cannot: 12 §2.1 signs its own bytes, so an id written back into it invalidates every signature over it |
+| `cli-honest.json` | Two gateways serving that document, its tree, its **path manifest**, and the four credential transactions 12 §1.4 gate 4 publishes in the release notes |
+| `cli-extra-payload.json` | The same, except `beta` lists and serves one extra file nobody signed. Nothing pinned is missing or altered, which is why a fetch loop driven by the signed map reports it clean |
+| `cli-local-tree/` | The `--local dist/` side of §1.3's command: the tree a third party built |
+
+`cli-honest.json` also serves a **second manifest address** carrying the release's own bytes at
+the release's own paths. It is not a tampered tree — every file under it verifies — and it is
+the only way to ask whether `compare` binds the manifest it was pointed at to the one
+`release.json` pins.
+
+The path manifests carry `manifest`, `version`, `index` and `paths` because a real one does.
+Only the `paths` **keys** are read, by `fetchManifestPaths` here and by
+`tools/monitoring/attestation_monitor.py`, which has consumed the same key since O5. The
+per-path `id` values are placeholders nothing resolves, so the fixture still claims nothing
+about what a gateway *does* with a manifest — which is the half FE-P7 leaves open.
 
 Nothing here is a key, a person or an organization of this project. The real registry is
 [`app/tools/release/sources/signers.json`](../../tools/release/sources/signers.json) and it is
