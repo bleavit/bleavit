@@ -159,9 +159,32 @@ function assertWrongChainReport(report) {
 }
 
 /**
- * The `funding` leg's acceptance rule — 11 §11.9; 02 §7.7.
+ * The deposit-leg refusals a Zombienet topology genuinely forces — 15 §4.8; 02 §7.7.
  *
- * **A blocked leg is not a failure here, and that is the point.** 02 §7.7 requires an
+ * **Exactly two, and they are named rather than described.** 15 §4.8 rules that Zombienet
+ * cannot certify the deposit leg's positive case at all: §7.7 pins the Asset Hub of the relay a
+ * release targets, a locally generated Asset Hub has its own genesis by construction, and no
+ * client correctness makes that pin match. So an Asset Hub that is **absent** or **unpinned** is
+ * the documented refusal and must pass here.
+ *
+ * That same paragraph says what the Zombienet row *does* certify — *"the identity check, the
+ * two-chain reader pair, the branded reads, the terminal classification"* — and every other
+ * blocked cause is one of those four failing. `local-unreadable` is the sharpest: Asset Hub
+ * attached and answered, and the leg still blocked, on **this** chain, which the withdraw leg
+ * immediately above it has just read successfully.
+ *
+ * A closed list rather than a prefix test on `asset-hub-`, because two of the four Asset Hub
+ * causes are not refusals by the Asset Hub: a chain that attached and then could not be read,
+ * and a classifier that threw, are defects wearing an Asset Hub name. A cause added later is
+ * refused until somebody decides it belongs here, which is the safe direction for a list whose
+ * whole job is to be narrow.
+ */
+const FORCED_DEPOSIT_REFUSALS = ['asset-hub-unavailable', 'asset-hub-wrong-chain'];
+
+/**
+ * The `funding` leg's acceptance rule — 11 §11.9; 02 §7.7; 15 §4.8.
+ *
+ * **A blocked deposit is not a failure here, and that is the point.** 02 §7.7 requires an
  * unavailable or unpinned Asset Hub to block the deposit flow *with diagnostics*, so a run that
  * demanded a `ready` deposit would fail on the correct behaviour and could only be satisfied by
  * pointing the drill at the real pinned Asset Hub. What this leg refuses is a report that
@@ -173,12 +196,15 @@ function assertWrongChainReport(report) {
  *  - **the key this client builds must be the key the runtime published.** A mismatch means
  *    every read below asked about the wrong entry, and an empty answer to the wrong key is
  *    indistinguishable from an honest zero balance.
- *  - **a `ready` leg must carry reads.** An arm with an empty `reads` array is a leg that
- *    reported success without having read anything, which is the one outcome this drill exists
- *    to make impossible.
+ *  - **a `ready` leg must carry reads, and they must have decoded.** See {@link requireReads}.
  *  - **the two legs must be on different chains.** They are read at two independent finalized
  *    blocks on two chains, and one chain answering both is `SameChainError`'s subject: every
  *    Asset Hub figure would be a futarchy-chain read under an Asset Hub label.
+ *  - **a blocked deposit must be one of the two refusals this topology forces.** See
+ *    {@link FORCED_DEPOSIT_REFUSALS}. Until this rule existed, any nonempty sentence passed —
+ *    so a second local `FinalizedReader.open` that failed left `ready` withdraw beside a
+ *    `blocked` deposit and read exactly like the expected Asset Hub refusal, and drill 14 could
+ *    pass without ever completing the two-chain deposit read path it advertises.
  */
 function assertFundingReport(report) {
   if (!report || typeof report !== 'object') throw new Error('the funding leg produced no report object');
@@ -209,14 +235,41 @@ function assertFundingReport(report) {
     if (typeof deposit.foreignMode !== 'string' || deposit.foreignMode.length === 0) {
       throw new Error(`the deposit leg carries no 02 §7.7 foreign verdict: ${JSON.stringify(deposit)}`);
     }
-  } else if (deposit.kind !== 'blocked' || typeof deposit.reason !== 'string' || deposit.reason.length === 0) {
-    throw new Error(
-      `the deposit leg is neither ready nor blocked-with-diagnostics (11 E17): ${JSON.stringify(deposit)}`,
-    );
+  } else {
+    if (deposit.kind !== 'blocked' || typeof deposit.reason !== 'string' || deposit.reason.length === 0) {
+      throw new Error(
+        `the deposit leg is neither ready nor blocked-with-diagnostics (11 E17): ${JSON.stringify(deposit)}`,
+      );
+    }
+    if (!FORCED_DEPOSIT_REFUSALS.includes(deposit.cause)) {
+      throw new Error(
+        `the deposit leg blocked on ${JSON.stringify(deposit.cause)}, which is not an Asset Hub ` +
+          'refusal this topology forces. 15 §4.8 excuses an absent or unpinned Asset Hub and ' +
+          'nothing else, because that is the one outcome no client correctness can change; a ' +
+          'reader that did not open or a classifier that threw is a defect this drill reports: ' +
+          JSON.stringify(deposit),
+      );
+    }
   }
   return report;
 }
 
+/**
+ * What a `ready` arm must carry — and *decoding* is half of it.
+ *
+ * Three separate claims, and the third was missing:
+ *
+ *  - **reads at all.** An empty `reads` array is a leg that reported success without having
+ *    read anything, which is the one outcome this drill exists to make impossible.
+ *  - **a storage key on each.** The same claim wearing an array.
+ *  - **nothing undecodable.** A key was built, a chain answered it, and the answer could not be
+ *    read — which is where a live storage-layout or descriptor mismatch lands, and the exact
+ *    failure a release-tier run is worth spawning three chains for. Counting *attempted* reads
+ *    passed such a run, so `ForeignAssets.Account`, `Assets.Account`, `System.Account` or
+ *    `PhaseFlags` could each be undecodable with the drill green. It is refused here rather
+ *    than in the client: an undecodable read is INV-FE-12's correct **client** behaviour —
+ *    render it raw with a warning, never guess — and a *drill* accepting it certifies nothing.
+ */
 function requireReads(leg, arm) {
   if (!Array.isArray(arm.reads) || arm.reads.length === 0) {
     throw new Error(`the ${leg} leg reported ready with no reads at all: ${JSON.stringify(arm)}`);
@@ -225,6 +278,18 @@ function requireReads(leg, arm) {
     if (!read || typeof read.key !== 'string' || !read.key.startsWith('0x')) {
       throw new Error(`the ${leg} leg reported a read with no storage key: ${JSON.stringify(read)}`);
     }
+  }
+  // An absent list is not an empty one: a report that stopped carrying the field would
+  // otherwise satisfy this rule by omission, which is the same defect one level up.
+  if (!Array.isArray(arm.undecodable)) {
+    throw new Error(`the ${leg} leg reported ready with no undecodable list at all: ${JSON.stringify(arm)}`);
+  }
+  if (arm.undecodable.length > 0) {
+    throw new Error(
+      `the ${leg} leg could not decode ${arm.undecodable.length} of its reads, so this run ` +
+        'attempted the funding read path rather than verifying it: ' +
+        JSON.stringify(arm.undecodable),
+    );
   }
 }
 

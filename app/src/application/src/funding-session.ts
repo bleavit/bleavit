@@ -165,12 +165,50 @@ export type WithdrawLeg =
   | { readonly kind: 'blocked'; readonly reason: string };
 
 /**
+ * Which of the six things went wrong, as a value rather than as a sentence — 02 §7.7; 11 E17.
+ *
+ * `reason` is written for a person and is the only thing a screen renders. It is not something
+ * a *caller* can decide on, and two of these six mean opposite things: an Asset Hub that is
+ * absent or unpinned is a fact about the world that 02 §7.7 requires this client to accept and
+ * report, while a local reader that did not open is a fact about **this chain** — and one that
+ * the withdraw leg beside it has usually just disproved.
+ *
+ * The distinction was load-bearing and unavailable. 15 §4.8 excuses exactly the first two in a
+ * Zombienet topology, because §7.7 pins the Asset Hub of the relay a release targets and a
+ * locally generated one has its own genesis; the drill harness therefore had to separate them
+ * and could only do it by matching the prose. It did, and a `local-unreadable` sentence passed
+ * as the documented refusal, so drill 14 could go green without ever completing the two-chain
+ * deposit read path it exists to run.
+ *
+ * Kept as one flat union rather than "Asset Hub" and "not Asset Hub" groups: `asset-hub-*` is a
+ * prefix a consumer may not read as a class. Only two of the four Asset Hub causes are
+ * *refusals by the connection*, and the other two — a chain that attached and then could not be
+ * read, a classifier that threw — are as much a defect as the local one.
+ */
+export type DepositBlockCause =
+  /** `attachAssetHub` reached a chain and it was not the pinned one. Terminal (10 §3.1). */
+  | 'asset-hub-wrong-chain'
+  /** The Asset Hub connection was not established or was abandoned. Retryable (E17 `R:`). */
+  | 'asset-hub-unavailable'
+  /** `connectAssetHub` **threw**, which `assetHubConnector` never does — see below. */
+  | 'asset-hub-connect-failed'
+  /** Asset Hub attached, and no finalized block arrived to read at. */
+  | 'asset-hub-unreadable'
+  /** This chain could not be read at a finalized block. Never an Asset Hub problem. */
+  | 'local-unreadable'
+  /** 10 §5.2's foreign classifier rejected rather than returning a verdict. */
+  | 'classification-failed';
+
+/**
  * S12's leg — the branded reader pair, or the Asset Hub leg's own reason for refusing.
  *
  * `blocked` carries the reason the *Asset Hub* connection gave, unchanged: `attachAssetHub`
  * and `assetHubConnector` already distinguish a wrong chain (terminal, retrying cannot help)
  * from an unreachable one (retryable, E17's recovery action is *"retry AH sync"*), and
  * rewriting either into a generic sentence would discard the distinction a user acts on.
+ *
+ * It carries {@link DepositBlockCause} **beside** that sentence, never instead of it: E17 asks
+ * for the flow *"blocked with diagnostics"*, and a code is not a diagnosis.
  */
 export type DepositLeg =
   | {
@@ -187,7 +225,22 @@ export type DepositLeg =
        */
       readonly foreign: ForeignVerdict;
     }
-  | { readonly kind: 'blocked'; readonly reason: string };
+  | { readonly kind: 'blocked'; readonly cause: DepositBlockCause; readonly reason: string };
+
+/**
+ * The connector's own refusal arms, mapped — and a **total** record, deliberately.
+ *
+ * `AssetHubConnection`'s non-attached arms are the two things 02 §7.7 calls an unavailable or
+ * unpinned Asset Hub, which is exactly the pair 15 §4.8 excuses. A ternary here would map a
+ * third arm added later onto `asset-hub-unavailable` in silence — quietly widening what a drill
+ * accepts as the documented refusal. A record keyed on the union fails to compile instead.
+ */
+const ASSET_HUB_REFUSALS: {
+  readonly [K in Exclude<AssetHubConnection<ChainHeadTransport>, { readonly kind: 'attached' }>['kind']]: DepositBlockCause;
+} = {
+  'wrong-chain': 'asset-hub-wrong-chain',
+  unavailable: 'asset-hub-unavailable',
+};
 
 function because(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
@@ -264,15 +317,20 @@ export async function openDepositLeg<T extends ChainHeadTransport>(
   } catch (error) {
     // `assetHubConnector` never throws — every failure is an arm. A throw therefore means the
     // connector was replaced or the attach path itself failed, and it must still not take down
-    // a screen for a leg that only blocks deposits.
+    // a screen for a leg that only blocks deposits. It is its **own** cause rather than
+    // `asset-hub-unavailable`, because the two say different things: the connector reporting an
+    // unreachable chain is the world, and the connector not reporting at all is this client.
     return {
       kind: 'blocked',
+      cause: 'asset-hub-connect-failed',
       reason:
         `The Asset Hub connection failed: ${because(error)}. Deposits are unavailable; nothing ` +
         'else in the app is affected (02 §7.7).',
     };
   }
-  if (connection.kind !== 'attached') return { kind: 'blocked', reason: connection.reason };
+  if (connection.kind !== 'attached') {
+    return { kind: 'blocked', cause: ASSET_HUB_REFUSALS[connection.kind], reason: connection.reason };
+  }
 
   let assetHub: FundingReader;
   try {
@@ -280,6 +338,7 @@ export async function openDepositLeg<T extends ChainHeadTransport>(
   } catch (error) {
     return {
       kind: 'blocked',
+      cause: 'asset-hub-unreadable',
       reason:
         `Asset Hub could not be read at a finalized block: ${because(error)}. Deposits are ` +
         'unavailable until it syncs; nothing else in the app is affected (11 E17).',
@@ -292,6 +351,7 @@ export async function openDepositLeg<T extends ChainHeadTransport>(
   } catch (error) {
     return {
       kind: 'blocked',
+      cause: 'local-unreadable',
       reason:
         `This chain could not be read at a finalized block: ${because(error)}. The deposit ` +
         'checks span both chains, so it is blocked rather than checked on one of them.',
@@ -317,6 +377,7 @@ export async function openDepositLeg<T extends ChainHeadTransport>(
   } catch (error) {
     return {
       kind: 'blocked',
+      cause: 'classification-failed',
       reason:
         `The Asset Hub compatibility check could not be completed: ${because(error)}. Deposits ` +
         'are unavailable; nothing else in the app is affected (02 §7.7, 11 E17).',

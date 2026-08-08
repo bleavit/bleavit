@@ -19,6 +19,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -255,6 +256,44 @@ test('withdraw stays ready when the Asset Hub connector refuses everything (02 �
   assert.match(report.deposit.reason, /Asset Hub never synced/);
 });
 
+test('a blocked deposit reports WHICH side refused, because only one side is excused', async () => {
+  // The harness has this report and nothing else to decide on, and 15 §4.8 excuses exactly one
+  // blocked cause in a Zombienet topology: 02 §7.7 pins the Asset Hub of the relay a release
+  // targets, so a locally generated one is absent or unpinned by construction. The report used
+  // to carry only `reason`, a sentence written for a person — so a **local** reader that failed
+  // to open read as that documented refusal and drill 14 passed without ever completing the
+  // two-chain read path it advertises.
+  const refused = await runFunding(
+    pinDocument(),
+    NO_BOOTNODES,
+    OPTIONS,
+    deps(connection({ assetHub: { kind: 'unavailable', reason: 'Asset Hub never synced.' } })),
+  );
+  assert.equal(refused.deposit.kind, 'blocked');
+  if (refused.deposit.kind !== 'blocked') return;
+  assert.equal(refused.deposit.cause, 'asset-hub-unavailable');
+
+  // The other side of the same fact. Asset Hub attaches and its reader opens; the **second**
+  // local `FinalizedReader.open` is the one that fails, so the withdraw leg above it is `ready`
+  // and only the deposit leg blocks — the shape that is indistinguishable from the refusal
+  // above unless the report says which side gave way.
+  const local = transport(LOCAL_CHAIN);
+  let opens = 0;
+  const flaky: ChainHeadTransport = {
+    ...local,
+    async pinnedBlock() {
+      opens += 1;
+      if (opens > 1) throw new Error('the local follow subscription dropped');
+      return local.pinnedBlock();
+    },
+  };
+  const defect = await runFunding(pinDocument(), NO_BOOTNODES, OPTIONS, deps(connection({ local: flaky })));
+  assert.equal(defect.withdraw.kind, 'ready', 'the withdraw leg did not open, so this is not the shape under test');
+  assert.equal(defect.deposit.kind, 'blocked');
+  if (defect.deposit.kind !== 'blocked') return;
+  assert.equal(defect.deposit.cause, 'local-unreadable');
+});
+
 test('a wrong-chain Asset Hub leaves the leg READY and blocks the deposit as a row', async () => {
   // §11.9.1 makes *"AH connection synced & descriptors compatible"* a precondition **row**, not
   // a gate: a `restricted` or `wrong-chain` Asset Hub whose readers opened must still produce a
@@ -338,6 +377,92 @@ test('a pin document with no Asset Hub role is refused rather than half-run', as
   );
   // …and it is refused BEFORE a light client is started, so nothing needs stopping.
   assert.equal(client.stops.count, 0);
+});
+
+/* --------------------------------------------- the driver and the harness rule, bound */
+
+/**
+ * The rule the drill applies, loaded the way the drill loads it.
+ *
+ * `drill-harness-rules.test.ts` drives this module over hand-written report shapes and this
+ * file drives the producer, and until both were applied to **one** value nothing bound the two:
+ * a rule keyed on `deposit.cause` beside a report writing `deposit.blockedBy` leaves both
+ * suites green and drill 14 accepting every blocked deposit again. Every assertion below is
+ * therefore on a report `runFunding` actually produced.
+ */
+const harnessRules = createRequire(import.meta.url)(
+  join(APP, '..', 'zombienet', 'drills', 'js', 'client-boot-rules.js'),
+) as { assertFundingReport(report: unknown): unknown };
+
+/**
+ * A local transport whose `PhaseFlags` decodes — 17 = `sudo present | shadow mode`, the real
+ * bootstrap value V-115 records, little-endian as the runtime writes it.
+ *
+ * The bare fake answers that key with nothing, and an absent `PhaseFlags` is undecodable rather
+ * than a zero. That is the right client behaviour and the wrong fixture for a test about
+ * something else, so the two are kept apart.
+ */
+async function decodableLocal(): Promise<ChainHeadTransport> {
+  const setup = await fundingSetup(AH_BUNDLE, FIXTURE);
+  return transport(LOCAL_CHAIN, { [setup.artifacts.keys.phaseFlags().toLowerCase()]: '0x11000000' });
+}
+
+test('the harness accepts the refusal 15 §4.8 forces and refuses the local failure beside it', async () => {
+  const refused = await runFunding(
+    pinDocument(),
+    NO_BOOTNODES,
+    OPTIONS,
+    deps(connection({ assetHub: { kind: 'unavailable', reason: 'Asset Hub never synced.' }, local: await decodableLocal() })),
+  );
+  harnessRules.assertFundingReport(refused);
+
+  // Asset Hub attached and read; the second LOCAL open failed. Same `kind`, same nonempty
+  // sentence, opposite meaning — and the drill must not report this run as a pass.
+  const local = await decodableLocal();
+  let opens = 0;
+  const defect = await runFunding(
+    pinDocument(),
+    NO_BOOTNODES,
+    OPTIONS,
+    deps(
+      connection({
+        local: {
+          ...local,
+          async pinnedBlock() {
+            opens += 1;
+            if (opens > 1) throw new Error('the local follow subscription dropped');
+            return local.pinnedBlock();
+          },
+        },
+      }),
+    ),
+  );
+  assert.throws(() => harnessRules.assertFundingReport(defect), /not an Asset Hub refusal/);
+});
+
+test('the harness refuses a ready report whose reads did not decode', async () => {
+  // The default fake answers `PhaseFlags` with nothing, and `readDepositInputs` records that as
+  // undecodable rather than as a zero — so this is the producer's own shape, not a fixture
+  // written to fail. A run that read three surfaces and could not decode one of them verified
+  // nothing about that surface, however many keys it built.
+  const blind = await runFunding(pinDocument(), NO_BOOTNODES, OPTIONS, deps(connection()));
+  assert.equal(blind.deposit.kind, 'ready');
+  if (blind.deposit.kind !== 'ready') return;
+  assert.deepEqual(blind.deposit.undecodable, ['Constitution.PhaseFlags: the storage key returned no value']);
+  assert.throws(() => harnessRules.assertFundingReport(blind), /could not decode/);
+
+  // The negative control: the same run with a decodable `PhaseFlags` passes, so the rule above
+  // is refusing the undecodable read rather than refusing everything.
+  const sighted = await runFunding(
+    pinDocument(),
+    NO_BOOTNODES,
+    OPTIONS,
+    deps(connection({ local: await decodableLocal() })),
+  );
+  assert.equal(sighted.deposit.kind, 'ready');
+  if (sighted.deposit.kind !== 'ready') return;
+  assert.deepEqual(sighted.deposit.undecodable, []);
+  harnessRules.assertFundingReport(sighted);
 });
 
 /* ------------------------------------------------------------------------- the arguments */

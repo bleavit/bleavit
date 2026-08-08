@@ -70,6 +70,7 @@ import {
   fundingArtifacts,
   openDepositLeg,
   openWithdrawLeg,
+  type DepositBlockCause,
   type ForeignVerdict,
   type FundingArtifacts,
   type FundingPins,
@@ -268,7 +269,15 @@ export interface FundingDrillReport {
         readonly undecodable: readonly string[];
         readonly blocks: readonly string[];
       }
-    | { readonly kind: 'blocked'; readonly reason: string };
+    /**
+     * The **cause** rides beside the reason, because only one cause is excused.
+     *
+     * 15 §4.8 rules that a Zombienet topology can only ever produce an absent or unpinned Asset
+     * Hub, so the drill harness must accept that refusal and refuse every other. `reason` is a
+     * sentence written for a person; matching it is how a **local** reader that failed to open
+     * passed as the documented refusal, and drill 14 went green having read one chain.
+     */
+    | { readonly kind: 'blocked'; readonly cause: DepositBlockCause; readonly reason: string };
 }
 
 function stage(name: string): void {
@@ -498,7 +507,7 @@ export async function runFunding(
     });
     let depositReport: FundingDrillReport['deposit'];
     if (deposit.kind === 'blocked') {
-      depositReport = { kind: 'blocked', reason: deposit.reason };
+      depositReport = { kind: 'blocked', cause: deposit.cause, reason: deposit.reason };
     } else {
       const { local, assetHub: assetHubReader } = deposit.readers;
       stage(`deposit readers at ${local.at.chain} #${local.at.blockNumber} / ${assetHubReader.at.chain} #${assetHubReader.at.blockNumber}`);

@@ -88,6 +88,7 @@ export {
   fundingArtifacts,
   openDepositLeg,
   openWithdrawLeg,
+  type DepositBlockCause,
   type DepositLeg,
   type DepositLegDeps,
   type FundingArtifacts,

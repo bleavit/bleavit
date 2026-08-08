@@ -190,15 +190,54 @@ test('a BLOCKED deposit passes, because 02 §7.7 requires exactly that', () => {
   // The leg must not demand a green deposit. §7.7 requires an unavailable or unpinned Asset Hub
   // to block the flow *with diagnostics*, so a rule insisting on `ready` would fail on the
   // correct behaviour and could only be satisfied by pointing the drill at the real Asset Hub.
-  rules.assertFundingReport({ ...FUNDING, deposit: { kind: 'blocked', reason: 'Asset Hub is not attached.' } });
+  rules.assertFundingReport({
+    ...FUNDING,
+    deposit: { kind: 'blocked', cause: 'asset-hub-unavailable', reason: 'Asset Hub is not attached.' },
+  });
   // …but a blocked leg carrying no diagnostics is not "blocked with diagnostics" (11 E17).
   assert.throws(
-    () => rules.assertFundingReport({ ...FUNDING, deposit: { kind: 'blocked', reason: '' } }),
+    () => rules.assertFundingReport({ ...FUNDING, deposit: { kind: 'blocked', cause: 'asset-hub-unavailable', reason: '' } }),
     /neither ready nor blocked-with-diagnostics/,
   );
   assert.throws(
     () => rules.assertFundingReport({ ...FUNDING, deposit: { kind: 'exploded' } }),
     /neither ready nor blocked-with-diagnostics/,
+  );
+});
+
+test('only an ASSET HUB refusal excuses a blocked deposit; a local-chain failure does not', () => {
+  // 15 §4.8 excuses one thing and names it: 02 §7.7 pins the Asset Hub of the relay a release
+  // targets, a locally generated one has its own genesis, so an **absent or unpinned** Asset Hub
+  // is the refusal this topology forces. That paragraph also says what the Zombienet row does
+  // certify — "the two-chain reader pair, the branded reads, the terminal classification" — and
+  // every other blocked cause is one of those three failing.
+  for (const cause of ['asset-hub-unavailable', 'asset-hub-wrong-chain']) {
+    rules.assertFundingReport({ ...FUNDING, deposit: { kind: 'blocked', cause, reason: 'Asset Hub is not attached.' } });
+  }
+  // `openDepositLeg` blocks for four further reasons, and the drill must report every one of
+  // them. The local one is the sharpest: Asset Hub attached, and the drill still never completed
+  // the two-chain read path it advertises.
+  for (const cause of ['local-unreadable', 'asset-hub-unreadable', 'classification-failed', 'asset-hub-connect-failed']) {
+    assert.throws(
+      () =>
+        rules.assertFundingReport({
+          ...FUNDING,
+          deposit: { kind: 'blocked', cause, reason: 'This chain could not be read at a finalized block: …' },
+        }),
+      /not an Asset Hub refusal/,
+      `a deposit blocked on ${cause} was accepted`,
+    );
+  }
+  // And the shape that shipped: any nonempty sentence, with no cause at all, passed as the
+  // documented refusal. A report that stops carrying the discriminator fails rather than
+  // reverting to that.
+  assert.throws(
+    () =>
+      rules.assertFundingReport({
+        ...FUNDING,
+        deposit: { kind: 'blocked', reason: 'This chain could not be read at a finalized block: …' },
+      }),
+    /not an Asset Hub refusal/,
   );
 });
 
@@ -223,6 +262,35 @@ test('a leg that reported ready without reading anything is the one outcome refu
   assert.throws(
     () => rules.assertFundingReport({ ...FUNDING, withdraw: { ...FUNDING.withdraw, reads: [{ surface: 'x' }] } }),
     /a read with no storage key/,
+  );
+});
+
+test('a ready leg whose reads did not DECODE is a read path that was attempted, not verified', () => {
+  // A syntactically valid key was built and a chain answered it — and the answer could not be
+  // read. `undecodable` is where a live storage-layout or descriptor mismatch lands, so a rule
+  // that only counted attempted reads stayed green on exactly the release-tier failure this
+  // leg exists to find.
+  assert.throws(
+    () =>
+      rules.assertFundingReport({
+        ...FUNDING,
+        withdraw: { ...FUNDING.withdraw, undecodable: ['ForeignAssets.Account(who): trailing bytes'] },
+      }),
+    /could not decode/,
+  );
+  assert.throws(
+    () =>
+      rules.assertFundingReport({
+        ...FUNDING,
+        deposit: { ...FUNDING.deposit, undecodable: ['Constitution.PhaseFlags: the storage key returned no value'] },
+      }),
+    /could not decode/,
+  );
+  // An absent list is not an empty one. A report that stopped carrying the field would otherwise
+  // satisfy this rule by omission, which is the same defect one level up.
+  assert.throws(
+    () => rules.assertFundingReport({ ...FUNDING, withdraw: { ...FUNDING.withdraw, undecodable: undefined } }),
+    /no undecodable list/,
   );
 });
 
