@@ -143,8 +143,16 @@ Read this file first. Then read `PLAN.md`. Then work.
   `github.ref` with `cancel-in-progress` on every ref except `main`, so pushing
   again to a branch *cancels* the previous run rather than queueing beside it.
   A run that shows `cancelled` after you pushed is that, not a failure — check
-  the newest run for the branch. `main` never cancels, because there each run is
-  the record for its own commit. Do not launch concurrent duplicate Cargo gates;
+  the newest run for the branch. On `main` the flag is false, so a run already
+  **in progress** there is never cancelled. That protects what is running and
+  **cannot** protect what is queued. GitHub keeps at most one pending run per
+  concurrency group, so a second `main` commit arriving while the first still
+  waits displaces the first. Verified 2026-08-08: merging #276 and #277 31
+  seconds apart left `ba7a2d8b`'s run `cancelled` with `total_jobs = 0`, having
+  never started a job, while `36de7ac2`'s in-progress run survived both. A full
+  run here exceeds two hours, so two `main` commits inside one cycle leave the
+  earlier one with **no CI record of its own**. Space them, or accept that only
+  the newest tip is tested. Do not launch concurrent duplicate Cargo gates;
   `tools/ci/rust-workspace-gates.sh --changed [PACKAGE...]` provides a locked,
   changed-scope feedback loop, while the no-argument script remains exhaustive.
   When CI polling is useful, poll no more than once every five minutes. Standing
