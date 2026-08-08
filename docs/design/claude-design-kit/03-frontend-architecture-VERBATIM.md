@@ -1,11 +1,12 @@
 > **DERIVED COPY for design-tool context — DO NOT EDIT.**
 > Verbatim copy of `docs/architecture/10-frontend-architecture.md` (the source of truth),
-> regenerated 2026-08-08 at integration contract **v30**, which re-measured §9.3's metadata
-> blob once more: the four guardian allowance constants and the two frozen playbook reads
-> grew the committed `metadata.scale` to **473,749 B** raw and **148,175 B** gz. The rounded
-> 0.15 MB figure has now held across three contract bumps, so §9.4's metadata row is again
-> unchanged — the *count* bound is what binds at this blob size. Nothing else in this
-> document moved. The 2026-08-07 regeneration note follows, unchanged. From **F1**:
+> regenerated 2026-08-08 for the SQ-1011/SQ-1012/SQ-1013 rulings (F26): §3.1 gains a
+> **`CompatUnavailable`** state under a new code `FE-COMPAT-003`, for a compatibility probe
+> that could not complete — fail-closed, non-terminal, naming **no** disabled surface because
+> none was examined. §3.2 keeps its three rows and now says why the fourth outcome is not a
+> mode. §4.1 gains the normative rule for a compatibility probe's own `Chain` handle, and
+> §9.4's mobile-CPU row gains the line that handle actually costs. The previous
+> regeneration was 2026-08-07 and carried three changes that landed that day. From **F1**:
 > §5.2's rewritten depth paragraph, now that FE-P5 is resolved. What bounds historical
 > depth is **hash acquisition, not state retrieval** — `chain_getBlockHash(height)`
 > returns `null` for every height except `0` and the best block — and §5.2 gains two
@@ -177,12 +178,14 @@ stateDiagram-v2
     CompatCheck --> Ready: compat = full
     CompatCheck --> ReadyRestricted: compat = restricted (boot-time)
     CompatCheck --> ReadOnlyIncompatible: spec_version unsupported
+    CompatCheck --> CompatUnavailable: probe did not complete (FE-COMPAT-003)
     Ready --> Degraded: peer loss / finality stall
     ReadyRestricted --> Degraded: peer loss / finality stall
     Degraded --> Ready: recovered
     WorkerFailed --> WorkerSpawn: user retry
     WasmFailed --> WorkerSpawn: user retry / reduced-memory guidance
     ReadOnlyIncompatible --> Ready: user loads newer release
+    CompatUnavailable --> CompatCheck: retry (backoff 1s→60s)
     WrongChain --> [*]
 ```
 
@@ -192,6 +195,7 @@ New states, normatively:
 - **`WorkerFailed`** (`FE-BOOT-002`): worker spawn failure (CSP, browser policy, resource exhaustion). Renderable surface: docs, settings, verification panel, cached dashboard (if storage is up) with `stale-cache` badges. No verified reads exist; signing is unavailable in normal mode. Expert-mode RPC-only operation is offered with the full §2.2 quarantine (provider-labelled, signing behind interstitial).
 - **`WasmFailed`** (`FE-BOOT-004`): smoldot WASM instantiation or memory failure (observed class: iOS memory pressure). Same surface as `WorkerFailed`, plus device guidance. Reduced-memory mode trims app features only — the parachain client cannot run without the relay client, so "single-chain mode" does not exist.
 - **`ReadyRestricted`**: boot-time `restricted` mode. Compatibility probing (§5.2) is a lattice, not a boolean; when only part of `CRITICAL_SURFACE` passes at boot, the app boots directly into restricted mode with named disabled surfaces — it does not pretend to be `Ready` and fail lazily.
+- **`CompatUnavailable`** (`FE-COMPAT-003`; added 2026-08-08, SQ-1011): the compatibility probe **did not complete** — the runtime version could not be read, or no compat surface could be pulled at all. This is **not** a fourth compatibility mode, and §5.2's classifier keeps exactly three. Each of `full` / `restricted` / `read-only-incompatible` is a claim *about the runtime*, and none of them is available to a client that examined nothing: synthesising `restricted` with every surface disabled would put *"this surface is absent from this runtime"* on screen about surfaces nothing looked at, which is the fabrication §5.2's coverage refusal exists to prevent, one layer up. The state therefore records a claim about the **client** — compatibility is unestablished — and it is fail-closed and non-terminal. Signing is unavailable; **no surface is named as disabled**, because none was examined; the renderable surface is `WorkerFailed`'s, with the stated reason; the client retries into `CompatCheck` on the same 1 s→60 s backoff as `SyncDegraded`. It is deliberately **not** `SyncDegraded`: a probe that could not complete is not a peer fault, and the `system_health` rule below already forbids routing a broken introspection path to the peer-diagnostics panel *"for a fault that is not theirs"*. The same distinction one chain over — a pinned, reachable Asset Hub whose surface could not be pulled — is **not** a `ForeignMode` either, and [02](02-integration-contract.md) §7.7 already names it: that section blocks the funding flow on an *"unavailable **or unprobed**"* surface, which is this outcome under its contract-side name (SQ-1012).
 - **`SyncDegraded`**: pre-`Ready` degradation is now a state with the same peer-diagnostics panel as post-`Ready` `Degraded` (per-bootnode dial results, port-443 note, add-bootnode, expert RPC option). Previously the machine could only degrade after `Ready`, leaving the most common real-world failure (cannot reach peers on first load) stateless.
 
 **Where the peer count comes from, and what happens when it does not (normative; SQ-597, 2026-08-05).** The two `SyncDegraded` entry conditions above are written in **peer counts**, and the light client publishes those only through the **legacy** JSON-RPC method `system_health` — the newer interface spec that owns `chainHead_v1_*` has no peer or sync-progress surface at all. That dependency is therefore named here rather than discovered later, with its three properties stated:
@@ -212,6 +216,8 @@ The boot machine and the runtime-compatibility machine (§5.3, the FRONTEND_PLAN
 | `restricted` | `ReadyRestricted` | partial probe failure on `CodeUpdated` | per-surface |
 | `read-only-incompatible` | `ReadOnlyIncompatible` | uncovered upgrade enacted | disabled |
 
+**The table has three rows because the lattice has three modes, and the fourth outcome is not one of them (SQ-1011, 2026-08-08).** A probe that could not complete yields no mode at all: §3.1's `CompatUnavailable` carries it, and it is a claim about the client rather than about the runtime. Mid-session the rule is the same one `FE-TX-007` already applies to a moved runtime — a re-classification that could not complete drops the session to `CompatUnavailable` and disables signing, and the previously established mode **MUST NOT** be carried across a runtime change the client was unable to examine. Reporting a stale `full` against a runtime nothing probed is the failure this state exists to make impossible.
+
 Orthogonal session flags, all combinable with any compat mode: `Degraded` (peer/finality health), `MemoryOnly` (storage), `RpcOnly` (expert fallback). The UI state is therefore the product `compatMode × {nominal, degraded} × storageMode`, and every combination has defined rendering (degradation matrix, [11-frontend-workflows.md](11-frontend-workflows.md)).
 
 ---
@@ -221,6 +227,11 @@ Orthogonal session flags, all combinable with any compat mode: `Degraded` (peer/
 ### 4.1 Topology
 
 Unchanged: one smoldot instance hosting the relay light client (GRANDPA warp sync from a per-release checkpoint) and the parachain client (`potentialRelayChains` linkage); parachain finality derives from relay-finalized para-inclusion; storage read via proofs. PAPI `createClient(getSmProvider(...))`, typed API from committed descriptors. Bundled hash-pinned chain specs; genesis identity check per §3.1 (`WrongChain` on mismatch, no override).
+
+**A compatibility probe attaches its own `Chain` handle, and doing so is the vendor's own instruction rather than this client's convenience (normative; SQ-1013, ruled 2026-08-08).** §5.2's classifier needs a PAPI client of its own, and PAPI binds one `Chain` to one JSON-RPC connection and removes that chain on disconnect — so a probe cannot borrow the reader's handle without taking the reader down when it closes. The pinned `smoldot@3.3.2` answers the resulting question directly: it *"will automatically de-duplicate chains if multiple identical chains are added, in order to save resources"*, and callers are *"strongly encouraged to trust smoldot and not attempt to de-duplicate chains yourself, as determining whether two chains are identical is complicated and might have security implications"*. A second handle over an already-added spec is therefore a **lookup, not a second sync**, and hand-rolling the sharing would be the worse engineering. [11](11-frontend-workflows.md) §11.9.1's *"second light-client connection to Asset Hub (same smoldot instance, additional chain)"* already covers the probe's handle on that side. Two obligations follow, and both are about a resource this section had not named:
+
+1. **A probe handle is transient and is released when its verdict is produced.** The same client *"tries to distribute CPU resources equally between all active `Chain` objects"*, so the cost of an extra handle is **CPU share, not sync state or memory** — a handle held for the session permanently dilutes the reader's share of one core (§9.4's CPU row, which names this line).
+2. **Releasing it stops every chain the probe added, not only the one whose provider was handed out.** A factory that adds a relay and a parachain and then releases one leaks the other, and §3.2 re-runs the classifier on **every** `CodeUpdated` — so a partially transient client is worse than a persistent one, because nothing counts the remainder.
 
 ### 4.2 What smoldot can and cannot serve — stated plainly
 
@@ -276,6 +287,8 @@ Descriptors are generated from built runtime artifacts (never a live node), comm
 ### 5.2 Compatibility gating
 
 `CRITICAL_SURFACE` (every storage item, event, call, constant and runtime API the app uses; generated; CI-tested against each committed descriptor set) drives a three-mode classifier: `full` / `restricted` (named disabled surfaces) / `read-only-incompatible`. `TxPreparation` embeds the spec_version + metadata hash it was built against; the final pre-sign refresh re-reads the live runtime version and refuses on any change (`FE-TX-007`). Compatibility-API surface details are **resolved (FE-P1, 2026-08-03)**: the surface is `(await api.getStaticApis()).compat[group][pallet][member]`, it exists on `getTypedApi(descriptors)` and not on `getUnsafeApi()`, `isCompatible()` defaults its threshold to `BackwardsCompatible` so the client MUST NOT supply its own, and an absent surface yields `Incompatible` with `isCompatible: () => false`, which is what makes absence detectable and fail-closed per INV-FE-12. **Two traps are normative for this classifier.** With no descriptors supplied at all PAPI reports the value side as `identical`, which reads as full compatibility while nothing was compared. And a **`rpc_methods` response is not a capability set** — smoldot returns its whole macro-generated method-name list, including the methods that answer `-32000 Not implemented in smoldot yet` (§4.2), so a classifier that read it would over-report by a quarter of the list.
+
+**The classifier answers about a runtime, so it has no arm for *"the probe did not run"* — and that absence is deliberate rather than a gap (SQ-1011 / SQ-1012, ruled 2026-08-08).** A client that could not read `spec_version`, or could not pull a compat surface at all, has established nothing about the chain in front of it, and the outcome belongs one layer up: §3.1's `CompatUnavailable` here, and [02](02-integration-contract.md) §7.7's *"unavailable **or unprobed**"* for Asset Hub, whose verdict this same classifier produces as a **separate** result (§7.7; §13 rule 8 forbids folding the two). Neither enters the three-mode union, and neither enters the foreign arms — a mode names what a runtime does or does not carry, and in this case no runtime was read. Both consumers therefore fail closed on it: nothing is proven, nothing may be signed, and no surface is listed as disabled.
 
 ### 5.3 The `ReadOnlyIncompatible` window is now bounded
 
@@ -662,10 +675,16 @@ Measured in CI (Lighthouse + Playwright timers) on reference hardware (desktop =
 | IndexedDB growth | §9.2 caps (300 MB / 75 MB) with auto-tuned retention | quota manager + tests. `app/packages/local-index/src/quota.ts` applies §9.2's ladder and `app/src/features/analysis/src/index-quota.ts` is where the client runs it — a manager the client never reaches holds no cap at all, which is what this row enforced until F14. The pass is a **writer**: it deletes rows and rewrites §9.2's `"downsampled"` label set wholesale, so it runs under §4.4's `fut-ingest` lock and a tab that cannot take it reports that rather than writing beside the tab that can. `tools/ci/check-frontend-budgets.py` binds the manager's two platform caps, its four internal shares and §9.3's blob bounds to the cells published above, and binds §9.1's per-row model to the one client module that names it: the package refuses to compile that figure in, because §9.1 labels it a modelling assumption and a module holding it would publish an assumption as a measurement. The device classification §9.2 does not state is made there, fail-closed, and is not repeated here (SQ-1000) |
 | Memory, desktop (tab + worker) | ≤ 600 MB steady-state | Playwright memory probe |
 | Memory, mobile | ≤ 350 MB steady-state, **including a named 2× smoldot line: 2 × ≤ 120 MB instances [VERIFY per-instance footprint — FE-P3/P4]** for leader-handoff and follower-tx transients (§4.4) | memory probe incl. dual-instance scenario |
-| Mobile CPU | ≤ 15% avg of one core steady-state after sync | profiling budget, FE-P4 |
+| Mobile CPU | ≤ 15% avg of one core steady-state after sync, **including a named compatibility-probe line**: smoldot distributes CPU equally between the active `Chain` objects of one client (§4.1), so each transient probe handle takes an equal share of this budget for as long as it lives — one probed chain halves the reader's share, two thirds it. The steady-state figure is therefore the **no-probe** figure, and the obligation the budget carries is that a probe handle is released when its verdict is produced rather than held. **[VERIFY probe-handle CPU share against the pinned client — FE-P4]**; the de-duplication and equal-distribution mechanisms are verified against `smoldot@3.3.2`'s own published contract (§4.1) and only the measured share is open | profiling budget, FE-P4 |
 | Ingest throughput | ≥ 20 finalized blocks/s catch-up on desktop **[VERIFY — FE-P4]**; all backfill arithmetic in §6.4 derives from this single number | perf test |
 
-Error taxonomy: as reviewed (`FE-BOOT-001..004`, `FE-CHAIN-001..005`, `FE-COMPAT-001..002`, `FE-TX-001..007`, `FE-IDX-001..002`, `FE-REL-001..004`, `FE-PROV-001..004`), plus `FE-HANDOFF-001..013` (§13.3) and `FE-FEE-001..002` (below), now with every `FE-BOOT` code owning a state in §3.1. Fixed user copy + expert detail + documented recovery per code; no free-text errors.
+Error taxonomy: as reviewed (`FE-BOOT-001..004`, `FE-CHAIN-001..005`, `FE-COMPAT-001..003`, `FE-TX-001..007`, `FE-IDX-001..002`, `FE-REL-001..004`, `FE-PROV-001..004`), plus `FE-HANDOFF-001..013` (§13.3) and `FE-FEE-001..002` (below), now with every `FE-BOOT` code owning a state in §3.1. Fixed user copy + expert detail + documented recovery per code; no free-text errors.
+
+**`FE-COMPAT-003` — a compatibility verdict that could not be reached is reported as such, never synthesised (added 2026-08-08; SQ-1011, SQ-1012).** The two existing codes in this family report what a *probe found*. This one reports that no probe completed, which is a different fact and needs its own code, because the recovery differs: there is nothing for a newer release to fix and nothing for the user to enable.
+
+| Code | Raised when | Recovery |
+|---|---|---|
+| `FE-COMPAT-003` | The compatibility probe did not complete on either chain: the runtime version could not be read, or no compat surface could be pulled. §3.1's `CompatUnavailable` for this chain; [02](02-integration-contract.md) §7.7's *"unavailable or unprobed"* Asset Hub surface for the foreign one, which blocks the funding flow alone and never the app | No mode is claimed, **no surface is listed as disabled**, and signing is unavailable. The client retries into `CompatCheck` on the §3.1 backoff. A previously established mode MUST NOT be carried forward across a runtime change the client could not examine |
 
 **The `FE-FEE-*` family — a fee that cannot be priced is refused, never estimated.** §2.3 makes the fee estimate and the fee headroom sourced values that MUST be `Finalized<T>`, and both codes below exist because the alternative to refusing is a number on a confirm screen that the chain will not honour. A fee is money the user has already consented to by the time it is wrong, so the recovery for both is the same shape: no figure, a stated reason, and no path to a signature.
 

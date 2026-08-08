@@ -181,7 +181,7 @@ pushing the book beyond its price domain is rejected — an evaluable quote with
 `QuoteView.within_domain == false` lets the UI disable it beforehand; an unevaluable quote
 disables action without rendering price-like fields. **Signing-version warning**: releases older than
 `min_supported_version` sign only past a blocking warning. Client-side error codes:
-`FE-BOOT-001..004`, `FE-CHAIN-001..005`, `FE-COMPAT-001..002`, `FE-TX-001..007`,
+`FE-BOOT-001..004`, `FE-CHAIN-001..005`, `FE-COMPAT-001..003`, `FE-TX-001..007`,
 `FE-IDX-001..002`, `FE-REL-001..004`, `FE-PROV-001..004`, `FE-UPG-001` — fixed user copy +
 expert detail + documented recovery per code; no free-text errors.
 

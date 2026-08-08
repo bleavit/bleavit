@@ -203,7 +203,24 @@ test('an unsupported spec_version is read-only-incompatible, whatever the probes
 });
 
 test('a fully passing probe set is full, and both live runtimes classify', () => {
-  for (const runtime of SUPPORTED_RUNTIMES) {
+  /**
+ * **What this loop does not establish, measured rather than assumed (2026-08-08).** Crossing
+ * the pair — primary descriptors against recovery metadata, or either set against the other's
+ * metadata — still classifies `full`. The two runtimes are surface-identical over
+ * `CRITICAL_SURFACE` today, so both mutants survive and this loop cannot tell them apart.
+ * That is a fact about the runtimes, not a weakness to paper over: what is new here is that
+ * **both are probed at all**, where the drill probes only the primary. The guard below stops
+ * the loop from silently degrading into one runtime probed twice if a regeneration ever
+ * pointed both entries at one blob.
+ */
+test('the two supported runtimes are distinct artifacts, so probing both is two probes', () => {
+  const digests = new Set(SUPPORTED_RUNTIMES.map((r) => r.metadataSha256));
+  assert.equal(digests.size, SUPPORTED_RUNTIMES.length, 'two supported runtimes share one metadata blob');
+  const keys = new Set(SUPPORTED_RUNTIMES.map((r) => r.descriptorKey));
+  assert.equal(keys.size, SUPPORTED_RUNTIMES.length, 'two supported runtimes share one descriptor set');
+});
+
+for (const runtime of SUPPORTED_RUNTIMES) {
     const result = classify(runtime.specVersion, SUPPORTED_SPEC_VERSIONS, allPass());
     assert.equal(result.mode, 'full', `${runtime.profile} did not classify full`);
     assert.equal(result.proven.length, CRITICAL_SURFACE.length);
@@ -601,3 +618,67 @@ test('a surface the runtime DOES have is compatible — the control that stops t
 });
 
 
+
+/* ------------- 15 §4.8's per-PR descriptor-compatibility row, which nothing discharged */
+
+/**
+ * The full `CRITICAL_SURFACE` probe against **each** committed metadata.
+ *
+ * **This is the gate 15 §4.8 has always required and no test performed (R-6 review of F26,
+ * 2026-08-08).** `descriptors:check` is a byte-diff of the generated tree, so it answers
+ * *"did the descriptor artifacts change?"* and never *"can this release read the runtimes it
+ * claims to support?"*. The two tests above probe one surface each — enough to prove the
+ * compat construction works, and nothing at all about the other 292. Until this test the only
+ * full-surface probe in the repository ran in a Zombienet drill, at release tier, against the
+ * **primary** runtime only: `bleavit_recovery` had never been probed against any metadata, and
+ * B16 makes recovery a live-capable runtime the client may have to boot into during an
+ * incident.
+ */
+async function compatFor(descriptorKey: string, specVersion: number): Promise<CompatGroups> {
+  const papi = resolve(
+    APP_ROOT,
+    'node_modules/.pnpm/polkadot-api@2.1.8_esbuild@0.28.1_rxjs@7.8.2/node_modules/polkadot-api/dist/src',
+  );
+  const observable = resolve(
+    APP_ROOT,
+    'node_modules/.pnpm/@polkadot-api+observable-client@0.18.7_rxjs@7.8.2/node_modules/@polkadot-api/observable-client/dist',
+  );
+  const { createCompatHelpers } = (await import(`${papi}/compatibility/compatibility.js`)) as {
+    createCompatHelpers: (d: unknown) => { getSyncHelpers: (ctx: unknown) => Promise<CompatGroups> };
+  };
+  const { createRuntimeCtx } = (await import(`${observable}/utils/create-metadata-ctx.js`)) as {
+    createRuntimeCtx: (meta: unknown, raw: Uint8Array, codeHash: string) => unknown;
+  };
+  const bindings = await import('@polkadot-api/substrate-bindings');
+  const sets = (await import('@polkadot-api/descriptors')) as Record<string, unknown>;
+  const descriptors = sets[descriptorKey];
+  assert.ok(descriptors, `this release ships no descriptor set named ${descriptorKey}`);
+  // Read in place from the committed feed, so the metadata under test is the artifact the
+  // release pins rather than anything this suite could shape.
+  const raw = new Uint8Array(
+    readFileSync(join(APP_ROOT, `fixtures/chain-feed/${specVersion}/metadata.scale`)),
+  );
+  const ctx = createRuntimeCtx(
+    bindings.unifyMetadata(bindings.metadata.dec(raw)),
+    raw,
+    `0x${'00'.repeat(32)}`,
+  );
+  return createCompatHelpers(descriptors).getSyncHelpers(ctx);
+}
+
+for (const runtime of SUPPORTED_RUNTIMES) {
+  test(`every CRITICAL_SURFACE entry resolves in spec_version ${runtime.specVersion} (${runtime.role})`, async () => {
+    const compat = await compatFor(runtime.descriptorKey, runtime.specVersion);
+    const probes = probeCriticalSurface(compat);
+    // Coverage first, and it throws rather than returning: a probe list short of the frozen
+    // set is a release-manifest defect, not a compatibility verdict.
+    const verdict = classify(runtime.specVersion, SUPPORTED_SPEC_VERSIONS, probes);
+    assert.deepEqual(
+      probes.filter((p) => !p.compatible).map((p) => p.id),
+      [],
+      `this release cannot read surfaces of the runtime it claims to support`,
+    );
+    assert.equal(verdict.mode, 'full');
+    assert.equal(verdict.proven.length, CRITICAL_SURFACE.length);
+  });
+}

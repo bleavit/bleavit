@@ -275,14 +275,15 @@ function reportOf(label, mode, timeoutSeconds) {
 
 async function boot() {
   const report = reportOf("client boot", "boot", 840);
-  // `unestablished` is what the classifier returns when no chain was connected, so a
-  // report carrying it is a boot that did not happen wearing a verdict's clothes.
-  if (report.compat === "unestablished") {
+  // `unestablished` is what the classifier returns when a probe could not complete, and
+  // `not-attempted` when no chain was connected at all. A report carrying either is a boot
+  // that did not happen wearing a verdict's clothes.
+  if (report.compat === "unestablished" || report.compat === "not-attempted") {
     throw new Error(`the classifier ran without a chain: ${JSON.stringify(report)}`);
   }
-  // **The lattice, not the wrapper.** `CompatVerdict.kind` is `classified | unestablished`,
-  // so asserting `!== "unestablished"` says only that a chain answered — which the finalized
-  // head below already proves. 10 §5.2's verdict is the MODE, and a `read-only-incompatible`
+  // **The lattice, not the wrapper.** `CompatVerdict.kind` says only whether a verdict was
+  // reached, so asserting on it says only that a chain answered — which the finalized head
+  // below already proves. 10 §5.2's verdict is the MODE, and a `read-only-incompatible`
   // runtime is `classified`: a leg that stopped at the wrapper would pass on the regression
   // it exists to catch.
   if (report.compatMode !== "full") {
@@ -294,6 +295,29 @@ async function boot() {
   }
   if (typeof report.finalizedHash !== "string" || !report.finalizedHash.startsWith("0x")) {
     throw new Error(`no finalized head was delivered: ${JSON.stringify(report)}`);
+  }
+  // **The same assertion one chain over, and it was missing until 2026-08-08.** The leg
+  // recorded `ForeignVerdict.kind` and asserted nothing, so a `wrong-chain` Asset Hub, an
+  // `unsupported` one and a `restricted` one all reported "classified" — the identical
+  // wrapper-not-lattice defect the paragraph above describes, left standing beside its own
+  // explanation. This drill is the only place 02 §7.7's classifier runs against a real chain.
+  //
+  // The Asset Hub leg is allowed to be absent: its genesis is ~189k entries and 11 E17 makes
+  // the connection lazy and non-fatal. What is refused is a leg that ANSWERED and answered
+  // wrongly — `classified` at any mode other than `full`, or a `classified` wrapper with no
+  // mode behind it at all.
+  if (report.assetHub === "classified" && report.assetHubMode !== "full") {
+    throw new Error(
+      `02 §7.7 classified Asset Hub as ${JSON.stringify(report.assetHubMode)}, not "full". ` +
+        `A verdict was reached, so this is a real disagreement rather than an absent leg: ` +
+        JSON.stringify(report),
+    );
+  }
+  if (report.assetHub !== "classified" && report.assetHubMode !== undefined) {
+    throw new Error(
+      `Asset Hub reported a mode without a classified verdict, which no code path should ` +
+        `produce: ${JSON.stringify(report)}`,
+    );
   }
   console.log(`client boot: ${JSON.stringify(report)}`);
   return 1;

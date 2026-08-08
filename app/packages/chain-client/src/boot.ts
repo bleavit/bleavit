@@ -31,6 +31,14 @@ export type BootState =
   | 'Ready'
   | 'ReadyRestricted'
   | 'ReadOnlyIncompatible'
+  /**
+   * 10 §3.1's fourth `CompatCheck` exit — the probe did not complete (SQ-1011, 2026-08-08).
+   *
+   * Not a mode, and the session carries **no** `compat` while it is here: each of the three
+   * modes is a claim about the runtime, and this is a claim about the client. Non-terminal,
+   * and the only edge out is back into `CompatCheck`.
+   */
+  | 'CompatUnavailable'
   | 'Degraded'
   | 'WorkerFailed'
   | 'WasmFailed'
@@ -39,8 +47,19 @@ export type BootState =
 /** 10 §3.2: the compat machine's mode is a session variable the boot machine carries. */
 export type CompatMode = 'full' | 'restricted' | 'read-only-incompatible';
 
-/** The boot error codes 10 §3.1 names. Only `FE-BOOT-003` is terminal. */
-export type BootErrorCode = 'FE-BOOT-001' | 'FE-BOOT-002' | 'FE-BOOT-003' | 'FE-BOOT-004';
+/**
+ * The error codes 10 §3.1's machine names. Only `FE-BOOT-003` is terminal.
+ *
+ * `FE-COMPAT-003` is the one member outside the `FE-BOOT` family, and it is here because
+ * §3.1 gained a state for it: the type is *the codes this machine can record*, not the codes
+ * whose names begin with `FE-BOOT`.
+ */
+export type BootErrorCode =
+  | 'FE-BOOT-001'
+  | 'FE-BOOT-002'
+  | 'FE-BOOT-003'
+  | 'FE-BOOT-004'
+  | 'FE-COMPAT-003';
 
 export type BootEvent =
   | { type: 'shell-parsed' }
@@ -57,6 +76,8 @@ export type BootEvent =
   | { type: 'genesis-matches' }
   | { type: 'genesis-mismatch' } //                      FE-BOOT-003, terminal
   | { type: 'compat-classified'; mode: CompatMode }
+  | { type: 'compat-unavailable' } //                    FE-COMPAT-003, non-terminal
+  | { type: 'compat-retry' } //                          the §3.1 backoff, 1s -> 60s
   | { type: 'health-degraded' }
   | { type: 'health-recovered' }
   | { type: 'newer-release-loaded' }
@@ -175,9 +196,21 @@ export function reduce(session: BootSession, event: BootEvent): BootSession {
       // The compat classifier is a lattice, not a boolean (10 §5.2): a partial pass boots
       // *directly* into restricted with named disabled surfaces rather than claiming
       // Ready and failing lazily.
-      return event.type === 'compat-classified'
-        ? at(COMPAT_TARGET[event.mode], { compat: event.mode })
+      if (event.type === 'compat-classified') {
+        return at(COMPAT_TARGET[event.mode], { compat: event.mode });
+      }
+      // The probe could not complete. **`compat` is cleared, not left**: §3.2 forbids
+      // carrying a previously established mode across a check the client was unable to
+      // make, and this arm is the only place the machine can hold a stale one.
+      return event.type === 'compat-unavailable'
+        ? at('CompatUnavailable', { compat: undefined, lastError: 'FE-COMPAT-003' })
         : session;
+
+    case 'CompatUnavailable':
+      // Non-terminal by ruling: the client retries into `CompatCheck` on the same backoff
+      // `SyncDegraded` uses. Nothing else moves it, and it names no disabled surface on the
+      // way out because nothing was examined.
+      return event.type === 'compat-retry' ? at('CompatCheck', { lastError: undefined }) : session;
 
     case 'Ready':
     case 'ReadyRestricted':
@@ -198,29 +231,55 @@ export function reduce(session: BootSession, event: BootEvent): BootSession {
   }
 }
 
-/** Every (from, to) edge this reducer can take. The diagram in 10 §3.1 must equal it. */
+/**
+ * Every (from, to) edge this reducer can take. The diagram in 10 §3.1 must equal it.
+ *
+ * **Both lists below are exhaustive by the compiler, not by hand (2026-08-08).** They were
+ * plain arrays until the SQ-1011 ruling added `CompatUnavailable` and two events: the suite
+ * that binds this function to §3.1's diagram reported the two new edges as missing, and it
+ * would have reported nothing at all had the state been added here and the events forgotten.
+ * A hand-kept enumeration of a closed union is a check that stops checking the moment the
+ * union grows, so each is keyed by the union itself and a missing member fails to compile.
+ */
 export function transitionEdges(): readonly (readonly [BootState, BootState])[] {
-  const states: BootState[] = [
-    'ShellLoaded', 'StorageOpen', 'WorkerSpawn', 'ChainStarting', 'RelaySyncing',
-    'ParaSyncing', 'SyncDegraded', 'IdentityCheck', 'CompatCheck', 'Ready',
-    'ReadyRestricted', 'ReadOnlyIncompatible', 'Degraded', 'WorkerFailed',
-    'WasmFailed', 'WrongChain',
-  ];
-  const events: BootEvent[] = [
-    { type: 'shell-parsed' }, { type: 'storage-open' }, { type: 'storage-failed' },
-    { type: 'worker-up' }, { type: 'worker-failed' }, { type: 'relay-added' },
-    { type: 'wasm-failed' }, { type: 'relay-finality-verified' }, { type: 'peers-lost' },
-    { type: 'peer-acquired' }, { type: 'first-finalized-para-head' },
-    { type: 'genesis-matches' }, { type: 'genesis-mismatch' },
-    { type: 'compat-classified', mode: 'full' },
-    { type: 'compat-classified', mode: 'restricted' },
-    { type: 'compat-classified', mode: 'read-only-incompatible' },
-    { type: 'health-degraded' }, { type: 'health-recovered' },
-    { type: 'newer-release-loaded' }, { type: 'user-retry' },
-  ];
+  const everyState: Record<BootState, true> = {
+    ShellLoaded: true, StorageOpen: true, WorkerSpawn: true, ChainStarting: true,
+    RelaySyncing: true, ParaSyncing: true, SyncDegraded: true, IdentityCheck: true,
+    CompatCheck: true, Ready: true, ReadyRestricted: true, ReadOnlyIncompatible: true,
+    CompatUnavailable: true, Degraded: true, WorkerFailed: true, WasmFailed: true,
+    WrongChain: true,
+  };
+  // One entry per event *type*, holding every payload worth driving. `compat-classified`
+  // carries a mode, so it holds three; the rest hold themselves.
+  const everyEvent: Record<BootEvent['type'], readonly BootEvent[]> = {
+    'shell-parsed': [{ type: 'shell-parsed' }],
+    'storage-open': [{ type: 'storage-open' }],
+    'storage-failed': [{ type: 'storage-failed' }],
+    'worker-up': [{ type: 'worker-up' }],
+    'worker-failed': [{ type: 'worker-failed' }],
+    'relay-added': [{ type: 'relay-added' }],
+    'wasm-failed': [{ type: 'wasm-failed' }],
+    'relay-finality-verified': [{ type: 'relay-finality-verified' }],
+    'peers-lost': [{ type: 'peers-lost' }],
+    'peer-acquired': [{ type: 'peer-acquired' }],
+    'first-finalized-para-head': [{ type: 'first-finalized-para-head' }],
+    'genesis-matches': [{ type: 'genesis-matches' }],
+    'genesis-mismatch': [{ type: 'genesis-mismatch' }],
+    'compat-classified': [
+      { type: 'compat-classified', mode: 'full' },
+      { type: 'compat-classified', mode: 'restricted' },
+      { type: 'compat-classified', mode: 'read-only-incompatible' },
+    ],
+    'compat-unavailable': [{ type: 'compat-unavailable' }],
+    'compat-retry': [{ type: 'compat-retry' }],
+    'health-degraded': [{ type: 'health-degraded' }],
+    'health-recovered': [{ type: 'health-recovered' }],
+    'newer-release-loaded': [{ type: 'newer-release-loaded' }],
+    'user-retry': [{ type: 'user-retry' }],
+  };
   const edges = new Set<string>();
-  for (const state of states) {
-    for (const event of events) {
+  for (const state of Object.keys(everyState) as BootState[]) {
+    for (const event of Object.values(everyEvent).flat()) {
       const next = reduce({ ...INITIAL_SESSION, state }, event);
       if (next.state !== state) edges.add(`${state}>${next.state}`);
     }

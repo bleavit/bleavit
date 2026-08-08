@@ -129,6 +129,7 @@ test('the wrong-chain leg fails when the client boots anyway', async () => {
     compat: 'classified',
     compatMode: 'full',
     assetHub: undefined,
+    assetHubMode: undefined,
     finalizedHash: GENESIS,
   };
   await assert.rejects(

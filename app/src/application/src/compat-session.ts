@@ -74,10 +74,17 @@ export type DescriptorKey = SupportedRuntime['descriptorKey'];
  * fabrication `classify`'s coverage refusal exists to prevent, one layer up.
  *
  * So it is a separate arm, and consumers fail closed on it: no surface is proven, nothing may
- * be signed. **10 §3.1 gives it no state**, which is a real gap in the boot machine rather
- * than something to invent UX for — a client that reached `CompatCheck` and could not
- * complete it has no edge to take. Raised as **SQ-1011** rather than resolved here; the
- * foreign lattice has the same hole one chain over, which is **SQ-1012**.
+ * be signed.
+ *
+ * **SQ-1011 and SQ-1012 are ruled (2026-08-08), and the ruling ratified this shape rather
+ * than replacing it.** 10 §3.1 now carries the state this arm had no edge for —
+ * `CompatUnavailable`, non-terminal, retrying into `CompatCheck` on the `SyncDegraded`
+ * backoff — under the new error code `FE-COMPAT-003`, and §3.2 says in as many words that its
+ * table has three rows because the lattice has three modes and this outcome is not one of
+ * them. The foreign half needed no contract change at all: 02 §7.7 already blocks the funding
+ * flow on an *"unavailable **or unprobed**"* surface, so the distinction was frozen there
+ * before 10 §5.2 had a name for it. `ForeignMode` therefore keeps five arms and `CompatMode`
+ * three, and the two `unestablished` arms below stay where they are.
  */
 export type CompatVerdict =
   | {
@@ -98,7 +105,36 @@ export type CompatVerdict =
        */
       readonly codeHash: string | undefined;
     }
-  | { readonly kind: 'unestablished'; readonly reason: string };
+  | {
+      readonly kind: 'unestablished';
+      /**
+       * 10 §9.4's code for a verdict that could not be reached, added with the SQ-1011 /
+       * SQ-1012 ruling. A literal type rather than a `string`, so a site that omits it or
+       * writes another code does not compile — the code is a property of the arm, not a
+       * convention each construction site is trusted to follow.
+       */
+      readonly code: 'FE-COMPAT-003';
+      readonly reason: string;
+    }
+  | {
+      /**
+       * The boot never reached `CompatCheck`, so no probe was even attempted.
+       *
+       * **Distinct from `unestablished`, and the distinction is the error code (R-6 review,
+       * 2026-08-08).** 10 §3.1 draws the only edge into `CompatUnavailable` from
+       * `CompatCheck`, and that state's published recovery is *"retries into `CompatCheck`"*.
+       * A release that pins no chain spec, or bundles no worker, satisfies neither: there is
+       * nothing to retry, and the conditions are `FE-BOOT-001` / `FE-BOOT-002` /
+       * `FE-BOOT-004`, which the **session** owns and this verdict does not. Stamping
+       * `FE-COMPAT-003` on it would publish a recovery the client cannot perform, which is
+       * the same shape of defect as a mode claimed about a runtime nothing read.
+       *
+       * So this arm carries **no code**. The reasons come from the session, and the caller
+       * that has one should render those rather than anything from here.
+       */
+      readonly kind: 'not-attempted';
+      readonly reason: string;
+    };
 
 /** The same distinction for the foreign verdict — 02 §7.7, §13 rule 8. Never merged. */
 export type ForeignVerdict =
@@ -108,7 +144,17 @@ export type ForeignVerdict =
       /** As {@link CompatVerdict}: the runtime examined, or `undefined` where none was. */
       readonly codeHash: string | undefined;
     }
-  | { readonly kind: 'unestablished'; readonly reason: string };
+  | {
+      readonly kind: 'unestablished';
+      /**
+       * 10 §9.4's code for a verdict that could not be reached, added with the SQ-1011 /
+       * SQ-1012 ruling. A literal type rather than a `string`, so a site that omits it or
+       * writes another code does not compile — the code is a property of the arm, not a
+       * convention each construction site is trusted to follow.
+       */
+      readonly code: 'FE-COMPAT-003';
+      readonly reason: string;
+    };
 
 /** A pulled compat surface and the transient client behind it, which the caller closes. */
 export interface PulledSurface {
@@ -259,6 +305,7 @@ export async function classifyLocalRuntime(deps: CompatProbeDeps): Promise<Compa
   if (runtime === undefined) {
     return {
       kind: 'unestablished',
+      code: 'FE-COMPAT-003',
       reason:
         'This client could not read which runtime the chain is on, so no surface has been ' +
         'checked. Nothing is treated as available and nothing can be signed (10 §5.2, INV-FE-12).',
@@ -278,6 +325,7 @@ export async function classifyLocalRuntime(deps: CompatProbeDeps): Promise<Compa
   if (descriptorKey === undefined) {
     return {
       kind: 'unestablished',
+      code: 'FE-COMPAT-003',
       reason:
         `Runtime ${runtime.specVersion} is listed as supported but names no descriptor set, ` +
         'so there is nothing to compare this release against (10 §5.1).',
@@ -290,6 +338,7 @@ export async function classifyLocalRuntime(deps: CompatProbeDeps): Promise<Compa
   } catch (error) {
     return {
       kind: 'unestablished',
+      code: 'FE-COMPAT-003',
       reason: isAbort(error)
         ? `This client waited for runtime ${runtime.specVersion}'s metadata and gave up. ` +
           'Nothing is treated as available until it can be checked (10 §5.2).'
@@ -304,6 +353,7 @@ export async function classifyLocalRuntime(deps: CompatProbeDeps): Promise<Compa
     if (moved !== undefined) {
       return {
         kind: 'unestablished',
+        code: 'FE-COMPAT-003',
         reason:
           `The runtime changed while this client was checking it (${moved}), so this release ` +
           'cannot say which one it examined. Nothing is treated as available until the check ' +
@@ -319,6 +369,7 @@ export async function classifyLocalRuntime(deps: CompatProbeDeps): Promise<Compa
     if (isReleaseManifestDefect(error)) throw error; // See `isReleaseManifestDefect`.
     return {
       kind: 'unestablished',
+      code: 'FE-COMPAT-003',
       reason:
         `This client could not compare runtime ${runtime.specVersion} against this release: ` +
         `${because(error)}. Nothing is treated as available until it can.`,
@@ -444,6 +495,7 @@ export async function classifyAssetHub(deps: ForeignProbeDeps): Promise<ForeignV
   } catch (error) {
     return {
       kind: 'unestablished',
+      code: 'FE-COMPAT-003',
       reason: isAbort(error)
         ? `${deps.chainLabel} answered, but this client waited for its metadata and gave up. ` +
           'Deposits are unavailable; nothing else in the app is affected (02 §7.7).'
@@ -459,6 +511,7 @@ export async function classifyAssetHub(deps: ForeignProbeDeps): Promise<ForeignV
     if (moved !== undefined) {
       return {
         kind: 'unestablished',
+        code: 'FE-COMPAT-003',
         reason:
           `${deps.chainLabel}'s runtime changed while this client was checking it (${moved}), ` +
           'so this release cannot say which one it examined. Deposits are unavailable until ' +
@@ -474,6 +527,7 @@ export async function classifyAssetHub(deps: ForeignProbeDeps): Promise<ForeignV
     if (isReleaseManifestDefect(error)) throw error; // See `isReleaseManifestDefect`.
     return {
       kind: 'unestablished',
+      code: 'FE-COMPAT-003',
       reason:
         `${deps.chainLabel} answered, but this client could not compare its surfaces against ` +
         `this release: ${because(error)}. Deposits are unavailable; nothing else in the app ` +
