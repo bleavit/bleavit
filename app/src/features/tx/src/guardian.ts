@@ -856,11 +856,13 @@ function playbookBlocks(
 }
 
 /**
- * `PlaybookNotRegistered`, evaluated where the pallet evaluates it.
+ * `PlaybookNotRegistered` — shared by the propose flow and the approve flow.
  *
  * `approve_action` reads `PlaybookRegistered::<T>::get(id)` **after** counting the approval
  * that reaches the threshold, so the guardian this refuses is the fifth one — and the whole
- * extrinsic reverts inside `with_storage_layer`, so their signature buys nothing at all.
+ * extrinsic reverts inside `with_storage_layer`, so their signature buys nothing at all. Both
+ * flows therefore evaluate it, and both do so through this one function: two implementations
+ * of one refusal is how a scope comes apart, which is the defect the caveat list had.
  *
  * All six playbooks are registered at genesis (02 §7.4), which is exactly why an `unread`
  * blocks rather than assuming the common case: *"usually true"* is the shape of every check
@@ -1726,6 +1728,28 @@ export type GuardianProposal =
       readonly trigger: TriggerState;
       readonly expiry: number;
       readonly horizon: HoldHorizon;
+      /**
+       * `Guardian.PlaybookRegistered[id]` — 02 §7.4, contract v30.
+       *
+       * **Inside the arm, and that placement is the enforcement.** On the approve side the
+       * power is decoded from somebody else's bytes, so the evidence arrives beside it and
+       * `playbookBlocks` compares the two. Here the power is the discriminant of a union this
+       * client builds, so the read belongs to the arm exactly as `trigger` and `horizon` do —
+       * and the four non-activation arms have **no field** to carry it. A `pause_intake`
+       * proposal therefore cannot be blocked by a playbook read, because there is nowhere to
+       * put one. That was a runtime scope test on the approve side; here it is a type error
+       * (`tests/firewall/fixtures/playbook-reads-on-a-non-activation.ts`).
+       */
+      readonly registration: RegistrationReading;
+      /**
+       * `Guardian.ActivePlaybooks` — 02 §7.4, contract v30.
+       *
+       * Read for **every** activation and consulted for `PB-LEDGER-FREEZE` alone. Supplying it
+       * unconditionally is not the same as blocking on it: `activeRecordBlocks` is the single
+       * place the narrowing lives, shared with the approve flow, so the propose side cannot
+       * grow its own answer to *"does presence block?"* and drift from it.
+       */
+      readonly active: ActivePlaybookReading;
     }
   | {
       readonly power: 'suspend_on_gate';
@@ -1796,10 +1820,19 @@ export interface ProposeInputs {
  * compared. Splitting a check across two functions that see different halves of one action is
  * how *"nothing evaluated it"* survives a review that reads both functions.
  *
- * The blocks below are every refusal `guardian_core::check_and_consume` can raise for a power,
- * plus the justification argument. §11.8.2's propose row names two preconditions (allowance,
- * and the activation trigger) while the runtime enforces more; the extra ones are implemented
- * fail-closed and the gap is raised rather than assumed away.
+ * The blocks below are every refusal the *dispatch* of this power can raise — which is more
+ * than `check_and_consume`, because `dispatch` and `approve_action` each add one frame above
+ * it. §11.8.2's propose row names two preconditions (allowance, and the activation trigger)
+ * while the runtime enforces more; the extra ones are implemented fail-closed and the gap is
+ * raised rather than assumed away.
+ *
+ * **"The runtime does not check it at propose time" is not a reason to omit a refusal here,**
+ * and this function already settled that: it blocks `PB-MIGRATION` although `propose_action`
+ * validates nothing on chain, because 06 §6.2 guarantees the fifth approval reverts and
+ * records nothing. `PlaybookNotRegistered` and `PlaybookAlreadyActive` are the same situation
+ * with the same cost, so they are evaluated here too (contract v30). A propose flow that
+ * models every other dispatch refusal and stays blind to two of them is not a narrower client,
+ * it is an inconsistent one.
  */
 export function proposalBlocks(inputs: ProposeInputs): readonly GuardianBlock[] {
   const blocks: GuardianBlock[] = [];
@@ -1832,6 +1865,19 @@ export function proposalBlocks(inputs: ProposeInputs): readonly GuardianBlock[] 
       const named = triggerOf(proposal.trigger);
       const refusal = triggerRefusal(proposal.trigger);
       if (refusal !== undefined) blocks.push({ check: 'Trigger condition', detail: refusal });
+      // **Contract v30's two reads, on the propose flow as well as the approve flow.** The
+      // runtime raises `PlaybookNotRegistered` and `PlaybookAlreadyActive` on the *dispatching*
+      // approval and checks neither at propose time — and that is not a defence, because it
+      // checks `PB-MIGRATION`'s empty call set at propose time either, and this function blocks
+      // that. The cost is identical and it is the one §11.4 rule 1 exists to prevent: a council
+      // walked through five signatures to an extrinsic that reverts whole.
+      //
+      // The same two helpers as `playbookBlocks`, not a second pair. Their scoping is the part
+      // that is easy to get wrong — registration applies to the playbook this activation names,
+      // the active-record refusal to `PB-LEDGER-FREEZE` alone, and an unread record set narrows
+      // with it — so there is one implementation of each and no propose-side copy to drift.
+      blocks.push(...registrationBlocks(proposal.id, proposal.registration));
+      blocks.push(...activeRecordBlocks(proposal.id, proposal.active));
       // The pairing the chain checks as `BadPlaybookTrigger`. A client holding the trigger
       // enum and not this map walks a council through five signatures on a refusal — and
       // because `target` is derived from this same reading, the pairing also settles the

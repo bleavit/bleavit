@@ -1175,11 +1175,19 @@ test('an unreadable obligation names an OPEN spec question, and blocking ones cl
   );
   // O-3 (SQ-1030), contract v30: the two maps `approve_action` and `dispatch` refuse on.
   assert.deepEqual(blockingObligationsFor('O-3'), [], 'S15 is still closed on a resolved question');
-  for (const surface of ['storage.guardian.playbook_registered', 'storage.guardian.active_playbooks'] as const) {
-    assert.ok(
-      rowsFor('O-3', 'USDC').some((clause) => clause.surface === surface),
-      `O-3 declares no ${surface} clause, so its check was retired rather than replaced`,
-    );
+  // **Both guardian rows, not only the approve one.** The refusals fall on the dispatching
+  // approval and the runtime checks neither at propose time — which is exactly what it does
+  // with `PB-MIGRATION`'s empty admissible call set, and the client blocks that at propose
+  // time because 06 §6.2 guarantees the fifth approval reverts and records nothing. Same cost,
+  // same signatures; a propose row declaring every other dispatch input and not these two
+  // leaves them undeclared, which `clauseGroupsFor` reports as vacuously passed.
+  for (const row of ['O-3', 'O-4'] as const) {
+    for (const surface of ['storage.guardian.playbook_registered', 'storage.guardian.active_playbooks'] as const) {
+      assert.ok(
+        rowsFor(row, 'USDC').some((clause) => clause.surface === surface),
+        `${row} declares no ${surface} clause, so its check was retired rather than replaced`,
+      );
+    }
   }
 });
 

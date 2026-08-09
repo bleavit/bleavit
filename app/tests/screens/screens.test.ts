@@ -2880,7 +2880,15 @@ const RERUNNABLE = (state: ProposalStateName = 'Queued'): RerunState => ({
   kind: 'read', state: finalized(state), rerun: finalized(false), delayedOnce: finalized(false),
 });
 
-/** One complete proposal per power, defaulting to the state in which it is admissible. */
+/**
+ * One complete proposal per power, defaulting to the state in which it is admissible.
+ *
+ * `registration` and `active` default to the admissible pair (registered, nothing active), so
+ * every incumbent propose test stays a *clean-path* test. That default is exactly the hazard
+ * the approve side hit: a suite whose fixture is always registered cannot tell the check from
+ * its absence, so the propose-side refusals are asserted on their own fixtures below (V30-14,
+ * V30-15) rather than being assumed to ride along.
+ */
 const ACTIVATION = (over: Partial<Extract<GuardianProposal, { power: 'activate_playbook' }>> = {}):
   GuardianProposal => ({
   power: 'activate_playbook',
@@ -2888,6 +2896,8 @@ const ACTIVATION = (over: Partial<Extract<GuardianProposal, { power: 'activate_p
   trigger: active('GateBreach'),
   expiry: 9_000,
   horizon: HORIZON,
+  registration: { kind: 'read', registered: finalized(true) },
+  active: { kind: 'read', ids: finalized<readonly PlaybookId[]>([]) },
   ...over,
 });
 
@@ -3752,6 +3762,134 @@ test('V30-12 — admissibility evidence must describe THIS action, in both direc
     ['Playbook admissibility'],
     'an activation with no admissibility evidence must not be approved on checks that did not run',
   );
+});
+
+test('V30-14 — the PROPOSE flow refuses both playbook conditions too, and on the same terms', () => {
+  // The runtime raises `PlaybookNotRegistered` and `PlaybookAlreadyActive` on the *dispatching*
+  // approval and checks neither at propose time. That is not a defence: it checks
+  // `PB-MIGRATION`'s empty admissible call set at propose time either, and `proposalBlocks`
+  // blocks that — because 06 §6.2 guarantees the fifth approval reverts and records nothing.
+  // Identical cost, identical signatures, so identical treatment. A propose flow modelling
+  // every other dispatch refusal and blind to two of them is inconsistent, not narrower.
+  //
+  // The fixture defaults to registered-and-not-active, so each refusal is given its own
+  // fixture here. A suite that only ever proposed an admissible playbook could not tell these
+  // checks from their absence — the same shape that let the approve side's caveat defect hide.
+  const propose = (over: Partial<Extract<GuardianProposal, { power: 'activate_playbook' }>>) =>
+    proposalBlocks(PROPOSE(ACTIVATION(over))).map((b) => b.check);
+
+  assert.deepEqual(propose({}), [], 'the clean path must stay clean');
+  assert.deepEqual(
+    propose({ registration: { kind: 'read', registered: finalized(false) } }),
+    ['Playbook registration'],
+  );
+  assert.deepEqual(
+    propose({ registration: { kind: 'unread', reason: 'the storage read failed' } }),
+    ['Playbook registration'],
+  );
+  // The one playbook whose re-activation `dispatch` refuses. `PB-LEDGER-FREEZE` pairs with
+  // `LedgerDrift` alone, so the trigger moves with the id.
+  assert.deepEqual(
+    propose({
+      id: 'PB-LEDGER-FREEZE',
+      trigger: active('LedgerDrift'),
+      active: { kind: 'read', ids: finalized<readonly PlaybookId[]>(['PB-LEDGER-FREEZE']) },
+    }),
+    ['Playbook already active'],
+  );
+  assert.deepEqual(
+    propose({
+      id: 'PB-LEDGER-FREEZE',
+      trigger: active('LedgerDrift'),
+      active: { kind: 'unread', reason: 'the storage read failed' },
+    }),
+    ['Playbook already active'],
+  );
+});
+
+test('V30-15 — a propose of another playbook is never blocked by the ledger-freeze record', () => {
+  // Constraint 2 of the O-3 scoping, restated on the propose side because the code path is a
+  // different one: presence blocks `PB-LEDGER-FREEZE` alone, and an **unread** record set
+  // narrows with it. Every other playbook renews by re-activation while its trigger holds
+  // (06 §6.2), so blocking those refuses five lawful renewals — 02 §7.4's own sentence.
+  const renewals: readonly (readonly [PlaybookId, PlaybookTrigger])[] = [
+    ['PB-DEPEG', 'DepegMedian'],
+    ['PB-MIGRATION', 'MigrationHalt'],
+    ['PB-ORACLE-VOID', 'OracleDeadlock'],
+    ['PB-HALT-INTAKE', 'GateBreach'],
+    ['PB-RESERVE', 'ReserveHealth'],
+  ];
+  assert.equal(renewals.length, 5, '02 §7.4 counts exactly these five');
+  for (const [id, trigger] of renewals) {
+    for (const reading of [
+      { kind: 'read', ids: finalized<readonly PlaybookId[]>([id, 'PB-LEDGER-FREEZE']) },
+      { kind: 'unread', reason: 'the storage read failed' },
+    ] as const) {
+      const blocks = proposalBlocks(
+        PROPOSE(ACTIVATION({ id, trigger: active(trigger), active: reading })),
+      );
+      assert.ok(
+        !blocks.some((block) => block.check === 'Playbook already active'),
+        `${id} (${reading.kind}) renews in place; blocking it refuses what the chain accepts`,
+      );
+    }
+  }
+  // Anti-vacuity: the identical `read` set DOES block the one playbook it is about, so the
+  // loop above is not passing because the check has been switched off.
+  assert.deepEqual(
+    proposalBlocks(
+      PROPOSE(
+        ACTIVATION({
+          id: 'PB-LEDGER-FREEZE',
+          trigger: active('LedgerDrift'),
+          active: { kind: 'read', ids: finalized<readonly PlaybookId[]>(['PB-LEDGER-FREEZE']) },
+        }),
+      ),
+    ).map((b) => b.check),
+    ['Playbook already active'],
+  );
+});
+
+test('V30-16 — the four non-activation powers have NO field for a playbook read', () => {
+  // Constraint 1, made structural rather than checked. On the approve side the power is
+  // decoded from somebody else's bytes, so the evidence travels beside it and `playbookBlocks`
+  // compares them. Here the power is the discriminant of a union this client builds, so the
+  // reads are fields of the `activate_playbook` arm — and a `pause_intake` proposal cannot be
+  // blocked by a playbook read because there is nowhere to put one.
+  //
+  // The compiler owns that (`tests/firewall/fixtures/playbook-reads-on-a-non-activation.ts`).
+  // What is asserted here is the behaviour it guarantees: the other four powers propose
+  // cleanly while the record set holds the very entry that blocks an activation.
+  assert.deepEqual(
+    proposalBlocks(
+      PROPOSE({ power: 'pause_intake', meter: METER('pause_intake'), until: 5_000, horizon: HORIZON }),
+    ),
+    [],
+  );
+  assert.deepEqual(
+    proposalBlocks(
+      PROPOSE({ power: 'delay_once', meter: METER('delay_once'), pid: 'p1', proposal: RERUNNABLE() }),
+    ),
+    [],
+  );
+  assert.deepEqual(
+    proposalBlocks(
+      PROPOSE({ power: 'force_rerun', meter: METER('force_rerun'), pid: 'p1', proposal: RERUNNABLE() }),
+    ),
+    [],
+  );
+  assert.deepEqual(
+    proposalBlocks(PROPOSE({ power: 'suspend_on_gate', gate: gateReading() })),
+    [],
+  );
+  // The arms carry no such key at runtime either, so nothing could read one off them by name.
+  for (const proposal of [
+    { power: 'pause_intake', meter: METER('pause_intake'), until: 5_000, horizon: HORIZON },
+    { power: 'suspend_on_gate', gate: gateReading() },
+  ] as const) {
+    assert.ok(!('registration' in proposal), proposal.power);
+    assert.ok(!('active' in proposal), proposal.power);
+  }
 });
 
 test('V30-13 — O-3 declares both frozen maps and cites SQ-1030 nowhere', () => {

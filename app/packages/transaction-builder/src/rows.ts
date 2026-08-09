@@ -971,6 +971,22 @@ const O4: readonly PreconditionClause[] = [
   clause('O-4', 'the pause_intake allowance per window is read at B′', 'constant.guardian.pause_intake_allowance', 'constant', 'chain', { key: 'allowance-limit-pause-intake' }),
   clause('O-4', 'the pause_intake allowance window length is read at B′', 'constant.guardian.pause_intake_allowance_window_epochs', 'constant', 'chain', { key: 'allowance-window-pause-intake' }),
   clause('O-4', 'the epoch the pause_intake window is measured from', 'storage.epoch.epoch_of', 'storage', 'chain', { key: 'allowance-window-epoch' }),
+  // **The two playbook reads, on the propose row as well as the approve row (contract v30).**
+  // The runtime raises `PlaybookNotRegistered` and `PlaybookAlreadyActive` on the *dispatching*
+  // approval and checks neither here — which is exactly what it does with `PB-MIGRATION`'s
+  // empty admissible call set, and this client blocks that at propose time because 06 §6.2
+  // guarantees the fifth approval reverts and records nothing. Same cost, same signatures, so
+  // the same treatment: a propose row declaring every other dispatch input and not these two
+  // leaves them undeclared, and `clauseGroupsFor` reports an undeclared read as vacuously
+  // passed.
+  //
+  // Declared unconditionally, like O-4's trigger clauses and for the same reason stated above
+  // them: the row is fixed, so a preparation cannot narrow its clause list to the power the
+  // form happens to have open. What is scoped is the *refusal*, and `GuardianProposal` scopes
+  // it structurally — the two reads are fields of the `activate_playbook` arm, so the other
+  // four powers have nowhere to carry one.
+  clause('O-4', 'the playbook an activation names is registered on this chain', 'storage.guardian.playbook_registered', 'storage', 'chain', { key: 'playbook-registered' }),
+  clause('O-4', 'no PB-LEDGER-FREEZE record is already active', 'storage.guardian.active_playbooks', 'storage', 'chain', { key: 'playbook-not-already-active' }),
   // **The propose-side bound, which is this row's own and was declared on the approve row
   // instead (SQ-1022).** `guardian_core::propose_action` refuses when `pending.len() >= 64`,
   // so the count is a *propose* precondition; O-3 declared `PendingActions` because an
