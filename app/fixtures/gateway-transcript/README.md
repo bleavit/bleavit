@@ -27,7 +27,7 @@ operator configuration, exactly as `tools/monitoring/attestation_monitor.py` alr
 
 | File | What it is |
 |---|---|
-| `honest.json` | Two gateways, both serving the signed tree correctly |
+| `honest.json` | Two gateways, both serving the signed tree correctly, under both 12 §1.2 manifests |
 | `tampered-gateway.json` | The same, except `beta` serves an altered `assets/app.js` |
 | `refused-status.json` | The same, except `beta` answers 404 with the **correct** bytes |
 | `release.json` | The release document those transcripts serve, kept beside them for readability |
@@ -44,20 +44,38 @@ reason: the counting only ever ran against a document shape this repository does
 | File | What it is |
 |---|---|
 | `cli-release.json` | The document `tools/release/release-json.ts` really builds, patched as 12 §1.2's second pass patches it. It names **no** signature or attestation transactions, because it cannot: 12 §2.1 signs its own bytes, so an id written back into it invalidates every signature over it |
-| `cli-honest.json` | Two gateways serving that document, its tree, its **path manifest**, and the four credential transactions 12 §1.4 gate 4 publishes in the release notes |
+| `cli-honest.json` | Two gateways serving that document, its tree, **both** 12 §1.2 path manifests, and the four credential transactions 12 §1.4 gate 4 publishes in the release notes |
 | `cli-extra-payload.json` | The same, except `beta` lists and serves one extra file nobody signed. Nothing pinned is missing or altered, which is why a fetch loop driven by the signed map reports it clean |
+| `cli-final-poisoned.json` | The same, except the **repointed** manifest `M′` serves application code nobody signed. `M` — the address `release.json` pins — is impeccable |
+| `cli-final-substituted.json` | The same, except `M′` resolves `release.json` to a sibling nobody signed. Its bytes are the signed document's, so only the address differs |
+| `cli-final-omits-release-json.json` | The same, except `M′` contains no `release.json` at all — the release naming a manifest that does not contain it |
 | `cli-local-tree/` | The `--local dist/` side of §1.3's command: the tree a third party built |
 
-`cli-honest.json` also serves a **second manifest address** carrying the release's own bytes at
-the release's own paths. It is not a tampered tree — every file under it verifies — and it is
-the only way to ask whether `compare` binds the manifest it was pointed at to the one
-`release.json` pins.
+### The two manifest addresses
+
+12 §1.2 produces two, and says the verification CLI checks both. Every transcript here serves
+all three of them:
+
+- **`M`** (`MMM…`) — the asset-tree manifest `release.json` pins. What the release *authorized*.
+- **`M′`** (`FFF…`) — the manifest the ArNS name is repointed to, which is `M` plus the
+  `release.json` sibling. What a browser *loads*.
+- An **impostor** (`NNN…`) serving the release's own bytes at the release's own paths. Not a
+  tampered tree — every file under it verifies — and the only way to ask whether `compare`
+  binds the manifest it was pointed at to the one `release.json` pins.
+
+The three `cli-final-*` transcripts exist because that pair can disagree: each serves the
+signed bytes at every path of `M`, so a verifier that stops at the pinned address prints
+`MATCH` for a release whose users are being handed something else.
 
 The path manifests carry `manifest`, `version`, `index` and `paths` because a real one does.
-Only the `paths` **keys** are read, by `fetchManifestPaths` here and by
-`tools/monitoring/attestation_monitor.py`, which has consumed the same key since O5. The
-per-path `id` values are placeholders nothing resolves, so the fixture still claims nothing
-about what a gateway *does* with a manifest — which is the half FE-P7 leaves open.
+The `paths` **keys** are read by `fetchManifestPaths` here and by
+`tools/monitoring/attestation_monitor.py`, which has consumed the same key since O5. One
+per-path `id` is read and only one: `M′`'s entry for `release.json`, which must be the
+transaction the signatures were verified over. The rest are placeholders nothing resolves, and
+`M` and `M′` deliberately carry **different** ones for the shared paths — whether an uploader
+mints new data items when the second pass re-uploads identical bytes is inside FE-P7's open
+`[VERIFY]`, so a fixture whose two manifests agreed on ids would invite a checker to compare
+them and pass, which is an assumption about the uploader wearing a green test.
 
 Nothing here is a key, a person or an organization of this project. The real registry is
 [`app/tools/release/sources/signers.json`](../../tools/release/sources/signers.json) and it is

@@ -34,9 +34,12 @@
  * `tools/monitoring/attestation_monitor.py` already takes in its own config — and a template
  * missing a field it must interpolate is refused rather than fetched.
  *
- * **How to resolve the name.** §1.3's command takes `--arweave <manifest-txid>`, so resolution
- * is not part of this subcommand at all. Resolving `futarchy` across gateways and comparing the
- * answers is §5.2's out-of-band monitor's job, and that tool does it.
+ * **How to resolve the name.** §1.3's command takes the manifest addresses as arguments, so
+ * resolution is not part of this subcommand at all. Resolving `futarchy` across gateways and
+ * comparing the answers is §5.2's out-of-band monitor's job, and that tool does it. What this
+ * module *does* check is that the address a caller says the name points at contains the tree
+ * the release signed — the two are different questions, and only the second is decidable from
+ * bytes alone.
  *
  * ## The comparison is the app's own
  *
@@ -60,6 +63,18 @@ import { ATTESTATION_FLOOR, VerifyError, releaseSignatureFrom, releaseVerdict } 
 
 /** §1.3's "fetches via ≥ 2 gateways". Stated as a constant so the refusal can cite it. */
 export const GATEWAY_FLOOR = 2;
+
+/**
+ * The one path 12 §1.2's second pass adds — the difference between `M` and `M′`.
+ *
+ * Named once because three separate decisions turn on it: the final manifest MUST list it,
+ * MUST resolve it to the transaction whose bytes the signatures are over, and MUST otherwise
+ * list exactly what the asset manifest lists.
+ */
+export const RELEASE_JSON_PATH = 'release.json';
+
+/** An Arweave transaction id: 43 base64url characters, as `arweave.ts` writes them. */
+const TXID = /^[A-Za-z0-9_-]{43}$/;
 
 export interface GatewayResponse {
   readonly status: number;
@@ -202,6 +217,17 @@ export async function fetchTransaction(
 export interface ManifestEnumeration {
   /** Every path the manifest lists, sorted. Empty when it could not be read. */
   readonly paths: readonly string[];
+  /**
+   * Path to the transaction the manifest resolves it to, for every entry carrying a
+   * well-formed id.
+   *
+   * Read for **one** binding and deliberately no more: 12 §1.2's final manifest must resolve
+   * `release.json` to the sibling transaction whose bytes the signatures are over. The other
+   * paths' ids are never compared between the two manifests, because whether an uploader
+   * mints new data items when the second pass re-uploads identical bytes is inside FE-P7's
+   * open `[VERIFY]` — and a checker that assumed either answer would be resolving it.
+   */
+  readonly entries: Readonly<Record<string, string>>;
   /** Why it could not be read. A finding carried into the verdict, never a silent skip. */
   readonly failure?: string;
 }
@@ -241,6 +267,7 @@ export async function fetchManifestPaths(
   } catch (error) {
     return {
       paths: [],
+      entries: {},
       failure: `${gateway.name} would not serve the path manifest ${manifestTxid}, so it was not checked for files nobody signed: ${message(error)}`,
     };
   }
@@ -250,6 +277,7 @@ export async function fetchManifestPaths(
   } catch (error) {
     return {
       paths: [],
+      entries: {},
       failure: `${gateway.name} served a path manifest that is not JSON: ${message(error)}`,
     };
   }
@@ -257,20 +285,123 @@ export async function fetchManifestPaths(
   if (!isRecord(paths) || Object.keys(paths).length === 0) {
     return {
       paths: [],
+      entries: {},
       failure: `${gateway.name} served a path manifest with no paths object, so the files it lists are unknown`,
     };
   }
   const names: string[] = [];
-  for (const name of Object.keys(paths)) {
+  const entries: Record<string, string> = {};
+  for (const [name, entry] of Object.entries(paths)) {
     if (name.length === 0 || name.split('/').includes('..')) {
       return {
         paths: [],
+        entries: {},
         failure: `${gateway.name}'s path manifest lists ${JSON.stringify(name)}, which is not a release-relative path`,
       };
     }
     names.push(name);
+    const id = isRecord(entry) ? entry['id'] : undefined;
+    // A malformed id is left out rather than recorded as an address. The only consumer is the
+    // `release.json` binding below, which reports an absent entry in its own words — so a
+    // manifest with no usable id for that path fails there, and never by comparing `undefined`
+    // against a transaction that happens to be missing too.
+    if (typeof id === 'string' && TXID.test(id)) entries[name] = id;
   }
-  return { paths: names.sort() };
+  return { paths: names.sort(), entries };
+}
+
+/** The two manifest addresses 12 §1.2 produces, as one gateway answered for them. */
+export interface FinalManifestInputs {
+  readonly gateway: string;
+  /** `M` — what `release.json` pins, as this gateway lists it. */
+  readonly assets: ManifestEnumeration;
+  /** `M′` — what the ArNS name is repointed to, as this gateway lists it. */
+  readonly final: ManifestEnumeration;
+  readonly assetManifestTxid: string;
+  readonly finalManifestTxid: string;
+  /** The transaction whose bytes were fetched and whose hash the signatures are over. */
+  readonly releaseJsonTxid: string;
+}
+
+/**
+ * Bind `M′` to `M` and to the signed `release.json` transaction — 12 §1.2.
+ *
+ * §1.2 says the verification CLI checks **both** addresses, and the two checks are not the
+ * same check twice. `M` is what the release *authorized*: comparing it against the pin is what
+ * makes a manifest serving the right bytes at the wrong address unusable. `M′` is what the
+ * name *serves*: it is the address a user's browser resolves, so a release whose `M` is
+ * impeccable and whose `M′` carries a payload is a release every user runs the payload from.
+ *
+ * Three claims are decidable here without assuming anything about gateway or uploader
+ * behaviour, and each is 12 §1.2's own arithmetic:
+ *
+ * 1. `M′` lists `release.json`. §1.2's second pass exists to put it there; a manifest without
+ *    it leaves the release pinning a manifest that does not contain it.
+ * 2. `M′` resolves that path to the transaction the signatures were verified over. Equal bytes
+ *    are not the same claim — `arweave.ts` records why the driver passes the *address* to the
+ *    second `uploadTree` — and a byte comparison structurally cannot see the difference.
+ * 3. `M′` lists exactly what `M` lists, plus that one path. A path only one of them carries is
+ *    a tree the release did not sign in whichever direction it differs.
+ *
+ * What is **not** claimed: that the two manifests resolve the shared paths to the same
+ * transactions. The second pass re-uploads the tree, and whether identical bytes yield
+ * identical data items is FE-P7's open `[VERIFY]`. Those paths are checked where the check
+ * needs no such answer — by fetching them through `M′` and hashing what comes back.
+ */
+export function finalManifestFindings(inputs: FinalManifestInputs): string[] {
+  const { gateway, assets, final, assetManifestTxid, finalManifestTxid, releaseJsonTxid } = inputs;
+  const findings: string[] = [];
+  if (final.failure !== undefined) {
+    // The unreadable manifest is already carried as a fetch failure; what is added here is
+    // that the binding was therefore not performed. Silence would read as performed and clean.
+    return [
+      `${gateway} did not answer for the final manifest ${finalManifestTxid}, so 12 §1.2's ` +
+        'second address was not checked at all',
+    ];
+  }
+  if (assets.failure !== undefined) {
+    return [
+      `${gateway} did not answer for the asset manifest ${assetManifestTxid}, so the two ` +
+        'manifests 12 §1.2 requires checking could not be compared',
+    ];
+  }
+
+  const servedReleaseJson = final.entries[RELEASE_JSON_PATH];
+  if (servedReleaseJson === undefined) {
+    findings.push(
+      `${gateway}'s final manifest ${finalManifestTxid} lists no ${RELEASE_JSON_PATH} with a ` +
+        'usable transaction id (12 §1.2). The second pass exists to put it there, so the ' +
+        'release names a manifest that does not contain it.',
+    );
+  } else if (servedReleaseJson !== releaseJsonTxid) {
+    findings.push(
+      `${gateway}'s final manifest ${finalManifestTxid} resolves ${RELEASE_JSON_PATH} to ` +
+        `${servedReleaseJson}, and the signatures verified here are over ${releaseJsonTxid} ` +
+        '(12 §1.2). Two transactions carrying the same bytes today are two objects tomorrow, ' +
+        'which is why the manifest binds the address rather than the content.',
+    );
+  }
+
+  const expected = new Set([...assets.paths, RELEASE_JSON_PATH]);
+  const listed = new Set(final.paths);
+  for (const path of [...expected].sort()) {
+    if (path === RELEASE_JSON_PATH && servedReleaseJson === undefined) continue;
+    if (!listed.has(path)) {
+      findings.push(
+        `${gateway}'s final manifest ${finalManifestTxid} does not list ${path}, which the ` +
+          `asset manifest ${assetManifestTxid} does (12 §1.2)`,
+      );
+    }
+  }
+  for (const path of [...listed].sort()) {
+    if (!expected.has(path)) {
+      findings.push(
+        `${gateway}'s final manifest ${finalManifestTxid} lists ${path}, which the asset ` +
+          `manifest ${assetManifestTxid} does not (12 §1.2)`,
+      );
+    }
+  }
+  return findings;
 }
 
 /**
@@ -286,13 +417,27 @@ export async function fetchGatewayTree(
   gateway: Gateway,
   manifestTxid: string,
   signedPaths: readonly string[],
-): Promise<ServedTree> {
+): Promise<GatewayTree> {
   const enumerated = await fetchManifestPaths(get, gateway, manifestTxid);
   const paths = [...new Set([...signedPaths, ...enumerated.paths])].sort();
-  const tree = await fetchServedTree(get, gateway, manifestTxid, paths);
-  return enumerated.failure === undefined
-    ? tree
-    : { ...tree, failures: [...tree.failures, enumerated.failure] };
+  const served = await fetchServedTree(get, gateway, manifestTxid, paths);
+  const tree =
+    enumerated.failure === undefined
+      ? served
+      : { ...served, failures: [...served.failures, enumerated.failure] };
+  return { tree, manifest: enumerated };
+}
+
+/**
+ * One gateway's answer about one manifest: the bytes it served, and what it listed.
+ *
+ * The enumeration is returned rather than consumed here because 12 §1.2 has **two** manifests
+ * and the caller must compare them. Deriving it twice would fetch the same document twice and,
+ * worse, let the two readings disagree.
+ */
+export interface GatewayTree {
+  readonly tree: ServedTree;
+  readonly manifest: ManifestEnumeration;
 }
 
 /**
@@ -303,11 +448,12 @@ export async function fetchGatewayTree(
  * verifier which one to stop using. A file both serve identically and wrongly is still caught,
  * by the map — so this check adds the case the map cannot name.
  */
-export function crossGatewayFindings(trees: readonly ServedTree[]): string[] {
+export function crossGatewayFindings(trees: readonly ServedTree[], label = ''): string[] {
   const findings: string[] = [];
+  const where = label === '' ? '' : `${label}: `;
   if (trees.length < GATEWAY_FLOOR) {
     findings.push(
-      `${trees.length} gateway(s) answered; 12 §1.3 verifies through at least ${GATEWAY_FLOOR}`,
+      `${where}${trees.length} gateway(s) answered; 12 §1.3 verifies through at least ${GATEWAY_FLOOR}`,
     );
   }
   const paths = new Set<string>();
@@ -323,10 +469,10 @@ export function crossGatewayFindings(trees: readonly ServedTree[]): string[] {
       const detail = [...seen.entries()]
         .map(([hash, names]) => `${names.join('+')}=${hash.slice(0, 12)}`)
         .join(' ');
-      findings.push(`gateways disagree about ${path}: ${detail}`);
+      findings.push(`${where}gateways disagree about ${path}: ${detail}`);
     }
   }
-  for (const tree of trees) findings.push(...tree.failures);
+  for (const tree of trees) for (const failure of tree.failures) findings.push(`${where}${failure}`);
   return findings;
 }
 
@@ -343,7 +489,20 @@ export interface CompareInputs {
   /** The per-file map the release signed, read from that document by `parseReleaseDocument`. */
   readonly perFileHashes: Readonly<Record<string, Sha256Hex>>;
   readonly localHashes: Readonly<Record<string, Sha256Hex>>;
+  /** What each gateway served under `M`, the manifest `release.json` pins (12 §1.2). */
   readonly servedTrees: readonly ServedTree[];
+  /**
+   * What each gateway served under `M′`, the manifest the ArNS name is repointed to.
+   *
+   * Required rather than optional, and that is the whole design: 12 §1.2 says the CLI checks
+   * both addresses, an omitted second one is indistinguishable from a checked one in any
+   * report, and the first repair of this defect bound the pinned address and then never
+   * fetched the served address at all. An empty list is not a way out either — it is `0`
+   * gateways for `M′`, which is below §1.3's floor and fails.
+   */
+  readonly finalTrees: readonly ServedTree[];
+  /** `finalManifestFindings` for every gateway, which the verdict may not come back clean on. */
+  readonly manifestFindings: readonly string[];
   /** 12 §2.2's published registry — the only thing that says who holds which key. */
   readonly entries: readonly RegistryEntry[];
   /** The current keyring generation, from `release.json` and cross-checked against the chain. */
@@ -367,6 +526,16 @@ export interface CompareReport {
   readonly ok: boolean;
   readonly local: SelfCheckResult;
   readonly served: readonly ServedCheck[];
+  /**
+   * The same check over the tree served under `M′`, against the signed map **plus
+   * `release.json`**.
+   *
+   * The extra entry is not a special case that widens what may be served: 12 §1.2 says `M′`
+   * is the signed tree plus that one file, its bytes are the ones fetched by transaction id,
+   * and its hash is what every signature is over. Leaving it out would report the document
+   * itself as a file nobody signed on every healthy release.
+   */
+  readonly finalServed: readonly ServedCheck[];
   readonly gatewayFindings: readonly string[];
   readonly release: Verdict;
   /**
@@ -415,7 +584,19 @@ export function compareRelease(inputs: CompareInputs): CompareReport {
     gateway: tree.gateway,
     check: runSelfCheck({ perFileHashes: inputs.perFileHashes }, tree.hashes),
   }));
-  const gatewayFindings = crossGatewayFindings(inputs.servedTrees);
+  const finalPins = {
+    ...inputs.perFileHashes,
+    [RELEASE_JSON_PATH]: sha256Hex(inputs.releaseJsonBytes),
+  };
+  const finalServed = inputs.finalTrees.map((tree) => ({
+    gateway: tree.gateway,
+    check: runSelfCheck({ perFileHashes: finalPins }, tree.hashes),
+  }));
+  const gatewayFindings = [
+    ...crossGatewayFindings(inputs.servedTrees),
+    ...crossGatewayFindings(inputs.finalTrees, 'final manifest'),
+    ...inputs.manifestFindings,
+  ];
 
   const release = releaseVerdict({
     selfCheck: local,
@@ -429,8 +610,11 @@ export function compareRelease(inputs: CompareInputs): CompareReport {
   });
 
   const ok =
-    release.ok && gatewayFindings.length === 0 && served.every((entry) => entry.check.ok);
-  return { ok, local, served, gatewayFindings, release, unchecked };
+    release.ok &&
+    gatewayFindings.length === 0 &&
+    served.every((entry) => entry.check.ok) &&
+    finalServed.every((entry) => entry.check.ok);
+  return { ok, local, served, finalServed, gatewayFindings, release, unchecked };
 }
 
 /**

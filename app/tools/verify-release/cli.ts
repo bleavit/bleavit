@@ -32,14 +32,17 @@
  *
  * ## What `compare` binds, and why each binding is here
  *
- * Four of them, and each one exists because its absence made some check unable to report the
- * thing it was written for. `tests/release/verify-release-cli.test.ts` drives them as the
- * command rather than through a re-implementation of it, which is how they stayed absent.
+ * Each one exists because its absence made some check unable to report the thing it was
+ * written for. `tests/release/verify-release-cli.test.ts` drives them as the command rather
+ * than through a re-implementation of it, which is how they stayed absent.
  *
- * 1. **The manifest fetched is the manifest the release pins.** 12 §1.2 records `M` in
- *    `release.json` and says the CLI checks both addresses. Without the comparison, pointing
- *    `--arweave` at any other manifest serving the same bytes printed `MATCH` for a content
- *    address the release never authorized.
+ * 1. **Both manifest addresses are checked, because 12 §1.2 produces two.** `--arweave` must
+ *    be the `M` that `release.json` pins: without that comparison, pointing it at any other
+ *    manifest serving the same bytes printed `MATCH` for a content address the release never
+ *    authorized. `--final-manifest` is the `M′` the ArNS name is repointed to — the address a
+ *    browser actually loads — and it is fetched, byte-compared, and bound to the `release.json`
+ *    transaction the signatures are over. Checking only the pin verified a tree nobody loads,
+ *    so a release whose `M` was impeccable and whose `M′` served a payload printed `MATCH`.
  * 2. **The served tree is the union of the signed map and what the manifest lists.** Derive
  *    the fetch list from `perFileHashes` alone and every path fetched is a path the release
  *    signed, so `runSelfCheck`'s **unexpected** finding — the injected payload — can never
@@ -49,6 +52,24 @@
  * 4. **Credentials are named, not inferred.** The producer cannot carry its own signature
  *    transaction ids, so they come from 12 §1.4 gate 4's release notes as `--signature` and
  *    `--attestation` (see `credentials` below for why the other reading is unfillable).
+ *
+ * ## What defaults, and what a verifier must be handed
+ *
+ * §1.3 promises a verdict reproducible *"with no project infrastructure"*. That is a promise
+ * about **private** infrastructure: every input is published, and the split is by where it is
+ * published rather than by convenience.
+ *
+ * Defaulted, because 12 gives them a fixed home this repository holds: the signer registry
+ * (§2.2 point 1) and the keyring (§2.1 — *"published in-repo, in-app, and on Arweave"*). A
+ * verifier following §1.3 has already cloned the repository, so naming them would be asking
+ * for a file they are standing in.
+ *
+ * Supplied per release, because 12 §1.4 gate 4 publishes them in the release notes and they
+ * describe one release rather than the project: both manifest addresses, the `release.json`
+ * transaction, every signature and attestation transaction, and **the multi-gateway URL set**.
+ * The gateway set is not defaulted for a second reason as well — 12 §5.1 rules that naming
+ * gateway operators is the operator's decision rather than an implementation choice, and
+ * leaves the list empty until they do.
  */
 
 import { readFileSync } from 'node:fs';
@@ -57,8 +78,16 @@ import { fileURLToPath } from 'node:url';
 
 import { readPerFileHashes } from '@bleavit/verify';
 
-import type { Gateway, GatewayGet, SignatureBlob } from './compare.ts';
-import { compareRelease, fetchGatewayTree, fetchTransaction, hashDirectory } from './compare.ts';
+import type { Gateway, GatewayGet, ServedTree, SignatureBlob } from './compare.ts';
+import {
+  GATEWAY_FLOOR,
+  RELEASE_JSON_PATH,
+  compareRelease,
+  fetchGatewayTree,
+  fetchTransaction,
+  finalManifestFindings,
+  hashDirectory,
+} from './compare.ts';
 import { liveGateway, readTranscript, transcriptGateway } from './gateway.ts';
 import { checkControllerQuorum, checkDisjointness, parseRegistry } from './registry.ts';
 import type { FileHashes } from './verdict.ts';
@@ -66,6 +95,16 @@ import { diffScope } from './verdict.ts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REGISTRY = resolve(HERE, '../release/sources/signers.json');
+/**
+ * The published keyring's in-repo home — 12 §2.1: *"Keyring published in-repo, in-app, and on
+ * Arweave."*
+ *
+ * A default, for the same reason `--registry` has one and `--gateways` does not: this is where
+ * the project publishes the file, so a verifier who cloned the repository already holds it and
+ * §1.3's published command need not name it. Pre-ceremony it publishes nobody, and that reads
+ * as one refusal naming the phase gate rather than as a rejection per signature.
+ */
+const KEYRING = resolve(HERE, '../release/sources/keyring.json');
 
 function signersAudit(strict: boolean): number {
   const document: unknown = JSON.parse(readFileSync(REGISTRY, 'utf8'));
@@ -265,20 +304,57 @@ function credentials(argv: readonly string[], document: unknown, field: string, 
 async function compareCommand(argv: readonly string[]): Promise<number> {
   const local = option(argv, '--local');
   const manifestArg = option(argv, '--arweave');
+  const finalManifestArg = option(argv, '--final-manifest');
   const releaseJsonArg = option(argv, '--release-json');
   const transcriptPath = option(argv, '--transcript');
   const gatewayConfigPath = option(argv, '--gateways');
-  if (local === undefined || manifestArg === undefined || releaseJsonArg === undefined) {
-    throw new Error('compare needs --local <dir>, --arweave <manifest-txid> and --release-json <txid>');
+  if (
+    local === undefined ||
+    manifestArg === undefined ||
+    finalManifestArg === undefined ||
+    releaseJsonArg === undefined
+  ) {
+    throw new Error(
+      'compare needs --local <dir>, --arweave <asset-manifest-txid>, ' +
+        '--final-manifest <final-manifest-txid> and --release-json <txid>. 12 §1.2 produces ' +
+        'two manifest addresses and says the verification CLI checks both: `--arweave` is the ' +
+        'one release.json pins, `--final-manifest` is the one the name is repointed to and the ' +
+        'one a browser loads. Both are published in the release notes (§1.4 gate 4).',
+    );
   }
   // Normalised once, before any use: the shape check, the gateway URL and the manifest
   // binding must all see the same id, or accepting `ar://` in one place breaks it in another.
   const manifestTxid = assertTxid(bareTxid(manifestArg), '--arweave');
+  const finalManifestTxid = assertTxid(bareTxid(finalManifestArg), '--final-manifest');
   const releaseJsonTxid = assertTxid(bareTxid(releaseJsonArg), '--release-json');
+  if (manifestTxid === finalManifestTxid) {
+    // The cheapest way to satisfy a second-address check is to pass the first one again, and
+    // 12 §1.2 states the arithmetic that forbids it: the final manifest references one more
+    // transaction than the asset manifest, so equal addresses mean release.json is not in it.
+    // `twoPassDeploy` refuses to *produce* this; refusing to verify it is the same claim from
+    // the other end.
+    throw new Error(
+      `--arweave and --final-manifest name the same manifest ${manifestTxid} (12 §1.2). The ` +
+        'final manifest references one more transaction than the asset manifest — release.json ' +
+        'itself — so two equal addresses mean the release names a manifest that does not ' +
+        'contain it, and checking one address twice checks one address.',
+    );
+  }
   if ((transcriptPath === undefined) === (gatewayConfigPath === undefined)) {
+    // Neither is as much a refusal as both, and it is the one §1.3's published command hits.
+    // The gateway set is not this repository's to default: 12 §1.4 gate 4 publishes it per
+    // release, and 12 §5.1 rules that naming gateway operators is the operator's decision
+    // rather than an implementation choice. So the refusal carries the source and the shape,
+    // because a verifier following the published line has been given no other way to learn it.
     throw new Error(
       'compare needs exactly one of --transcript <path> (replay, what the suite runs) or ' +
-        '--gateways <config.json> (the live call, which no suite in this repository exercises)',
+        '--gateways <config.json> (the live call, which no suite in this repository exercises).' +
+        '\n\nThe gateway set is a per-release published input, like the credential transaction ' +
+        'ids: 12 §1.4 gate 4 lists "the multi-gateway URL set" in the release notes, and 12 ' +
+        '§5.1 leaves naming operators to the operator. Write those URLs into a file:\n\n' +
+        '  { "gateways": [ { "name": "<operator>", "rawUrl": "<https://…/{txid}>", ' +
+        '"txUrl": "<https://…/{txid}/{path}>" } ] }\n\n' +
+        `and pass it as --gateways <path>. 12 §1.3 verifies through at least ${String(GATEWAY_FLOOR)}.`,
     );
   }
 
@@ -329,16 +405,38 @@ async function compareCommand(argv: readonly string[]): Promise<number> {
     throw new Error(
       `--arweave names the manifest ${manifestTxid} and the served release.json pins ` +
         `${pinnedManifest} (12 §1.2). Comparing against the first would verify a content ` +
-        'address this release never authorized, however well its bytes matched.',
+        'address this release never authorized, however well its bytes matched. If the two ' +
+        'addresses were swapped: the one release.json pins is --arweave, and the release\'s ' +
+        'own immutable address — what the name resolves to — is --final-manifest.',
     );
   }
 
   const paths = Object.keys(pins.perFileHashes);
-  const servedTrees = [];
+  const servedTrees: ServedTree[] = [];
+  const finalTrees: ServedTree[] = [];
+  const manifestFindings: string[] = [];
   for (const gateway of gateways) {
-    // Over the union of the signed map and what each gateway's manifest lists, so a served
-    // file nobody signed is reported instead of being unreachable by construction.
-    servedTrees.push(await fetchGatewayTree(get, gateway, manifestTxid, paths));
+    // Both addresses, through every gateway. Over the union of the signed map and what each
+    // manifest lists, so a served file nobody signed is reported instead of being unreachable
+    // by construction — and `release.json` is asked of the final manifest by name, so a
+    // manifest that dropped it produces a missing file as well as an unbound address.
+    const assets = await fetchGatewayTree(get, gateway, manifestTxid, paths);
+    const final = await fetchGatewayTree(get, gateway, finalManifestTxid, [
+      ...paths,
+      RELEASE_JSON_PATH,
+    ]);
+    servedTrees.push(assets.tree);
+    finalTrees.push(final.tree);
+    manifestFindings.push(
+      ...finalManifestFindings({
+        gateway: gateway.name,
+        assets: assets.manifest,
+        final: final.manifest,
+        assetManifestTxid: manifestTxid,
+        finalManifestTxid,
+        releaseJsonTxid,
+      }),
+    );
   }
 
   const blobs = async (field: string, flag: string): Promise<SignatureBlob[]> => {
@@ -361,11 +459,11 @@ async function compareCommand(argv: readonly string[]): Promise<number> {
         'one revokes whichever keys happen to sit at those indices.',
     );
   }
-  const keyringPath = option(argv, '--keyring');
-  const keyring = keyringPath === undefined ? undefined : readKeyring(keyringPath);
-  if (keyring !== undefined && keyring.generation !== generation) {
+  const keyringPath = option(argv, '--keyring') ?? KEYRING;
+  const keyring = publishedKeyring(keyringPath, keyringPath === KEYRING);
+  if (keyring.generation !== undefined && keyring.generation !== generation) {
     throw new Error(
-      `${String(keyringPath)} publishes keyring generation ${String(keyring.generation)} and ` +
+      `${keyringPath} publishes keyring generation ${String(keyring.generation)} and ` +
         `this release names ${String(generation)} (12 §2.1). Old keyrings are retained to verify ` +
         'historical releases, so verifying against the wrong one is a silent success.',
     );
@@ -376,10 +474,12 @@ async function compareCommand(argv: readonly string[]): Promise<number> {
     perFileHashes: pins.perFileHashes,
     localHashes: hashDirectory(local),
     servedTrees,
+    finalTrees,
+    manifestFindings,
     entries: publishedRegistry(option(argv, '--registry') ?? REGISTRY),
     generation,
     ...(channel === undefined ? {} : { revokedKeyBits: channel.revokedKeyBits }),
-    publicKeys: keyring?.keys ?? {},
+    publicKeys: keyring.keys,
     releaseSignatures: await blobs('release_signatures', '--signature'),
     attestations: await blobs('attestations', '--attestation'),
     ...(integerOption(argv, '--min-signatures') === undefined
@@ -394,6 +494,14 @@ async function compareCommand(argv: readonly string[]): Promise<number> {
   for (const served of report.served) {
     for (const finding of served.check.findings) {
       console.error(`${served.gateway}  ${finding.kind} ${finding.path}`);
+    }
+  }
+  // Labelled, because "changed assets/app.js" is a different incident depending on which
+  // manifest served it: under the pinned address the release is not what it says it is, and
+  // under the repointed one every user is being handed something else.
+  for (const served of report.finalServed) {
+    for (const finding of served.check.findings) {
+      console.error(`${served.gateway} final manifest  ${finding.kind} ${finding.path}`);
     }
   }
   for (const finding of report.gatewayFindings) console.error(`gateway  ${finding}`);
@@ -455,9 +563,14 @@ function readGatewayConfig(path: string): readonly Gateway[] {
   });
 }
 
-/** The published keyring (12 §2.1): its generation, and key id to minisign public-key text. */
+/**
+ * The published keyring (12 §2.1): its generation, and key id to minisign public-key text.
+ *
+ * The generation is `undefined` only for a keyring that declares a phase gate and publishes
+ * nobody — the pre-ceremony state — because there is then no generation to bind a release to.
+ */
 interface PublishedKeyring {
-  readonly generation: number;
+  readonly generation: number | undefined;
   readonly keys: Record<string, string>;
 }
 
@@ -468,15 +581,39 @@ interface PublishedKeyring {
  * precisely because old ones are retained to verify historical releases, so a keyring file
  * that does not say which one it is cannot be checked against the release it is verifying —
  * and verifying a current release against a superseded keyring succeeds silently.
+ *
+ * ## Why an empty one is a refusal in its own words, and only at the in-repo default
+ *
+ * §1.3's published command names no keyring, because §2.1 publishes it in-repo and a verifier
+ * has already cloned the repository. Pre-ceremony that file publishes nobody, and running with
+ * it printed one *"the published keyring carries no public key for X"* per signature — an
+ * answer about each key rather than about the state of the world, and the same defect the
+ * credential arrays had: a refusal for want of inputs reported as a verdict about the release.
+ *
+ * The empty case is accepted **only** when the file declares a `_phase_gate`, exactly as
+ * `signers audit` accepts an empty registry. Emptying a populated keyring, or pointing
+ * `--keyring` at an empty file of your own, is still an error — otherwise "verify against no
+ * keys" becomes a spelling of "skip verification".
  */
-function readKeyring(path: string): PublishedKeyring {
+function publishedKeyring(path: string, isDefault: boolean): PublishedKeyring {
   const document: unknown = JSON.parse(readFileSync(path, 'utf8'));
+  const keys = isRecord(document) ? document['keys'] : undefined;
+  const phaseGate = isRecord(document) ? document['_phase_gate'] : undefined;
+  const empty = !isRecord(keys) || Object.keys(keys).length === 0;
+  if (empty && isDefault && typeof phaseGate === 'string') {
+    console.error(
+      `NO KEYRING  ${path} publishes no keys: ${phaseGate} (12 §2.1). Every signature below ` +
+        'is therefore counted against nobody, and this run refuses for want of a keyring ' +
+        'rather than for anything the release did. Pass --keyring <path> to verify against a ' +
+        'keyring published elsewhere.',
+    );
+    return { generation: undefined, keys: {} };
+  }
   const generation = isRecord(document) ? document['generation'] : undefined;
   if (typeof generation !== 'number' || !Number.isInteger(generation)) {
     throw new Error(`${path} declares no keyring generation (12 §2.1); it cannot be bound to a release`);
   }
-  const keys = isRecord(document) ? document['keys'] : undefined;
-  if (!isRecord(keys) || Object.keys(keys).length === 0) {
+  if (empty || !isRecord(keys)) {
     throw new Error(`${path} publishes no keys; a keyring nobody is in verifies nothing`);
   }
   const out: Record<string, string> = {};
@@ -561,15 +698,23 @@ export async function main(argv: readonly string[]): Promise<number> {
   console.error(
     'usage: verify-release signers audit [--strict]\n' +
       '   or: verify-release diff-scope <incumbent.json> <candidate.json>\n' +
-      '   or: verify-release compare --local <dir> --arweave <manifest-txid> --release-json <txid>\n' +
+      '   or: verify-release compare --local <dir> --arweave <asset-manifest-txid>\n' +
+      '                              --final-manifest <final-manifest-txid>\n' +
+      '                              --release-json <txid>\n' +
       '                              (--transcript <path> | --gateways <config.json>)\n' +
       '                              [--keyring <path>] [--release-channel <path>]\n' +
       '                              [--registry <path>] [--min-signatures N]\n' +
       '                              [--require-attestations N]\n' +
       '                              [--signature <txid>]... [--attestation <txid>]...\n' +
       '\n' +
+      '12 §1.2 produces two manifest addresses and the CLI checks both: --arweave is the\n' +
+      'asset-tree manifest release.json pins, --final-manifest is the one the ArNS name is\n' +
+      'repointed to and the one a browser loads.\n' +
+      '\n' +
       '--signature and --attestation name the credential transactions 12 §1.4 gate 4 publishes\n' +
-      'in the release notes. Repeat each flag once per transaction.',
+      'in the release notes. Repeat each flag once per transaction. That gate also publishes\n' +
+      `the multi-gateway URL set --gateways takes; 12 §1.3 verifies through at least ${String(GATEWAY_FLOOR)}.\n` +
+      '--keyring defaults to the in-repo keyring 12 §2.1 publishes.',
   );
   return 64;
 }

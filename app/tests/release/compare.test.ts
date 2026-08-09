@@ -26,10 +26,13 @@ import { readPerFileHashes } from '@bleavit/verify';
 import type { CompareInputs, Gateway, ServedTree, SignatureBlob } from '../../tools/verify-release/compare.ts';
 import {
   CompareError,
+  RELEASE_JSON_PATH,
   compareRelease,
   crossGatewayFindings,
+  fetchManifestPaths,
   fetchServedTree,
   fetchTransaction,
+  finalManifestFindings,
   formatUrl,
   hashDirectory,
   sha256Hex,
@@ -49,6 +52,8 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const FIXTURES = resolve(HERE, '..', '..', 'fixtures', 'gateway-transcript');
 
 const MANIFEST_TXID = 'M'.repeat(43);
+/** 12 §1.2's `M′` — the manifest the ArNS name is repointed to, which is what a browser loads. */
+const FINAL_MANIFEST_TXID = 'F'.repeat(43);
 const RELEASE_JSON_TXID = 'R'.repeat(43);
 
 const registryEntries = parseRegistry(
@@ -73,6 +78,8 @@ async function scenario(
   releaseJsonBytes: Uint8Array;
   perFileHashes: Readonly<Record<string, Sha256Hex>>;
   servedTrees: ServedTree[];
+  finalTrees: ServedTree[];
+  manifestFindings: string[];
   releaseSignatures: SignatureBlob[];
   attestations: SignatureBlob[];
   document: { release_signatures: { txid: string }[]; attestations: { txid: string }[] };
@@ -87,8 +94,26 @@ async function scenario(
   if (pins.kind !== 'pins') throw new Error('unreachable');
   const paths = Object.keys(pins.perFileHashes);
   const servedTrees: ServedTree[] = [];
+  // 12 §1.2's second address, fetched for every scenario rather than only the ones about it:
+  // `compareRelease` requires it, and it requires it because a second address that a caller
+  // may omit is one every caller omits on the day it would have mattered.
+  const finalTrees: ServedTree[] = [];
+  const manifestFindings: string[] = [];
   for (const each of transcript.gateways) {
     servedTrees.push(await fetchServedTree(get, each, MANIFEST_TXID, paths));
+    finalTrees.push(
+      await fetchServedTree(get, each, FINAL_MANIFEST_TXID, [...paths, RELEASE_JSON_PATH]),
+    );
+    manifestFindings.push(
+      ...finalManifestFindings({
+        gateway: each.name,
+        assets: await fetchManifestPaths(get, each, MANIFEST_TXID),
+        final: await fetchManifestPaths(get, each, FINAL_MANIFEST_TXID),
+        assetManifestTxid: MANIFEST_TXID,
+        finalManifestTxid: FINAL_MANIFEST_TXID,
+        releaseJsonTxid: RELEASE_JSON_TXID,
+      }),
+    );
   }
   const rows = document as { release_signatures: { txid: string }[]; attestations: { txid: string }[] };
   const blobs = async (list: { txid: string }[]): Promise<SignatureBlob[]> => {
@@ -106,6 +131,8 @@ async function scenario(
     releaseJsonBytes,
     perFileHashes: pins.perFileHashes,
     servedTrees,
+    finalTrees,
+    manifestFindings,
     releaseSignatures: await blobs(rows.release_signatures),
     attestations: await blobs(rows.attestations),
     document: rows,
@@ -123,6 +150,8 @@ function inputs(
     // own build, and the interesting failures are the served ones.
     localHashes: base.perFileHashes,
     servedTrees: base.servedTrees,
+    finalTrees: base.finalTrees,
+    manifestFindings: base.manifestFindings,
     entries: registryEntries,
     generation: 4,
     publicKeys,

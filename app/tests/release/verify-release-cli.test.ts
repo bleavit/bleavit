@@ -41,6 +41,8 @@ const FIXTURES = resolve(HERE, '..', '..', 'fixtures', 'gateway-transcript');
 
 const MANIFEST_TXID = 'M'.repeat(43);
 const IMPOSTOR_MANIFEST_TXID = 'N'.repeat(43);
+const FINAL_MANIFEST_TXID = 'F'.repeat(43);
+const SUBSTITUTE_RELEASE_JSON_TXID = 'X'.repeat(43);
 const RELEASE_JSON_TXID = 'R'.repeat(43);
 const SIGNATURE_TXIDS = ['P1'.padEnd(43, 'e'), 'P2'.padEnd(43, 'f')];
 const ATTESTATION_TXIDS = ['Q1'.padEnd(43, 'g'), 'Q2'.padEnd(43, 'h')];
@@ -99,8 +101,10 @@ async function run(argv: readonly string[]): Promise<Run> {
 function compareArgv(over: {
   readonly transcript?: string;
   readonly arweave?: string;
+  readonly finalManifest?: string | false;
   readonly channel?: string;
   readonly registry?: string;
+  readonly keyring?: boolean;
   readonly credentials?: boolean;
 } = {}): string[] {
   return [
@@ -109,12 +113,14 @@ function compareArgv(over: {
     join(FIXTURES, 'cli-local-tree'),
     '--arweave',
     over.arweave ?? MANIFEST_TXID,
+    ...(over.finalManifest === false
+      ? []
+      : ['--final-manifest', over.finalManifest ?? FINAL_MANIFEST_TXID]),
     '--release-json',
     RELEASE_JSON_TXID,
     '--transcript',
     join(FIXTURES, over.transcript ?? 'cli-honest.json'),
-    '--keyring',
-    join(FIXTURES, 'keyring.json'),
+    ...(over.keyring === false ? [] : ['--keyring', join(FIXTURES, 'keyring.json')]),
     '--registry',
     over.registry ?? join(FIXTURES, 'registry.json'),
     ...(over.channel === undefined ? [] : ['--release-channel', over.channel]),
@@ -240,6 +246,114 @@ test('a manifest the release does not pin is refused, however well its bytes mat
   assert.match(String(result.thrown?.message), /never authorized/);
 });
 
+// ---------------------------------------------------------------------------------------
+// The second address — 12 §1.2's `M′`.
+//
+// `release.json` pins `M`, the ArNS name is repointed to `M′`, and §1.2 says the verification
+// CLI checks **both**. Binding `--arweave` to the pin (the test above) is one of the two: it
+// makes a manifest the release never authorized unusable. It says nothing at all about the
+// manifest users actually load, which is the one that can serve a payload while the pinned
+// address stays impeccable.
+//
+// Every transcript below serves the signed bytes at every path of `M`, so a verifier that
+// stops at the pinned address prints MATCH for each of them.
+// ---------------------------------------------------------------------------------------
+
+test('a payload under the repointed manifest is caught, though the pinned one is honest', async () => {
+  // The whole of the release is right at `M`. `M′` — what the name resolves to, what a user
+  // loads — serves application code nobody signed. This is the case a pinned-address-only
+  // check cannot reach, because every path it asks for it asks of the honest manifest.
+  const result = await run(
+    compareArgv({
+      transcript: 'cli-final-poisoned.json',
+      channel: releaseChannel('clean-final-poisoned.bin', 4, 0n),
+    }),
+  );
+  assert.equal(result.thrown, undefined, result.thrown?.message);
+  assert.equal(
+    result.code,
+    1,
+    `expected MISMATCH; the command exited ${String(result.code)} saying: ${result.out}`,
+  );
+  assert.match(result.err, /final manifest {2}changed assets\/app\.js/);
+  assert.match(result.out, /VERDICT: MISMATCH/);
+});
+
+test('the repointed manifest must resolve release.json to the signed sibling, not to equal bytes', async () => {
+  // `M′` lists `release.json` and hands over the signed document's exact bytes — from another
+  // transaction. `arweave.ts` names why the address is the binding: two objects with the same
+  // bytes today have no guarantee of it tomorrow, and a byte comparison cannot see the
+  // difference at all.
+  const result = await run(
+    compareArgv({
+      transcript: 'cli-final-substituted.json',
+      channel: releaseChannel('clean-final-substituted.bin', 4, 0n),
+    }),
+  );
+  assert.equal(result.thrown, undefined, result.thrown?.message);
+  assert.equal(
+    result.code,
+    1,
+    `expected MISMATCH; the command exited ${String(result.code)} saying: ${result.out}`,
+  );
+  assert.match(result.err, new RegExp(`resolves release\\.json to ${SUBSTITUTE_RELEASE_JSON_TXID}`));
+  assert.match(result.err, new RegExp(`signatures verified here are over ${RELEASE_JSON_TXID}`));
+  assert.match(result.out, /VERDICT: MISMATCH/);
+});
+
+test('a repointed manifest with no release.json in it is reported', async () => {
+  // 12 §1.2's second pass exists to put `release.json` inside the manifest the name serves.
+  // A manifest without it leaves the release naming a manifest that does not contain it —
+  // the exact failure `twoPassDeploy` refuses to produce, seen from the verifying end.
+  const result = await run(
+    compareArgv({
+      transcript: 'cli-final-omits-release-json.json',
+      channel: releaseChannel('clean-final-omits.bin', 4, 0n),
+    }),
+  );
+  assert.equal(result.thrown, undefined, result.thrown?.message);
+  assert.equal(
+    result.code,
+    1,
+    `expected MISMATCH; the command exited ${String(result.code)} saying: ${result.out}`,
+  );
+  assert.match(result.err, /lists no release\.json/);
+  assert.match(result.out, /VERDICT: MISMATCH/);
+});
+
+test('naming one address twice does not satisfy the two-address check', async () => {
+  // The cheapest way to defeat a second-address check is to pass the first one again. 12 §1.2
+  // states the arithmetic that forbids it: the final manifest references one more transaction,
+  // so `M′ = M` means `release.json` is not in it.
+  const result = await run(compareArgv({ finalManifest: MANIFEST_TXID }));
+  assert.equal(result.code, undefined, `expected a refusal; got exit ${String(result.code)}`);
+  assert.match(String(result.thrown?.message), /--arweave and --final-manifest name the same manifest/);
+  assert.match(String(result.thrown?.message), /12 §1\.2/);
+});
+
+test('the final manifest address is required, because a check that can be omitted is not one', async () => {
+  const result = await run(compareArgv({ finalManifest: false }));
+  assert.equal(result.code, undefined, `expected a refusal; got exit ${String(result.code)}`);
+  assert.match(String(result.thrown?.message), /--final-manifest <final-manifest-txid>/);
+});
+
+test('a final manifest nobody serves is a failure, not a leg quietly skipped', async () => {
+  // The anti-vacuity control for every test above: they show the second address being *judged*,
+  // and this one shows it being *fetched*. A checker wired to an address the transcript never
+  // recorded must report that it could not look, because "not served" and "served correctly"
+  // are the two answers a skipped leg is indistinguishable between.
+  const result = await run(
+    compareArgv({
+      finalManifest: 'Z'.repeat(43),
+      channel: releaseChannel('clean-final-absent.bin', 4, 0n),
+    }),
+  );
+  assert.equal(result.thrown, undefined, result.thrown?.message);
+  assert.equal(result.code, 1, `expected MISMATCH; the command exited ${String(result.code)}`);
+  assert.match(result.err, /did not answer for the final manifest Z{43}/);
+  assert.match(result.err, /second address was not checked at all/);
+});
+
 test('12 §1.3’s published command runs — the ar:// scheme is accepted, not interpolated', async () => {
   // §1.3 prints the verification command with the scheme:
   //
@@ -311,9 +425,51 @@ test('fetchGatewayTree carries an unreadable manifest into the verdict as a fail
   const get = transcriptGateway(transcript);
   const alpha = transcript.gateways[0];
   assert.ok(alpha !== undefined);
-  const tree = await fetchGatewayTree(get, alpha, 'Z'.repeat(43), ['index.html']);
+  const { tree, manifest } = await fetchGatewayTree(get, alpha, 'Z'.repeat(43), ['index.html']);
   assert.equal(tree.gateway, 'alpha');
   assert.ok(tree.failures.some((line) => line.includes('would not serve the path manifest')));
+  // The enumeration comes back too, because 12 §1.2 has two manifests and the caller must
+  // compare them. Fetching it twice would let the two readings disagree.
+  assert.match(String(manifest.failure), /would not serve the path manifest/);
+});
+
+// ---------------------------------------------------------------------------------------
+// What §1.3's published command can and cannot default — 12 §1.3, §1.4 gate 4, §2.1.
+//
+// §1.3 promises a verdict reproducible "with no project infrastructure". That is a promise
+// about *private* infrastructure: every input it needs is published, and the tool's job is to
+// default the ones with a fixed home and to name the ones that arrive per release.
+// ---------------------------------------------------------------------------------------
+
+test('the published keyring has an in-repo home, so its absence is one named line', async () => {
+  // 12 §2.1: "Keyring published in-repo, in-app, and on Arweave." So `--keyring` has a
+  // default, exactly as `--registry` does, and pre-ceremony that default is empty — which
+  // must read as *nobody has published a key yet*, not as one rejection per signature.
+  const result = await run(
+    compareArgv({ keyring: false, channel: releaseChannel('clean-no-keyring.bin', 4, 0n) }),
+  );
+  assert.equal(result.thrown, undefined, result.thrown?.message);
+  assert.equal(result.code, 1, `expected MISMATCH; the command exited ${String(result.code)}`);
+  assert.match(result.err, /NO KEYRING {2}/);
+  assert.match(result.err, /12 §2\.1/);
+  // Refused by counting, which is the arithmetic and not a declaration.
+  assert.match(result.out, /signatures: 0 distinct active key\(s\)/);
+});
+
+test('a live run takes its gateway set from the release notes, and the refusal says where', async () => {
+  // §1.3's published command supplies neither `--transcript` nor `--gateways`, so it is
+  // rejected before any request is made. The set is not this repository's to default —
+  // §1.4 gate 4 publishes it per release and 12 §5.1 makes naming operators the operator's
+  // decision — so the refusal has to carry both the source and the shape, or a verifier who
+  // followed the published line is left with an error about a flag nobody told them to pass.
+  const argv = compareArgv().filter(
+    (token, index, all) => token !== '--transcript' && all[index - 1] !== '--transcript',
+  );
+  const result = await run(argv);
+  assert.equal(result.code, undefined, `expected a refusal; got exit ${String(result.code)}`);
+  assert.match(String(result.thrown?.message), /12 §1\.4 gate 4/);
+  assert.match(String(result.thrown?.message), /--gateways/);
+  assert.match(String(result.thrown?.message), /"rawUrl"/);
 });
 
 test('the usage text names the credential flags, because nothing else does', async () => {

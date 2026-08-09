@@ -1,0 +1,10 @@
+{
+  "_doc": "The 12 §2.1 published keyring: minisign key id to public-key packet, tagged by keyring generation. §2.1 names three publication channels — in-repo, in-app, and on Arweave — and this file is the in-repo one, which is why `verify-release compare` defaults `--keyring` here: a verifier following 12 §1.3 has already cloned the repository, so the trust root is a file they hold rather than an argument they must be told to pass.",
+  "_phase_gate": "no key ceremony has been held (12 §2.1), so this keyring publishes nobody",
+  "_generation": "12 §2.1 tags every keyring by generation and old ones are retained to verify historical releases, so a populated file MUST carry `generation` and `compare` refuses a keyring whose generation is not the one the release names. The field is absent here rather than 0, because 0 would be a generation nobody published rather than the absence of one.",
+  "_entry_schema": {
+    "<key id>": "the minisign public-key packet as its `.pub` file carries it, comment line included. The key id is the same one `app/tools/release/sources/signers.json` declares for that holder — one is who holds the key, the other is the key"
+  },
+  "_populations": "Both release signers and attestors (12 §1.4 gate 2) verify from here. Which population a key belongs to is the registry's claim, never this file's: `compare` rejects a signature whose key the registry does not publish in the population being counted, which is what stops a release signature satisfying an attestation floor.",
+  "keys": {}
+}
