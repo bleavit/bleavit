@@ -587,8 +587,17 @@
     color: var(--color-muted);
   }
 
+  /*
+   * Three ways of saying "there is no value here", styled identically on purpose.
+   *
+   * `__reason` and `__unavailable` are children of a datum that still has a name; `--unavailable`
+   * is the whole datum standing in for one, which `shell.tsx`'s `SurfaceUnavailable` renders when
+   * the runtime on chain does not carry the surface at all. The distinction matters to the markup
+   * and to nothing the reader sees, so it must not produce two visual vocabularies for one idea.
+   */
   .datum__reason,
-  .datum__unavailable {
+  .datum__unavailable,
+  .datum--unavailable {
     @apply text-xs;
     color: var(--color-faint);
     font-style: italic;
@@ -642,6 +651,18 @@
 
   .notice--danger .notice__heading {
     color: var(--color-deny-text);
+  }
+
+  /*
+   * The surfaces 10 §5.2 classified as absent, listed inside the notice that already states the
+   * consequence. Deliberately quiet: the notice carries the severity colour and says signing is
+   * unavailable, and this list is the evidence behind that sentence, not a second alarm. Giving
+   * it its own border and tint would read as two problems where there is one.
+   */
+  .compat__disabled {
+    @apply mt-1 flex flex-col gap-1 text-sm;
+    list-style: none;
+    color: var(--color-muted);
   }
 
   /*
