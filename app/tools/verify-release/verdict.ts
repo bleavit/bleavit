@@ -26,13 +26,18 @@
  * means — including its third finding kind, the *unexpected* served file that a
  * manifest-driven loop cannot see.
  *
- * ## `diff-scope` is a two-directional comparison
+ * ## `diff-scope` is a two-directional comparison, over a scope that holds no asset path
  *
- * §1.5's expedited lane is admissible only when the delta is confined to descriptors,
- * descriptor metadata and release metadata, with **zero app-code delta**: "every other file
- * in the built tree MUST be byte-identical to the incumbent release". A checker that
- * iterated the new tree would miss a *deleted* file, and a deletion outside the permitted
- * scope is exactly as much of an app-code delta as an edit.
+ * §1.5's expedited lane is admissible only when the delta is confined to its permitted scope
+ * with **zero app-code delta**: "every other file in the built tree MUST be byte-identical to
+ * the incumbent release". A checker that iterated the new tree would miss a *deleted* file,
+ * and a deletion outside the permitted scope is exactly as much of an app-code delta as an
+ * edit.
+ *
+ * The permitted scope itself is release metadata and nothing else, because §1.5 names its
+ * admissible class over **source** paths and has it checked over the **built** tree — and
+ * under §1.1 no descriptor-only release produces a built-tree delta confined to any fixed
+ * path. `EXPEDITED_SCOPE` carries that argument in full.
  */
 
 import type { SelfCheckResult } from '@bleavit/verify';
@@ -343,13 +348,51 @@ export function releaseVerdict({
   return { ok: failures.length === 0, failures, signatures: sigs, attestations: atts };
 }
 
-/** §1.5's admissible delta scope for the expedited lane. */
+/**
+ * §1.5's admissible delta scope for the expedited lane — **release metadata, and nothing else**.
+ *
+ * ## Why no descriptor path is listed here
+ *
+ * §1.5 states its admissible class over **source** paths (`packages/descriptors/**`) and then has
+ * it checked over the **built** tree: *"every other file in the built tree MUST be byte-identical
+ * to the incumbent release"*. Those are two different sets of names, and 12 §1.1 is what
+ * separates them. The release build emits every chunk under a content hash **alone** —
+ * `entryFileNames: 'assets/[hash].js'`, `chunkFileNames: 'assets/[hash].js'` — so refreshing a
+ * descriptor does not *edit* a published file, it **renames** one. And because a Rollup chunk's
+ * hash covers the file names of the chunks it imports, the rename cascades up through every
+ * importer to the entry chunk and into `index.html`, which carries the entry's name and one
+ * `modulepreload` link per static chunk.
+ *
+ * So there is no path prefix under which a real descriptor-only release's built-tree delta is
+ * confined, and this list cannot contain one.
+ *
+ * ## The defect this closes
+ *
+ * `'assets/descriptors/'` was listed here, and the build has never emitted that path — the
+ * fixtures invented an output, this list allowlisted it, and the suites agreed with both while
+ * all three disagreed with the build. An entry in this list is not a description, it is an
+ * **authorization**: it is what lets `diffScope` call a delta admissible, on the one gate that
+ * decides whether a release may skip the standard lane's 72 h soak.
+ *
+ * ## The lane is therefore unavailable, and that is the safe direction
+ *
+ * Until the build emits a separately identifiable descriptor artifact whose published path is
+ * stable across refreshes, `diffScope` refuses every candidate whose built-tree delta touches
+ * app assets. The only unsafe error available here is skipping a soak on a false premise, so a
+ * refusal is R-7's status-quo default rather than a gap: a release this lane cannot admit is not
+ * blocked, it takes the standard lane and the soak §1.5 says that lane carries.
+ */
 export const EXPEDITED_SCOPE: readonly string[] = Object.freeze([
-  'assets/descriptors/',
   'release.json',
   'CHANGELOG.md',
   'release-history.json',
 ]);
+
+/** The published tree's asset directory — where 12 §1.1's `assets/[hash]` output lands. */
+const ASSET_PREFIX = 'assets/';
+
+/** The document that names the entry chunk, so every rename cascade ends here. */
+const ENTRY_DOCUMENT = 'index.html';
 
 /** Path → sha256 over a built tree, as `release.json`'s `perFileHashes` carries it. */
 export type FileHashes = Readonly<Record<string, string>>;
@@ -370,12 +413,55 @@ function inScope(path: string, scope: readonly string[]): boolean {
 }
 
 /**
+ * Does this out-of-scope set have the shape a 12 §1.1 content-hash rename makes?
+ *
+ * A published chunk is named by its content alone, so an edited chunk never arrives as
+ * `changed`: the old name disappears and a new one takes its place. The signature is therefore
+ * an `assets/` **pair** — at least one addition and at least one removal — optionally with
+ * `index.html` changed, since the entry chunk's name is written into that document.
+ *
+ * This is a classification of the *explanation*, never of the verdict: both arms refuse, and the
+ * sentence it selects says the delta is **indistinguishable** from an app-code delta rather than
+ * claiming it is a descriptor refresh. That reading stays true when it really is app code, which
+ * is what keeps a nicer-sounding message from becoming a quieter one.
+ *
+ * An `assets/` path reported as `changed` fails the test on purpose: a name that survived its
+ * own bytes is not something §1.1's output can do, so it is a fact worth the generic sentence.
+ */
+function isContentHashRename(changes: readonly ScopeChange[]): boolean {
+  let added = 0;
+  let removed = 0;
+  for (const entry of changes) {
+    if (entry.path.startsWith(ASSET_PREFIX)) {
+      if (entry.change === 'added') added += 1;
+      else if (entry.change === 'removed') removed += 1;
+      else return false;
+      continue;
+    }
+    if (entry.path === ENTRY_DOCUMENT && entry.change === 'changed') continue;
+    return false;
+  }
+  return added > 0 && removed > 0;
+}
+
+/**
  * `verify-release diff-scope --against <incumbent-txid>`.
  *
  * Compares **both directions**. A loop over the new tree misses a *deleted* file, and a
  * deletion outside the permitted scope is exactly as much of an app-code delta as an edit —
  * §1.5's requirement is that every other file be *byte-identical*, which a missing file is
- * not.
+ * not. Under §1.1 that second direction is not an edge case either: a content-hash rename is
+ * *always* a removal paired with an addition, so a one-directional checker would report half
+ * of every real delta.
+ *
+ * `scope` defaults to `EXPEDITED_SCOPE`, which holds release metadata and no asset path — see
+ * its comment for why one cannot be added. The practical consequence is stated to the operator
+ * rather than left to be inferred from a list of hashes: a descriptor refresh is
+ * indistinguishable from an app-code delta in the published tree, so the expedited lane is
+ * unavailable and the standard lane with its soak applies.
+ *
+ * Pure and total. It fetches nothing, reads no clock and throws on no input, because §1.3's
+ * promise is a verdict reproducible with no project infrastructure.
  */
 export function diffScope(
   incumbent: FileHashes,
@@ -395,13 +481,25 @@ export function diffScope(
     outOfScope.push({ path, change: 'added' });
   }
   outOfScope.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
-  return {
-    admissible: outOfScope.length === 0,
-    outOfScope,
-    detail:
-      outOfScope.length === 0
-        ? 'the delta is confined to the descriptor and release-metadata scope 12 §1.5 admits'
-        : `${outOfScope.length} out-of-scope file(s); §1.5 requires zero app-code delta, so this ` +
-          'release must use the standard lane with its 72 h soak',
-  };
+  return { admissible: outOfScope.length === 0, outOfScope, detail: explain(outOfScope) };
+}
+
+/** The operator-facing sentence for a scope verdict. Three cases, and each says a different thing. */
+function explain(outOfScope: readonly ScopeChange[]): string {
+  if (outOfScope.length === 0) {
+    return 'the delta is confined to the release-metadata files 12 §1.5 admits, and no published app asset moved';
+  }
+  if (isContentHashRename(outOfScope)) {
+    return (
+      `${outOfScope.length} out-of-scope file(s), and their shape is a content-hash rename. 12 §1.1 ` +
+      'publishes every chunk as `assets/<hash>.js`, so a descriptor refresh renames the descriptor ' +
+      'chunk, then every chunk that imports it, then index.html — which makes a descriptor-only ' +
+      'release indistinguishable from an app-code delta in the published tree. The expedited lane ' +
+      'is therefore unavailable, and this release must use the standard lane with its 72 h soak'
+    );
+  }
+  return (
+    `${outOfScope.length} out-of-scope file(s); §1.5 requires zero app-code delta, so this ` +
+    'release must use the standard lane with its 72 h soak'
+  );
 }

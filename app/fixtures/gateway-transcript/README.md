@@ -55,16 +55,36 @@ reason: the counting only ever ran against a document shape this repository does
 
 `verify-release diff-scope --against <incumbent-txid>` is what 12 §1.5 calls the *mechanical*
 check on the lane with **no staging soak**. `--against` is a transaction id, so the incumbent is
-fetched rather than read off disk, and these are what it is fetched from. The incumbent carries a
-descriptor file the rest of this corpus has none of: a scope check whose admissible class is
-empty in the fixture can only ever show its refusing half.
+fetched rather than read off disk, and these are what it is fetched from.
+
+**These trees carry the names the build really emits, and the rest of this corpus does not.**
+The transcripts above are about fetching, byte comparison and signature counting, so their paths
+(`assets/app.js`, `assets/logo.png`) are readable placeholders. §1.5's check is decided over
+*names*, so these four trees carry what 12 §1.1 produces: content-hashed chunks under
+`assets/<hash>.js`, plus the fixed-name root files (`index.html`, `sw.js`,
+`manifest.webmanifest`) that `public/` and the release build put there verbatim.
+
+Until 2026-08-09 the incumbent carried `assets/descriptors/bleavit.js`, a path no build has ever
+emitted, and `EXPEDITED_SCOPE` allowlisted its prefix. The fixture invented an output, the tool
+authorized it, and the suite asserted the descriptor tree was **admitted** — so the gate that
+decides whether a release may skip the 72 h soak was only ever run against a tree that does not
+exist. A chunk is named by its content alone, so a descriptor refresh renames its chunk, then the
+entry chunk that imports it, then `index.html` which names that; no prefix confines the delta,
+and the lane is unavailable until the build emits a separately identifiable descriptor artifact
+with a stable path.
 
 | File | What it is |
 |---|---|
 | `cli-incumbent.json` | Both gateways serving the incumbent release's `release.json` from inside its immutable manifest (`III…`), which is where 12 §1.2's second pass puts it |
-| `cli-incumbent-divergent.json` | The same, except `beta` serves an incumbent whose `assets/app.js` hash is the **candidate's** — so a verifier that believed it would find no app-code delta and admit the release to the lane |
-| `diff-scope-descriptor-tree/` | A candidate whose only delta is the descriptor bundle. Admissible |
-| `diff-scope-app-code-tree/` | The same descriptor refresh with one line of application code carried along. Standard lane, with its soak |
+| `cli-incumbent-divergent.json` | The same, except `beta` serves an incumbent whose per-file map is the **candidate's own** — so a verifier that believed it would measure the candidate against itself, find no delta at all, and admit the release to the lane |
+| `diff-scope-descriptor-tree/` | A descriptor refresh with nothing else touched: both chunks renamed, `index.html` following them. The most favourable delta the lane could ever be offered, and **refused** |
+| `diff-scope-app-code-tree/` | The same refresh with application code carried along in `sw.js`, which keeps its name and so arrives as `changed`. Refused in the other words, which is what keeps the structural explanation from matching every refusal |
+| `diff-scope-metadata-tree/` | The incumbent tree byte for byte, plus `CHANGELOG.md` and `release-history.json`. **Admissible** — the half of §1.5 that survives §1.1, and the arm without which a checker that refused everything would pass |
+
+`diff-scope-descriptor-tree/` holds `sw.js` constant, which idealizes it slightly: the service
+worker bakes the per-file hash map (12 §5.2), so a real refresh moves that file too. The
+idealization is deliberate — it is what lets the fixture show the rename-shaped refusal on its
+own, and the real case is only further from admissible.
 
 ### One operator is not two gateways
 

@@ -18,7 +18,7 @@
  */
 
 import { createHash, createPrivateKey, createPublicKey, sign as signEd25519 } from 'node:crypto';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -448,6 +448,7 @@ writeFileSync(join(OUT, 'cli-release.json'), Buffer.from(producerBytes));
 // The `--local dist/` side of 12 §1.3's command: the tree a third party built, written here
 // so the suite compares a real directory rather than a map it made up.
 const LOCAL = join(OUT, 'cli-local-tree');
+rmSync(LOCAL, { recursive: true, force: true });
 for (const [path, bytes] of Object.entries(files)) {
   const target = join(LOCAL, path);
   mkdirSync(dirname(target), { recursive: true });
@@ -458,16 +459,43 @@ for (const [path, bytes] of Object.entries(files)) {
 // The expedited lane — 12 §1.5's `diff-scope --against <incumbent-txid>`.
 //
 // §1.5 admits a release to a lane with **no staging soak** when its delta against the
-// incumbent production release is confined to descriptors and release metadata. So the two
-// sides are the incumbent's *published* per-file map, fetched from the `release.json` inside
-// its immutable manifest, and the tree the attestor built, hashed from disk.
+// incumbent production release stays inside its permitted scope. So the two sides are the
+// incumbent's *published* per-file map, fetched from the `release.json` inside its immutable
+// manifest, and the tree the attestor built, hashed from disk.
 //
-// The corpus therefore needs an incumbent that carries a descriptor file — the tree above has
-// none, and a scope check whose admissible class is empty in the fixture can only ever show
-// the refusing half.
+// ## These trees use the names the build really emits, and the corpus above does not
+//
+// The transcripts above are about fetching, byte comparison and signature counting, so their
+// paths are readable placeholders. These four trees are about **names**, because that is what
+// §1.5's check is decided over — so they carry what 12 §1.1 produces and nothing else:
+// content-hashed chunks under `assets/<hash>.js`, plus the fixed-name root files (`index.html`,
+// `sw.js`, `manifest.webmanifest`) that `public/` and the release build put there verbatim.
+//
+// Until this round the incumbent carried `assets/descriptors/bleavit.js`, a path the build has
+// never emitted, and `EXPEDITED_SCOPE` allowlisted its prefix. The fixture invented an output,
+// the tool authorized it and the suites agreed with both — so the gate that decides whether a
+// release may skip the 72 h soak was only ever exercised on a tree no build produces.
+//
+// What the real shape costs the lane is stated in `verdict.ts`: a chunk is named by its content
+// alone, so a descriptor refresh **renames** rather than edits, and a Rollup chunk hash covers
+// the names of the chunks it imports — so the rename walks up every importer to the entry chunk
+// and into `index.html`, which names it. The descriptor tree below is therefore the most
+// favourable descriptor-only delta that can exist, and it is still refused.
 // ---------------------------------------------------------------------------------------
 
-const DESCRIPTOR_PATH = 'assets/descriptors/bleavit.js';
+/** The incumbent's two chunks, and the two names the same code takes after a refresh. */
+const ENTRY_CHUNK = 'assets/8f1c0a24.js';
+const DESCRIPTOR_CHUNK = 'assets/4b9d7e05.js';
+const REFRESHED_ENTRY_CHUNK = 'assets/2c6ab913.js';
+const REFRESHED_DESCRIPTOR_CHUNK = 'assets/d05e3f78.js';
+
+/** `index.html` names the entry chunk, which is why every rename cascade ends in this file. */
+const indexHtml = (entry: string): Uint8Array =>
+  utf8(`<!doctype html><title>bleavit</title>\n<script type="module" src="./${entry}"></script>\n`);
+
+/** The entry chunk imports the descriptor chunk **by name**, which is what makes the cascade real. */
+const entryChunk = (descriptor: string): Uint8Array =>
+  utf8(`import './${descriptor.slice('assets/'.length)}';\nexport const boot = () => undefined;\n`);
 
 /** A producer-built `release.json` over one tree. The same call `cli-release.json` comes from. */
 function producerRelease(tree: Record<string, Uint8Array>, manifestTxid: string): Uint8Array {
@@ -498,22 +526,66 @@ function producerRelease(tree: Record<string, Uint8Array>, manifestTxid: string)
   });
 }
 
-/** The incumbent production tree: the app, plus the descriptor bundle a refresh would move. */
+/** The incumbent production tree, in the shape 12 §1.1 emits. */
 const incumbentFiles: Record<string, Uint8Array> = {
-  ...files,
-  [DESCRIPTOR_PATH]: utf8('export const descriptors = "spec_version 2..3";\n'),
+  'index.html': indexHtml(ENTRY_CHUNK),
+  [ENTRY_CHUNK]: entryChunk(DESCRIPTOR_CHUNK),
+  [DESCRIPTOR_CHUNK]: utf8('export const descriptors = "spec_version 2..3";\n'),
+  // The service worker keeps a fixed name because a browser resolves it by URL, so it is one of
+  // the few published files whose delta can arrive as `changed` rather than as a rename.
+  'sw.js': utf8('self.MAP = { boot: "8f1c0a24" };\n'),
+  'manifest.webmanifest': utf8('{"name":"bleavit"}\n'),
 };
+
+/** The candidate trees the `diff-scope` outcomes are decided over. Written to disk below. */
+const candidateTrees: Record<string, Record<string, Uint8Array>> = {
+  /**
+   * A descriptor refresh, expressed the way the build expresses one: both chunks are renamed
+   * and `index.html` follows them. Nothing else moves — this is the *best case* the lane could
+   * ever be offered, and §1.5's built-tree test still cannot tell it from application code.
+   */
+  'diff-scope-descriptor-tree': {
+    'index.html': indexHtml(REFRESHED_ENTRY_CHUNK),
+    [REFRESHED_ENTRY_CHUNK]: entryChunk(REFRESHED_DESCRIPTOR_CHUNK),
+    [REFRESHED_DESCRIPTOR_CHUNK]: utf8('export const descriptors = "spec_version 3..4";\n'),
+    'sw.js': incumbentFiles['sw.js']!,
+    'manifest.webmanifest': incumbentFiles['manifest.webmanifest']!,
+  },
+  /**
+   * The same refresh with application code carried along, and the difference is visible in the
+   * *shape*: `sw.js` keeps its name and changes its bytes, which a content hash cannot do. It
+   * is the fixture that keeps the structural explanation from swallowing every refusal.
+   */
+  'diff-scope-app-code-tree': {
+    'index.html': indexHtml(REFRESHED_ENTRY_CHUNK),
+    [REFRESHED_ENTRY_CHUNK]: entryChunk(REFRESHED_DESCRIPTOR_CHUNK),
+    [REFRESHED_DESCRIPTOR_CHUNK]: utf8('export const descriptors = "spec_version 3..4";\n'),
+    'sw.js': utf8('self.MAP = { boot: "8f1c0a24" };\nself.steal = true;\n'),
+    'manifest.webmanifest': incumbentFiles['manifest.webmanifest']!,
+  },
+  /**
+   * The delta §1.5 still admits: the incumbent tree byte for byte, plus the release-metadata
+   * files. Without it the corpus could only show `diff-scope` refusing, and a checker that
+   * refused everything would pass a suite made only of refusals.
+   */
+  'diff-scope-metadata-tree': {
+    ...incumbentFiles,
+    'CHANGELOG.md': utf8('# 0.1.1\n\n- descriptor refresh\n'),
+    'release-history.json': utf8('{"releases":["0.1.0","0.1.1"]}\n'),
+  },
+};
+
 const incumbentBytes = producerRelease(incumbentFiles, 'J'.repeat(43));
 
 /**
  * A second incumbent document, served by one gateway only — the reason every gateway is asked.
  *
- * Its per-file map is the incumbent's with `assets/app.js` replaced by the *candidate's* hash.
- * A verifier that took the first answer and got this one would find no app-code delta at all
- * and admit an app-code release to the lane that skips the 72 h soak.
+ * Its per-file map is the **candidate's**, so a verifier that took this gateway's answer would
+ * measure the app-code candidate against itself, find zero out-of-scope files, and admit it to
+ * the lane that skips the 72 h soak.
  */
 const divergentIncumbentBytes = producerRelease(
-  { ...incumbentFiles, 'assets/app.js': utf8('export const boot = () => steal();\n') },
+  candidateTrees['diff-scope-app-code-tree']!,
   'J'.repeat(43),
 );
 
@@ -531,22 +603,10 @@ function incumbentTranscript(divergent: boolean): unknown {
 write('cli-incumbent.json', incumbentTranscript(false));
 write('cli-incumbent-divergent.json', incumbentTranscript(true));
 
-/** The candidate trees the two `diff-scope` outcomes are decided over. */
-const candidateTrees: Record<string, Record<string, Uint8Array>> = {
-  // Descriptors only: exactly what §1.5's lane exists for.
-  'diff-scope-descriptor-tree': {
-    ...incumbentFiles,
-    [DESCRIPTOR_PATH]: utf8('export const descriptors = "spec_version 3..4";\n'),
-  },
-  // The same descriptor refresh, with one line of application code carried along. §1.5 requires
-  // every other file to be byte-identical, so this belongs in the standard lane with its soak.
-  'diff-scope-app-code-tree': {
-    ...incumbentFiles,
-    [DESCRIPTOR_PATH]: utf8('export const descriptors = "spec_version 3..4";\n'),
-    'assets/app.js': utf8('export const boot = () => steal();\n'),
-  },
-};
 for (const [name, tree] of Object.entries(candidateTrees)) {
+  // Removed first: a generator that only writes leaves every past shape behind, and a candidate
+  // tree that is the union of every name this file ever used asserts against no build at all.
+  rmSync(join(OUT, name), { recursive: true, force: true });
   for (const [path, bytes] of Object.entries(tree)) {
     const target = join(OUT, name, path);
     mkdirSync(dirname(target), { recursive: true });

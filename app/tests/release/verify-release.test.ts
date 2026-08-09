@@ -27,6 +27,7 @@ import {
 import type { Attestation, Keyring, ReleaseSignature } from '../../tools/verify-release/verdict.ts';
 import {
   ATTESTATION_FLOOR,
+  EXPEDITED_SCOPE,
   SIGNATURE_FLOOR,
   VerifyError,
   countAttestations,
@@ -196,22 +197,86 @@ test('a deployment may require more signatures and may not configure fewer', () 
 
 test('diff-scope sees a deletion, not only an edit', () => {
   // §1.5 requires every other file to be *byte-identical*; a missing file is not. A loop over
-  // the candidate tree alone would report this delta as admissible.
-  const incumbent = { 'assets/app.js': 'x', 'assets/descriptors/bleavit.js': 'd' };
-  const removed = diffScope(incumbent, { 'assets/descriptors/bleavit.js': 'd' });
+  // the candidate tree alone would report this delta as admissible — and under 12 §1.1 that is
+  // not an edge case, since a content-hash rename is always a removal paired with an addition.
+  const incumbent = { 'assets/8f1c0a24.js': 'x', 'sw.js': 'd' };
+  const removed = diffScope(incumbent, { 'sw.js': 'd' });
   assert.equal(removed.admissible, false);
-  assert.deepEqual(removed.outOfScope, [{ path: 'assets/app.js', change: 'removed' }]);
-  const added = diffScope(incumbent, { ...incumbent, 'assets/new.js': 'y' });
+  assert.deepEqual(removed.outOfScope, [{ path: 'assets/8f1c0a24.js', change: 'removed' }]);
+  const added = diffScope(incumbent, { ...incumbent, 'assets/2c6ab913.js': 'y' });
   assert.equal(added.admissible, false);
-  assert.deepEqual(added.outOfScope, [{ path: 'assets/new.js', change: 'added' }]);
+  assert.deepEqual(added.outOfScope, [{ path: 'assets/2c6ab913.js', change: 'added' }]);
 });
 
-test('a descriptor-only delta is admissible for the expedited lane', () => {
-  const incumbent = { 'assets/app.js': 'x', 'assets/descriptors/bleavit.js': 'd', 'release.json': 'r' };
-  const candidate = { 'assets/app.js': 'x', 'assets/descriptors/bleavit.js': 'D', 'release.json': 'R' };
+test('EXPEDITED_SCOPE allowlists no asset prefix, because no build output is one', () => {
+  // The pin on the ruling this suite exists to hold. `'assets/descriptors/'` sat in this list
+  // and the build has never emitted that path: an allowlisted asset prefix is what let the
+  // lane that skips the 72 h soak be authorized on an imaginary path, and every suite over it
+  // agreed because the fixtures invented the same output.
+  for (const prefix of EXPEDITED_SCOPE) {
+    assert.equal(prefix.startsWith('assets/'), false, `${prefix} allowlists a built asset path`);
+  }
+  assert.deepEqual([...EXPEDITED_SCOPE], ['release.json', 'CHANGELOG.md', 'release-history.json']);
+});
+
+test('a descriptor refresh, as the build emits one, is refused and told why', () => {
+  // 12 §1.1 names every chunk by its content alone, so refreshing a descriptor renames its
+  // chunk, then the entry chunk that imports it, then `index.html` which names that. Nothing
+  // else moves here — this is the most favourable descriptor-only delta that can exist, and it
+  // is still indistinguishable from an app-code delta in the published tree.
+  const incumbent = {
+    'index.html': 'h',
+    'assets/8f1c0a24.js': 'e',
+    'assets/4b9d7e05.js': 'd',
+    'sw.js': 'w',
+  };
+  const candidate = {
+    'index.html': 'H',
+    'assets/2c6ab913.js': 'E',
+    'assets/d05e3f78.js': 'D',
+    'sw.js': 'w',
+  };
+  const result = diffScope(incumbent, candidate);
+  assert.equal(result.admissible, false);
+  assert.deepEqual(result.outOfScope, [
+    { path: 'assets/2c6ab913.js', change: 'added' },
+    { path: 'assets/4b9d7e05.js', change: 'removed' },
+    { path: 'assets/8f1c0a24.js', change: 'removed' },
+    { path: 'assets/d05e3f78.js', change: 'added' },
+    { path: 'index.html', change: 'changed' },
+  ]);
+  assert.match(result.detail, /content-hash rename/);
+  assert.match(result.detail, /indistinguishable from an app-code delta/);
+  assert.match(result.detail, /expedited lane\s+is therefore unavailable/);
+  assert.match(result.detail, /standard lane with its 72 h soak/);
+});
+
+test('a delta that edits a fixed-name file gets the generic refusal, not the rename sentence', () => {
+  // `sw.js` keeps its name because a browser resolves it by URL, so its delta arrives as
+  // `changed` — which a content hash cannot produce. The structural explanation must not
+  // swallow this: a classifier that matched every refusal would explain nothing.
+  const incumbent = { 'assets/8f1c0a24.js': 'e', 'sw.js': 'w' };
+  const result = diffScope(incumbent, { 'assets/8f1c0a24.js': 'e', 'sw.js': 'W' });
+  assert.equal(result.admissible, false);
+  assert.deepEqual(result.outOfScope, [{ path: 'sw.js', change: 'changed' }]);
+  assert.doesNotMatch(result.detail, /content-hash rename/);
+  assert.match(result.detail, /§1\.5 requires zero app-code delta/);
+});
+
+test('a release-metadata-only delta is still admissible for the expedited lane', () => {
+  // The half of §1.5 that survives 12 §1.1: changelog, release history and `release.json`
+  // itself keep fixed names, so a delta confined to them is expressible in the built tree.
+  const incumbent = { 'assets/8f1c0a24.js': 'e', 'release.json': 'r', 'CHANGELOG.md': 'c' };
+  const candidate = {
+    'assets/8f1c0a24.js': 'e',
+    'release.json': 'R',
+    'CHANGELOG.md': 'C',
+    'release-history.json': 'H',
+  };
   const result = diffScope(incumbent, candidate);
   assert.equal(result.admissible, true);
-  assert.match(result.detail, /12 §1\.5 admits/);
+  assert.deepEqual(result.outOfScope, []);
+  assert.match(result.detail, /no published app asset moved/);
 });
 
 test('disjointness is evaluated over operators — the key-id reading would pass forever', () => {

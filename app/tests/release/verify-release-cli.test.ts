@@ -496,6 +496,15 @@ test('a live run takes its gateway set from the release notes, and the refusal s
 // Every test below drives `main(argv)` for the reason the header of this file gives: the defect
 // lived in the caller, and a suite over `diffScope` — which this repository has, and which is
 // green — agrees with a caller it never runs.
+//
+// ## The candidate trees carry the names 12 §1.1 emits, and until this round they did not
+//
+// The fixture incumbent carried `assets/descriptors/bleavit.js` and `EXPEDITED_SCOPE`
+// allowlisted that prefix, so these tests asserted that a descriptor-only delta is *admitted* —
+// against a build that emits no such path. The build names every chunk by its content alone,
+// so a descriptor refresh **renames** its chunk, then the entry chunk importing it, then
+// `index.html`; nothing confines that to a prefix, so the lane is unavailable and the refusal
+// is what has to be asserted. See `EXPEDITED_SCOPE`'s comment for the whole argument.
 // ---------------------------------------------------------------------------------------
 
 /** §1.5's command: the incumbent by transaction id, the candidate as the tree you built. */
@@ -518,30 +527,55 @@ function diffScopeArgv(
   ];
 }
 
-test('12 §1.5’s published diff-scope command runs, and admits a descriptor-only delta', async () => {
+test('12 §1.5’s published diff-scope command runs, and refuses a descriptor refresh', async () => {
   const result = await run(diffScopeArgv());
   assert.equal(result.thrown, undefined, result.thrown?.message);
   // The incumbent is fetched, not read off disk: `--against` is a transaction id.
-  assert.match(result.out, new RegExp(`incumbent ${INCUMBENT_MANIFEST_TXID}: 4 signed file\\(s\\)`));
+  assert.match(result.out, new RegExp(`incumbent ${INCUMBENT_MANIFEST_TXID}: 5 signed file\\(s\\)`));
   assert.match(result.out, /corroborated by 2 gateway\(s\) \(alpha, beta\)/);
-  assert.match(result.out, /confined to the descriptor and release-metadata scope 12 §1\.5 admits/);
-  assert.equal(result.code, 0);
+
+  // The candidate is a descriptor-only refresh with nothing else touched, and the delta is
+  // still every chunk plus `index.html` — which is the whole reason the lane cannot run.
+  assert.equal(result.code, 1, `expected inadmissible; the command exited ${String(result.code)}`);
+  assert.match(result.err, /removed: assets\/4b9d7e05\.js/);
+  assert.match(result.err, /added: assets\/d05e3f78\.js/);
+  assert.match(result.err, /changed: index\.html/);
+  assert.match(result.out, /content-hash rename/);
+  assert.match(result.out, /indistinguishable from an app-code delta/);
+  assert.match(result.out, /expedited lane\s+is therefore unavailable/);
+  assert.match(result.out, /must use the standard lane with its 72 h soak/);
 });
 
-test('an app-code delta is refused, so the admissible verdict above is not vacuous', async () => {
-  // The same descriptor refresh with one line of application code carried along. §1.5 requires
-  // every other file to be byte-identical, and the soak exists to catch exactly this.
+test('a release-metadata-only delta is admitted, so the refusal above is not vacuous', async () => {
+  // The half of §1.5 that survives 12 §1.1: a changelog and a release history keep fixed names,
+  // so a delta confined to them is expressible in the built tree. Without this arm the command
+  // could refuse everything and pass a suite made only of refusals.
+  const result = await run(diffScopeArgv({ local: join(FIXTURES, 'diff-scope-metadata-tree') }));
+  assert.equal(result.thrown, undefined, result.thrown?.message);
+  assert.equal(result.code, 0, `expected admissible; the command exited ${String(result.code)}`);
+  assert.match(result.out, /confined to the release-metadata files 12 §1\.5 admits/);
+  assert.match(result.out, /no published app asset moved/);
+  assert.equal(result.err.trim(), '');
+});
+
+test('a delta that edits a fixed-name file is refused in the other words', async () => {
+  // The same descriptor refresh with application code carried along in `sw.js`, which keeps its
+  // name because a browser resolves it by URL. Its delta therefore arrives as `changed`, which a
+  // content hash cannot produce — so the structural sentence must not be the one printed here.
   const result = await run(diffScopeArgv({ local: join(FIXTURES, 'diff-scope-app-code-tree') }));
   assert.equal(result.thrown, undefined, result.thrown?.message);
   assert.equal(result.code, 1, `expected inadmissible; the command exited ${String(result.code)}`);
-  assert.match(result.err, /changed: assets\/app\.js/);
+  assert.match(result.err, /changed: sw\.js/);
+  assert.doesNotMatch(result.out, /content-hash rename/);
+  assert.match(result.out, /§1\.5 requires zero app-code delta/);
   assert.match(result.out, /must use the standard lane with its 72 h soak/);
 });
 
 test('one gateway lying about the incumbent cannot admit a release to the lane', async () => {
-  // `beta` serves an incumbent document whose `assets/app.js` hash is the *candidate's*, so a
-  // verifier that took the first answer — or that happened to ask beta — would find no app-code
-  // delta at all. This is the whole reason the document is fetched through every gateway.
+  // `beta` serves an incumbent document whose per-file map is the *candidate's own*, so a
+  // verifier that took the first answer — or that happened to ask beta — would measure the
+  // candidate against itself, find zero out-of-scope files and admit it to the lane that skips
+  // the soak. This is the whole reason the document is fetched through every gateway.
   const result = await run(
     diffScopeArgv({
       local: join(FIXTURES, 'diff-scope-app-code-tree'),
@@ -568,8 +602,15 @@ test('--against names the immutable address, and the asset manifest is refused a
 
 test('the ar:// scheme is accepted here too, because §1.3 accepts it', async () => {
   // One tool, one reading of a transaction id. A scheme that works on `--release-json` and not
-  // on `--against` is the same defect the scheme fix closed, moved one flag over.
-  const result = await run(diffScopeArgv({ against: `ar://${INCUMBENT_MANIFEST_TXID}` }));
+  // on `--against` is the same defect the scheme fix closed, moved one flag over. Driven over
+  // the admissible tree, so a stripped scheme has to reach a verdict rather than merely reach
+  // the same refusal every other input reaches.
+  const result = await run(
+    diffScopeArgv({
+      against: `ar://${INCUMBENT_MANIFEST_TXID}`,
+      local: join(FIXTURES, 'diff-scope-metadata-tree'),
+    }),
+  );
   assert.equal(result.thrown, undefined, result.thrown?.message);
   assert.equal(result.code, 0);
 });
