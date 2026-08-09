@@ -387,8 +387,17 @@ export async function classifyLocalRuntime(deps: CompatProbeDeps): Promise<Compa
  * 02 §13 rule 7 is explicit that they are independent — so a `spec_version`-only comparison
  * would agree across exactly the swap it exists to notice. `spec_name` too: a chain answering
  * under a different name is not a version change at all.
+ *
+ * **Exported because it is also how a `CodeUpdated` is seen.** 10 §3.2 re-runs the classifier on
+ * every `CodeUpdated`, and the observable a light client has for one is exactly this comparison at
+ * the finalized head: `chainHead_v1_follow(withRuntime)` reports `newRuntime` on the block whose
+ * runtime changed, and `ChainHeadConnection` promotes that reading into `finalizedRuntime()` once
+ * the block finalizes. `compat-driver.ts` therefore watches this predicate rather than a decoded
+ * `System.Events` entry: the event and the version report describe the same upgrade, and only the
+ * version report is already finalized-only, already parsed, and already fail-closed on a
+ * connection that has lost track of which runtime it is on.
  */
-function runtimeMoved(
+export function runtimeMoved(
   before: RuntimeVersionReport,
   after: RuntimeVersionReport | undefined,
 ): string | undefined {

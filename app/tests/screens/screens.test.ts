@@ -49,6 +49,7 @@ import type {
   ShellDecoders,
   ShellStateReader,
 } from '@bleavit/application';
+import type { CompatClassification } from '@bleavit/descriptors';
 import {
   ConfirmSurface,
   EpochShrinkNotice,
@@ -1519,6 +1520,15 @@ test('a prefix key with no value is reported, never silently dropped', async () 
 
 // ------------------------------------------- the confirm surface's gate wiring
 
+/**
+ * The compat verdict every gate fixture below runs against — 10 §3.2's `full` row.
+ *
+ * `gate()` requires one and requires it to prove signing (INV-FE-12). These fixtures are about
+ * the confirm surface and the operator controls, so they hand it the mode in which signing is
+ * enabled; the refusal itself is asserted in `tests/transaction-builder/machine.test.ts`.
+ */
+const PROVEN: CompatClassification = { mode: 'full', specVersion: 1, disabled: [], proven: [] };
+
 const session = (overrides: Partial<TxSession> = {}): TxSession => ({
   state: 'Draft', prep: undefined, failed: [], lastError: undefined,
   signingWindow: undefined, ...overrides,
@@ -1535,7 +1545,7 @@ const gatePassedAt = (at: FinalizedBlockRef, rows: readonly DeclarableRowId[]): 
   const results = rows.flatMap((row) =>
     coverageOf(row).map((id) => ({ ...PASSING_ROW, id, at })),
   );
-  const outcome = gate(prep, at, prep.builtFor, results);
+  const outcome = gate(prep, at, prep.builtFor, PROVEN, results);
   assert.equal(outcome.kind, 'proceed', 'the gate fixture no longer opens');
   return outcome.passed;
 };
@@ -1559,7 +1569,7 @@ const readySession = (row: DeclarableRowId): TxSession => {
   // preparation the proof names must be the one the session holds, because `reduce` and
   // `operatorGate` both refuse a proof minted for different bytes.
   const results = coverageOf(row).map((id) => ({ ...PASSING_ROW, id, at: AT }));
-  const outcome = gate(prep, AT, prep.builtFor, results);
+  const outcome = gate(prep, AT, prep.builtFor, PROVEN, results);
   assert.equal(outcome.kind, 'proceed', 'the operator gate fixture no longer opens');
   return session({ state: 'AwaitingSignature', prep, signingWindow: outcome.passed });
 };
