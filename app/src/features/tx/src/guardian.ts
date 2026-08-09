@@ -57,7 +57,7 @@
  * another screen.
  */
 
-import { combine2, type Combined, type Verified } from '@bleavit/shared-types';
+import { combine, combine2, type Combined, type Verified } from '@bleavit/shared-types';
 import type { ObligationScope, SurfaceId } from '@bleavit/transaction-builder';
 import type { EvidenceState } from './evidence.js';
 
@@ -294,6 +294,65 @@ export type DispatchEvidence =
   | { readonly kind: 'rerun'; readonly proposal: RerunState }
   | { readonly kind: 'not-applicable' };
 
+/**
+ * Whether the playbook an activation names may be activated at all — 02 §7.4, contract v30.
+ *
+ * Two reads, one arm each, and both were `blocking` unreadable obligations on row `O-3` until
+ * contract v30 froze the maps. Both refusals fall on the **dispatching** approval:
+ * `approve_action` reads `Guardian.PlaybookRegistered[id]` *after* counting the fifth approval
+ * (`PlaybookNotRegistered`), and `dispatch` reads `Guardian.ActivePlaybooks`
+ * (`PlaybookAlreadyActive`). A client blind to either walks a 5-of-7 council through four
+ * signatures to a guaranteed revert on the fifth.
+ *
+ * `not-applicable` is the explicit answer for the four powers that are not activations —
+ * written down rather than omitted, for the reason every arm in this module exists: an
+ * optional field is an evaluation that defaults to *nothing was wrong*.
+ *
+ * ## The two readings 02 §7.4 forbids, and where each is prevented
+ *
+ * **Registration is admissibility, never a trigger source** (06 §6.2). It is consumed only by
+ * `playbookBlocks`, and `TRIGGER_READS` — the one table `triggerRefusal` consults — names
+ * neither surface, so registration has no path to the trigger evaluation at all. A registered
+ * playbook whose trigger is inactive still blocks, and an unregistered one whose trigger is
+ * live blocks too; neither answer can stand in for the other.
+ *
+ * **Presence in `ActivePlaybooks` is not uniformly a refusal.** `dispatch` refuses
+ * re-activation for `PB-LEDGER-FREEZE` alone — it renews only through a values referendum
+ * (06 §6.3) — while every other playbook re-activates in place without consuming a slot
+ * (06 §6.2's *"renew by re-activation while triggered"*). So `activeIds` is read for the
+ * ledger-freeze activation and for nothing else, and an **unread** set blocks only that same
+ * activation: refusing five lawful renewals on a read that decides nothing about them is the
+ * mirror-rule defect, and an over-broad fail-closed is still a client refusing what the chain
+ * accepts.
+ */
+export type PlaybookAdmissibility =
+  | {
+      readonly kind: 'activation';
+      readonly registration: RegistrationReading;
+      readonly active: ActivePlaybookReading;
+    }
+  | { readonly kind: 'not-applicable' };
+
+/** `Guardian.PlaybookRegistered[id]` for the playbook this action names (02 §7.4). */
+export type RegistrationReading =
+  | { readonly kind: 'read'; readonly registered: Verified<boolean> }
+  | { readonly kind: 'unread'; readonly reason: string };
+
+/**
+ * `Guardian.ActivePlaybooks`, as the ids it holds records for (02 §7.4).
+ *
+ * The ids alone rather than the `ActivePlaybook { id, expiry, renewals_used }` records,
+ * because the only question `dispatch` asks of this item is membership — `active_playbooks
+ * .iter().any(|p| p.id == id)`. Carrying the expiry here would invite a screen to compute a
+ * countdown the runtime does not consult on this path.
+ *
+ * One `Verified` over the whole vector, not one per id: it is one storage read, and a status
+ * per element would let a caller pair a verified id with a provider one inside a single value.
+ */
+export type ActivePlaybookReading =
+  | { readonly kind: 'read'; readonly ids: Verified<readonly PlaybookId[]> }
+  | { readonly kind: 'unread'; readonly reason: string };
+
 /** One power's allowance as the chain publishes it — `Guardian.Allowances` (02 §7.4). */
 export interface AllowanceReading {
   readonly used: Verified<number>;
@@ -346,6 +405,180 @@ export interface AllowanceMeter<P extends MeteredPower = MeteredPower> {
   readonly power: P;
   readonly used: Verified<number>;
   readonly limit: Verified<number>;
+}
+
+/**
+ * The frozen surfaces each metered power's meter is read from — 02 §7.4 and §9, contract v30.
+ *
+ * A meter is a **pair**, and 02 §9's binding row says so in as many words: the four constants
+ * are read *"together with §7.4's `Guardian.Allowances`, which stores the used counters alone.
+ * A meter is the pair; neither half is a meter"*. Until contract v30 no constant published a
+ * bound at all, so `AllowanceMeter.limit` had no producer and the only way to satisfy
+ * §11.8.2's *"allowance remaining for the power"* precondition was to invent it — which is
+ * INV-FE-1 twice over, on the one precondition that document names by name.
+ *
+ * `pause_intake` names **four** surfaces where the other two name two, and the extra pair is
+ * the whole reason `allowanceBook` exists rather than a record literal: its allowance is one
+ * use per window, so the count is meaningless without the window length and without the epoch
+ * to measure it from.
+ *
+ * The table is data the producer consults — `allowanceBook`'s refusal names these ids — so it
+ * is a control rather than a comment, the way `TRIGGER_READS` is.
+ */
+export const ALLOWANCE_READS: Readonly<Record<MeteredPower, readonly SurfaceId[]>> =
+  Object.freeze({
+    delay_once: Object.freeze([
+      'storage.guardian.allowances',
+      'constant.guardian.delay_once_allowance_per_epoch',
+    ] as SurfaceId[]),
+    force_rerun: Object.freeze([
+      'storage.guardian.allowances',
+      'constant.guardian.force_rerun_allowance_per_epoch',
+    ] as SurfaceId[]),
+    pause_intake: Object.freeze([
+      'storage.guardian.allowances',
+      'constant.guardian.pause_intake_allowance',
+      'constant.guardian.pause_intake_allowance_window_epochs',
+      'storage.epoch.epoch_of',
+    ] as SurfaceId[]),
+  });
+
+/**
+ * The nine reads a book is built from — `Guardian.Allowances`, `Epoch.EpochOf` and the four
+ * 02 §9 constants (contract v30).
+ *
+ * One union with one `unread` arm rather than a union per read, because the book is a single
+ * derived value: any missing input means there is no book, and a caller holding a failed read
+ * has to say so rather than reach for a zero. INV-FE-12's rule is that a value no read
+ * produced is **absent**, and 10 §2.2 gives it no status — so there is no `Verified<number>`
+ * to put in a field and the type must not offer one.
+ *
+ * **The counter field names are the metadata's, not the core crate's.** `AllowanceState` is
+ * published as `{ delay_used_this_epoch, force_rerun_used_this_epoch, pause_window_start,
+ * pause_used_in_window }` — the third is `pause_window_start`, although
+ * `guardian_core::Guardian` calls its own copy `pause_used_epoch_window_start`. The metadata
+ * name is what a client decodes and encodes; do not "correct" it to the Rust one.
+ */
+export type AllowanceReads =
+  | {
+      readonly kind: 'read';
+      /** `Guardian.Allowances.delay_used_this_epoch`. */
+      readonly delayUsedThisEpoch: Verified<number>;
+      /** `Guardian.Allowances.force_rerun_used_this_epoch`. */
+      readonly forceRerunUsedThisEpoch: Verified<number>;
+      /** `Guardian.Allowances.pause_window_start` — **not** `pause_used_epoch_window_start`. */
+      readonly pauseWindowStart: Verified<number>;
+      /** `Guardian.Allowances.pause_used_in_window`. */
+      readonly pauseUsedInWindow: Verified<number>;
+      /** `Epoch.EpochOf.index` at B′ — the epoch the chain's own window test compares against. */
+      readonly currentEpoch: Verified<number>;
+      /** `Guardian::DelayOnceAllowancePerEpoch` (02 §9). */
+      readonly delayOnceAllowancePerEpoch: Verified<number>;
+      /** `Guardian::ForceRerunAllowancePerEpoch` (02 §9). */
+      readonly forceRerunAllowancePerEpoch: Verified<number>;
+      /** `Guardian::PauseIntakeAllowance` (02 §9). */
+      readonly pauseIntakeAllowance: Verified<number>;
+      /** `Guardian::PauseIntakeAllowanceWindowEpochs` (02 §9). */
+      readonly pauseIntakeAllowanceWindowEpochs: Verified<number>;
+    }
+  | { readonly kind: 'unread'; readonly reason: string };
+
+/**
+ * A book, or the honest absence of one.
+ *
+ * `AllowanceBook` is total over the three metered powers and has no per-power absent arm, so a
+ * figure this client cannot establish refuses the **whole** book. That is deliberately blunt
+ * and it is the safe blunt: every input is read at one pinned block, so the only way one power
+ * fails is a caller that mixed blocks — which is precisely the state INV-FE-2's pre-sign
+ * refresh exists to collapse, and which says nothing trustworthy about the other two either.
+ */
+export type AllowanceBookState =
+  | { readonly kind: 'book'; readonly book: AllowanceBook }
+  | { readonly kind: 'unreadable'; readonly reason: string };
+
+/**
+ * Build every metered power's meter from the reads the chain publishes — contract v30.
+ *
+ * **The `pause_intake` meter is windowed, and the naive subtraction is wrong in the dangerous
+ * direction.** `check_and_consume` resets that counter **lazily**, at consume time:
+ *
+ * ```rust
+ * if self.current_epoch.saturating_sub(self.pause_used_epoch_window_start)
+ *     >= PAUSE_INTAKE_ALLOWANCE_WINDOW_EPOCHS
+ * { self.pause_used_epoch_window_start = self.current_epoch; self.pause_used_in_window = 0; }
+ * ensure!(self.pause_used_in_window < PAUSE_INTAKE_ALLOWANCE, Error::AllowanceExhausted);
+ * ```
+ *
+ * So the stored counter is **stale outside the window**, and with `PauseIntakeAllowance = 1` a
+ * client that read `pause_used_in_window = 1` and subtracted would show **zero remaining** — an
+ * exhausted meter — while the chain would reset the window and accept the call. That is the
+ * client refusing what the runtime accepts, on an emergency power, which 15 §4.8's mirror rule
+ * forbids in those words. This applies the same window test the pallet applies, against the
+ * same `saturating_sub`, before the subtraction happens.
+ *
+ * **The other two counters need no such test, and the asymmetry is a fact about the pallet
+ * rather than an oversight.** `sync_epoch()` zeroes `delay_used_this_epoch` and
+ * `force_rerun_used_this_epoch` in `on_initialize` (`pallets/guardian/src/lib.rs`), so at any
+ * finalized block those two are already current and pass straight through. Nothing resets the
+ * pause pair outside `check_and_consume`, which is why exactly one meter is derived.
+ *
+ * The derived figure carries the provenance of **all four** of its inputs through `combine`,
+ * never the counter's own status: a window computed from a provider's epoch and a verified
+ * counter is not a verified figure, and two verified reads at different blocks describe no
+ * block at all. Either makes the whole book `unreadable` rather than a number with a badge it
+ * did not earn (10 §2.2; app-code rule 2's rule B).
+ */
+export function allowanceBook(reads: AllowanceReads): AllowanceBookState {
+  if (reads.kind === 'unread') {
+    const surfaces = [...new Set(Object.values(ALLOWANCE_READS).flat())].sort().join(', ');
+    return {
+      kind: 'unreadable',
+      reason:
+        `This client could not establish the guardian allowance meters (${reads.reason}). A ` +
+        `meter is a used counter and its published limit together, read from ${surfaces}, and ` +
+        'a power whose remaining budget cannot be established is not offered — these are the ' +
+        'five most privileged actions in the system, and "we could not check the budget" is ' +
+        'not a reason to spend it.',
+    };
+  }
+  // The pallet's own test, in the pallet's own order: saturating subtraction first, then the
+  // `>=` comparison. A signed subtraction here would make a window start ahead of the current
+  // epoch read as an enormous elapsed count and silently reset a live window.
+  const windowed = combine(
+    Math.max(0, reads.currentEpoch.value - reads.pauseWindowStart.value) >=
+      reads.pauseIntakeAllowanceWindowEpochs.value
+      ? 0
+      : reads.pauseUsedInWindow.value,
+    [
+      reads.pauseUsedInWindow.status,
+      reads.pauseWindowStart.status,
+      reads.currentEpoch.status,
+      reads.pauseIntakeAllowanceWindowEpochs.status,
+    ],
+  );
+  if (windowed.kind === 'incomparable') {
+    return {
+      kind: 'unreadable',
+      reason:
+        'This client cannot establish whether the pause-intake allowance window has elapsed. ' +
+        `${windowed.reason} The stored counter is only meaningful inside its window, so it is ` +
+        'not reported on its own.',
+    };
+  }
+  return {
+    kind: 'book',
+    book: {
+      pause_intake: { used: windowed.datum, limit: reads.pauseIntakeAllowance },
+      delay_once: {
+        used: reads.delayUsedThisEpoch,
+        limit: reads.delayOnceAllowancePerEpoch,
+      },
+      force_rerun: {
+        used: reads.forceRerunUsedThisEpoch,
+        limit: reads.forceRerunAllowancePerEpoch,
+      },
+    },
+  };
 }
 
 /** The meter for one metered power. Derived from the book, never written beside the call. */
@@ -437,7 +670,7 @@ export function approvalBlocks(context: ApprovalContext): readonly GuardianBlock
         'refused here: the guardian powers are the ones that cannot be undone.',
     });
   }
-  blocks.push(...conditionBlocks(context.action.power, context.condition));
+  blocks.push(...conditionBlocks(context.action.power, context.condition, context.playbooks));
   blocks.push(...dispatchBlocks(context));
   if (context.callerHasApproved) {
     // Its own reason, not folded into "not eligible": approving twice is not a no-op to a
@@ -525,6 +758,7 @@ function dispatchBlocks(context: ApprovalContext): readonly GuardianBlock[] {
 function conditionBlocks(
   power: PendingPower,
   evidence: ConditionEvidence,
+  playbooks: PlaybookAdmissibility,
 ): readonly GuardianBlock[] {
   if (power.kind === 'undecodable') {
     return [
@@ -538,7 +772,7 @@ function conditionBlocks(
       },
     ];
   }
-  return [...playbookBlocks(power), ...triggerConditionBlocks(power, evidence)];
+  return [...playbookBlocks(power, playbooks), ...triggerConditionBlocks(power, evidence)];
 }
 
 /**
@@ -561,9 +795,42 @@ function conditionBlocks(
  * a target naming the *wrong* cohort is refused there too. Splitting them is deliberate — the
  * remedies differ, and one sentence for three states says nothing useful about any of them.
  */
-function playbookBlocks(power: Exclude<PendingPower, { kind: 'undecodable' }>): readonly GuardianBlock[] {
-  if (power.kind !== 'activate_playbook') return [];
-  const blocks: GuardianBlock[] = [];
+function playbookBlocks(
+  power: Exclude<PendingPower, { kind: 'undecodable' }>,
+  playbooks: PlaybookAdmissibility,
+): readonly GuardianBlock[] {
+  if (power.kind !== 'activate_playbook') {
+    // The mirror, and it blocks for the reason the missing evidence does: an activation's
+    // admissibility supplied for a `delay_once` means two actions have been confused, and
+    // ignoring it approves whichever one the rest of the context happens to describe.
+    return playbooks.kind === 'not-applicable'
+      ? []
+      : [
+          {
+            check: 'Playbook admissibility',
+            detail:
+              `Playbook registration and activation records were supplied for ${power.kind}, ` +
+              'and only activate_playbook is dispatched through either. Two different actions ' +
+              'have been confused, so this is refused rather than ignored.',
+          },
+        ];
+  }
+  if (playbooks.kind !== 'activation') {
+    return [
+      {
+        check: 'Playbook admissibility',
+        detail:
+          'This action activates a playbook, and the chain checks the playbook’s registration ' +
+          'and its active record at the threshold approval. No such evidence was supplied, so ' +
+          'those checks have not been performed and the approval is refused rather than ' +
+          'collected on checks that did not run.',
+      },
+    ];
+  }
+  const blocks: GuardianBlock[] = [
+    ...registrationBlocks(power.id.value, playbooks.registration),
+    ...activeRecordBlocks(power.id.value, playbooks.active),
+  ];
   const id = power.id.value;
   const named = power.trigger.value;
   if (!PLAYBOOK_TRIGGERS[id].includes(named)) {
@@ -586,6 +853,98 @@ function playbookBlocks(power: Exclude<PendingPower, { kind: 'undecodable' }>): 
     });
   }
   return blocks;
+}
+
+/**
+ * `PlaybookNotRegistered`, evaluated where the pallet evaluates it.
+ *
+ * `approve_action` reads `PlaybookRegistered::<T>::get(id)` **after** counting the approval
+ * that reaches the threshold, so the guardian this refuses is the fifth one — and the whole
+ * extrinsic reverts inside `with_storage_layer`, so their signature buys nothing at all.
+ *
+ * All six playbooks are registered at genesis (02 §7.4), which is exactly why an `unread`
+ * blocks rather than assuming the common case: *"usually true"* is the shape of every check
+ * that has quietly stopped running, and INV-FE-12 makes an unproven capability absent.
+ *
+ * It says nothing about the trigger. 06 §6.2 makes registration **admissibility**, and an
+ * activation of a registered playbook whose condition is dead is still refused — by
+ * `triggerConditionBlocks`, from the reading `TRIGGER_READS` binds, which names neither of
+ * these two surfaces.
+ */
+function registrationBlocks(
+  id: PlaybookId,
+  reading: RegistrationReading,
+): readonly GuardianBlock[] {
+  if (reading.kind === 'unread') {
+    return [
+      {
+        check: 'Playbook registration',
+        detail:
+          `Whether ${id} is registered on this chain could not be read (${reading.reason}). ` +
+          'The chain checks it after the fifth approval is counted and reverts the whole ' +
+          'extrinsic if it is off, so an approval collected now may be a signature toward ' +
+          'nothing — it is refused rather than offered on a check that did not run.',
+      },
+    ];
+  }
+  return reading.registered.value
+    ? []
+    : [
+        {
+          check: 'Playbook registration',
+          detail:
+            `${id} is not registered on this chain. Registration is a values-governed toggle ` +
+            'over the six routines (06 §6.2), and the chain refuses the activation after the ' +
+            'fifth approval is counted, reverting the whole extrinsic. Re-registering it is a ' +
+            'governance action, not something approving can repair.',
+        },
+      ];
+}
+
+/**
+ * `PlaybookAlreadyActive`, which is **one playbook's refusal and not every playbook's**.
+ *
+ * `dispatch` refuses re-activation only when the id is already in `ActivePlaybooks` *and* is
+ * `PB-LEDGER-FREEZE`; every other playbook upserts its record and renews in place, consuming
+ * no slot (06 §6.2's *"renew by re-activation while triggered"*). 02 §7.4 states the forbidden
+ * reading directly: *"a client that reads mere presence as blocking refuses five lawful
+ * renewals"*.
+ *
+ * The `unread` arm is narrowed the same way, and that is not a softening. A read that decides
+ * nothing about an action cannot make that action unsafe by failing — blocking a `PB-RESERVE`
+ * renewal because `ActivePlaybooks` was unreadable would refuse what the chain accepts, which
+ * is the same defect as refusing it on presence, arrived at through a failure instead of a
+ * value.
+ */
+function activeRecordBlocks(
+  id: PlaybookId,
+  reading: ActivePlaybookReading,
+): readonly GuardianBlock[] {
+  if (id !== 'PB-LEDGER-FREEZE') return [];
+  if (reading.kind === 'unread') {
+    return [
+      {
+        check: 'Playbook already active',
+        detail:
+          `Whether a ${id} record is already active could not be read (${reading.reason}). ` +
+          'That playbook is the one the chain refuses to re-activate — it renews only through ' +
+          'a values referendum (06 §6.3) — so an unreadable record set is not something this ' +
+          'client will approve past.',
+      },
+    ];
+  }
+  return reading.ids.value.includes(id)
+    ? [
+        {
+          check: 'Playbook already active',
+          detail:
+            `${id} already has an active record. It is the one playbook the chain refuses to ` +
+            're-activate: every other playbook renews by being activated again while its ' +
+            'trigger holds, but a ledger freeze is renewed only through a values referendum ' +
+            '(06 §6.3). The chain raises this after the fifth approval is counted.',
+        },
+      ]
+    : [];
 }
 
 /** The trigger half of `check_and_consume`, against the evidence supplied. */
@@ -732,6 +1091,17 @@ export interface ApprovalContext {
    * `dispatchBlocks`. Required for the same reason `condition` is.
    */
   readonly dispatch: DispatchEvidence;
+  /**
+   * The two playbook reads contract v30 froze — see `PlaybookAdmissibility`.
+   *
+   * Required, and keyed on the action's own decoded power like every other evidence field
+   * here, because these refusals live **one frame above** `check_and_consume` — in `dispatch`
+   * and in the pallet — and both fall on the threshold approver. They were `blocking`
+   * unreadable obligations on row `O-3` for one day, which closed the approve control
+   * outright; now they are evaluated, and the scoping the obligations carried is
+   * `playbookBlocks`' rather than the row's.
+   */
+  readonly playbooks: PlaybookAdmissibility;
 }
 
 /**

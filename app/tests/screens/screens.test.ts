@@ -166,6 +166,8 @@ import {
   progressLine,
   MIGRATION_NO_ACTION_FOLLOWS,
   PLAYBOOK_TRIGGERS,
+  ALLOWANCE_READS,
+  allowanceBook,
   guardianCall,
   guardianStatus,
   isMetered,
@@ -204,24 +206,32 @@ import {
   OPERATOR_SURFACE_ROWS,
   declaredCoverageIds,
   gate,
+  obligationAppliesTo,
   operatorRowsFor,
   rowsFor,
+  scopedObligationsFor,
   unreadableObligationsFor,
 } from '@bleavit/transaction-builder';
 import type {
   ClauseId,
   DeclarableRowId,
   GatePassed,
+  ObligationScope,
   PreconditionResult,
   TxPreparation,
   TxSession,
   TxState,
+  UnreadableObligation,
 } from '@bleavit/transaction-builder';
 import type {
+  ActivePlaybookReading,
   AllowanceBook,
   AllowanceMeter,
+  AllowanceReads,
   ConditionEvidence,
   DispatchEvidence,
+  PlaybookAdmissibility,
+  RegistrationReading,
   GuardianProposal,
   HoldHorizon,
   MeteredPower,
@@ -2771,19 +2781,79 @@ const ALLOWANCES = (used = 0, limit = 3): AllowanceBook => ({
   force_rerun: { used: finalized(used), limit: finalized(limit) },
 });
 
-/** An approval context whose condition is, by default, the live one the action names. */
-const APPROVE = (over: Partial<ApprovalContext> = {}): ApprovalContext => ({
-  action: ACTION(),
-  justification: JUSTIFICATION(),
-  callerIsMember: true,
-  callerHasApproved: false,
-  now: finalized(100),
-  allowances: ALLOWANCES(),
-  condition: { kind: 'trigger', reading: active('LedgerDrift') },
-  // The default action is an activation, so the default dispatch evidence is its hold window.
-  dispatch: { kind: 'hold', horizon: HORIZON },
+/**
+ * The nine reads `allowanceBook` builds a book from — contract v30.
+ *
+ * The limits are the four constants 02 §9 freezes at their kernel values (2, 1, 1 and a
+ * 4-epoch window), never a number this fixture chose. `ALLOWANCES` above stays a hand-built
+ * record because the arithmetic tests only care about used-versus-limit — but before v30 that
+ * shape was the **only** one available, and this suite shipped `finalized(3)` for every power
+ * because no constant published a bound. That is the defect the freeze closes, so the producer
+ * is exercised through its real inputs here.
+ *
+ * `pauseWindowStart === currentEpoch` by default: the window has just opened, which is the
+ * state in which the stored counter means what it says.
+ */
+const READS = (
+  over: Partial<Extract<AllowanceReads, { kind: 'read' }>> = {},
+): AllowanceReads => ({
+  kind: 'read',
+  delayUsedThisEpoch: finalized(0),
+  forceRerunUsedThisEpoch: finalized(0),
+  pauseWindowStart: finalized(10),
+  pauseUsedInWindow: finalized(0),
+  currentEpoch: finalized(10),
+  delayOnceAllowancePerEpoch: finalized(2),
+  forceRerunAllowancePerEpoch: finalized(1),
+  pauseIntakeAllowance: finalized(1),
+  pauseIntakeAllowanceWindowEpochs: finalized(4),
   ...over,
 });
+
+/** The book, or a failure naming the refusal — so a test never silently asserts on a refusal. */
+const bookOf = (reads: AllowanceReads): AllowanceBook => {
+  const state = allowanceBook(reads);
+  if (state.kind !== 'book') return assert.fail(`expected a book, got a refusal: ${state.reason}`);
+  return state.book;
+};
+
+/** The registration and active-record reads an activation is admitted on (02 §7.4, v30). */
+const ADMISSIBLE = (over: Partial<{
+  readonly registration: RegistrationReading;
+  readonly active: ActivePlaybookReading;
+}> = {}): PlaybookAdmissibility => ({
+  kind: 'activation',
+  registration: { kind: 'read', registered: finalized(true) },
+  active: { kind: 'read', ids: finalized<readonly PlaybookId[]>([]) },
+  ...over,
+});
+
+/**
+ * An approval context whose condition is, by default, the live one the action names.
+ *
+ * `playbooks` defaults from the **action's own power**, not from a constant: an activation
+ * gets its registration and active-record reads and every other power gets `not-applicable`.
+ * A fixture that handed activation evidence to a `pause_intake` would be building an incoherent
+ * context, and `playbookBlocks` refuses exactly that — see V30-12, which supplies the wrong
+ * kind on purpose. Overriding it still wins, which is how that test reaches the refusal.
+ */
+const APPROVE = (over: Partial<ApprovalContext> = {}): ApprovalContext => {
+  const action = over.action ?? ACTION();
+  return {
+    action,
+    justification: JUSTIFICATION(),
+    callerIsMember: true,
+    callerHasApproved: false,
+    now: finalized(100),
+    allowances: ALLOWANCES(),
+    condition: { kind: 'trigger', reading: active('LedgerDrift') },
+    // The default action is an activation, so the default dispatch evidence is its hold window.
+    dispatch: { kind: 'hold', horizon: HORIZON },
+    // …and, since contract v30 froze both maps, its registration and active-record reads.
+    playbooks: action.power.kind === 'activate_playbook' ? ADMISSIBLE() : { kind: 'not-applicable' },
+    ...over,
+  };
+};
 
 /** `now` and `Guardian.PlaybookFreezeWindowBlocks`, read together. */
 const HORIZON: HoldHorizon = { now: finalized(1_000), maxBlocks: finalized(100_000) };
@@ -3188,6 +3258,248 @@ test('B2 — the approve flow refuses a stray cohort target (BadPlaybookTarget),
   assert.deepEqual(both.map((b) => b.check), ['Trigger', 'Cohort target']);
 });
 
+// ------------------------------------------- the allowance book's producer (contract v30)
+
+test('V30-1 — the book is built from the frozen reads, and each limit lands on its own power', () => {
+  // Until contract v30 `AllowanceMeter.limit` had **no producer**: `Guardian.Allowances`
+  // stores used-counters and no `constant.guardian.*` published a bound, so the only way to
+  // satisfy §11.8.2's "allowance remaining for the power" precondition was to fabricate one.
+  // The four constants are frozen now, and this is the function that consumes them.
+  //
+  // Three distinct limits, because the defect a mapping can have is a **swap**: a producer
+  // that handed `force_rerun`'s bound to `delay_once` is right about every number and wrong
+  // about every power, and a fixture using one value for all three cannot see it.
+  const book = bookOf(
+    READS({
+      delayOnceAllowancePerEpoch: finalized(2),
+      forceRerunAllowancePerEpoch: finalized(1),
+      pauseIntakeAllowance: finalized(7),
+      delayUsedThisEpoch: finalized(11),
+      forceRerunUsedThisEpoch: finalized(12),
+      pauseUsedInWindow: finalized(13),
+    }),
+  );
+  assert.equal(book.delay_once.limit.value, 2);
+  assert.equal(book.force_rerun.limit.value, 1);
+  assert.equal(book.pause_intake.limit.value, 7);
+  assert.equal(book.delay_once.used.value, 11);
+  assert.equal(book.force_rerun.used.value, 12);
+  assert.equal(book.pause_intake.used.value, 13);
+  // Exactly the three powers `AllowanceState` counts — see M4 for why the other two have none.
+  assert.deepEqual(Object.keys(book).sort(), ['delay_once', 'force_rerun', 'pause_intake']);
+});
+
+test('V30-2 — a pause_intake meter whose WINDOW has elapsed is available, not exhausted', () => {
+  // **The one that matters, and the one a naive subtraction gets wrong in the dangerous
+  // direction.** `check_and_consume` resets the pause counter lazily, at consume time:
+  //
+  //   if self.current_epoch.saturating_sub(self.pause_used_epoch_window_start)
+  //       >= PAUSE_INTAKE_ALLOWANCE_WINDOW_EPOCHS
+  //   { …window_start = current_epoch; …used_in_window = 0; }
+  //   ensure!(self.pause_used_in_window < PAUSE_INTAKE_ALLOWANCE, AllowanceExhausted);
+  //
+  // So the stored counter is **stale outside the window**. With `PauseIntakeAllowance = 1` a
+  // client reading `pause_used_in_window = 1` and subtracting shows zero remaining — an
+  // exhausted meter — while the chain would reset the window and accept the call. That is the
+  // client refusing what the runtime accepts, on an emergency power.
+  const elapsed = bookOf(
+    READS({ pauseWindowStart: finalized(0), currentEpoch: finalized(4), pauseUsedInWindow: finalized(1) }),
+  );
+  assert.equal(elapsed.pause_intake.used.value, 0, 'the stale counter was carried past its window');
+  const remaining = allowanceRemaining(meterFor(elapsed, 'pause_intake'));
+  assert.equal(remaining.kind, 'stated');
+  assert.equal(remaining.kind === 'stated' ? remaining.datum.value : -1, 1);
+  // …and the model agrees: the propose control is open.
+  assert.deepEqual(
+    proposalBlocks(
+      PROPOSE({
+        power: 'pause_intake',
+        meter: meterFor(elapsed, 'pause_intake'),
+        until: 5_000,
+        horizon: HORIZON,
+      }),
+    ),
+    [],
+    'a pause_intake whose window elapsed is refused an allowance the chain would grant',
+  );
+
+  // The inside-window case, which is the anti-vacuity control. A test covering only this one
+  // passes against the naive subtraction, which is exactly how the defect would survive.
+  const inWindow = bookOf(
+    READS({ pauseWindowStart: finalized(0), currentEpoch: finalized(3), pauseUsedInWindow: finalized(1) }),
+  );
+  assert.equal(inWindow.pause_intake.used.value, 1, 'a live window must keep its counter');
+  assert.deepEqual(
+    proposalBlocks(
+      PROPOSE({
+        power: 'pause_intake',
+        meter: meterFor(inWindow, 'pause_intake'),
+        until: 5_000,
+        horizon: HORIZON,
+      }),
+    ).map((b) => b.check),
+    ['Allowance'],
+    'a pause_intake inside a spent window must still be refused',
+  );
+});
+
+test('V30-3 — the window boundary is the pallet’s `>=`, and its subtraction saturates', () => {
+  // Off-by-one in either direction is a real defect with a real cost: one epoch early grants
+  // a second emergency pause inside its window, one epoch late refuses a lawful one. The
+  // pallet's comparison is `>=`, so elapsed == window resets and elapsed == window - 1 does
+  // not — asserted at both sides of the same boundary rather than at a comfortable distance.
+  const usedAt = (start: number, now: number, window = 4): number =>
+    bookOf(
+      READS({
+        pauseWindowStart: finalized(start),
+        currentEpoch: finalized(now),
+        pauseUsedInWindow: finalized(1),
+        pauseIntakeAllowanceWindowEpochs: finalized(window),
+      }),
+    ).pause_intake.used.value;
+  assert.equal(usedAt(10, 13), 1, 'elapsed 3 of a 4-epoch window is still inside it');
+  assert.equal(usedAt(10, 14), 0, 'elapsed 4 of a 4-epoch window has left it');
+
+  // **`saturating_sub`, not a signed subtraction**, and the window length is a *read* rather
+  // than the 4 this release happens to see — so the arithmetic must be the chain's for every
+  // value it can return, not only for the current one. Both fields are `EpochId`, and Rust's
+  // subtraction on them saturates at zero.
+  //
+  // A window start ahead of the current epoch is state a reorg or a mixed read produces. At
+  // window 4 the two spellings agree by luck (`-6 >= 4` and `0 >= 4` are both false), which is
+  // exactly why that case alone proves nothing — a signed-subtraction mutant survives it. They
+  // part at window 0, where the chain resets on every consume: saturating gives `0 >= 0`,
+  // signed gives `-6 >= 0`, and the client would carry a counter the chain had just cleared.
+  assert.equal(usedAt(20, 14), 1, 'a window start ahead of the epoch must saturate, not go negative');
+  assert.equal(usedAt(20, 14, 0), 0, 'the subtraction is unsigned and saturating, as the chain’s is');
+  assert.equal(usedAt(10, 14, 0), 0, 'a zero-length window resets on every read, as the chain does');
+});
+
+test('V30-4 — the two per-epoch counters are NOT windowed, and the pallet is why', () => {
+  // The asymmetry is a fact about `pallets/guardian`, not a simplification here.
+  // `sync_epoch()` zeroes both per-epoch counters in `on_initialize`, so at any finalized
+  // block they are already current and pass straight through; nothing resets the pause pair
+  // outside `check_and_consume`, which is why exactly one meter is derived.
+  //
+  // Asserted against the pallet source, so a change that made the reset lazy — or that made
+  // the pause reset eager — fails here and says which way the client must move.
+  const pallet = readFileSync(join(REPO, 'pallets/guardian/src/lib.rs'), 'utf8');
+  assert.match(
+    pallet,
+    /fn on_initialize\([^)]*\) -> Weight \{\s*Self::sync_epoch\(\);/,
+    'the per-epoch allowance reset left on_initialize — the client must window those counters too',
+  );
+  assert.match(
+    pallet,
+    /fn sync_epoch\(\) \{[\s\S]*?a\.delay_used_this_epoch = 0;\s*a\.force_rerun_used_this_epoch = 0;/,
+    'sync_epoch no longer resets both per-epoch counters',
+  );
+  assert.ok(
+    !/sync_epoch\(\)[\s\S]{0,400}pause_used_in_window = 0/.test(pallet),
+    'the pause counter gained an eager reset — the client’s window test is now double-counting',
+  );
+
+  // The client half of the same claim: a stale-looking per-epoch counter is reported as read,
+  // whatever the pause window is doing beside it.
+  const book = bookOf(
+    READS({
+      delayUsedThisEpoch: finalized(2),
+      forceRerunUsedThisEpoch: finalized(1),
+      pauseWindowStart: finalized(0),
+      currentEpoch: finalized(99),
+      pauseUsedInWindow: finalized(1),
+    }),
+  );
+  assert.equal(book.delay_once.used.value, 2);
+  assert.equal(book.force_rerun.used.value, 1);
+  assert.equal(book.pause_intake.used.value, 0, 'the pause counter is the only windowed one');
+});
+
+test('V30-5 — an unreadable input refuses the book and names the reads, never a zero', () => {
+  // INV-FE-12's lattice: an unproven capability is *absent*, and absence disables the
+  // dependent surface with a named reason. A substituted zero would read as *no allowance
+  // has been used* — the most permissive answer available — on the five most privileged
+  // actions in the system.
+  const refused = allowanceBook({ kind: 'unread', reason: 'the storage read failed' });
+  assert.equal(refused.kind, 'unreadable');
+  if (refused.kind !== 'unreadable') return;
+  assert.match(refused.reason, /the storage read failed/);
+  // The refusal names the surfaces a meter is read from, taken from `ALLOWANCE_READS` rather
+  // than written out — so the sentence cannot drift from the table the client actually reads.
+  for (const surface of new Set(Object.values(ALLOWANCE_READS).flat())) {
+    assert.ok(refused.reason.includes(surface), `the refusal does not name ${surface}`);
+  }
+});
+
+test('V30-6 — reads at different blocks refuse the book rather than badging the difference', () => {
+  // The window test is a value derived from four reads. Carrying one input's status would be
+  // a promotion by arithmetic (app-code rule 2's rule B) and two verified reads at different
+  // blocks describe **no** block, which no status can express — so `combine` refuses and the
+  // book refuses with it.
+  const otherBlock = {
+    value: 0,
+    status: {
+      kind: 'verified-finalized',
+      chain: TEST_CHAIN,
+      blockHash: '0xbeef',
+      blockNumber: 9,
+    },
+  } as const;
+  const state = allowanceBook(READS({ pauseWindowStart: otherBlock }));
+  assert.equal(state.kind, 'unreadable');
+  if (state.kind !== 'unreadable') return;
+  assert.match(state.reason, /different blocks/);
+  assert.match(state.reason, /only meaningful inside its window/);
+});
+
+test('V30-7 — the derived pause figure carries its weakest input’s provenance', () => {
+  // INV-FE-1: provider data is never promoted to verified. The window test reads the epoch,
+  // and an epoch this client did not verify makes the derived counter unverified too — the
+  // badge follows the arithmetic, not the counter it started from.
+  const book = bookOf(
+    READS({
+      pauseUsedInWindow: finalized(1),
+      currentEpoch: { value: 10, status: { kind: 'provider', providerId: 'acme', sampled: false } },
+    }),
+  );
+  assert.equal(book.pause_intake.used.status.kind, 'provider');
+  // The unwindowed counters keep their own status, because nothing was derived from them.
+  assert.equal(book.delay_once.used.status.kind, 'verified-finalized');
+});
+
+test('V30-8 — ALLOWANCE_READS names frozen surfaces, and the pause meter needs four', () => {
+  // App-code rule 7: reads go through declared `SurfaceId`s. The type already restricts the
+  // ids to `CRITICAL_SURFACE`; what this pins is the *content* — that the pause meter names
+  // its window length and the epoch to measure it from, which is the whole difference between
+  // a meter and a counter for that power.
+  assert.deepEqual(
+    [...ALLOWANCE_READS.pause_intake].sort(),
+    [
+      'constant.guardian.pause_intake_allowance',
+      'constant.guardian.pause_intake_allowance_window_epochs',
+      'storage.epoch.epoch_of',
+      'storage.guardian.allowances',
+    ],
+  );
+  assert.deepEqual(
+    [...ALLOWANCE_READS.delay_once].sort(),
+    ['constant.guardian.delay_once_allowance_per_epoch', 'storage.guardian.allowances'],
+  );
+  assert.deepEqual(
+    [...ALLOWANCE_READS.force_rerun].sort(),
+    ['constant.guardian.force_rerun_allowance_per_epoch', 'storage.guardian.allowances'],
+  );
+  // Every one of them is declared on both guardian rows, so the gate re-reads at B′ what the
+  // meter was computed from. A read the model performs and the row does not declare is one
+  // `clauseGroupsFor` reports as vacuously passed.
+  for (const row of ['O-3', 'O-4'] as const) {
+    const declared = new Set(rowsFor(row, 'USDC').map((entry) => entry.surface));
+    for (const surface of new Set(Object.values(ALLOWANCE_READS).flat())) {
+      assert.ok(declared.has(surface), `${row} does not declare ${surface}`);
+    }
+  }
+});
+
 test('M4 — the two powers the chain does NOT meter are not refused on a meter (06 §5.2)', () => {
   // 06 §5.2's Allowance column gives `activate_playbook` "per-playbook" and `suspend_on_gate`
   // "condition-gated". Neither is a counter, and `guardian_core::check_and_consume` charges no
@@ -3262,6 +3574,199 @@ test('M4 — the two powers the chain does NOT meter are not refused on a meter 
     }),
   );
   assert.ok(fieldPresent(meteredHtml, 'Allowance remaining'), meteredHtml);
+});
+
+// ------------------------------- the two playbook maps contract v30 froze (SQ-1030 closed)
+
+/** An approval of one named playbook, with its admissibility reads. */
+const ACTIVATION_OF = (
+  id: PlaybookId,
+  trigger: PlaybookTrigger,
+  playbooks: PlaybookAdmissibility = ADMISSIBLE(),
+): ApprovalContext =>
+  APPROVE({
+    action: ACTION({
+      power: PLAYBOOK_POWER({ id: finalized<PlaybookId>(id), trigger: finalized<PlaybookTrigger>(trigger) }),
+    }),
+    condition: { kind: 'trigger', reading: active(trigger) },
+    playbooks,
+  });
+
+test('V30-9 — an unregistered playbook is refused, on the approval the chain refuses it on', () => {
+  // `approve_action` reads `PlaybookRegistered::<T>::get(id)` **after** counting the fifth
+  // approval and reverts the whole extrinsic (`pallets/guardian/src/lib.rs`). Until contract
+  // v30 froze the map this was a `blocking` unreadable obligation citing SQ-1030, which closed
+  // S15's approve control for every activation rather than refusing the ones the chain does.
+  assert.deepEqual(approvalBlocks(ACTIVATION_OF('PB-RESERVE', 'ReserveHealth')), []);
+  assert.deepEqual(
+    approvalBlocks(
+      ACTIVATION_OF(
+        'PB-RESERVE',
+        'ReserveHealth',
+        ADMISSIBLE({ registration: { kind: 'read', registered: finalized(false) } }),
+      ),
+    ).map((b) => b.check),
+    ['Playbook registration'],
+  );
+  // All six are registered at genesis (02 §7.4), which is exactly why an unread blocks rather
+  // than assuming the common case: "usually true" is the shape of a check that has quietly
+  // stopped running.
+  assert.deepEqual(
+    approvalBlocks(
+      ACTIVATION_OF(
+        'PB-RESERVE',
+        'ReserveHealth',
+        ADMISSIBLE({ registration: { kind: 'unread', reason: 'the storage read failed' } }),
+      ),
+    ).map((b) => b.check),
+    ['Playbook registration'],
+  );
+});
+
+test('V30-10 — presence in ActivePlaybooks blocks PB-LEDGER-FREEZE ALONE (02 §7.4)', () => {
+  // 02 §7.4 states the forbidden reading in as many words: *"a client that reads mere
+  // presence as blocking refuses five lawful renewals"*. `guardian_core::dispatch` refuses
+  // re-activation only for `PB-LEDGER-FREEZE`, which renews through a values referendum
+  // (06 §6.3); every other playbook re-activates in place without consuming a slot.
+  const renewals: readonly (readonly [PlaybookId, PlaybookTrigger])[] = [
+    ['PB-DEPEG', 'DepegMedian'],
+    ['PB-MIGRATION', 'MigrationHalt'],
+    ['PB-ORACLE-VOID', 'OracleDeadlock'],
+    ['PB-HALT-INTAKE', 'GateBreach'],
+    ['PB-RESERVE', 'ReserveHealth'],
+  ];
+  // Five, and the count is the point — 02 §7.4's own sentence is about exactly these.
+  assert.equal(renewals.length, 5);
+  for (const [id, trigger] of renewals) {
+    const alreadyActive = ADMISSIBLE({
+      active: { kind: 'read', ids: finalized<readonly PlaybookId[]>([id, 'PB-LEDGER-FREEZE']) },
+    });
+    assert.ok(
+      !approvalBlocks(ACTIVATION_OF(id, trigger, alreadyActive)).some(
+        (block) => block.check === 'Playbook already active',
+      ),
+      `${id} renews by re-activation; blocking it refuses what the chain accepts`,
+    );
+  }
+  // The one it does block, and it is asserted against the core rather than restated: if
+  // `dispatch` ever widened the refusal to every playbook, this client would be the one
+  // refusing lawful renewals and would have no way to know.
+  const core = readFileSync(join(REPO, 'crates/guardian-core/src/lib.rs'), 'utf8');
+  assert.match(
+    core,
+    /if self\.active_playbooks\.iter\(\)\.any\(\|p\| p\.id == id\) \{\s*ensure!\(\s*!matches!\(id, PlaybookId::LedgerFreeze\),/,
+    'dispatch no longer narrows PlaybookAlreadyActive to LedgerFreeze — rescope the client',
+  );
+  const freeze = ADMISSIBLE({
+    active: { kind: 'read', ids: finalized<readonly PlaybookId[]>(['PB-LEDGER-FREEZE']) },
+  });
+  assert.deepEqual(
+    approvalBlocks(ACTIVATION_OF('PB-LEDGER-FREEZE', 'LedgerDrift', freeze)).map((b) => b.check),
+    ['Playbook already active'],
+  );
+  // An **unread** record set is narrowed the same way, and that is not a softening: a read
+  // that decides nothing about an action cannot make it unsafe by failing. Blocking a
+  // PB-RESERVE renewal on it would refuse what the chain accepts, through a failure instead
+  // of through a value.
+  const unreadSet = ADMISSIBLE({
+    active: { kind: 'unread', reason: 'the storage read failed' },
+  });
+  assert.deepEqual(approvalBlocks(ACTIVATION_OF('PB-RESERVE', 'ReserveHealth', unreadSet)), []);
+  assert.deepEqual(
+    approvalBlocks(ACTIVATION_OF('PB-LEDGER-FREEZE', 'LedgerDrift', unreadSet)).map((b) => b.check),
+    ['Playbook already active'],
+  );
+});
+
+test('V30-11 — registration is admissibility and can never stand in for a trigger', () => {
+  // 02 §7.4 and 06 §6.2: registration is not a trigger source, and neither of these two items
+  // may be substituted for §11.8.2's trigger table. Enforced structurally rather than
+  // remembered — `triggerRefusal` consults `TRIGGER_READS`, which names neither surface, so
+  // there is no path from one answer to the other.
+  const triggerSurfaces = new Set(Object.values(TRIGGER_READS).flat());
+  assert.ok(!triggerSurfaces.has('storage.guardian.playbook_registered'));
+  assert.ok(!triggerSurfaces.has('storage.guardian.active_playbooks'));
+
+  // Behaviourally, both directions: a registered playbook with a dead trigger still blocks…
+  assert.deepEqual(
+    approvalBlocks(
+      APPROVE({
+        action: ACTION({
+          power: PLAYBOOK_POWER({
+            id: finalized<PlaybookId>('PB-RESERVE'),
+            trigger: finalized<PlaybookTrigger>('ReserveHealth'),
+          }),
+        }),
+        condition: { kind: 'trigger', reading: inactiveAt('ReserveHealth') },
+        playbooks: ADMISSIBLE(),
+      }),
+    ).map((b) => b.check),
+    ['Trigger condition'],
+  );
+  // …and an unregistered playbook with a live trigger blocks too. Neither answer covers for
+  // the other, which is what "admissibility, never a trigger source" means in code.
+  assert.deepEqual(
+    approvalBlocks(
+      ACTIVATION_OF(
+        'PB-RESERVE',
+        'ReserveHealth',
+        ADMISSIBLE({ registration: { kind: 'read', registered: finalized(false) } }),
+      ),
+    ).map((b) => b.check),
+    ['Playbook registration'],
+  );
+});
+
+test('V30-12 — admissibility evidence must describe THIS action, in both directions', () => {
+  // The device every evidence field in this module uses: supplying the wrong kind is a
+  // refusal rather than something to ignore, because ignoring it approves whichever action
+  // the rest of the context happens to describe.
+  const pause = ACTION({ power: { kind: 'pause_intake', until: finalized(50_000) } });
+  assert.deepEqual(
+    approvalBlocks(
+      APPROVE({
+        action: pause,
+        condition: { kind: 'no-condition' },
+        dispatch: { kind: 'hold', horizon: HORIZON },
+        playbooks: ADMISSIBLE(),
+      }),
+    ).map((b) => b.check),
+    ['Playbook admissibility'],
+    'activation evidence supplied for a pause_intake must be refused, not ignored',
+  );
+  assert.deepEqual(
+    approvalBlocks(
+      APPROVE({
+        action: pause,
+        condition: { kind: 'no-condition' },
+        dispatch: { kind: 'hold', horizon: HORIZON },
+        playbooks: { kind: 'not-applicable' },
+      }),
+    ),
+    [],
+  );
+  assert.deepEqual(
+    approvalBlocks(
+      ACTIVATION_OF('PB-RESERVE', 'ReserveHealth', { kind: 'not-applicable' }),
+    ).map((b) => b.check),
+    ['Playbook admissibility'],
+    'an activation with no admissibility evidence must not be approved on checks that did not run',
+  );
+});
+
+test('V30-13 — O-3 declares both frozen maps and cites SQ-1030 nowhere', () => {
+  // The O-6 precedent: contract v28 froze `PendingUpgrade`, the `blocking` obligation was
+  // retired, and the row grew the ordinary clauses that replace it. A retirement without the
+  // replacement read would be the check being dropped rather than closed — which is why the
+  // surfaces are asserted, not only the absence.
+  const surfaces = new Set(rowsFor('O-3', 'USDC').map((entry) => entry.surface));
+  assert.ok(surfaces.has('storage.guardian.playbook_registered'));
+  assert.ok(surfaces.has('storage.guardian.active_playbooks'));
+  const cited = unreadableObligationsFor('O-3').map((entry) => entry.specQuestion);
+  assert.ok(!cited.includes('SQ-1030'), 'an obligation outlived the freeze that closes it');
+  // The `stated` SQ-1022 caveat is untouched: its bound (128 open review records) has no
+  // frozen constant and its count is not frozen either, so it is a different question.
+  assert.deepEqual(cited, ['SQ-1022']);
 });
 
 test('M3 — `suspend_on_gate` is condition-gated on the APPROVE side too (06 §5.2)', () => {
@@ -4235,76 +4740,152 @@ test('a blocked approval lists EVERY reason, not the first', () => {
   // The fourth heading is E20's trigger-condition status, which renders on **every** approval
   // including the clean ones — see the test below.
   //
-  // **Three more arrived on 2026-08-08 and they are not model blocks**: `O-3` declares two
-  // `blocking` and one `stated` unreadable obligation (SQ-1030, SQ-1022) for the three
-  // refusals that live one frame above `check_and_consume` — `PlaybookNotRegistered`,
-  // `PlaybookAlreadyActive` and `TooManyReviews`. They are listed here rather than filtered
-  // out, because the property under test is that **every** reason reaches the screen.
-  //
-  // **One of the two was scoped away later the same day** (Codex review of #287). This
-  // fixture activates `PB-ORACLE-VOID`, and `guardian_core::dispatch` refuses re-activation
-  // for `PB-LEDGER-FREEZE` alone — so that obligation says nothing about this action and
-  // renders no notice. One `Not readable at B′` remains: the registration read, which every
-  // `ActivatePlaybook` really does reach. The caveat list still names all three, because a
-  // caveat is a statement about the row and not about this action.
+  // **Two `Not readable at B′` headings arrived on 2026-08-08 and are gone again**: `O-3`
+  // declared `PlaybookNotRegistered` and `PlaybookAlreadyActive` as `blocking` obligations
+  // citing SQ-1030 for one day, and contract v30 froze both maps — so they are ordinary
+  // clauses now and the refusals are model blocks scoped to the arms the runtime guards them
+  // behind. What remains is the `stated` SQ-1022 caveat (`TooManyReviews`), whose bound has no
+  // frozen constant and whose count is not frozen either; it never blocks and always renders.
   assert.deepEqual(
     headings.sort(),
     [
       'Already approved',
       'Expiry',
       'Membership',
-      'Not readable at B′',
       'Trigger condition — OracleDeadlock',
       'What this client cannot check here',
     ],
   );
 });
 
-test('an approval is not blocked by a condition its own dispatch never reads', () => {
-  // The defect Codex found on #287: `O-3` is one row for all five guardian powers, and its
-  // two blocking obligations were spliced in for every one of them. The runtime guards both
-  // behind `if let GuardianPower::ActivatePlaybook`, so approving a `pause_intake` was
-  // refused for a condition its dispatch never evaluates — the client refusing what the
-  // chain would accept, which is the failure 09 §1.2's mirror exists to prevent.
+test('the caveat panel describes THIS action’s dispatch, not the row’s whole call', () => {
+  // The Codex finding on #287, in its second half. Scoping was applied to
+  // `blockingObligationsFor` alone, so the approve control *opened* for a `pause_intake` while
+  // `operatorGate.unreadable` — which `GateControl` renders unconditionally — still told the
+  // guardian that playbook registration and an active `PB-LEDGER-FREEZE` record could not be
+  // checked. The control opening and the copy describing a different dispatch is the same
+  // defect one layer up, and one predicate now serves both lists.
   //
-  // Rendered rather than asserted on the model, because the model was already right about
-  // `approvalBlocks`; what was wrong was the gate above it, and only a render proves the
-  // notice is gone from the screen a guardian actually sees.
-  const notReadable = (context: ApprovalContext): number => {
+  // Rendered rather than asserted on the model: what was wrong was never `approvalBlocks`, and
+  // only a render proves what a guardian is actually shown.
+  const caveats = (context: ApprovalContext): readonly string[] => {
     const html = renderToStaticMarkup(
       h(ApproveAction, { context, session: readySession('O-3'), onApprove: noSubmit }),
     );
-    return [...html.matchAll(/<strong class="notice__heading">Not readable at B′<\/strong>/g)].length;
+    const panel = /What this client cannot check here<\/strong>([\s\S]*?)<\/ul>/.exec(html);
+    const body = panel?.[1];
+    return body === undefined ? [] : [...body.matchAll(/<li>([^<]*)<\/li>/g)].map((m) => m[1] ?? '');
   };
 
-  // A metered power: neither obligation applies.
-  assert.equal(
-    notReadable(
-      APPROVE({
-        action: { ...ACTION_ROW(), power: { kind: 'pause_intake', until: finalized(9_000) } },
-        condition: { kind: 'no-condition' },
-      }),
-    ),
-    0,
-    'a pause_intake approval is closed by a playbook condition it never reaches',
-  );
+  // Every approval carries the one caveat that is about the row rather than about an arm:
+  // `TooManyReviews` applies to all five powers, and a `stated` obligation never blocks — so
+  // filtering on disposition instead of on scope would delete exactly the caveat that matters.
+  const pause = APPROVE({
+    action: { ...ACTION_ROW(), power: { kind: 'pause_intake', until: finalized(9_000) } },
+    condition: { kind: 'no-condition' },
+    playbooks: { kind: 'not-applicable' },
+  });
+  const shown = caveats(pause);
+  assert.equal(shown.length, 1, `expected exactly the row-wide caveat, got: ${shown.join(' | ')}`);
+  assert.match(shown[0] ?? '', /retrospective review record/);
+  assert.match(shown[0] ?? '', /SQ-1022/);
+  // …and no caveat about a condition this dispatch never reaches.
+  assert.ok(!shown.some((entry) => /playbook/i.test(entry)), shown.join(' | '));
 
-  // The one playbook whose re-activation dispatch refuses: both obligations apply.
+  // The mechanism itself, over synthetic obligations, because today's real table carries no
+  // scoped entry — `blockingObligationsFor` and the displayed list would agree vacuously and
+  // a green run would prove nothing. `ObligationScope` is kept for the same reason: `O-3` is
+  // one row for five powers whatever the table happens to hold this week.
+  const scoped = (scope?: ObligationScope): UnreadableObligation => ({
+    row: 'O-3',
+    requirement: 'a condition only one dispatch arm reads',
+    reason: 'synthetic — this exercises the predicate, not the table',
+    specQuestion: 'SQ-1022',
+    disposition: 'stated',
+    ...(scope === undefined ? {} : { scope }),
+  });
+  const unscoped = scoped();
+  const anyActivation = scoped({ power: 'activate_playbook' });
+  const freezeOnly = scoped({ power: 'activate_playbook', playbook: 'PB-LEDGER-FREEZE' });
+
+  // An unscoped obligation is about the whole call and always applies.
+  assert.equal(obligationAppliesTo(unscoped, { power: 'pause_intake' }), true);
+  // No subject: everything is kept. A caller that cannot name the power has not shown the
+  // narrow ones do not apply, and dropping one on an unproven premise is fail-open.
+  assert.equal(obligationAppliesTo(freezeOnly, undefined), true);
+  // A positive match failure on the power…
+  assert.equal(obligationAppliesTo(anyActivation, { power: 'delay_once' }), false);
+  assert.equal(obligationAppliesTo(anyActivation, { power: 'activate_playbook' }), true);
+  // …and on the playbook, which is the narrower half.
   assert.equal(
-    notReadable(
-      APPROVE_ROW({
-        action: {
-          ...ACTION_ROW(),
-          power: PLAYBOOK_POWER({
-            id: finalized<PlaybookId>('PB-LEDGER-FREEZE'),
-            trigger: finalized<PlaybookTrigger>('LedgerDrift'),
-            target: undefined,
-          }),
-        },
-      }),
-    ),
-    2,
-    'PB-LEDGER-FREEZE lost the re-activation obligation that is scoped to it alone',
+    obligationAppliesTo(freezeOnly, { power: 'activate_playbook', playbook: 'PB-DEPEG' }),
+    false,
+  );
+  assert.equal(
+    obligationAppliesTo(freezeOnly, { power: 'activate_playbook', playbook: 'PB-LEDGER-FREEZE' }),
+    true,
+  );
+  // A power-scoped obligation is not narrowed by a playbook it does not name.
+  assert.equal(
+    obligationAppliesTo(anyActivation, { power: 'activate_playbook', playbook: 'PB-DEPEG' }),
+    true,
+  );
+});
+
+test('the gate’s two lists cannot disagree about which action they describe', () => {
+  // The invariant the finding is about, stated so it holds whatever the obligation table
+  // contains: a `blocking` obligation that reaches the caveat panel must also have closed the
+  // control. If the displayed list ever goes back to the unscoped set, an obligation scoped
+  // away from `blocks` would surface here and this fails.
+  const subjects: readonly (ObligationScope | undefined)[] = [
+    undefined,
+    { power: 'pause_intake' },
+    { power: 'delay_once' },
+    { power: 'force_rerun' },
+    { power: 'suspend_on_gate' },
+    { power: 'activate_playbook' },
+    { power: 'activate_playbook', playbook: 'PB-LEDGER-FREEZE' },
+    { power: 'activate_playbook', playbook: 'PB-DEPEG' },
+  ];
+  for (const subject of subjects) {
+    const gateResult = operatorGate('guardian.approve_action', readySession('O-3'), [], subject);
+    // The displayed list is the scoped one, `stated` entries included.
+    assert.deepEqual(gateResult.unreadable, scopedObligationsFor('O-3', subject));
+    const blocked = new Set(gateResult.blocks.map((block) => block.detail));
+    for (const entry of gateResult.unreadable) {
+      if (entry.disposition !== 'blocking') continue;
+      assert.ok(
+        [...blocked].some((detail) => detail.includes(entry.requirement)),
+        `${entry.requirement} is shown as an unchecked condition but did not close the control`,
+      );
+    }
+    // A `stated` obligation must survive the filter: it never blocks, and dropping it would
+    // let a console present a complete verdict for a check it knows to be partial.
+    assert.ok(
+      gateResult.unreadable.some((entry) => entry.disposition === 'stated'),
+      'the row-wide stated caveat was filtered out with the scoped ones',
+    );
+  }
+
+  // **Asserted on the module's source, and that is not belt-and-braces — it is the only
+  // non-vacuous form available today.** Every obligation the real table now carries is
+  // unscoped, so `scopedObligationsFor(row, subject)` and `unreadableObligationsFor(row)`
+  // return the same list for every subject: a behavioural test cannot tell the fixed code
+  // from the defect, and a mutant reverting this line survives the whole suite (measured).
+  // The property is *which list this module reads*, so it is checked as one — the same device
+  // this file already uses to bind client scoping to the pallet's own `if let`.
+  const gateSource = readFileSync(
+    join(REPO, 'app/src/features/tx/src/operator-gate.ts'),
+    'utf8',
+  );
+  assert.match(
+    gateSource,
+    /const unreadable = scopedObligationsFor\(row, subject\);/,
+    'operatorGate no longer scopes the obligations it displays',
+  );
+  assert.ok(
+    !/\bunreadableObligationsFor\b/.test(gateSource),
+    'operatorGate reads the unscoped obligation list, so its caveats can describe another dispatch',
   );
 });
 
@@ -4780,16 +5361,14 @@ test('the approve flow renders every call in the batch, decoded', () => {
   assert.ok(!/\bhidden\b/.test(nth(list, 1, 'capture')), `the batch list is hidden: ${nth(list, 0, 'capture')}`);
   assert.ok(!/aria-hidden="true"/.test(nth(list, 1, 'capture')), `the batch list is aria-hidden: ${nth(list, 0, 'capture')}`);
   assert.ok(!/display:\s*none/.test(nth(list, 1, 'capture')), `the batch list is display:none: ${nth(list, 0, 'capture')}`);
-  // **The model opens; the row is closed by a declared obligation, and the two are asserted
-  // separately.** They used to be one assertion — `!buttonDisabled` — and that is exactly the
-  // shape that made this test worthless before contract v28: with a blocking obligation in
-  // place the button is disabled whatever the batch does, so a test reading only the button
-  // passes with the batch rendering nothing at all.
+  // **The model opens and so does the control**, and the two are still asserted separately.
+  // They used to be one assertion — `!buttonDisabled` — which is the shape that made this test
+  // worthless while a blocking obligation stood: the button is disabled whatever the batch
+  // does, so a test reading only the button passes with the batch rendering nothing at all.
   //
-  // O-3 carries two `blocking` obligations again since 2026-08-08 (SQ-1030 —
-  // `Guardian.PlaybookRegistered` and `Guardian.ActivePlaybooks` are not frozen in 02 §7.4),
-  // so the button is disabled and this is what must be checked instead: the **model** finds
-  // nothing wrong, and no reason on screen is the batch's.
+  // O-3 carried two `blocking` obligations for one day (SQ-1030) and contract v30 froze both
+  // maps, so **S15's approve control opens again** — which is the state this test could not
+  // reach before and the reason the split is kept rather than collapsed back.
   assert.deepEqual(
     approvalBlocks(
       APPROVE({
@@ -4799,8 +5378,8 @@ test('the approve flow renders every call in the batch, decoded', () => {
     [],
     'a decoded batch on a clean context must produce no model block',
   );
-  assert.ok(buttonDisabled(html, 'Approve'), html);
-  assert.ok(/SQ-1030/.test(html), 'the control is closed without naming the question that closes it');
+  assert.ok(!buttonDisabled(html, 'Approve'), html);
+  assert.ok(!/SQ-1030/.test(html), 'a resolved spec question is still closing this control');
   assert.ok(!/SQ-616/.test(html), 'a resolved spec question is still closing this control');
   assert.ok(!/Empty batch|Undecodable call/.test(html), `the batch itself must not block: ${html}`);
 });
@@ -6124,21 +6703,22 @@ test('an unverifiable withdraw destination warns in its own words, and does not 
 /**
  * The §11.8 calls whose row this release can actually read end to end.
  *
- * It was seven, then eleven — every operator surface call there is — and it is now **ten**.
- * Contract v28 froze the guardian pending-action pair, the two upgrade items and the
- * registry's three maps (SQ-615/616/619); contract v29 published the last four reads §11.8
- * requires and nothing carried — `api.bond_quote` for the report and filing bonds
+ * It was seven, then eleven — every operator surface call there is — then ten for one day, and
+ * it is eleven again. Contract v28 froze the guardian pending-action pair, the two upgrade
+ * items and the registry's three maps (SQ-615/616/619); contract v29 published the last four
+ * reads §11.8 requires and nothing carried — `api.bond_quote` for the report and filing bonds
  * (SQ-598/SQ-731), `api.treasury_streams` for the per-stream claim (SQ-601), and the two
  * storage latches behind §11.8.2's trigger table (SQ-730).
  *
- * **`guardian.approve_action` left the list on 2026-08-08**, and that is a real regression in
- * reach rather than a bookkeeping change. `approve_action` refuses on
- * `Guardian.PlaybookRegistered[id]` and on `Guardian.ActivePlaybooks` **after** counting the
- * fifth approval, 02 §7.4 freezes neither, and INV-FE-12's lattice makes an unproven
- * capability absent. The cost is exactly what this file's own note warns of — a screen that
- * cannot open is a screen nothing exercises end to end — so the tests below check the model
- * and the gate separately rather than folding both into one `buttonDisabled` assertion, and
- * the entry expires mechanically when SQ-1030 closes.
+ * **`guardian.approve_action` left the list on 2026-08-08 and returned on 2026-08-09.** It
+ * left because `approve_action` refuses on `Guardian.PlaybookRegistered[id]` and on
+ * `Guardian.ActivePlaybooks` **after** counting the fifth approval and 02 §7.4 froze neither,
+ * so INV-FE-12's lattice made both absent and closed the control. Contract v30 froze both
+ * maps: the reads are ordinary O-3 clauses now and the refusals are model blocks scoped to the
+ * arms the runtime guards them behind. The day it was closed cost exactly what this file's own
+ * note warns of — a screen that cannot open is a screen nothing exercises end to end — so the
+ * tests below keep the model and the gate as separate assertions rather than folding both back
+ * into one `buttonDisabled`.
  *
  * A list rather than a derivation, deliberately: derived from `UNREADABLE` it would agree
  * with whatever that file says and could never disagree with it. The binding between the two
@@ -6150,6 +6730,7 @@ const OPENABLE_CALLS = [
   'welfare.record_snapshot',
   'oracle.challenge',
   'oracle.report',
+  'guardian.approve_action',
   'guardian.propose_action',
   'futarchy_treasury.claim_stream',
   'system.apply_authorized_upgrade',
@@ -6232,29 +6813,34 @@ test('every row whose central read 02 does not freeze is CLOSED, with its id nam
     [...OPENABLE_CALLS].sort(),
     Object.keys(OPERATOR_SURFACE_ROWS).filter((call) => !blocking.includes(call)).sort(),
   );
-  // **One control is closed again, and by a question raised rather than one left behind.**
-  // `approve_action` refuses on `Guardian.PlaybookRegistered[id]` and `ActivePlaybooks` after
-  // the fifth approval is counted, and 02 §7.4 freezes neither (SQ-1030). The difference from
-  // the v28 defect this test was rewritten for is the whole point of the mechanical expiry:
-  // that one cited questions PLAN.md had already resolved, and this one cites an open row that
-  // `check-unreadable-obligations.py` will fail on the day it closes.
-  assert.deepEqual(blocking, ['guardian.approve_action'], `unexpected blocking set: ${blocking}`);
-  // Anti-vacuity for the `stated` half: O-1's two SQ-564 conditions are still surfaced, and
-  // they still do not close a control. O-3's `stated` SQ-1022 entry is NOT in this list — the
-  // loop `continue`s on a blocked row — so it is asserted directly below rather than being
-  // silently uncovered while the row is shut.
-  assert.deepEqual(stated, ['SQ-564', 'SQ-564'], 'the stated obligations stopped being carried');
+  // **Nothing is closed, and the one control that was is open again.** `approve_action` shut
+  // for one day on SQ-1030 — `Guardian.PlaybookRegistered` and `Guardian.ActivePlaybooks` were
+  // not frozen, and both refusals fall on the fifth approval. Contract v30 froze both, so the
+  // reads are ordinary O-3 clauses and the refusals are model blocks. That is the mechanical
+  // expiry working: the entries cited an **open** row, and the day it closed they had to go.
+  assert.deepEqual(blocking, [], `unexpected blocking set: ${blocking}`);
+  // Anti-vacuity for the `stated` half: O-1's two SQ-564 conditions are still surfaced and
+  // still do not close a control — and O-3's SQ-1022 caveat now reaches this list too, because
+  // the row is no longer blocked and the loop no longer `continue`s past it. That it appears
+  // here at all is the evidence S15's approve control is open.
+  assert.deepEqual(stated, ['SQ-564', 'SQ-564', 'SQ-1022'], 'the stated obligations stopped being carried');
   const guardian = unreadableObligationsFor('O-3');
   assert.deepEqual(
     guardian.map((entry) => [entry.specQuestion, entry.disposition]),
-    [['SQ-1030', 'blocking'], ['SQ-1030', 'blocking'], ['SQ-1022', 'stated']],
+    [['SQ-1022', 'stated']],
   );
+  // The replacement reads are declared, so the two obligations were **closed** rather than
+  // dropped. A retirement with no clause behind it is the check going missing quietly, which
+  // is the failure mode this whole list exists to make visible.
+  const o3 = new Set(rowsFor('O-3', 'USDC').map((entry) => entry.surface));
+  assert.ok(o3.has('storage.guardian.playbook_registered'));
+  assert.ok(o3.has('storage.guardian.active_playbooks'));
   // `TooManyReviews` is `stated` on purpose and the reasoning is asserted, not just the flag:
   // neither the count (`Guardian.ReviewDeadlines`) nor the bound (128) is readable, so closing
   // the control on it would refuse what the chain accepts — the mirror-rule defect. Naming it
   // is the point; an unenumerated shape is how this class survived its first fix.
-  assert.match(nth(guardian, 2, 'obligation').reason, /TooManyReviews/);
-  assert.match(nth(guardian, 2, 'obligation').reason, /refuse what the chain accepts/);
+  assert.match(nth(guardian, 0, 'obligation').reason, /TooManyReviews/);
+  assert.match(nth(guardian, 0, 'obligation').reason, /refuse what the chain accepts/);
 });
 
 test('a preparation declaring somebody else’s row is refused, not gated against it', () => {

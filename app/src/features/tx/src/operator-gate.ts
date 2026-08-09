@@ -50,6 +50,8 @@
  *    *"every declared read passed"*, which for a row whose central read 02 freezes no
  *    surface for is vacuously true. INV-FE-12's lattice says an unproven capability is
  *    absent, so those rows are closed with the reason and the spec-question id named.
+ *    A row is coarser than a dispatch, so `subject` narrows both the refusals **and** the
+ *    displayed caveats through one predicate — see `OperatorGate.unreadable`.
  * 3. **The model's own blocks still apply.** They are not redundant with the gate: the gate
  *    re-reads, and these interpret. Both must hold, and merging them here means a console
  *    has one list to render rather than two it might render only one of.
@@ -59,7 +61,7 @@ import type { GatePassed, TxPreparation, TxSession } from '@bleavit/transaction-
 import {
   OPERATOR_SURFACE_ROWS,
   blockingObligationsFor,
-  unreadableObligationsFor,
+  scopedObligationsFor,
   type ObligationScope,
   type OperatorSurfaceCall,
   type RowId,
@@ -103,11 +105,21 @@ export interface OperatorGate {
   /** Every reason, in one list — a screen rendering only the first teaches guesswork. */
   readonly blocks: readonly OperatorBlock[];
   /**
-   * What §11.8 requires and no frozen surface answers, whether or not it blocks.
+   * What §11.8 requires and no frozen surface answers **for this action**, blocking or not.
    *
    * Always present, `stated` obligations included, so a console cannot render a complete
    * verdict for a row whose check is known to be partial (the `RegistrationCheck.uncheckable`
    * device, generalised to every operator row).
+   *
+   * **Scoped by the same predicate as `blocks`, and that was half missing.** The scope filter
+   * was applied to the blocking list alone, so an approval could open for `pause_intake` while
+   * this list still told the guardian that playbook registration and an active
+   * `PB-LEDGER-FREEZE` record *"cannot be checked"* — two conditions that approval's dispatch
+   * never reads. The control opening and the copy describing a different dispatch is the same
+   * defect one layer up, and the fix is one predicate rather than two filters.
+   *
+   * The filter is on **scope, never on disposition**: a `stated` obligation never blocks and
+   * must still render, which is the whole reason this field is separate from `blocks`.
    */
   readonly unreadable: readonly UnreadableObligation[];
 }
@@ -173,7 +185,9 @@ export function operatorGate(
   subject?: ObligationScope,
 ): OperatorGate {
   const row = OPERATOR_SURFACE_ROWS[call];
-  const unreadable = unreadableObligationsFor(row);
+  // Both lists take the **same** scope filter. Displaying the unscoped set beside a control the
+  // scope had opened is how the caveat came to describe a dispatch the action never reaches.
+  const unreadable = scopedObligationsFor(row, subject);
   const window = session.signingWindow;
   // `subject` narrows the row's blocking obligations to the ones the pending action's
   // dispatch actually evaluates. A row is one id for a whole call, but the pallet guards
