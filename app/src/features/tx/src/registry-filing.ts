@@ -83,7 +83,9 @@
  *
  * - **`AlreadyFinal`** is a plain read, because `ClosedAt` is the same `(epoch, spec_version)`
  *   double map `close_epoch` writes in the same call that pushes the terminal aggregate. It is
- *   frozen (02 §7.4, contract v28) and O-9 already cited it; O-8 did not.
+ *   frozen (02 §7.4, contract v28) and O-9 already cited it; O-8 did not. Its **absence** now
+ *   carries the read that found it absent — see `EpochClosure`, where the arm that grants
+ *   permission was the one arm holding no evidence.
  * - **`InvalidClass`** is made unrepresentable rather than checked — see `FilingInputs`. The
  *   two instances take disjoint class types, so a milestone filing carrying `S2` does not
  *   typecheck.
@@ -315,18 +317,74 @@ interface FilingInputsBase {
    * that pushes the aggregate `registry_core::file` tests. `unread` is its own arm for the
    * reason every arm like it exists here: a read that did not land is not the same fact as
    * *"this epoch is open"*, and treating it as the second posts a bond into an epoch the
-   * chain has closed.
+   * chain has closed. Build the two read arms with {@link epochClosure} — *open* is a chain
+   * answer and cannot be written by hand.
    */
   readonly epochClosed: EpochClosure;
   /** The evidence hash the filer supplies. Absent is a refusal, not a default. */
   readonly evidenceHash: string | undefined;
 }
 
-/** `ClosedAt[epoch][spec_version]`, read — 07 §7's terminal aggregate (02 §7.4, v28). */
+declare const CLOSURE_READ: unique symbol;
+
+/**
+ * `ClosedAt[epoch][spec_version]`, read — 07 §7's terminal aggregate (02 §7.4, v28).
+ *
+ * ## `open` is a chain answer, so it carries the read that produced it
+ *
+ * Two of the three arms always held their evidence: `closed` carries the block and `unread`
+ * carries the reason. `open` was `{ kind: 'open' }` — no datum, no pin and no producer — so
+ * any caller could satisfy `file`'s `AlreadyFinal` precondition by writing two words, and
+ * `filingBlocks` would raise nothing. It was a state the type let you *assert* rather than
+ * one a read could *establish*, which is the defect this branch already closed once, on a
+ * `Verified<T>` allowance limit that nothing produced.
+ *
+ * The direction is what makes it expensive rather than merely wrong. `unread` and `closed`
+ * both block, so a hand-assembled one of those costs a user nothing. **`open` permits, and a
+ * filing is bonded**: the bond is committed with the extrinsic, and the runtime then reverts
+ * the call it paid for. So the arm that grants permission is the arm that must carry proof.
+ *
+ * The repair is a type rather than a check. `open` holds the finalized read that found the
+ * key empty, plus a module-private brand — the `Finalized<T>` and `GatePassed` construction —
+ * so {@link epochClosure} is the only producer and `{ kind: 'open' }` does not typecheck at
+ * all (`tests/firewall/fixtures/registry-filing-open-epoch-without-a-read.ts`). The brand also
+ * puts this type under `check:casts`, which discovers brands rather than listing them, so
+ * `as EpochClosure` is refused everywhere except the file below.
+ *
+ * The sibling arms of `BondQuoteState` and `RerunState` are **deliberately** left structural:
+ * `undeterminable`, `unread` and `absent` all refuse, so writing one by hand can only cost a
+ * user an action they could have taken, never a bond on a transaction that cannot land.
+ */
 export type EpochClosure =
-  | { readonly kind: 'open' }
+  | {
+      readonly kind: 'open';
+      /**
+       * The read that established the absence — `Verified<undefined>` because the key held
+       * nothing at that block, not because nothing was read.
+       */
+      readonly read: Verified<undefined>;
+      readonly [CLOSURE_READ]: true;
+    }
   | { readonly kind: 'closed'; readonly at: Verified<number> }
   | { readonly kind: 'unread'; readonly reason: string };
+
+/**
+ * `ClosedAt[epoch][spec_version]` as the chain answers it — and the only producer of `open`.
+ *
+ * It takes the whole `Option<BlockNumber>` read rather than a pre-decided arm, so which arm
+ * results is the chain's answer and not the caller's claim. A caller holding no read has
+ * nothing to pass in, which is the property `derive` has for the same reason (10 §2.2).
+ *
+ * Two arms are reachable without it and both refuse, which is why neither is branded: a
+ * `closed` literal can only block a lawful filing, and `unread` is the client's own report
+ * that the read did not land rather than a chain datum at all.
+ */
+export function epochClosure(read: Verified<number | undefined>): EpochClosure {
+  const { value, status } = read;
+  return value === undefined
+    ? ({ kind: 'open', read: { value: undefined, status } } as EpochClosure)
+    : { kind: 'closed', at: { value, status } };
+}
 
 /**
  * §11.8.6 row 1's inputs, keyed on the instance being filed to.

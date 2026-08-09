@@ -130,6 +130,7 @@ import {
   navPresentation,
   admitRegistryWindowEvent,
   challengeBlocks,
+  epochClosure,
   escalationConsequence,
   filingBlocks,
   INCIDENT_CLASSES,
@@ -271,7 +272,6 @@ import type {
   Stream,
   ArtifactSource,
   ChallengeFilingInputs,
-  EpochClosure,
   FrozenSpecVersions,
   EvidenceState,
   FetchProgress,
@@ -1597,8 +1597,9 @@ const FILING_BASE = () => ({
   // set `Epoch.CohortSchedules[epoch].specs` says the live cohorts committed to.
   specVersion: 3,
   frozenSpecVersions: { kind: 'read', versions: finalized([2, 3]) } as FrozenSpecVersions,
-  // `registry_core::file`'s `AlreadyFinal` — read from `ClosedAt[epoch][spec_version]`.
-  epochClosed: { kind: 'open' } as EpochClosure,
+  // `registry_core::file`'s `AlreadyFinal` — read from `ClosedAt[epoch][spec_version]`. The
+  // read arms have one producer, so even a fixture states which chain answer it stands for.
+  epochClosed: epochClosure(finalized<number | undefined>(undefined)),
   evidenceHash: '0xevidence' as string | undefined,
 });
 
@@ -4239,6 +4240,74 @@ test('SQ-1018 — the hold window is READ, and a hold outside it is refused', ()
   assert.match(nth(blocks, 0, 'block').detail, /cannot establish/);
 });
 
+test('a hold ending AT the pinned finalized block is already over when the chain reads it', () => {
+  // `check_and_consume` refuses `PauseIntake.until` and `ActivatePlaybook.expiry` outside
+  // `[now, now + HOLD_MAX_BLOCKS]`, and the runtime's `now` is the block that executes the
+  // **dispatching** approval. B′ is finalized (§11.4), so no transaction this client signs can
+  // be included in it and the dispatch height is always strictly greater. A hold ending exactly
+  // at B′ therefore fails `until >= now` — the **lower** bound, not the ceiling — at the only
+  // block that will ever evaluate it, and a 5-of-7 council was walked to a guaranteed revert.
+  //
+  // The refusal is exactly the arithmetic and no more. One block later is admissible here,
+  // because how long inclusion takes is a value nothing in the spec fixes.
+  const pause = (until: number): GuardianProposal =>
+    ({ power: 'pause_intake', meter: METER('pause_intake'), until, horizon: HORIZON });
+  const atPin = proposalBlocks(PROPOSE(pause(HORIZON.now.value)));
+  assert.deepEqual(atPin.map((b) => b.check), ['Hold window']);
+  assert.match(nth(atPin, 0, 'block').detail, /already final/);
+  assert.deepEqual(proposalBlocks(PROPOSE(pause(HORIZON.now.value + 1))), []);
+
+  // The activation arm takes the same bound, so this is not a `pause_intake` special case.
+  assert.deepEqual(
+    proposalBlocks(PROPOSE(ACTIVATION({ expiry: HORIZON.now.value }))).map((b) => b.check),
+    ['Hold window'],
+  );
+  assert.deepEqual(proposalBlocks(PROPOSE(ACTIVATION({ expiry: HORIZON.now.value + 1 }))), []);
+
+  // …and the approve side, which is where the refusal really falls: `check_and_consume` runs
+  // inside `dispatch`, so it is the fifth signature that meets it.
+  const stale = ACTION({ power: PLAYBOOK_POWER({ expiry: finalized(HORIZON.now.value) }) });
+  assert.deepEqual(approvalBlocks(APPROVE({ action: stale })).map((b) => b.check), ['Hold window']);
+
+  // A strictly past hold keeps its own sentence — the two are different facts and the remedy
+  // differs, so folding them into one message would hide which happened.
+  const past = proposalBlocks(PROPOSE(pause(HORIZON.now.value - 1)));
+  assert.match(nth(past, 0, 'block').detail, /1 blocks in the past/);
+
+  // The **ceiling** is inclusive and takes no matching correction, which is asserted here
+  // rather than argued: `until <= now + HOLD_MAX_BLOCKS` admits the last block, and at
+  // dispatch the runtime's own ceiling is higher still because its `now` is. A client that
+  // moved this bound with the one above would refuse a hold the chain accepts. Found by
+  // mutation — the incumbent suite tested one block past the ceiling and never the ceiling.
+  const ceiling = HORIZON.now.value + HORIZON.maxBlocks.value;
+  assert.deepEqual(proposalBlocks(PROPOSE(pause(ceiling))), []);
+  assert.deepEqual(proposalBlocks(PROPOSE(pause(ceiling + 1))).map((b) => b.check), ['Hold window']);
+});
+
+test('an action whose last admissible block IS the pin cannot be approved either', () => {
+  // The same arithmetic one function over. `approve_action` refuses unless
+  // `now <= action.expires_at` (`ActionExpired`), evaluated at the block that includes the
+  // approval — strictly after B′. So an action whose last admissible block is B′ is one no
+  // approval this client signs can reach, and offering the button spends a guardian signature
+  // on a transaction the chain was always going to revert.
+  const expiring = APPROVE({ action: ACTION({ expiresAt: finalized(100) }), now: finalized(100) });
+  const blocks = approvalBlocks(expiring);
+  assert.deepEqual(blocks.map((b) => b.check), ['Expiry']);
+  assert.match(nth(blocks, 0, 'block').detail, /already final/);
+
+  // One block of headroom is admissible, for the same reason as the hold window above.
+  assert.deepEqual(
+    approvalBlocks(APPROVE({ action: ACTION({ expiresAt: finalized(101) }), now: finalized(100) })),
+    [],
+  );
+  // …and an action already past its expiry keeps the sentence it had.
+  const gone = approvalBlocks(
+    APPROVE({ action: ACTION({ expiresAt: finalized(99) }), now: finalized(100) }),
+  );
+  assert.deepEqual(gone.map((b) => b.check), ['Expiry']);
+  assert.match(nth(gone, 0, 'block').detail, /has expired/);
+});
+
 test('SQ-1018 — a rerun power reads the proposal, and the two powers take different states', () => {
   // `delay_once` needs `ProposalStatus::Queued`; `force_rerun` needs `rerunnable()` —
   // `Trading | Extended | Queued`. Both refuse a proposal already delayed or re-run
@@ -6065,6 +6134,49 @@ test('M7 — a filing behind a CLOSED epoch is refused (AlreadyFinal), which not
     assert.equal(clause.surface, `storage.${instance}_registry.closed_at`);
     assert.equal(clause.subject, 'chain');
   }
+});
+
+test('an OPEN epoch is a finalized read, and the arm that PERMITS is the one that needed proof', () => {
+  // `{ kind: 'open' }` carried no datum and no pin, so any caller could report the epoch open
+  // without ever reading `ClosedAt` — and `open` is the arm that raises no block. On a bonded
+  // filing that is the expensive direction: the bond is committed with the extrinsic and the
+  // runtime then reverts the call it paid for.
+  //
+  // The repair is the type, not a check. `epochClosure` is the only producer of `open`, so the
+  // unproven state cannot be written; the hand-assembled literal is a compile error, held in
+  // `tests/firewall/fixtures/registry-filing-open-epoch-without-a-read.ts`.
+  const answer = (closedAt: number | undefined) => epochClosure(finalized<number | undefined>(closedAt, 4_242));
+
+  // The chain's answer decides the arm — a caller cannot report open from a read that found a
+  // closure, because it hands over the read rather than the conclusion.
+  const open = answer(undefined);
+  assert.equal(open.kind, 'open');
+  assert.deepEqual(filingBlocks(FILING({ epochClosed: open })), []);
+
+  const closed = answer(88_000);
+  assert.equal(closed.kind, 'closed');
+  assert.deepEqual(
+    filingBlocks(FILING({ epochClosed: closed })).map((b) => b.check),
+    ['Epoch closed'],
+  );
+
+  // The pin travels with both answers, so an absence is an observation at a block rather than
+  // a default: `open` at a block is what a later read can contradict.
+  assert.equal(open.kind === 'open' && open.read.status.kind, 'verified-finalized');
+  assert.equal(
+    open.kind === 'open' && open.read.status.kind === 'verified-finalized'
+      ? open.read.status.blockNumber
+      : undefined,
+    4_242,
+  );
+  assert.equal(open.kind === 'open' ? open.read.value : 'not open', undefined);
+  assert.equal(closed.kind === 'closed' ? closed.at.value : undefined, 88_000);
+  assert.equal(
+    closed.kind === 'closed' && closed.at.status.kind === 'verified-finalized'
+      ? closed.at.status.blockNumber
+      : undefined,
+    4_242,
+  );
 });
 
 test('M7 — the filing CLASS is the instance’s own, and the wrong one cannot be built', () => {

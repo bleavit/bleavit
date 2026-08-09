@@ -640,12 +640,22 @@ export function approvalBlocks(context: ApprovalContext): readonly GuardianBlock
         'attempt.',
     });
   }
-  if (context.now.value > context.action.expiresAt.value) {
+  // `approve_action` refuses unless `now <= action.expires_at` (`ActionExpired`), and its
+  // `now` is the block that **includes the approval** — strictly after the finalized block
+  // these readings were pinned at. So an action whose last admissible block is B′ itself is
+  // one no approval this client signs can reach, and it is refused here for the same reason
+  // `horizonBlocks` refuses a hold ending at B′. See that function for the argument and for
+  // why no further inclusion margin is applied.
+  if (context.now.value >= context.action.expiresAt.value) {
     blocks.push({
       check: 'Expiry',
       detail:
-        'This action has expired. Approving it would not execute it — it would need ' +
-        'proposing again.',
+        context.now.value === context.action.expiresAt.value
+          ? 'This action expires at the block these readings were taken at, which is already ' +
+            'final. An approval can only be included at a later block, by which time the ' +
+            'chain treats the action as expired.'
+          : 'This action has expired. Approving it would not execute it — it would need ' +
+            'proposing again.',
     });
   }
   // §11.8.2 requires the exact batch decoded and displayed. Two states make that impossible,
@@ -1934,7 +1944,32 @@ function allowanceBlocks(meter: AllowanceMeter): readonly GuardianBlock[] {
     : [];
 }
 
-/** 06 §5.2's *"≤ 14 days per activation"* bound, as the runtime enforces it. */
+/**
+ * 06 §5.2's *"≤ 14 days per activation"* bound, as the runtime enforces it.
+ *
+ * ## The pinned block is already spent, and the lower bound is where that lands
+ *
+ * `check_and_consume` refuses `until`/`expiry` outside `[now, now + HOLD_MAX_BLOCKS]` with
+ * `DurationTooLong`, and its `now` is `frame_system::block_number()` **at the block that
+ * executes the dispatching approval** — never the block this client read. B′ is finalized by
+ * §11.4's definition, so it is already in the chain and no transaction signed against it can
+ * be included in it: every dispatch happens at a strictly greater height.
+ *
+ * So a hold ending exactly at B′ fails `until >= now` — the **lower** bound, not the ceiling
+ * the name `DurationTooLong` suggests — at the only block that will ever evaluate it. This
+ * client used to accept it, and the cost is a 5-of-7 council walked to a guaranteed revert.
+ *
+ * **No inclusion margin beyond that is applied, deliberately.** How many blocks pass before
+ * inclusion, and how many days a council takes to reach five signatures, are values nothing
+ * in the spec or the constants fixes, and R-2 forbids picking one. The refusal here is
+ * exactly what the arithmetic proves: B′ + 1 is admissible.
+ *
+ * The **ceiling** needs no matching correction and must not get one. At dispatch the runtime
+ * allows up to `now + HOLD_MAX_BLOCKS`, and `now > B′`, so this client's `B′ + max` is the
+ * stricter bound of the two. That is the safe direction — at worst it refuses a hold the
+ * chain would have taken — and widening it would need the dispatch height, which no client
+ * can know.
+ */
 function horizonBlocks(
   what: string,
   block: number,
@@ -1951,13 +1986,19 @@ function horizonBlocks(
       },
     ];
   }
-  if (block < horizon.now.value) {
+  if (block <= horizon.now.value) {
+    const behind = horizon.now.value - block;
     return [
       {
         check: 'Hold window',
         detail:
-          `${what} is ${horizon.now.value - block} blocks in the past. The chain refuses a ` +
-          'hold that has already ended, so this call would be rejected after signing.',
+          (behind === 0
+            ? `${what} is the block these readings were taken at, which is already final. ` +
+              'This transaction can only be included at a later block, so the hold has ended ' +
+              'before the chain evaluates it. '
+            : `${what} is ${behind} blocks in the past. `) +
+          'The chain refuses a hold that has already ended, so this call would be rejected ' +
+          'after signing.',
       },
     ];
   }

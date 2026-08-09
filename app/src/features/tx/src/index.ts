@@ -318,6 +318,7 @@ export {
   INCIDENT_CLASSES,
   admitRegistryWindowEvent,
   challengeFilingBlocks,
+  epochClosure,
   filingBlocks,
   type Admission,
   type ChallengeFilingInputs,
