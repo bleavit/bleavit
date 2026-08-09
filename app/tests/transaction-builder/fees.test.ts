@@ -32,6 +32,17 @@ import type {
 import { finalize } from '@bleavit/chain-client/testing';
 import type { Finalized, FinalizedBlockRef } from '@bleavit/chain-client';
 import type { HexString } from '@bleavit/shared-types';
+import type { CompatClassification } from '@bleavit/descriptors';
+
+/**
+ * The compat verdict this fixture gates against — 10 §3.2's `full` row.
+ *
+ * `gate()` now requires one and requires it to prove signing: INV-FE-12 disables signing
+ * wherever compatibility is unproven, so a fixture that could omit the verdict would be
+ * exercising a gate this client does not ship.
+ */
+const PROVEN: CompatClassification = { mode: 'full', specVersion: 1, disabled: [], proven: [] };
+
 
 /** The chain identity every pin in this file is read against (F18). Named, not inlined:
  *  the field exists so two reads can agree on it, and copies agree until one is edited. */
@@ -79,7 +90,7 @@ const passingResults = (at: FinalizedBlockRef): readonly PreconditionResult[] =>
  */
 const gatePin = (blockHash: HexString = `0x${'11'.repeat(32)}`, blockNumber = 1): GatePassed => {
   const at: FinalizedBlockRef = { chain: TEST_CHAIN, blockHash, blockNumber };
-  const outcome = gate(GATE_PREP, at, GATE_PREP.builtFor, passingResults(at));
+  const outcome = gate(GATE_PREP, at, GATE_PREP.builtFor, PROVEN, passingResults(at));
   assert.equal(outcome.kind, 'proceed', 'the gate fixture no longer opens');
   return outcome.passed;
 };

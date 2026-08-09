@@ -35,10 +35,23 @@ import {
   startShell,
   terminalChainMismatch,
 } from '@bleavit/application';
+import type { CompatVerdict } from '@bleavit/application';
 import type { HexString } from '@bleavit/shared-types';
 
 const PINNED: HexString = `0x${'11'.repeat(32)}`;
 const SYNCED: HexString = `0x${'22'.repeat(32)}`;
+
+/**
+ * What a boot that never started a chain reports — 10 §3.1, `CompatVerdict`'s `not-attempted`.
+ *
+ * The right verdict for these fixtures rather than a convenient one: none of them connects,
+ * so none of them reached `CompatCheck`, and stamping `FE-COMPAT-003` here would publish a
+ * retry into a state the boot never entered.
+ */
+const NOT_ATTEMPTED: CompatVerdict = {
+  kind: 'not-attempted',
+  reason: 'this suite never starts a chain',
+};
 
 /** One node of the fake tree. Only what the terminal screen writes through. */
 interface FakeElement {
@@ -256,6 +269,7 @@ test('a wrong chain from connect reaches the terminal screen WITH boot mount han
   await startShell(host, {
     mount: async () => ({
       worker: { kind: 'unavailable' as const, reason: 'no service worker in this suite' },
+      showCompat: () => {},
       unmount: () => journal.push('unmount'),
     }),
     connect: () => Promise.reject(error),
@@ -283,7 +297,7 @@ test('a mount that rejects reaches the handler with NO handle', async () => {
 
   await startShell(host, {
     mount: () => Promise.reject(failure),
-    connect: () => Promise.resolve(),
+    connect: () => Promise.resolve({ compat: NOT_ATTEMPTED }),
     onFailure: (_container, _error, unmount) => {
       handle = unmount;
     },
@@ -301,6 +315,7 @@ test('startShell does not swallow what the handler re-throws', async () => {
     startShell(host, {
       mount: async () => ({
         worker: { kind: 'unavailable' as const, reason: 'no service worker in this suite' },
+        showCompat: () => {},
         unmount: () => {},
       }),
       connect: () => Promise.reject(new Error('the release worker could not be registered')),

@@ -29,7 +29,8 @@ import type { LightClient } from '@bleavit/chain-client/light-client';
 import { releaseChainSpecs, releaseWorkerSource } from './chain-identity.js';
 import { startChainSession, type ChainSession } from './chain-session.js';
 import { classifyChain } from './compat-boot.js';
-import type { CompatVerdict } from './compat-session.js';
+import { watchCompat } from './compat-driver.js';
+import type { ConnectedChain } from './boot.js';
 
 /**
  * Start this release's light client, or report why there is none.
@@ -65,10 +66,9 @@ export async function connectChain(): Promise<ChainSession<LightClient>> {
  * ships no descriptors for, and reporting it for a client that never connected would send a
  * user to *"load a newer release"* for a missing chain spec or a missing worker.
  */
-export async function connectAndClassify(): Promise<{
-  readonly session: ChainSession<LightClient>;
-  readonly compat: CompatVerdict;
-}> {
+export async function connectAndClassify(): Promise<
+  ConnectedChain & { readonly session: ChainSession<LightClient> }
+> {
   const session = await connectChain();
   if (session.kind !== 'started') {
     return {
@@ -81,7 +81,32 @@ export async function connectAndClassify(): Promise<{
           `No chain was connected, so no runtime has been checked: ${session.reasons.join(' ')} ` +
           'Everything that does not need the chain still renders (10 §3.2).',
       },
+      // No `watch`. There is no runtime to observe and no `CompatCheck` to retry into — §3.1
+      // draws that edge only from `CompatUnavailable`, and this boot reached neither. A watch
+      // supplied here would be a retry loop over a client that does not exist.
     };
   }
-  return { session, compat: await classifyChain(session.client) };
+  const client = session.client;
+  const compat = await classifyChain(client);
+  return {
+    session,
+    compat,
+    // 10 §3.2's *"re-runs the classifier on **every** `CodeUpdated`"*, and §3.1's retry. The
+    // rules are `compat-driver.ts`'s; the values a rule cannot supply are here, and all of them
+    // come off the transport the reads already share — see `classifyChain` for why the runtime
+    // reading must be the finalized one this connection is pinning.
+    //
+    // The boot verdict is handed in as `initial` so the watch knows whether it owes a retry:
+    // a boot that ended in `CompatUnavailable` arms §3.1's backoff immediately, and one that
+    // classified waits for the runtime to move. It is not re-published — `startShell` has
+    // already rendered it.
+    watch: (publish) =>
+      watchCompat({
+        initial: compat,
+        reclassify: () => classifyChain(client),
+        runtimeNow: () => client.transport.finalizedRuntime(),
+        onFinalized: (listener) => client.transport.onFinalized(() => listener()),
+        publish,
+      }),
+  };
 }
