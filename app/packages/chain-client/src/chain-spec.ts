@@ -125,6 +125,60 @@ export function relayChainOf(spec: Record<string, unknown>): string | undefined 
   return typeof snake === 'string' ? snake : undefined;
 }
 
+/** The two genesis forms smoldot accepts. Not a preference — see {@link genesisFormOf}. */
+export type GenesisForm = 'raw' | 'state-root';
+
+const STATE_ROOT = /^0x[0-9a-f]{64}$/i;
+
+/**
+ * Which genesis form a spec carries — F18, 2026-08-08, and the sentence it replaces was wrong.
+ *
+ * This module used to refuse anything without a `genesis.raw` map, saying *"smoldot accepts
+ * only raw chain specifications"*. **The pinned `smoldot@3.3.2` says otherwise, in its own
+ * words**: handed a `genesis.raw` spec it logs
+ *
+ * > Chain specification of `<id>` contains a `genesis.raw` item. It is possible to
+ * > significantly improve the initialization time by replacing the `"raw": ...` field with
+ * > `"stateRootHash": "0x…"`
+ *
+ * — a string read out of the shipped WebAssembly rather than remembered, and then executed:
+ * the two forms of one dev Asset Hub spec return the **identical** genesis hash, and
+ * `addChain` resolves in 3 ms instead of 23,644 ms (a 79.4 MB, ~189k-entry genesis). Every
+ * published light-client spec in the ecosystem uses this form, so the old rule also meant the
+ * canonical client could not load the very artifact 02 §7.7 will pin for Asset Hub.
+ *
+ * **The state-root form is refused for a relay, and that is not symmetry-breaking for its own
+ * sake.** A relay's finality is its own: smoldot establishes the GRANDPA authority set from
+ * genesis storage, so a relay spec carrying neither that storage nor a `lightSyncState`
+ * checkpoint syncs and never finalizes — the failure mode this file already calls
+ * indistinguishable from slow sync. A **parachain** derives finality from relay-finalized
+ * para-inclusion (10 §4.1), so it needs no genesis storage at all.
+ *
+ * Nothing is weakened by admitting the form. The bytes are still hashed against the release
+ * pin before smoldot sees them, and 10 §3.1's identity check still compares the genesis hash
+ * smoldot computes — from the header it builds out of this state root — against the pin. A
+ * tampered `stateRootHash` fails the first check on the bytes and the second on the hash.
+ *
+ * A spec declaring **both** is refused rather than resolved, on `relayChainOf`'s grounds: two
+ * declarations of one fact are a spec that has been edited, and picking a winner is how a
+ * client ends up anchored on the root the other key did not name.
+ */
+export function genesisFormOf(spec: Record<string, unknown>): GenesisForm | undefined {
+  const genesis = spec['genesis'];
+  if (typeof genesis !== 'object' || genesis === null) return undefined;
+  const fields = genesis as Record<string, unknown>;
+  const raw = typeof fields['raw'] === 'object' && fields['raw'] !== null;
+  const stateRoot = typeof fields['stateRootHash'] === 'string' && STATE_ROOT.test(fields['stateRootHash']);
+  if (raw && stateRoot) {
+    throw new ChainSpecIntegrityError(
+      'chain spec declares both `genesis.raw` and `genesis.stateRootHash`; it has been edited, ' +
+        'and the two need not describe the same state — anchoring on either would be a guess',
+    );
+  }
+  if (raw) return 'raw';
+  return stateRoot ? 'state-root' : undefined;
+}
+
 /**
  * Verify a bundled chain spec against its release pin, and return the fields the topology
  * needs.
@@ -161,18 +215,30 @@ export async function verifyBundledChainSpec(
     );
   }
 
-  // smoldot supports **raw** specs only. A non-raw spec fails inside `addChain` with a
-  // message that reads like a connectivity problem, so catching it here is the difference
-  // between "the build shipped the wrong artifact" and an hour spent on the network.
-  const genesis = spec['genesis'];
-  const isRaw =
-    typeof genesis === 'object' &&
-    genesis !== null &&
-    typeof (genesis as Record<string, unknown>)['raw'] === 'object';
-  if (!isRaw) {
+  // smoldot supports a **raw** genesis map or a **state root**, and nothing else. A spec
+  // carrying neither fails inside `addChain` with a message that reads like a connectivity
+  // problem, so catching it here is the difference between "the build shipped the wrong
+  // artifact" and an hour spent on the network.
+  const form = genesisFormOf(spec);
+  if (form === undefined) {
     throw new ChainSpecIntegrityError(
-      `chain spec ${pinned.id} is not a raw spec; smoldot accepts only raw chain specifications`,
+      `chain spec ${pinned.id} declares neither a \`genesis.raw\` map nor a 32-byte ` +
+        '`genesis.stateRootHash`; smoldot accepts no third form, and it reports the ' +
+        'difference as a chain that never finalises',
     );
+  }
+  if (form === 'state-root' && pinned.kind === 'relay') {
+    // A relay establishes its own finality from the GRANDPA authority set in genesis
+    // storage. Without that storage and without a checkpoint it syncs forever — see
+    // `genesisFormOf` for why a parachain is not in the same position.
+    const checkpoint = spec['lightSyncState'];
+    if (typeof checkpoint !== 'object' || checkpoint === null) {
+      throw new ChainSpecIntegrityError(
+        `relay spec ${pinned.id} carries a \`genesis.stateRootHash\` and no \`lightSyncState\`; ` +
+          'a relay has no other chain to derive finality from, so it would sync and never ' +
+          'finalize — which on screen is indistinguishable from slow sync',
+      );
+    }
   }
 
   const relayChain = relayChainOf(spec);
