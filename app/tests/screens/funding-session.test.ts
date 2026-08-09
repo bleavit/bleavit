@@ -301,9 +301,14 @@ test('every blocked deposit says WHY as a value, not only as a sentence', async 
   // The reason is written for a person and it is the only thing a caller could act on, so a
   // caller wanting to separate *the Asset Hub refused* from *a reader did not open* had to
   // match on prose. `zombienet/drills/js/client-boot-rules.js` did exactly that and could not:
-  // 15 §4.8 excuses an absent or unpinned Asset Hub in a Zombienet topology and nothing else,
-  // and a nonempty sentence is what every arm here produces. The five other causes are defects
-  // in the path that paragraph says the Zombienet row *does* certify.
+  // only an absent or unpinned Asset Hub is environmental, and a nonempty sentence is what every
+  // arm here produces. The four other causes are defects in the path 15 §4.8 says the Zombienet
+  // row *does* certify.
+  //
+  // The connector's `wrong-chain` arm maps to `asset-hub-bundle-pin-mismatch` and not to a cause
+  // spelled `wrong-chain`: that arm compares against `BundledChain.pinned.genesisHash`, while 10
+  // §5.2's identically named `ForeignMode` compares against the release's `FOREIGN_CHAIN_PINS`.
+  // Two comparisons, two pins, and in a development topology two opposite meanings.
   const base = {
     local: transport(LOCAL_CHAIN),
     artifacts: ARTIFACTS,
@@ -316,7 +321,7 @@ test('every blocked deposit says WHY as a value, not only as a sentence', async 
       { ...base, openReader, connectAssetHub: async () => ({ kind: 'unavailable', reason: 'not synced' }) },
     ],
     [
-      'asset-hub-wrong-chain',
+      'asset-hub-bundle-pin-mismatch',
       {
         ...base,
         openReader,

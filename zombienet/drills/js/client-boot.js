@@ -363,12 +363,23 @@ async function wrongChain() {
 /**
  * The 11 §11.9 funding read path, against both live chains — F18.
  *
- * A **blocked deposit is a pass** and a blocked withdraw is not; `assertFundingReport` carries
- * the whole rule and says why. The verdict, the two chains and every key are printed, because
- * the value of this leg is what it read rather than that it finished.
+ * **Two different claims, and this leg reports both.** Whether the run *failed* is the tier's
+ * question: at the release tier the deposit leg must be `ready` and must show the three things 15
+ * §4.8 says this row certifies, while at the exploratory tier the two documented environmental
+ * refusals stay legitimate outcomes. Whether the run *certified* is a separate line, printed at
+ * either tier — because a drill whose only output is pass/fail cannot tell a run that walked the
+ * deposit path from one that refused before opening a reader, and that is precisely how this leg
+ * went green three times over having proved less each time than it claimed.
+ *
+ * The tier comes from `BLEAVIT_DRILL_TIER` and defaults to `release`, so the fail-closed
+ * direction is the default and the escape has to be typed by a person.
  */
 async function funding() {
-  const report = rules.assertFundingReport(reportOf("funding read path", "funding", 900));
+  const tier = rules.drillTier(process.env);
+  const report = rules.assertFundingReport(reportOf("funding read path", "funding", 900), tier);
+  const certification = rules.fundingCertification(report);
+  console.log(`funding tier: ${tier}`);
+  console.log(`funding certification: ${certification.summary}`);
   console.log(`funding withdraw: ${JSON.stringify(report.withdraw)}`);
   console.log(`funding deposit: ${JSON.stringify(report.deposit)}`);
   console.log(`funding inputs: ${JSON.stringify(report.driverInputs)}`);

@@ -393,7 +393,16 @@ test('a pin document with no Asset Hub role is refused rather than half-run', as
  */
 const harnessRules = createRequire(import.meta.url)(
   join(APP, '..', 'zombienet', 'drills', 'js', 'client-boot-rules.js'),
-) as { assertFundingReport(report: unknown): unknown };
+) as {
+  assertFundingReport(report: unknown, tier: string): unknown;
+  fundingCertification(report: unknown): {
+    readonly certified: boolean;
+    readonly shown: readonly string[];
+    readonly missing: readonly string[];
+    readonly summary: string;
+  };
+  readonly CERTIFIED_CLAIMS: readonly string[];
+};
 
 /**
  * A local transport whose `PhaseFlags` decodes — 17 = `sudo present | shadow mode`, the real
@@ -408,14 +417,14 @@ async function decodableLocal(): Promise<ChainHeadTransport> {
   return transport(LOCAL_CHAIN, { [setup.artifacts.keys.phaseFlags().toLowerCase()]: '0x11000000' });
 }
 
-test('the harness accepts the refusal 15 §4.8 forces and refuses the local failure beside it', async () => {
+test('the harness accepts the environmental refusal and refuses the local failure beside it', async () => {
   const refused = await runFunding(
     pinDocument(),
     NO_BOOTNODES,
     OPTIONS,
     deps(connection({ assetHub: { kind: 'unavailable', reason: 'Asset Hub never synced.' }, local: await decodableLocal() })),
   );
-  harnessRules.assertFundingReport(refused);
+  harnessRules.assertFundingReport(refused, 'exploratory');
 
   // Asset Hub attached and read; the second LOCAL open failed. Same `kind`, same nonempty
   // sentence, opposite meaning — and the drill must not report this run as a pass.
@@ -438,7 +447,106 @@ test('the harness accepts the refusal 15 §4.8 forces and refuses the local fail
       }),
     ),
   );
-  assert.throws(() => harnessRules.assertFundingReport(defect), /not an Asset Hub refusal/);
+  assert.throws(() => harnessRules.assertFundingReport(defect, 'exploratory'), /not an Asset Hub refusal/);
+});
+
+test('a PRODUCED report that took an early refusal fails the release tier and certifies nothing', async () => {
+  // The round-three finding, driven end to end. `openDepositLeg` returns both documented
+  // refusals **before** `openReader(connection.transport)`, before `fundingReaders`, and before
+  // `classifyAssetHub` — so a release run that takes one exercised neither the two-chain branded
+  // reads nor the terminal classification, and the drill reported it as a pass.
+  //
+  // Both arms come from `AssetHubConnection`'s own union rather than from a typed cause, so this
+  // is the producer's mapping under test as well as the rule.
+  const arms = [
+    [{ kind: 'unavailable', reason: 'Asset Hub never synced.' } as const, 'asset-hub-unavailable'],
+    [
+      {
+        kind: 'wrong-chain',
+        genesisHash: `0x${'fe'.repeat(32)}`,
+        reason: 'That is a different chain, and retrying will not change this.',
+      } as const,
+      'asset-hub-bundle-pin-mismatch',
+    ],
+  ] as const;
+
+  for (const [arm, cause] of arms) {
+    const refused = await runFunding(
+      pinDocument(),
+      NO_BOOTNODES,
+      OPTIONS,
+      deps(connection({ assetHub: arm, local: await decodableLocal() })),
+    );
+    assert.equal(refused.deposit.kind, 'blocked');
+    if (refused.deposit.kind !== 'blocked') return;
+    assert.equal(refused.deposit.cause, cause);
+
+    const verdict = harnessRules.fundingCertification(refused);
+    assert.equal(verdict.certified, false, `${cause} was reported as certifying`);
+    assert.deepEqual([...verdict.missing], [...harnessRules.CERTIFIED_CLAIMS]);
+    assert.throws(
+      () => harnessRules.assertFundingReport(refused, 'release'),
+      /certifies nothing/,
+      `the release tier accepted ${cause}`,
+    );
+    // Still a legitimate outcome one tier down — and reported there as not certifying.
+    harnessRules.assertFundingReport(refused, 'exploratory');
+  }
+
+  // The negative control, and it is the whole point of the split: a run that DID walk the path
+  // passes the release tier and certifies every claim. So the rule above refuses the runs that
+  // did no work rather than refusing the tier.
+  const walked = await runFunding(
+    pinDocument(),
+    NO_BOOTNODES,
+    OPTIONS,
+    deps(connection({ local: await decodableLocal() })),
+  );
+  assert.equal(walked.deposit.kind, 'ready');
+  harnessRules.assertFundingReport(walked, 'release');
+  const certified = harnessRules.fundingCertification(walked);
+  assert.equal(certified.certified, true);
+  assert.deepEqual([...certified.shown], [...harnessRules.CERTIFIED_CLAIMS]);
+});
+
+test('the connector pin mismatch and the ForeignMode classification are NOT one name', async () => {
+  // Two different comparisons wearing one word until this round. `attachAssetHub` compares the
+  // chain that answered against `BundledChain.pinned.genesisHash` — which in this drill is the
+  // development pin `dev-chain-pin.ts` generated from the running node minutes earlier — while
+  // `ForeignMode` compares against `FOREIGN_CHAIN_PINS`, the 02 §7.7 Asset Hub of the relay the
+  // release targets. A reader seeing `wrong-chain` could not tell which, and they are opposite
+  // facts: the first is a harness or topology defect, the second is the expected terminal
+  // outcome 15 §4.8 says this row certifies.
+  const mismatch = await runFunding(
+    pinDocument(),
+    NO_BOOTNODES,
+    OPTIONS,
+    deps(
+      connection({
+        local: await decodableLocal(),
+        assetHub: {
+          kind: 'wrong-chain',
+          genesisHash: `0x${'fe'.repeat(32)}`,
+          reason: 'That is a different chain, and retrying will not change this.',
+        },
+      }),
+    ),
+  );
+  assert.equal(mismatch.deposit.kind, 'blocked');
+  if (mismatch.deposit.kind !== 'blocked') return;
+  assert.notEqual(mismatch.deposit.cause, 'asset-hub-wrong-chain');
+  assert.equal(mismatch.deposit.cause, 'asset-hub-bundle-pin-mismatch');
+
+  // …and the classification keeps the name, because that is the one 10 §5.2 owns.
+  const classified = await runFunding(
+    pinDocument(),
+    NO_BOOTNODES,
+    OPTIONS,
+    deps(connection({ local: await decodableLocal(), verdict: foreignIdentityVerdict(assetHubLabel(), AH_CHAIN) })),
+  );
+  assert.equal(classified.deposit.kind, 'ready');
+  if (classified.deposit.kind !== 'ready') return;
+  assert.equal(classified.deposit.foreignMode, 'wrong-chain');
 });
 
 test('the harness refuses a ready report whose reads did not decode', async () => {
@@ -450,7 +558,7 @@ test('the harness refuses a ready report whose reads did not decode', async () =
   assert.equal(blind.deposit.kind, 'ready');
   if (blind.deposit.kind !== 'ready') return;
   assert.deepEqual(blind.deposit.undecodable, ['Constitution.PhaseFlags: the storage key returned no value']);
-  assert.throws(() => harnessRules.assertFundingReport(blind), /could not decode/);
+  assert.throws(() => harnessRules.assertFundingReport(blind, 'release'), /could not decode/);
 
   // The negative control: the same run with a decodable `PhaseFlags` passes, so the rule above
   // is refusing the undecodable read rather than refusing everything.
@@ -463,7 +571,7 @@ test('the harness refuses a ready report whose reads did not decode', async () =
   assert.equal(sighted.deposit.kind, 'ready');
   if (sighted.deposit.kind !== 'ready') return;
   assert.deepEqual(sighted.deposit.undecodable, []);
-  harnessRules.assertFundingReport(sighted);
+  harnessRules.assertFundingReport(sighted, 'release');
 });
 
 test('the harness refuses the verdict the development-label bug produced', async () => {
@@ -485,7 +593,7 @@ test('the harness refuses the verdict the development-label bug produced', async
   assert.equal(bugged.deposit.kind, 'ready');
   if (bugged.deposit.kind !== 'ready') return;
   assert.equal(bugged.deposit.foreignMode, 'unreachable');
-  assert.throws(() => harnessRules.assertFundingReport(bugged), /can only ever reach "wrong-chain"/);
+  assert.throws(() => harnessRules.assertFundingReport(bugged, 'release'), /can only ever reach "wrong-chain"/);
 
   // The negative control, and it is what binds the rule to the topology: asked about the label
   // the pin itself carries, the real classifier returns `wrong-chain` for a locally generated
@@ -500,7 +608,7 @@ test('the harness refuses the verdict the development-label bug produced', async
   assert.equal(pinned.deposit.kind, 'ready');
   if (pinned.deposit.kind !== 'ready') return;
   assert.equal(pinned.deposit.foreignMode, 'wrong-chain');
-  harnessRules.assertFundingReport(pinned);
+  harnessRules.assertFundingReport(pinned, 'release');
 });
 
 test('the harness refuses a produced report with a required surface missing', async () => {
@@ -527,7 +635,7 @@ test('the harness refuses a produced report with a required surface missing', as
       deposit: { ...built.deposit, reads: built.deposit.reads.filter((read) => read.surface !== surface) },
     };
     assert.throws(
-      () => harnessRules.assertFundingReport(short),
+      () => harnessRules.assertFundingReport(short, 'release'),
       new RegExp(`never read ${surface.replace('.', '\\.')}`),
       `a report missing ${surface} was accepted`,
     );
@@ -537,13 +645,13 @@ test('the harness refuses a produced report with a required surface missing', as
   assert.equal(built.withdraw.kind, 'ready');
   if (built.withdraw.kind !== 'ready') return;
   assert.throws(
-    () => harnessRules.assertFundingReport({ ...built, withdraw: { ...built.withdraw, reads: [] } }),
+    () => harnessRules.assertFundingReport({ ...built, withdraw: { ...built.withdraw, reads: [] } }, 'release'),
     /reported ready with no reads at all/,
   );
 
   // The intact report the producer built passes, so none of the refusals above refuses
   // everything — and this is the assertion that fails if a surface name ever moves.
-  harnessRules.assertFundingReport(built);
+  harnessRules.assertFundingReport(built, 'release');
 });
 
 /* ------------------------------------------------------------------------- the arguments */

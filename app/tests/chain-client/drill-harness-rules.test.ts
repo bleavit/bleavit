@@ -27,6 +27,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -35,6 +36,13 @@ import { FUNDING_READS } from '@bleavit/features-tx';
 
 const APP = join(dirname(fileURLToPath(import.meta.url)), '../..');
 
+interface Certification {
+  readonly certified: boolean;
+  readonly shown: readonly string[];
+  readonly missing: readonly string[];
+  readonly summary: string;
+}
+
 interface HarnessRules {
   admissibleNode(pinned: string, version: string, packaged: string): boolean;
   networkDir(networkInfo: unknown, env: Record<string, string | undefined>): string;
@@ -42,9 +50,17 @@ interface HarnessRules {
   missingReportError(label: string, file: string, stdout: string): Error;
   assertBootReport(report: unknown): unknown;
   assertWrongChainReport(report: unknown): unknown;
-  assertFundingReport(report: unknown): unknown;
+  /**
+   * `tier` is `unknown` on purpose: the harness is JavaScript, so the rule has to refuse an
+   * absent or misspelled tier at runtime, and a `string` declaration here would make the one
+   * case worth testing unwritable without a banned double assertion.
+   */
+  assertFundingReport(report: unknown, tier: unknown): unknown;
+  fundingCertification(report: unknown): Certification;
+  drillTier(env: Record<string, string | undefined>): string;
   /** Exported so this suite can bind the harness's restatement to the frozen `FUNDING_READS`. */
   readonly REQUIRED_SURFACES: { readonly withdraw: readonly string[]; readonly deposit: readonly string[] };
+  readonly CERTIFIED_CLAIMS: readonly string[];
 }
 
 const load = createRequire(import.meta.url);
@@ -257,57 +273,75 @@ const FUNDING = {
   },
 };
 
-test('a BLOCKED deposit passes, because 02 §7.7 requires exactly that', () => {
-  // The leg must not demand a green deposit. §7.7 requires an unavailable or unpinned Asset Hub
-  // to block the flow *with diagnostics*, so a rule insisting on `ready` would fail on the
-  // correct behaviour and could only be satisfied by pointing the drill at the real Asset Hub.
-  rules.assertFundingReport({
-    ...FUNDING,
-    deposit: { kind: 'blocked', cause: 'asset-hub-unavailable', reason: 'Asset Hub is not attached.' },
-  });
+test('a BLOCKED deposit passes at the EXPLORATORY tier, because 02 §7.7 requires exactly that', () => {
+  // The lower tier must not demand a green deposit. §7.7 requires an unavailable or unpinned
+  // Asset Hub to block the flow *with diagnostics*, and a development Asset Hub that has not
+  // finalized inside the connector deadline is a slow machine rather than a client defect. What
+  // the tier costs is the certification, not the run — see the release-tier test below.
+  rules.assertFundingReport(
+    {
+      ...FUNDING,
+      deposit: { kind: 'blocked', cause: 'asset-hub-unavailable', reason: 'Asset Hub is not attached.' },
+    },
+    'exploratory',
+  );
   // …but a blocked leg carrying no diagnostics is not "blocked with diagnostics" (11 E17).
   assert.throws(
-    () => rules.assertFundingReport({ ...FUNDING, deposit: { kind: 'blocked', cause: 'asset-hub-unavailable', reason: '' } }),
+    () =>
+      rules.assertFundingReport(
+        { ...FUNDING, deposit: { kind: 'blocked', cause: 'asset-hub-unavailable', reason: '' } },
+        'exploratory',
+      ),
     /neither ready nor blocked-with-diagnostics/,
   );
   assert.throws(
-    () => rules.assertFundingReport({ ...FUNDING, deposit: { kind: 'exploded' } }),
+    () => rules.assertFundingReport({ ...FUNDING, deposit: { kind: 'exploded' } }, 'exploratory'),
     /neither ready nor blocked-with-diagnostics/,
   );
 });
 
-test('only an ASSET HUB refusal excuses a blocked deposit; a local-chain failure does not', () => {
-  // 15 §4.8 excuses one thing and names it: 02 §7.7 pins the Asset Hub of the relay a release
-  // targets, a locally generated one has its own genesis, so an **absent or unpinned** Asset Hub
-  // is the refusal this topology forces. That paragraph also says what the Zombienet row does
-  // certify — "the two-chain reader pair, the branded reads, the terminal classification" — and
-  // every other blocked cause is one of those three failing.
-  for (const cause of ['asset-hub-unavailable', 'asset-hub-wrong-chain']) {
-    rules.assertFundingReport({ ...FUNDING, deposit: { kind: 'blocked', cause, reason: 'Asset Hub is not attached.' } });
+test('only an ASSET HUB refusal is environmental; a local-chain failure is a defect at every tier', () => {
+  // Two documented environmental refusals and nothing else. 02 §7.7 requires an unavailable or
+  // unpinned Asset Hub to block the flow with diagnostics, so a run that hits one is behaving
+  // correctly — and 15 §4.8 names what the Zombienet row *certifies* — "the two-chain reader
+  // pair, the branded reads, the terminal classification" — none of which such a run reached.
+  for (const cause of ['asset-hub-unavailable', 'asset-hub-bundle-pin-mismatch']) {
+    rules.assertFundingReport(
+      { ...FUNDING, deposit: { kind: 'blocked', cause, reason: 'Asset Hub is not attached.' } },
+      'exploratory',
+    );
   }
   // `openDepositLeg` blocks for four further reasons, and the drill must report every one of
-  // them. The local one is the sharpest: Asset Hub attached, and the drill still never completed
-  // the two-chain read path it advertises.
+  // them at **both** tiers: a defect is not weather. The local one is the sharpest: Asset Hub
+  // attached, and the drill still never completed the two-chain read path it advertises.
   for (const cause of ['local-unreadable', 'asset-hub-unreadable', 'classification-failed', 'asset-hub-connect-failed']) {
-    assert.throws(
-      () =>
-        rules.assertFundingReport({
-          ...FUNDING,
-          deposit: { kind: 'blocked', cause, reason: 'This chain could not be read at a finalized block: …' },
-        }),
-      /not an Asset Hub refusal/,
-      `a deposit blocked on ${cause} was accepted`,
-    );
+    for (const tier of ['release', 'exploratory']) {
+      assert.throws(
+        () =>
+          rules.assertFundingReport(
+            {
+              ...FUNDING,
+              deposit: { kind: 'blocked', cause, reason: 'This chain could not be read at a finalized block: …' },
+            },
+            tier,
+          ),
+        /not an Asset Hub refusal/,
+        `a deposit blocked on ${cause} was accepted at the ${tier} tier`,
+      );
+    }
   }
   // And the shape that shipped: any nonempty sentence, with no cause at all, passed as the
   // documented refusal. A report that stops carrying the discriminator fails rather than
   // reverting to that.
   assert.throws(
     () =>
-      rules.assertFundingReport({
-        ...FUNDING,
-        deposit: { kind: 'blocked', reason: 'This chain could not be read at a finalized block: …' },
-      }),
+      rules.assertFundingReport(
+        {
+          ...FUNDING,
+          deposit: { kind: 'blocked', reason: 'This chain could not be read at a finalized block: …' },
+        },
+        'exploratory',
+      ),
     /not an Asset Hub refusal/,
   );
 });
@@ -316,7 +350,7 @@ test('a BLOCKED withdraw fails, because §11.9.2 says it does not depend on Asse
   // The asymmetry is the property worth proving live: a blocked withdraw beside a blocked
   // deposit is the "funding is down" coupling 02 §7.7 and §11.9.2 exist to forbid.
   assert.throws(
-    () => rules.assertFundingReport({ ...FUNDING, withdraw: { kind: 'blocked', reason: 'Asset Hub is down.' } }),
+    () => rules.assertFundingReport({ ...FUNDING, withdraw: { kind: 'blocked', reason: 'Asset Hub is down.' } }, 'release'),
     /independent of Asset Hub/,
   );
 });
@@ -324,14 +358,14 @@ test('a BLOCKED withdraw fails, because §11.9.2 says it does not depend on Asse
 test('a leg that reported ready without reading anything is the one outcome refused outright', () => {
   for (const reads of [[], undefined, 'two']) {
     assert.throws(
-      () => rules.assertFundingReport({ ...FUNDING, withdraw: { ...FUNDING.withdraw, reads } }),
+      () => rules.assertFundingReport({ ...FUNDING, withdraw: { ...FUNDING.withdraw, reads } }, 'release'),
       /reported ready with no reads at all/,
       `accepted reads=${JSON.stringify(reads)}`,
     );
   }
   // A "read" with no storage key is the same claim wearing an array.
   assert.throws(
-    () => rules.assertFundingReport({ ...FUNDING, withdraw: { ...FUNDING.withdraw, reads: [{ surface: 'x' }] } }),
+    () => rules.assertFundingReport({ ...FUNDING, withdraw: { ...FUNDING.withdraw, reads: [{ surface: 'x' }] } }, 'release'),
     /a read with no storage key/,
   );
 });
@@ -343,24 +377,30 @@ test('a ready leg whose reads did not DECODE is a read path that was attempted, 
   // leg exists to find.
   assert.throws(
     () =>
-      rules.assertFundingReport({
-        ...FUNDING,
-        withdraw: { ...FUNDING.withdraw, undecodable: ['ForeignAssets.Account(who): trailing bytes'] },
-      }),
+      rules.assertFundingReport(
+        {
+          ...FUNDING,
+          withdraw: { ...FUNDING.withdraw, undecodable: ['ForeignAssets.Account(who): trailing bytes'] },
+        },
+        'release',
+      ),
     /could not decode/,
   );
   assert.throws(
     () =>
-      rules.assertFundingReport({
-        ...FUNDING,
-        deposit: { ...FUNDING.deposit, undecodable: ['Constitution.PhaseFlags: the storage key returned no value'] },
-      }),
+      rules.assertFundingReport(
+        {
+          ...FUNDING,
+          deposit: { ...FUNDING.deposit, undecodable: ['Constitution.PhaseFlags: the storage key returned no value'] },
+        },
+        'release',
+      ),
     /could not decode/,
   );
   // An absent list is not an empty one. A report that stopped carrying the field would otherwise
   // satisfy this rule by omission, which is the same defect one level up.
   assert.throws(
-    () => rules.assertFundingReport({ ...FUNDING, withdraw: { ...FUNDING.withdraw, undecodable: undefined } }),
+    () => rules.assertFundingReport({ ...FUNDING, withdraw: { ...FUNDING.withdraw, undecodable: undefined } }, 'release'),
     /no undecodable list/,
   );
 });
@@ -369,14 +409,18 @@ test('a key that is not the runtime\'s own published key fails the whole leg', (
   // Every read below it asked the chain about the wrong entry, and an empty answer to the
   // wrong key is indistinguishable from an honest zero balance.
   assert.throws(
-    () => rules.assertFundingReport({ ...FUNDING, publishedKeyAgrees: false }),
+    () => rules.assertFundingReport({ ...FUNDING, publishedKeyAgrees: false }, 'release'),
     /not the key the runtime published/,
   );
 });
 
 test('two deposit readers on one chain are refused — that is `SameChainError`\'s subject', () => {
   assert.throws(
-    () => rules.assertFundingReport({ ...FUNDING, deposit: { ...FUNDING.deposit, assetHubChain: FUNDING.deposit.localChain } }),
+    () =>
+      rules.assertFundingReport(
+        { ...FUNDING, deposit: { ...FUNDING.deposit, assetHubChain: FUNDING.deposit.localChain } },
+        'release',
+      ),
     /under an Asset Hub label/,
   );
 });
@@ -386,7 +430,7 @@ test('a ready deposit with no 02 §7.7 verdict is refused', () => {
   // reporting that a deposit may be constructed against a chain nothing classified.
   for (const foreignMode of [undefined, '', 42]) {
     assert.throws(
-      () => rules.assertFundingReport({ ...FUNDING, deposit: { ...FUNDING.deposit, foreignMode } }),
+      () => rules.assertFundingReport({ ...FUNDING, deposit: { ...FUNDING.deposit, foreignMode } }, 'release'),
       /carries no 02 §7.7 foreign verdict/,
       `accepted ${String(foreignMode)}`,
     );
@@ -406,7 +450,7 @@ test('a ready deposit carrying any verdict but `wrong-chain` is refused — 15 �
   // leave this leg green with a nonempty-string rule.
   for (const foreignMode of ['full', 'restricted', 'unsupported', 'unreachable', 'unestablished']) {
     assert.throws(
-      () => rules.assertFundingReport({ ...FUNDING, deposit: { ...FUNDING.deposit, foreignMode } }),
+      () => rules.assertFundingReport({ ...FUNDING, deposit: { ...FUNDING.deposit, foreignMode } }, 'release'),
       /can only ever reach "wrong-chain"/,
       `accepted ${foreignMode}`,
     );
@@ -420,38 +464,45 @@ test('a ready leg that skipped a required surface is refused, and an extra read 
   // correct addition until somebody unblocking themselves loosened it. That is how this
   // function came to accept six foreign verdicts where one is reachable.
   const deposit = { ...FUNDING.deposit, reads: DEPOSIT_READS };
-  rules.assertFundingReport({ ...FUNDING, deposit });
+  rules.assertFundingReport({ ...FUNDING, deposit }, 'release');
   for (const surface of rules.REQUIRED_SURFACES.deposit) {
     assert.throws(
       () =>
-        rules.assertFundingReport({
-          ...FUNDING,
-          deposit: { ...deposit, reads: DEPOSIT_READS.filter((read) => read.surface !== surface) },
-        }),
+        rules.assertFundingReport(
+          {
+            ...FUNDING,
+            deposit: { ...deposit, reads: DEPOSIT_READS.filter((read) => read.surface !== surface) },
+          },
+          'release',
+        ),
       new RegExp(`never read ${surface.replace('.', '\\.')}`),
       `a deposit leg missing ${surface} was accepted`,
     );
   }
   // The withdraw leg has its own required set, and it is not the deposit leg's.
   assert.throws(
-    () => rules.assertFundingReport({ ...FUNDING, withdraw: { ...FUNDING.withdraw, reads: DEPOSIT_READS } }),
+    () => rules.assertFundingReport({ ...FUNDING, withdraw: { ...FUNDING.withdraw, reads: DEPOSIT_READS } }, 'release'),
     /never read ForeignAssets\.Account/,
   );
   // An extra read passes, which is the half that keeps this a certification rather than a
   // change-detector.
-  rules.assertFundingReport({
-    ...FUNDING,
-    deposit: { ...deposit, reads: [...DEPOSIT_READS, { surface: 'Assets.Asset', key: `0x${'ff'.repeat(20)}` }] },
-  });
+  rules.assertFundingReport(
+    {
+      ...FUNDING,
+      deposit: { ...deposit, reads: [...DEPOSIT_READS, { surface: 'Assets.Asset', key: `0x${'ff'.repeat(20)}` }] },
+    },
+    'release',
+  );
 });
 
 test('the required surfaces ARE the frozen funding set, in both directions', () => {
   // The harness is CommonJS outside the workspace and cannot import `FUNDING_READS`, so it
-  // restates the names — the same trade `FORCED_DEPOSIT_REFUSALS` makes for `DepositBlockCause`.
-  // What stops a restatement from drifting is this test, not care: every frozen surface must be
-  // required by exactly one leg, and every required surface must be a frozen one. A surface
-  // added to `FUNDING_READS` therefore fails here, where a person can assign it to a leg, rather
-  // than at the release tier where the report would simply carry a read nobody demanded.
+  // restates the names — the same trade `ENVIRONMENTAL_DEPOSIT_REFUSALS` makes for
+  // `DepositBlockCause`. What stops a restatement from drifting is this test, not care: every
+  // frozen surface must be required by exactly one leg, and every required surface must be a
+  // frozen one. A surface added to `FUNDING_READS` therefore fails here, where a person can
+  // assign it to a leg, rather than at the release tier where the report would simply carry a
+  // read nobody demanded.
   const frozen = [...Object.values(FUNDING_READS.assetHub), ...Object.values(FUNDING_READS.local)];
   const required = [...rules.REQUIRED_SURFACES.withdraw, ...rules.REQUIRED_SURFACES.deposit];
   assert.deepEqual([...required].sort(), [...frozen].sort());
@@ -459,5 +510,98 @@ test('the required surfaces ARE the frozen funding set, in both directions', () 
 });
 
 test('the happy shape passes, so none of the refusals above is refusing everything', () => {
-  assert.equal(rules.assertFundingReport(FUNDING), FUNDING);
+  assert.equal(rules.assertFundingReport(FUNDING, 'release'), FUNDING);
+});
+
+/* ------------------------------------ certification versus environmental refusal (round 3) */
+
+test('the release tier REFUSES a run that took an environmental refusal — 15 §4.8', () => {
+  // The finding this split answers. `openDepositLeg` returns both documented refusals **before**
+  // it opens the Asset Hub reader, builds `fundingReaders` or calls `classifyAssetHub`, so a run
+  // that takes one exercised none of the three things 15 §4.8 says this row certifies — and the
+  // drill reported it as a pass. Requiring `ready` at every tier was the wrong fix: a development
+  // Asset Hub that has not finalized inside the connector deadline is a slow machine, and a drill
+  // that goes red on that gets disabled. So the claim splits from the outcome.
+  for (const cause of ['asset-hub-unavailable', 'asset-hub-bundle-pin-mismatch']) {
+    const refused = { ...FUNDING, deposit: { kind: 'blocked', cause, reason: 'Asset Hub is not attached.' } };
+    assert.throws(() => rules.assertFundingReport(refused, 'release'), /certifies nothing/, `accepted ${cause}`);
+    // …and the same report is a legitimate outcome one tier down.
+    rules.assertFundingReport(refused, 'exploratory');
+  }
+});
+
+test('the certification names WHICH claims a run showed, at either tier', () => {
+  // The distinction has to be readable, not merely enforced: all three rounds of this defect
+  // share one shape — a report that could not tell a run which did the work from one which did
+  // not. A boolean would repeat that mistake one level up.
+  const shown = rules.fundingCertification(FUNDING);
+  assert.equal(shown.certified, true);
+  assert.deepEqual([...shown.shown], [...rules.CERTIFIED_CLAIMS]);
+  assert.deepEqual(shown.missing, []);
+  assert.match(shown.summary, /CERTIFIED/);
+
+  const refused = rules.fundingCertification({
+    ...FUNDING,
+    deposit: { kind: 'blocked', cause: 'asset-hub-unavailable', reason: 'Asset Hub is not attached.' },
+  });
+  assert.equal(refused.certified, false);
+  assert.deepEqual(refused.shown, []);
+  assert.deepEqual([...refused.missing], [...rules.CERTIFIED_CLAIMS]);
+  assert.match(refused.summary, /NOT CERTIFYING/);
+  // The reason a run did not certify belongs in the line a person reads, not only in the rule.
+  assert.match(refused.summary, /asset-hub-unavailable/);
+});
+
+test('the certification is computed from the report, not inherited from the refusals above', () => {
+  // Deliberately overlapping with `assertFundingReport`, and the overlap is the point: this is a
+  // positive statement of what a run proved, where every rule above is a refusal. Either one
+  // being loosened leaves the other holding the line, so a `ready` deposit missing a claim is
+  // still reported as missing it.
+  const partial = {
+    ...FUNDING,
+    deposit: { ...FUNDING.deposit, assetHubChain: FUNDING.deposit.localChain, foreignMode: 'unreachable', reads: [] },
+  };
+  const verdict = rules.fundingCertification(partial);
+  assert.equal(verdict.certified, false);
+  assert.deepEqual([...verdict.missing], [...rules.CERTIFIED_CLAIMS]);
+});
+
+test('the harness WIRES the tier and prints the certification — read from its source', () => {
+  // Deliberately lexical, and the reason is this file's own premise: `client-boot.js` performs
+  // the I/O, so nothing per commit can execute it, and every rule in `client-boot-rules.js` is
+  // worth exactly as much as the harness calling it. The three rounds of review on this leg all
+  // ended in a rule; none of them could see whether the rule was still wired.
+  //
+  // Kept to names rather than to a call shape, so renaming a local variable is not a false red —
+  // a check that cries wolf on correct changes is one somebody loosens. What it does catch is the
+  // realistic regression: the tier read, the assertion or the printed verdict quietly going away,
+  // or a hardcoded lower tier appearing where the environment should decide.
+  const harness = readFileSync(join(APP, '..', 'zombienet', 'drills', 'js', 'client-boot.js'), 'utf8');
+  for (const name of ['rules.drillTier(process.env)', 'rules.assertFundingReport(', 'rules.fundingCertification(']) {
+    assert.ok(harness.includes(name), `the funding leg no longer calls ${name}`);
+  }
+  assert.match(harness, /funding certification:/, 'the drill stopped printing what it certified');
+  assert.ok(
+    !/['"]exploratory['"]/.test(harness),
+    'the harness names the lower tier itself; the tier must come from the environment, and a ' +
+      'hardcoded one is a release drill that certifies nothing and reports success',
+  );
+});
+
+test('the tier defaults to `release`, and an unknown one is refused rather than assumed', () => {
+  // Fail-closed in the one direction that matters: a run that says nothing is held to the
+  // certifying standard, and the escape has to be typed by a person. An unrecognised value is
+  // a typo, and silently treating it as the lower tier would turn a typo into a drill that
+  // certifies nothing and says it passed.
+  assert.equal(rules.drillTier({}), 'release');
+  assert.equal(rules.drillTier({ BLEAVIT_DRILL_TIER: '' }), 'release');
+  assert.equal(rules.drillTier({ BLEAVIT_DRILL_TIER: 'release' }), 'release');
+  assert.equal(rules.drillTier({ BLEAVIT_DRILL_TIER: 'exploratory' }), 'exploratory');
+  for (const tier of ['g1', 'Release', 'nightly', 'true']) {
+    assert.throws(() => rules.drillTier({ BLEAVIT_DRILL_TIER: tier }), /BLEAVIT_DRILL_TIER/, `accepted ${tier}`);
+  }
+  // The rule itself refuses a tier nobody declared, so a harness edit that drops the argument
+  // fails loudly instead of picking one.
+  assert.throws(() => rules.assertFundingReport(FUNDING, undefined), /tier/);
+  assert.throws(() => rules.assertFundingReport(FUNDING, 'whenever'), /tier/);
 });

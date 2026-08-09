@@ -270,12 +270,20 @@ export interface FundingDrillReport {
         readonly blocks: readonly string[];
       }
     /**
-     * The **cause** rides beside the reason, because only one cause is excused.
+     * The **cause** rides beside the reason, because only two causes are environmental.
      *
-     * 15 §4.8 rules that a Zombienet topology can only ever produce an absent or unpinned Asset
-     * Hub, so the drill harness must accept that refusal and refuse every other. `reason` is a
-     * sentence written for a person; matching it is how a **local** reader that failed to open
-     * passed as the documented refusal, and drill 14 went green having read one chain.
+     * 02 §7.7 requires an absent or unpinned Asset Hub to block the flow with diagnostics, so the
+     * drill harness accepts those two at its lower tier and refuses every other cause at both.
+     * `reason` is a sentence written for a person; matching it is how a **local** reader that
+     * failed to open passed as the documented refusal, and drill 14 went green having read one
+     * chain.
+     *
+     * **A blocked leg of any cause certifies nothing**, and the harness — not this report — is
+     * where that is decided. `openDepositLeg` returns both environmental refusals before it opens
+     * the Asset Hub reader, before `fundingReaders` and before `classifyAssetHub`, so none of the
+     * three things 15 §4.8 says this row certifies has happened by the time this arm is built.
+     * The fields the harness reads that claim off are on the `ready` arm above, which is why
+     * they are there and not here.
      */
     | { readonly kind: 'blocked'; readonly cause: DepositBlockCause; readonly reason: string };
 }

@@ -173,12 +173,14 @@ export type WithdrawLeg =
  * report, while a local reader that did not open is a fact about **this chain** — and one that
  * the withdraw leg beside it has usually just disproved.
  *
- * The distinction was load-bearing and unavailable. 15 §4.8 excuses exactly the first two in a
- * Zombienet topology, because §7.7 pins the Asset Hub of the relay a release targets and a
- * locally generated one has its own genesis; the drill harness therefore had to separate them
- * and could only do it by matching the prose. It did, and a `local-unreadable` sentence passed
- * as the documented refusal, so drill 14 could go green without ever completing the two-chain
- * deposit read path it exists to run.
+ * The distinction was load-bearing and unavailable. Only the first two are **environmental** —
+ * conditions no client correctness changes — and the drill harness has to separate them from the
+ * rest; it could only do it by matching the prose. It did, and a `local-unreadable` sentence
+ * passed as the documented refusal, so drill 14 could go green without ever completing the
+ * two-chain deposit read path it exists to run. Note what "environmental" does **not** buy: both
+ * arms are returned before any reader opens, so a run that takes one has walked none of the
+ * deposit path, and 15 §4.8's Zombienet row certifies none of its four claims. That is a
+ * decision for the drill harness rather than for this module, and it is made there.
  *
  * Kept as one flat union rather than "Asset Hub" and "not Asset Hub" groups: `asset-hub-*` is a
  * prefix a consumer may not read as a class. Only two of the four Asset Hub causes are
@@ -186,8 +188,22 @@ export type WithdrawLeg =
  * read, a classifier that threw — are as much a defect as the local one.
  */
 export type DepositBlockCause =
-  /** `attachAssetHub` reached a chain and it was not the pinned one. Terminal (10 §3.1). */
-  | 'asset-hub-wrong-chain'
+  /**
+   * `attachAssetHub` reached a chain and it was not the **bundle's** pinned one. Terminal.
+   *
+   * **Deliberately not called `wrong-chain`, because two different comparisons wear that word
+   * and they are opposite facts.** This one is `attachAssetHub` comparing the genesis the light
+   * client reports against `BundledChain.pinned.genesisHash` — the chain-spec bundle this client
+   * was handed. {@link DepositLeg}'s `foreign` verdict is 10 §5.2's `ForeignMode`, comparing the
+   * same genesis against `FOREIGN_CHAIN_PINS` — the Asset Hub of the relay this **release**
+   * targets (02 §7.7). In production the two pins usually agree; in a development topology they
+   * cannot, because the bundle is generated from the running node minutes earlier and the
+   * release pin names a public chain. So in a drill this cause means *the pin document and the
+   * chain it was built from disagree* — a harness or topology defect — while `ForeignMode`
+   * reaching `wrong-chain` is the expected terminal outcome 15 §4.8 says that row certifies.
+   * One name for both left a reader of a report unable to tell them apart.
+   */
+  | 'asset-hub-bundle-pin-mismatch'
   /** The Asset Hub connection was not established or was abandoned. Retryable (E17 `R:`). */
   | 'asset-hub-unavailable'
   /** `connectAssetHub` **threw**, which `assetHubConnector` never does — see below. */
@@ -231,14 +247,18 @@ export type DepositLeg =
  * The connector's own refusal arms, mapped — and a **total** record, deliberately.
  *
  * `AssetHubConnection`'s non-attached arms are the two things 02 §7.7 calls an unavailable or
- * unpinned Asset Hub, which is exactly the pair 15 §4.8 excuses. A ternary here would map a
+ * unpinned Asset Hub — the pair a drill may treat as environmental. A ternary here would map a
  * third arm added later onto `asset-hub-unavailable` in silence — quietly widening what a drill
- * accepts as the documented refusal. A record keyed on the union fails to compile instead.
+ * accepts as an environmental refusal. A record keyed on the union fails to compile instead.
+ *
+ * The connector's arm is named `wrong-chain` and the cause it maps to is not, because the arm is
+ * about the **bundle** pin and 10 §5.2's identically named verdict is about the **release** pin.
+ * The mapping is where the two vocabularies meet, so it is where the rename belongs.
  */
 const ASSET_HUB_REFUSALS: {
   readonly [K in Exclude<AssetHubConnection<ChainHeadTransport>, { readonly kind: 'attached' }>['kind']]: DepositBlockCause;
 } = {
-  'wrong-chain': 'asset-hub-wrong-chain',
+  'wrong-chain': 'asset-hub-bundle-pin-mismatch',
   unavailable: 'asset-hub-unavailable',
 };
 

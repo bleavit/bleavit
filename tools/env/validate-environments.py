@@ -80,6 +80,18 @@ HRMP_OPEN_PAIRS = {
     "13-client-ingress-negative-matrix.zndsl": "4343:4242,4242:4343",
 }
 
+# F18 — the legs a drill MUST run, bound so that dropping one is not a green run.
+#
+# 15 §4.8 names what drill 14's row certifies: "the identity check, the two-chain reader pair,
+# the branded reads, the terminal classification". The first is the `wrong-chain` leg and the
+# other three are the `funding` leg, so a zndsl that stopped invoking either would leave the row
+# certifying nothing while every gate stayed green — the same class of defect the harness rules
+# were rewritten three times to remove, one file further out. `pin` and `boot` are listed for the
+# same reason: they are what the other two run against.
+REQUIRED_DRILL_LEGS = {
+    "14-client-boot.zndsl": ("pin", "boot", "funding", "wrong-chain"),
+}
+
 # 02 §11 forked-state rows plus the exhaustive 06 §6.2 playbook registry.
 REQUIRED_SCENARIOS = {
     "upgrade-transition.yml": "15 §4.7; 02 §11",
@@ -616,6 +628,15 @@ def validate_drills(root: Path, failures: list[str]) -> None:
             if not helper.is_file():
                 failures.append(
                     f"15 §4.7: {name} references missing js helper {raw!r}"
+                )
+
+        # F18 — see REQUIRED_DRILL_LEGS. A helper that exists and is never invoked
+        # certifies exactly as much as one that does not exist.
+        for leg in REQUIRED_DRILL_LEGS.get(name, ()):
+            if f'with "{leg}"' not in text:
+                failures.append(
+                    f"15 §4.7/§4.8: {name} must run its {leg!r} leg; without it the "
+                    "drill's row certifies less than it reports"
                 )
 
         # SQ-567: the topologies no longer preopen HRMP at relay genesis, so a
