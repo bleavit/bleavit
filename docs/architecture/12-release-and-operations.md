@@ -67,6 +67,13 @@ Requirements: the same reproducible build and **2 attestations** — where each 
 
 Rationale (honest scope): the soak exists to catch app-behavior regressions; a descriptor-only delta has no app-code surface to regress, while descriptor lateness is itself a live risk (§1.6). Any change touching app code — however small — MUST use the standard lane.
 
+**The lane is unavailable until the build emits a separately identifiable descriptor artifact (normative; added 2026-08-09, SQ-1039).** This section states the admissible delta over **source** paths (`packages/descriptors/**`) and has `diff-scope` check it over the **built tree**, and under §1.1 those two are not the same statement. §1.1 gives every emitted chunk a content-hash-only name, and a bundler's chunk hash covers the filenames of the chunks that chunk imports. So a descriptor refresh renames its own chunk, then renames every chunk that imports it, up to the entry chunk and `index.html`. No descriptor-only source delta therefore produces a built-tree delta confined to any path prefix. Two consequences follow, and the first is a rule about the checker rather than about a release:
+
+1. **`diff-scope` MUST NOT allowlist a descriptor path prefix.** Until 2026-08-09 it allowlisted `assets/descriptors/`, which the build has never emitted — the path existed only in the tool's fixtures. An allowlist entry naming an output that does not exist makes the lane look decidable while authorizing nothing, and the fixtures agreed with the code because both were written from the same wrong premise.
+2. **Until the build emits a separately identifiable descriptor artifact, the expedited lane is unavailable.** `diff-scope` MUST refuse every candidate whose built-tree delta reaches app assets, and that release MUST take the standard lane with its soak. The refusal is the safe direction, and it is the only safe direction available: skipping a 72 h soak on a false premise is the failure this section cannot afford, while taking a soak that was not strictly required costs time alone.
+
+What would restore the lane is a build that gives descriptors a path stable across refreshes, or a signed declaration in `release.json` of which built files are descriptor-derived. SQ-1039 owns that choice. Neither is a change to this section's policy — the policy stands, and what is missing is a built tree that can evidence it.
+
 ### 1.6 Descriptor lead-time gating (D-14, D-12)
 
 This is a **release-gating rule, not a convention**:
