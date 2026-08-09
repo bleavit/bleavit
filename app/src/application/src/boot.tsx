@@ -24,7 +24,7 @@
  * longest and least attended part of a session.
  */
 
-import { mount as mountTree } from '@bleavit/ui';
+import { mountLive } from '@bleavit/ui';
 import {
   IndexBootDisclosure,
   bootLocalIndex,
@@ -35,9 +35,11 @@ import {
 } from '@bleavit/features-analysis';
 import { registerReleaseWorker, type WorkerStatus } from './release-worker.js';
 import { Shell, type ShellChainState } from './shell.js';
+import type { ReleaseChannelPointer } from './release-channel.js';
 import { Outlet, screenFor } from './routes.js';
 import { implementedScreens } from './composition.js';
 import { releaseMetadataPins, releaseParaChain } from './chain-identity.js';
+import type { CompatVerdict } from './compat-session.js';
 
 /**
  * What the shell shows before anything has been read: nothing, said out loud.
@@ -94,6 +96,26 @@ export function screenForHash(hash: string, handoffEnabled: boolean): string {
 export interface BootedShell {
   /** 12 §5.2's release-worker state, as `registerReleaseWorker` reported it. */
   readonly worker: WorkerStatus;
+  /**
+   * Re-render the shell with 10 §5.2's verdict — the re-render path this file's own note
+   * recorded as F7's remainder, supplied for the one value that cannot wait for it.
+   *
+   * §3.2 makes the compat mode *"a session-scoped variable"* that changes on **every**
+   * `CodeUpdated`, so a shell that could only paint once could hold no such variable: F26
+   * classified at boot and had nowhere to put the answer, which is why `startShell` typed its
+   * `connect` as returning `unknown` and dropped it. This is the smallest thing that fixes
+   * that — a second `root.render` into the same root, which React reconciles.
+   *
+   * It deliberately takes the **verdict** and not a whole `ShellChainState`: the chain reads
+   * still land once, at mount, and a `show(state)` would read as though they did not.
+   *
+   * `channel` is 10 §5.3's newer-release pointer, and it is a *second* argument rather than a
+   * second call because the two arrive at different times: the verdict is already known when a
+   * session becomes stranded, and the raw `ReleaseChannel` read is a round trip after it. So the
+   * notice paints at once and the pointer lands under it, rather than the whole notice waiting
+   * on a read — see `startShell`. Omitted means *not read*, which the pointer renders as such.
+   */
+  readonly showCompat: (compat: CompatVerdict, channel?: ReleaseChannelPointer) => void;
   /** Tear the mounted tree down. Safe to call once; React's own `unmount` clears the container. */
   readonly unmount: () => void;
 }
@@ -150,18 +172,37 @@ export async function boot(container: Element): Promise<BootedShell> {
     pins: releaseMetadataPins(),
     now: Math.floor(Date.now() / 1000),
   });
-  const unmount = mountTree(
-    container,
-    <Shell chain={initialChainState()} handoffEnabled={handoffEnabled} activeScreen={active}>
+  // The tree is a **function of the verdict**, and everything else in it is fixed at mount.
+  // `showCompat` re-renders by calling it again: React reconciles by element type and position,
+  // so `IndexBootDisclosure` and the outlet are updated rather than remounted, and the index
+  // disclosure stays the shell's unconditional first child on every render — which is the shape
+  // `tests/analysis/index-disclosure.test.ts` reads out of this file.
+  const shellState = initialChainState();
+  const tree = (compat: CompatVerdict | undefined, channel?: ReleaseChannelPointer) => (
+    <Shell
+      chain={shellState}
+      compat={compat}
+      channel={channel}
+      handoffEnabled={handoffEnabled}
+      activeScreen={active}
+    >
       <IndexBootDisclosure state={indexState} retention={retention} />
       <Outlet hash={hash} handoffEnabled={handoffEnabled} implemented={implemented} />
-    </Shell>,
+    </Shell>
   );
+  const mounted = mountLive(container, tree(undefined));
+  const unmount = mounted.unmount;
   // Registered after the tree is up: a release-worker failure must not stop the app
   // rendering, since the verification panel is one of the things that still renders when
   // smoldot never starts (12 §5.2).
   try {
-    return { worker: await registerReleaseWorker(), unmount };
+    return {
+      worker: await registerReleaseWorker(),
+      showCompat: (compat, channel) => {
+        mounted.render(tree(compat, channel));
+      },
+      unmount,
+    };
   } catch (error) {
     // **The guarantee that a rejected `boot` never left a tree behind is enforced here,
     // where the mount is, rather than asserted at the call site.** It was true by accident:
@@ -189,13 +230,89 @@ export async function boot(container: Element): Promise<BootedShell> {
  * about `start`: `connectAndClassify` reaches PAPI and `@polkadot-api/descriptors`, and a
  * default here would load both into every Node suite that imports this package.
  */
+/**
+ * What a connected chain hands the shell — 10 §3.1's `CompatCheck`, and what happens after it.
+ *
+ * This type is the repair for the first half of F26's R-6 review. `connect` was typed
+ * `() => Promise<unknown>`, so the verdict `connectAndClassify` produced could not be read by
+ * anything: `main.ts`'s own comment recorded that *"the verdict is not yet rendered"*, and the
+ * consequence was larger than a missing screen — nothing downstream could see the mode, so
+ * neither §3.2's re-classification nor INV-FE-12's signing gate had anywhere to attach.
+ */
+export interface ConnectedChain {
+  /** The verdict 10 §5.2's classifier produced at boot. Rendered immediately. */
+  readonly compat: CompatVerdict;
+  /**
+   * 10 §5.3's newer-release pointer, read on demand — `Constitution.ReleaseChannel`, raw.
+   *
+   * A **function** rather than a value, and that is the whole reason this seam works. §3.2
+   * re-runs the classifier on every `CodeUpdated`, so the ordinary way a session becomes
+   * `read-only-incompatible` is a runtime upgrade *after* boot — a pointer read once at connect
+   * would be absent exactly when the mode it exists for arrives. `startShell` calls this each
+   * time it is about to show that mode, and never otherwise: a stranded client is the only one
+   * §5.3 gives this read to, and a chain that answers everything else needs no rescue key.
+   *
+   * Optional, because a boot that never connected has no transport to read through — the same
+   * reason `watch` is optional, and the same arm (`not-attempted`).
+   */
+  readonly readChannel?: () => Promise<ReleaseChannelPointer>;
+  /**
+   * Keep the verdict true for the rest of the session — 10 §3.2, §3.1.
+   *
+   * Optional, and its absence is a real state rather than an unimplemented one: a boot that
+   * never started a chain has no runtime to watch and no `CompatCheck` to retry into, which is
+   * exactly the `not-attempted` arm. Present means the classifier re-runs on every
+   * `CodeUpdated` and on §3.1's 1 s→60 s backoff, publishing each verdict through the callback.
+   * Returns the stop handle.
+   */
+  readonly watch?: (publish: (verdict: CompatVerdict) => void) => () => void;
+}
+
 export interface ShellDeps<C> {
   /** Usually {@link boot}. */
   readonly mount: (container: C) => Promise<BootedShell>;
-  /** Usually `connectAndClassify` from `chain-boot.ts`. */
-  readonly connect: () => Promise<unknown>;
+  /**
+   * Usually `connectAndClassify` from `chain-boot.ts`.
+   *
+   * Typed by what it returns rather than as `Promise<unknown>`. That was not a loose annotation
+   * — it was the seam at which the compatibility verdict stopped: a caller cannot render, gate
+   * or re-run what it has discarded.
+   */
+  readonly connect: () => Promise<ConnectedChain>;
   /** Usually `handleTerminalBootFailure`. Re-throws anything that is not a wrong chain. */
   readonly onFailure: (container: C, error: unknown, unmount?: () => void) => void;
+}
+
+/**
+ * Show a verdict, and fetch 10 §5.3's pointer behind it when the verdict is the stranded one.
+ *
+ * Two renders rather than one, deliberately. The notice is the thing that explains why nothing
+ * works, so it must not wait on a round trip; the pointer is the remedy, so it must not be
+ * skipped because the notice already painted. Rendering the verdict first also means a read that
+ * never lands leaves the user with the explanation rather than with a blank screen.
+ *
+ * A rejected read becomes the `unread` arm here as well as inside `readReleaseChannel`, because
+ * this function is injected and a supplied one may throw where the real one does not. An
+ * unhandled rejection would be swallowed by the `void` at the call site and the pointer would
+ * silently never appear — which is the state this whole repair exists to remove.
+ */
+async function showVerdict(
+  booted: BootedShell,
+  connected: ConnectedChain,
+  verdict: CompatVerdict,
+): Promise<void> {
+  booted.showCompat(verdict);
+  const stranded =
+    verdict.kind === 'classified' && verdict.classification.mode === 'read-only-incompatible';
+  if (!stranded || connected.readChannel === undefined) return;
+  try {
+    booted.showCompat(verdict, await connected.readChannel());
+  } catch (error) {
+    booted.showCompat(verdict, {
+      kind: 'unread',
+      reason: `the release-channel read did not land (${String(error)})`,
+    });
+  }
 }
 
 export async function startShell<C>(container: C, deps: ShellDeps<C>): Promise<void> {
@@ -204,8 +321,24 @@ export async function startShell<C>(container: C, deps: ShellDeps<C>): Promise<v
   // down. The failure this carries is raised later, by `connect`.
   let unmount: (() => void) | undefined;
   try {
-    unmount = (await deps.mount(container)).unmount;
-    await deps.connect();
+    const booted = await deps.mount(container);
+    unmount = booted.unmount;
+    const connected = await deps.connect();
+    // The boot verdict reaches the screen before the watch starts, so the first thing a user
+    // sees is what the classifier actually concluded rather than a screen that says nothing
+    // until the chain next finalizes a block.
+    await showVerdict(booted, connected, connected.compat);
+    // Every later verdict lands the same way. The stop handle is deliberately dropped: this
+    // watch lives as long as the tab, and the one path that ends a session early is the
+    // terminal screen below, which replaces the tree rather than unwinding it.
+    //
+    // `void`, because `publish` is synchronous by design — it is called from a finalized-block
+    // listener — while the §5.3 pointer read behind a stranded verdict is not. The verdict
+    // itself is still rendered synchronously inside `showVerdict`, so nothing a user sees waits
+    // on the read, and `showVerdict` handles its own failure rather than rejecting.
+    connected.watch?.((verdict) => {
+      void showVerdict(booted, connected, verdict);
+    });
   } catch (error) {
     deps.onFailure(container, error, unmount);
   }

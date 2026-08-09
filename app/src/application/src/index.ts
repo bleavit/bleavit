@@ -7,7 +7,14 @@ export {
   setPinned,
   type WorkerStatus,
 } from './release-worker.js';
-export { boot, screenForHash, startShell, type BootedShell, type ShellDeps } from './boot.js';
+export {
+  boot,
+  screenForHash,
+  startShell,
+  type BootedShell,
+  type ConnectedChain,
+  type ShellDeps,
+} from './boot.js';
 export {
   INVENTORY_IDS,
   SCREENS,
@@ -19,7 +26,32 @@ export {
   type Screen,
   type ScreenArea,
 } from './screens.js';
-export { EpochHeader, Shell, sudoBannerFor, type ShellChainState } from './shell.js';
+export {
+  CompatNotice,
+  EpochHeader,
+  NewerReleasePointer,
+  Shell,
+  sudoBannerFor,
+  type ShellChainState,
+} from './shell.js';
+export {
+  RELEASE_CHANNEL_READ,
+  decodeReleaseChannel,
+  readReleaseChannel,
+  releaseChannelKey,
+  type ReleaseChannelPointer,
+  type ReleaseChannelReader,
+} from './release-channel.js';
+export {
+  COMPAT_RETRY_MAX_MS,
+  COMPAT_RETRY_MIN_MS,
+  compatRetryDelayMs,
+  signingBlockedReason,
+  verdictIsUnestablished,
+  watchCompat,
+  type CompatWatchDeps,
+  type ScheduleDelay,
+} from './compat-driver.js';
 export {
   SHELL_READS,
   assertOnePin,

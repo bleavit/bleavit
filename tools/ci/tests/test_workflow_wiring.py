@@ -69,6 +69,17 @@ UNWIRED_BY_DESIGN = {
     "surface:generate": _REGENERATOR,
     "schemas:generate": _REGENERATOR,
     "skills:generate": _REGENERATOR,
+    "dev": (
+        "the Vite dev server, added with F28. It never terminates, so a CI step running it "
+        "would hang the job rather than check anything. It is also the one command whose "
+        "Content-Security-Policy deliberately differs from the release: `vite.config.ts` "
+        "carries a `serve`-only plugin that adds `'unsafe-inline'` to `style-src` and "
+        "substitutes `connect-src`, because a `<meta>` policy binds the source document and "
+        "the release's own policy makes the dev server unrenderable. Running it in CI is "
+        "therefore not merely useless but the one context where that relaxation could be "
+        "mistaken for a released one — `app/tests/release/pipeline.test.ts` asserts the built "
+        "tree carries `style-src 'self'` with no inline allowance and no dev marker"
+    ),
 }
 
 # **Every** `pnpm run <script>` in a step body — not the first, and not one per line.

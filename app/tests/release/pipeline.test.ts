@@ -106,6 +106,41 @@ test('the emitted policy has exactly one connect-src, and it is the derived allo
   assert.ok(policy.includes("default-src 'none'"));
   // Meta-CSP cannot set it, so emitting it would buy a console error and nothing else.
   assert.ok(!policy.includes('frame-ancestors'));
+  /*
+   * `style-src` is asserted verbatim, and this assertion is younger than the directive it
+   * guards (F28). Until Tailwind arrived nothing in the tree emitted CSS, so the directive
+   * cost nothing and nothing tested it. It now has a way to be widened: `vite.config.ts`
+   * carries a `serve`-only plugin that adds `'unsafe-inline'` so the dev server can inject
+   * its hot-replaced styles. That plugin cannot run at build time, but "cannot" is a claim
+   * about a config file one edit could falsify, and the failure would be silent — a release
+   * that permits inline styles looks exactly like one that does not.
+   *
+   * So both halves are checked: the directive is exactly `'self'`, and the marker the dev
+   * relaxation writes appears nowhere in the built document.
+   */
+  assert.ok(policy.includes("style-src 'self';"), "12 §5.1 keeps style-src at 'self' exactly");
+  assert.ok(!policy.includes('unsafe-inline'), 'no inline allowance may reach a built tree');
+  assert.ok(!indexHtml.includes('--dev-only'), 'the dev-only CSP relaxation must never ship');
+});
+
+test('the stylesheet is linked, and it carries an SRI digest like every other subresource', () => {
+  /*
+   * 12 §5.3 requires build-generated `integrity` on every `<script>` **and `<link>`**, and
+   * until F28 the tree emitted no stylesheet, so the `<link>` half of that sentence was
+   * untested. The existing SRI test iterates `<script … src>` only, and `build.ts`'s
+   * post-condition is satisfied by any single `integrity="sha384-` in the document — which
+   * the scripts already supply. So a stylesheet shipping with no digest would have passed.
+   *
+   * The existence assertion is the load-bearing half. Without it, a change that routed CSS
+   * back through a JS-injected `<style>` element would leave this file with nothing to check,
+   * and the only thing left to notice would be the browser refusing it at run time under
+   * `style-src 'self'` — in production, not in CI.
+   */
+  const links = [...indexHtml.matchAll(/<link\b[^>]*rel="stylesheet"[^>]*>/g)].map((m) => m[0]);
+  assert.ok(links.length >= 1, 'the built document links at least one stylesheet');
+  for (const link of links) {
+    assert.match(link, /integrity="sha384-/, `stylesheet link carries no SRI digest: ${link}`);
+  }
 });
 
 test('every script in the entry document carries an SRI digest of the file that was emitted', () => {

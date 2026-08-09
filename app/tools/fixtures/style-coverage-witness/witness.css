@@ -1,0 +1,25 @@
+/*
+ * Witness stylesheet for `check-style-coverage.ts`. Never imported by anything.
+ *
+ * It styles two of the fixture's three classes and adds one rule nothing renders, so a run
+ * over this pair must report all four findings: an unstyled class, an undeclared dynamic
+ * family, a declared variant with no rule, and a dead rule.
+ */
+
+.witness-declared {
+  color: red;
+}
+
+/* `witness-declared--gone` is declared in the witness family list and deliberately absent. */
+.witness-declared--present {
+  color: blue;
+}
+
+.witness-undeclared {
+  color: green;
+}
+
+/* (4) a rule no `className` in the fixture renders */
+.witness-dead-rule {
+  color: rebeccapurple;
+}

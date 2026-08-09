@@ -44,4 +44,4 @@ export {
 } from './disclosure.js';
 export { Button, DataTable, Notice, Panel, Refusal, Undecodable } from './chrome.js';
 export { abbreviateIdentifier, formatBaseUnits, formatCount, formatPpm } from './format.js';
-export { mount } from './mount.js';
+export { mount, mountLive, type MountedTree } from './mount.js';

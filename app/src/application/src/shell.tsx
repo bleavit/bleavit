@@ -34,6 +34,7 @@ import {
   AlwaysVisible,
   BlockRef,
   Field,
+  Identifier,
   Notice,
   Panel,
   Phrase,
@@ -43,6 +44,9 @@ import {
 import type { Verified } from '@bleavit/shared-types';
 import { navigationFor, type Navigation, type Screen } from './screens.js';
 import { sudoActive } from './phase-flags.js';
+import { CRITICAL_SURFACE } from '@bleavit/descriptors';
+import { verdictAllowsSigning, verdictProvesSurface, type CompatVerdict } from './compat-session.js';
+import type { ReleaseChannelPointer } from './release-channel.js';
 
 /**
  * What the shell knows about the chain's phase.
@@ -101,6 +105,227 @@ export function sudoBannerFor(phaseFlags: Verified<number> | undefined): ReactNo
   );
 }
 
+/**
+ * The two `CRITICAL_SURFACE` entries this header reads — 02 §7.1, §7.3.
+ *
+ * Resolved from the generated list by pallet and member rather than by writing the ids out, so a
+ * regeneration that renumbers them cannot leave this file naming a surface nothing probes: a
+ * `verdictProvesSurface` call against an id no longer in `CRITICAL_SURFACE` answers `false`
+ * forever, which would read on screen as *"this runtime does not carry the epoch"* on a perfectly
+ * healthy chain. `undefined` is impossible today and is handled as *unproven*, which is the same
+ * fail-closed direction INV-FE-12 takes everywhere else — and `tests/screens` binds these two
+ * pairs to `SHELL_READS`, so the pair that is written here cannot drift from the key that is read.
+ */
+const HEADER_SURFACES = Object.freeze({
+  epochOf: CRITICAL_SURFACE.find((e) => e.pallet === 'Epoch' && e.member === 'EpochOf')?.id,
+  phaseFlags: CRITICAL_SURFACE.find((e) => e.pallet === 'Constitution' && e.member === 'PhaseFlags')?.id,
+});
+
+/**
+ * Whether the header may show a field at all — INV-FE-12's read half.
+ *
+ * > reads continue only where compatibility probes pass
+ *
+ * `undefined` verdict is *not* the same question and answers `true`: before the first
+ * classification the client has established nothing about the runtime, and refusing to render the
+ * header during boot would replace *"not read yet"* with *"this runtime does not carry it"* — a
+ * claim about the chain, made by a client that has not looked. The compat notice below states the
+ * unestablished case in its own words instead.
+ */
+function surfaceReadable(compat: CompatVerdict | undefined, id: string | undefined): boolean {
+  if (compat === undefined) return true;
+  if (compat.kind !== 'classified') return true;
+  return id !== undefined && verdictProvesSurface(compat, id);
+}
+
+/** Why a field is not shown, in the classifier's own words. */
+function surfaceReason(compat: CompatVerdict | undefined, id: string | undefined): string {
+  if (compat?.kind !== 'classified') return 'this release could not check it against the runtime.';
+  if (compat.classification.mode === 'read-only-incompatible') {
+    return (
+      `this release ships no descriptors for runtime ${compat.classification.specVersion}, so ` +
+      'nothing on this chain can be decoded (10 §5.3).'
+    );
+  }
+  const named = compat.classification.disabled.find((entry) => entry.id === id);
+  return named?.reason ?? 'this release could not prove it is present in the runtime on chain.';
+}
+
+/**
+ * A field this runtime does not carry — INV-FE-12's *"named reason"*.
+ *
+ * Deliberately distinct from {@link NotEstablished}. That one says *"nobody has read this yet"*,
+ * which is a statement about the client; this one says *"the runtime on chain does not carry it,
+ * and here is the probe's reason"*, which is a statement about the chain. Collapsing them would
+ * present a permanent condition as a pending one, and a user waiting for a number that is never
+ * coming is the worst of the two wrong answers.
+ */
+function SurfaceUnavailable({ what, why }: { readonly what: string; readonly why: string }) {
+  return (
+    <span className="datum datum--unavailable" role="note" data-compat-unavailable={what}>
+      Unavailable in this release — {why} Nothing is being substituted for it (INV-FE-12).
+    </span>
+  );
+}
+
+/** 10 §3.2's third column, as a sentence. `undefined` while nothing has been classified. */
+const SIGNING_HEADING = 'Runtime compatibility';
+
+/**
+ * 10 §5.3's newer-release pointer, rendered where the notice names it as the remedy.
+ *
+ * ## The sentence above this was a promise nothing kept
+ *
+ * `read-only-incompatible` says signing is unavailable *"until a newer release is loaded"*, and
+ * until this component existed **nothing in the client read `Constitution.ReleaseChannel`** —
+ * so the remedy was named and never pointed at, on the one screen whose entire subject is being
+ * stranded. §5.3 does not leave the shape open: the pointer is that key, read raw, because a
+ * client with no descriptors for the runtime in front of it has no typed read left.
+ *
+ * ## Every arm but one says what it does **not** know
+ *
+ * The three failing arms are not variations on *"no update available"*. A client that could not
+ * read the channel has established nothing about whether a newer release exists, and a screen
+ * that let the user infer otherwise would leave them sitting on a stranded build believing it
+ * is current — a worse outcome than the one the notice is already reporting. Each therefore
+ * states the gap in its own words and says outright that it is not the absence of a release.
+ *
+ * `undefined` is the fourth of those: no read was attempted. It is optional rather than
+ * required because every call site that has not been wired yet must land in the fail-closed
+ * case by default, and here the closed direction is *say nothing was read*.
+ *
+ * `data-compat-pointer` carries the **arm**, so a test can tell "the pointer is on screen" from
+ * "some sentence about releases is on screen" — the four differ only in their words.
+ */
+export function NewerReleasePointer({
+  pointer,
+}: {
+  readonly pointer: ReleaseChannelPointer | undefined;
+}) {
+  if (pointer === undefined) {
+    return (
+      <p className="compat__pointer" data-compat-pointer="not-attempted">
+        This client has not read the chain’s release channel, so it cannot name the canonical
+        release. That is not a statement that none exists.
+      </p>
+    );
+  }
+  if (pointer.kind === 'named') {
+    return (
+      <div className="compat__pointer" data-compat-pointer="named">
+        <p>
+          The chain names this release as the canonical one. Load it — this build cannot decode
+          the runtime it is connected to (10 §5.3).
+        </p>
+        <Field label="Canonical release">
+          <Phrase datum={pointer.version} />
+        </Field>
+        <Field label="Arweave TXID">
+          <Identifier datum={pointer.manifestTxid} />
+        </Field>
+        <Field label="Channel last updated">
+          <BlockRef datum={pointer.updatedAt} />
+        </Field>
+      </div>
+    );
+  }
+  if (pointer.kind === 'unnamed') {
+    return (
+      <p className="compat__pointer" data-compat-pointer="unnamed">
+        The chain’s release channel names no canonical release ({pointer.reason}). This client is
+        reporting what the record says rather than concluding that no newer release exists —
+        a release that has not been published on chain may still have been published.
+      </p>
+    );
+  }
+  if (pointer.kind === 'undecodable') {
+    return (
+      <p className="compat__pointer" data-compat-pointer="undecodable">
+        The chain’s release-channel record is not in the layout this client can read (
+        {pointer.reason}), so it is shown as raw bytes rather than guessed at:{' '}
+        <code>{pointer.rawHex}</code>. Nothing is being inferred about whether a newer release
+        exists.
+      </p>
+    );
+  }
+  return (
+    <p className="compat__pointer" data-compat-pointer="unread">
+      This client could not read the chain’s release channel ({pointer.reason}), so it cannot
+      name the canonical release. That is a failed read, not evidence that none exists.
+    </p>
+  );
+}
+
+/**
+ * What the shell says about 10 §5.2's verdict — the surface F26 produced and never rendered.
+ *
+ * Four outcomes and four sentences, because §3.1 and §5.2 give each a different recovery and a
+ * screen that collapsed them would send a user to the wrong one:
+ *
+ * - **`full`** — nothing is rendered. A notice on every screen for the healthy case is a notice
+ *   people stop reading, and there is no disabled surface to name.
+ * - **`restricted`** — the disabled surfaces **by name**, which is §3.1's word for the whole
+ *   difference between this mode and *"claiming Ready and failing lazily"*.
+ * - **`read-only-incompatible`** — signing disabled, load a newer release (§5.3).
+ * - **`unestablished` / `not-attempted`** — the stated reason, **no surface named as disabled**,
+ *   because none was examined. §3.1 is explicit that naming one here would put *"this surface is
+ *   absent from this runtime"* on screen about surfaces nothing looked at.
+ *
+ * `data-compat-mode` carries the **mode**, not the arm: 10 §5.2's verdict *is* the mode, and a
+ * marker saying only that some chain answered would be satisfied by every one of these four.
+ *
+ * **`read-only-incompatible` now carries the pointer its own sentence promises** — see
+ * {@link NewerReleasePointer}. It is rendered on that arm alone, because it is the only one
+ * whose remedy is a different release: `restricted` is a *runtime* that dropped a surface this
+ * release depends on, and telling that user to go and load a newer app would send them after a
+ * fix that is not theirs to make.
+ */
+export function CompatNotice({
+  compat,
+  channel,
+}: {
+  readonly compat: CompatVerdict | undefined;
+  /**
+   * 10 §5.3's `ReleaseChannel` reading. Optional, and the default is the fail-closed one:
+   * `undefined` renders *"this client has not read the channel"*, never *"you are current"*.
+   */
+  readonly channel?: ReleaseChannelPointer | undefined;
+}) {
+  if (compat === undefined) return null;
+  if (compat.kind !== 'classified') {
+    return (
+      <Notice severity="danger" heading={SIGNING_HEADING}>
+        <span data-compat-mode="none" data-compat-code={compat.kind === 'unestablished' ? compat.code : 'none'}>
+          {compat.reason}
+        </span>
+      </Notice>
+    );
+  }
+  const mode = compat.classification.mode;
+  if (mode === 'full' && verdictAllowsSigning(compat)) return null;
+  return (
+    <Notice severity={mode === 'read-only-incompatible' ? 'danger' : 'caution'} heading={SIGNING_HEADING}>
+      <span data-compat-mode={mode} data-compat-signing={verdictAllowsSigning(compat) ? 'enabled' : 'disabled'}>
+        {mode === 'read-only-incompatible'
+          ? `This release ships no descriptors for runtime ${compat.classification.specVersion}. ` +
+            'Reads are unavailable and nothing can be signed until a newer release is loaded (10 §5.3).'
+          : `${compat.classification.disabled.length} surface(s) this release depends on are not ` +
+            'available in the runtime on chain, so signing is unavailable (INV-FE-12).'}
+      </span>
+      {mode === 'restricted' ? (
+        <ul className="compat__disabled">
+          {compat.classification.disabled.map((entry) => (
+            <li key={entry.id} data-compat-disabled={entry.id}>
+              {entry.reason}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+      {mode === 'read-only-incompatible' ? <NewerReleasePointer pointer={channel} /> : null}
+    </Notice>
+  );
+}
+
 function NavigationBar({ nav, active }: { readonly nav: Navigation; readonly active: string }) {
   const link = (screen: Screen) => (
     <a
@@ -151,18 +376,35 @@ function NotEstablished({ what }: { readonly what: string }) {
   );
 }
 
-export function EpochHeader({ chain }: { readonly chain: ShellChainState }) {
+export function EpochHeader({
+  chain,
+  compat,
+}: {
+  readonly chain: ShellChainState;
+  /**
+   * 10 §5.2's verdict for this session. Optional, and the default is *not* a permissive one:
+   * `undefined` means no classification has been made, which `surfaceReadable` renders as
+   * *"not read yet"* rather than as *"the runtime does not carry it"*. See that function.
+   */
+  readonly compat?: CompatVerdict | undefined;
+}) {
+  const epochReadable = surfaceReadable(compat, HEADER_SURFACES.epochOf);
+  const flagsReadable = surfaceReadable(compat, HEADER_SURFACES.phaseFlags);
   return (
     <Panel title="Epoch and phase">
       <Field label="Epoch">
-        {chain.epoch === undefined ? (
+        {!epochReadable ? (
+          <SurfaceUnavailable what="epoch" why={surfaceReason(compat, HEADER_SURFACES.epochOf)} />
+        ) : chain.epoch === undefined ? (
           <NotEstablished what="the epoch" />
         ) : (
           <BlockRef datum={chain.epoch} />
         )}
       </Field>
       <Field label="Phase">
-        {chain.phaseLabel === undefined ? (
+        {!epochReadable ? (
+          <SurfaceUnavailable what="phase" why={surfaceReason(compat, HEADER_SURFACES.epochOf)} />
+        ) : chain.phaseLabel === undefined ? (
           <NotEstablished what="the phase" />
         ) : (
           <Phrase datum={chain.phaseLabel} />
@@ -175,6 +417,17 @@ export function EpochHeader({ chain }: { readonly chain: ShellChainState }) {
           <BlockRef datum={chain.finalizedHeight} />
         )}
       </Field>
+      {/* The banner's own read. Rendered as its own row so a runtime that dropped
+          `Constitution.PhaseFlags` says so, rather than showing the unread-sudo warning
+          forever with no explanation of why the read will never land. */}
+      {flagsReadable ? null : (
+        <Field label="Governance phase">
+          <SurfaceUnavailable
+            what="phase-flags"
+            why={surfaceReason(compat, HEADER_SURFACES.phaseFlags)}
+          />
+        </Field>
+      )}
     </Panel>
   );
 }
@@ -188,11 +441,33 @@ export function EpochHeader({ chain }: { readonly chain: ShellChainState }) {
  */
 export function Shell({
   chain,
+  compat,
+  channel,
   handoffEnabled,
   activeScreen,
   children,
 }: {
   readonly chain: ShellChainState;
+  /**
+   * 10 §3.2's session-scoped compat mode, as `connectAndClassify` and the §3.1 retry produce it.
+   *
+   * A prop of its own rather than a field of `ShellChainState`, because it is not one of S1's
+   * reads: `assertOnePin` requires every leaf of that model to carry the reader's pin, and a
+   * verdict carries a `:code` hash and no block at all. §3.2 already calls it *"a session-scoped
+   * variable that the boot machine's terminal healthy states parameterize"*, which is exactly a
+   * second input rather than a fourth leaf.
+   */
+  readonly compat?: CompatVerdict | undefined;
+  /**
+   * 10 §5.3's `ReleaseChannel` reading, for the `read-only-incompatible` arm of the notice.
+   *
+   * A prop of its own for the same reason `compat` is one: it is not a leaf of
+   * `ShellChainState`. `assertOnePin` requires every leaf of that model to carry the shell
+   * reader's pin, and this is a raw-key read a stranded client makes when the typed reads that
+   * fill the header are exactly what is unavailable — so binding it into that model would tie
+   * the pointer to the reads it exists to survive.
+   */
+  readonly channel?: ReleaseChannelPointer | undefined;
   readonly handoffEnabled: boolean;
   readonly activeScreen: string;
   readonly children: ReactNode;
@@ -204,8 +479,9 @@ export function Shell({
       {banner === null ? null : (
         <AlwaysVisible fold={aboveTheFold('sudo-era-banner', banner)} />
       )}
+      <CompatNotice compat={compat} channel={channel} />
       <header className="shell__header">
-        <EpochHeader chain={chain} />
+        <EpochHeader chain={chain} compat={compat} />
       </header>
       <NavigationBar nav={nav} active={activeScreen} />
       <main className="shell__main">{children}</main>

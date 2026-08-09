@@ -32,6 +32,17 @@ import type {
 } from '@bleavit/signing';
 import { declaredCoverageIds, gate } from '@bleavit/transaction-builder';
 import type { GatePassed, TxPreparation } from '@bleavit/transaction-builder';
+import type { CompatClassification } from '@bleavit/descriptors';
+
+/**
+ * The compat verdict this fixture gates against — 10 §3.2's `full` row.
+ *
+ * `gate()` now requires one and requires it to prove signing: INV-FE-12 disables signing
+ * wherever compatibility is unproven, so a fixture that could omit the verdict would be
+ * exercising a gate this client does not ship.
+ */
+const PROVEN: CompatClassification = { mode: 'full', specVersion: 1, disabled: [], proven: [] };
+
 
 /** The chain identity every pin in this file is read against (F18). Named, not inlined:
  *  the field exists so two reads can agree on it, and copies agree until one is edited. */
@@ -105,6 +116,7 @@ const WINDOW: GatePassed = (() => {
     PREP,
     at,
     PREP.builtFor,
+    PROVEN,
     declaredCoverageIds('P-1', PREP.feeAsset).map((id) => ({
       id,
       ok: true,

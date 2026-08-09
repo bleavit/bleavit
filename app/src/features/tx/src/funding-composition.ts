@@ -34,10 +34,22 @@
  * a well-formed key for the wrong entry returns no value, and no value renders as **0 USDC**.
  */
 
-import type { ChainCodecs, ChainMetadata, StorageKeyBuilder } from '@bleavit/chain-client';
-import { storageDecoder, storageKeyBuilder } from '@bleavit/chain-client';
+import type { ChainApiCodecs, ChainCodecs, ChainMetadata, StorageKeyBuilder } from '@bleavit/chain-client';
 import {
+  apiArgs,
+  apiDecoder,
+  concatDigestBytes,
+  storageDecoder,
+  storageHashers,
+  storageKeyBuilder,
+  type StorageItem,
+} from '@bleavit/chain-client';
+import {
+  CAPS_READS,
   FUNDING_READS,
+  type CapParamView,
+  type CapsDecoders,
+  type CapsKeys,
   type Decoded,
   type FundingDecoders,
   type FundingKeys,
@@ -187,6 +199,242 @@ function decoderFor<T>(
 ): (raw: string) => Decoded<T> {
   const [pallet, item] = split(qualified);
   return through(storageDecoder(chain.codecs, pallet, item), narrow);
+}
+
+/* ------------------------------------------------------- D-13's caps (11 §11.9.1, SQ-1034) */
+
+/** The runtime API 02 §3 freezes. Named once so a typo is one failure rather than three. */
+const FUTARCHY_API = 'FutarchyApi';
+
+/** `ParamKey`'s width — 13 rule 6's own bound, and the reason `phase3.dep_cap` has that name. */
+const PARAM_KEY_BYTES = 16;
+
+/**
+ * A 13 key name as the runtime's `ParamKey` — the ASCII name, zero-padded to 16 bytes.
+ *
+ * This mirrors `constitution_core::key16`, which is the *only* producer of the keys the
+ * constitution is indexed by, and it lives here rather than in `funding-reads.ts` because it
+ * is a chain encoding. Getting it wrong is silent in the direction that matters: `params()`
+ * omits a key it holds no record for, so a mis-padded key yields a short answer rather than
+ * an error, and a client reading absence as "no cap" would skip D-13 entirely.
+ */
+function paramKeyHex(name: string): string {
+  const bytes = new TextEncoder().encode(name);
+  if (bytes.length > PARAM_KEY_BYTES) {
+    throw new Error(
+      `"${name}" is ${bytes.length} bytes and a ParamKey is ${PARAM_KEY_BYTES} (13 rule 6). ` +
+        'The constitution is indexed by the padded key, so a longer name has no record at ' +
+        'all and params() would answer by silently omitting it.',
+    );
+  }
+  const padded = new Uint8Array(PARAM_KEY_BYTES);
+  padded.set(bytes, 0);
+  let hex = '0x';
+  for (const byte of padded) hex += byte.toString(16).padStart(2, '0');
+  return hex;
+}
+
+/** The inverse — a decoded `ParamKey` back to the 13 name, with its padding removed. */
+function paramKeyName(hex: string): Decoded<string> {
+  const body = hex.startsWith('0x') ? hex.slice(2) : hex;
+  if (body.length !== PARAM_KEY_BYTES * 2 || !/^[0-9a-fA-F]*$/.test(body)) {
+    return { ok: false, reason: `a ParamKey is ${PARAM_KEY_BYTES} bytes; this one is "${hex}"` };
+  }
+  const bytes = new Uint8Array(PARAM_KEY_BYTES);
+  for (let i = 0; i < PARAM_KEY_BYTES; i += 1) bytes[i] = Number.parseInt(body.slice(i * 2, i * 2 + 2), 16);
+  // Trailing NULs are `key16`'s padding. Stripping them anywhere else would corrupt the name.
+  let end = PARAM_KEY_BYTES;
+  while (end > 0 && bytes[end - 1] === 0) end -= 1;
+  return { ok: true, value: new TextDecoder().decode(bytes.subarray(0, end)) };
+}
+
+/**
+ * The local chain, plus the **runtime-API** half of its codec surface.
+ *
+ * `FundingChain` deliberately names only `query`, and widening it to reach `params()` would
+ * make every storage-only stub in the suites fail to typecheck for a property none of them
+ * touches — the reason `chain-client` declares `ChainApiCodecs` apart from `ChainCodecs` in
+ * the first place. So the caps composition names the larger surface it actually reaches, and
+ * a `CapsChain` still satisfies `FundingChain` wherever only storage is needed.
+ */
+export interface CapsChain {
+  readonly codecs: ChainCodecs & ChainApiCodecs;
+  readonly metadata: ChainMetadata;
+}
+
+/** Everything `capsKeys` needs: the local chain and the USDC `Location` its maps are keyed by. */
+export interface CapsKeyInputs {
+  /** **Local only.** D-13's three surfaces are this chain's; Asset Hub answers none of them. */
+  readonly local: CapsChain;
+  /** The XCM `Location` of USDC, as `FundingKeyInputs` requires it and for the same reason. */
+  readonly usdcLocation: unknown;
+}
+
+/**
+ * D-13's three key/argument builders, all on the **local** chain.
+ *
+ * `usdcAsset` takes the same `Location` as `localFreeUsdc` and from the same field, because
+ * `ForeignAssets` is keyed by the XCM Location throughout (02 §7.4/§8, X-11a). Two Locations
+ * in one composition root would be two things to keep in step with one chain.
+ */
+export function capsKeys(inputs: CapsKeyInputs): CapsKeys {
+  const paramsArgs = apiArgs(inputs.local.codecs, FUTARCHY_API, CAPS_READS.paramsApi);
+  const cumulativeDeposits = builder(inputs.local, CAPS_READS.cumulativeDeposits);
+  const usdcAsset = builder(inputs.local, CAPS_READS.usdcAsset);
+
+  return {
+    // One argument, and it is a *list* — `params(keys)` takes a `BoundedVec<ParamKey, 64>`,
+    // so the array is the single argument rather than the argument list.
+    paramsArgs: (keys) => paramsArgs([keys.map(paramKeyHex)]),
+    cumulativeDeposits: (who) => cumulativeDeposits.key([who]),
+    usdcAsset: () => usdcAsset.key([inputs.usdcLocation]),
+  };
+}
+
+/** One `params()` row, narrowed to the two fields a cap check reads. */
+function asParamViews(value: unknown): Decoded<readonly CapParamView[]> {
+  if (!Array.isArray(value)) {
+    return { ok: false, reason: 'params() did not decode to a list of views' };
+  }
+  const rows: CapParamView[] = [];
+  for (const entry of value) {
+    if (typeof entry !== 'object' || entry === null) {
+      return { ok: false, reason: 'params() returned a view that is not a record' };
+    }
+    const row = entry as { key?: unknown; value?: unknown };
+    if (typeof row.key !== 'string') {
+      return { ok: false, reason: 'a params() view carries no ParamKey' };
+    }
+    if (typeof row.value !== 'bigint') {
+      // `ParamView.value` is the `u128` scalar `ParamValue::as_u128()` produced (02 §4). A
+      // view whose value is not a bigint is a runtime this release does not understand, and
+      // INV-FE-12 renders that rather than coercing it.
+      return { ok: false, reason: `params() view "${row.key}" carries no u128 value` };
+    }
+    const name = paramKeyName(row.key);
+    if (!name.ok) return name;
+    rows.push({ key: name.value, value: row.value });
+  }
+  return { ok: true, value: rows };
+}
+
+/** The stored `ParamRecord`, narrowed to the scalar `ParamView.value` restates (02 §4). */
+function asParamRecordValue(value: unknown): Decoded<bigint> {
+  if (typeof value !== 'object' || value === null) {
+    return { ok: false, reason: 'Constitution.Params did not decode to a ParamRecord' };
+  }
+  const scalar = (value as { value?: unknown }).value;
+  if (typeof scalar !== 'bigint') {
+    return {
+      ok: false,
+      reason:
+        'a stored ParamRecord carries no bigint `value`. The witness exists to disagree with ' +
+        'params() when the runtime view and its own storage differ, and a record this release ' +
+        'cannot read is not evidence that they agree.',
+    };
+  }
+  return { ok: true, value: scalar };
+}
+
+/**
+ * The FE-P2 witness decoder for `Constitution.Params` — 10 §11's fourth bullet, 10 §4.2.
+ *
+ * `params()` answers a `ParamView` the runtime **computes**; this prefix holds the
+ * `ParamRecord` it stores. Reducing both to `(name, scalar)` is what makes the comparison
+ * meaningful rather than circular — the one field a cap check consumes, from two sources.
+ *
+ * The name is read out of the storage **key**, because a `ParamRecord` does not carry its own.
+ * `ParamKey` is `[u8; 16]`, so its SCALE encoding is exactly those sixteen bytes with no length
+ * prefix, and the width is asserted rather than assumed. The offset it starts at comes from the
+ * hasher in this chain's own metadata (`concatDigestBytes`) rather than from a tabulated
+ * constant, so a runtime that hashed this map differently is read at the right offset instead
+ * of a fixed number of bytes late — the same discipline `keySplitter` applies to `Positions`.
+ */
+function paramWitnessDecoder(local: CapsChain): CapsDecoders['paramEntries'] {
+  const [pallet, item] = split(CAPS_READS.params);
+  const hashers = storageHashers(local.metadata, pallet, item);
+  const [hasher] = hashers;
+  if (hashers.length !== 1 || hasher === undefined) {
+    throw new Error(
+      `"${CAPS_READS.params}" is keyed by ${hashers.length} hashed position(s); 02 §7.3 ` +
+        'declares it `ParamKey -> ParamRecord`, one hash. A key read at the wrong offset ' +
+        'names the wrong parameter with a perfectly well-formed string.',
+    );
+  }
+  /** `storagePrefix` is `twox128(pallet) ‖ twox128(item)` — two 16-byte digests. */
+  const PREFIX_BYTES = 32;
+  const digestBytes = concatDigestBytes(hasher);
+  const keyOffset = PREFIX_BYTES + digestBytes;
+  const scalarOf = decoderFor(local, CAPS_READS.params, asParamRecordValue);
+
+  return (items: readonly StorageItem[]): Decoded<readonly CapParamView[]> => {
+    const rows: CapParamView[] = [];
+    for (const entry of items) {
+      // A key with no value carries no scalar to compare. Skipping it here is what makes it
+      // surface as `no record` on the comparison side rather than as a silent agreement.
+      if (entry.value === undefined) continue;
+      const body = entry.key.startsWith('0x') ? entry.key.slice(2) : entry.key;
+      const keyHex = body.slice(keyOffset * 2);
+      if (keyHex.length !== PARAM_KEY_BYTES * 2) {
+        return {
+          ok: false,
+          reason:
+            `${CAPS_READS.params}: a key carries ${keyHex.length / 2} byte(s) after its ` +
+            `${digestBytes}-byte digest, and a ParamKey is ${PARAM_KEY_BYTES}`,
+        };
+      }
+      const name = paramKeyName(`0x${keyHex}`);
+      if (!name.ok) return name;
+      const scalar = scalarOf(entry.value);
+      if (!scalar.ok) return scalar;
+      rows.push({ key: name.value, value: scalar.value });
+    }
+    return { ok: true, value: rows };
+  };
+}
+
+/** `InflowCaps.CumulativeDeposits` — a bare `u128`, and nothing else is accepted for it. */
+function asMeter(value: unknown): Decoded<bigint> {
+  if (typeof value !== 'bigint') {
+    return {
+      ok: false,
+      reason:
+        'InflowCaps.CumulativeDeposits did not decode to a u128. This runtime meters the ' +
+        'Phase-3 per-account cap differently than this release expects.',
+    };
+  }
+  return { ok: true, value };
+}
+
+/** `ForeignAssets.Asset` — `AssetDetails`, of which the cap check reads only `supply`. */
+function asAssetDetails(value: unknown): Decoded<{ readonly supply: bigint }> {
+  if (typeof value !== 'object' || value === null) {
+    return { ok: false, reason: 'ForeignAssets.Asset did not decode to a record' };
+  }
+  const supply = (value as { supply?: unknown }).supply;
+  if (typeof supply !== 'bigint') {
+    return {
+      ok: false,
+      reason:
+        'ForeignAssets.Asset decoded to a record without a bigint `supply`. Total local USDC ' +
+        'issuance is the quantity phase3.tvl_cap bounds, so without it the global cap cannot ' +
+        'be checked at all.',
+    };
+  }
+  return { ok: true, value: { supply } };
+}
+
+/** D-13's three decoders, each bound to the local chain — the only chain that answers them. */
+export function capsDecoders(local: CapsChain): CapsDecoders {
+  return {
+    paramViews: through(
+      apiDecoder(local.codecs, FUTARCHY_API, CAPS_READS.paramsApi),
+      asParamViews,
+    ),
+    paramEntries: paramWitnessDecoder(local),
+    cumulativeDeposits: decoderFor(local, CAPS_READS.cumulativeDeposits, asMeter),
+    usdcAsset: decoderFor(local, CAPS_READS.usdcAsset, asAssetDetails),
+  };
 }
 
 /** The four decoders, each bound to the chain whose bytes it will actually see. */

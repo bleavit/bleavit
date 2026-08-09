@@ -60,13 +60,29 @@ const INCUMBENT = join(HERE, 'sources/incumbent-connect-src.json');
 export const CONNECT_SRC_PLACEHOLDER = '__CONNECT_SRC__';
 export const ASSET_MAP_PLACEHOLDER = '__BLEAVIT_RELEASE_ASSETS__';
 
-/** What the recipe digest is computed over — the files that decide what the build emits. */
+/**
+ * What the recipe digest is computed over — the files that decide what the build emits.
+ *
+ * `src/styles/app.css` is here for the same reason `vite.config.ts` is, and it was added with
+ * F28 (Tailwind). The stylesheet is not a source module the bundler discovers through an
+ * import graph: it is the CSS **entry**, and it carries the whole Tailwind configuration —
+ * the `@theme` tokens and the `@source` directives that decide which files are scanned for
+ * class candidates. Two builds could therefore emit visibly different trees from identical
+ * source while publishing the same `buildRecipeDigest`, which is a digest asserting that the
+ * recipes matched when they did not. The two-environment tree-hash gate would still catch the
+ * divergence; this stops `release.json` from making a false claim on the way there.
+ *
+ * Tailwind needs no config file of its own — v4 configures in CSS, so there is no
+ * `tailwind.config.*` and no `postcss.config.*` to add. Should either ever appear, it belongs
+ * in this list.
+ */
 const RECIPE_INPUTS = [
   '.npmrc',
   'index.html',
   'package.json',
   'pnpm-lock.yaml',
   'pnpm-workspace.yaml',
+  'src/styles/app.css',
   'tsconfig.base.json',
   'vite.config.ts',
   'tools/release/build.ts',

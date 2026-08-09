@@ -1,0 +1,1172 @@
+/*
+ * The Bleavit visual layer — F28.
+ *
+ * ## Why this file styles class names instead of putting utilities in the markup
+ *
+ * The markup already carries a complete semantic vocabulary: 92 class names in a strict
+ * block__element--modifier shape, plus `data-status`, `data-code`, `data-narrowed` and
+ * `data-undecodable` attributes that name the *state* rather than its appearance. That is
+ * exactly the surface a stylesheet wants, and it was built before any stylesheet existed.
+ *
+ * Moving that vocabulary into utility strings would rewrite 35 `.tsx` files, put appearance
+ * back into the components 10 §2 keeps free of it, and — the reason that actually decides
+ * it — change files the render-provenance, HTML-sink and above-the-fold gates parse. So the
+ * markup is untouched. Tailwind is used for its token system, its reset, and `@apply` inside
+ * component rules; new markup may use utilities directly.
+ *
+ * ## The one rule that is not taste
+ *
+ * 10 §2.1 requires provenance labelling to be **"mandatory, non-suppressible"** and INV-FE-9
+ * says there is **"no unlabeled rendering path"**. So no rule in this file may hide a badge,
+ * a `data-status` treatment, a refusal or a notice — not with `display: none`, not with
+ * `opacity: 0`, not behind `:hover`. Provenance is quiet here, never absent: the marker
+ * always renders and always has its text equivalent. A future rule that hides one of these is
+ * a spec violation, not a restyling.
+ *
+ * **On "the detail expands on hover":** it does, and only on hover. The detail is the native
+ * `title` on `ProvenanceBadge`'s `<span>`, and a `<span>` is not focusable, so a sighted
+ * keyboard user reaches it by no route at all. The accessibility tree is covered — the badge
+ * carries `aria-label` — which is why this is a gap rather than a violation of INV-FE-9. It
+ * is recorded as such rather than described away: an earlier draft of this comment claimed
+ * "hover and focus", and the focus half was never built.
+ */
+
+/*
+ * `source(none)` is load-bearing, and the first version of this file did not have it.
+ *
+ * `@source` **adds** to Tailwind's automatic detection; it does not replace it. So the two
+ * directives below documented an intent the build did not implement: auto-detection stayed on
+ * and scanned every non-ignored file under `app/`, which is how `.ordinal`, `.row-4`,
+ * `.start-3` and `.end-2` reached the published stylesheet. Those four are not classes any
+ * component renders — they are words that happen to appear in `tests/screens/`,
+ * `tests/mock-runtime/` and `tests/local-index/` prose, read as utility candidates.
+ *
+ * That is a 12 §1.1 problem rather than a tidiness one: it made the emitted CSS a function of
+ * every untracked or test file present in a build environment, so two environments differing
+ * by a scratch file would emit different stylesheets. `source(none)` turns detection off and
+ * makes the two `@source` lines the whole input.
+ */
+@import 'tailwindcss' source(none);
+
+/*
+ * Explicit sources rather than auto-detection, and narrowed to `.tsx` under the two source
+ * roots.
+ *
+ * Tailwind v4 otherwise walks up from this file and scans what it finds, which makes the
+ * emitted rule set a function of what happens to be on disk — and 12 §1.1 requires two
+ * independent environments to produce a byte-identical tree. Two directories in this
+ * repository would make that false: every package's own `dist` exists at release-build time
+ * because `release:build` needs it, and the `node_modules/.pnpm` layout is a function of the
+ * install shape rather than of the source. Either one inside the scan turns the stylesheet
+ * into a function of the build environment.
+ *
+ * (A glob is spelled out in prose here rather than written literally, because a `star slash`
+ * sequence inside a CSS comment closes the comment. That is not hypothetical: it broke this
+ * build once, and the style-coverage gate did not notice, because its own comment-stripping
+ * regex stops at the same early terminator. The compiler was the only thing that saw it.)
+ *
+ * The witness fixtures under `tools/` are excluded for a different reason: they exist to make
+ * a gate fire, they are never mounted, and a class in one of them is not a class the
+ * application renders.
+ */
+@source '../../src/**/*.tsx';
+@source '../../packages/*/src/**/*.tsx';
+
+/* ---------------------------------------------------------------------------------------
+ * Palette
+ *
+ * OKLCH throughout: the state colors have to stay distinguishable at equal lightness, and
+ * that is the one thing sRGB hex makes hard to hold. Each ramp keeps L roughly constant
+ * across hues so a green and a red of the same rank read as equally loud.
+ * ------------------------------------------------------------------------------------- */
+
+@theme {
+  /* Brand — a saturated indigo. One accent, used sparingly, never for state. */
+  --color-brand-50: oklch(0.97 0.014 280);
+  --color-brand-100: oklch(0.94 0.03 280);
+  --color-brand-200: oklch(0.88 0.06 280);
+  --color-brand-300: oklch(0.79 0.11 278);
+  --color-brand-400: oklch(0.68 0.17 277);
+  --color-brand-500: oklch(0.58 0.21 276);
+  --color-brand-600: oklch(0.51 0.21 275);
+  --color-brand-700: oklch(0.44 0.18 274);
+  --color-brand-900: oklch(0.29 0.11 273);
+
+  /* State. Never carried by hue alone — every use pairs with an icon, a label or a shape. */
+  --color-affirm-400: oklch(0.74 0.15 155);
+  --color-affirm-500: oklch(0.63 0.15 155);
+  --color-affirm-600: oklch(0.53 0.13 155);
+  --color-deny-400: oklch(0.7 0.18 25);
+  --color-deny-500: oklch(0.59 0.2 25);
+  --color-deny-600: oklch(0.5 0.18 25);
+  --color-caution-400: oklch(0.81 0.15 80);
+  --color-caution-500: oklch(0.72 0.16 70);
+  --color-caution-600: oklch(0.6 0.14 65);
+  --color-info-500: oklch(0.62 0.14 240);
+
+  /* Neutrals, cooled very slightly toward the brand so greys never look muddy beside it. */
+  --color-ink-50: oklch(0.985 0.003 275);
+  --color-ink-100: oklch(0.96 0.005 275);
+  --color-ink-200: oklch(0.92 0.007 275);
+  --color-ink-300: oklch(0.85 0.009 275);
+  --color-ink-400: oklch(0.7 0.012 275);
+  --color-ink-500: oklch(0.56 0.014 275);
+  --color-ink-600: oklch(0.45 0.015 275);
+  --color-ink-700: oklch(0.35 0.016 275);
+  --color-ink-800: oklch(0.26 0.017 275);
+  --color-ink-900: oklch(0.19 0.016 275);
+  --color-ink-950: oklch(0.14 0.014 275);
+
+  /*
+   * Semantic tokens indirect through a plain custom property, which is what lets a single
+   * `:root` override flip the whole application between light and dark. A `@theme` value is
+   * static; a `@theme` value that *reads* a variable is not.
+   */
+  --color-canvas: var(--surface-canvas);
+  --color-surface: var(--surface-raised);
+  --color-surface-sunken: var(--surface-sunken);
+  --color-hairline: var(--surface-hairline);
+  --color-body: var(--text-body);
+  /*
+   * State **text** colours indirect exactly like the surfaces do, and for the same reason.
+   * The `-600` steps are tuned against white; reusing them verbatim on a dark ground put
+   * five pairs under 3:1, three of them provenance badges — a label that renders and
+   * cannot be read meets 10 §2.1's obligation nominally and not in fact.
+   */
+  --color-affirm-text: var(--state-affirm);
+  --color-deny-text: var(--state-deny);
+  --color-caution-text: var(--state-caution);
+  --color-brand-text: var(--state-brand);
+  --color-info-text: var(--state-info);
+  --color-neutral-text: var(--state-neutral);
+  --color-muted: var(--text-muted);
+  --color-faint: var(--text-faint);
+
+  /* Type. System stacks only — `font-src 'self'` and no network at boot (12 §5.1). */
+  --font-sans:
+    ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', 'JetBrains Mono', Menlo, Consolas, monospace;
+
+  --radius-control: 0.625rem;
+  --radius-card: 1rem;
+  --radius-panel: 1.25rem;
+
+  --shadow-card: 0 1px 2px oklch(0.2 0.02 275 / 0.05), 0 4px 16px oklch(0.2 0.02 275 / 0.06);
+  --shadow-lift: 0 2px 4px oklch(0.2 0.02 275 / 0.06), 0 12px 32px oklch(0.2 0.02 275 / 0.1);
+}
+
+/* ---------------------------------------------------------------------------------------
+ * Light is the default; dark follows the system, and `data-theme` overrides both so a
+ * future toggle has somewhere to write.
+ * ------------------------------------------------------------------------------------- */
+
+:root {
+  --surface-canvas: oklch(0.985 0.004 275);
+  --surface-raised: oklch(1 0 0);
+  --surface-sunken: oklch(0.965 0.005 275);
+  --surface-hairline: oklch(0.9 0.008 275);
+  --text-body: oklch(0.26 0.017 275);
+  --text-muted: oklch(0.5 0.015 275);
+  --text-faint: oklch(0.53 0.014 275);
+  --state-affirm: oklch(0.53 0.13 155);
+  --state-deny: oklch(0.5 0.18 25);
+  --state-caution: oklch(0.5 0.12 65);
+  --state-brand: oklch(0.51 0.21 275);
+  --state-info: oklch(0.52 0.14 240);
+  --state-neutral: oklch(0.45 0.015 275);
+  --elevation: var(--shadow-card);
+  color-scheme: light;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --surface-canvas: oklch(0.16 0.014 275);
+    --surface-raised: oklch(0.21 0.017 275);
+    --surface-sunken: oklch(0.185 0.015 275);
+    --surface-hairline: oklch(0.31 0.018 275);
+    --text-body: oklch(0.95 0.006 275);
+    --text-muted: oklch(0.73 0.012 275);
+    --text-faint: oklch(0.6 0.013 275);
+    /* Shadow does almost nothing on a dark canvas; elevation becomes a lighter surface. */
+  --state-affirm: oklch(0.8 0.15 155);
+    --state-deny: oklch(0.75 0.16 25);
+    --state-caution: oklch(0.84 0.14 82);
+    --state-brand: oklch(0.79 0.11 278);
+    --state-info: oklch(0.78 0.11 240);
+    --state-neutral: oklch(0.78 0.012 275);
+    --elevation: 0 1px 0 oklch(1 0 0 / 0.04) inset, 0 8px 24px oklch(0 0 0 / 0.35);
+    color-scheme: dark;
+  }
+}
+
+:root[data-theme='light'] {
+  --surface-canvas: oklch(0.985 0.004 275);
+  --surface-raised: oklch(1 0 0);
+  --surface-sunken: oklch(0.965 0.005 275);
+  --surface-hairline: oklch(0.9 0.008 275);
+  --text-body: oklch(0.26 0.017 275);
+  --text-muted: oklch(0.5 0.015 275);
+  --text-faint: oklch(0.53 0.014 275);
+  --state-affirm: oklch(0.53 0.13 155);
+  --state-deny: oklch(0.5 0.18 25);
+  --state-caution: oklch(0.5 0.12 65);
+  --state-brand: oklch(0.51 0.21 275);
+  --state-info: oklch(0.52 0.14 240);
+  --state-neutral: oklch(0.45 0.015 275);
+  --elevation: var(--shadow-card);
+  color-scheme: light;
+}
+
+:root[data-theme='dark'] {
+  --surface-canvas: oklch(0.16 0.014 275);
+  --surface-raised: oklch(0.21 0.017 275);
+  --surface-sunken: oklch(0.185 0.015 275);
+  --surface-hairline: oklch(0.31 0.018 275);
+  --text-body: oklch(0.95 0.006 275);
+  --text-muted: oklch(0.73 0.012 275);
+  --text-faint: oklch(0.6 0.013 275);
+  --state-affirm: oklch(0.8 0.15 155);
+  --state-deny: oklch(0.75 0.16 25);
+  --state-caution: oklch(0.84 0.14 82);
+  --state-brand: oklch(0.79 0.11 278);
+  --state-info: oklch(0.78 0.11 240);
+  --state-neutral: oklch(0.78 0.012 275);
+  --elevation: 0 1px 0 oklch(1 0 0 / 0.04) inset, 0 8px 24px oklch(0 0 0 / 0.35);
+  color-scheme: dark;
+}
+
+/* ---------------------------------------------------------------------------------------
+ * Base
+ * ------------------------------------------------------------------------------------- */
+
+@layer base {
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    background-color: var(--color-canvas);
+    color: var(--color-body);
+    font-family: var(--font-sans);
+    font-size: 1rem;
+    line-height: 1.6;
+    /* Numbers in this application are compared down a column far more often than read in
+     * a sentence, so figures are tabular everywhere rather than only in tables. */
+    font-variant-numeric: tabular-nums;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  h1,
+  h2,
+  h3 {
+    color: var(--color-body);
+    font-weight: 650;
+    letter-spacing: -0.02em;
+    line-height: 1.2;
+    text-wrap: balance;
+  }
+
+  h1 {
+    font-size: clamp(1.75rem, 1.2rem + 2vw, 2.5rem);
+  }
+  h2 {
+    font-size: clamp(1.25rem, 1rem + 0.9vw, 1.6rem);
+  }
+  h3 {
+    font-size: 1.0625rem;
+  }
+
+  p {
+    text-wrap: pretty;
+  }
+
+  code,
+  kbd,
+  pre,
+  samp {
+    font-family: var(--font-mono);
+    font-size: 0.9em;
+  }
+
+  /* One focus treatment, defined once, never removed. Every control in this application
+   * can move money or refuse to; a keyboard user must always be able to see where they are. */
+  :focus-visible {
+    outline: 2px solid var(--color-brand-500);
+    outline-offset: 2px;
+    border-radius: 0.25rem;
+  }
+
+  ::selection {
+    background-color: var(--color-brand-200);
+    color: var(--color-ink-900);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+/* ---------------------------------------------------------------------------------------
+ * Shell and navigation
+ * ------------------------------------------------------------------------------------- */
+
+@layer components {
+  /*
+   * A column flexbox, not `grid-template-rows: auto 1fr`.
+   *
+   * The grid version named two rows for a shell that renders three or four children — the
+   * §11.10 sudo banner, the header, the nav, then `main` — so the `1fr` track landed on
+   * whichever child happened to be second. With the banner present, which is the fail-closed
+   * default while `PhaseFlags` is unread, that was the **header**: it absorbed all the slack
+   * on any screen shorter than the viewport and pushed the page body to the bottom edge.
+   *
+   * Flex makes the growing child a property of the child rather than of its position, so
+   * adding or removing a banner cannot move the stretch onto something else.
+   */
+  .shell {
+    @apply min-h-screen;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .shell__header {
+    @apply sticky top-0 z-20 flex flex-wrap items-center gap-x-6 gap-y-3 px-6 py-4;
+    background-color: color-mix(in oklch, var(--color-canvas) 82%, transparent);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--color-hairline);
+  }
+
+  .shell__main {
+    @apply mx-auto w-full max-w-5xl px-6 py-10;
+    /* The child that absorbs the slack, named here rather than positionally. */
+    flex: 1 1 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 1.75rem;
+  }
+
+  .nav {
+    @apply flex flex-col gap-3;
+  }
+
+  .nav__primary {
+    @apply flex flex-wrap items-center gap-1;
+  }
+
+  /*
+   * `.nav__link` rather than `.nav a`: the descendant selector was a guess about the markup,
+   * and the markup names its own class. It also carries `aria-current="page"`, so the active
+   * rule is written against **both** — the class for the styling and the ARIA state as the
+   * thing that must not silently diverge from it.
+   */
+  .nav__link {
+    @apply rounded-full px-3.5 py-1.5 text-sm font-medium no-underline;
+    color: var(--color-muted);
+    transition:
+      background-color 140ms ease,
+      color 140ms ease;
+  }
+
+  .nav__link:hover {
+    background-color: var(--color-surface-sunken);
+    color: var(--color-body);
+  }
+
+  .nav__link--active,
+  .nav__link[aria-current='page'] {
+    background-color: var(--color-brand-500);
+    color: oklch(1 0 0);
+  }
+
+  .nav__link--active:hover,
+  .nav__link[aria-current='page']:hover {
+    background-color: var(--color-brand-text);
+    color: oklch(1 0 0);
+  }
+
+  .nav__advanced {
+    @apply rounded-2xl p-1;
+    border: 1px solid var(--color-hairline);
+    background-color: var(--color-surface-sunken);
+  }
+
+  .nav__advanced-body {
+    @apply flex flex-wrap items-center gap-1 p-1;
+  }
+
+  .nav__caveat,
+  .nav__note {
+    @apply px-2 text-xs;
+    color: var(--color-faint);
+  }
+
+  .link {
+    color: var(--color-brand-text);
+    text-decoration-color: color-mix(in oklch, var(--color-brand-500) 40%, transparent);
+    text-underline-offset: 0.2em;
+  }
+
+  .link:hover {
+    text-decoration-color: currentColor;
+  }
+}
+
+/* ---------------------------------------------------------------------------------------
+ * Panels — the card layer the whole product is built from
+ * ------------------------------------------------------------------------------------- */
+
+@layer components {
+  .panel {
+    @apply relative overflow-hidden p-6;
+    background-color: var(--color-surface);
+    border: 1px solid var(--color-hairline);
+    border-radius: var(--radius-panel);
+    box-shadow: var(--elevation);
+  }
+
+  .panel__title {
+    @apply mb-4 flex flex-wrap items-baseline gap-x-3 gap-y-1 text-lg;
+  }
+
+  .panel__subject {
+    @apply text-sm font-normal;
+    color: var(--color-muted);
+    font-family: var(--font-mono);
+  }
+
+  .panel__body {
+    @apply flex flex-col gap-4;
+  }
+
+  /*
+   * The "advanced" tone is 11 §11.2's second tier — the operator, treasury and upgrade
+   * surfaces. It reads as a different room rather than a louder version of the same one:
+   * a cooler sunken ground and a brand-tinted top edge, no extra chrome.
+   */
+  .panel--advanced {
+    background-color: var(--color-surface-sunken);
+  }
+
+  .panel--advanced::before {
+    content: '';
+    @apply absolute inset-x-0 top-0 h-px;
+    background: linear-gradient(
+      90deg,
+      transparent,
+      var(--color-brand-400),
+      color-mix(in oklch, var(--color-brand-400) 30%, transparent),
+      transparent
+    );
+  }
+
+  .summary {
+    @apply text-base;
+    color: var(--color-muted);
+  }
+}
+
+/* ---------------------------------------------------------------------------------------
+ * Provenance — the quiet, always-present layer
+ *
+ * INV-FE-9 and 10 §2.1 govern everything below. The badge is small and low-contrast at
+ * rest; it is never hidden, and its text is always in the accessibility tree. `provider`,
+ * `stale-cache` and `external-proposal` are deliberately louder than the verified kinds,
+ * because those are the three a user could act on wrongly.
+ * ------------------------------------------------------------------------------------- */
+
+@layer components {
+  .badge {
+    @apply inline-flex items-center gap-1 rounded-full px-2 py-0.5 align-middle text-[0.6875rem] font-medium whitespace-nowrap;
+    border: 1px solid transparent;
+    letter-spacing: 0.01em;
+  }
+
+  .badge::before {
+    content: '';
+    @apply size-1.5 shrink-0 rounded-full;
+    background-color: currentColor;
+  }
+
+  .badge--verified-finalized {
+    color: var(--color-affirm-text);
+    background-color: color-mix(in oklch, var(--color-affirm-500) 12%, transparent);
+    border-color: color-mix(in oklch, var(--color-affirm-500) 22%, transparent);
+  }
+
+  /* Display-only (10 §2.1): a hollow marker, so "best head" never looks settled. */
+  .badge--verified-best {
+    color: var(--color-info-text);
+    background-color: color-mix(in oklch, var(--color-info-500) 10%, transparent);
+    border-color: color-mix(in oklch, var(--color-info-500) 24%, transparent);
+  }
+
+  .badge--verified-best::before {
+    background-color: transparent;
+    border: 1.5px solid currentColor;
+  }
+
+  .badge--derived-local {
+    color: var(--color-brand-text);
+    background-color: color-mix(in oklch, var(--color-brand-500) 10%, transparent);
+    border-color: color-mix(in oklch, var(--color-brand-500) 22%, transparent);
+  }
+
+  .badge--provider {
+    color: var(--color-caution-text);
+    background-color: color-mix(in oklch, var(--color-caution-500) 16%, transparent);
+    border-color: color-mix(in oklch, var(--color-caution-500) 34%, transparent);
+  }
+
+  .badge--stale-cache {
+    color: var(--color-neutral-text);
+    background-color: var(--color-surface-sunken);
+    border-color: var(--color-hairline);
+  }
+
+  /* Bottom of the lattice — a request, true at no block. Dashed, so it never reads as read. */
+  .badge--external-proposal {
+    color: var(--color-deny-text);
+    background-color: color-mix(in oklch, var(--color-deny-500) 10%, transparent);
+    border-color: color-mix(in oklch, var(--color-deny-500) 40%, transparent);
+    border-style: dashed;
+  }
+
+  .datum {
+    @apply inline-flex flex-wrap items-baseline gap-x-1.5 gap-y-0.5;
+  }
+
+  .datum__name {
+    @apply text-xs font-medium tracking-wide uppercase;
+    color: var(--color-faint);
+  }
+
+  .datum__value {
+    @apply font-medium;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .datum--identifier .datum__value {
+    @apply rounded-md px-1.5 py-0.5 text-[0.8125rem];
+    font-family: var(--font-mono);
+    background-color: var(--color-surface-sunken);
+    border: 1px solid var(--color-hairline);
+  }
+
+  /*
+   * The three risky statuses get a standing mark on the value itself, not only on the
+   * badge beside it. A badge can be scrolled past; an underline under the number cannot.
+   */
+  .datum[data-status='provider'] .datum__value {
+    text-decoration: underline dotted
+      color-mix(in oklch, var(--color-caution-500) 70%, transparent);
+    text-underline-offset: 0.25em;
+    text-decoration-thickness: 2px;
+  }
+
+  .datum[data-status='stale-cache'] .datum__value {
+    color: var(--color-muted);
+    text-decoration: underline dashed var(--color-ink-400);
+    text-underline-offset: 0.25em;
+  }
+
+  .datum[data-status='external-proposal'] .datum__value {
+    text-decoration: underline wavy color-mix(in oklch, var(--color-deny-500) 65%, transparent);
+    text-underline-offset: 0.25em;
+  }
+
+  .datum--incomparable,
+  .datum--unread {
+    color: var(--color-muted);
+  }
+
+  /*
+   * Three ways of saying "there is no value here", styled identically on purpose.
+   *
+   * `__reason` and `__unavailable` are children of a datum that still has a name; `--unavailable`
+   * is the whole datum standing in for one, which `shell.tsx`'s `SurfaceUnavailable` renders when
+   * the runtime on chain does not carry the surface at all. The distinction matters to the markup
+   * and to nothing the reader sees, so it must not produce two visual vocabularies for one idea.
+   */
+  .datum__reason,
+  .datum__unavailable,
+  .datum--unavailable {
+    @apply text-xs;
+    color: var(--color-faint);
+    font-style: italic;
+  }
+}
+
+/* ---------------------------------------------------------------------------------------
+ * Notices, refusals, undecodable reads — the loud half
+ * ------------------------------------------------------------------------------------- */
+
+@layer components {
+  .notice {
+    @apply flex flex-col gap-1.5 p-4;
+    border-radius: var(--radius-card);
+    border: 1px solid var(--color-hairline);
+    border-left-width: 3px;
+    background-color: var(--color-surface-sunken);
+  }
+
+  .notice__heading {
+    @apply text-sm font-semibold;
+  }
+
+  .notice__body {
+    @apply text-sm;
+    color: var(--color-muted);
+  }
+
+  .notice--info {
+    border-left-color: var(--color-info-text);
+    background-color: color-mix(in oklch, var(--color-info-500) 7%, var(--color-surface));
+  }
+
+  .notice--info .notice__heading {
+    color: var(--color-info-text);
+  }
+
+  .notice--caution {
+    border-left-color: var(--color-caution-500);
+    background-color: color-mix(in oklch, var(--color-caution-500) 10%, var(--color-surface));
+  }
+
+  .notice--caution .notice__heading {
+    color: var(--color-caution-text);
+  }
+
+  .notice--danger {
+    border-left-color: var(--color-deny-500);
+    background-color: color-mix(in oklch, var(--color-deny-500) 9%, var(--color-surface));
+  }
+
+  .notice--danger .notice__heading {
+    color: var(--color-deny-text);
+  }
+
+  /*
+   * The surfaces 10 §5.2 classified as absent, listed inside the notice that already states the
+   * consequence. Deliberately quiet: the notice carries the severity colour and says signing is
+   * unavailable, and this list is the evidence behind that sentence, not a second alarm. Giving
+   * it its own border and tint would read as two problems where there is one.
+   */
+  .compat__disabled {
+    @apply mt-1 flex flex-col gap-1 text-sm;
+    list-style: none;
+    color: var(--color-muted);
+  }
+
+  /*
+   * 10 §5.3's newer-release pointer, inside the notice that names loading one as the remedy.
+   * Styled like the disabled list and not like a second notice, for the same reason: this is
+   * the evidence behind the sentence above it, and a user stranded on an undecodable runtime
+   * has one problem rather than two. The word-break is load-bearing — an Arweave TXID is 43
+   * unbroken characters and would otherwise push the notice past the viewport on a phone,
+   * which is where a stranded user is most likely to be reading it.
+   */
+  .compat__pointer {
+    @apply mt-2 flex flex-col gap-1 text-sm;
+    color: var(--color-muted);
+    overflow-wrap: anywhere;
+  }
+
+  /*
+   * A refusal is the most important thing on the screen when it appears: the client has
+   * declined to do something the user asked for. It gets full contrast, the machine code
+   * kept legible for a bug report, and the recovery line emphasised over the explanation —
+   * because the user's next question is always "so what do I do".
+   */
+  .refusal {
+    @apply flex flex-col gap-2 p-5;
+    border-radius: var(--radius-card);
+    border: 1px solid color-mix(in oklch, var(--color-deny-500) 35%, transparent);
+    background-color: color-mix(in oklch, var(--color-deny-500) 8%, var(--color-surface));
+  }
+
+  .refusal__code {
+    @apply inline-flex w-fit rounded-md px-2 py-0.5 text-xs font-semibold tracking-wider;
+    font-family: var(--font-mono);
+    color: var(--color-deny-text);
+    background-color: color-mix(in oklch, var(--color-deny-500) 15%, transparent);
+    border: 1px solid color-mix(in oklch, var(--color-deny-500) 30%, transparent);
+  }
+
+  .refusal__message {
+    @apply text-base font-medium;
+  }
+
+  .refusal__detail {
+    @apply text-sm;
+    color: var(--color-muted);
+  }
+
+  .refusal__recovery {
+    @apply mt-1 text-sm font-medium;
+    color: var(--color-body);
+    padding-top: 0.75rem;
+    border-top: 1px solid color-mix(in oklch, var(--color-deny-500) 22%, transparent);
+  }
+
+  .undecodable {
+    @apply flex flex-col gap-2 p-4;
+    border-radius: var(--radius-card);
+    border: 1px dashed color-mix(in oklch, var(--color-caution-500) 50%, transparent);
+    background-color: color-mix(in oklch, var(--color-caution-500) 8%, var(--color-surface));
+  }
+
+  .undecodable__label {
+    @apply text-sm font-semibold;
+    color: var(--color-caution-text);
+  }
+
+  .undecodable__reason {
+    @apply text-sm;
+    color: var(--color-muted);
+  }
+
+  .undecodable__raw,
+  .scale-hex {
+    @apply block overflow-x-auto rounded-lg p-3 text-xs;
+    font-family: var(--font-mono);
+    background-color: var(--color-surface-sunken);
+    border: 1px solid var(--color-hairline);
+    word-break: break-all;
+  }
+
+  .interstitial__state {
+    @apply mx-auto flex max-w-lg flex-col items-center gap-3 py-16 text-center;
+    color: var(--color-muted);
+  }
+}
+
+/* ---------------------------------------------------------------------------------------
+ * Above-the-fold facts — 11 §11.5/§11.6/§11.7.6/§11.10/§11.14.4
+ *
+ * These five change what an action *means*. They are never collapsed, and the stylesheet
+ * has no rule that could collapse them.
+ * ------------------------------------------------------------------------------------- */
+
+@layer components {
+  .above-fold {
+    @apply flex flex-col gap-1.5 p-4;
+    border-radius: var(--radius-card);
+    border: 1px solid color-mix(in oklch, var(--color-brand-500) 28%, transparent);
+    background-color: color-mix(in oklch, var(--color-brand-500) 7%, var(--color-surface));
+  }
+
+  .above-fold--charged-redemption-net-payout,
+  .above-fold--void-recovery-decomposition {
+    border-color: color-mix(in oklch, var(--color-caution-500) 40%, transparent);
+    background-color: color-mix(in oklch, var(--color-caution-500) 9%, var(--color-surface));
+  }
+
+  .above-fold--sudo-era-banner,
+  .above-fold--imported-action-origin {
+    border-color: color-mix(in oklch, var(--color-deny-500) 38%, transparent);
+    background-color: color-mix(in oklch, var(--color-deny-500) 8%, var(--color-surface));
+  }
+}
+
+/* ---------------------------------------------------------------------------------------
+ * Disclosure
+ * ------------------------------------------------------------------------------------- */
+
+@layer components {
+  .disclosure {
+    @apply overflow-hidden;
+    border-radius: var(--radius-card);
+    border: 1px solid var(--color-hairline);
+    background-color: var(--color-surface);
+  }
+
+  .disclosure__summary {
+    @apply cursor-pointer list-none px-4 py-3 text-sm font-medium select-none;
+    color: var(--color-body);
+    transition: background-color 140ms ease;
+    /*
+     * Inset, because `.disclosure` clips. The summary's border box is the disclosure's
+     * padding box, so the base `outline-offset: 2px` drew the focus ring entirely outside the
+     * clip rect and `overflow: hidden` removed it — on the control that opens the decoded
+     * payload before signing. The base rule's own comment says the focus treatment is never
+     * removed, so the fix belongs here rather than as an exception to it.
+     */
+    outline-offset: -3px;
+  }
+
+  .disclosure__summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .disclosure__summary::before {
+    content: '▸';
+    @apply mr-2 inline-block text-xs;
+    color: var(--color-faint);
+    transition: transform 160ms ease;
+  }
+
+  .disclosure[open] > .disclosure__summary::before {
+    transform: rotate(90deg);
+  }
+
+  .disclosure__summary:hover {
+    background-color: var(--color-surface-sunken);
+  }
+
+  .disclosure__body {
+    @apply flex flex-col gap-3 px-4 pt-1 pb-4 text-sm;
+    border-top: 1px solid var(--color-hairline);
+    color: var(--color-muted);
+  }
+
+  .disclosure__copy {
+    @apply text-sm;
+    color: var(--color-muted);
+  }
+
+  .disclosure__copy--awaiting {
+    color: var(--color-faint);
+    font-style: italic;
+  }
+}
+
+/* ---------------------------------------------------------------------------------------
+ * Controls
+ * ------------------------------------------------------------------------------------- */
+
+@layer components {
+  .button {
+    @apply inline-flex cursor-pointer items-center justify-center gap-2 px-4 py-2.5 text-sm font-semibold whitespace-nowrap;
+    border-radius: var(--radius-control);
+    border: 1px solid transparent;
+    transition:
+      background-color 140ms ease,
+      border-color 140ms ease,
+      box-shadow 140ms ease,
+      transform 90ms ease;
+  }
+
+  .button:active:not(:disabled) {
+    transform: translateY(0.5px);
+  }
+
+  /*
+   * A disabled control in this application is almost always a *refusal* — a precondition the
+   * chain would reject — so it stays readable rather than fading out.
+   *
+   * **This rule said that and did the opposite until a review measured it.** It carried
+   * `opacity: 0.62`, and opacity composites the background and the label as one group, so the
+   * pair fell to 2.41:1 for `button--primary` and 2.61:1 for `button--danger` — the fading the
+   * comment above disclaims, arrived at by the one property that cannot be reasoned about
+   * per-colour. The state is now two stated colours, so the contrast is a value someone chose
+   * rather than one that emerged.
+   */
+  .button:disabled {
+    @apply cursor-not-allowed;
+    background-color: var(--color-surface-sunken);
+    color: var(--color-muted);
+    border-color: var(--color-hairline);
+    box-shadow: none;
+  }
+
+  .button--primary {
+    background-color: var(--color-brand-500);
+    color: oklch(1 0 0);
+    box-shadow: 0 1px 2px oklch(0.3 0.1 275 / 0.25);
+  }
+
+  .button--primary:hover:not(:disabled) {
+    background-color: var(--color-brand-text);
+  }
+
+  .button--secondary {
+    background-color: var(--color-surface);
+    color: var(--color-body);
+    border-color: var(--color-hairline);
+  }
+
+  .button--secondary:hover:not(:disabled) {
+    background-color: var(--color-surface-sunken);
+    border-color: var(--color-ink-300);
+  }
+
+  .button--danger {
+    background-color: var(--color-deny-500);
+    color: oklch(1 0 0);
+  }
+
+  .button--danger:hover:not(:disabled) {
+    background-color: var(--color-deny-text);
+  }
+
+  .confirm__actions,
+  .review__actions {
+    @apply flex flex-wrap items-center gap-3 pt-2;
+    border-top: 1px solid var(--color-hairline);
+  }
+
+  .field {
+    @apply flex flex-col gap-1.5;
+  }
+
+  .field__label {
+    @apply text-xs font-semibold tracking-wide uppercase;
+    color: var(--color-muted);
+  }
+
+  .field__body {
+    @apply flex flex-wrap items-baseline gap-2;
+  }
+
+  .field__reason {
+    @apply text-xs;
+    color: var(--color-caution-text);
+  }
+
+  .power-fields {
+    @apply grid gap-4;
+    grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  }
+}
+
+/* ---------------------------------------------------------------------------------------
+ * Tables and the verification panel
+ * ------------------------------------------------------------------------------------- */
+
+@layer components {
+  .data-table {
+    @apply w-full border-collapse text-sm;
+  }
+
+  .data-table th {
+    @apply px-3 py-2 text-left text-xs font-semibold tracking-wide uppercase;
+    color: var(--color-faint);
+    border-bottom: 1px solid var(--color-hairline);
+  }
+
+  .data-table td {
+    @apply px-3 py-2.5 align-baseline;
+    border-bottom: 1px solid color-mix(in oklch, var(--color-hairline) 55%, transparent);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .data-table tbody tr:last-child td {
+    border-bottom: none;
+  }
+
+  .data-table tbody tr:hover td {
+    background-color: var(--color-surface-sunken);
+  }
+
+  .verification {
+    @apply grid gap-x-4 gap-y-0;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .verification__row {
+    @apply grid items-baseline gap-x-4 gap-y-1 py-2.5;
+    grid-template-columns: minmax(9rem, 14rem) minmax(0, 1fr);
+    border-bottom: 1px solid color-mix(in oklch, var(--color-hairline) 55%, transparent);
+  }
+
+  .verification__row:last-child {
+    border-bottom: none;
+  }
+
+  .verification__label {
+    @apply text-sm font-medium;
+    color: var(--color-muted);
+  }
+
+  .verification__kind {
+    @apply text-xs;
+    color: var(--color-faint);
+  }
+
+  .verification__value {
+    @apply overflow-x-auto text-sm;
+    font-family: var(--font-mono);
+    word-break: break-all;
+  }
+
+  /* `pinned` is what the release claims; `observed` is what the chain answered. */
+  .verification__row[data-kind='observed'] .verification__value {
+    color: var(--color-affirm-text);
+  }
+
+  .verification__warnings {
+    @apply mt-3 flex flex-col gap-1.5 rounded-xl p-3 text-sm;
+    list-style: none;
+    color: var(--color-caution-text);
+    background-color: color-mix(in oklch, var(--color-caution-500) 9%, transparent);
+    border: 1px solid color-mix(in oklch, var(--color-caution-500) 26%, transparent);
+  }
+}
+
+/* ---------------------------------------------------------------------------------------
+ * Domain surfaces — payouts, VOID recovery, vaults, conviction, scope, evidence
+ * ------------------------------------------------------------------------------------- */
+
+@layer components {
+  .payout,
+  .void-recovery,
+  .vault-state,
+  .conviction-lock,
+  .coverage,
+  .reach,
+  .fleet,
+  .evidence,
+  .scope,
+  .call-batch,
+  .covered-history,
+  .provider-panel__guarantee,
+  .import-progress {
+    @apply flex flex-col gap-2.5 p-4;
+    border-radius: var(--radius-card);
+    border: 1px solid var(--color-hairline);
+    background-color: var(--color-surface-sunken);
+  }
+
+  .payout__itemization {
+    @apply flex flex-col gap-1.5 text-sm;
+  }
+
+  .payout__note,
+  .void-recovery__copy,
+  .vault-state__copy,
+  .conviction-lock__note,
+  .coverage__summary,
+  .reach__guarantee,
+  .scope__copy,
+  .import-progress__note,
+  .import-result__note {
+    @apply text-sm;
+    color: var(--color-muted);
+  }
+
+  /*
+   * The three VOID outcomes (11 §11.6). Par, part-par and neutral are different amounts of
+   * money back, so they are three visually distinct things rather than three labels.
+   */
+  .void-recovery__par {
+    color: var(--color-affirm-text);
+    font-weight: 600;
+  }
+
+  .void-recovery__part-par {
+    color: var(--color-caution-text);
+    font-weight: 600;
+  }
+
+  .void-recovery__neutral {
+    color: var(--color-muted);
+  }
+
+  .coverage__edge-caveat {
+    @apply text-xs;
+    color: var(--color-caution-text);
+  }
+
+  .reach__counts {
+    @apply flex flex-wrap gap-x-5 gap-y-1 text-sm;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .evidence__label,
+  .scope__name {
+    @apply text-xs font-semibold tracking-wide uppercase;
+    color: var(--color-faint);
+  }
+
+  .evidence__text {
+    @apply text-sm;
+  }
+
+  /*
+   * `.scope` is a checkbox label in the handoff share sheet (10 §13) — the control that
+   * decides what leaves the client. It is styled as a control rather than as a panel.
+   */
+  .scope {
+    @apply cursor-pointer flex-row flex-wrap items-baseline gap-x-2.5;
+    transition:
+      border-color 140ms ease,
+      background-color 140ms ease;
+  }
+
+  .scope:hover {
+    border-color: var(--color-ink-300);
+  }
+
+  .scope:has(input:checked) {
+    border-color: color-mix(in oklch, var(--color-brand-500) 45%, transparent);
+    background-color: color-mix(in oklch, var(--color-brand-500) 7%, var(--color-surface));
+  }
+
+  .scope:has(input:focus-visible) {
+    outline: 2px solid var(--color-brand-500);
+    outline-offset: 2px;
+  }
+
+  /*
+   * An account scope is the one that carries an address out of the client, so a *checked*
+   * account scope is the state worth seeing from across the room. Unchecked it stays neutral:
+   * an option nobody has taken should not look like a warning.
+   */
+  .scope--account:has(input:checked) {
+    border-color: color-mix(in oklch, var(--color-caution-500) 55%, transparent);
+    background-color: color-mix(in oklch, var(--color-caution-500) 10%, var(--color-surface));
+  }
+
+  .scope--pseudonymize {
+    border-color: color-mix(in oklch, var(--color-caution-500) 40%, transparent);
+    background-color: color-mix(in oklch, var(--color-caution-500) 8%, var(--color-surface));
+  }
+
+  .clamp-row {
+    @apply flex flex-wrap items-baseline gap-x-3 gap-y-1 text-sm;
+  }
+
+  .import-progress__line,
+  .import-result__record {
+    @apply text-sm;
+    font-family: var(--font-mono);
+  }
+
+  .provider-action {
+    @apply flex flex-wrap items-center gap-3;
+  }
+
+  /*
+   * `asked-vs-encoded` is 11 §11.3's honesty control: what the user asked for beside what
+   * the payload will actually carry. When the two differ the encoded side is what gets the
+   * weight, because that is the number being signed.
+   */
+  .asked-vs-encoded {
+    @apply flex flex-wrap items-baseline gap-x-3 gap-y-1 rounded-lg px-3 py-2;
+    background-color: var(--color-surface-sunken);
+    border: 1px solid var(--color-hairline);
+  }
+
+  .asked-vs-encoded[data-narrowed='true'] {
+    border-color: color-mix(in oklch, var(--color-caution-500) 45%, transparent);
+    background-color: color-mix(in oklch, var(--color-caution-500) 9%, var(--color-surface));
+  }
+
+  .asked-vs-encoded__name {
+    @apply text-xs font-semibold tracking-wide uppercase;
+    color: var(--color-faint);
+  }
+
+  .asked-vs-encoded__note {
+    @apply text-xs;
+    color: var(--color-caution-text);
+  }
+}

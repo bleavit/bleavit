@@ -22,6 +22,7 @@
  */
 
 import type { FinalizedBlockRef } from '@bleavit/chain-client';
+import { callIsProven, callUnavailableReason, type CompatClassification } from '@bleavit/descriptors';
 import type { HexString } from '@bleavit/shared-types';
 import type { ClauseId, PreconditionResult } from './preconditions.js';
 import { clauseCoverageIds, type RowId } from './rows.js';
@@ -205,19 +206,80 @@ export const TX_TERMINAL_STATES: ReadonlySet<TxState> = new Set<TxState>([
 ]);
 
 /**
+ * What this session established about the runtime — 10 §5.2's verdict, at the gate.
+ *
+ * `undefined` means **compatibility is unestablished**, and it is a required argument rather
+ * than an optional one for the reason every fail-open defect in this client has had in common:
+ * an omitted argument defaults to *nothing is wrong*. A caller with no verdict must say so, and
+ * saying so blocks.
+ *
+ * It is `CompatClassification` and not the application layer's `CompatVerdict` because the
+ * dependency runs the other way — `packages/` cannot see `src/` — and because the three arms of
+ * a verdict collapse to exactly two questions here: *is there a classification*, and *does it
+ * prove this call*. `verdictAllowsSigning` asks the same pair one layer up, over the same
+ * `callIsProven`, so the two cannot disagree about what "unproven" means.
+ */
+export type GateCompat = CompatClassification | undefined;
+
+/**
  * Run the gate — 11 §11.4's `refreshAndGate`, with the reads injected.
  *
- * `FE-TX-007` is checked **first and separately**. A runtime that changed under the
- * preparation invalidates the *encoding*, so evaluating preconditions against it would be
- * decoding new metadata with old assumptions — every row could pass and the bytes still be
- * wrong. Order matters here in a way it does not between the rows themselves.
+ * ## The compatibility verdict is checked first, and that is INV-FE-12 becoming structural
+ *
+ * > signing is disabled wherever compatibility is unproven
+ *
+ * Until this argument existed the classifier's verdict reached nothing: `callIsProven` had no
+ * production caller, so a session that had classified `restricted` — or that had not classified
+ * at all — minted `GatePassed` values exactly like a `full` one. The invariant was implemented,
+ * tested, and not wired, which is the shape of defect this client keeps finding.
+ *
+ * It goes **here** rather than at each submit surface because `AwaitingSignature` has one
+ * inbound edge and it requires a `GatePassed` only this function can mint (11 §11.4 rule 1's
+ * *"structurally … not by convention"*). Nine operator consoles, the trade ticket, the
+ * redemption ticket and every future submit path inherit it without naming it.
+ *
+ * It runs **before** `FE-TX-007` because the two answer different questions and only one of them
+ * is about this preparation. A session that may not sign at all should say that, rather than
+ * reporting that these particular bytes are stale — a user told to rebuild would rebuild, and
+ * find the new preparation refused for the reason nobody mentioned.
+ *
+ * The code is `FE-TX-004` with an **empty** `failed` set, which is what this function already
+ * does for its four other non-row refusals. It is deliberately not one of `FE-COMPAT-001`/`002`:
+ * 10 §9.4 names that family without publishing either code's text, so choosing one would be
+ * guessing at a code's meaning, and `FE-COMPAT-003` is reserved for the narrower fact that a
+ * probe did not complete — which is only one of the three ways this branch is reached.
+ *
+ * `FE-TX-007` is then checked **first among the preparation's own questions and separately**. A
+ * runtime that changed under the preparation invalidates the *encoding*, so evaluating
+ * preconditions against it would be decoding new metadata with old assumptions — every row could
+ * pass and the bytes still be wrong. Order matters here in a way it does not between the rows
+ * themselves.
  */
 export function gate(
   prep: TxPreparation,
   at: FinalizedBlockRef,
   live: BuiltFor,
+  compat: GateCompat,
   results: readonly PreconditionResult[],
 ): GateOutcome {
+  // `'*'` is the whole-session question — *"is any call provable?"* — and it is the honest one
+  // to ask today: `CRITICAL_SURFACE` carries no `call` entries (SQ-577), so `callIsProven`
+  // fail-closes to `mode === 'full'` for every name. A per-call name enters here when the
+  // manifest gains calls, and this line is where it lands; passing `prep`'s own call would
+  // imply a granularity the frozen surface cannot yet answer at.
+  if (compat === undefined || !callIsProven(compat, '*')) {
+    return {
+      kind: 'blocked',
+      code: 'FE-TX-004',
+      at,
+      failed: [],
+      detail:
+        compat === undefined
+          ? 'this client has not established which runtime the chain is on, so no surface has ' +
+            'been proven compatible and nothing may be signed (10 §3.2, INV-FE-12).'
+          : `signing is unavailable: ${callUnavailableReason(compat, 'this call') ?? 'compatibility is unproven.'}`,
+    };
+  }
   if (live.specVersion !== prep.builtFor.specVersion || live.metadataHash !== prep.builtFor.metadataHash) {
     return {
       kind: 'blocked',
@@ -435,8 +497,18 @@ export function txTransitionEdges(): readonly (readonly [TxState, TxState])[] {
       at: pin,
     }),
   );
-  const proceed = gate(prep, pin, prep.builtFor, passing);
-  const blocked = gate(prep, pin, { specVersion: 2, metadataHash: '0x00' }, passing);
+  // A `full` classification, because this enumerator walks the machine and not the compat
+  // lattice: a session that may not sign has no edge into `AwaitingSignature` at all, so
+  // enumerating with anything else would report the specification's own lifecycle as missing
+  // an edge. The compat refusal is asserted where it belongs, in `tests/transaction-builder`.
+  const proven: CompatClassification = {
+    mode: 'full',
+    specVersion: 1,
+    disabled: [],
+    proven: [],
+  };
+  const proceed = gate(prep, pin, prep.builtFor, proven, passing);
+  const blocked = gate(prep, pin, { specVersion: 2, metadataHash: '0x00' }, proven, passing);
 
   const states: TxState[] = [
     'Draft', 'Prepared', 'Refreshing', 'Blocked', 'AwaitingSignature',

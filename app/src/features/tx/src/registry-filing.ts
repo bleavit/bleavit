@@ -106,15 +106,13 @@
  *
  * `filingsUsed` was the third instance and is closed the same way — see
  * {@link FilingOccupancy}, whose key is `(instance, epoch)` and deliberately not the closure's
- * three fields. **One reading in this file still names no subject**, recorded here rather than
- * left for a fifth review to rediscover:
+ * three fields.
  *
- * - the whole **challenge** row (`ChallengeFilingInputs`) names no filing at all: not the
- *   epoch, not the `filing_id`, on a call whose signature is
- *   `challenge_filing(epoch, filing_id, evidence_hash)`. So `windowOpen` and `challengeBond`
- *   are both per-filing reads with nowhere to say which filing, and both decide the control.
- *   That is a modelling gap of the kind `class` and `points` were, not only a subject gap, so
- *   it is a row to implement rather than a field to add.
+ * The **challenge** row was the fourth, and it named no filing at all: not the epoch, not the
+ * `filing_id`, on a call whose signature is `challenge_filing(epoch, filing_id, evidence_hash)`.
+ * It is closed by {@link ChallengeSubject} on each of the row's two per-filing readings — see
+ * {@link ChallengeFilingInputs} for why the subject travels with the reading rather than beside
+ * it, and why the window arrives whole instead of flattened into a boolean and a sentence.
  *
  * Three stay open and are named rather than hidden (SQ-1031): the **filing window**
  * (`WindowClosed`, from `Epoch::filing_window_end(epoch)`, which no frozen surface publishes),
@@ -132,6 +130,7 @@ import {
   BOND_QUOTE_IS_A_QUOTE,
   type BondQuoteState,
 } from './bond-quote.js';
+import { challengeWindowCopy, mayChallenge, type ChallengeWindow } from './registry-crank.js';
 
 export type FilingKind = 'incident' | 'milestone';
 
@@ -533,6 +532,23 @@ export interface RegistrySubject<K extends FilingKind = FilingKind> {
 }
 
 /**
+ * Which **filing** a reading answers about — `challenge_filing`'s first two arguments.
+ *
+ * A third key shape rather than a reuse, on the same argument {@link RegistrySubject} makes
+ * about the other two: `Filings` is `(instance, epoch, filing_id)` and no other item this
+ * module reads is. The two registries allocate ids independently (07 §7), so `filingId` alone
+ * is not an id and the instance rides with it here exactly as it does in the window stream.
+ *
+ * There is deliberately no `specVersion`. `challenge_filing` does not take one and `Filings` is
+ * not keyed by one, so carrying it would be the false precision {@link RegistrySubject}'s note
+ * refuses — a reading claiming it was keyed to a version nothing keyed it to.
+ */
+export interface ChallengeSubject<K extends FilingKind = FilingKind> extends RegistrySubject<K> {
+  /** `Filings`' inner key, and `challenge_filing`'s second argument. `registry_core` types it `u32`. */
+  readonly filingId: number;
+}
+
+/**
  * `FilingCount[epoch]` on this instance, and the epoch it was counted for.
  *
  * `used < bound` is a **permitting** comparison on a bonded action, and `filingsUsed` was a
@@ -615,26 +631,112 @@ export interface FilingBlock {
  * resolved in the contract-v29 batch and §11.8.6's O-9 row now carries the clause in its own
  * text — so this is the row implemented, not a client working around a document. It is
  * blocked on rather than defaulted, because there is no hash that means *no evidence*.
+ *
+ * ## And it named no filing, on the one row whose call takes a filing id (2026-08-09)
+ *
+ * Everything above was true of a row that could not say **which** filing it was about. The
+ * window and the bond are both reads of `Filings[epoch][filing_id]` (02 §7.4, contract v28) —
+ * one deadline, one stored amount, one filing — and this shape carried a bare `boolean`, a
+ * bare sentence and a bare `Verified<bigint>`. So a window read for a filing whose 72 h has
+ * not started, or a bond read from the cheapest filing in the epoch, opened a **bonded**
+ * control against a different filing, and nothing in the model could notice: the two arms of
+ * `filingBlocks` that catch exactly this — {@link EpochClosure} and {@link FilingOccupancy} —
+ * had no counterpart here.
+ *
+ * The repair follows this file's own device rather than adding fields. Each per-filing
+ * reading carries the {@link ChallengeSubject} it was taken under, and
+ * {@link challengeFilingBlocks} refuses when the two disagree. **The subject travels with the
+ * reading, never beside it**: a `subject` on the inputs and a second on the bond would be two
+ * homes for one fact, which is how a finalized read of the wrong key came to satisfy a
+ * precondition about another (see {@link FilingInputsBase}).
+ *
+ * The window arrives **whole** for the same reason. It used to be flattened into `windowOpen`
+ * and `windowReason` at the screen, so the panel rendered one `ChallengeWindow` while the
+ * blocks were computed from a boolean derived somewhere else, and nothing tied them together.
+ * `mayChallenge` and `challengeWindowCopy` are now applied here, to the reading this row
+ * actually holds — one window, one countdown, one answer.
  */
-export interface ChallengeFilingInputs {
-  readonly kind: FilingKind;
-  /** From `challengeWindow` — its `indeterminate` arm blocks, never falls back. */
-  readonly windowOpen: boolean;
-  /** Why, when it is not open. Carried so this module states the window's own reason. */
-  readonly windowReason: string;
+export interface ChallengeFilingInputs<K extends FilingKind = FilingKind> {
+  /**
+   * The 72 h window as `Filings[epoch][filing_id]` and its acknowledgments answer it.
+   *
+   * Its subject is **the call's own** `(epoch, filing_id)` pair: this row carries no separate
+   * copy of either argument, so an encoder for `challenge_filing` takes both from here and
+   * from nowhere else — the rule `FilingInputsBase` states for `file`.
+   */
+  readonly window: ChallengeWindowReading<K>;
+  /** The filing's own stored bond, and the filing it was read from. */
+  readonly bond: ChallengeBondReading<K>;
   readonly freeUsdc: Verified<bigint>;
-  /** Value-scaled per 07 §7 — a read, never a constant this module knows. */
-  readonly challengeBond: Verified<bigint>;
   /** `challenge_filing`'s third argument. Absent is a refusal, not a default. */
   readonly evidenceHash: string | undefined;
 }
 
+/**
+ * The challenge window, keyed — 11 §11.8.6's *"filing within its 72 h challenge window"*.
+ *
+ * Holds the `ChallengeWindow` itself rather than a decision taken from it, so the panel and
+ * the model read one value. Its `indeterminate` arm blocks and never falls back to the base
+ * window: a countdown that ignored a watchtower extension tells a challenger they are out of
+ * time when they are not.
+ */
+export interface ChallengeWindowReading<K extends FilingKind = FilingKind> {
+  readonly subject: ChallengeSubject<K>;
+  readonly window: ChallengeWindow;
+}
+
+/**
+ * `Filings[epoch][filing_id].bond`, and the filing it came from.
+ *
+ * Read, never computed: `challenge_filing` posts the filing's own stored amount (07 §7, I-28),
+ * which the chain priced when the filing was created. `used < bound` has an analogue here —
+ * `freeUsdc >= bond` is the **permitting** comparison, so a bond read from a cheaper filing
+ * opens the control, which is why this reading names its filing and the comparison refuses
+ * when it is not this one.
+ */
+export interface ChallengeBondReading<K extends FilingKind = FilingKind> {
+  readonly subject: ChallengeSubject<K>;
+  readonly amount: Verified<bigint>;
+}
+
+/** Whether two readings answer about the same `(instance, epoch, filing_id)`. */
+function sameFiling(left: ChallengeSubject, right: ChallengeSubject): boolean {
+  return (
+    left.registry === right.registry &&
+    left.epoch === right.epoch &&
+    left.filingId === right.filingId
+  );
+}
+
+/** How a filing is named in a refusal an operator has to act on. */
+function nameFiling(subject: ChallengeSubject): string {
+  return `${subject.registry} filing ${subject.filingId} in epoch ${subject.epoch}`;
+}
+
 export function challengeFilingBlocks(inputs: ChallengeFilingInputs): readonly FilingBlock[] {
   const blocks: FilingBlock[] = [];
-  if (!inputs.windowOpen) {
-    blocks.push({ check: 'Challenge window', detail: inputs.windowReason });
+  // `challenge_filing`'s `(epoch, filing_id)` pair, taken from the window reading that was
+  // keyed to it. There is no second copy on `ChallengeFilingInputs` to disagree with.
+  const subject = inputs.window.subject;
+  if (!mayChallenge(inputs.window.window)) {
+    blocks.push({ check: 'Challenge window', detail: challengeWindowCopy(inputs.window.window) });
   }
-  if (inputs.freeUsdc.value < inputs.challengeBond.value) {
+  if (!sameFiling(inputs.bond.subject, subject)) {
+    // The instance half is compared here and not left to the type parameter, unlike
+    // `FilingOccupancy`'s: `FilingInputs` splits into two arms that pin `K` concretely, and
+    // this row has one arm whose `K` defaults to the union — so a milestone bond in an
+    // incident challenge is a shape that typechecks. A permitting comparison against another
+    // filing's bond is the same defect the subject exists to remove, so it blocks here rather
+    // than being reached at all.
+    blocks.push({
+      check: 'Challenge bond',
+      detail:
+        `The bond this client read belongs to ${nameFiling(inputs.bond.subject)}, and this ` +
+        `challenge is against ${nameFiling(subject)}. Every filing is bonded at its own ` +
+        'value, so that amount says nothing about this one — the control stays closed rather ' +
+        'than posting a bond sized against a different claim.',
+    });
+  } else if (inputs.freeUsdc.value < inputs.bond.amount.value) {
     blocks.push({
       check: 'Challenge bond',
       detail:

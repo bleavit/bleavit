@@ -9,13 +9,14 @@
     "pnpm": ">=10.23.0 <11"
   },
   "scripts": {
+    "dev": "vite",
     "typecheck": "tsc -b",
     "build": "tsc -b",
     "clean": "tsc -b --clean",
     "depcruise": "depcruise packages src src-tauri tools/desktop --config .dependency-cruiser.mjs",
     "test:firewall": "node tools/run-suite.ts \"tests/firewall/*.test.{js,ts}\"",
     "test:protocol": "node tools/run-suite.ts \"tests/protocol/*.test.{js,ts}\"",
-    "test": "pnpm run check:types && pnpm run test:firewall && pnpm run test:ui && pnpm run test:screens && pnpm run test:providers && pnpm run test:snapshot-tool && pnpm run test:platform && pnpm run test:protocol && pnpm run test:mock-runtime && pnpm run test:chain-client && pnpm run test:descriptors && pnpm run test:tx && pnpm run test:verify && pnpm run test:local-index && pnpm run test:analysis && pnpm run test:intents && pnpm run test:contexts && pnpm run schemas:check && pnpm run skills:check && pnpm run test:receipts && pnpm run test:llm-handoff && pnpm run test:release && pnpm run check:handoff-network && pnpm run check:handoff-network:witness && pnpm run check:handoff-emitted && pnpm run check:above-fold && pnpm run check:handoff-emitted:witness && pnpm run check:chain-literals && pnpm run check:chain-literals:witness && pnpm run check:render-provenance && pnpm run check:render-provenance:witness && pnpm run check:no-html-sinks && pnpm run check:no-html-sinks:witness && pnpm run check:casts && pnpm run check:casts:witness && pnpm run surface:check && pnpm run foreign:check && pnpm run check:budget && pnpm run depcruise:witness && pnpm run check:smoldot-surface && pnpm run check:smoldot-surface:witness && pnpm run test:budgets && pnpm run check:provenance-mints && pnpm run check:provenance-mints:witness && pnpm run check:covered-history && pnpm run check:covered-history:witness",
+    "test": "pnpm run check:types && pnpm run test:firewall && pnpm run test:ui && pnpm run test:screens && pnpm run test:providers && pnpm run test:snapshot-tool && pnpm run test:platform && pnpm run test:protocol && pnpm run test:mock-runtime && pnpm run test:chain-client && pnpm run test:descriptors && pnpm run test:tx && pnpm run test:verify && pnpm run test:local-index && pnpm run test:analysis && pnpm run test:intents && pnpm run test:contexts && pnpm run schemas:check && pnpm run skills:check && pnpm run test:receipts && pnpm run test:llm-handoff && pnpm run test:release && pnpm run check:handoff-network && pnpm run check:handoff-network:witness && pnpm run check:handoff-emitted && pnpm run check:above-fold && pnpm run check:handoff-emitted:witness && pnpm run check:chain-literals && pnpm run check:chain-literals:witness && pnpm run check:render-provenance && pnpm run check:render-provenance:witness && pnpm run check:no-html-sinks && pnpm run check:no-html-sinks:witness && pnpm run check:casts && pnpm run check:casts:witness && pnpm run surface:check && pnpm run foreign:check && pnpm run check:budget && pnpm run depcruise:witness && pnpm run check:smoldot-surface && pnpm run check:smoldot-surface:witness && pnpm run test:budgets && pnpm run check:provenance-mints && pnpm run check:provenance-mints:witness && pnpm run check:covered-history && pnpm run check:covered-history:witness && pnpm run check:style-coverage && pnpm run check:style-coverage:witness",
     "depcruise:witness": "depcruise tests/depcruise-witness --config tests/depcruise-witness/.dependency-cruiser.mjs --output-type err && (echo 'WITNESS DID NOT FIRE — the rule set is vacuous' && exit 1) || echo 'witness fired: rules are live'",
     "check:casts": "node tools/check-finalized-casts.ts",
     "check:casts:witness": "node tools/check-finalized-casts.ts --witness",
@@ -45,6 +46,8 @@
     "check:no-html-sinks:witness": "node tools/check-no-html-sinks.ts --witness",
     "check:render-provenance": "node tools/check-render-provenance.ts",
     "check:render-provenance:witness": "node tools/check-render-provenance.ts --witness",
+    "check:style-coverage": "node tools/check-style-coverage.ts",
+    "check:style-coverage:witness": "node tools/check-style-coverage.ts --witness",
     "release:build": "node tools/release/build.ts",
     "release:check": "node tools/release/build.ts --check",
     "release:manifest": "node tools/release/repro-manifest.ts",
@@ -79,6 +82,7 @@
   },
   "devDependencies": {
     "@polkadot-api/substrate-bindings": "0.20.3",
+    "@tailwindcss/vite": "4.3.3",
     "@types/node": "22.18.12",
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.4",
@@ -86,6 +90,7 @@
     "esbuild": "0.28.1",
     "polkadot-api": "2.1.8",
     "prettier": "3.6.2",
+    "tailwindcss": "4.3.3",
     "typescript": "5.9.3",
     "vite": "8.1.4"
   }

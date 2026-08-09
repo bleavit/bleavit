@@ -52,6 +52,7 @@ import {
   xcmWarning,
   type DepositInputs,
   type DepositProgress,
+  type FundingBlock,
   type WithdrawInputs,
 } from './funding.js';
 
@@ -70,6 +71,40 @@ function BalanceUnreadable({ what }: { readonly what: string }) {
       {what} could not be decoded from the record this client read. It is not being guessed
       at, and nothing is being substituted for it.
     </span>
+  );
+}
+
+/**
+ * The chain figures a refusal was decided on, each with its own badge.
+ *
+ * §11.9.1's D-13 row does not merely require the deposit blocked — it requires it *"blocked
+ * with the cap shown"*, which is a display obligation the model cannot discharge on its own.
+ * The figures arrive as `Verified<bigint>` and render through `Amount`, so the number the
+ * user is told about carries the status of the read it came from (INV-FE-9). Interpolating it
+ * into the refusal sentence would put a chain value on screen with no badge at all, which is
+ * the defect `check-render-provenance` rule C exists to catch one layer over.
+ *
+ * Rendered for **any** block carrying figures rather than for D-13 specifically: a component
+ * that knew which check it was would be a second place the rule lives.
+ */
+function BlockFigures({
+  block,
+  decimals,
+  symbol,
+}: {
+  readonly block: FundingBlock;
+  readonly decimals: number;
+  readonly symbol: string;
+}): ReactNode {
+  if (block.figures === undefined) return null;
+  return (
+    <>
+      {block.figures.map((figure) => (
+        <Field label={figure.label} key={figure.label}>
+          <Amount datum={figure.amount} decimals={decimals} symbol={symbol} />
+        </Field>
+      ))}
+    </>
   );
 }
 
@@ -103,6 +138,7 @@ export function DepositForm({
       {blocks.map((block) => (
         <Notice severity="danger" heading={block.check} key={block.check}>
           {block.detail}
+          <BlockFigures block={block} decimals={decimals} symbol={symbol} />
         </Notice>
       ))}
 
@@ -199,6 +235,7 @@ export function WithdrawForm({
       {blocks.map((block) => (
         <Notice severity="danger" heading={block.check} key={block.check}>
           {block.detail}
+          <BlockFigures block={block} decimals={decimals} symbol={symbol} />
         </Notice>
       ))}
 

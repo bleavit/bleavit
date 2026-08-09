@@ -792,6 +792,17 @@ jobs:
         working-directory: app
         run: pnpm run check:render-provenance && pnpm run check:render-provenance:witness
 
+      - name: Style coverage (F28) — no unstyled markup, no dead rules
+        # The markup carried 92 semantic class names with no stylesheet at all for weeks and
+        # nothing said so: an unstyled element still holds its text, so every suite passed
+        # while the application rendered as browser-default HTML. This binds the two halves
+        # in both directions. Dynamic families (`badge--${kind}` and four others) are
+        # declared with their variants rather than inferred, because the first version of
+        # this tool could not parse an interpolated class name and reported 100 % coverage
+        # over the subset it could read.
+        working-directory: app
+        run: pnpm run check:style-coverage && pnpm run check:style-coverage:witness
+
       - name: No VerificationStatus constructed outside the modules that own it (10 §2.1, §2.2)
         # The construction gate, and it is the complement of the two above rather than a
         # third spelling of them. `check:casts` matches `as Finalized<...>`; the render gate
