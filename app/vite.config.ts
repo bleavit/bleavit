@@ -1,4 +1,43 @@
-import { defineConfig } from 'vite';
+import { defineConfig, type Plugin } from 'vite';
+import tailwindcss from '@tailwindcss/vite';
+
+/**
+ * Makes the dev server runnable at all, without weakening one byte of the release policy.
+ *
+ * 12 §5.1's meta CSP lives in `index.html`, and a `<meta http-equiv>` policy is enforced
+ * wherever that document is served — including by the dev server, which serves the **source**
+ * file. Two directives make a dev session impossible as written, and both are correct for the
+ * release:
+ *
+ *  - `connect-src __CONNECT_SRC__`. The placeholder is substituted by `tools/release/build.ts`
+ *    into `dist/index.html`, so in dev the directive's source list contains no valid source
+ *    expression, which a parser treats as `'none'`. That blocks every connection the page
+ *    makes, including Vite's own HMR WebSocket.
+ *  - `style-src 'self'` with no inline allowance. The release satisfies this honestly:
+ *    Tailwind emits one `assets/[hash].css` and `index.html` links it, same-origin, and it
+ *    even picks up an SRI digest. The dev server is the different case — it serves CSS
+ *    through a JS module so it can hot-replace it, which means an injected `<style>` element
+ *    the policy refuses. Left alone, the dev server renders the application completely
+ *    unstyled while the release renders correctly, which is the most misleading split
+ *    available.
+ *
+ * Both relaxations therefore happen in `serve` mode only, in a plugin that **cannot** run at
+ * build time (`apply: 'serve'`), rather than by widening the policy in the file that ships.
+ * The `--dev-only` marker is there to be greppable: a policy that leaked into a built tree
+ * can be found by searching for it, and `app/tests/release/pipeline.test.ts` asserts the
+ * built `index.html` still carries `style-src 'self'` exactly.
+ */
+function devOnlyCsp(): Plugin {
+  return {
+    name: 'bleavit:dev-only-csp',
+    apply: 'serve',
+    transformIndexHtml(html) {
+      return html
+        .replace("style-src 'self'", "style-src 'self' 'unsafe-inline' /* --dev-only */")
+        .replace('__CONNECT_SRC__', "'self' ws: wss: https: /* --dev-only */");
+    },
+  };
+}
 
 /**
  * The deterministic release build — 12 §1.1, F11.
@@ -7,6 +46,7 @@ import { defineConfig } from 'vite';
  * content-addressed serving, or fought the CSP of 12 §5.1. Nothing is set for taste.
  */
 export default defineConfig({
+  plugins: [tailwindcss(), devOnlyCsp()],
   /**
    * **Relative, and this is load-bearing.** The release is served from a content address —
    * `https://<gateway>/<manifest-txid>/index.html` on a path gateway, a sandboxed

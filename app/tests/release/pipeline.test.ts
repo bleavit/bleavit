@@ -106,6 +106,21 @@ test('the emitted policy has exactly one connect-src, and it is the derived allo
   assert.ok(policy.includes("default-src 'none'"));
   // Meta-CSP cannot set it, so emitting it would buy a console error and nothing else.
   assert.ok(!policy.includes('frame-ancestors'));
+  /*
+   * `style-src` is asserted verbatim, and this assertion is younger than the directive it
+   * guards (F28). Until Tailwind arrived nothing in the tree emitted CSS, so the directive
+   * cost nothing and nothing tested it. It now has a way to be widened: `vite.config.ts`
+   * carries a `serve`-only plugin that adds `'unsafe-inline'` so the dev server can inject
+   * its hot-replaced styles. That plugin cannot run at build time, but "cannot" is a claim
+   * about a config file one edit could falsify, and the failure would be silent — a release
+   * that permits inline styles looks exactly like one that does not.
+   *
+   * So both halves are checked: the directive is exactly `'self'`, and the marker the dev
+   * relaxation writes appears nowhere in the built document.
+   */
+  assert.ok(policy.includes("style-src 'self';"), "12 §5.1 keeps style-src at 'self' exactly");
+  assert.ok(!policy.includes('unsafe-inline'), 'no inline allowance may reach a built tree');
+  assert.ok(!indexHtml.includes('--dev-only'), 'the dev-only CSP relaxation must never ship');
 });
 
 test('every script in the entry document carries an SRI digest of the file that was emitted', () => {

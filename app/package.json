@@ -9,6 +9,7 @@
     "pnpm": ">=10.23.0 <11"
   },
   "scripts": {
+    "dev": "vite",
     "typecheck": "tsc -b",
     "build": "tsc -b",
     "clean": "tsc -b --clean",
@@ -45,6 +46,8 @@
     "check:no-html-sinks:witness": "node tools/check-no-html-sinks.ts --witness",
     "check:render-provenance": "node tools/check-render-provenance.ts",
     "check:render-provenance:witness": "node tools/check-render-provenance.ts --witness",
+    "check:style-coverage": "node tools/check-style-coverage.ts",
+    "check:style-coverage:witness": "node tools/check-style-coverage.ts --witness",
     "release:build": "node tools/release/build.ts",
     "release:check": "node tools/release/build.ts --check",
     "release:manifest": "node tools/release/repro-manifest.ts",
@@ -79,6 +82,7 @@
   },
   "devDependencies": {
     "@polkadot-api/substrate-bindings": "0.20.3",
+    "@tailwindcss/vite": "4.3.3",
     "@types/node": "22.18.12",
     "@types/react": "19.2.18",
     "@types/react-dom": "19.2.4",
@@ -86,6 +90,7 @@
     "esbuild": "0.28.1",
     "polkadot-api": "2.1.8",
     "prettier": "3.6.2",
+    "tailwindcss": "4.3.3",
     "typescript": "5.9.3",
     "vite": "8.1.4"
   }

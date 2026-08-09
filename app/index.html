@@ -20,6 +20,15 @@
     />
     <link rel="manifest" href="./manifest.webmanifest" />
     <meta name="color-scheme" content="light dark" />
+    <!--
+      The stylesheet is linked here rather than imported from `main.ts` for two reasons, and
+      neither is style. A `<link>` is a same-origin stylesheet request, which `style-src
+      'self'` permits without an inline exception; a JS-side import makes Vite inject a
+      `<style>` element the policy would refuse. And `main.ts` is compiled by `tsc -b`, which
+      has no module declaration for `.css` and would need one invented purely to describe a
+      file TypeScript never reads.
+    -->
+    <link rel="stylesheet" href="./src/styles/app.css" />
     <title>Bleavit</title>
   </head>
   <body>
