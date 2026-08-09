@@ -725,6 +725,40 @@ export const CRANK_CALLS = Object.keys(CRANK_STALENESS) as readonly CrankCall[];
  * the way the limit-coverage registry and the monitoring seams do — by the row closing,
  * not by somebody remembering to delete a comment.
  */
+/**
+ * The guardian power an obligation is scoped to, when it is scoped to one at all.
+ *
+ * A row is coarser than a dispatch. `guardian.approve_action` is one row, `O-3`, for all
+ * five powers — but the runtime does not evaluate one set of conditions for all five, and
+ * two of `O-3`'s obligations are guarded in the pallet by a `if let GuardianPower::…` arm.
+ * Attaching those to the row unconditionally closes the approve control for powers whose
+ * dispatch never reads the condition at all, which refuses what the chain would accept.
+ * That is the failure `check-dispatch-mirror.py` exists to prevent, arriving through the
+ * one door that checker does not watch.
+ *
+ * The literals are repeated here rather than imported: `guardian.ts` imports `SurfaceId`
+ * from this package, so the dependency runs the other way and an import would close a
+ * cycle. The repetition is not free-floating — the console passes its own `GuardianPower`
+ * and `PlaybookId` values straight into `blockingObligationsFor`, so a rename on either
+ * side stops compiling rather than silently unscoping an obligation.
+ */
+export interface ObligationScope {
+  readonly power:
+    | 'pause_intake'
+    | 'delay_once'
+    | 'force_rerun'
+    | 'activate_playbook'
+    | 'suspend_on_gate';
+  /** Narrower still: the one playbook whose dispatch reads the condition. */
+  readonly playbook?:
+    | 'PB-DEPEG'
+    | 'PB-MIGRATION'
+    | 'PB-ORACLE-VOID'
+    | 'PB-HALT-INTAKE'
+    | 'PB-RESERVE'
+    | 'PB-LEDGER-FREEZE';
+}
+
 export interface UnreadableObligation {
   readonly row: RowId;
   /** The condition §11.8 requires, in the words the user is shown. */
@@ -734,6 +768,14 @@ export interface UnreadableObligation {
   /** The open PLAN.md spec-question id. */
   readonly specQuestion: string;
   readonly disposition: 'stated' | 'blocking';
+  /**
+   * The dispatch arm that reads this condition, when only one does.
+   *
+   * `undefined` means the row's whole call reads it, which is the common case and stays
+   * the default. A scope narrows *which* pending actions the obligation speaks about — it
+   * never widens, and it never softens the obligation for the actions it does cover.
+   */
+  readonly scope?: ObligationScope;
 }
 
 const unread = (
@@ -742,7 +784,14 @@ const unread = (
   reason: string,
   specQuestion: string,
   disposition: 'stated' | 'blocking',
-): UnreadableObligation => ({ row, requirement, reason, specQuestion, disposition });
+  scope?: ObligationScope,
+): UnreadableObligation =>
+  // The key is omitted rather than set to `undefined`: `exactOptionalPropertyTypes` is on,
+  // so "absent" and "present and undefined" are different types here, and only the first
+  // one means *this obligation is not scoped*.
+  scope === undefined
+    ? { row, requirement, reason, specQuestion, disposition }
+    : { row, requirement, reason, specQuestion, disposition, scope };
 
 /**
  * Fee headroom in the **selected** asset — 11 §11.3, applied to every operator row.
@@ -826,7 +875,56 @@ const O3: readonly PreconditionClause[] = [
   clause('O-3', 'the enumerated call batch’s preimage is noted', 'storage.preimage.preimage_for', 'storage', 'chain', { key: 'batch-preimage' }),
   // E20's V-facet, third item: the allowance `check_and_consume` charges at the threshold
   // approval, so the approver it refuses is the fifth one.
-  clause('O-3', 'this action’s power still has allowance', 'storage.guardian.allowances', 'storage', 'acting', { key: 'allowance' }),
+  //
+  // **`subject: 'chain'`, not `'acting'`.** `pallet_guardian` declares
+  // `Allowances: StorageValue<_, AllowanceState>` — one global value with no account key at
+  // all, and the counters inside it are per *power* and per *epoch*, never per guardian. An
+  // `acting` subject makes `accountForClause` resolve an account for a read that has none,
+  // which is a proxy or multisig wrapper silently changing which key a keyless read is
+  // attributed to.
+  clause('O-3', 'this action’s power still has allowance', 'storage.guardian.allowances', 'storage', 'chain', { key: 'allowance' }),
+  // **The other half of every meter — contract v30.** `Guardian.Allowances` stores the *used*
+  // counters and no limit, so a row citing that item alone declares a **counter** and calls it
+  // a meter. 02 §9's binding row makes the pair explicit: the four constants are read
+  // *"**together with** §7.4's `Guardian.Allowances`, which stores the used counters alone. A
+  // meter is the pair; neither half is a meter"*. Before v30 no constant published a bound at
+  // all, so `AllowanceMeter.limit` had no producer and could only be fabricated.
+  //
+  // `pause_intake` takes **two** constants, and that is not symmetry for its own sake: a count
+  // without its window is not a rate. The allowance is one use per
+  // `PauseIntakeAllowanceWindowEpochs`-epoch window, and `check_and_consume` resets the stored
+  // counter **lazily**, at consume time — so a client holding the count and not the window
+  // reads an exhausted meter for a power the chain would accept.
+  clause('O-3', 'the delay_once allowance per epoch is read at B′', 'constant.guardian.delay_once_allowance_per_epoch', 'constant', 'chain', { key: 'allowance-limit-delay-once' }),
+  clause('O-3', 'the force_rerun allowance per epoch is read at B′', 'constant.guardian.force_rerun_allowance_per_epoch', 'constant', 'chain', { key: 'allowance-limit-force-rerun' }),
+  clause('O-3', 'the pause_intake allowance per window is read at B′', 'constant.guardian.pause_intake_allowance', 'constant', 'chain', { key: 'allowance-limit-pause-intake' }),
+  clause('O-3', 'the pause_intake allowance window length is read at B′', 'constant.guardian.pause_intake_allowance_window_epochs', 'constant', 'chain', { key: 'allowance-window-pause-intake' }),
+  // The epoch the window test is performed against. Same surface as the trigger clause below
+  // — one `EpochOf` read answers both — but a separate clause, for the reason O-5 states over
+  // `api.nav`: it is a separate refusal with a separate remedy, and one requirement sentence
+  // cannot serve both. Without it the pause meter's staleness test has no declared input.
+  clause('O-3', 'the epoch the pause_intake window is measured from', 'storage.epoch.epoch_of', 'storage', 'chain', { key: 'allowance-window-epoch' }),
+  // **Contract v30 froze both playbook maps in 02 §7.4**, so the two `blocking` unreadable
+  // obligations this row carried under SQ-1030 are retired for ordinary clauses — the O-6
+  // precedent, exactly. Both refusals fall on the **dispatching** approval:
+  // `approve_action` reads `PlaybookRegistered[id]` *after* counting the fifth approval
+  // (`pallets/guardian/src/lib.rs`) and `dispatch` reads `ActivePlaybooks`
+  // (`crates/guardian-core/src/lib.rs`), so a client blind to either walks a 5-of-7 council to
+  // a guaranteed revert on the scarcest signatures the protocol has.
+  //
+  // **The scoping the obligations carried is preserved in the model, not here, and the two
+  // places are not interchangeable.** A row's clause list is fixed — O-4's note says why: a
+  // preparation that narrowed its clauses to the action it opened would mint a window a
+  // different action's evaluation never covered — so the *reads* are declared for every
+  // approval. What is scoped is the *refusal*, and `playbookBlocks` in `guardian.ts` applies
+  // each to the arm the runtime guards it behind. 02 §7.4 forbids two readings and both are
+  // properties of that model: registration is **admissibility, never a trigger source**
+  // (06 §6.2 — it may not stand in for §11.8.2's trigger table), and presence in
+  // `ActivePlaybooks` is **not uniformly a refusal** — it blocks `PB-LEDGER-FREEZE` alone,
+  // while every other playbook re-activates in place without consuming a slot, so a client
+  // reading mere presence as blocking refuses five lawful renewals.
+  clause('O-3', 'the playbook an activation names is registered on this chain', 'storage.guardian.playbook_registered', 'storage', 'chain', { key: 'playbook-registered' }),
+  clause('O-3', 'no PB-LEDGER-FREEZE record is already active', 'storage.guardian.active_playbooks', 'storage', 'chain', { key: 'playbook-not-already-active' }),
   // E20's V-facet fourth item and its F-facet — §11.8.2's own trigger table, read at B′.
   clause('O-3', 'the dead-man and reserve-health trigger flags are read at B′', 'storage.constitution.phase_flags', 'storage', 'chain', { key: 'trigger-phase-flags' }),
   clause('O-3', 'the gate-breach trigger flag for the current epoch is read at B′', 'storage.welfare.gate_breach_flags', 'storage', 'chain', { key: 'trigger-gate-breach' }),
@@ -860,7 +958,43 @@ const O3: readonly PreconditionClause[] = [
  */
 const O4: readonly PreconditionClause[] = [
   clause('O-4', 'you are a guardian', 'storage.guardian.members', 'storage', 'acting', { key: 'member' }),
-  clause('O-4', 'this power’s allowance has room', 'storage.guardian.allowances', 'storage', 'acting', { key: 'allowance' }),
+  // `Guardian.Allowances` is a global `StorageValue` with no account key — see the same
+  // clause on O-3 for why `subject` is `'chain'`.
+  clause('O-4', 'this power’s allowance has room', 'storage.guardian.allowances', 'storage', 'chain', { key: 'allowance' }),
+  // The limits — contract v30, and the same argument as O-3's copy of these four. §11.8.2's
+  // propose row names *"allowance remaining for the power (allowance meters displayed)"* by
+  // name, and §11.4 rule 2 makes a precondition an exact chain read; a row declaring only the
+  // used counter left the other half undeclared, which `clauseGroupsFor` reports as
+  // vacuously passed.
+  clause('O-4', 'the delay_once allowance per epoch is read at B′', 'constant.guardian.delay_once_allowance_per_epoch', 'constant', 'chain', { key: 'allowance-limit-delay-once' }),
+  clause('O-4', 'the force_rerun allowance per epoch is read at B′', 'constant.guardian.force_rerun_allowance_per_epoch', 'constant', 'chain', { key: 'allowance-limit-force-rerun' }),
+  clause('O-4', 'the pause_intake allowance per window is read at B′', 'constant.guardian.pause_intake_allowance', 'constant', 'chain', { key: 'allowance-limit-pause-intake' }),
+  clause('O-4', 'the pause_intake allowance window length is read at B′', 'constant.guardian.pause_intake_allowance_window_epochs', 'constant', 'chain', { key: 'allowance-window-pause-intake' }),
+  clause('O-4', 'the epoch the pause_intake window is measured from', 'storage.epoch.epoch_of', 'storage', 'chain', { key: 'allowance-window-epoch' }),
+  // **The two playbook reads, on the propose row as well as the approve row (contract v30).**
+  // The runtime raises `PlaybookNotRegistered` and `PlaybookAlreadyActive` on the *dispatching*
+  // approval and checks neither here — which is exactly what it does with `PB-MIGRATION`'s
+  // empty admissible call set, and this client blocks that at propose time because 06 §6.2
+  // guarantees the fifth approval reverts and records nothing. Same cost, same signatures, so
+  // the same treatment: a propose row declaring every other dispatch input and not these two
+  // leaves them undeclared, and `clauseGroupsFor` reports an undeclared read as vacuously
+  // passed.
+  //
+  // Declared unconditionally, like O-4's trigger clauses and for the same reason stated above
+  // them: the row is fixed, so a preparation cannot narrow its clause list to the power the
+  // form happens to have open. What is scoped is the *refusal*, and `GuardianProposal` scopes
+  // it structurally — the two reads are fields of the `activate_playbook` arm, so the other
+  // four powers have nowhere to carry one.
+  clause('O-4', 'the playbook an activation names is registered on this chain', 'storage.guardian.playbook_registered', 'storage', 'chain', { key: 'playbook-registered' }),
+  clause('O-4', 'no PB-LEDGER-FREEZE record is already active', 'storage.guardian.active_playbooks', 'storage', 'chain', { key: 'playbook-not-already-active' }),
+  // **The propose-side bound, which is this row's own and was declared on the approve row
+  // instead (SQ-1022).** `guardian_core::propose_action` refuses when `pending.len() >= 64`,
+  // so the count is a *propose* precondition; O-3 declared `PendingActions` because an
+  // approval reads the action itself, and the count clause had nowhere to live. It is
+  // readable and the bound is not, which is what SQ-1022 asks about — the clause declares the
+  // half that exists rather than leaving the whole read undeclared, since `clauseGroupsFor`
+  // reports an undeclared read as vacuously passed.
+  clause('O-4', 'the pending-action queue is read at B′', 'storage.guardian.pending_actions', 'storage', 'chain', { key: 'pending-count' }),
   // §11.8.2's trigger table, one clause per readable variant.
   // `DeadMan` (bit 6) and `ReserveHealth` (bit 7) share this item with different bits.
   clause('O-4', 'the dead-man and reserve-health trigger flags are read at B′', 'storage.constitution.phase_flags', 'storage', 'chain', { key: 'trigger-phase-flags' }),
@@ -1004,6 +1138,16 @@ const REGISTRY_SURFACE = {
 
 const o8For = (instance: RegistryInstance): readonly PreconditionClause[] => [
   clause('O-8', 'this registry instance has room for another filing this epoch', REGISTRY_SURFACE[instance].filings, 'storage', 'chain', { key: 'occupancy' }),
+  // **`registry_core::file`'s `AlreadyFinal`, which nothing evaluated (2026-08-08).**
+  // `file` refuses when this instance already holds an aggregate for `(epoch, spec_version)`:
+  // *"a closed-out `(epoch, version)` aggregate is terminal (07 §7): late filings must not
+  // land behind an already-derived welfare input"*. The client can read exactly that —
+  // `ClosedAt` is the **same double map, keyed the same way**, written by `close_epoch` in the
+  // same call that pushes the aggregate and removed by `reap_epoch` in the same call that
+  // removes it, so its presence is the core's own condition rather than a proxy for it.
+  // Contract v28 froze it and O-9 already cites it; O-8 read it nowhere, which for a bonded
+  // call means posting a bond into an epoch the chain has closed.
+  clause('O-8', 'this epoch is not already closed at the MetricSpec version this filing names', REGISTRY_SURFACE[instance].closedAt, 'storage', 'chain', { key: 'not-final' }),
   // Contract v29 (SQ-731) — the same read P-13 makes, one pallet over. The request enum
   // names the *instance* (`IncidentFiling` / `MilestoneFiling`), which is why this clause
   // needs no per-instance surface: the two share one method, and a `None` answer is
@@ -1164,6 +1308,49 @@ export const OPERATOR_SURFACE_ROWS: Readonly<Record<OperatorSurfaceCall, RowId>>
  * which this bump froze). What remains here is what a *stated* obligation is for: a
  * condition the specification requires, this release genuinely cannot evaluate, and which
  * costs at most one refused transaction to learn.
+ *
+ * ## `O-3`'s three 2026-08-08 entries, of which two are already retired
+ *
+ * The 2026-08-08 re-review found the guardian class still open **one frame above**
+ * `check_and_consume`: in `dispatch`, in the pallet, and in the effect dispatcher. Three
+ * refusals live there, all falling on the threshold approver, and none of them was declared:
+ *
+ * - **`PlaybookNotRegistered`** (`pallets/guardian/src/lib.rs`) — `approve_action` checks
+ *   `PlaybookRegistered::<T>::get(id)` *after* the fifth approval is counted.
+ * - **`PlaybookAlreadyActive`** (`crates/guardian-core/src/lib.rs`) — `dispatch` refuses
+ *   re-activation of `PB-LEDGER-FREEZE` when a record for it is already in
+ *   `ActivePlaybooks`, because that playbook renews only through a values referendum
+ *   (06 §6.3) while every other one renews in place.
+ * - **`TooManyReviews`** — `dispatch` refuses at 128 open review records.
+ *
+ * The first two were `blocking` entries citing SQ-1030 for one day. **Contract v30 froze both
+ * maps in 02 §7.4, so they are gone**: `O-3` declares `storage.guardian.playbook_registered`
+ * and `storage.guardian.active_playbooks` as ordinary clauses, and `guardian.ts` evaluates
+ * each refusal on the arm the runtime guards it behind. That is the retirement this list's
+ * whole design is for, and it is the third time it has run (SQ-615/616/619 at v28,
+ * SQ-598/601/730/731 at v29) — the entries did not need deleting by hand so much as they
+ * needed the freeze to exist.
+ *
+ * The scoping those two carried did **not** move into the clause list, and the difference is
+ * worth stating because it is where a reader would look for it. A clause declares a *read*
+ * and a row's clause list is fixed; the refusal is what is scoped, and it is scoped in the
+ * model (`playbookBlocks`). `ObligationScope` and `blockingObligationsFor`'s filter stay —
+ * `O-3` is one row for five powers whatever this list happens to contain today, and the
+ * machinery is what a future narrow obligation needs. It is proven by its own tests rather
+ * than by having a live user.
+ *
+ * `TooManyReviews` is `stated`, and the difference is not a severity dial. Its bound (128) has
+ * no frozen constant and its count (`Guardian.ReviewDeadlines`) is not frozen either, so it is
+ * strictly less readable than SQ-1022's `TooManyPending`, where at least the count is. Closing
+ * the approve control on a bound this far from reachable would refuse what the chain accepts —
+ * the mirror-rule defect — so it is **enumerated** instead. Enumerating it is the whole point:
+ * an unenumerated shape is how this class survived its first fix.
+ *
+ * `TooManyActivePlaybooks` sits on the same `ensure!` as `PlaybookAlreadyActive` and is
+ * **unreachable**, so it gets no entry: `dispatch` upserts by id, there are exactly six
+ * `PlaybookId` values, and the bound is six — so the length check can only fail if a seventh
+ * id existed. Declaring it would be an obligation with no reachable failure behind it, which
+ * makes the list harder to read without making the client safer.
  */
 const UNREADABLE: Partial<Readonly<Record<RowId, readonly UnreadableObligation[]>>> = {
   'O-1': [
@@ -1183,6 +1370,19 @@ const UNREADABLE: Partial<Readonly<Record<RowId, readonly UnreadableObligation[]
       'stated',
     ),
   ],
+  'O-3': [
+    unread(
+      'O-3',
+      'the chain has room for another retrospective review record',
+      '`dispatch` refuses at 128 open review records (`TooManyReviews`). Neither half is ' +
+        'readable: `Guardian.ReviewDeadlines` is not frozen and no constant publishes the ' +
+        'bound — strictly worse than SQ-1022, where the count at least is. Stated rather ' +
+        'than blocking, because closing the approve control on a bound this far from ' +
+        'reachable would refuse what the chain accepts.',
+      'SQ-1022',
+      'stated',
+    ),
+  ],
 };
 
 /**
@@ -1196,9 +1396,60 @@ export function unreadableObligationsFor(id: RowId): readonly UnreadableObligati
   return UNREADABLE[id] ?? [];
 }
 
-/** The obligations that close a control rather than being stated beside it. */
-export function blockingObligationsFor(id: RowId): readonly UnreadableObligation[] {
-  return unreadableObligationsFor(id).filter((entry) => entry.disposition === 'blocking');
+/**
+ * Whether an obligation speaks about the action a control would take.
+ *
+ * **One predicate, because the two lists that consult it diverged.** Scoping was added to
+ * `blockingObligationsFor` alone, so the approve control *opened* for a `pause_intake`
+ * approval while the caveat panel beside it still said playbook registration and an active
+ * `PB-LEDGER-FREEZE` record could not be checked — conditions that approval's dispatch never
+ * evaluates. That is the same defect one layer up: the control opens and the copy describes
+ * somebody else's dispatch. A second filter written beside the first is how the halves came
+ * apart, so there is now one.
+ *
+ * Omitting `subject` keeps **every** obligation, which is the conservative reading and the
+ * right default: a caller that cannot say which power it is approving has not shown that the
+ * narrow ones do not apply, and an obligation dropped on an unproven premise is the fail-open
+ * shape this whole list exists to prevent. The guardian console omits it precisely once —
+ * when the pending power is `undecodable` — and that is the case where keeping them is right.
+ *
+ * A scoped obligation is dropped only on a **positive match failure**: the subject names a
+ * power, and it is not the power the pallet guards the condition behind.
+ */
+export function obligationAppliesTo(
+  entry: UnreadableObligation,
+  subject?: ObligationScope,
+): boolean {
+  if (entry.scope === undefined || subject === undefined) return true;
+  if (entry.scope.power !== subject.power) return false;
+  return entry.scope.playbook === undefined || entry.scope.playbook === subject.playbook;
+}
+
+/**
+ * Every obligation this row carries **for this action**, blocking and stated alike.
+ *
+ * This is the list a console displays. It is filtered on **scope, never on disposition**:
+ * a `stated` obligation does not close the control and must still be shown, because the
+ * whole point of `stated` is that the verdict beside it is known to be partial.
+ */
+export function scopedObligationsFor(
+  id: RowId,
+  subject?: ObligationScope,
+): readonly UnreadableObligation[] {
+  return unreadableObligationsFor(id).filter((entry) => obligationAppliesTo(entry, subject));
+}
+
+/**
+ * The obligations that close a control rather than being stated beside it.
+ *
+ * The scope filter is `scopedObligationsFor`'s, so this list and the displayed one cannot
+ * disagree about which action they describe.
+ */
+export function blockingObligationsFor(
+  id: RowId,
+  subject?: ObligationScope,
+): readonly UnreadableObligation[] {
+  return scopedObligationsFor(id, subject).filter((entry) => entry.disposition === 'blocking');
 }
 
 /** 11 §11.5's table, as data. */

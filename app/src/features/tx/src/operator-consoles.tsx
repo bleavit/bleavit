@@ -763,8 +763,26 @@ export function RegistryFilingForm({
       <Field label="Your free balance">
         <Amount datum={inputs.freeUsdc} decimals={decimals} symbol={symbol} />
       </Field>
+      {/* `file`'s second and fifth arguments, rendered as plain text because both are form
+          values rather than chain reads — the same reason the panel title is not badged. They
+          are here because a value the model carries and no screen shows is the shape this
+          client keeps finding (V-169): the class decides what the claim *is*, and the version
+          decides what it is scored against. The admissible class set is the instance's own —
+          `validate_class` — and the union makes the other instance's set unbuildable. */}
+      <Field label="Class">
+        <span>{inputs.kind === 'incident' ? inputs.class : `Scope ${inputs.class.scope}`}</span>
+      </Field>
+      {/* The version and the epoch come from the key the `ClosedAt` read was taken under —
+          `FilingInputs` holds no second copy (2026-08-09). So the number on screen is the
+          number the precondition was evaluated for, and the one an encoder must emit. */}
+      <Field label="Epoch this filing is against">
+        <span>{String(inputs.epochClosed.subject.epoch)}</span>
+      </Field>
+      <Field label="MetricSpec version this filing names">
+        <span>{String(inputs.epochClosed.subject.specVersion)}</span>
+      </Field>
       <Field label="Filings this epoch">
-        <Count datum={inputs.filingsUsed} />
+        <Count datum={inputs.filingsUsed.used} />
         <Count datum={inputs.filingsBound} name="of" />
       </Field>
 

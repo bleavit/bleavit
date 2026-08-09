@@ -102,7 +102,25 @@ export const WITHDRAW_IDENTITIES: readonly ['proposer', 'funder'] = Object.freez
  */
 declare const funderBrand: unique symbol;
 
-export interface FunderReads {
+/**
+ * The marker that makes the pairing survive **editing**, not only assembly (2026-08-09).
+ *
+ * The symbol above stops the literal. It does not stop `{ ...reads, freeBalance: somebody
+ * else's }`, which needs no cast and keeps the brand — and `account` still matches
+ * `inputs.funder`, so `WrongSubjectError` never fires. That is a wrong-subject admission on a
+ * **bonded** control: `proposalBlocks` blocks when `freeBalance.value < classBond.value` and
+ * when `entriesThisEpoch.value >= maxPerAccount.value`, so a substituted read on either field
+ * skips the block and offers a submission the chain refuses after the bond is committed.
+ *
+ * TypeScript drops `#private` members from a spread type, which is the whole mechanism. See
+ * `ProducedByEpochClosure` in `registry-filing.ts` for the argument
+ * (`tests/firewall/fixtures/funder-reads-rebound-by-spread.ts`).
+ */
+declare class ProducedByFunderReads {
+  readonly #producedByFunderReads: true;
+}
+
+export interface FunderReads extends ProducedByFunderReads {
   /** The account these were read for. Compared against the declared funder. */
   readonly account: string;
   /**
