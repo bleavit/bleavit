@@ -4736,6 +4736,22 @@
       }
     },
     {
+      "id": "storage.inflow_caps.cumulative_deposits",
+      "kind": "storage",
+      "pallet": "InflowCaps",
+      "item": "CumulativeDeposits",
+      "query": "prefix",
+      "required": true,
+      "citation": "02 §7.4; 09 §5.2",
+      "layout": {
+        "hashers": [
+          "Blake2_128Concat"
+        ],
+        "key": "sp_core::crypto::AccountId32([u8;32])",
+        "value": "u128"
+      }
+    },
+    {
       "id": "storage.ledger.baseline_vaults",
       "kind": "storage",
       "pallet": "ConditionalLedger",

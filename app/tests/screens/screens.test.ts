@@ -2453,9 +2453,23 @@ test('the bootstrap caps read a bit, and an unreadable cap blocks (V-115, D-13)'
 
   const overGlobal = depositBlocks(DEPOSIT({
     bootstrapPhase: true,
-    caps: { globalTvlHeadroom: finalized(1_000n), perAccountHeadroom: finalized(999_000_000n) },
+    caps: {
+      // 1,000 base units of global headroom against a 10,000,000 deposit; the per-account
+      // cap is wide, so exactly one of the two rows may fire.
+      globalTvlCap: finalized(1_000_000n),
+      totalIssuance: finalized(999_000n),
+      perAccountCap: finalized(999_000_000n),
+      accountCumulative: finalized(0n),
+    },
   }));
   assert.ok(overGlobal.some((b) => b.check === 'Global TVL cap'));
+  assert.ok(!overGlobal.some((b) => b.check === 'Per-account deposit cap'));
+  // The cap travels as a badged datum, never interpolated into the sentence — §11.9.1's
+  // "with the cap shown" and INV-FE-9 together (the screen suite renders it).
+  const globalRow = overGlobal.find((b) => b.check === 'Global TVL cap');
+  assert.equal(globalRow?.figures?.[0]?.amount.value, 1_000_000n);
+  assert.equal(globalRow?.figures?.[0]?.amount.status.kind, 'verified-finalized');
+  assert.ok(!/1000000|1,000,000/.test(globalRow?.detail ?? ''), 'the cap was interpolated unbadged');
 
   // Outside bootstrap the caps do not apply at all — so the control is not vacuous.
   assert.deepEqual(depositBlocks(DEPOSIT({ bootstrapPhase: false })), []);
@@ -7301,6 +7315,165 @@ test('a real block DOES disable it, so the warning test is not vacuous', () => {
   assert.ok(buttonDisabled(html, 'Deposit'), html);
   assert.match(html, /data-severity="danger"/);
   assert.match(html, /blocked rather than offering to send anyway/);
+});
+
+/* ------------------------------------------- D-13's exposure caps on screen (11 §11.9.1) */
+
+/**
+ * The `data-status` of the badged datum whose text contains `needle`.
+ *
+ * Splitting on the datum's own opening tag bounds each chunk at the next datum, so a value
+ * found here really is inside that badge rather than merely somewhere after it. Reading the
+ * status is the point: §11.9.1 requires the cap **shown**, and INV-FE-9 requires whatever is
+ * shown to carry its provenance — a number in the refusal sentence would satisfy the first
+ * and silently fail the second.
+ */
+function datumStatusFor(html: string, needle: string): string | undefined {
+  for (const chunk of html.split('<span class="datum"').slice(1)) {
+    if (chunk.includes(needle)) return /^ data-status="([^"]+)"/.exec(chunk)?.[1] ?? undefined;
+  }
+  return undefined;
+}
+
+/** 2,000,000 USDC of global cap against 1,999,999 issued — one USDC of headroom. */
+const CAPS_TIGHT_GLOBAL = {
+  globalTvlCap: finalized(2_000_000_000_000n),
+  totalIssuance: finalized(1_999_999_000_000n),
+  perAccountCap: finalized(20_000_000_000n),
+  accountCumulative: finalized(0n),
+};
+/** 20,000 USDC of per-account cap against 19,999.999 already deposited. */
+const CAPS_TIGHT_ACCOUNT = {
+  globalTvlCap: finalized(2_000_000_000_000n),
+  totalIssuance: finalized(0n),
+  perAccountCap: finalized(20_000_000_000n),
+  accountCumulative: finalized(19_999_999_000n),
+};
+
+const depositHtml = (over: Partial<DepositInputs>): string =>
+  renderToStaticMarkup(
+    h(DepositForm, {
+      inputs: DEPOSIT_SCREEN(over),
+      xcmHealthy: true,
+      decimals: 6,
+      symbol: 'USDC',
+      onDeposit: () => {},
+    }),
+  );
+
+test('bit 4 CLEAR leaves the caps unconsulted, however tight they are', () => {
+  // §11.10's normative correction: the condition is `PhaseFlags` bit 4, and D-13's containment
+  // exists for the sudo window alone. A client that applied the caps outside it would refuse
+  // deposits the chain accepts — the mirror failure 15 §4.8 forbids, and the one a fail-closed
+  // reader makes easy to reach by accident.
+  const html = depositHtml({ bootstrapPhase: false, caps: CAPS_TIGHT_GLOBAL });
+  assert.ok(!html.includes('Global TVL cap'), html);
+  assert.ok(!html.includes('Per-account deposit cap'), html);
+  assert.ok(!buttonDisabled(html, 'Deposit'), 'the caps were applied outside the sudo window');
+});
+
+test('bit 4 SET and under both caps does not block — the control is not vacuous', () => {
+  const html = depositHtml({
+    bootstrapPhase: true,
+    caps: {
+      globalTvlCap: finalized(2_000_000_000_000n),
+      totalIssuance: finalized(1_000_000_000n),
+      perAccountCap: finalized(20_000_000_000n),
+      accountCumulative: finalized(1_000_000n),
+    },
+  });
+  assert.ok(!html.includes('data-severity="danger"'), html);
+  assert.ok(!buttonDisabled(html, 'Deposit'), 'a lawful bootstrap-era deposit was refused');
+});
+
+test('over the GLOBAL cap blocks with the cap shown, badged (11 §11.9.1 D-13)', () => {
+  // "a deposit that would exceed either is blocked **with the cap shown**". The number is the
+  // assertion, not the presence of a block: a refusal that names no figure leaves the user
+  // unable to tell whether to deposit less or not at all.
+  const html = depositHtml({ bootstrapPhase: true, caps: CAPS_TIGHT_GLOBAL });
+  assert.ok(buttonDisabled(html, 'Deposit'), html);
+  assert.match(html, /data-severity="danger"/);
+  assert.match(html, /Global TVL cap/);
+  assert.match(html, /Bootstrap cap on USDC issued here/);
+  assert.match(html, /2,000,000\.000000 USDC/, 'the cap itself was not rendered');
+  // Both terms of the runtime's own check, so the user can see the gap rather than trust ours.
+  assert.match(html, /USDC issued here so far/);
+  assert.match(html, /1,999,999\.000000 USDC/);
+  assert.equal(datumStatusFor(html, '2,000,000.000000 USDC'), 'verified-finalized');
+  assert.equal(datumStatusFor(html, '1,999,999.000000 USDC'), 'verified-finalized');
+  // The per-account cap is untouched here, so the two rows cannot be one row wearing two names.
+  assert.ok(!html.includes('Per-account deposit cap'), html);
+});
+
+test('over the PER-ACCOUNT cap blocks with that cap shown, and only that row', () => {
+  const html = depositHtml({ bootstrapPhase: true, caps: CAPS_TIGHT_ACCOUNT });
+  assert.ok(buttonDisabled(html, 'Deposit'), html);
+  assert.match(html, /Per-account deposit cap/);
+  assert.match(html, /Bootstrap cap per account/);
+  assert.match(html, /20,000\.000000 USDC/, 'the per-account cap itself was not rendered');
+  assert.match(html, /Your deposits so far/);
+  assert.match(html, /19,999\.999000 USDC/);
+  assert.equal(datumStatusFor(html, '20,000.000000 USDC'), 'verified-finalized');
+  assert.ok(!html.includes('Global TVL cap'), html);
+});
+
+test('an exactly-fitting deposit is admitted, because the chain admits it', () => {
+  // 09 §5.2 is `used + amount <= cap`, not `<`. A client using the strict comparison would
+  // refuse the last lawful deposit under each cap — refusing what the chain accepts, again.
+  const exact = depositHtml({
+    bootstrapPhase: true,
+    amount: 1_000_000n,
+    caps: {
+      globalTvlCap: finalized(2_000_000_000_000n),
+      totalIssuance: finalized(1_999_999_000_000n),
+      perAccountCap: finalized(20_000_000_000n),
+      accountCumulative: finalized(19_999_000_000n),
+    },
+  });
+  assert.ok(!buttonDisabled(exact, 'Deposit'), exact);
+
+  // One base unit more, and both rows fire — so the boundary above is a boundary.
+  const over = depositHtml({
+    bootstrapPhase: true,
+    amount: 1_000_001n,
+    caps: {
+      globalTvlCap: finalized(2_000_000_000_000n),
+      totalIssuance: finalized(1_999_999_000_000n),
+      perAccountCap: finalized(20_000_000_000n),
+      accountCumulative: finalized(19_999_000_000n),
+    },
+  });
+  assert.match(over, /Global TVL cap/);
+  assert.match(over, /Per-account deposit cap/);
+});
+
+test('a chain already OVER cap refuses even a one-unit deposit', () => {
+  // The meter must be in the comparison. A check that read the amount against the cap alone
+  // would admit a small deposit onto a chain already past its bootstrap ceiling, which is the
+  // state D-13 exists for — and 09 §5.2's mint step would then refuse the transfer with
+  // nothing credited, after the user signed on Asset Hub.
+  const html = depositHtml({
+    bootstrapPhase: true,
+    amount: 1n,
+    caps: {
+      globalTvlCap: finalized(2_000_000_000_000n),
+      totalIssuance: finalized(2_000_000_000_001n),
+      perAccountCap: finalized(20_000_000_000n),
+      accountCumulative: finalized(0n),
+    },
+  });
+  assert.match(html, /Global TVL cap/, html);
+  assert.ok(buttonDisabled(html, 'Deposit'), html);
+});
+
+test('a cap that could not be READ still fails closed, and says so', () => {
+  // The fail-closed answer is unchanged by SQ-1034 — what changed is what it means. Before the
+  // reader existed it meant "no reader exists" and no chain could ever satisfy the row; now it
+  // means a read was attempted and did not arrive.
+  const html = depositHtml({ bootstrapPhase: true });
+  assert.ok(buttonDisabled(html, 'Deposit'), html);
+  assert.match(html, /Phase-3 exposure caps/);
+  assert.match(html, /blocked rather than proceeding without the limit/);
 });
 
 test('"sent" is never rendered as "arrived", and the block says which chain it is', () => {

@@ -128,6 +128,7 @@ const SURFACES: readonly (readonly [string, string, string])[] = [
   ['storage.identity.parachain_id.json', 'ParachainInfo', 'ParachainId'],
   ['storage.identity.usdc_asset.json', 'ForeignAssets', 'Asset'],
   ['storage.identity.usdc_metadata.json', 'ForeignAssets', 'Metadata'],
+  ['storage.inflow_caps.cumulative_deposits.json', 'InflowCaps', 'CumulativeDeposits'],
   ['storage.ledger.baseline_vaults.json', 'ConditionalLedger', 'BaselineVaults'],
   // Contract v29 (SQ-730): the I-4 drift latch a `PB-LEDGER-FREEZE` activation is
   // admissible under. A `StorageValue`, so its **complete** key is the 32-byte
@@ -259,7 +260,7 @@ test('the table covers EVERY recorded storage surface, not a chosen subset', () 
   assert.equal(named.size, SURFACES.length, 'the table names a fixture twice');
 });
 
-test('the corpus is 80 prefixes and exactly 2 full keys — measured, not assumed (V-159)', () => {
+test('the corpus is 81 prefixes and exactly 2 full keys — measured, not assumed (V-159)', () => {
   // What the corpus actually contains, counted. An earlier version of this suite asserted
   // that *every* recorded key was a 32-byte prefix; that was false, and it passed only
   // because it inspected the first request per file. Two files record a second,
@@ -290,6 +291,13 @@ test('the corpus is 80 prefixes and exactly 2 full keys — measured, not assume
   // a `StorageValue` whose complete key *is* the 32-byte prefix, while `PlaybookRegistered`
   // is a real `Blake2_128Concat` map the recorder read with `descendantsValues` — so its
   // hasher is still never exercised here. Reach is unchanged again.
+  //
+  // 80 -> 81 with F28's D-13 work, which recorded `InflowCaps.CumulativeDeposits` — frozen in
+  // 02 §7.4 since contract v6 and absent from the manifest until now, which is what made 11
+  // §11.9.1's D-13 row unpassable (SQ-1034). The caveat holds a fourth time: it is a real
+  // `Blake2_128Concat` map, and the recorder read it with `descendantsValues`, so its hasher
+  // is **not** exercised here and this suite's reach is unchanged. The number moves because
+  // the corpus grew, not because the claim did.
   const prefixes: string[] = [];
   const full: { file: string; key: string }[] = [];
   for (const [file] of SURFACES) {
@@ -298,7 +306,7 @@ test('the corpus is 80 prefixes and exactly 2 full keys — measured, not assume
       else full.push({ file, key });
     }
   }
-  assert.equal(prefixes.length, 80, 'the number of recorded map-prefix reads changed');
+  assert.equal(prefixes.length, 81, 'the number of recorded map-prefix reads changed');
   assert.equal(full.length, 2, 'the number of recorded single-entry reads changed');
   assert.deepEqual(
     full.map((f) => f.file).sort(),

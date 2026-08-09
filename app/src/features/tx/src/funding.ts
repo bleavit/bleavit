@@ -31,6 +31,20 @@
  * in the spec (V-115) and read here as bit 4 via `sudoActive`-style testing, supplied by
  * the caller as a boolean so this module names no bit itself.
  *
+ * ## The caps are the runtime's own two terms, not a headroom somebody computed
+ *
+ * {@link DepositCaps} carries **four** reads, because 09 §5.2's two admission checks are
+ * each a cap against a live meter: `phase3.tvl_cap` bounds *total local USDC issuance*
+ * (`ForeignAssets.Asset(USDC).supply`) and `phase3.dep_cap` bounds *this account's
+ * cumulative inflow* (`InflowCaps.CumulativeDeposits(who)`). The predicate below is the
+ * runtime's, term for term — `used + amount <= cap` — so the unbounded sentinel needs no
+ * constant written into this client (13 §2's sentinel is *"the maximum representable value of
+ * the key's `Balance` type"*, which app rule 7 forbids the frontend from spelling out).
+ *
+ * Carrying the cap rather than a pre-subtracted headroom is what makes §11.9.1's *"blocked
+ * with the cap shown"* reachable: a headroom is a number the client derived, and a screen
+ * given only that has nothing to show the user but its own arithmetic.
+ *
  * ## Two `[VERIFY]`s are respected, not assumed away
  *
  * §11.9.1 carries **[VERIFY exact AH extrinsic + params]** and **[VERIFY asset id 1337]**.
@@ -40,10 +54,86 @@
 
 import type { Verified } from '@bleavit/shared-types';
 
+/**
+ * A chain figure a refusal turns on, carried so the screen can badge it.
+ *
+ * The figure travels as the `Verified<bigint>` a read produced rather than interpolated into
+ * {@link FundingBlock.detail}, and that is INV-FE-9 rather than presentation taste: a number
+ * inside a sentence has no `status` for `ProvenanceBadge` to switch on, so it reaches the
+ * user as an unlabelled assertion by this client. `check-render-provenance`'s own note on
+ * rule C says the repair in as many words — *"a value that genuinely belongs in the sentence
+ * is rendered as a `Verified<T>` beside it through a `ui` component"*.
+ */
+export interface FundingFigure {
+  readonly label: string;
+  readonly amount: Verified<bigint>;
+}
+
 /** A reason a funding leg cannot proceed. Each is shown with what it read. */
 export interface FundingBlock {
   readonly check: string;
   readonly detail: string;
+  /**
+   * The reads this refusal was decided on, each badged where it renders.
+   *
+   * Optional because most refusals turn on figures the screen already shows above them (the
+   * Asset Hub balance) or on values that are not chain reads at all (the amount the user
+   * typed, the release-pinned `min_balance`). D-13's two rows are the case §11.9.1 states an
+   * explicit display obligation for.
+   */
+  readonly figures?: readonly FundingFigure[];
+}
+
+/**
+ * The four live figures 09 §5.2's two Phase-3 admission checks are made of.
+ *
+ * Every field is a **read**, never a difference. That is what makes the refusal showable: a
+ * headroom is a number this client computed, and §11.9.1 requires the *cap* on screen. All
+ * four come from the same local reader at one pin — `readDepositCaps` produces them together
+ * and `readDepositInputs` refuses a set read on any other chain (`WrongChainInputError`).
+ */
+export interface DepositCaps {
+  /** `phase3.tvl_cap` — 13 §1, the global cap on total local USDC issuance (09 §5.2). */
+  readonly globalTvlCap: Verified<bigint>;
+  /**
+   * Total local USDC issuance — `ForeignAssets.Asset(USDC).supply`, 02 §8.
+   *
+   * The term `phase3.tvl_cap` actually bounds. 09 §5.2 amended the base to *total local
+   * issuance* under SQ-111 precisely because a holdings base made the inflow-leg check
+   * vacuous, so a client bounding anything else would be checking a cap the chain does not
+   * enforce.
+   */
+  readonly totalIssuance: Verified<bigint>;
+  /** `phase3.dep_cap` — 13 §1's canonical key for the per-account cap (13 rule 6). */
+  readonly perAccountCap: Verified<bigint>;
+  /** `InflowCaps.CumulativeDeposits(who)` — 02 §7.4, this account's Phase-3 meter. */
+  readonly accountCumulative: Verified<bigint>;
+}
+
+/**
+ * 09 §5.2's admission test, term for term: would `amount` take `used` past `cap`?
+ *
+ * The runtime asks exactly this — `pallet_inflow_caps::mint_admissible` reads
+ * `issuance + amount <= tvl_cap` and `inflow_admissible` reads `cumulative + amount <=
+ * dep_cap` — and writing it the same way round is what keeps this client from owning a
+ * second version of the rule. It is `<=`, not `<`: an exactly-fitting deposit is lawful, and
+ * refusing it would be a client refusing what the chain accepts.
+ *
+ * **Written as an addition rather than as a subtracted headroom, after measurement.** The
+ * subtracted form invites a floor at zero for the already-over-cap case, and that floor is
+ * *inert*: TypeScript's `bigint` is signed and arbitrary-precision, so `amount > cap - used`
+ * is already true for every positive amount when `used` exceeds `cap`. A floor there is a
+ * guard no test can fail on — it survived the mutant that deleted it — and a guard that
+ * cannot fail is worse than none, because it reads as protection.
+ *
+ * The one place this can diverge from the runtime is the unbounded sentinel (13 §2, the
+ * maximum representable `Balance`), where the runtime *saturates* the addition and this does
+ * not. Reaching it needs `used + amount` above `2^128 - 1`, which needs issuance already
+ * within one deposit of the whole `u128` range; the divergence is toward refusing, and app
+ * rule 7 forbids the frontend from naming the constant that would close it.
+ */
+function exceeds(cap: bigint, used: bigint, amount: bigint): boolean {
+  return used + amount > cap;
 }
 
 export interface DepositInputs {
@@ -68,11 +158,15 @@ export interface DepositInputs {
   readonly minBalance: bigint;
   /** True while `Constitution.PhaseFlags` bit 4 (`sudo present`) is set — 02 §7.3, V-115. */
   readonly bootstrapPhase: boolean;
-  /** Remaining headroom under the two D-13 caps. Present only during bootstrap. */
-  readonly caps?: {
-    readonly globalTvlHeadroom: Verified<bigint>;
-    readonly perAccountHeadroom: Verified<bigint>;
-  };
+  /**
+   * The two D-13 caps and the two meters they bound — absent when a read failed.
+   *
+   * Absence means *a read was attempted and did not arrive*, and `depositBlocks` blocks on
+   * it. Until F18's remainder closed (SQ-1034) it also meant *nothing in this client reads
+   * them*, which made §11.9.1's D-13 row unpassable by construction: the fail-closed answer
+   * was correct and permanent, so the row could never be satisfied on any chain.
+   */
+  readonly caps?: DepositCaps;
   /** Whether the Asset Hub connection is synced and its descriptors compatible. */
   readonly assetHubReady: boolean;
   /** XCM channel health from the C_onchain sub-metric. */
@@ -132,16 +226,33 @@ export function depositBlocks(inputs: DepositInputs): readonly FundingBlock[] {
           'applies to it.',
       });
     } else {
-      if (inputs.amount > inputs.caps.globalTvlHeadroom.value) {
+      const { globalTvlCap, totalIssuance, perAccountCap, accountCumulative } = inputs.caps;
+      if (exceeds(globalTvlCap.value, totalIssuance.value, inputs.amount)) {
         blocks.push({
           check: 'Global TVL cap',
-          detail: `Only ${inputs.caps.globalTvlHeadroom.value} of headroom remains under the chain-wide cap.`,
+          detail:
+            'This deposit would take the USDC issued on this chain past the bootstrap cap, so ' +
+            'the chain would refuse the transfer at its mint step and nothing would be ' +
+            'credited. The cap and the issuance it is measured against are shown below.',
+          // The cap first, because §11.9.1 requires it shown; the meter beside it, because a
+          // cap on its own does not tell the user how much room is left.
+          figures: [
+            { label: 'Bootstrap cap on USDC issued here', amount: globalTvlCap },
+            { label: 'USDC issued here so far', amount: totalIssuance },
+          ],
         });
       }
-      if (inputs.amount > inputs.caps.perAccountHeadroom.value) {
+      if (exceeds(perAccountCap.value, accountCumulative.value, inputs.amount)) {
         blocks.push({
           check: 'Per-account deposit cap',
-          detail: `Only ${inputs.caps.perAccountHeadroom.value} of headroom remains on your account.`,
+          detail:
+            'This deposit would take your cumulative bootstrap-era deposits past the ' +
+            'per-account cap, so the chain would refuse the transfer before minting anything. ' +
+            'The cap and your deposits so far are shown below.',
+          figures: [
+            { label: 'Bootstrap cap per account', amount: perAccountCap },
+            { label: 'Your deposits so far', amount: accountCumulative },
+          ],
         });
       }
     }

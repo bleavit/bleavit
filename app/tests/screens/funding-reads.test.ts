@@ -11,17 +11,26 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  PHASE3_CAP_KEYS,
   SUDO_PRESENT_BIT,
   SameChainError,
   WrongChainInputError,
   depositBlocks,
   fundingReaders,
+  readDepositCaps,
   readDepositInputs,
   readWithdrawInputs,
   sudoActive,
   withdrawBlocks,
 } from '@bleavit/features-tx';
-import type { FundingDecoders, FundingKeys, FundingReader } from '@bleavit/features-tx';
+import type {
+  CapsDecoders,
+  CapsKeys,
+  CapsReader,
+  FundingDecoders,
+  FundingKeys,
+  FundingReader,
+} from '@bleavit/features-tx';
 import type { Finalized, StorageItem } from '@bleavit/chain-client';
 import { finalize } from '@bleavit/chain-client/testing';
 import type { HexString, Verified } from '@bleavit/shared-types';
@@ -168,7 +177,12 @@ test('a D-13 cap read on another chain is refused', async () => {
     () =>
       readDepositInputs(pair(), KEYS, DECODERS, {
         ...PARAMS,
-        caps: { globalTvlHeadroom: onAh(1n), perAccountHeadroom: onAh(1n) },
+        caps: {
+          globalTvlCap: onAh(1n),
+          totalIssuance: onAh(0n),
+          perAccountCap: onAh(1n),
+          accountCumulative: onAh(0n),
+        },
       }),
     WrongChainInputError,
   );
@@ -182,9 +196,42 @@ test('a D-13 cap read on the local chain is accepted', async () => {
   });
   const { inputs } = await readDepositInputs(pair(), KEYS, DECODERS, {
     ...PARAMS,
-    caps: { globalTvlHeadroom: onLocal(9n), perAccountHeadroom: onLocal(9n) },
+    caps: {
+      globalTvlCap: onLocal(9n),
+      totalIssuance: onLocal(0n),
+      perAccountCap: onLocal(9n),
+      accountCumulative: onLocal(0n),
+    },
   });
-  assert.equal(inputs.caps?.globalTvlHeadroom.value, 9n);
+  assert.equal(inputs.caps?.globalTvlCap.value, 9n);
+});
+
+test('EVERY cap leaf is chain-checked, not just the first', async () => {
+  // The loop that checks them is the whole control, and a loop over a subset passes every
+  // assertion above. A meter read on Asset Hub is exactly as wrong as a cap read there —
+  // `phase3.tvl_cap` bounds *this* chain's issuance, so a foreign supply figure would report
+  // headroom that has nothing to do with the chain the deposit lands on.
+  const onLocal = (value: bigint): Verified<bigint> => ({
+    value,
+    status: { kind: 'verified-finalized', chain: LOCAL_CHAIN, blockHash: `0x${'cc'.repeat(32)}`, blockNumber: 7 },
+  });
+  const onAh = (value: bigint): Verified<bigint> => ({
+    value,
+    status: { kind: 'verified-finalized', chain: AH_CHAIN, blockHash: `0x${'aa'.repeat(32)}`, blockNumber: 99 },
+  });
+  const good = {
+    globalTvlCap: onLocal(9n),
+    totalIssuance: onLocal(0n),
+    perAccountCap: onLocal(9n),
+    accountCumulative: onLocal(0n),
+  };
+  for (const field of ['globalTvlCap', 'totalIssuance', 'perAccountCap', 'accountCumulative'] as const) {
+    await assert.rejects(
+      () => readDepositInputs(pair(), KEYS, DECODERS, { ...PARAMS, caps: { ...good, [field]: onAh(1n) } }),
+      WrongChainInputError,
+      `"${field}" was not chain-checked`,
+    );
+  }
 });
 
 /* ------------------------------------------------------------------- the bit, not a number */
@@ -339,4 +386,195 @@ test('an unknown destination stays UNKNOWN — the field is present and undefine
   });
   assert.equal('destinationViable' in inputs, true, 'the three-state field was dropped');
   assert.equal(inputs.destinationViable, undefined);
+});
+
+/* --------------------------------------------------- D-13's caps (11 §11.9.1, SQ-1034) */
+
+/**
+ * A local reader that also answers `params()` — the shape `readDepositCaps` requires.
+ *
+ * The runtime-API result is a **marked** string rather than a shape, for the reason the two
+ * USDC decoders are separate: a stub that answered every call identically would let the
+ * reader ask for the wrong API and still pass. The marker is asserted below.
+ */
+function capsReader(
+  values: Readonly<Record<string, string>>,
+  chain: HexString = LOCAL_CHAIN,
+  height = 7,
+): CapsReader {
+  const at = { chain, blockHash: `0x${'11'.repeat(32)}` as HexString, blockNumber: height };
+  return {
+    at,
+    async storage(key: string): Promise<Finalized<readonly StorageItem[]>> {
+      const value = values[key];
+      return finalize(value === undefined ? [] : [{ key, value }], at);
+    },
+    async crossCheckedCall(source) {
+      return finalize({ result: `${source.api}|${source.storagePrefix}|${source.argsHex}`, witness: [] }, at);
+    },
+  };
+}
+
+const CAPS_KEYS: CapsKeys = {
+  paramsArgs: (names) => `args:${names.join(',')}`,
+  cumulativeDeposits: (who) => `local:meter:${who}`,
+  usdcAsset: () => 'local:usdc-asset',
+};
+
+/** What the `params()` stub answers with. Set per test; an omitted key is 13 rule 7's silence. */
+let PARAM_STATE: string | undefined;
+
+/** A `params()` stub reading `key=value;key=value` out of whatever the call returned. */
+function capsDecoderStub(patch: Partial<CapsDecoders> = {}): CapsDecoders {
+  return {
+    paramViews: (raw) => {
+      const body = raw.split('|')[2] ?? '';
+      if (!body.startsWith('args:')) {
+        return { ok: false, reason: `params() was called with "${body}"` };
+      }
+      const rows = (PARAM_STATE ?? '')
+        .split(';')
+        .filter((row) => row.length > 0)
+        .map((row) => {
+          const [key, value] = row.split('=');
+          return { key: String(key), value: BigInt(String(value)) };
+        });
+      return { ok: true, value: rows };
+    },
+    cumulativeDeposits: (raw) =>
+      raw.startsWith('bad') ? { ok: false, reason: 'not a u128' } : { ok: true, value: BigInt(raw) },
+    usdcAsset: (raw) =>
+      raw.startsWith('bad')
+        ? { ok: false, reason: 'not an AssetDetails' }
+        : { ok: true, value: { supply: BigInt(raw) } },
+    ...patch,
+  };
+}
+
+const CAPS_VALUES = { 'local:meter:5Grw': '4000', 'local:usdc-asset': '900000' } as const;
+
+test('the caps reader asks the runtime for BOTH 13 keys, cross-checked against Constitution.Params', async () => {
+  // 02 §9 binds the caps to `params()` "using the canonical keys in 13, combined with §7.4
+  // CumulativeDeposits", and 11 §11.4 rule 2 makes a precondition an exact chain read. The
+  // keys are the parenthesised canonical ones: `phase3.deposit_cap` is the ROW HEADING and is
+  // 18 bytes, which no ParamKey can hold — asking for it would get silence, not an error.
+  assert.deepEqual([PHASE3_CAP_KEYS.globalTvl, PHASE3_CAP_KEYS.perAccount], [
+    'phase3.tvl_cap',
+    'phase3.dep_cap',
+  ]);
+
+  PARAM_STATE = 'phase3.tvl_cap=2000000;phase3.dep_cap=20000';
+  let asked: { api: string; storagePrefix: string; argsHex?: string } | undefined;
+  const reader = capsReader(CAPS_VALUES);
+  const spy: CapsReader = {
+    ...reader,
+    async crossCheckedCall(source) {
+      asked = { ...source };
+      return reader.crossCheckedCall(source);
+    },
+  };
+  const { caps, undecodable } = await readDepositCaps(spy, CAPS_KEYS, capsDecoderStub(), { who: WHO });
+  assert.deepEqual(undecodable, []);
+  assert.equal(asked?.api, 'params');
+  assert.equal(asked?.storagePrefix, 'Constitution.Params');
+  assert.equal(asked?.argsHex, 'args:phase3.tvl_cap,phase3.dep_cap');
+  assert.equal(caps?.globalTvlCap.value, 2_000_000n);
+  assert.equal(caps?.perAccountCap.value, 20_000n);
+  assert.equal(caps?.accountCumulative.value, 4_000n);
+  assert.equal(caps?.totalIssuance.value, 900_000n);
+});
+
+test('every cap leaf carries the LOCAL reader’s pin, so readDepositInputs accepts them', async () => {
+  // The four figures are the one place a foreign value could enter the local leg, and
+  // `readDepositInputs` refuses a set stamped anywhere else. That refusal is only reachable
+  // because this reader stamps each leaf with the read that produced it.
+  PARAM_STATE = 'phase3.tvl_cap=2000000;phase3.dep_cap=20000';
+  const { caps } = await readDepositCaps(capsReader(CAPS_VALUES), CAPS_KEYS, capsDecoderStub(), {
+    who: WHO,
+  });
+  assert.ok(caps !== undefined);
+  for (const [label, leaf] of Object.entries(caps)) {
+    assert.equal(leaf.status.kind, 'verified-finalized', label);
+    assert.ok('chain' in leaf.status && leaf.status.chain === LOCAL_CHAIN, `${label} left the local chain`);
+  }
+  const { inputs } = await readDepositInputs(pair(), KEYS, DECODERS, { ...PARAMS, caps });
+  assert.equal(inputs.caps?.globalTvlCap.value, 2_000_000n);
+});
+
+test('an ABSENT deposit meter is a badged zero — the map is ValueQuery and never holds one', async () => {
+  // `pallets/inflow-caps` refuses to write a zero entry and `try_state` rejects one, so "no
+  // row" is the chain stating this account has deposited nothing. Treating it as unreadable
+  // would block every first-time depositor, which is the population the flow exists for.
+  PARAM_STATE = 'phase3.tvl_cap=2000000;phase3.dep_cap=20000';
+  const { caps, undecodable } = await readDepositCaps(
+    capsReader({ 'local:usdc-asset': '900000' }),
+    CAPS_KEYS,
+    capsDecoderStub(),
+    { who: WHO },
+  );
+  assert.deepEqual(undecodable, []);
+  assert.equal(caps?.accountCumulative.value, 0n);
+  assert.equal(caps?.accountCumulative.status.kind, 'verified-finalized');
+});
+
+test('an ABSENT USDC asset row is NOT a zero — a zero there reports the whole cap as headroom', async () => {
+  // The asymmetry with the meter above is the point, and it is the direction that matters:
+  // `phase3.tvl_cap` bounds total local issuance, so substituting `0n` would say the chain has
+  // issued nothing and admit any deposit. 02 §8 freezes the row as chain identity, so its
+  // absence is a client that cannot establish the quantity, not a chain that holds none.
+  PARAM_STATE = 'phase3.tvl_cap=2000000;phase3.dep_cap=20000';
+  const { caps, undecodable } = await readDepositCaps(
+    capsReader({ 'local:meter:5Grw': '4000' }),
+    CAPS_KEYS,
+    capsDecoderStub(),
+    { who: WHO },
+  );
+  assert.equal(caps, undefined, 'an unestablished issuance must not yield a usable cap set');
+  assert.equal(undecodable.length, 1);
+  assert.match(undecodable[0]?.label ?? '', /ForeignAssets\.Asset/);
+});
+
+test('a params() answer that OMITS a key fails closed, and says which key', async () => {
+  // 13 rule 7: `params()` skips a record whose bounds do not project, and skips a key it holds
+  // no record for. Both are silence on the wire. A client reading silence as "no cap applies"
+  // would skip D-13 on exactly the malformed-constitution chain that most needs it.
+  PARAM_STATE = 'phase3.tvl_cap=2000000';
+  const { caps, undecodable } = await readDepositCaps(
+    capsReader(CAPS_VALUES),
+    CAPS_KEYS,
+    capsDecoderStub(),
+    { who: WHO },
+  );
+  assert.equal(caps, undefined);
+  assert.equal(undecodable.length, 1);
+  assert.match(undecodable[0]?.label ?? '', /params\(phase3\.dep_cap\)/);
+});
+
+test('an undecodable read of ANY leaf leaves the whole set absent', async () => {
+  // All four or none. A screen handed one cap and not the other would run half of D-13's
+  // containment while looking like it ran all of it.
+  const cases = [
+    ['params', capsDecoderStub({ paramViews: () => ({ ok: false, reason: 'trailing bytes' }) }), CAPS_VALUES],
+    ['meter', capsDecoderStub(), { ...CAPS_VALUES, 'local:meter:5Grw': 'bad' }],
+    ['asset', capsDecoderStub(), { ...CAPS_VALUES, 'local:usdc-asset': 'bad' }],
+  ] as const;
+  for (const [label, decoders, values] of cases) {
+    PARAM_STATE = 'phase3.tvl_cap=2000000;phase3.dep_cap=20000';
+    const { caps, undecodable } = await readDepositCaps(capsReader(values), CAPS_KEYS, decoders, {
+      who: WHO,
+    });
+    assert.equal(caps, undefined, label);
+    assert.ok(undecodable.length >= 1, `${label}: the failure was not reported`);
+    // And the consequence through the model: fail-closed, with the reason the row demands.
+    const blocks = depositBlocks({
+      assetHubBalance: undefined,
+      amount: 1n,
+      assetHubFee: 0n,
+      minBalance: 0n,
+      bootstrapPhase: true,
+      assetHubReady: true,
+      xcmHealthy: true,
+    });
+    assert.ok(blocks.some((b) => b.check === 'Phase-3 exposure caps'), label);
+  }
 });
