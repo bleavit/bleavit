@@ -255,6 +255,78 @@ export async function startLightClient(options: LightClientOptions): Promise<Lig
  */
 export type SmoldotClientFactory = () => RealSmoldotClient;
 
+/**
+ * How a chain factory becomes a PAPI provider — `getSmProvider` in production.
+ *
+ * **A seam, and the R-6 review of 2026-08-08 is why it exists.** `compatProvider()` leaked
+ * two chains per retry for as long as it had existed, and the review's own diagnosis of how
+ * was that neither compat provider had a single test: the leak lives entirely in *how many
+ * times* `getSmProvider` re-invokes the factory it was handed, and that number is inside a
+ * PAPI closure no assertion can reach. Injecting the wrapper puts the count back under a
+ * test's control, which is the same shape `chain-boot.ts` uses for `start` and
+ * `compat-session.ts` for `pullFor`: the rules stay here, the SDK function arrives as an
+ * argument. Production never passes it.
+ */
+export type SmProviderFactory = typeof getSmProvider;
+
+/**
+ * The release accounting for a transient probe handle — 10 §4.1 obligation 2.
+ *
+ * Extracted so it can be tested at all. The defect it exists to prevent is a **counting**
+ * one: `getSmProvider` re-invokes its chain factory on every halt and on `onReady(null)`
+ * (this module measured 131 calls in 300 ms), each call adds a relay **and** a parachain,
+ * and a handle that remembered only the newest pair left every earlier pair syncing. That is
+ * two chains leaked per retry on a path 10 §3.2 re-runs on every `CodeUpdated`.
+ *
+ * The count lives inside a PAPI closure, so no test can reach it through `compatProvider()`.
+ * What a test *can* do is drive this directly: track three, release, and assert three stops
+ * and an empty registry. `topologies` is passed in because `stop()` walks the same array and
+ * a released topology must leave it — a handle that stopped a topology and left it listed
+ * would have it stopped twice on teardown.
+ *
+ * ## Release is latched, because the same leak is reachable one race later
+ *
+ * The probe that leaks is the **slow** one, and a slow probe is the one still inside
+ * `newTopology()` when the deadline fires. `compat-session.ts` abandons a pull after
+ * `COMPAT_PULL_DEADLINE_MS`, `classifyChain`'s `finally` releases immediately, and the pinned
+ * SDK cancels nothing: `getSmProvider`'s teardown is `() => { isRunning = false; }`, so every
+ * in-flight `getChain()` still resolves and still runs `track()`. Worse, `sm-provider` then
+ * calls `resolvedChain.remove()` on what it was handed — the **parachain alone** — so the
+ * relay chain and the `Topology` go on syncing with nothing reading them.
+ *
+ * A `track()` that only appended would therefore file those topologies under a handle whose
+ * one `release()` has already run, and `compat-boot.ts` never calls it twice. That is the
+ * original leak restored on exactly the path it was found on. So a topology arriving after
+ * release is not recorded but **given back at once**, which is the only answer that does not
+ * depend on somebody calling `release()` again.
+ */
+export function transientTopologies<T extends { stop(): void }>(
+  registry: T[],
+): { track(topology: T): void; releaseAll(): void } {
+  const mine: T[] = [];
+  let released = false;
+  const giveBack = (topology: T): void => {
+    topology.stop();
+    const at = registry.indexOf(topology);
+    if (at >= 0) registry.splice(at, 1);
+  };
+  return {
+    track(topology: T): void {
+      // Arrived after the release it should have been part of — see the header. Stopping it
+      // here is what keeps this handle's accounting total rather than merely early.
+      if (released) {
+        giveBack(topology);
+        return;
+      }
+      mine.push(topology);
+    },
+    releaseAll(): void {
+      released = true;
+      for (const topology of mine.splice(0)) giveBack(topology);
+    },
+  };
+}
+
 /** {@link LightClientOptions} with the worker replaced by the factory that produces a client. */
 export interface HostedLightClientOptions {
   readonly relay: BundledChain;
@@ -262,6 +334,8 @@ export interface HostedLightClientOptions {
   /** 10 §4.3 expert setting; local-only, never remote-configured. */
   readonly extraBootnodes?: readonly string[];
   readonly startClient: SmoldotClientFactory;
+  /** See {@link SmProviderFactory}. Defaults to PAPI's own `getSmProvider`. */
+  readonly smProvider?: SmProviderFactory;
 }
 
 /** {@link startLightClient}, for a host that has its own way to start smoldot. */
@@ -269,6 +343,7 @@ export async function startLightClientWith(
   options: HostedLightClientOptions,
 ): Promise<LightClient> {
   const client = options.startClient();
+  const smProvider = options.smProvider ?? getSmProvider;
   const topologies: Topology<RealSmoldotChain>[] = [];
   let latest: Topology<RealSmoldotChain> | undefined;
 
@@ -321,7 +396,7 @@ export async function startLightClientWith(
     }
   };
 
-  const provider = getSmProvider(async () => {
+  const provider = smProvider(async () => {
     const topology = await newTopology();
     latest = topology;
     // The transport follows the **parachain**. The relay client exists so parachain
@@ -402,7 +477,7 @@ export async function startLightClientWith(
     // `nextJsonRpcResponse()` directly and two consumers of that method race for every
     // response, so it may only be used before a provider attaches its own reader.
     openTransport: async (chain, bundled) =>
-      ChainHeadConnection.open(asTransportProvider(getSmProvider(async () => chain)), {
+      ChainHeadConnection.open(asTransportProvider(smProvider(async () => chain)), {
         // The pin, not the probe — and here the distinction has teeth the local one does
         // not: this identity is what every Asset Hub `Finalized<T>` carries, so it is what
         // stops an Asset Hub balance combining with a futarchy read (F18).
@@ -418,19 +493,32 @@ export async function startLightClientWith(
     topology,
     connectAssetHub: (bundled, connectOptions) => assetHub.connect(bundled, connectOptions),
     compatProvider() {
-      let created: Topology<RealSmoldotChain> | undefined;
+      /**
+       * **Every** topology this handle created, not the last one.
+       *
+       * `getSmProvider` wraps `getSyncProvider`, which re-invokes its chain factory on every
+       * halt and on `onReady(null)` — this module measured 131 factory calls in 300 ms. Each
+       * call runs `newTopology()`, which adds a relay **and** a parachain. A single
+       * `created` variable therefore names only the newest pair, and `release()` left every
+       * earlier pair syncing until `client.terminate()`: a leak of two chains per retry,
+       * on a path 10 §3.2 re-runs on every `CodeUpdated`.
+       *
+       * Found by the R-6 review of 2026-08-08, against the §4.1 obligation written in the
+       * same session — *"a partially transient client is worse than a persistent one,
+       * because nothing counts the remainder"*. The first version of that fix counted one.
+       */
+      const created = transientTopologies(topologies);
       return {
         // **Not** through `asTransportProvider`. That binding narrows to the read layer's
         // deliberately wider `JsonRpcProviderLike`, which PAPI's `createClient` does not
         // accept — the width flows the wrong way through the callback (see `compat.ts`). The
         // compat client is handed the provider PAPI's own type describes, unmodified.
-        provider: getSmProvider(async () => {
+        provider: smProvider(async () => {
           const topology = await newTopology();
-          created = topology;
+          created.track(topology);
           return topology.para;
         }),
         release() {
-          if (created === undefined) return;
           // **Stops the whole topology, not just the para chain.** `getSmProvider`'s
           // `disconnect` removes only the chain it was handed, and this factory adds two —
           // relay and para. Handing out the *transport's* provider instead, as the first
@@ -438,10 +526,13 @@ export async function startLightClientWith(
           // re-runs the classifier on **every** `CodeUpdated`. A transient client whose
           // transience is only partial is worse than a persistent one, because nothing counts
           // the remainder.
-          created.stop();
-          const at = topologies.indexOf(created);
-          if (at >= 0) topologies.splice(at, 1);
-          created = undefined;
+          //
+          // And **all** of them, for the same reason one layer up: see `transientTopologies`.
+          // Including the ones that are not here yet. This runs from `classifyChain`'s
+          // `finally`, so a pull abandoned at its deadline releases while the factory above
+          // is still awaiting `newTopology()` — the handle latches and stops those on
+          // arrival, because nothing calls this a second time.
+          created.releaseAll();
         },
       };
     },
@@ -455,7 +546,7 @@ export async function startLightClientWith(
         // Built here and only here, after `attachAssetHub`'s genesis probe has already run
         // on this chain — `probeGenesisHash` drives `nextJsonRpcResponse()` directly, and a
         // provider attached first would race it for every response.
-        provider: getSmProvider(async () => leg.chain),
+        provider: smProvider(async () => leg.chain),
         genesisHash: leg.genesisHash,
         release: () => {
           leg.detach();

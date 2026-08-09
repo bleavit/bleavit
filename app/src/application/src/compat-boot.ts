@@ -153,8 +153,11 @@ export async function classifyAssetHubFor(
    * `ChainHeadConnection` of its own. That is the right source and not merely the available
    * one: it is the runtime of the finalized head the deposit preconditions are read at, so
    * the verdict and the reads describe the same block. `undefined` — no Asset Hub connection
-   * open, or none that has reported a finalized block — yields `unsupported` with a named
-   * reason rather than a guess, which is 02 §7.7's fail-closed direction.
+   * open, or none that has reported a finalized block — yields **`unestablished`** under
+   * `FE-COMPAT-003` rather than a guess, which is 02 §7.7's fail-closed direction. It read
+   * `unsupported` until the second-round review of 2026-08-09, and that was the wrong half of
+   * the fail-closed pair: both block the deposit, but `unsupported` publishes *"load a newer
+   * release"* as the recovery for a runtime nothing read (10 §5.2, §9.4).
    */
   runtime: RuntimeVersionReport | undefined,
   /**

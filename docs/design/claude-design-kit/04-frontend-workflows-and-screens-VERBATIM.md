@@ -1,16 +1,10 @@
 > **DERIVED COPY for design-tool context — DO NOT EDIT.**
 > Verbatim copy of `docs/architecture/11-frontend-workflows.md` (the source of truth),
-> regenerated 2026-08-08 at integration contract **v30**, picking up the guardian
-> console's two repaired preconditions: §11.8.2's propose row now states that an
-> allowance meter is a **pair** — `Guardian.Allowances` carries the used counters and
-> the four new `Guardian::*Allowance*` metadata constants carry the limits, with the
-> `pause_intake` half windowed rather than per-epoch — and its approve row states the
-> two refusals the runtime raises only on the **dispatching** approval,
-> `PlaybookNotRegistered` and `PlaybookAlreadyActive`, against the newly frozen
-> `Guardian.PlaybookRegistered` and `Guardian.ActivePlaybooks`. Both were previously
-> unrenderable: the limits had no surface at all, so a meter could only be fabricated.
-> The v29 regeneration note follows, unchanged, because that content is still current —
-> it picked up the three amounts an
+> regenerated 2026-08-08 for the SQ-1011 ruling (F26), which added one clause to **E4**: a
+> compatibility probe that could not complete at all is a third outcome, distinct from a
+> single unprobed surface and from `read-only-incompatible` — code `FE-COMPAT-003`, no mode
+> named, no surface listed, and a retry rather than a newer release as its recovery. The
+> previous regeneration was 2026-08-07 at integration contract v29, picking up the three amounts an
 > operator commits and the chain now publishes: P-13's report bond and O-8's filing bond
 > are **read** from `bond_quote` rather than recomputed or floored, S16's claimable figure
 > comes from `treasury_streams(caller)`, `INSURANCE` is classified against
@@ -506,7 +500,7 @@ Rows E1–E14 are enumerated in [15](15-invariants-and-testing.md) §3.3 and car
 
 **E3 Returning visit after a gap.** V: coverage rendered **with its holes visible**, each labelled by provenance; no range is joined across a provenance boundary. L: forward ingestion resumes from the live pinned window. A: everything inside coverage, at its own origin's status. U: the gap itself, unless a labelled layer-2 source fills it. F: — (a gap is a normal state, not a failure). R: provider-fillable, labelled `provider` forever (10 §2.2). **The corrected promise:** a 2-hour gap (1,200 blocks) exceeds the pinned window and **cannot** be closed with verified data — the old "history continuous" promise was impossible and is withdrawn (10 §6). Gaps are never silently spliced.
 
-**E4 Returning after a runtime upgrade.** V: the compat verdict named, with the disabled surfaces listed by name rather than a single "some features unavailable". A: whatever `full`/`restricted` admits, per the 10 §5.2 lattice over `CRITICAL_SURFACE`. U: the named surfaces. F: `read-only-incompatible` is about the **`spec_version`**, not about how much broke, and an **unprobed** surface is refused rather than counted as passing; a `Partial` compatibility level is **not** a pass. R: obtain a release supporting the new runtime — and the window is bounded by 10 §5.3.
+**E4 Returning after a runtime upgrade.** V: the compat verdict named, with the disabled surfaces listed by name rather than a single "some features unavailable". A: whatever `full`/`restricted` admits, per the 10 §5.2 lattice over `CRITICAL_SURFACE`. U: the named surfaces. F: `read-only-incompatible` is about the **`spec_version`**, not about how much broke, and an **unprobed** surface is refused rather than counted as passing; a `Partial` compatibility level is **not** a pass. A probe that could not complete **at all** is a third thing again — `FE-COMPAT-003`, 10 §3.1's `CompatUnavailable`: no mode is named, **no** surface is listed as disabled because none was examined, signing is unavailable, and the previously established mode is not carried across the upgrade. R: obtain a release supporting the new runtime — and the window is bounded by 10 §5.3. For `FE-COMPAT-003` there is no newer release to obtain and nothing for the user to enable, so the recovery is the retry 10 §3.1 schedules.
 
 **E5 Deep link to an old proposal.** V: the proposal at whatever depth is retained, with its provenance; beyond the layer-1 ring, the record is labelled as outside retained history rather than rendered as absent. A: anything within the 32-cohort ring and the pinned window. U: detail beyond it, subject to UX-D7 (15 §3.3) — degradable, never structurally impossible for everyone. F: — . R: enable a labelled provider, or accept the bounded view.
 

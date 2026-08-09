@@ -38,6 +38,7 @@ import {
   type PulledSurface,
 } from '@bleavit/application';
 import type { RuntimeVersionReport } from '@bleavit/chain-client';
+import { DOC_10, architecture, theLineContaining } from './spec-sources.ts';
 
 const PRIMARY = SUPPORTED_RUNTIMES.find((r) => r.role === 'primary');
 const RECOVERY = SUPPORTED_RUNTIMES.find((r) => r.role === 'recovery');
@@ -479,6 +480,69 @@ test('an Asset Hub runtime this release has no descriptors for is `unsupported`,
   assert.equal(assetHubCompatible(verdict), false);
 });
 
+test('a reachable Asset Hub whose runtime could not be read is `unestablished`, never `unsupported`', async () => {
+  // **The two verdicts publish two different recoveries and only one of them can be right.**
+  // `unsupported` says *this release ships no descriptors — load a newer one*; `FE-COMPAT-003`
+  // says *the probe did not complete — it will be retried*. 10 §5.2 rules the case directly: a
+  // client that could not read `spec_version` *"has established nothing about the chain in
+  // front of it"*, the outcome *"belongs one layer up"*, and it enters *"neither the three-mode
+  // union"* nor *"the foreign arms"*. 10 §9.4 says the same about the code, and says it about
+  // **both** chains: `FE-COMPAT-003` is raised when *"the runtime version could not be read, or
+  // no compat surface could be pulled"*.
+  //
+  // This is a reachable state rather than a hypothetical. `finalizedRuntime()` answers
+  // `undefined` for a chain that is answering — a follow that has not initialized, an `invalid`
+  // runtime, or dropped announcements that mark the reading uncertain — and the deposit leg
+  // hands exactly that reading to this function.
+  let pulls = 0;
+  const unread = await classifyAssetHub({
+    chainLabel: AH_PIN.label,
+    genesisHash: AH_PIN.genesisHash,
+    runtime: undefined,
+    runtimeNow: () => undefined,
+    pull: async () => {
+      pulls += 1;
+      return pulled(surfaceOver(FOREIGN_SURFACE), { count: 0 });
+    },
+    pins: [AH_PIN],
+  });
+  assert.equal(unread.kind, 'unestablished');
+  assert.equal(pulls, 0, 'without a runtime version there is no descriptor set to pull');
+  assert.equal(assetHubCompatible(unread), false);
+  // The recovery is the point of the finding: nothing here may send the user after a release.
+  assert.doesNotMatch(assetHubBlockReason(unread) ?? '', /newer release/i);
+  assert.match(assetHubBlockReason(unread) ?? '', /nothing else in the app is affected/);
+
+  // **The other direction, deliberately in the same test.** A suite asserting only the case
+  // above passes against code that renamed the arm rather than narrowing it. An **observed**
+  // version outside the release set is still `unsupported`, and for that one *"load a newer
+  // release"* is the true recovery — so the narrowing has to keep it.
+  const observed = await classifyAssetHub({
+    chainLabel: AH_PIN.label,
+    genesisHash: AH_PIN.genesisHash,
+    runtime: ahRuntime(9_999_999),
+    runtimeNow: () => ahRuntime(9_999_999),
+    pull: async () => pulled(surfaceOver(FOREIGN_SURFACE), { count: 0 }),
+    pins: [AH_PIN],
+  });
+  assert.ok(observed.kind === 'classified');
+  assert.equal(observed.classification.mode, 'unsupported');
+  assert.match(assetHubBlockReason(observed) ?? '', /newer release/i);
+});
+
+test('the identity-only verdict draws the same line, for a caller that never got a runtime', async () => {
+  // `foreignIdentityVerdict` exists for a caller holding an identity and no probe, and it
+  // passes `specVersion: undefined` by construction — so the pinned, genesis-matching chain
+  // reaches the same fork one function over. The identity answers stay identity answers.
+  const matching = foreignIdentityVerdict(AH_PIN.label, AH_PIN.genesisHash, [AH_PIN]);
+  assert.equal(matching.kind, 'unestablished');
+  assert.doesNotMatch(assetHubBlockReason(matching) ?? '', /newer release/i);
+  assert.equal(assetHubCompatible(matching), false);
+  const unreachable = foreignIdentityVerdict(AH_PIN.label, undefined, [AH_PIN]);
+  assert.ok(unreachable.kind === 'classified');
+  assert.equal(unreachable.classification.mode, 'unreachable');
+});
+
 test('an Asset Hub probe that fails is `unestablished`, and the deposit row carries the reason', async () => {
   const verdict = await classifyAssetHub({
     chainLabel: AH_PIN.label,
@@ -612,4 +676,112 @@ test('the local and foreign verdicts are different types and neither answers for
   assert.ok(foreign.kind === 'classified' && foreign.classification.domain === 'foreign');
   // @ts-expect-error — a foreign classification carries no `mode` the local gate accepts.
   assert.equal(verdictAllowsSigning(foreign), false);
+});
+
+/* ------------------------------------ FE-COMPAT-003: the code the boot machine now owns */
+
+/**
+ * SQ-1011 / SQ-1012, ruled 2026-08-08.
+ *
+ * The ruling kept the lattice at three modes and gave the fourth outcome a **state** instead
+ * — 10 §3.1's `CompatUnavailable`, under a new code. The code is a literal type on the arm,
+ * so a construction site that omits it or writes another one does not compile. That makes an
+ * assertion of the literal here **vacuous**: it would restate what the compiler already
+ * proved, and it would agree with the type while both drifted from the specification
+ * together. So the expected value is **read out of doc 10** instead, and what these tests
+ * check is the one relation neither the compiler nor the document can check alone.
+ */
+function publishedCompatUnavailableCode(): string {
+  const state = theLineContaining(architecture(DOC_10), '**`CompatUnavailable`**');
+  const codes = [...new Set([...state.matchAll(/FE-COMPAT-\d{3}/g)].map((m) => m[0]))];
+  assert.deepEqual(codes.length, 1, `10 §3.1 must name exactly one code for CompatUnavailable, found ${codes.join(', ') || 'none'}`);
+  const [code] = codes;
+  assert.ok(code !== undefined);
+  return code;
+}
+
+test('every unestablished verdict this module can produce carries the code doc 10 publishes', async () => {
+  const ah = () => ({ ...AH_PIN });
+  const verdicts = [
+    // No runtime reported at all.
+    await classifyLocalRuntime({ runtime: undefined, runtimeNow: () => undefined, pullFor: async () => { throw new Error('unreachable'); } }),
+    // The pull itself failed.
+    await classifyLocalRuntime({
+      runtime: runtime(PRIMARY.specVersion),
+      runtimeNow: steady(runtime(PRIMARY.specVersion)),
+      pullFor: async () => { throw new Error('no metadata'); },
+    }),
+    // The runtime moved under the probe.
+    await classifyLocalRuntime({
+      runtime: runtime(PRIMARY.specVersion),
+      runtimeNow: steady(runtime(RECOVERY.specVersion)),
+      pullFor: async () => pulled(surfaceOver(CRITICAL_SURFACE), { count: 0 }),
+    }),
+    // The foreign half, one chain over — 02 §7.7's "unavailable or unprobed".
+    await classifyAssetHub({
+      chainLabel: ah().label,
+      genesisHash: ah().genesisHash,
+      runtime: ahRuntime(),
+      runtimeNow: () => ahRuntime(),
+      pull: async () => { throw new Error('no metadata'); },
+      pins: [ah()],
+    }),
+    // And the foreign half of the FIRST case: 10 §9.4 raises this code on either chain for
+    // *"the runtime version could not be read"*, so the reachable Asset Hub with no readable
+    // runtime carries the same code as its local twin rather than a mode.
+    await classifyAssetHub({
+      chainLabel: ah().label,
+      genesisHash: ah().genesisHash,
+      runtime: undefined,
+      runtimeNow: () => undefined,
+      pull: async () => { throw new Error('unreachable'); },
+      pins: [ah()],
+    }),
+    foreignIdentityVerdict(ah().label, ah().genesisHash, [ah()]),
+  ];
+  const unestablished = verdicts.filter((v) => v.kind === 'unestablished');
+  assert.equal(unestablished.length, verdicts.length, 'every case above is meant to be unestablished');
+  const published = publishedCompatUnavailableCode();
+  for (const verdict of unestablished) {
+    assert.equal(verdict.code, published);
+    // The reason is a diagnosis, not a code. An empty one would satisfy the assertion above
+    // and tell an operator nothing, which is the shape 10 §9.4 forbids.
+    assert.ok(verdict.reason.length > 0);
+  }
+});
+
+test('the code doc 10 §3.1 publishes is inside the range §9.4 declares', () => {
+  const published = publishedCompatUnavailableCode();
+  // §9.4's taxonomy line read `FE-COMPAT-001..002` until the ruling. A code outside the
+  // declared range is one no error table can own, and the two lines are far enough apart in
+  // the document that only a check binds them. Parsed rather than matched against a literal,
+  // so extending the family again keeps this test honest instead of merely green.
+  const taxonomy = theLineContaining(architecture(DOC_10), 'Error taxonomy: as reviewed');
+  const range = /`FE-COMPAT-(\d{3})\.\.(\d{3})`/.exec(taxonomy);
+  assert.ok(range, `10 §9.4 declares no FE-COMPAT range: ${taxonomy}`);
+  const [, low, high] = range;
+  const ordinal = Number(published.slice('FE-COMPAT-'.length));
+  assert.ok(ordinal >= Number(low) && ordinal <= Number(high), `${published} is outside FE-COMPAT-${low}..${high}`);
+});
+
+test('10 §3.1 states the two clauses the ruling turns on, and the client obeys both', async () => {
+  const state = theLineContaining(architecture(DOC_10), '**`CompatUnavailable`**');
+  // Clause 1 — no surface may be named as disabled, because none was examined. A client that
+  // listed surfaces here would fabricate exactly the finding the coverage refusal one layer
+  // up exists to prevent.
+  assert.match(state, /no surface is named as disabled/i);
+  // Clause 2 — the state is non-terminal and retries, which is what distinguishes it from
+  // `WrongChain`. Both are read from the document rather than restated.
+  assert.match(state, /non-terminal/i);
+  assert.match(state, /retries into `CompatCheck`/);
+  // And the client's own half of clause 1: an unestablished verdict proves no surface and
+  // permits no signature. Driven through the real predicates, not asserted about the shape.
+  const verdict = await classifyLocalRuntime({
+    runtime: undefined,
+    runtimeNow: () => undefined,
+    pullFor: async () => { throw new Error('unreachable'); },
+  });
+  assert.equal(verdict.kind, 'unestablished');
+  assert.equal(verdictAllowsSigning(verdict), false);
+  for (const entry of CRITICAL_SURFACE) assert.equal(verdictProvesSurface(verdict, entry.id), false);
 });

@@ -31,6 +31,14 @@ export type BootState =
   | 'Ready'
   | 'ReadyRestricted'
   | 'ReadOnlyIncompatible'
+  /**
+   * 10 §3.1's fourth `CompatCheck` exit — the probe did not complete (SQ-1011, 2026-08-08).
+   *
+   * Not a mode, and the session carries **no** `compat` while it is here: each of the three
+   * modes is a claim about the runtime, and this is a claim about the client. Non-terminal,
+   * and the only edge out is back into `CompatCheck`.
+   */
+  | 'CompatUnavailable'
   | 'Degraded'
   | 'WorkerFailed'
   | 'WasmFailed'
@@ -39,8 +47,19 @@ export type BootState =
 /** 10 §3.2: the compat machine's mode is a session variable the boot machine carries. */
 export type CompatMode = 'full' | 'restricted' | 'read-only-incompatible';
 
-/** The boot error codes 10 §3.1 names. Only `FE-BOOT-003` is terminal. */
-export type BootErrorCode = 'FE-BOOT-001' | 'FE-BOOT-002' | 'FE-BOOT-003' | 'FE-BOOT-004';
+/**
+ * The error codes 10 §3.1's machine names. Only `FE-BOOT-003` is terminal.
+ *
+ * `FE-COMPAT-003` is the one member outside the `FE-BOOT` family, and it is here because
+ * §3.1 gained a state for it: the type is *the codes this machine can record*, not the codes
+ * whose names begin with `FE-BOOT`.
+ */
+export type BootErrorCode =
+  | 'FE-BOOT-001'
+  | 'FE-BOOT-002'
+  | 'FE-BOOT-003'
+  | 'FE-BOOT-004'
+  | 'FE-COMPAT-003';
 
 export type BootEvent =
   | { type: 'shell-parsed' }
@@ -57,6 +76,8 @@ export type BootEvent =
   | { type: 'genesis-matches' }
   | { type: 'genesis-mismatch' } //                      FE-BOOT-003, terminal
   | { type: 'compat-classified'; mode: CompatMode }
+  | { type: 'compat-unavailable' } //                    FE-COMPAT-003, non-terminal
+  | { type: 'compat-retry' } //                          the §3.1 backoff, 1s -> 60s
   | { type: 'health-degraded' }
   | { type: 'health-recovered' }
   | { type: 'newer-release-loaded' }
@@ -88,6 +109,38 @@ export const TERMINAL_STATES: ReadonlySet<BootState> = new Set<BootState>(['Wron
  * deliberately: 10 §5.3 makes it an *exceptional* state indicating process failure, but a
  * bounded and navigable one — it displays the newer-release pointer read from the
  * fixed-layout `ReleaseChannel` raw key, which is readable without current metadata.
+ *
+ * **`CompatUnavailable` is here because §3.1 puts it here** (added 2026-08-09). That bullet
+ * does not describe the state's surface, it *assigns* it another state's: *"the renderable
+ * surface is `WorkerFailed`'s, with the stated reason"*. Leaving it out was the SQ-1011 repair
+ * producing a silent screen in place of a wrong one — the state exists for the user whose probe
+ * never completes, and that user is exactly the one it rendered nothing to. Nothing caught it:
+ * `RENDERING_STATES` is the goal set of a *reachability* test, and `CompatCheck` can classify,
+ * so a walk out of `CompatUnavailable` reached `Ready` and reported the state healthy.
+ *
+ * `CompatCheck` is deliberately **not** here, and the distinction is *resting* rather than
+ * *passing through*. It is bounded by the probe's own timeout and always leaves — to a mode, or
+ * to `CompatUnavailable` — so a first boot sitting in it has shown the skeleton the diagram
+ * opens with and claims nothing. Adding it would also make the reachability test agree with
+ * itself for the two states this defect lived in. What a retried probe owes the user instead is
+ * continuity, and that is a property of the session rather than of the state name — see
+ * {@link rendersUsableSurface}.
+ *
+ * **`SyncDegraded` is here for the same reason, and it was the same defect** (added
+ * 2026-08-09). §3.1 grants it *"the same peer-diagnostics panel as post-`Ready` `Degraded`"*
+ * — per-bootnode dial results, the port-443 note, add-bootnode, the expert RPC option — and
+ * `Degraded` renders while this did not. The masking was identical: `SyncDegraded` walks back
+ * to `RelaySyncing` and on to `Ready`, so a reachability test found it a surface and called it
+ * healthy, while §3.1's own headline case for the state — *"cannot reach peers on first load"*
+ * — is a session that never gets there. Only `peer-acquired` moves it, and a client with no
+ * peers never fires that, so this is precisely where such a session lives.
+ *
+ * It needs no session clause, unlike the compat cycle, and the asymmetry is in the cycles
+ * rather than in the reasoning. That one *rests in the retry*, so continuity across the edge is
+ * the whole experience; this one rests in the state that renders, and its transient half is a
+ * session that has just found peers and is syncing normally — which is not when a user wants
+ * peer diagnostics. There is also no error code for peer loss to carry across the edge, and
+ * inventing a session field for a problem this cycle shape does not have is the wrong trade.
  */
 export const RENDERING_STATES: ReadonlySet<BootState> = new Set<BootState>([
   'Ready',
@@ -96,7 +149,29 @@ export const RENDERING_STATES: ReadonlySet<BootState> = new Set<BootState>([
   'ReadOnlyIncompatible',
   'WorkerFailed',
   'WasmFailed',
+  'CompatUnavailable',
+  'SyncDegraded',
 ]);
+
+/**
+ * Whether this session has a usable surface on screen, rather than the boot skeleton.
+ *
+ * Takes a session and not a bare state, because one state's answer depends on how it was
+ * reached. `CompatUnavailable` retries into `CompatCheck` on a 1 s→60 s backoff (10 §3.1), so a
+ * probe that keeps failing leaves the session cycling between the two for as long as the fault
+ * lasts. Answering from the state name alone would tear the diagnostics down on every attempt
+ * and put them back — a flicker, once per backoff, forever, on the one screen whose whole job
+ * is to explain why nothing else works.
+ *
+ * The session distinguishes the two `CompatCheck`s by the reason it is still stating: a first
+ * probe carries no compat error, and a re-probe of an unestablished one carries `FE-COMPAT-003`
+ * until a classification completes. So this adds no state, no compatibility mode, and no row to
+ * §3.2's table — the fourth outcome stays a claim about the client, exactly as §3.1 requires.
+ */
+export function rendersUsableSurface(session: BootSession): boolean {
+  if (RENDERING_STATES.has(session.state)) return true;
+  return session.state === 'CompatCheck' && session.lastError === 'FE-COMPAT-003';
+}
 
 /**
  * Signing availability. `Degraded` is a health flag orthogonal to compat (10 §3.2), so it
@@ -175,9 +250,34 @@ export function reduce(session: BootSession, event: BootEvent): BootSession {
       // The compat classifier is a lattice, not a boolean (10 §5.2): a partial pass boots
       // *directly* into restricted with named disabled surfaces rather than claiming
       // Ready and failing lazily.
-      return event.type === 'compat-classified'
-        ? at(COMPAT_TARGET[event.mode], { compat: event.mode })
+      if (event.type === 'compat-classified') {
+        // A completed classification retires `FE-COMPAT-003` and **only** that code: it is the
+        // one error this edge resolves. Clearing `lastError` outright would also erase
+        // `FE-BOOT-001`, and a session that forgot why it is memory-only would stop labelling it.
+        return at(COMPAT_TARGET[event.mode], {
+          compat: event.mode,
+          lastError: session.lastError === 'FE-COMPAT-003' ? undefined : session.lastError,
+        });
+      }
+      // The probe could not complete. **`compat` is cleared, not left**: §3.2 forbids
+      // carrying a previously established mode across a check the client was unable to
+      // make, and this arm is the only place the machine can hold a stale one.
+      return event.type === 'compat-unavailable'
+        ? at('CompatUnavailable', { compat: undefined, lastError: 'FE-COMPAT-003' })
         : session;
+
+    case 'CompatUnavailable':
+      // Non-terminal by ruling: the client retries into `CompatCheck` on the same backoff
+      // `SyncDegraded` uses. Nothing else moves it, and it names no disabled surface on the
+      // way out because nothing was examined.
+      //
+      // **The retry keeps `FE-COMPAT-003`**, unlike the `user-retry` edges below, and the
+      // asymmetry is deliberate. Those restart a boot a user asked to restart, so a cleared
+      // banner is the answer to a button. This one fires on a timer nobody pressed, and
+      // compatibility stays unestablished until a classification *completes* — so dropping the
+      // code here would retract §3.1's *"with the stated reason"* mid-cycle and, through
+      // `rendersUsableSurface`, blank the surface the retry exists to keep.
+      return event.type === 'compat-retry' ? at('CompatCheck') : session;
 
     case 'Ready':
     case 'ReadyRestricted':
@@ -198,29 +298,55 @@ export function reduce(session: BootSession, event: BootEvent): BootSession {
   }
 }
 
-/** Every (from, to) edge this reducer can take. The diagram in 10 §3.1 must equal it. */
+/**
+ * Every (from, to) edge this reducer can take. The diagram in 10 §3.1 must equal it.
+ *
+ * **Both lists below are exhaustive by the compiler, not by hand (2026-08-08).** They were
+ * plain arrays until the SQ-1011 ruling added `CompatUnavailable` and two events: the suite
+ * that binds this function to §3.1's diagram reported the two new edges as missing, and it
+ * would have reported nothing at all had the state been added here and the events forgotten.
+ * A hand-kept enumeration of a closed union is a check that stops checking the moment the
+ * union grows, so each is keyed by the union itself and a missing member fails to compile.
+ */
 export function transitionEdges(): readonly (readonly [BootState, BootState])[] {
-  const states: BootState[] = [
-    'ShellLoaded', 'StorageOpen', 'WorkerSpawn', 'ChainStarting', 'RelaySyncing',
-    'ParaSyncing', 'SyncDegraded', 'IdentityCheck', 'CompatCheck', 'Ready',
-    'ReadyRestricted', 'ReadOnlyIncompatible', 'Degraded', 'WorkerFailed',
-    'WasmFailed', 'WrongChain',
-  ];
-  const events: BootEvent[] = [
-    { type: 'shell-parsed' }, { type: 'storage-open' }, { type: 'storage-failed' },
-    { type: 'worker-up' }, { type: 'worker-failed' }, { type: 'relay-added' },
-    { type: 'wasm-failed' }, { type: 'relay-finality-verified' }, { type: 'peers-lost' },
-    { type: 'peer-acquired' }, { type: 'first-finalized-para-head' },
-    { type: 'genesis-matches' }, { type: 'genesis-mismatch' },
-    { type: 'compat-classified', mode: 'full' },
-    { type: 'compat-classified', mode: 'restricted' },
-    { type: 'compat-classified', mode: 'read-only-incompatible' },
-    { type: 'health-degraded' }, { type: 'health-recovered' },
-    { type: 'newer-release-loaded' }, { type: 'user-retry' },
-  ];
+  const everyState: Record<BootState, true> = {
+    ShellLoaded: true, StorageOpen: true, WorkerSpawn: true, ChainStarting: true,
+    RelaySyncing: true, ParaSyncing: true, SyncDegraded: true, IdentityCheck: true,
+    CompatCheck: true, Ready: true, ReadyRestricted: true, ReadOnlyIncompatible: true,
+    CompatUnavailable: true, Degraded: true, WorkerFailed: true, WasmFailed: true,
+    WrongChain: true,
+  };
+  // One entry per event *type*, holding every payload worth driving. `compat-classified`
+  // carries a mode, so it holds three; the rest hold themselves.
+  const everyEvent: Record<BootEvent['type'], readonly BootEvent[]> = {
+    'shell-parsed': [{ type: 'shell-parsed' }],
+    'storage-open': [{ type: 'storage-open' }],
+    'storage-failed': [{ type: 'storage-failed' }],
+    'worker-up': [{ type: 'worker-up' }],
+    'worker-failed': [{ type: 'worker-failed' }],
+    'relay-added': [{ type: 'relay-added' }],
+    'wasm-failed': [{ type: 'wasm-failed' }],
+    'relay-finality-verified': [{ type: 'relay-finality-verified' }],
+    'peers-lost': [{ type: 'peers-lost' }],
+    'peer-acquired': [{ type: 'peer-acquired' }],
+    'first-finalized-para-head': [{ type: 'first-finalized-para-head' }],
+    'genesis-matches': [{ type: 'genesis-matches' }],
+    'genesis-mismatch': [{ type: 'genesis-mismatch' }],
+    'compat-classified': [
+      { type: 'compat-classified', mode: 'full' },
+      { type: 'compat-classified', mode: 'restricted' },
+      { type: 'compat-classified', mode: 'read-only-incompatible' },
+    ],
+    'compat-unavailable': [{ type: 'compat-unavailable' }],
+    'compat-retry': [{ type: 'compat-retry' }],
+    'health-degraded': [{ type: 'health-degraded' }],
+    'health-recovered': [{ type: 'health-recovered' }],
+    'newer-release-loaded': [{ type: 'newer-release-loaded' }],
+    'user-retry': [{ type: 'user-retry' }],
+  };
   const edges = new Set<string>();
-  for (const state of states) {
-    for (const event of events) {
+  for (const state of Object.keys(everyState) as BootState[]) {
+    for (const event of Object.values(everyEvent).flat()) {
       const next = reduce({ ...INITIAL_SESSION, state }, event);
       if (next.state !== state) edges.add(`${state}>${next.state}`);
     }

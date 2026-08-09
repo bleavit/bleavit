@@ -119,12 +119,25 @@ export interface DrillReport {
   /**
    * 10 §5.2's lattice — `full` / `restricted` / `read-only-incompatible`.
    *
-   * `CompatVerdict.kind` is only `classified | unestablished`, so recording it alone discards
-   * the verdict: a `read-only-incompatible` runtime is `classified`, and a drill asserting
-   * only that would pass on exactly the regression it exists to catch.
+   * `CompatVerdict.kind` distinguishes only *whether* a verdict was reached — `classified`,
+   * `unestablished`, `not-attempted` — so recording it alone discards the verdict itself: a
+   * `read-only-incompatible` runtime is `classified`, and a drill asserting only that would
+   * pass on exactly the regression it exists to catch.
    */
   readonly compatMode: string | undefined;
   readonly assetHub: string | undefined;
+  /**
+   * 02 §7.7's foreign lattice — `full` / `restricted` / `unsupported` / `wrong-chain` /
+   * `unreachable`.
+   *
+   * **This field exists because the line above it was the same defect one chain over (R-6
+   * review, 2026-08-08).** `assetHub` recorded `ForeignVerdict.kind` alone, so a
+   * `wrong-chain` Asset Hub, an `unsupported` one and a `restricted` one all reported
+   * `"classified"` — and this drill is the only place `classifyForeign` runs against a real
+   * chain. The reasoning that produced `compatMode` was written down two fields up and was
+   * not carried across, which is how a fix stays local to the instance that prompted it.
+   */
+  readonly assetHubMode: string | undefined;
   readonly finalizedHash: string;
 }
 
@@ -204,6 +217,7 @@ async function bootAndClassify(
     stage(`local verdict: ${compat.kind}`);
 
     let assetHub: string | undefined;
+    let assetHubMode: string | undefined;
     if (document.assetHub !== undefined) {
       const leg = bundled(document.assetHub);
       stage('attaching Asset Hub');
@@ -235,6 +249,7 @@ async function bootAndClassify(
           compat: compat.kind,
           compatMode: compat.kind === 'classified' ? compat.classification.mode : undefined,
           assetHub: `unavailable: no genesis answer within ${timeoutSeconds}s`,
+          assetHubMode: undefined,
           finalizedHash,
         };
       }
@@ -250,6 +265,7 @@ async function bootAndClassify(
           () => connection.transport.finalizedRuntime(),
         );
         assetHub = foreign.kind;
+        assetHubMode = foreign.kind === 'classified' ? foreign.classification.mode : undefined;
       }
     }
 
@@ -261,6 +277,7 @@ async function bootAndClassify(
       compat: compat.kind,
       compatMode: compat.kind === 'classified' ? compat.classification.mode : undefined,
       assetHub,
+      assetHubMode,
       finalizedHash,
     };
   } finally {

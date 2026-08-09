@@ -243,6 +243,15 @@ export function classifyForeign(
     };
   }
 
+  // **An *unread* `spec_version` is decided one layer up, and only the floor is left here**
+  // (10 §5.2, ruled 2026-08-08; second-round review 2026-08-09). `ForeignMode` keeps five arms,
+  // all of them claims about the foreign chain, and *"the runtime version could not be read"* is
+  // a claim about the client — 10 §9.4 gives it `FE-COMPAT-003` and 10 §5.2 says it enters
+  // *"neither the three-mode union"* nor *"the foreign arms"*. So the verdict producer
+  // (`application/compat-session.ts`) answers `unestablished` for a pinned, genesis-matching
+  // chain with no runtime reading, and this function never sees that observation from it.
+  // What remains below is the fail-closed floor for a caller with no layer above it: refusing
+  // is still right, and only the published recovery would be wrong.
   if (observation.specVersion === undefined || !pin.supportedSpecVersions.includes(observation.specVersion)) {
     return {
       ...base,

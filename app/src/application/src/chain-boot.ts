@@ -74,7 +74,9 @@ export async function connectAndClassify(): Promise<{
     return {
       session,
       compat: {
-        kind: 'unestablished',
+        // `not-attempted`, not `unestablished`: 10 §3.1 reaches `CompatUnavailable` only
+        // from `CompatCheck`, and this boot never got there. See the arm's own note.
+        kind: 'not-attempted',
         reason:
           `No chain was connected, so no runtime has been checked: ${session.reasons.join(' ')} ` +
           'Everything that does not need the chain still renders (10 §3.2).',
