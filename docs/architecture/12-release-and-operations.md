@@ -33,8 +33,8 @@ Two readings are ruled out, each for its own reason. The version MUST NOT track 
 Anyone MUST be able to reproduce the verdict with no project infrastructure:
 
 ```bash
-git clone https://github.com/<org>/futarchy-app && cd futarchy-app && git checkout <commit>
-docker run --rm -v $PWD:/src futarchy/build@sha256:<digest> ./tools/release/build.sh
+git clone https://github.com/<org>/bleavit && cd bleavit && git checkout <commit>
+docker run --rm -v $PWD:/src futarchy/build@sha256:<digest> ./app/tools/release/build.sh
 # §1.4 gate 4's release notes publish everything per-release below: both §1.2 manifest
 # addresses, the release.json transaction, every credential transaction, and the
 # multi-gateway URL set. Write that URL set into a config file:
@@ -78,7 +78,9 @@ CI can neither sign nor repoint: CI holds **no** minisign keys and **no** ANT co
 
 A second, faster lane exists. It is **admissible only** for releases whose delta against the incumbent production release is confined to: `packages/descriptors/**` (including the Asset Hub descriptor set), descriptor metadata hashes and the supported `spec_version` range in `release.json`, and release metadata files (changelog, release history data). **Zero app-code delta**: every other file in the built tree MUST be byte-identical to the incumbent release.
 
-Requirements: the same reproducible build and **2 attestations** — where each attestor additionally attests to the **delta scope** (mechanically checked by `verify-release diff-scope --against <incumbent-txid>`, which byte-compares the trees and fails if any out-of-scope file differs) — then a **3-of-5 repoint**. **No staging soak is required.** The `ReleaseChannel` update sets the writer-(b)-owned `EXPEDITED` flag while preserving every guard-owned byte and bit (§3.1); every expedited release MUST be followed by a retrospective entry in the release log stating why the lane was used.
+Requirements: the same reproducible build and **2 attestations** — where each attestor additionally attests to the **delta scope** (mechanically checked by `verify-release diff-scope --against <incumbent-txid> --local dist/ --gateways gateways.json`, which byte-compares the trees and fails if any out-of-scope file differs) — then a **3-of-5 repoint**. **No staging soak is required.** The `ReleaseChannel` update sets the writer-(b)-owned `EXPEDITED` flag while preserving every guard-owned byte and bit (§3.1); every expedited release MUST be followed by a retrospective entry in the release log stating why the lane was used.
+
+**What `diff-scope` is handed, and which address `--against` takes (normative; added 2026-08-09).** `<incumbent-txid>` is the incumbent production release's **immutable** address — the manifest the name was repointed to, which §1.4 gate 4 publishes in the release notes and which §3.1 carries as `ReleaseChannel.manifest_txid`. It is **not** the asset-tree manifest `release.json` pins: §1.2's second pass is what puts `release.json` inside the immutable one, and that document's signed per-file map is what the delta is measured against. A transaction id is not a local file, so this command takes the multi-gateway URL set for the same reason §1.3 does and MUST NOT default one (§5.1). It MUST fetch the incumbent document through **every** configured gateway and MUST refuse when they disagree, rather than taking the first answer — a lane that skips the soak may not rest on one gateway's account of what the incumbent published, and a single gateway serving an incumbent map whose hash for one file happens to equal the candidate's would turn an app-code delta into an admissible descriptor-only one. The candidate is the local built tree, named as §1.3 names it (`--local <dir>`). Verifying the incumbent's own signatures is §1.3's `compare`, not this command.
 
 Rationale (honest scope): the soak exists to catch app-behavior regressions; a descriptor-only delta has no app-code surface to regress, while descriptor lateness is itself a live risk (§1.6). Any change touching app code — however small — MUST use the standard lane.
 
