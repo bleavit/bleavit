@@ -35,12 +35,25 @@ Anyone MUST be able to reproduce the verdict with no project infrastructure:
 ```bash
 git clone https://github.com/<org>/futarchy-app && cd futarchy-app && git checkout <commit>
 docker run --rm -v $PWD:/src futarchy/build@sha256:<digest> ./tools/release/build.sh
-./tools/verify-release compare --local dist/ --arweave <manifest-txid> \
-    --release-json ar://<release-json-txid> --require-attestations 2
-# fetches via ≥2 gateways with hash verification, byte-compares every file,
-# verifies minisign signatures against the published keyring, checks the
-# on-chain revocation set (§3.1) when a node is reachable, prints VERDICT
+# §1.4 gate 4's release notes publish everything per-release below: both §1.2 manifest
+# addresses, the release.json transaction, every credential transaction, and the
+# multi-gateway URL set. Write that URL set into a config file:
+#   { "gateways": [ { "name": "<operator>", "rawUrl": "https://…/{txid}",
+#                     "txUrl": "https://…/{txid}/{path}" } ] }
+./tools/verify-release compare --local dist/ \
+    --arweave <asset-manifest-txid> --final-manifest <final-manifest-txid> \
+    --release-json ar://<release-json-txid> --gateways gateways.json \
+    --signature <txid> --signature <txid> \
+    --attestation <txid> --attestation <txid> \
+    --release-channel <release-channel.bin> --require-attestations 2
+# fetches BOTH §1.2 manifest addresses via ≥2 gateways with hash verification,
+# byte-compares every file, binds the final manifest's release.json entry to the
+# signed sibling, verifies minisign signatures against the published keyring
+# (--keyring, defaulting to the in-repo one of §2.1), checks the on-chain
+# revocation set (§3.1) when a node is reachable, prints VERDICT
 ```
+
+**What the verifier is handed, and what the tool already holds (normative; added 2026-08-09).** §1.3's promise is a verdict reproducible with no *private* infrastructure, not one with no inputs. Two inputs have a fixed home this repository publishes and MUST default to it: the signer registry (§2.2 point 1) and the keyring (§2.1, *"Keyring published in-repo, in-app, and on Arweave"*). The rest describe one release rather than the project and MUST be supplied per run from gate 4's release notes: both §1.2 manifest addresses, the `release.json` transaction, every release-signature and attestation transaction, and the multi-gateway URL set. `verify-release` MUST NOT ship a default gateway set — §5.1 leaves naming gateway operators to the operator — and MUST refuse with that source and the config shape named, rather than with a bare option error. A run that cannot read the `ReleaseChannel` record MUST name the unchecked condition and MUST NOT exit 0 (§2.3 point 3).
 
 `tools/verify-release` is also published standalone. It MUST fail on any signature from a key marked revoked in the on-chain `ReleaseChannel` record (§2.3) and MUST include the signer-registry disjointness check (§2.2) in its `signers audit` subcommand.
 
@@ -91,6 +104,7 @@ Every release is a permanent Arweave transaction; per-release undernames plus in
 Two disjoint key populations:
 
 - **Release minisign keys**: sign `release.json`'s hash. Keyring published in-repo, in-app, and on Arweave. Attestor keys are minisign keys of the independent builders.
+- **An attestation signs the same message a release signature does — `release.json`'s SHA-256 hash (normative; added 2026-08-09).** §1.4 gate 2 says independent builders *"reproduce the tree hash"*, and that phrase describes the **check the builder performs**, not the message they sign. This document defines no tree hash anywhere, and it does not need one: `release.json` carries the per-file SHA-256 map, so a signature over that document's hash is already a commitment to the exact tree. Neither message would prove a rebuild in any case — an attestor could sign either value without building — so the independence claim rests where §2.2 puts it, on the two disjoint key populations, and never on the choice of message. A verifier MUST therefore verify both credential sets over the same digest, and MUST separate them by the signing key's declared **role**: a release key's signature is not an attestation, whatever it covers.
 - **ArNS controller keys**: control the ANT that resolves `futarchy` (§4.2).
 
 Both: hardware-backed, geographically distributed, documented ceremony, annual rotation with overlap; old keyrings are retained in-app for verifying historical releases, tagged by **keyring generation** (a monotonically increasing `u32` carried in `release.json` and in `ReleaseChannel`). CI holds neither population (§1.4).
