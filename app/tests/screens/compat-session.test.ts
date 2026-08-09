@@ -480,6 +480,69 @@ test('an Asset Hub runtime this release has no descriptors for is `unsupported`,
   assert.equal(assetHubCompatible(verdict), false);
 });
 
+test('a reachable Asset Hub whose runtime could not be read is `unestablished`, never `unsupported`', async () => {
+  // **The two verdicts publish two different recoveries and only one of them can be right.**
+  // `unsupported` says *this release ships no descriptors — load a newer one*; `FE-COMPAT-003`
+  // says *the probe did not complete — it will be retried*. 10 §5.2 rules the case directly: a
+  // client that could not read `spec_version` *"has established nothing about the chain in
+  // front of it"*, the outcome *"belongs one layer up"*, and it enters *"neither the three-mode
+  // union"* nor *"the foreign arms"*. 10 §9.4 says the same about the code, and says it about
+  // **both** chains: `FE-COMPAT-003` is raised when *"the runtime version could not be read, or
+  // no compat surface could be pulled"*.
+  //
+  // This is a reachable state rather than a hypothetical. `finalizedRuntime()` answers
+  // `undefined` for a chain that is answering — a follow that has not initialized, an `invalid`
+  // runtime, or dropped announcements that mark the reading uncertain — and the deposit leg
+  // hands exactly that reading to this function.
+  let pulls = 0;
+  const unread = await classifyAssetHub({
+    chainLabel: AH_PIN.label,
+    genesisHash: AH_PIN.genesisHash,
+    runtime: undefined,
+    runtimeNow: () => undefined,
+    pull: async () => {
+      pulls += 1;
+      return pulled(surfaceOver(FOREIGN_SURFACE), { count: 0 });
+    },
+    pins: [AH_PIN],
+  });
+  assert.equal(unread.kind, 'unestablished');
+  assert.equal(pulls, 0, 'without a runtime version there is no descriptor set to pull');
+  assert.equal(assetHubCompatible(unread), false);
+  // The recovery is the point of the finding: nothing here may send the user after a release.
+  assert.doesNotMatch(assetHubBlockReason(unread) ?? '', /newer release/i);
+  assert.match(assetHubBlockReason(unread) ?? '', /nothing else in the app is affected/);
+
+  // **The other direction, deliberately in the same test.** A suite asserting only the case
+  // above passes against code that renamed the arm rather than narrowing it. An **observed**
+  // version outside the release set is still `unsupported`, and for that one *"load a newer
+  // release"* is the true recovery — so the narrowing has to keep it.
+  const observed = await classifyAssetHub({
+    chainLabel: AH_PIN.label,
+    genesisHash: AH_PIN.genesisHash,
+    runtime: ahRuntime(9_999_999),
+    runtimeNow: () => ahRuntime(9_999_999),
+    pull: async () => pulled(surfaceOver(FOREIGN_SURFACE), { count: 0 }),
+    pins: [AH_PIN],
+  });
+  assert.ok(observed.kind === 'classified');
+  assert.equal(observed.classification.mode, 'unsupported');
+  assert.match(assetHubBlockReason(observed) ?? '', /newer release/i);
+});
+
+test('the identity-only verdict draws the same line, for a caller that never got a runtime', async () => {
+  // `foreignIdentityVerdict` exists for a caller holding an identity and no probe, and it
+  // passes `specVersion: undefined` by construction — so the pinned, genesis-matching chain
+  // reaches the same fork one function over. The identity answers stay identity answers.
+  const matching = foreignIdentityVerdict(AH_PIN.label, AH_PIN.genesisHash, [AH_PIN]);
+  assert.equal(matching.kind, 'unestablished');
+  assert.doesNotMatch(assetHubBlockReason(matching) ?? '', /newer release/i);
+  assert.equal(assetHubCompatible(matching), false);
+  const unreachable = foreignIdentityVerdict(AH_PIN.label, undefined, [AH_PIN]);
+  assert.ok(unreachable.kind === 'classified');
+  assert.equal(unreachable.classification.mode, 'unreachable');
+});
+
 test('an Asset Hub probe that fails is `unestablished`, and the deposit row carries the reason', async () => {
   const verdict = await classifyAssetHub({
     chainLabel: AH_PIN.label,
@@ -663,6 +726,18 @@ test('every unestablished verdict this module can produce carries the code doc 1
       pull: async () => { throw new Error('no metadata'); },
       pins: [ah()],
     }),
+    // And the foreign half of the FIRST case: 10 §9.4 raises this code on either chain for
+    // *"the runtime version could not be read"*, so the reachable Asset Hub with no readable
+    // runtime carries the same code as its local twin rather than a mode.
+    await classifyAssetHub({
+      chainLabel: ah().label,
+      genesisHash: ah().genesisHash,
+      runtime: undefined,
+      runtimeNow: () => undefined,
+      pull: async () => { throw new Error('unreachable'); },
+      pins: [ah()],
+    }),
+    foreignIdentityVerdict(ah().label, ah().genesisHash, [ah()]),
   ];
   const unestablished = verdicts.filter((v) => v.kind === 'unestablished');
   assert.equal(unestablished.length, verdicts.length, 'every case above is meant to be unestablished');

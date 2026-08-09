@@ -449,20 +449,79 @@ export interface ForeignProbeDeps {
  * rather than this function's property.
  *
  * Probing therefore happens only where a probe could mean something; {@link
- * foreignIdentityVerdict} is the same call for a caller that never got far enough to hold one.
+ * foreignIdentityVerdict} is the same decision for a caller that never got far enough to hold
+ * a probe, and it reaches it through the same {@link identitySettles} rather than a copy — a
+ * second copy of the pin comparison is a second place for the two to disagree.
  */
 export function foreignIdentityVerdict(
   chainLabel: string,
   genesisHash: string | undefined,
   pins: readonly ForeignChainPin[] = FOREIGN_CHAIN_PINS,
 ): ForeignVerdict {
+  const observed = { chainLabel, genesisHash, specVersion: undefined };
+  return identitySettles(observed, pins) ?? runtimeUnread(chainLabel);
+}
+
+/**
+ * The verdict identity alone settles, or `undefined` when it settles nothing.
+ *
+ * Three outcomes need no probe and no runtime, and `classifyForeign` owns all three: no pin
+ * (`unreachable`), no chain reached (`unreachable`), and a genesis that is not the pinned one
+ * (`wrong-chain`). Each is a claim the pin comparison can make on its own, so a surface pulled
+ * here would be pulled from a chain this release has already refused or cannot name.
+ *
+ * Its converse is the whole point: a **pinned chain whose genesis matches** has passed
+ * identity, so nothing about identity can decide the rest, and the caller must answer for what
+ * it could or could not read. `undefined` is that hand-off.
+ */
+function identitySettles(
+  observed: {
+    readonly chainLabel: string;
+    readonly genesisHash: string | undefined;
+    readonly specVersion: number | undefined;
+  },
+  pins: readonly ForeignChainPin[],
+): ForeignVerdict | undefined {
+  const pin = pins.find((each) => each.label === observed.chainLabel);
+  // An absent `genesisHash` cannot equal a pin's, so this one test covers all three cases —
+  // and covers them in the direction that matters, since what it must not admit is a chain
+  // that never proved its identity.
+  if (pin !== undefined && observed.genesisHash === pin.genesisHash) return undefined;
   return {
     kind: 'classified',
-    classification: classifyForeign(
-      { chainLabel, genesisHash, specVersion: undefined, probes: [] },
-      pins,
-    ),
+    classification: classifyForeign({ ...observed, probes: [] }, pins),
     codeHash: undefined,
+  };
+}
+
+/**
+ * The pinned chain answered, its genesis matched, and its runtime could not be read.
+ *
+ * **This is `FE-COMPAT-003` and not `unsupported`, and the difference is the recovery the user
+ * is sent to** (10 §5.2; §9.4's code row; second-round review, 2026-08-09). `unsupported` names
+ * a version — it says *this release ships no descriptors for the runtime that answered, so load
+ * a newer release* — and a client that read no version has named nothing. 10 §5.2 rules exactly
+ * this case: such a client *"has established nothing about the chain in front of it"*, the
+ * outcome *"belongs one layer up"*, and it enters *"neither the three-mode union"* nor *"the
+ * foreign arms"*. §9.4 raises the code *"on either chain: the runtime version could not be
+ * read, or no compat surface could be pulled"* — both chains, both conditions.
+ *
+ * It is reachable rather than theoretical. `ChainHeadConnection.finalizedRuntime()` answers
+ * `undefined` for a chain that is answering — a follow that has not initialized, a runtime
+ * reported `invalid`, or dropped announcements that make the held reading uncertain — and the
+ * deposit leg hands that reading straight to `classifyAssetHub`. Telling that user to load a
+ * newer release is advice no release can satisfy; the truthful answer is that the probe did not
+ * complete, which is the retry 10 §3.1 already schedules.
+ */
+function runtimeUnread(chainLabel: string): ForeignVerdict {
+  return {
+    kind: 'unestablished',
+    code: 'FE-COMPAT-003',
+    reason:
+      `${chainLabel} answered and is the chain this release pins, but this client could not ` +
+      'read which runtime it is on, so none of the surfaces the deposit depends on has been ' +
+      'checked. Deposits are unavailable until the check completes; nothing else in the app ' +
+      'is affected (02 §7.7).',
   };
 }
 
@@ -474,20 +533,12 @@ export async function classifyAssetHub(deps: ForeignProbeDeps): Promise<ForeignV
   };
   const pins = deps.pins ?? FOREIGN_CHAIN_PINS;
 
-  // Three cases where a probe would mean nothing, and `classifyForeign` already has the
-  // honest verdict for each without one: no chain reached (`unreachable`), a chain whose
-  // runtime could not be read (`unsupported`), and a chain whose genesis is not the pinned
-  // one (`wrong-chain`). Pulling a surface would be pulling one from a chain this release has
-  // already refused, or one it cannot name.
-  const pin = pins.find((each) => each.label === deps.chainLabel);
-  const wrongChain = pin !== undefined && deps.genesisHash !== pin.genesisHash;
-  if (deps.genesisHash === undefined || deps.runtime === undefined || wrongChain) {
-    return {
-      kind: 'classified',
-      classification: classifyForeign({ ...observed, probes: [] }, pins),
-      codeHash: undefined,
-    };
-  }
+  // Identity first, exactly as `foreign.ts` orders it. What identity cannot settle falls
+  // through, and the first thing below it is the runtime reading — see `runtimeUnread` for why
+  // an unread one is a code rather than a mode.
+  const settled = identitySettles(observed, pins);
+  if (settled !== undefined) return settled;
+  if (deps.runtime === undefined) return runtimeUnread(deps.chainLabel);
 
   let surface: PulledSurface;
   try {
