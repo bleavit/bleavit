@@ -1,0 +1,102 @@
+/* Scene-local rules for the conditional-ledger scene. Everything else comes from
+   the design system in ui/theme.css and ui/app.css. */
+
+/* The redemption matrix is genuinely six columns wide and lives in an 8-column
+   rail. It scrolls sideways inside its own panel rather than shrinking to
+   illegibility, because dropping a column would drop a protocol fact. */
+.lx-scroll {
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.lx-scroll > table {
+  min-width: 520px;
+}
+
+/* The storage key of a position, under its human name. It is the real
+   `Positions` map key, so it is set in mono and never wrapped mid-token. */
+.lx-key {
+  display: block;
+  font-size: var(--t-micro);
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+
+/* The row whose vault state is the one the vault is actually in. Marked with a
+   left edge in ink — never a colour, because "current" is not an outcome. */
+.lx-row--current td:first-child {
+  box-shadow: inset 2px 0 0 0 var(--ink);
+}
+
+/* Shape legend: the three instrument families are separated by shape before
+   colour does anything, so the legend has to draw the shapes. */
+.lx-legend {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: var(--sp-2);
+}
+
+.lx-legend li {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--t-caption);
+}
+
+.lx-glyph {
+  flex: none;
+  width: 26px;
+  height: 14px;
+  border: 1px solid var(--ink);
+}
+
+/* Round: a scalar leg. Equal width and height in the model, drawn as a disc. */
+.lx-glyph--round {
+  width: 14px;
+  border-radius: 50%;
+}
+
+/* Tall tablet: a gate leg. */
+.lx-glyph--tablet {
+  width: 11px;
+}
+
+/* Wide bar: branch-USDC — money inside one world. */
+.lx-glyph--bar {
+  height: 8px;
+}
+
+.lx-calls {
+  margin: 0;
+  padding-left: 1.4em;
+  font-size: var(--t-caption);
+  columns: 2;
+  column-gap: var(--sp-4);
+}
+
+.lx-calls li {
+  margin-bottom: 2px;
+  break-inside: avoid;
+}
+
+.lx-calls code {
+  font-family: var(--font-mono);
+  font-size: var(--t-caption);
+}
+
+/* A frozen holding is dimmed in the table exactly as it is dimmed on the stage,
+   and it stays in its row. Frozen is not removed. */
+.lx-frozen td {
+  opacity: 0.62;
+}
+
+.lx-eq {
+  font-family: var(--font-mono);
+  font-size: var(--t-caption);
+  line-height: 1.6;
+  color: var(--ink);
+  margin: 0 0 var(--sp-3);
+  white-space: pre-wrap;
+}

@@ -88,11 +88,37 @@ PROPOSAL_BOOKS = 6  # 13 §4: 2 decision + 4 gate books.
 DELAY_ONCE_ALLOWANCE_PER_EPOCH = 2
 FORCE_RERUN_ALLOWANCE_PER_EPOCH = 1
 
-# 13 §5 pins the normal-class PoV budget.  The ref-time half follows from the
-# runtime's 75% normal share of a two-second block; it is an argument to the
-# generic capacity function so callers can re-evaluate another runtime profile.
-NORMAL_PROOF_BUDGET = 3_932_160
-NORMAL_REF_TIME_BUDGET = 1_500_000_000_000
+# The normal class's two budgets, each derived from the runtime's own block
+# limits rather than transcribed.  Both are arguments to the generic capacity
+# function, so a caller can re-evaluate another runtime profile.
+#
+# MAXIMUM_BLOCK_WEIGHT is two seconds of ref-time and one whole PoV, and
+# `pallet_welfare::primary_capacity()` hands the normal class everything the N7
+# resource partition does not reserve for the external domain -- 75% of each.
+# The PoV half is the relay's MAX_POV_SIZE, which the pinned polkadot-primitives
+# fixes at 10 MiB.
+#
+# THE PROOF FIGURE READ 3,932,160 UNTIL 2026-08-09, taken from 13 §5's own
+# sentence.  That number is a real limit of this runtime and the wrong one: it
+# is 75% of the 5 MiB `BlockLength`, so it bounds an extrinsic's ENCODED LENGTH
+# rather than the proof its execution generates.  The two are separate resources
+# enforced by different code, and this module divides a proof size by it.  The
+# consequence was a published trade capacity of half the true one, in the
+# direction of reporting the chain twice as full as it is.  Doc 13 §5 carried the
+# same error and was corrected in the same change.
+#
+# Derive these; do not copy them back out of a document.  A transcribed constant
+# agrees with its source forever, including when its source is wrong.
+MAX_POV_SIZE = 10 * 1024 * 1024
+BLOCK_REF_TIME = 2_000_000_000_000
+NORMAL_DISPATCH_RATIO = Fraction(75, 100)
+NORMAL_PROOF_BUDGET = int(NORMAL_DISPATCH_RATIO * MAX_POV_SIZE)  # 7,864,320
+NORMAL_REF_TIME_BUDGET = int(NORMAL_DISPATCH_RATIO * BLOCK_REF_TIME)  # 1.5e12
+
+# 75% of the 5 MiB `BlockLength`.  Named only so the error above cannot be made
+# twice: it is what an extrinsic's encoded length is measured against, and it is
+# never a PoV budget.  Nothing in this module divides a weight by it.
+NORMAL_LENGTH_CEILING = int(NORMAL_DISPATCH_RATIO * 5 * 1024 * 1024)
 
 # The runtime binds frame_system::DbWeight = RocksDbWeight.  In the pinned
 # frame-support 48.0.0, a read is 25,000 ns and a write 100,000 ns at 1,000

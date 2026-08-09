@@ -1,0 +1,79 @@
+/*
+ * Scene-local rules for the welfare engine.
+ *
+ * One is semantic rather than cosmetic: `.we-row--reserved` renders MetricId 11
+ * in the secondary ink. The slot is assigned but not registered in v1, and an
+ * assigned-but-inactive row must read as weaker than a live one — never as
+ * equal, and never as missing, because ids are never reused and the slot is
+ * deliberately held open.
+ *
+ * The large W readout this scene used to own is gone: W is now a `KeyFact` at
+ * the top of the rail, which is the one place on the page a number is allowed to
+ * be big. A second hero would have meant two answers to the same question.
+ */
+
+.we-formula {
+  font-family: var(--font-mono);
+  font-size: var(--t-body);
+  line-height: var(--lh-body);
+  color: var(--ink);
+  margin: 0 0 var(--sp-2);
+  max-width: none;
+}
+
+/* The v1 metric set is genuinely wide; it scrolls inside the panel rather than
+   dropping a column, because every column of it is normative. */
+.we-scroll {
+  overflow-x: auto;
+}
+
+.we-table th[scope='row'] {
+  background: var(--well);
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: var(--t-caption);
+  font-weight: 500;
+  color: var(--ink);
+  white-space: normal;
+  vertical-align: top;
+}
+
+.we-table th[scope='row'].mono {
+  font-family: var(--font-mono);
+  white-space: nowrap;
+}
+
+.we-row--reserved th[scope='row'],
+.we-row--reserved td {
+  color: var(--ink-2);
+}
+
+.we-absent {
+  font-family: var(--font-mono);
+  font-size: var(--t-caption);
+  color: var(--ink-2);
+}
+
+.we-chiprow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  align-items: center;
+  margin: 0 0 var(--sp-3);
+}
+
+.we-dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: var(--sp-1) var(--sp-3);
+  margin: 0 0 var(--sp-3);
+  font-size: var(--t-caption);
+}
+
+.we-dl dt {
+  color: var(--ink-2);
+}
+
+.we-dl dd {
+  margin: 0;
+}

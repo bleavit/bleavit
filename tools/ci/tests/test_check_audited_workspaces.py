@@ -321,7 +321,18 @@ class ManifestIntegrityTests(unittest.TestCase):
 
 
 class CommandLineTests(unittest.TestCase):
+    """The `--print` plumbing the gate script routes on.
+
+    These assert the SHAPE of the output, and take the expected counts from the
+    manifest rather than restating them. A test that hard-coded "5 rows" would
+    fail the day a sixth workspace is classified — which is the day the manifest
+    is right and the test is wrong, and the wrong half is the one a hurried
+    session edits. The rows below are named individually because membership is
+    the property worth pinning; the total is not.
+    """
+
     def test_print_emits_machine_readable_rows_on_stdout(self) -> None:
+        declared = load_checker().load_workspaces(MANIFEST)
         completed = subprocess.run(
             [sys.executable, str(CHECKER), "--print"],
             cwd=REPO_ROOT,
@@ -330,16 +341,19 @@ class CommandLineTests(unittest.TestCase):
         )
         self.assertEqual(completed.returncode, 0, completed.stderr)
         rows = [line.split("\t") for line in completed.stdout.splitlines() if line]
-        self.assertEqual(len(rows), 5)
+        self.assertEqual(len(rows), len(declared))
         self.assertTrue(all(len(row) == 4 for row in rows))
         self.assertIn(["app", "cargo", "app", "app/Cargo.lock"], rows)
         self.assertIn(["fuzz", "cargo", "fuzz", "fuzz/Cargo.lock"], rows)
         self.assertIn(["root", "cargo", ".", "Cargo.lock"], rows)
         self.assertIn(["app-npm", "npm", "app", "app/pnpm-lock.yaml"], rows)
+        self.assertIn(["explainer-npm", "npm", "explainer", "explainer/package-lock.json"], rows)
 
     def test_ecosystem_filter_selects_only_that_ecosystems_rows(self) -> None:
         """The gate routes on this, so an over-broad filter would misroute a leg."""
-        for ecosystem, expected in (("cargo", 4), ("npm", 1)):
+        declared = load_checker().load_workspaces(MANIFEST)
+        for ecosystem in sorted({row["ecosystem"] for row in declared}):
+            expected = sum(1 for row in declared if row["ecosystem"] == ecosystem)
             with self.subTest(ecosystem=ecosystem):
                 completed = subprocess.run(
                     [sys.executable, str(CHECKER), "--print", "--ecosystem", ecosystem],
@@ -351,6 +365,28 @@ class CommandLineTests(unittest.TestCase):
                 rows = [line.split("\t") for line in completed.stdout.splitlines() if line]
                 self.assertEqual(len(rows), expected)
                 self.assertTrue(all(row[1] == ecosystem for row in rows))
+
+    def test_every_row_is_reachable_through_some_ecosystem_filter(self) -> None:
+        """The per-ecosystem work lists must partition the manifest, not sample it.
+
+        The gate builds each leg's arguments from one filtered run. If a row's
+        ecosystem were spelled in a way no filter selects, that workspace would
+        be classified — passing the coverage check — and still handed to no leg.
+        That is the original hole wearing the manifest's own clothes.
+        """
+        checker_module = load_checker()
+        declared = checker_module.load_workspaces(MANIFEST)
+        seen: list[str] = []
+        for ecosystem in sorted(checker_module.LOCKFILE_NAMES):
+            completed = subprocess.run(
+                [sys.executable, str(CHECKER), "--print", "--ecosystem", ecosystem],
+                cwd=REPO_ROOT,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            seen.extend(line.split("\t")[3] for line in completed.stdout.splitlines() if line)
+        self.assertEqual(sorted(seen), sorted(row["lockfile"] for row in declared))
 
     def test_the_ecosystem_filter_does_not_narrow_the_coverage_check(self) -> None:
         """Narrowing the work list must never narrow what the repository is checked against.

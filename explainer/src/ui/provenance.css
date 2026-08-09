@@ -1,0 +1,102 @@
+.prov {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  vertical-align: baseline;
+}
+
+.prov__glyph {
+  flex: none;
+  display: block;
+}
+
+/* Chroma clamp. Note what this does NOT do: it never reduces text contrast. */
+.prov--spec {
+  color: var(--ink);
+}
+.prov--derived {
+  color: var(--ink-2);
+}
+.prov--simulated {
+  color: var(--ink-2);
+}
+
+.prov__text {
+  font-size: var(--t-micro);
+  line-height: var(--lh-micro);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  color: var(--ink-2);
+}
+
+/* --- Value ---------------------------------------------------------------- */
+
+.value {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--sp-1);
+  white-space: nowrap;
+}
+
+.value__num {
+  font-variant-numeric: tabular-nums slashed-zero;
+}
+
+.value__unit {
+  font-size: 0.85em;
+  color: var(--ink-2);
+}
+
+/* A 3px hatched left edge — never a background wash, which would tax the text
+   contrast of the very number we are labelling. */
+.value--simulated,
+.value--derived {
+  position: relative;
+  padding-left: 6px;
+}
+
+.value--simulated::before,
+.value--derived::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0.1em;
+  bottom: 0.1em;
+  width: 3px;
+  background-image: repeating-linear-gradient(
+    45deg,
+    var(--hatch-ink) 0,
+    var(--hatch-ink) 1px,
+    transparent 1px,
+    transparent 4px
+  );
+}
+
+.value--derived::before {
+  background-image: none;
+  background: var(--ink-3);
+  opacity: 0.5;
+}
+
+.value--unverified .value__num {
+  /* A doc-13 [VERIFY] or sim-gated row: the number exists but the spec has not
+     settled it. Dashed underline, never a colour change. */
+  text-decoration: underline dashed var(--ink-3);
+  text-underline-offset: 3px;
+}
+
+.value--accept .value__num {
+  color: var(--accept);
+}
+.value--reject .value__num {
+  color: var(--reject);
+}
+
+.value__cite {
+  font-family: var(--font-mono);
+  font-size: var(--t-micro);
+  color: var(--ink-2);
+}
+
+/* The standing simulated-data disclosure lives in the transport bar now — see
+   `.simchip` in app.css. */

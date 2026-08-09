@@ -1,0 +1,648 @@
+/* --- Header ---------------------------------------------------------------- */
+
+.app-header {
+  border-bottom: 1px solid var(--line);
+  background: var(--surface);
+  position: sticky;
+  top: 0;
+  z-index: 30;
+}
+
+.app-header__inner {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  padding: 0 var(--sp-5);
+  max-width: var(--content-max);
+  margin: 0 auto;
+  height: var(--h-header);
+}
+
+.app-header__brand {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  text-decoration: none;
+  color: var(--ink);
+  flex: none;
+}
+
+.app-header__brand .brandmark {
+  color: var(--accent);
+  transition: color var(--d-2) var(--ease-in);
+}
+
+.app-header__wordmark {
+  font-size: 1.375rem;
+  font-weight: 800;
+  font-stretch: 118%;
+  letter-spacing: -0.02em;
+}
+
+.app-header__sub {
+  font-size: var(--t-micro);
+  color: var(--ink-2);
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  font-weight: 650;
+  font-stretch: 88%;
+  padding-left: var(--sp-2);
+  border-left: 1px solid var(--line);
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+}
+
+.app-header__clock {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  margin-left: auto;
+  min-width: 0;
+}
+
+.app-header__tools {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: center;
+  flex: none;
+}
+
+/* A switch that looks like a switch. The dot is the state; the word confirms it,
+   because a dot alone encodes state in colour and position only. */
+.tgl {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-2);
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--ink-2);
+  padding: 4px var(--sp-2);
+  font-size: var(--t-micro);
+  font-weight: 650;
+  font-stretch: 88%;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  cursor: pointer;
+}
+
+.tgl__dot {
+  width: 7px;
+  height: 7px;
+  background: var(--ink-3);
+}
+
+.tgl[aria-pressed='true'] {
+  color: var(--ink);
+  border-color: var(--accent-line);
+}
+
+.tgl[aria-pressed='true'] .tgl__dot {
+  background: var(--accent);
+}
+
+.tgl:hover {
+  border-color: var(--accent);
+}
+
+/* --- Scene nav ------------------------------------------------------------- */
+
+.scenenav {
+  border-bottom: 1px solid var(--line);
+  background: var(--ground);
+  position: sticky;
+  top: var(--h-header);
+  z-index: 25;
+}
+
+/* The three acts sit on one row and scroll together as one strip. Scrolling the
+   groups jointly rather than each list separately is what keeps the running
+   number meaningful: 01 to 14 stays one sequence a reader can move along, and a
+   group boundary reads as a pause in it rather than as a separate control. */
+.scenenav__inner {
+  max-width: var(--content-max);
+  margin: 0 auto;
+  padding: 0 var(--sp-5);
+  display: flex;
+  align-items: stretch;
+  gap: var(--sp-4);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.scenenav__inner::-webkit-scrollbar {
+  display: none;
+}
+
+.scenenav__group {
+  display: flex;
+  align-items: stretch;
+  flex: 0 0 auto;
+}
+
+/* The act's name is set in the label register — condensed, small, quiet — so it
+   reads as a divider rather than as a fifteenth thing to click. */
+.scenenav__grouptitle {
+  align-self: center;
+  margin: 0 var(--sp-2) 0 0;
+  padding-left: var(--sp-3);
+  border-left: 1px solid var(--line);
+  font-size: var(--t-micro);
+  font-weight: 600;
+  font-stretch: 88%;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-3, var(--ink-2));
+  white-space: nowrap;
+}
+
+.scenenav__group:first-child .scenenav__grouptitle {
+  border-left: 0;
+  padding-left: 0;
+}
+
+.scenenav__list {
+  display: flex;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  gap: 0;
+  scrollbar-width: none;
+  height: var(--h-nav);
+}
+
+.scenenav__list::-webkit-scrollbar {
+  display: none;
+}
+
+.scenenav__btn {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  height: var(--h-nav);
+  background: transparent;
+  border: 0;
+  border-bottom: 3px solid transparent;
+  padding: 0 var(--sp-3);
+  font-size: var(--t-caption);
+  font-weight: 600;
+  font-stretch: 94%;
+  color: var(--ink-2);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.scenenav__btn:hover {
+  color: var(--ink);
+  background: var(--accent-wash);
+}
+
+/* Each chip carries its own scene's hue, so the nav is the colour legend for
+   the whole app and the current scene's band matches the page you are on. */
+.scenenav__btn[aria-current='page'] {
+  color: var(--ink);
+  font-weight: 700;
+  border-bottom-color: var(--accent);
+  background: var(--accent-wash);
+}
+
+.scenenav__idx {
+  font-size: var(--t-micro);
+  color: var(--accent);
+  font-weight: 400;
+}
+
+/* --- Main ------------------------------------------------------------------ */
+
+/* One fixed bar at the bottom now — the transport, with the standing disclosure
+   folded into it. The padding clears its height plus a line of wrap. */
+.app-main {
+  padding: 0 0 132px;
+}
+
+/* --- Scene header band ----------------------------------------------------- */
+
+.scene-head {
+  padding-top: var(--sp-5);
+  padding-bottom: var(--sp-4);
+}
+
+.scene-head__inner {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--sp-4);
+  border-left: 4px solid var(--accent);
+  padding-left: var(--sp-4);
+}
+
+.scene-head__idx {
+  font-size: var(--t-hero);
+  line-height: 0.86;
+  font-weight: 800;
+  font-stretch: 118%;
+  color: var(--accent);
+  flex: none;
+  letter-spacing: -0.04em;
+}
+
+.scene-head__text {
+  min-width: 0;
+}
+
+.scene-title {
+  margin-bottom: 2px;
+}
+
+/* The heading is `tabIndex={-1}` and takes focus programmatically on every scene
+   change, so that keyboard and screen-reader users land where the new content
+   starts. Chromium treats that script focus as `:focus-visible` and drew a ring
+   around the title on every navigation — correct for a control, wrong for a
+   heading nobody tabbed to. The heading is never a click target, so suppressing
+   the ring here removes no affordance. */
+.scene-title:focus,
+.scene-title:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+
+.scene-tagline {
+  color: var(--ink-2);
+  font-size: var(--t-prose);
+  line-height: var(--lh-prose);
+  margin: 0;
+  max-width: 60ch;
+}
+
+@media (max-width: 767px) {
+  .scene-head__idx {
+    font-size: var(--t-head);
+  }
+}
+
+/* --- Panels ---------------------------------------------------------------- */
+
+.panel {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  padding: var(--sp-4);
+  margin-bottom: var(--sp-3);
+}
+
+.panel__title {
+  font-size: var(--t-micro);
+  font-weight: 650;
+  font-stretch: 88%;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--accent);
+  margin-bottom: var(--sp-3);
+}
+
+.panel__note {
+  font-size: var(--t-caption);
+  line-height: var(--lh-caption);
+  color: var(--ink-2);
+  margin: var(--sp-3) 0 0;
+}
+
+.stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--sp-2) 0;
+  /* A grid item defaults to `min-width: auto`, which is "as wide as my widest
+     child" — so a long chip inside one stat pushed straight over the stat next
+     to it instead of being contained. An automated sweep caught the state chip
+     `ScalarSettled(Accept, s = 0.201)` printed on top of its neighbour's value. */
+  min-width: 0;
+}
+
+.stat__label {
+  font-size: var(--t-micro);
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--ink-2);
+  font-weight: 650;
+  font-stretch: 88%;
+}
+
+.stat__value {
+  font-size: var(--t-sub);
+  font-weight: 750;
+  font-stretch: 106%;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* A chip is `nowrap` because a two-line pill reads as two pills, and `Value` is
+   `nowrap` so a number never separates from its unit mid-sentence. Both rules
+   are right in running prose and wrong in a fixed-width grid cell, where the
+   only thing a `nowrap` value can do is overflow into the cell beside it — an
+   automated sweep caught `201,600 blocks` printed across its neighbour at
+   1024px. Where the value *is* the cell, it wraps. */
+.stat__value .chip,
+.stat__value .value {
+  white-space: normal;
+}
+
+.stat__value .value {
+  flex-wrap: wrap;
+  row-gap: 0;
+}
+
+.statgrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: var(--sp-3);
+}
+
+/* --- Scenario transport ---------------------------------------------------- */
+
+.transport {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 35;
+  background: var(--surface);
+  border-top: 2px solid var(--accent);
+}
+
+.transport__inner {
+  max-width: var(--content-max);
+  margin: 0 auto;
+  padding: var(--sp-3) var(--sp-5);
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  flex-wrap: wrap;
+}
+
+.transport__deck {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: none;
+}
+
+.transport__scenario {
+  font-size: var(--t-caption);
+  font-weight: 600;
+  background: var(--well);
+  border: 1px solid var(--line);
+  padding: 6px var(--sp-2);
+  color: var(--ink);
+  max-width: 100%;
+  cursor: pointer;
+}
+
+.transport__scenario:hover {
+  border-color: var(--accent);
+}
+
+.transport__buttons {
+  display: flex;
+  gap: 2px;
+}
+
+.tbtn {
+  background: var(--well);
+  border: 1px solid var(--line);
+  color: var(--ink);
+  padding: 6px var(--sp-3);
+  font-size: var(--t-caption);
+  font-weight: 650;
+  cursor: pointer;
+  min-width: 36px;
+}
+
+.tbtn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.tbtn--primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--on-accent);
+  min-width: 80px;
+}
+
+.tbtn--primary:hover:not(:disabled) {
+  color: var(--on-accent);
+  filter: brightness(1.12);
+}
+
+.tbtn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.transport__pips {
+  display: flex;
+  gap: 3px;
+  align-items: center;
+}
+
+.transport__pip {
+  width: 6px;
+  height: 6px;
+  background: var(--line);
+}
+
+.transport__pip.is-done {
+  background: var(--accent);
+}
+
+.transport__step {
+  font-size: var(--t-micro);
+  color: var(--ink-2);
+}
+
+.transport__narration {
+  flex: 1 1 340px;
+  min-width: 0;
+  margin: 0;
+  max-width: none;
+  font-size: var(--t-caption);
+  line-height: var(--lh-caption);
+  color: var(--ink-2);
+}
+
+.transport__narration strong {
+  color: var(--ink);
+  font-weight: 700;
+}
+
+/* The standing disclosure, folded into the transport bar. Hatched, because
+   provenance is carried on texture as well as on words — never on colour. */
+.simchip {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: none;
+  background: var(--well);
+  border: 1px dashed var(--ink-3);
+  padding: 5px var(--sp-2);
+  font-size: var(--t-micro);
+  line-height: var(--lh-micro);
+  color: var(--ink-2);
+  cursor: pointer;
+  text-align: left;
+  max-width: 260px;
+}
+
+.simchip:hover {
+  border-color: var(--ink-2);
+  color: var(--ink);
+}
+
+.simchip strong {
+  color: var(--ink);
+  font-weight: 700;
+}
+
+@media (max-width: 1023px) {
+  .simchip__text {
+    display: none;
+  }
+  .simchip::after {
+    content: 'Simulated data';
+    font-weight: 700;
+    color: var(--ink);
+  }
+}
+
+@media (max-width: 767px) {
+  .app-main {
+    padding-bottom: 168px;
+  }
+  .app-header__inner,
+  .scenenav__inner,
+  .transport__inner {
+    padding-left: var(--sp-3);
+    padding-right: var(--sp-3);
+  }
+  /* The act names go on a phone. They are wayfinding for a strip you can see
+     all of at once, and on a 390px viewport you cannot — so they stop being
+     orientation and become three more things to scroll past. The running
+     number survives and carries the same ordering on its own. */
+  .scenenav__grouptitle {
+    display: none;
+  }
+  .scenenav__inner {
+    gap: 0;
+  }
+  /* The header is a fixed height so the sticky offsets below it stay honest.
+     Anything that would wrap out of that height has to be dropped rather than
+     allowed to spill over the nav — which is what the phase chip and the block
+     countdown were doing. The dial still shows the phase graphically, and the
+     clock scene carries every reading in full. */
+  .app-header__inner {
+    overflow: hidden;
+    gap: var(--sp-2);
+  }
+  /* The whole readout goes, not selected parts of it. Hiding the count and the
+     phase chip left the epoch number and — when the dead-man engages — the
+     sentence "clock paused — dead-man engaged", which is far too long for a
+     390px header and escaped it by 55px. The dial itself still carries both
+     facts: it turns alarm-coloured and stops, and its accessible label names
+     the epoch and the phase in full. */
+  .app-header__sub,
+  .dial-readout {
+    display: none;
+  }
+  .app-header__clock {
+    gap: var(--sp-2);
+  }
+  .transport__narration {
+    flex-basis: 100%;
+    order: 3;
+  }
+  .transport__inner {
+    gap: var(--sp-2);
+    padding-top: var(--sp-2);
+    padding-bottom: var(--sp-2);
+  }
+  .transport__deck {
+    flex-wrap: wrap;
+    gap: var(--sp-2);
+  }
+  .transport__scenario {
+    flex: 1 1 100%;
+  }
+  /* The pips are a redundant read of the counter beside them, and the first
+     thing to go when the row cannot hold everything. */
+  .transport__pips {
+    display: none;
+  }
+  .simchip {
+    max-width: none;
+  }
+}
+
+/* --- Source panel ---------------------------------------------------------- */
+
+.sourcepanel {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: rgb(4 6 18 / 62%);
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+
+.sourcepanel__body {
+  background: var(--surface);
+  border-top: 3px solid var(--accent);
+  width: min(100%, var(--content-max));
+  max-height: 80vh;
+  overflow: auto;
+  padding: var(--sp-5);
+}
+
+.sourcepanel__close {
+  float: right;
+}
+
+/* --- Misc ------------------------------------------------------------------ */
+
+.chip {
+  display: inline-block;
+  font-size: var(--t-micro);
+  font-weight: 650;
+  font-stretch: 88%;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  padding: 2px var(--sp-2);
+  border: 1px solid var(--line);
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+
+/* Proposal-state chips are ALWAYS ink. Rejection is the most common healthy
+   path (T10 -> T21); colouring it as failure would misteach the protocol. */
+.chip--state {
+  color: var(--ink);
+  border-color: var(--ink-3);
+  background: var(--well);
+}
+
+.chip--safety {
+  color: var(--alarm);
+  border-color: var(--alarm);
+}
+
+.cite {
+  font-family: var(--font-mono);
+  font-size: var(--t-micro);
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+
+.two-col {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: var(--sp-3);
+}

@@ -1,0 +1,143 @@
+/*
+ * Scene-local rules for the execution guard.
+ *
+ * Three of these are semantic rather than cosmetic:
+ *
+ *  - `.guard-mark` never encodes pass/fail in colour. The two states are the
+ *    words "holds" and "refuses" plus distinct glyphs; the refusal marker is
+ *    given weight and an underline so it survives monochrome, low contrast and
+ *    a screen reader alike. Colouring a refused check would misread it as an
+ *    alarm, and most refusals are not.
+ *  - `.guard-panel--major` gives the recoverable/terminal panel a rule down its
+ *    leading edge. That distinction is the one thing on this screen a reader
+ *    must not skim past: a recoverable refusal presented as terminal makes
+ *    everyone stop trying while the window is still open.
+ *  - `.guard-chip-reason` keeps a `RejectReason` in its frozen camel case so it
+ *    stays greppable against doc 02's variant names, and never changes colour.
+ */
+
+.guard-subhead {
+  font-size: var(--t-micro);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-2);
+  margin: var(--sp-4) 0 var(--sp-2);
+}
+
+.guard-panel--major {
+  border-left: 2px solid var(--ink);
+  padding-left: calc(var(--sp-4) - 2px);
+}
+
+.guard-table th[scope='row'] {
+  background: var(--well);
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: var(--t-caption);
+  font-weight: 500;
+  color: var(--ink);
+  white-space: normal;
+  vertical-align: top;
+}
+
+.guard-table th[scope='row'].numeric {
+  font-family: var(--font-mono);
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+
+/* Expected/actual are chain strings, not prose: mono keeps them comparable. */
+.guard-expect {
+  font-family: var(--font-mono);
+  font-size: var(--t-micro);
+  line-height: var(--lh-micro);
+  color: var(--ink-2);
+}
+
+.guard-checks td {
+  vertical-align: top;
+}
+
+/*
+ * Each check is named twice: the word the diagram uses, then the word the
+ * specification uses. A reader who has only seen the boxes needs the short one
+ * to land on; an auditor needs the exact one, and neither can be dropped for
+ * the other.
+ */
+.guard-plain {
+  display: block;
+  color: var(--ink);
+}
+
+.guard-specname {
+  display: block;
+  font-size: var(--t-micro);
+  line-height: var(--lh-micro);
+  color: var(--ink-2);
+}
+
+.guard-mark {
+  font-family: var(--font-mono);
+  font-size: var(--t-micro);
+  white-space: nowrap;
+  color: var(--ink-2);
+}
+
+.guard-mark--off {
+  color: var(--ink);
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.guard-absent {
+  font-family: var(--font-mono);
+  font-size: var(--t-micro);
+  color: var(--ink-2);
+}
+
+.guard-chiprow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  align-items: center;
+  margin: 0 0 var(--sp-3);
+}
+
+.guard-chip-reason {
+  text-transform: none;
+  letter-spacing: 0;
+}
+
+.guard-trigger {
+  display: block;
+  font-size: var(--t-micro);
+  line-height: var(--lh-micro);
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+
+.guard-caveats {
+  margin: var(--sp-3) 0 0;
+}
+
+.guard-caveat {
+  padding: var(--sp-2) 0;
+  border-top: 1px solid var(--ink-3);
+}
+
+.guard-caveat dt {
+  font-size: var(--t-caption);
+  font-weight: 600;
+  color: var(--ink);
+  margin-bottom: 2px;
+}
+
+.guard-caveat dd {
+  margin: 0;
+  font-size: var(--t-caption);
+  line-height: var(--lh-caption);
+  color: var(--ink-2);
+  max-width: 66ch;
+}

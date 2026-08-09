@@ -15,13 +15,30 @@ GATE = REPO_ROOT / "tools/ci/supply-chain-gates.sh"
 WORKSPACES_MANIFEST = REPO_ROOT / "tools/ci/audited-workspaces.toml"
 
 
-def audited_rows() -> list[dict]:
+def coverage_checker():
     checker = REPO_ROOT / "tools/ci/check-audited-workspaces.py"
     spec = importlib.util.spec_from_file_location("check_audited_workspaces", checker)
     module = importlib.util.module_from_spec(spec)
     sys.modules["check_audited_workspaces"] = module
     spec.loader.exec_module(module)
-    return module.load_workspaces(WORKSPACES_MANIFEST)
+    return module
+
+
+def audited_rows() -> list[dict]:
+    return coverage_checker().load_workspaces(WORKSPACES_MANIFEST)
+
+
+def npm_lockfile_basenames() -> tuple[str, ...]:
+    """Every filename this repository counts as an npm lockfile.
+
+    Taken from the coverage checker, which documents `LOCKFILE_NAMES` as the
+    single place a new ecosystem or manager is admitted. Restating one name here
+    is what broke this suite when `explainer/package-lock.json` was classified:
+    the stub below routed on the literal `pnpm-lock.yaml`, so a second, correctly
+    declared npm lockfile was answered as a cargo one and the npm checker
+    rejected it — a fixture failing a gate that was working.
+    """
+    return tuple(coverage_checker().LOCKFILE_NAMES["npm"])
 
 
 def audited_workspace_names() -> set[str]:
@@ -67,10 +84,16 @@ raise SystemExit(0)
 # decoration: the npm checker asserts `package.ecosystem == "npm"` precisely so a
 # misrouted lockfile fails loudly, so a stub that answered the same shape for both
 # would pass a gate whose routing was wrong.
+#
+# Which is why the npm filenames are INJECTED from the checker rather than written
+# here. This stub used to test `endswith('pnpm-lock.yaml')`, and adding a second,
+# properly declared npm lockfile turned it into a cargo answer that the npm checker
+# rightly refused — the fixture failing a gate that was working correctly.
 STUB_SCANNER = """#!/usr/bin/env python3
-import json, sys
+import json, os, sys
+NPM_LOCKFILE_NAMES = __NPM_LOCKFILE_NAMES__
 lockfile = next(a.split('=', 1)[1] for a in sys.argv if a.startswith('--lockfile='))
-if lockfile.endswith('pnpm-lock.yaml'):
+if os.path.basename(lockfile) in NPM_LOCKFILE_NAMES:
     package = {'name': 'demo-npm', 'version': '4.5.6', 'ecosystem': 'npm'}
     finding = {'id': 'GHSA-test-npm0', 'aliases': [], 'summary': 'npm fixture'}
 else:
@@ -81,7 +104,7 @@ print(json.dumps({'results': [{'packages': [{
     'vulnerabilities': [finding],
 }]}]}))
 raise SystemExit(1)
-"""
+""".replace("__NPM_LOCKFILE_NAMES__", repr(npm_lockfile_basenames()))
 
 # A stub finding plus its matching waiver, rather than the committed file: this
 # suite covers the summary, and pointing it at the real waivers would couple it to

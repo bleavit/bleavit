@@ -1,0 +1,1159 @@
+{
+  "schema": "bleavit.reference-model.v4",
+  "precision": "Python Decimal with function-local 100-digit working contexts",
+  "lmsr_vectors": {
+    "V1": {
+      "action": "buy_1000_long_cost",
+      "raw_64x64_nearest": 9.45386032498672e+21,
+      "value": "512.494795136255854128669868574815"
+    },
+    "V2": {
+      "action": "price_after_v1",
+      "raw_64x64_nearest": 9684156715447992000,
+      "value": "0.524979187478939986099193182604"
+    },
+    "V3": {
+      "action": "displace_0_5_to_0_6",
+      "cost": "2231.435513142097557662950903098345",
+      "delta": "4054.651081081643819780131154643491"
+    },
+    "V4": {
+      "action": "worst_case_loss",
+      "raw_64x64_nearest": 1.2786308645202656e+23,
+      "value": "6931.471805599453094172321214581766"
+    },
+    "V5": {
+      "action": "round_trip_v1_then_sell_1000",
+      "net_fees_only": "-3.074968770817535124772019211449",
+      "proceeds_before_fees": "512.494795136255854128669868574815"
+    },
+    "V6": {
+      "action": "domain_edge",
+      "amount": "1",
+      "b": "10000",
+      "error": "PriceBoundExceeded",
+      "q_long": "480000",
+      "q_short": "0",
+      "side": "long"
+    }
+  },
+  "lmsr_maker_example": {
+    "b": "25000",
+    "delta": "6029.051420422201761516032173405674947271950250117481684037561257509996520213181757961677939541385582",
+    "displacement_revenue": "3195.834287747122393058574175726735278849893005984075362151201608109768238309602514483743029682643558",
+    "expected_payout": "3376.268795436432986448978017107177970472292140065789743061034304205598051319381784458539646143175926",
+    "loss": "180.4345076893105933904038413804426916223991340817143809098326960958298130097792699747966164605323550",
+    "p": "0.56"
+  },
+  "high_precision_corpus": {
+    "b": "10000",
+    "samples": [
+      {
+        "cost": "6931.471805599453094172321214581766",
+        "cost_raw_64x64_nearest": 1.2786308645202656e+23,
+        "price_long": "0.500000000000000000000000000000",
+        "price_raw_64x64_nearest": 9223372036854776000,
+        "q_long": "0",
+        "q_short": "0"
+      },
+      {
+        "cost": "7443.966600735708948300991083156580",
+        "cost_raw_64x64_nearest": 1.3731694677701328e+23,
+        "price_long": "0.524979187478939986099193182604",
+        "price_raw_64x64_nearest": 9684156715447992000,
+        "q_long": "1000",
+        "q_short": "0"
+      },
+      {
+        "cost": "8259.394198788435622078361316583179",
+        "cost_raw_64x64_nearest": 1.5235893098893162e+23,
+        "price_long": "0.562176500885798104027323637903",
+        "price_raw_64x64_nearest": 10370326036093868000,
+        "q_long": "2500",
+        "q_short": "0"
+      },
+      {
+        "cost": "8259.394198788435622078361316583179",
+        "cost_raw_64x64_nearest": 1.5235893098893162e+23,
+        "price_long": "0.437823499114201895972676362097",
+        "price_raw_64x64_nearest": 8076418037615683000,
+        "q_long": "0",
+        "q_short": "2500"
+      },
+      {
+        "cost": "16879.472768273702586482265198428258",
+        "cost_raw_64x64_nearest": 3.113713142554947e+23,
+        "price_long": "0.635433855216816009556050908321",
+        "price_raw_64x64_nearest": 11721685702955215000,
+        "q_long": "12345",
+        "q_short": "6789"
+      },
+      {
+        "cost": "16879.472768273702586482265198428258",
+        "cost_raw_64x64_nearest": 3.113713142554947e+23,
+        "price_long": "0.364566144783183990443949091679",
+        "price_raw_64x64_nearest": 6725058370754338000,
+        "q_long": "6789",
+        "q_short": "12345"
+      },
+      {
+        "cost": "240000.000000377513454420783954750972",
+        "cost_raw_64x64_nearest": 4.427218577697256e+24,
+        "price_long": "0.999999999962248654558634186566",
+        "price_raw_64x64_nearest": 18446744073013162000,
+        "q_long": "240000",
+        "q_short": "0"
+      },
+      {
+        "cost": "240000.000000377513454420783954750972",
+        "cost_raw_64x64_nearest": 4.427218577697256e+24,
+        "price_long": "0.000000000037751345441365813434",
+        "price_raw_64x64_nearest": 696389408,
+        "q_long": "0",
+        "q_short": "240000"
+      },
+      {
+        "cost": "480000.000000000000000014251640827409",
+        "cost_raw_64x64_nearest": 8.854437155380585e+24,
+        "price_long": "0.999999999999999999998574835917",
+        "price_raw_64x64_nearest": 18446744073709552000,
+        "q_long": "480000",
+        "q_short": "0"
+      }
+    ]
+  },
+  "twap_scenarios": [
+    {
+      "inputs": {
+        "initial": "0.500",
+        "observations": [
+          {
+            "block": 10,
+            "previous_quote": "0.900"
+          },
+          {
+            "block": 20,
+            "previous_quote": "0.900"
+          }
+        ]
+      },
+      "mean_0_20": "0.503756250",
+      "mean_10_20": "0.505012500",
+      "name": "backward_weighted_mean",
+      "recorded": [
+        "0.502500",
+        "0.505012500"
+      ],
+      "stale_events": 0
+    },
+    {
+      "inputs": {
+        "block": 60,
+        "previous_quote": "0.900"
+      },
+      "name": "stale_gap_accounting",
+      "recorded": "0.515188754696882812500",
+      "stale_events": 1
+    }
+  ],
+  "window_stale_scenarios": [
+    {
+      "inputs": {
+        "end": 200,
+        "observations": [
+          10,
+          20,
+          30,
+          40,
+          50,
+          60,
+          70,
+          80,
+          90,
+          100
+        ],
+        "stale_gap_blocks": 50,
+        "start": 0
+      },
+      "name": "terminal_gap_at_close",
+      "stale_events": 1
+    },
+    {
+      "inputs": {
+        "end": 200,
+        "observations": [
+          10,
+          20,
+          30,
+          40,
+          50,
+          60,
+          70,
+          80,
+          90,
+          100,
+          110,
+          120,
+          130,
+          140,
+          150,
+          160,
+          170,
+          180,
+          190,
+          200
+        ],
+        "stale_gap_blocks": 50,
+        "start": 0
+      },
+      "name": "dense_window_is_fresh",
+      "stale_events": 0
+    },
+    {
+      "inputs": {
+        "end": 200,
+        "observations": [
+          20,
+          140,
+          150,
+          160,
+          170,
+          180,
+          190,
+          200
+        ],
+        "stale_gap_blocks": 50,
+        "start": 100
+      },
+      "name": "pre_window_quiet_not_charged",
+      "stale_events": 0
+    },
+    {
+      "inputs": {
+        "end": 300,
+        "observations": [
+          10,
+          100,
+          150
+        ],
+        "stale_gap_blocks": 50,
+        "start": 0
+      },
+      "name": "mid_and_terminal_gaps_force_reject",
+      "stale_events": 2
+    },
+    {
+      "inputs": {
+        "end": 100,
+        "observations": [],
+        "stale_gap_blocks": 50,
+        "start": 0
+      },
+      "name": "unobserved_window_is_one_gap",
+      "stale_events": 1
+    }
+  ],
+  "decision_scenarios": [
+    {
+      "inputs": {
+        "accept_full": "0.517",
+        "accept_trailing": "0.517",
+        "delta": "0.015",
+        "envelope_value": "100",
+        "measured_liquidity": "1000000",
+        "proposal_class": "Param",
+        "reject_full_effective": "0.50"
+      },
+      "name": "honest_param_adopt",
+      "outcome": "Adopt"
+    },
+    {
+      "inputs": {
+        "accept_full": "0.56",
+        "delta": "0.05",
+        "preimage_ok": false,
+        "reject_full_effective": "0.50"
+      },
+      "name": "constitution_violation",
+      "outcome": "Reject",
+      "reason": "ConstitutionViolation"
+    },
+    {
+      "inputs": {
+        "accept_full": "0.56",
+        "delta": "0.05",
+        "reject_full_effective": "0.50",
+        "resource_locks_held": false
+      },
+      "name": "resource_conflict",
+      "outcome": "Reject",
+      "reason": "ResourceConflict"
+    },
+    {
+      "inputs": {
+        "accept_full": "0.56",
+        "delta": "0.05",
+        "process_hold": true,
+        "reject_full_effective": "0.50"
+      },
+      "name": "process_hold",
+      "outcome": "Reject",
+      "reason": "ProcessHold"
+    },
+    {
+      "inputs": {
+        "accept_full": "0.56",
+        "ask": "100",
+        "delta": "0.05",
+        "gate_book_valid": false,
+        "proposal_class": "Treasury",
+        "reject_full_effective": "0.50",
+        "spendable_nav": "7393600"
+      },
+      "name": "gate_book_invalid",
+      "outcome": "Reject",
+      "reason": "NotDecisionGrade"
+    },
+    {
+      "inputs": {
+        "accept_full": "0.56",
+        "delta": "0.05",
+        "envelope_value": "100",
+        "measured_liquidity": "1000000",
+        "p_adopt": {
+          "Survival": "0.06"
+        },
+        "p_reject": {
+          "Survival": "0.01"
+        },
+        "proposal_class": "Param",
+        "reject_full_effective": "0.50"
+      },
+      "name": "param_gate_veto_survival",
+      "outcome": "Reject",
+      "reason": "GateVetoSurvival"
+    },
+    {
+      "inputs": {
+        "accept_full": "0.56",
+        "delta": "0.05",
+        "envelope_value": "100",
+        "measured_liquidity": "1000000",
+        "p_adopt": {
+          "Security": "0.06",
+          "Survival": "0.01"
+        },
+        "p_reject": {
+          "Security": "0.01",
+          "Survival": "0.01"
+        },
+        "proposal_class": "Param",
+        "reject_full_effective": "0.50"
+      },
+      "name": "param_gate_veto_security",
+      "outcome": "Reject",
+      "reason": "GateVetoSecurity"
+    },
+    {
+      "inputs": {
+        "accept_full": "0.56",
+        "ask": "100",
+        "delta": "0.05",
+        "p_adopt": {
+          "Survival": "0.06"
+        },
+        "proposal_class": "Treasury",
+        "reject_full_effective": "0.50",
+        "spendable_nav": "7393600",
+        "welfare_grade": "Invalid"
+      },
+      "name": "gate_veto_precedes_welfare_invalid",
+      "outcome": "Reject",
+      "reason": "GateVetoSurvival"
+    },
+    {
+      "inputs": {
+        "accept_full": "0.56",
+        "ask": "100",
+        "delta": "0.05",
+        "gate_valid": {
+          "Security": false,
+          "Survival": true
+        },
+        "p_adopt": {
+          "Survival": "0.06"
+        },
+        "p_reject": {
+          "Survival": "0.01"
+        },
+        "proposal_class": "Treasury",
+        "reject_full_effective": "0.50",
+        "spendable_nav": "7393600"
+      },
+      "name": "gate_veto_precedes_later_gate_invalid",
+      "outcome": "Reject",
+      "reason": "GateVetoSurvival"
+    },
+    {
+      "inputs": {
+        "accept_full": "0.56",
+        "delta": "0.05",
+        "reject_full_effective": "0.50",
+        "welfare_grade": "Invalid"
+      },
+      "name": "welfare_invalid",
+      "outcome": "Reject",
+      "reason": "NotDecisionGrade"
+    },
+    {
+      "inputs": {
+        "accept_full": "0.56",
+        "delta": "0.05",
+        "reject_full_effective": "0.50",
+        "welfare_grade": "Insufficient"
+      },
+      "name": "welfare_insufficient_extends",
+      "outcome": "Extend"
+    },
+    {
+      "inputs": {
+        "accept_full": "0.54",
+        "delta": "0.05",
+        "reject_full_effective": "0.50"
+      },
+      "name": "hurdle_not_met",
+      "outcome": "Reject",
+      "reason": "HurdleNotMet"
+    },
+    {
+      "inputs": {
+        "accept_full": "0.56",
+        "converged": false,
+        "delta": "0.05",
+        "reject_full_effective": "0.50"
+      },
+      "name": "convergence_failed",
+      "outcome": "Reject",
+      "reason": "ConvergenceFailed"
+    },
+    {
+      "inputs": {
+        "accept_full": "0.56",
+        "accept_trailing": "0.52",
+        "delta": "0.05",
+        "extended": true,
+        "reject_full_effective": "0.50"
+      },
+      "name": "second_extension_failed",
+      "outcome": "Reject",
+      "reason": "SecondExtensionFailed"
+    },
+    {
+      "inputs": {
+        "accept_full": "0.56",
+        "delta": "0.05",
+        "envelope_value": "1",
+        "measured_liquidity": "0",
+        "reject_full_effective": "0.50"
+      },
+      "name": "security_sizing",
+      "outcome": "Reject",
+      "reason": "SecuritySizing"
+    },
+    {
+      "inputs": {
+        "accept_full": "0.56",
+        "delta": "0.05",
+        "measured_liquidity": "1000000",
+        "reject_full_effective": "0.50"
+      },
+      "name": "undefined_param_prize_proxy",
+      "outcome": "Reject",
+      "reason": "SecuritySizing"
+    },
+    {
+      "inputs": {
+        "accept_full": "0.56",
+        "attestation_ok": false,
+        "delta": "0.05",
+        "envelope_value": "0",
+        "proposal_class": "Code",
+        "reject_full_effective": "0.50"
+      },
+      "name": "attestation_missing",
+      "outcome": "Reject",
+      "reason": "AttestationMissing"
+    },
+    {
+      "inputs": {
+        "accept_full": "0.56",
+        "delta": "0.05",
+        "envelope_value": "0",
+        "queue_time_ok": false,
+        "reject_full_effective": "0.50"
+      },
+      "name": "rate_limited",
+      "outcome": "Reject",
+      "reason": "RateLimited"
+    },
+    {
+      "inputs": {
+        "accept_full": "0.56",
+        "ask": "200000",
+        "b_accept": "25000",
+        "b_reject": "25000",
+        "contest_accept": "400000",
+        "contest_reject": "400000",
+        "delta": "0.05",
+        "flow_cap": "8",
+        "pol_depth": "34657.359028",
+        "proposal_class": "Treasury",
+        "reject_full_effective": "0.50"
+      },
+      "l_hat": "434657.359028",
+      "name": "adopt_contest_capital_l_hat",
+      "outcome": "Adopt"
+    },
+    {
+      "inputs": {
+        "accept_full": "0.56",
+        "ask": "200000",
+        "b_accept": "25000",
+        "b_reject": "25000",
+        "contest_accept": "100000",
+        "contest_reject": "100000",
+        "delta": "0.05",
+        "flow_cap": "8",
+        "pol_depth": "34657.359028",
+        "proposal_class": "Treasury",
+        "reject_full_effective": "0.50"
+      },
+      "l_hat": "134657.359028",
+      "name": "security_sizing_contest_shortfall",
+      "outcome": "Reject",
+      "reason": "SecuritySizing"
+    },
+    {
+      "inputs": {
+        "accept_full": "0.56",
+        "ask": "200000",
+        "b_accept": "25000",
+        "b_reject": "25000",
+        "contest_accept": "1000000000",
+        "contest_reject": "1000000000",
+        "delta": "0.05",
+        "flow_cap": "7",
+        "pol_depth": "34657.359028",
+        "proposal_class": "Treasury",
+        "reject_full_effective": "0.50"
+      },
+      "l_hat": "384657.359028",
+      "name": "security_sizing_flow_cap_ceiling",
+      "outcome": "Reject",
+      "reason": "SecuritySizing"
+    },
+    {
+      "inputs": {
+        "accept_full": "0.56",
+        "ask": "200000",
+        "b_accept": "25000",
+        "b_reject": "25000",
+        "contest_accept": "400000",
+        "contest_reject": "100000",
+        "delta": "0.05",
+        "flow_cap": "8",
+        "pol_depth": "34657.359028",
+        "proposal_class": "Treasury",
+        "reject_full_effective": "0.50"
+      },
+      "l_hat": "134657.359028",
+      "name": "security_sizing_asymmetric_pair_contest",
+      "outcome": "Reject",
+      "reason": "SecuritySizing"
+    }
+  ],
+  "welfare_scenarios": [
+    {
+      "inputs": {
+        "w_next": "0.8",
+        "w_next_2": "0.8"
+      },
+      "name": "equal_horizons",
+      "s": "0.800000000"
+    },
+    {
+      "inputs": {
+        "w_next": "0.64",
+        "w_next_2": "0.25"
+      },
+      "name": "mixed_horizons",
+      "s": "0.400000000"
+    },
+    {
+      "inputs": {
+        "a_components": {
+          "A01": "0.90",
+          "A02": "0.60"
+        },
+        "a_weights": {
+          "A01": "0.40",
+          "A02": "0.60"
+        },
+        "c_attested": {
+          "C03": "0.90"
+        },
+        "c_daily": {
+          "C01": "0.93",
+          "C02": "0.89"
+        },
+        "c_onchain": {
+          "C01": "0.94",
+          "C02": "0.91"
+        },
+        "c_weights": {
+          "C01": "0.50",
+          "C02": "0.30",
+          "C03": "0.20"
+        },
+        "f": "0.96",
+        "hhi": "0.335",
+        "incident": "0.98",
+        "p_components": {
+          "P01": "0.80",
+          "P02": "0.70"
+        },
+        "p_weights": {
+          "P01": "0.60",
+          "P02": "0.40"
+        },
+        "phase": 2,
+        "u": "0.97"
+      },
+      "name": "full_pipeline",
+      "outputs": {
+        "A": "0.705647413",
+        "C": "0.904379942",
+        "C_daily": "0.914793553",
+        "D_eff": "0.831250000",
+        "P": "0.758391065",
+        "S": "0.831250000",
+        "S_daily": "0.831250000",
+        "W": "0.000000000"
+      },
+      "settlement_with_self": "0.000000001"
+    },
+    {
+      "inputs": {
+        "a_components": {
+          "A01": "0.90",
+          "A02": "0.60"
+        },
+        "a_weights": {
+          "A01": "0.40",
+          "A02": "0.60"
+        },
+        "c_attested": {
+          "C03": "0.90"
+        },
+        "c_daily": {
+          "C01": "0.531441",
+          "C02": "1.0"
+        },
+        "c_onchain": {
+          "C01": "0.94",
+          "C02": "0.91"
+        },
+        "c_weights": {
+          "C01": "0.10",
+          "C02": "0.50",
+          "C03": "0.40"
+        },
+        "f": "0.96",
+        "hhi": "0.335",
+        "incident": "0.98",
+        "p_components": {
+          "P01": "0.80",
+          "P02": "0.70"
+        },
+        "p_weights": {
+          "P01": "0.60",
+          "P02": "0.40"
+        },
+        "phase": 2,
+        "u": "0.97"
+      },
+      "name": "full_pipeline_non_binary_daily_weights",
+      "outputs": {
+        "A": "0.705647413",
+        "C": "0.890751497",
+        "C_daily": "0.900000000",
+        "D_eff": "0.831250000",
+        "P": "0.758391065",
+        "S": "0.831250000",
+        "S_daily": "0.831250000",
+        "W": "0.000000000"
+      },
+      "settlement_with_self": "0.000000001"
+    },
+    {
+      "dropped": [
+        "A01",
+        "C03"
+      ],
+      "inputs": {
+        "a_components": {
+          "A01": "0.90",
+          "A02": "0.60"
+        },
+        "a_weights": {
+          "A01": "0.40",
+          "A02": "0.60"
+        },
+        "c_attested": {
+          "C03": "0.90"
+        },
+        "c_daily": {
+          "C01": "0.93",
+          "C02": "0.89"
+        },
+        "c_onchain": {
+          "C01": "0.94",
+          "C02": "0.91"
+        },
+        "c_weights": {
+          "C01": "0.50",
+          "C02": "0.30",
+          "C03": "0.20"
+        },
+        "f": "0.96",
+        "hhi": "0.335",
+        "incident": "0.98",
+        "p_components": {
+          "P01": "0.80",
+          "P02": "0.70"
+        },
+        "p_weights": {
+          "P01": "0.60",
+          "P02": "0.40"
+        },
+        "phase": 2,
+        "u": "0.97"
+      },
+      "name": "settlement_renormalized_drops_flagged_components",
+      "outputs": {
+        "A": "0.600000000",
+        "C": "0.910063100",
+        "C_daily": "0.914793553",
+        "D_eff": "0.831250000",
+        "P": "0.758391065",
+        "S": "0.831250000",
+        "S_daily": "0.831250000",
+        "W": "0.000000000"
+      },
+      "settlement_with_self": "0.000000001"
+    },
+    {
+      "dropped": [
+        "A01",
+        "A02"
+      ],
+      "inputs": {
+        "a_components": {
+          "A01": "0.90",
+          "A02": "0.60"
+        },
+        "a_weights": {
+          "A01": "0.40",
+          "A02": "0.60"
+        },
+        "c_attested": {
+          "C03": "0.90"
+        },
+        "c_daily": {
+          "C01": "0.93",
+          "C02": "0.89"
+        },
+        "c_onchain": {
+          "C01": "0.94",
+          "C02": "0.91"
+        },
+        "c_weights": {
+          "C01": "0.50",
+          "C02": "0.30",
+          "C03": "0.20"
+        },
+        "f": "0.96",
+        "hhi": "0.335",
+        "incident": "0.98",
+        "p_components": {
+          "P01": "0.80",
+          "P02": "0.70"
+        },
+        "p_weights": {
+          "P01": "0.60",
+          "P02": "0.40"
+        },
+        "phase": 2,
+        "u": "0.97"
+      },
+      "name": "settlement_renormalized_drops_whole_a_pillar",
+      "outputs": {
+        "A": "1.000000000",
+        "C": "0.904379942",
+        "C_daily": "0.914793553",
+        "D_eff": "0.831250000",
+        "P": "0.758391065",
+        "S": "0.831250000",
+        "S_daily": "0.831250000",
+        "W": "0.000000000"
+      },
+      "settlement_with_self": "0.000000001"
+    },
+    {
+      "inputs": {
+        "a_components": {
+          "A01": "0.90",
+          "A02": "0.60"
+        },
+        "a_weights": {
+          "A01": "0.40",
+          "A02": "0.60"
+        },
+        "c_attested": {
+          "C03": "0.90"
+        },
+        "c_daily": {
+          "C01": "0.93",
+          "C02": "0.89"
+        },
+        "c_onchain": {
+          "C01": "0.94",
+          "C02": "0.91"
+        },
+        "c_weights": {
+          "C01": "0.50",
+          "C02": "0.30",
+          "C03": "0.20"
+        },
+        "f": "0.99",
+        "hhi": "0.10",
+        "incident": "0.98",
+        "p_components": {
+          "P01": "0.80",
+          "P02": "0.70"
+        },
+        "p_weights": {
+          "P01": "0.60",
+          "P02": "0.40"
+        },
+        "phase": 2,
+        "u": "0.99"
+      },
+      "name": "full_pipeline_live_gates",
+      "outputs": {
+        "A": "0.705647413",
+        "C": "0.904379942",
+        "C_daily": "0.914793553",
+        "D_eff": "1.000000000",
+        "P": "0.758391065",
+        "S": "0.990000000",
+        "S_daily": "0.990000000",
+        "W": "0.416703840"
+      },
+      "settlement_with_self": "0.416703840"
+    },
+    {
+      "dropped": [
+        "A01",
+        "A02"
+      ],
+      "inputs": {
+        "a_components": {
+          "A01": "0.90",
+          "A02": "0.60"
+        },
+        "a_weights": {
+          "A01": "0.40",
+          "A02": "0.60"
+        },
+        "c_attested": {
+          "C03": "0.90"
+        },
+        "c_daily": {
+          "C01": "0.93",
+          "C02": "0.89"
+        },
+        "c_onchain": {
+          "C01": "0.94",
+          "C02": "0.91"
+        },
+        "c_weights": {
+          "C01": "0.50",
+          "C02": "0.30",
+          "C03": "0.20"
+        },
+        "f": "0.99",
+        "hhi": "0.10",
+        "incident": "0.98",
+        "p_components": {
+          "P01": "0.80",
+          "P02": "0.70"
+        },
+        "p_weights": {
+          "P01": "0.60",
+          "P02": "0.40"
+        },
+        "phase": 2,
+        "u": "0.99"
+      },
+      "name": "settlement_renormalized_whole_a_pillar_at_live_gates",
+      "outputs": {
+        "A": "1.000000000",
+        "C": "0.904379942",
+        "C_daily": "0.914793553",
+        "D_eff": "1.000000000",
+        "P": "0.758391065",
+        "S": "0.990000000",
+        "S_daily": "0.990000000",
+        "W": "0.428893718"
+      },
+      "settlement_with_self": "0.428893718"
+    }
+  ],
+  "ledger_scenarios": [
+    {
+      "branch_payout": 5000001,
+      "inputs": {
+        "branch_amount": 10000003,
+        "scalar_leg_amount": 4000003
+      },
+      "leg_payout": 1000000,
+      "name": "void_branch_and_leg_floors",
+      "unit": "USDC base units (1e-6)"
+    },
+    {
+      "inputs": {
+        "escrow": 20000,
+        "s": "0.70005"
+      },
+      "long_payout": 14001,
+      "name": "b5_scalar_fragmentation",
+      "short_payouts": [
+        2999,
+        2999
+      ],
+      "total_payout": 19999,
+      "unit": "USDC base units (1e-6)"
+    },
+    {
+      "inputs": {
+        "amount": 20000,
+        "s": "0.70005"
+      },
+      "name": "scalar_pair_exact",
+      "payout": 20000,
+      "unit": "USDC base units (1e-6)"
+    },
+    {
+      "inputs": {
+        "amount_each": 300,
+        "gate": "Survival",
+        "outcome": true
+      },
+      "name": "gate_settlement_one_zero",
+      "no_payout": 0,
+      "unit": "USDC base units (1e-6)",
+      "yes_payout": 300
+    },
+    {
+      "inputs": {
+        "amount": 10000,
+        "epoch": 7,
+        "s": "0.70005"
+      },
+      "long_payout": 7000,
+      "name": "baseline_scalar_and_pair",
+      "pair_payout": 10000,
+      "unit": "USDC base units (1e-6)"
+    }
+  ],
+  "ledger_score_scenarios": [
+    {
+      "amount": 20003,
+      "long_payout": 0,
+      "name": "score-0000000000",
+      "pair_payout": 20003,
+      "score": 0,
+      "short_payout": 20003
+    },
+    {
+      "amount": 20003,
+      "long_payout": 0,
+      "name": "score-0000000001",
+      "pair_payout": 20003,
+      "score": 1,
+      "short_payout": 20002
+    },
+    {
+      "amount": 20003,
+      "long_payout": 2469,
+      "name": "score-0123456789",
+      "pair_payout": 20003,
+      "score": 123456789,
+      "short_payout": 17533
+    },
+    {
+      "amount": 20003,
+      "long_payout": 6667,
+      "name": "score-0333333333",
+      "pair_payout": 20003,
+      "score": 333333333,
+      "short_payout": 13335
+    },
+    {
+      "amount": 20003,
+      "long_payout": 10001,
+      "name": "score-0500000001",
+      "pair_payout": 20003,
+      "score": 500000001,
+      "short_payout": 10001
+    },
+    {
+      "amount": 20003,
+      "long_payout": 14003,
+      "name": "score-0700049999",
+      "pair_payout": 20003,
+      "score": 700049999,
+      "short_payout": 5999
+    },
+    {
+      "amount": 20003,
+      "long_payout": 14003,
+      "name": "score-0700050000",
+      "pair_payout": 20003,
+      "score": 700050000,
+      "short_payout": 5999
+    },
+    {
+      "amount": 20003,
+      "long_payout": 14003,
+      "name": "score-0700050001",
+      "pair_payout": 20003,
+      "score": 700050001,
+      "short_payout": 5999
+    },
+    {
+      "amount": 20003,
+      "long_payout": 20002,
+      "name": "score-0999999999",
+      "pair_payout": 20003,
+      "score": 999999999,
+      "short_payout": 0
+    },
+    {
+      "amount": 20003,
+      "long_payout": 20003,
+      "name": "score-1000000000",
+      "pair_payout": 20003,
+      "score": 1000000000,
+      "short_payout": 0
+    }
+  ],
+  "treasury_scenarios": [
+    {
+      "commitment": "34657.35902799726547086160607290882840377500671801276270603400047466968109848473578029316634982093438",
+      "commitment_display": 34657,
+      "inputs": {
+        "proposal_class": "Param"
+      },
+      "name": "param_pol",
+      "nav_floor": "4620981.203732968729448214143",
+      "nav_floor_display": 4620981
+    },
+    {
+      "commitment": "55451.77444479562475337856971665412544604001074882042032965440075947148975757557724846906615971349500",
+      "commitment_display": 55452,
+      "inputs": {
+        "proposal_class": "Treasury"
+      },
+      "name": "treasury_pol",
+      "nav_floor": "7393600",
+      "nav_floor_display": 7393600
+    },
+    {
+      "commitment": "103972.0770839917964125848182187264852113250201540382881181020014240090432954542073408794990494628031",
+      "commitment_display": 103972,
+      "inputs": {
+        "proposal_class": "Code"
+      },
+      "name": "code_pol",
+      "nav_floor": "13862943.61119890618834464243",
+      "nav_floor_display": 13862944
+    },
+    {
+      "commitment": "159423.8515287874211659633879353806106573650309028587084477564021834805330530297845893485652091762981",
+      "commitment_display": 159424,
+      "inputs": {
+        "proposal_class": "Meta"
+      },
+      "name": "meta_pol",
+      "nav_floor": "21256533.33333333333333333333",
+      "nav_floor_display": 21256533
+    },
+    {
+      "commitment": "17328.67951399863273543080303645441420188750335900638135301700023733484054924236789014658317491046719",
+      "commitment_display": 17329,
+      "inputs": {
+        "b": "25000"
+      },
+      "name": "baseline_commitment"
+    },
+    {
+      "attack_cost": "2204208.092500",
+      "attack_cost_third": "734736.0308333333333333333333",
+      "dec_v_min": "1386294.400000",
+      "inputs": {
+        "spendable_nav": "13862944"
+      },
+      "liquidity": "1469472.061667193437130067855",
+      "name": "code_security_at_nav_floor",
+      "pol_depth": "83177.66166719343713006785457",
+      "prize": "693147.200000",
+      "security_ok": true,
+      "three_prize": "2079441.600000"
+    },
+    {
+      "delta": "0.10",
+      "inputs": {
+        "prize": "693147"
+      },
+      "name": "scaled_defaults",
+      "p_ref": "341588.8308335967185650339272874905940845300080616153152472408005696036173181816829363517996197851212",
+      "pol_b": "121751.1119977449864418454401"
+    },
+    {
+      "attack_cost": "651986.038542",
+      "inputs": {
+        "b_accept": "25000",
+        "b_reject": "25000",
+        "contest_capital": "400000",
+        "flow_cap": "8",
+        "pol_depth": "34657.359028"
+      },
+      "l_hat": "434657.359028",
+      "name": "l_hat_contest_within_ceiling"
+    },
+    {
+      "attack_cost": "576986.038542",
+      "inputs": {
+        "b_accept": "25000",
+        "b_reject": "25000",
+        "contest_capital": "1000000000",
+        "flow_cap": "7",
+        "pol_depth": "34657.359028"
+      },
+      "l_hat": "384657.359028",
+      "name": "l_hat_flow_cap_ceiling_binds"
+    }
+  ]
+}

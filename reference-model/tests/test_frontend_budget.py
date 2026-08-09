@@ -38,8 +38,12 @@ from bleavit_reference_model.frontend_budget import (
     FORCE_RERUN_ALLOWANCE_PER_EPOCH,
     HALF_LOAD_BOOKS,
     METADATA_SHARE,
+    MAX_POV_SIZE,
     METADATA_STATED_MIN_BYTES,
     MOBILE_QUOTA,
+    NORMAL_LENGTH_CEILING,
+    NORMAL_PROOF_BUDGET,
+    NORMAL_REF_TIME_BUDGET,
     PINNED_METADATA_BLOBS,
     RAW_SHARE,
     ROW_BYTES,
@@ -208,6 +212,52 @@ class TestTradedStream(unittest.TestCase):
         )
         self.assertGreater(weight.total_ref_time, weight.ref_time)
         self.assertGreater(weight.proof_size, 0)
+
+    def test_the_normal_class_budgets_are_derived_and_are_not_the_length_ceiling(self):
+        """The proof budget must never again be the block-*length* ceiling.
+
+        `NORMAL_PROOF_BUDGET` read 3,932,160 until 2026-08-09, copied out of a
+        13 §5 sentence that was itself wrong. That number is a real limit of
+        this runtime and a different resource: 75 % of the 5 MiB `BlockLength`,
+        which bounds an extrinsic's encoded length. This module divides a proof
+        size by it, so the published trade capacity came out at half the true
+        value, and no test noticed because every other test here is parametric
+        in the budget.
+
+        This one is not parametric on purpose. It asserts the derivation — 75 %
+        of `MAX_POV_SIZE` — and asserts the two ceilings are distinct, so a
+        future re-transcription fails here rather than shipping.
+        """
+        self.assertEqual(NORMAL_PROOF_BUDGET, MAX_POV_SIZE * 3 // 4)
+        self.assertEqual(NORMAL_PROOF_BUDGET, 7_864_320)
+        self.assertEqual(NORMAL_REF_TIME_BUDGET, 1_500_000_000_000)
+        self.assertEqual(NORMAL_LENGTH_CEILING, 3_932_160)
+        self.assertNotEqual(NORMAL_PROOF_BUDGET, NORMAL_LENGTH_CEILING)
+
+    def test_observed_trade_capacity_agrees_with_the_runtime_within_the_surcharge(self):
+        """The capacity here must land where the runtime's own pinned one does.
+
+        `pov_budgets.rs` asserts at runtime that the primary reservation holds
+        **70** `buy` calls. This module reaches the same figure from the same
+        generated weight, and lands two higher for one stated reason: the
+        runtime composes `EXTERNAL_TRADE_ROUTE_PROOF_SURCHARGE` (3,056 B) on top
+        of the generated 108,804 B, and `parse_generated_weight` reads only the
+        generated file. So the gap is a known 2, not an unknown drift.
+
+        The load-bearing part is the order of magnitude. Against the old budget
+        this returned 36 — half the runtime's own ceiling — and nothing here
+        compared the two.
+        """
+        capacity = self.observed.capacity
+        self.assertEqual(capacity.proof_limit, NORMAL_PROOF_BUDGET // self.observed.weight.proof_size)
+        runtime_pinned = 70
+        surcharge_free = NORMAL_PROOF_BUDGET // (self.observed.weight.proof_size + 3_056)
+        self.assertEqual(surcharge_free, runtime_pinned)
+        self.assertGreaterEqual(capacity.proof_limit, runtime_pinned)
+        self.assertLessEqual(capacity.proof_limit - runtime_pinned, 2)
+        # Proof still binds before ref-time, which is what makes the omitted
+        # `Traded` stream an operational risk rather than a rounding note.
+        self.assertEqual(capacity.binding_dimension, "proof_size")
 
     def test_capacity_and_exhaustion_are_parametric_in_per_event_weight(self):
         weight = DispatchWeight(

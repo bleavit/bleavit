@@ -1,0 +1,129 @@
+/*
+ * Scene-local rules for the oracle and registry sub-games.
+ *
+ * Two of these are semantic rather than cosmetic:
+ *
+ *  - `.oracle-absent` is the house rendering for a fact the protocol treats as
+ *    missing — an unretrievable evidence body, a per-round acknowledgement the
+ *    simulation does not carry. It is monospaced and quiet, never hidden: a
+ *    reader who cannot see that something is absent has learned the wrong thing.
+ *  - `.oracle-contrast` sets the two sub-games side by side. The whole scene
+ *    exists for one sentence — an oracle dispute can hold a decision, a registry
+ *    dispute holds only settlement — so the layout puts the two columns where
+ *    that comparison is unavoidable rather than burying it in prose.
+ */
+
+.oracle-lede {
+  font-size: var(--t-sub);
+  line-height: var(--lh-sub);
+  font-weight: 600;
+  margin: 0 0 var(--sp-2);
+}
+
+.oracle-chiprow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  align-items: center;
+  margin: 0 0 var(--sp-3);
+}
+
+/* Row headers keep the plate so a table does not look torn along its left edge. */
+.oracle-table th[scope='row'] {
+  background: var(--well);
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: var(--t-caption);
+  font-weight: 500;
+  color: var(--ink);
+  white-space: normal;
+  vertical-align: top;
+}
+
+.oracle-table th[scope='row'].numeric {
+  font-family: var(--font-mono);
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+
+/* A round the ladder has not reached yet must read as weaker than one it has. */
+.oracle-row--ahead td,
+.oracle-row--ahead th[scope='row'] {
+  color: var(--ink-2);
+}
+
+.oracle-absent {
+  font-family: var(--font-mono);
+  font-size: var(--t-caption);
+  color: var(--ink-2);
+}
+
+.oracle-hash {
+  font-family: var(--font-mono);
+  font-size: var(--t-caption);
+  word-break: break-all;
+}
+
+.oracle-contrast {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: var(--sp-3);
+  margin: var(--sp-3) 0 0;
+}
+
+.oracle-contrast__col {
+  background: var(--surface);
+  padding: var(--sp-3);
+}
+
+.oracle-contrast__head {
+  font-size: var(--t-micro);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-2);
+  margin: 0 0 var(--sp-2);
+}
+
+.oracle-contrast__claim {
+  font-size: var(--t-body);
+  line-height: var(--lh-body);
+  font-weight: 600;
+  margin: 0 0 var(--sp-2);
+}
+
+.oracle-contrast p:last-child {
+  margin-bottom: 0;
+}
+
+.oracle-paths {
+  list-style: none;
+  margin: var(--sp-3) 0 0;
+  padding: 0;
+}
+
+.oracle-path {
+  padding: var(--sp-3) 0;
+  border-top: 1px solid var(--ink-3);
+}
+
+.oracle-path:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.oracle-path__name {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: baseline;
+  margin: 0 0 var(--sp-1);
+}
+
+.oracle-path__gloss,
+.oracle-path__bonds {
+  font-size: var(--t-caption);
+  line-height: var(--lh-caption);
+  color: var(--ink-2);
+  margin: 0 0 var(--sp-1);
+  max-width: 66ch;
+}
