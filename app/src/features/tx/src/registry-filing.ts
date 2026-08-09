@@ -367,6 +367,61 @@ interface FilingInputsBase<K extends FilingKind> {
 declare const CLOSURE_READ: unique symbol;
 
 /**
+ * The marker that makes a branded value **unreassemblable**, not merely unwritable.
+ *
+ * ## A `unique symbol` brand does not survive what everyone assumed it survived
+ *
+ * The claim every brand in this workspace rests on — restated in `tools/check-finalized-casts.ts`
+ * for two months — was that the phantom field *"stops an object literal, a spread and
+ * `satisfies`"*. The first and third are true. **The second is false**, and it was checked by
+ * compiling it rather than by reading it:
+ *
+ * ```ts
+ * const legit = epochClosure({ registry: 'incident', epoch: 40, specVersion: 2 }, read);
+ * // no cast anywhere, and it compiles:
+ * const forged = { ...legit, subject: { registry: 'incident', epoch: 41, specVersion: 9 } };
+ * filingBlocks({ …, epochClosed: forged })  // => []
+ * ```
+ *
+ * Object spread copies own enumerable properties **including symbol-keyed ones**, and
+ * TypeScript's spread type keeps them, so the brand rides along into a value whose payload was
+ * replaced. The result is exactly the wrong-key admission the subject repair was written to
+ * prevent, reached through a different door: `read` proves an absence at `(40, 2)` and
+ * `filingBlocks` derives the permitted filing key from the substituted subject. Nothing in
+ * `check:casts` can see it, because there is no assertion in the expression.
+ *
+ * ## Why a private field, and why an ambient one
+ *
+ * TypeScript's spread type **drops** private and `#private` members — that is the one member
+ * kind a spread cannot carry — so intersecting the branded arm with a class that declares one
+ * makes the forged object miss a required property and the assignment fails. A caller cannot
+ * supply it from a class of its own either: a `#` field is nominal per *declaration*, so
+ * `{ ...mine, ...legit, subject: forged }` with `class Mine { #producedByEpochClosure = true }`
+ * is refused too. Both were verified by compiling them.
+ *
+ * `#private` rather than TypeScript's `private`: the two are equally nominal for assignability,
+ * but a `private` member is an ordinary own enumerable property at runtime and a spread really
+ * does copy it, so the type-level story and the runtime story would disagree — which is the
+ * exact shape of defect this comment exists to record. `#` names also live in their own
+ * namespace, so the marker can never collide with a payload field.
+ *
+ * `declare class` rather than a real one: the marker is **phantom**, like every brand here. It
+ * is never constructed and has no runtime representation, so the values stay plain objects —
+ * `structuredClone`, `deepStrictEqual` and the JSON fixtures behave exactly as before, and no
+ * consumer changes. The control is a compile-time one, and the assertion half of it is still
+ * `check:casts`'s job: the `unique symbol` stays, because that is what the gate discovers by.
+ *
+ * One marker per producer rather than one shared marker, so the diagnostic names the function
+ * the value has to come from. The **class** name is what carries it, not the field name —
+ * `tsc` emits a `#private` placeholder into the `.d.ts`, so a consumer compiling against the
+ * built package reads *"Property '#private' is missing … but required in type
+ * `ProducedByEpochClosure`"*. That is why the marker is named after its producer.
+ */
+declare class ProducedByEpochClosure {
+  readonly #producedByEpochClosure: true;
+}
+
+/**
  * `ClosedAt[epoch][spec_version]`, read — 07 §7's terminal aggregate (02 §7.4, v28).
  *
  * ## `open` is a chain answer, so it carries the read that produced it
@@ -423,9 +478,18 @@ declare const CLOSURE_READ: unique symbol;
  *
  * A comparison someone can forget to call is weaker than a shape they cannot build, and one
  * value is weaker still than nothing to compare.
+ *
+ * ## And a shape they cannot build is not a shape they cannot **edit** (2026-08-09)
+ *
+ * The paragraph above was true of construction and false of modification, which a fifth review
+ * found by writing the expression out: `{ ...open, subject: someOtherKey }` needs no cast, keeps
+ * the brand, and re-keys the evidence — so the instance was enforced by a type, the key by a
+ * derivation, and both were defeated by one spread. The arm is now intersected with
+ * {@link ProducedByEpochClosure}, whose `#private` member a spread cannot carry; see that
+ * marker for the mechanism and for why the `unique symbol` stays beside it.
  */
 export type EpochClosure<K extends FilingKind = FilingKind> =
-  | {
+  | (ProducedByEpochClosure & {
       readonly kind: 'open';
       readonly subject: ClosureSubject<K>;
       /**
@@ -434,7 +498,7 @@ export type EpochClosure<K extends FilingKind = FilingKind> =
        */
       readonly read: Verified<undefined>;
       readonly [CLOSURE_READ]: true;
-    }
+    })
   | { readonly kind: 'closed'; readonly subject: ClosureSubject<K>; readonly at: Verified<number> }
   | { readonly kind: 'unread'; readonly subject: ClosureSubject<K>; readonly reason: string };
 

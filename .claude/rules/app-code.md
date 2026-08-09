@@ -29,6 +29,35 @@ Practical consequences:
    `shared-types`: if the universal sink package can construct it, 10 §2.1 is void
    silently, with green CI. UI components reject unlabeled values by type.
 
+   **A brand does not stop a *spread* either, and three controls on this branch were
+   defeated by one before anybody compiled the expression (2026-08-09).** Object spread
+   copies own enumerable properties **including symbol-keyed ones**, and TypeScript's
+   spread type keeps them — so given any legitimate `v`, `{ ...v, field: yours }`
+   compiles with **no cast**, is still assignable to the branded type, and is invisible to
+   `check:casts` because there is no assertion in it. A brand proves *some* producer ran;
+   it does not prove the payload beside it is the one that producer emitted. Measured, not
+   argued: a genuine `ClosedAt` absence read for `(epoch 40, version 2)` re-pointed at
+   `(41, 9)` made `filingBlocks` return `[]` on a **bonded** filing, and a spread-refigured
+   `AllowanceMeter` turned `['Allowance']` into `[]` on an exhausted guardian power.
+
+   So when adding a brand, ask **what a caller can do with a value it holds legitimately**,
+   not only what it can assemble from nothing. If a permitting control reads a payload field
+   beside the brand, intersect the type with a phantom marker — a **non-exported**
+   `declare class` carrying a `#private` member, which is the one member kind a spread type
+   drops. `ProducedByEpochClosure` in `src/features/tx/src/registry-filing.ts` is the worked
+   example, `#private` rather than `private` is deliberate (a `private` member is an ordinary
+   own enumerable property at runtime, so the type story and the runtime story would
+   disagree), and the marker is discovered by `check:casts` in both spellings. Prove it with
+   a fixture that builds the value **by spread** — `tests/firewall/fixtures/*-by-spread.ts`;
+   a fixture that assembles a literal cannot distinguish the two cases and two rounds of
+   review missed this door for exactly that reason.
+
+   `Finalized<T>` itself is deliberately **not** hardened this way: `chain-client` exports
+   `derive(read, compute)`, which grants precisely what the spread grants — a new value under
+   an existing read's pin — so the spread is not an escalation, and the brand's real contract
+   (*a caller holding no read has nothing to pass in*) survives it. The control for the
+   related defect is `check:render-provenance`'s rule B, not the brand.
+
    **A third control covers the render edge**: `<Panel title={`Referendum ${id.value}`}>`
    typechecks perfectly and puts a chain read on screen with no badge, because the payload
    of a `Verified<string>` is a `string`. `app/tools/check-render-provenance.ts`
@@ -290,7 +319,7 @@ this file loads whenever a session touches `app/**`, which is when they apply.
 
 · **`pnpm run test:firewall`** — the 10 §10.2 negative-compilation corpus, the only suite that tests the firewall *rejects* rather than that the app works, with an anti-vacuity positive control
 
-· **`pnpm run check:casts`** — the 10 §2.1 assertion gate, since the brand stops object literals but cannot stop `as Finalized<T>`
+· **`pnpm run check:casts`** (+ `:witness`) — the 10 §2.1 assertion gate, since the brand stops object literals but cannot stop `as Finalized<T>`. Brands are **discovered**, never listed, by two devices: a `declare const S: unique symbol` plus the exported types carrying `[S]`, and — since 2026-08-09 — a non-exported marker class with a private member, referenced as an intersection member **or** in an `extends` clause. Reading only the first spelling silently dropped `GatePassed` from the governed set while every test stayed green, so `--witness` now runs a discovery leg over synthetic sources in both spellings plus two negative controls, ahead of the per-line expectations. The gate cannot see a spread and is not meant to — see the brand paragraph above for the control that does
 
 · **`pnpm run check:provenance-mints`** (+ `:witness`, V-200) — the 10 §2.1/§2.2 **construction** gate: a `VerificationStatus` may be built only in `packages/shared-types/src/provenance.ts`, `packages/chain-client/src/provenance.ts` and `chain-client/src/reads.ts` (`providerRead`, the never-promote disclaimer). It is the complement of the two gates above rather than a third spelling of them, and the reason is measured: a local helper writing `status: { kind: 'verified-finalized', chain: at.chain, … }` longhand was copied into four modules over seventeen call sites, six of which badged something no read produced, and **all three incumbent controls were green on every one** — `check:casts` matches `as Finalized<…>` and there is no assertion, `check:render-provenance` rule B matches a `status` initializer that is a `.status` *access* and this one is written out field by field, and the depcruise rule matches a `/testing` import this shape never needs. The badge on screen is read off `status.kind` and `Verified<T>` deliberately carries **no brand**, so writing that discriminant is a complete provenance claim with nothing behind it. The rule matches the **discriminant position** of a closed union, which is what makes it complete (there is no other way to build a member) and what keeps it silent on `.kind` comparisons, `switch` arms, `local-index`'s same-spelled `BodyProvenance` tags and the type declarations themselves — so it needs no exemption for any of them. Identifiers are constant-folded and shorthand is resolved, because naming the literal is what a developer does when a gate complains; a status parsed out of a runtime string is **not** covered and the gate says so, since reading string bodies is the tokenizer hole three gates here have had to remove. Elsewhere, **carry** the status: `derive(read, compute)` for a value computed from one read (`chain-client` exports it and `finalize` stays withheld — `derive` grants nothing, because a caller with no read has nothing to pass), `combine`/`combine2` for several, `externalProposal` for an imported request, a caller's own `Verified<T>` passed through — and for a value no read produced, **there is no status, so it is absent**. `tests/` is deliberately unscanned: a suite must be able to write a `Verified<T>` fixture, and a gate firing on thirty of them gets switched off. Witness: one firing per declared line across **all six** statuses, plus negative controls that must stay silent — a witness proving only `verified-finalized` leaves the other five mintable, and `verified-best` on a pre-read sentinel was one of the six real findings
 

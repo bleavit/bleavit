@@ -1,5 +1,11 @@
-// expect-error: TS2741 — 06 §5.2: `meterFor` is the only thing that pairs a power with its row
+// expect-error: TS2322 — 06 §5.2: `meterFor` is the only thing that pairs a power with its row
 // MUST FAIL: a meter cannot be assembled from a REAL book by naming the wrong entry.
+//
+// The declared code moved TS2741 → TS2322 on 2026-08-09 and the fixture is unchanged. It now
+// misses two required members rather than one — `[METER_PAIR]` and `ProducedByMeterFor`'s
+// private field — so TypeScript reports the assignment failure and elaborates, instead of
+// naming the single missing property. The refusal is strictly stronger, not relaxed:
+// `guardian-meter-refigured-by-spread.ts` is the fixture the second member exists for.
 //
 // The sibling of `guardian-meter-assembled-by-hand.ts`, and it exists because that one alone
 // does not prove what it looks like it proves. That fixture is refused by the **book**'s brand

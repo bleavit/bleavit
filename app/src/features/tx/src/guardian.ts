@@ -470,12 +470,39 @@ export function isMetered(power: GuardianPower): power is MeteredPower {
  * `Guardian.Allowances` is a single storage value (`AllowanceState`), so requiring all three
  * costs one read — and §11.8.2's propose row asks for *"allowance meters displayed"*, plural.
  */
-export type AllowanceBook = Readonly<Record<MeteredPower, AllowanceReading>> & {
-  readonly [METER_BOOK]: true;
-};
+export type AllowanceBook = ProducedByAllowanceBook &
+  Readonly<Record<MeteredPower, AllowanceReading>> & {
+    readonly [METER_BOOK]: true;
+  };
 
 declare const METER_BOOK: unique symbol;
 declare const METER_PAIR: unique symbol;
+
+/**
+ * The two markers that make a book and a meter unreassemblable — see
+ * `registry-filing.ts`'s `ProducedByEpochClosure` for the full argument, which is one
+ * argument for all three brands and is written out once there.
+ *
+ * In short: a `unique symbol` brand stops a literal and `satisfies`, and it does **not** stop
+ * `{ ...genuine, used: anotherCountersFigure }`, because object spread carries symbol-keyed
+ * properties and TypeScript's spread type keeps them. It drops `#private` members, which is
+ * why these exist. They are phantom `declare class`es — never constructed, no runtime
+ * representation — so nothing downstream changes.
+ *
+ * **Both levels need one, for the same reason both levels needed a brand.** Mark the book
+ * alone and `{ ...meterFor(book, 'delay_once'), used: book.pause_intake.used }` still pairs a
+ * power with another counter's budget; mark the meter alone and a spread-edited book feeds
+ * `meterFor` a fabricated row under a genuine pairing. Measured, not assumed: with the
+ * genuine exhausted `delay_once` meter `proposalBlocks` returns `['Allowance']`, and with
+ * either spread-forged one it returned `[]`.
+ */
+declare class ProducedByAllowanceBook {
+  readonly #producedByAllowanceBook: true;
+}
+
+declare class ProducedByMeterFor {
+  readonly #producedByMeterFor: true;
+}
 
 /**
  * Remaining allowance for a power, and whether a proposal fits under it.
@@ -500,8 +527,18 @@ declare const METER_PAIR: unique symbol;
  *
  * `AllowanceReading` stays unbranded on purpose: it is a field of the branded book and has no
  * independent producer to protect, so branding it would add a symbol and no control.
+ *
+ * ## The brand was the wrong half, and one review later it is both halves (2026-08-09)
+ *
+ * Everything above was written about *assembling* a meter, and it holds. It says nothing about
+ * *editing* one, and a fifth review found that `{ ...meterFor(book, 'delay_once'), used:
+ * book.force_rerun.used, limit: book.force_rerun.limit }` compiles with no cast and keeps
+ * `[METER_PAIR]` — so the paragraph claiming `meterFor` is the only producer was false as
+ * written. Both types are now intersected with a `#private` marker a spread cannot carry
+ * ({@link ProducedByAllowanceBook}, {@link ProducedByMeterFor}); the `unique symbol` stays,
+ * because it is what `check:casts` discovers the type by.
  */
-export type AllowanceMeter<P extends MeteredPower = MeteredPower> = {
+export type AllowanceMeter<P extends MeteredPower = MeteredPower> = ProducedByMeterFor & {
   readonly power: P;
   readonly used: Verified<number>;
   readonly limit: Verified<number>;

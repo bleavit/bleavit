@@ -2,15 +2,37 @@
 /**
  * The assertion gate for `Finalized<T>` — 10 §2.1, layer 2 of 3.
  *
- * The brand makes `Finalized<T>` unforgeable by object literal, spread, or
- * `satisfies`. It does NOT stop a type assertion: `x as Finalized<T>` is a
- * narrowing assertion between related types, which TypeScript permits by design.
- * The corpus proved that empirically rather than us assuming it.
+ * The brand makes `Finalized<T>` unforgeable by object literal or `satisfies`. It
+ * does NOT stop a type assertion: `x as Finalized<T>` is a narrowing assertion
+ * between related types, which TypeScript permits by design. The corpus proved that
+ * empirically rather than us assuming it.
  *
  * So the brand is not the whole control. This gate is the other half: exactly one
  * site in the workspace may assert to `Finalized<T>`, and `as unknown as` — the
  * double assertion that defeats any nominal technique in TypeScript — is banned
  * outright.
+ *
+ * ## It does not stop a **spread** either, and this file said for two months that it did
+ *
+ * That sentence used to read *"unforgeable by object literal, spread, or `satisfies`"*, and
+ * the middle term was false. Object spread copies own enumerable properties **including
+ * symbol-keyed ones**, and TypeScript's spread type keeps them, so given any legitimate `v`
+ * the expression `{ ...v, payloadField: attackerChosen }` compiles with no cast and still
+ * satisfies the branded type. A brand therefore proves *some* producer ran; it does not
+ * prove the payload beside it is the one that producer emitted.
+ *
+ * This gate is structurally blind to that — there is no assertion in the expression — and it
+ * cannot be taught to see it, because the defect is a value flow rather than a syntax. Three
+ * brands on the F17 branch were reached this way (`EpochClosure`, `AllowanceMeter`,
+ * `AllowanceBook`), each landing on a control that *permits*. The repair is per type and it
+ * belongs in the type: intersect the branded shape with a phantom `declare class` carrying a
+ * `#private` member, which is the one member kind a spread type drops. See
+ * `ProducedByEpochClosure` in `src/features/tx/src/registry-filing.ts` for the argument, and
+ * `tests/firewall/fixtures/*-by-spread.ts` for the corpus that keeps it honest.
+ *
+ * The rule for anyone adding a brand: **if a permitting control reads a payload field beside
+ * the brand, the brand alone is not enough.** Ask what a caller can do with a value it holds
+ * legitimately, not only what it can assemble from nothing.
  *
  * ## Why it reads the AST rather than the lines
  *
@@ -50,9 +72,10 @@ const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
  *
  * It governed exactly one, `Finalized`, while the workspace had grown fifteen `unique symbol`
  * brands. Every one of them rests on the same argument this file opens with: the phantom field
- * stops an object literal, a spread and `satisfies`, and it does **not** stop `x as Brand`, which
+ * stops an object literal and `satisfies`, and it does **not** stop `x as Brand`, which
  * TypeScript permits between related types. So fourteen brands had the weaker half of the control
- * and not the other half, and nothing said so.
+ * and not the other half, and nothing said so. (Nor does it stop a spread — see the header. This
+ * sentence claimed it did, in the file that defines the control, for two months.)
  *
  * An R-6 review found it through `AdmittedSnapshot`, whose docstring claimed a page "has no way to
  * name the brand" — true of the literal and false of a single assertion.
@@ -72,15 +95,48 @@ interface Brand {
 const SKIP_DIRS = new Set(['node_modules', 'dist', '.git', 'fixtures']);
 
 /**
- * Every exported type in `file` whose shape carries a `unique symbol` declared in that same file.
+ * Every exported type in `file` made nominal by something declared in that same file.
  *
  * Both halves have to be local. A symbol declared elsewhere is not a brand this file mints, and a
  * type that merely *references* a branded type (a union arm, a field) is not itself a mint — only
  * a declaration whose own members include the computed key can be asserted into existence.
+ *
+ * ## Two devices, not one — the second added 2026-08-09
+ *
+ * A `unique symbol` was the only device when this discovery was written, and the spread finding
+ * (see the header) made it insufficient on its own: three types now intersect a **marker class**,
+ * a non-exported `declare class` carrying a `#private` member, because that is the one member
+ * kind TypeScript drops from a spread type.
+ *
+ * A marker class makes its type exactly as nominal as a symbol does, so an assertion to it mints
+ * exactly as effectively — and it was invisible here. Worse, the two devices are each individually
+ * sufficient for nominality, so a later edit deleting the now-redundant symbol would have removed
+ * the type from this gate **silently**, with every test still green. That is the shape of defect
+ * this gate exists to prevent, so the gate learns the second device rather than relying on the
+ * first being left in place.
+ *
+ * Scope is deliberately the branding idiom and nothing wider: a **non-exported** marker class,
+ * referenced by an exported interface or type alias. An exported class with private members
+ * (`SignerRegistry`, `LocalIndex`, `MockSigner`) is nominal too, but it is a runtime object with
+ * a constructor rather than a phantom proof, and governing those would be a different rule with
+ * different exemptions.
  */
 function brandsDeclaredIn(source: ts.SourceFile, rel: string): Brand[] {
   const symbols = new Set<string>();
+  const markerClasses = new Set<string>();
   source.forEachChild((node) => {
+    if (ts.isClassDeclaration(node) && node.name !== undefined) {
+      const isExported =
+        ts.getModifiers(node)?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword) === true;
+      const hasPrivateMember = node.members.some(
+        (m) =>
+          (m.name !== undefined && ts.isPrivateIdentifier(m.name)) ||
+          (ts.canHaveModifiers(m) &&
+            ts.getModifiers(m)?.some((mod) => mod.kind === ts.SyntaxKind.PrivateKeyword) === true),
+      );
+      if (!isExported && hasPrivateMember) markerClasses.add(node.name.text);
+      return;
+    }
     if (!ts.isVariableStatement(node)) return;
     const declaresAmbient = node.modifiers?.some((m) => m.kind === ts.SyntaxKind.DeclareKeyword);
     if (declaresAmbient !== true) return;
@@ -92,7 +148,7 @@ function brandsDeclaredIn(source: ts.SourceFile, rel: string): Brand[] {
       if (isUniqueSymbol && ts.isIdentifier(decl.name)) symbols.add(decl.name.text);
     }
   });
-  if (symbols.size === 0) return [];
+  if (symbols.size === 0 && markerClasses.size === 0) return [];
 
   const carriesBrandKey = (node: ts.Node): boolean => {
     let found = false;
@@ -104,6 +160,24 @@ function brandsDeclaredIn(source: ts.SourceFile, rel: string): Brand[] {
           found = true;
           return;
         }
+      }
+      // The marker-class device, in **both** spellings. A type alias names the marker as an
+      // intersection member (`Marker & { … }`) and an interface names it in a heritage clause
+      // (`interface X extends Marker`), and those are different nodes: the first is a
+      // `TypeReferenceNode`, the second an `ExpressionWithTypeArguments` whose expression is a
+      // bare identifier. Reading only the first was measured and it silently dropped
+      // `GatePassed` from the governed set — the exact failure this discovery exists to prevent,
+      // reintroduced by the change that was closing it.
+      const marker = ts.isTypeReferenceNode(inner)
+        ? ts.isIdentifier(inner.typeName)
+          ? inner.typeName.text
+          : undefined
+        : ts.isExpressionWithTypeArguments(inner) && ts.isIdentifier(inner.expression)
+          ? inner.expression.text
+          : undefined;
+      if (marker !== undefined && markerClasses.has(marker)) {
+        found = true;
+        return;
       }
       ts.forEachChild(inner, walkMembers);
     };
@@ -254,7 +328,85 @@ function scan(files: readonly string[], brands: ReadonlyMap<string, Brand>): Vio
  * line scanner fires on, and a rewrite that quietly reacquired that behaviour would
  * otherwise pass.
  */
+/**
+ * Anti-vacuity for **discovery**, which the line witness below cannot reach.
+ *
+ * Every expectation in `finalized-cast-witness.ts` names `Finalized`, so all of them fire
+ * through the `unique symbol` device and none exercises the marker-class one. And no type in
+ * the workspace is marker-*only* today — the five that carry a marker carry a symbol beside it
+ * — so the marker path could be deleted, the whole corpus would stay green, and the next author
+ * who reached for a marker alone would get a type this gate never governed.
+ *
+ * That is the same hole the rest of this file is about, one level up, so it gets the same
+ * treatment: discovery is run against synthetic sources whose brands are known, in **both**
+ * marker spellings, and against a negative control that must find nothing. Measured rather
+ * than assumed — the heritage-clause spelling was missed by the first version of this device,
+ * and the symptom was `GatePassed` silently dropping out of the governed set.
+ */
+function discoveryWitness(): readonly string[] {
+  const failures: string[] = [];
+  const discover = (label: string, code: string, expected: readonly string[]): void => {
+    const source = ts.createSourceFile(label, code, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TS);
+    const found = brandsDeclaredIn(source, label)
+      .map((b) => b.name)
+      .sort();
+    const want = [...expected].sort();
+    if (found.join(',') !== want.join(',')) {
+      failures.push(`  discovery ${label}: expected [${want.join(', ')}], found [${found.join(', ')}]`);
+    }
+  };
+
+  // A brand made nominal by a marker class **alone**, in the intersection spelling.
+  discover(
+    'marker-intersection',
+    'declare class Marker { readonly #m: true; }\n' +
+      'export type Branded = Marker & { readonly payload: number };\n',
+    ['Branded'],
+  );
+  // The same, in the heritage spelling an interface uses.
+  discover(
+    'marker-heritage',
+    'declare class Marker { readonly #m: true; }\n' +
+      'export interface Branded extends Marker { readonly payload: number }\n',
+    ['Branded'],
+  );
+  // A TypeScript `private` member is nominal for assignability too, so it counts.
+  discover(
+    'marker-ts-private',
+    'declare class Marker { private m: true; }\n' +
+      'export type Branded = Marker & { readonly payload: number };\n',
+    ['Branded'],
+  );
+  // Negative control 1: an **exported** class is a runtime object with a constructor, not a
+  // phantom proof. Governing those is a different rule, so it must find nothing.
+  discover(
+    'exported-class-is-not-a-marker',
+    'export class NotAMarker { readonly #m: true; }\n' +
+      'export type Branded = NotAMarker & { readonly payload: number };\n',
+    [],
+  );
+  // Negative control 2: a class with no private member is structural, so referencing it makes
+  // no type nominal and must not be reported.
+  discover(
+    'public-class-is-not-a-marker',
+    'declare class Plain { readonly m: true; }\n' +
+      'export type Branded = Plain & { readonly payload: number };\n',
+    [],
+  );
+  return failures;
+}
+
 function runWitness(): number {
+  const discoveryFailures = discoveryWitness();
+  if (discoveryFailures.length > 0) {
+    console.error('DISCOVERY WITNESS FAILED — a brand device is not being discovered:\n');
+    for (const failure of discoveryFailures) console.error(failure);
+    console.error(
+      '\nA type this gate does not discover is a type any file may assert into existence.\n' +
+        'Fix `brandsDeclaredIn`; do not relax the expectations.',
+    );
+    return 1;
+  }
   const fixture = join(appRoot, 'tools/fixtures/finalized-cast-witness.ts');
   const lines = readFileSync(fixture, 'utf8').split('\n');
   const markers: { at: number; rule: Rule; note: string }[] = [];
@@ -314,9 +466,10 @@ function main(argv: readonly string[]): number {
     console.error('Brand assertion gate FAILED (10 §2.1):\n');
     for (const v of violations) console.error(`  ${v.file}:${v.line}  ${v.detail}`);
     console.error(
-      '\nA brand stops object literals, spreads and `satisfies`; it cannot stop an\n' +
-        'assertion. Each brand may be minted only in the file that declares its symbol.\n' +
-        'If you need one elsewhere, you need the check the brand stands for instead.',
+      '\nA brand stops object literals and `satisfies`. It stops neither an assertion\n' +
+        'nor a spread: `{ ...genuine, field: yours }` keeps the brand and needs no cast.\n' +
+        'Each brand may be minted only in the file that declares its symbol. If you need\n' +
+        'one elsewhere, you need the check the brand stands for instead.',
     );
     return 1;
   }
