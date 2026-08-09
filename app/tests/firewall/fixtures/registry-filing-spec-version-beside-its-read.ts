@@ -16,12 +16,12 @@
 // Excess-property checking is the whole mechanism, and that is the point rather than a
 // weakness — a second home cannot be added back without deleting this fixture.
 import { filingBlocks } from '@bleavit/features-tx';
-import type { BondQuoteState, EpochClosure, FrozenSpecVersions } from '@bleavit/features-tx';
+import type { BondQuoteState, EpochClosure, FilingOccupancy, FrozenSpecVersions } from '@bleavit/features-tx';
 import type { Verified } from '@bleavit/shared-types';
 
 declare const freeUsdc: Verified<bigint>;
 declare const filingBond: BondQuoteState;
-declare const filingsUsed: Verified<number>;
+declare const filingsUsed: FilingOccupancy<'incident'>;
 declare const filingsBound: Verified<number>;
 declare const frozenSpecVersions: FrozenSpecVersions;
 declare const epochClosed: EpochClosure<'incident'>;

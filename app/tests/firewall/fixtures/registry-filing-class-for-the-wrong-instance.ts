@@ -13,12 +13,12 @@
 // decides what to encode, so the admissible set belongs in the type the form fills in. The
 // instance decides the class, exactly as `validate_class` does.
 import { filingBlocks } from '@bleavit/features-tx';
-import type { BondQuoteState, EpochClosure, FrozenSpecVersions } from '@bleavit/features-tx';
+import type { BondQuoteState, EpochClosure, FilingOccupancy, FrozenSpecVersions } from '@bleavit/features-tx';
 import type { Verified } from '@bleavit/shared-types';
 
 declare const freeUsdc: Verified<bigint>;
 declare const filingBond: BondQuoteState;
-declare const filingsUsed: Verified<number>;
+declare const filingsUsed: FilingOccupancy<'milestone'>;
 declare const filingsBound: Verified<number>;
 declare const frozenSpecVersions: FrozenSpecVersions;
 declare const epochClosed: EpochClosure<'milestone'>;

@@ -16,12 +16,12 @@
 // that established the absence and a module-private brand, so `epochClosure` is the only
 // producer and this literal does not typecheck.
 import { filingBlocks } from '@bleavit/features-tx';
-import type { BondQuoteState, FrozenSpecVersions } from '@bleavit/features-tx';
+import type { BondQuoteState, FilingOccupancy, FrozenSpecVersions } from '@bleavit/features-tx';
 import type { Verified } from '@bleavit/shared-types';
 
 declare const freeUsdc: Verified<bigint>;
 declare const filingBond: BondQuoteState;
-declare const filingsUsed: Verified<number>;
+declare const filingsUsed: FilingOccupancy<'incident'>;
 declare const filingsBound: Verified<number>;
 declare const frozenSpecVersions: FrozenSpecVersions;
 

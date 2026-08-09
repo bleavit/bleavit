@@ -274,6 +274,7 @@ import type {
   ChallengeFilingInputs,
   ClosureSubject,
   EpochClosure,
+  FilingOccupancy,
   FilingKind,
   FrozenSpecVersions,
   EvidenceState,
@@ -307,11 +308,30 @@ const DOC11 = join(REPO, 'docs/architecture/11-frontend-workflows.md');
 // it, and 10 §2.1 puts the brand on `Finalized<T>` for the transaction path alone. So a
 // plain object is the right fixture here; the annotation is what keeps `kind` and
 // `blockHash` from widening to `string` and the status from matching nothing.
+/**
+ * A block hash that follows the block number — because a status where it does not is a lie.
+ *
+ * `finalized(v, n)` used to mint every read at `0xdead` whatever `n` was, so two reads with
+ * different numbers looked like **one block** to `combineStatus`, which keys on the hash. A
+ * test that varied only the number therefore proved nothing about cross-block combination,
+ * and the one place in this suite that needed it had quietly written its own status object
+ * with a different hash. Deriving the hash removes the trap rather than documenting it.
+ */
+const blockHashAt = (blockNumber: number): HexString => `0xdead${blockNumber.toString(16)}`;
 const finalized = <T>(value: T, blockNumber = 1_000_000): Verified<T> => ({
   value,
-  status: { kind: 'verified-finalized', chain: TEST_CHAIN, blockHash: '0xdead', blockNumber },
+  status: {
+    kind: 'verified-finalized',
+    chain: TEST_CHAIN,
+    blockHash: blockHashAt(blockNumber),
+    blockNumber,
+  },
 });
-const AT: FinalizedBlockRef = { chain: TEST_CHAIN, blockHash: '0xdead', blockNumber: 1_000_000 };
+const AT: FinalizedBlockRef = {
+  chain: TEST_CHAIN,
+  blockHash: blockHashAt(1_000_000),
+  blockNumber: 1_000_000,
+};
 /**
  * Whether a labelled button is really disabled.
  *
@@ -1611,11 +1631,18 @@ const OPEN_EPOCH = <K extends FilingKind>(
     finalized<number | undefined>(undefined),
   );
 
+/** `FilingCount[epoch]` on this instance — the count and the key it was counted under. */
+const OCCUPANCY = <K extends FilingKind>(
+  registry: K,
+  used: number,
+  epoch = FILING_EPOCH,
+): FilingOccupancy<K> => ({ subject: { registry, epoch }, used: finalized(used) });
+
 /** What both instances carry — the clean path, so a refusal elsewhere is not this fixture. */
 const FILING_BASE = <K extends FilingKind>(registry: K) => ({
   freeUsdc: finalized(10_000_000n),
   filingBond: QUOTED(1_000_000n, 40_000_000n),
-  filingsUsed: finalized(1),
+  filingsUsed: OCCUPANCY(registry, 1),
   filingsBound: finalized(8),
   // §11.8.6's frozen-version clause (contract v29): the version the filing names, and the
   // set `Epoch.CohortSchedules[epoch].specs` says the live cohorts committed to.
@@ -2804,11 +2831,15 @@ const unread = (trigger: PlaybookTrigger, reason = 'the storage read failed'): T
  * Adding either back is a compile error, which is the point — see the firewall fixture
  * `guardian-meter-on-an-unmetered-power.ts`.
  */
-const ALLOWANCES = (used = 0, limit = 3): AllowanceBook => ({
-  pause_intake: { used: finalized(used), limit: finalized(limit) },
-  delay_once: { used: finalized(used), limit: finalized(limit) },
-  force_rerun: { used: finalized(used), limit: finalized(limit) },
-});
+const ALLOWANCES = (used = 0, limit = 3): AllowanceBook =>
+  bookOf(READS({
+    delayUsedThisEpoch: finalized(used),
+    forceRerunUsedThisEpoch: finalized(used),
+    pauseUsedInWindow: finalized(used),
+    delayOnceAllowancePerEpoch: finalized(limit),
+    forceRerunAllowancePerEpoch: finalized(limit),
+    pauseIntakeAllowance: finalized(limit),
+  }));
 
 /**
  * The nine reads `allowanceBook` builds a book from — contract v30.
@@ -2914,9 +2945,40 @@ const gateReading = (kind: 'active' | 'inactive' | 'unread' = 'active'): Trigger
   return { kind: 'unread', subject: { trigger: 'GateBreach' }, reason: 'the storage read failed' };
 };
 
-/** A meter narrowed to one metered power — the shape `GuardianProposal`'s arms demand. */
+/**
+ * A meter narrowed to one metered power — the shape `GuardianProposal`'s arms demand.
+ *
+ * Through the producers since 2026-08-09: `AllowanceMeter` and `AllowanceBook` are both
+ * branded, so a fixture cannot write one out and neither can a screen. That is a
+ * strengthening of the suite as well as a consequence of it — every meter these tests use is
+ * now the one `allowanceBook` really derives from the nine reads, windowed correction and all.
+ */
 const METER = <P extends MeteredPower>(power: P, used = 0, limit = 3): AllowanceMeter<P> =>
-  ({ power, used: finalized(used), limit: finalized(limit) });
+  meterFor(ALLOWANCES(used, limit), power);
+
+/**
+ * One power's pair read at two different blocks — the shape `combineStatus` must refuse.
+ *
+ * Built through `allowanceBook` rather than beside it, which is a stronger claim than the
+ * literal it replaces: it proves the **producer** does not launder a cross-block pair on its
+ * way into a meter, not merely that `allowanceRemaining` refuses one that arrives.
+ */
+const SPLIT_METER = <P extends MeteredPower>(
+  power: P,
+  used: Verified<number>,
+  limit: Verified<number>,
+): AllowanceMeter<P> => {
+  const reads: Partial<Extract<AllowanceReads, { kind: 'read' }>> =
+    power === 'delay_once'
+      ? { delayUsedThisEpoch: used, delayOnceAllowancePerEpoch: limit }
+      : power === 'force_rerun'
+        ? { forceRerunUsedThisEpoch: used, forceRerunAllowancePerEpoch: limit }
+        : { pauseUsedInWindow: used, pauseIntakeAllowance: limit };
+  return meterFor(bookOf(READS(reads)), power);
+};
+
+/** A `Verified<T>` at a block of its own — the `0xbeef` convention, now derived not written. */
+const at = <T>(value: T, blockNumber: number): Verified<T> => finalized(value, blockNumber);
 
 /** The proposal id every rerun fixture is about — see `FILING_EPOCH` for why it is named once. */
 const RERUN_PID = 'p7';
@@ -3985,6 +4047,39 @@ test('V30-16 — the four non-activation powers have NO field for a playbook rea
   }
 });
 
+test('P2 — an expiry verdict from two blocks is a verdict about neither (rule B)', () => {
+  // Not a subject defect — the sweep classified this one as app-code rule 2's rule B, and
+  // that is exactly why it belongs here. `approvalBlocks` compared `context.now` with
+  // `action.expiresAt` using a bare `>=`, so two `Verified<number>` read at different blocks
+  // produced a definite verdict whose provenance is neither operand's. The unsafe direction is
+  // the permitting one: a stale `now` from an earlier block makes an expired action look live,
+  // and the guardian signs an `ActionExpired`.
+  const straddling = approvalBlocks(
+    APPROVE({
+      now: finalized(100, 1_000_000),
+      action: ACTION({ expiresAt: finalized(9_000, 999_000) }),
+    }),
+  );
+  assert.deepEqual(
+    straddling.map((b) => b.check),
+    ['Expiry'],
+    'an expiry compared across two blocks must refuse rather than answer',
+  );
+  // The refusal carries `combineStatus`'s own sentence, and that is the actionable half: the
+  // remedy for two readings at different blocks is a refresh, and no other refusal on this
+  // screen has that remedy. A first pass asserted only that *something* blocked, and a mutant
+  // that dropped the reason survived — a refusal whose cause is unstated is one an operator
+  // cannot act on, which is this round's whole subject in the copy rather than in the check.
+  assert.match(nth(straddling, 0, 'block').detail, /different blocks/);
+  assert.match(nth(straddling, 0, 'block').detail, /Refresh to read them together/);
+  // …and the clean single-block case still answers rather than refusing, so the arm above is
+  // a real discrimination and not a control that has stopped comparing.
+  assert.deepEqual(
+    approvalBlocks(APPROVE({ now: finalized(100), action: ACTION({ expiresAt: finalized(9_000) }) })),
+    [],
+  );
+});
+
 test('P2 — a registration read for ANOTHER playbook must not admit this activation', () => {
   // The 2026-08-09 P2, second face. `RegistrationReading` carried a boolean and nothing else,
   // so a successful read of `Guardian.PlaybookRegistered[PB-RESERVE]` paired with an action
@@ -4212,12 +4307,39 @@ test('M1 — the approve surface renders the allowance meter and the trigger sta
   assert.ok(fieldPresent(html, 'Approvals so far'), html);
 });
 
+test('a meter is labelled with the power its row belongs to, and the copy follows', () => {
+  // `meterFor` is the only producer, and the label it attaches is the one every downstream
+  // sentence names. A mutant that kept the right row and relabelled every meter `delay_once`
+  // survived the first pass: the arithmetic was still correct, and a guardian proposing a
+  // pause was told "No delay_once allowance remains in this window". That is this module's
+  // own thesis — one action, one description — failing in the copy rather than in the check.
+  const book = ALLOWANCES(1, 4);
+  for (const power of ['pause_intake', 'delay_once', 'force_rerun'] as const) {
+    assert.equal(meterFor(book, power).power, power, `meterFor relabelled ${power}`);
+  }
+  // …and the refusal a spent meter produces names the power that is spent.
+  const spent = proposalBlocks(
+    PROPOSE({
+      power: 'pause_intake',
+      meter: METER('pause_intake', 1, 1),
+      until: 5_000,
+      horizon: HORIZON,
+    }),
+  );
+  assert.deepEqual(spent.map((b) => b.check), ['Allowance']);
+  assert.match(nth(spent, 0, 'block').detail, /No pause_intake allowance remains/);
+  const spentRerun = proposalBlocks(
+    PROPOSE({ power: 'force_rerun', meter: METER('force_rerun', 1, 1), proposal: RERUNNABLE() }),
+  );
+  assert.match(nth(spentRerun, 0, 'block').detail, /No force_rerun allowance remains/);
+});
+
 test('an overrun allowance reads as zero remaining, never as negative headroom', () => {
   // A negative would be treated as headroom by any arithmetic downstream.
-  const two = allowanceRemaining({ power: 'delay_once', used: finalized(3), limit: finalized(5) });
+  const two = allowanceRemaining(SPLIT_METER('delay_once', finalized(3), finalized(5)));
   assert.equal(two.kind, 'stated');
   assert.equal(two.datum.value, 2);
-  const overrun = allowanceRemaining({ power: 'delay_once', used: finalized(9), limit: finalized(5) });
+  const overrun = allowanceRemaining(SPLIT_METER('delay_once', finalized(9), finalized(5)));
   assert.equal(overrun.kind, 'stated');
   assert.equal(overrun.datum.value, 0);
 });
@@ -4226,21 +4348,21 @@ test('an allowance read across two blocks is refused, not rendered', () => {
   // `limit` at one block and `used` at another describe no single budget. The figure is not
   // weakened — it is withheld, and `proposalBlocks` turns that into a block on the most
   // privileged actions in the system.
-  const split = allowanceRemaining({
-    power: 'delay_once',
-    used: finalized(3, 1_000_000),
-    limit: { value: 5, status: { kind: 'verified-finalized', chain: TEST_CHAIN, blockHash: '0xbeef', blockNumber: 999_000 } },
-  });
+  const split = allowanceRemaining(
+    SPLIT_METER('delay_once', at(3, 1_000_000), at(5, 999_000)),
+  );
   assert.equal(split.kind, 'incomparable');
   assert.match(split.reason, /different blocks/);
 });
 
 test('an allowance derived from provider data is never rendered as verified', () => {
-  const mixed = allowanceRemaining({
-    power: 'delay_once',
-    used: { value: 3, status: { kind: 'provider', providerId: 'p', sampled: false } },
-    limit: finalized(5),
-  });
+  const mixed = allowanceRemaining(
+    SPLIT_METER(
+      'delay_once',
+      { value: 3, status: { kind: 'provider', providerId: 'p', sampled: false } },
+      finalized(5),
+    ),
+  );
   assert.equal(mixed.kind, 'stated');
   assert.equal(mixed.datum.status.kind, 'provider', 'the light-client badge must not be inherited');
 });
@@ -4250,11 +4372,7 @@ test('a power whose remaining allowance cannot be established is not offered', (
   const blocks = proposalBlocks(
     PROPOSE({
       power: 'delay_once',
-      meter: {
-        power: 'delay_once',
-        used: finalized(0, 1_000_000),
-        limit: { value: 5, status: { kind: 'verified-finalized', chain: TEST_CHAIN, blockHash: '0xbeef', blockNumber: 999_000 } },
-      },
+      meter: SPLIT_METER('delay_once', at(0, 1_000_000), at(5, 999_000)),
       proposal: RERUNNABLE(),
     }),
   );
@@ -5277,11 +5395,7 @@ test('a propose panel offers nothing when the allowance cannot be established', 
     h(ProposeAction, {
       inputs: PROPOSE({
         power: 'pause_intake',
-        meter: {
-          power: 'pause_intake',
-          used: finalized(0, 1_000_000),
-          limit: { value: 3, status: { kind: 'verified-finalized', chain: TEST_CHAIN, blockHash: '0xbeef', blockNumber: 9 } },
-        },
+        meter: SPLIT_METER('pause_intake', at(0, 1_000_000), at(3, 9)),
         until: 5_000,
         horizon: HORIZON,
       }),
@@ -6212,7 +6326,7 @@ test('a filing is blocked by bond, bounds and evidence independently', () => {
   const ok = filingBlocks(FILING({
     freeUsdc: finalized(1_000n),
     filingBond: QUOTED(100n, 4_000n),
-    filingsUsed: finalized(3),
+    filingsUsed: OCCUPANCY('incident', 3),
     filingsBound: finalized(10),
     evidenceHash: '0xev',
   }));
@@ -6221,7 +6335,7 @@ test('a filing is blocked by bond, bounds and evidence independently', () => {
   const all = filingBlocks(FILING({
     freeUsdc: finalized(10n),
     filingBond: QUOTED(100n, 4_000n),
-    filingsUsed: finalized(10),
+    filingsUsed: OCCUPANCY('incident', 10),
     filingsBound: finalized(10),
     evidenceHash: undefined,
   }));
@@ -6237,7 +6351,7 @@ test('a filing is blocked by bond, bounds and evidence independently', () => {
   const empty = filingBlocks(MILESTONE_FILING({
     freeUsdc: finalized(1_000n),
     filingBond: QUOTED(100n, 4_000n),
-    filingsUsed: finalized(0),
+    filingsUsed: OCCUPANCY('milestone', 0),
     filingsBound: finalized(10),
     evidenceHash: '',
   }));
@@ -6388,12 +6502,14 @@ test('P2 — the closure read NAMES its key, and the filing has no second copy o
   assert.deepEqual(nine.map((b) => b.check), ['MetricSpec version']);
   assert.match(nth(nine, 0, 'block').detail, /MetricSpec version 9/);
 
-  // …and the epoch likewise: the cohort-schedule set is keyed by epoch, so moving the subject
-  // alone puts the two reads on different questions and the filing is refused.
+  // …and the epoch likewise. BOTH epoch-keyed reads fall out at once, which is the property
+  // a single home buys: moving the subject moves every check that was keyed to it, rather
+  // than leaving one of them quietly answering the old question.
   const shifted = named({ epoch: FILING_EPOCH - 1 });
-  assert.deepEqual(shifted.map((b) => b.check), ['Cohort schedule']);
+  assert.deepEqual(shifted.map((b) => b.check), ['Cohort schedule', 'Registry bounds']);
   assert.match(nth(shifted, 0, 'block').detail, /read for epoch 41/);
   assert.match(nth(shifted, 0, 'block').detail, /against epoch 40/);
+  assert.match(nth(shifted, 1, 'block').detail, /counted for epoch 41/);
 
   // The refusing arms name the key too — a retry instruction that names the wrong epoch is
   // one an operator cannot act on.
@@ -6427,6 +6543,53 @@ test('P2 — the closure read NAMES its key, and the filing has no second copy o
   );
   assert.deepEqual(closed.map((b) => b.check), ['Epoch closed']);
   assert.match(nth(closed, 0, 'block').detail, /MetricSpec version 2/);
+});
+
+test('P2 — the occupancy count must be the one read for THIS epoch and THIS instance', () => {
+  // The sweep's first finding, closed on the same terms as `FrozenSpecVersions`.
+  // `FilingCount` is keyed `(instance, epoch)` and `filingsUsed` was a bare
+  // `Verified<number>`, so a count read for a quiet neighbouring epoch — or for the sibling
+  // registry, whose allocator is independent — satisfied `used < bound` and opened the bonded
+  // control. `used < bound` is the permitting comparison, which is what makes it expensive.
+  //
+  // The instance half is a type (`registry-filing-occupancy-for-the-other-instance.ts`); the
+  // epoch half is compared against the key the filing is actually against, because a runtime
+  // number cannot be held in one.
+  assert.deepEqual(filingBlocks(FILING({ filingsUsed: OCCUPANCY('incident', 1) })), []);
+  const stale = filingBlocks(
+    FILING({ filingsUsed: OCCUPANCY('incident', 1, FILING_EPOCH - 1) }),
+  );
+  assert.deepEqual(
+    stale.map((b) => b.check),
+    ['Registry bounds'],
+    'a count read for another epoch must not admit a bonded filing in this one',
+  );
+  assert.match(nth(stale, 0, 'block').detail, /counted for epoch 40/);
+  assert.match(nth(stale, 0, 'block').detail, /against epoch 41/);
+  // The bound is a kernel constant and carries no subject, deliberately: it is true of every
+  // epoch and both instances, so a subject on it would be a claim with nothing behind it.
+  const atBound = filingBlocks(
+    FILING({ filingsUsed: OCCUPANCY('incident', 10), filingsBound: finalized(10) }),
+  );
+  assert.deepEqual(atBound.map((b) => b.check), ['Registry bounds']);
+  assert.match(nth(atBound, 0, 'block').detail, /at its bound/);
+
+  // A stale count that is ALSO at the bound must still say which of the two things went
+  // wrong. Both refuse, so nothing opens either way — but the remedies differ, and a mutant
+  // that let the at-bound sentence swallow the mismatch survived the first pass. "Re-read the
+  // count" and "wait for the epoch to close" are not the same instruction.
+  const staleAtBound = filingBlocks(
+    FILING({
+      filingsUsed: OCCUPANCY('incident', 10, FILING_EPOCH - 1),
+      filingsBound: finalized(10),
+    }),
+  );
+  assert.deepEqual(staleAtBound.map((b) => b.check), ['Registry bounds']);
+  assert.match(nth(staleAtBound, 0, 'block').detail, /counted for epoch 40/);
+  assert.ok(
+    !/at its bound/.test(nth(staleAtBound, 0, 'block').detail),
+    'a stale count must not be reported as a full registry',
+  );
 });
 
 test('P2 — the frozen-version set must be the one read for THIS epoch', () => {

@@ -63,17 +63,16 @@
  *   action-side key to disagree with. (`GateBreachFlags` is epoch-keyed, but the power names
  *   no epoch: the runtime tests the current one, so the exposure is staleness, which INV-FE-2's
  *   pre-sign refresh owns.)
- * - `AllowanceMeter` — **weaker than it looks, and not a subject gap.** Its `power` field is
- *   narrowed by the arm, so a meter cannot claim the wrong power; but `used` and `limit` are
- *   bare `Verified<number>`, so a hand-built meter can carry another counter's figures under
- *   the right name. `meterFor` exists to prevent exactly that and nothing forces its use. The
- *   repair is the one `EpochClosure` got: brand the meter so the producer is the only source.
+ * - `AllowanceMeter` — **was weaker than it looked, and it was not a subject gap.** Closed
+ *   2026-08-09 by branding both the meter and its book; see `AllowanceMeter`.
  * - `ReviewReferendum` and the justification `EvidenceState` — **display-side**. Neither
  *   raises a block, so neither opens a control; both can still describe another action's
  *   review or another action's document, which §11.8.2 cares about for its own reasons.
- * - `context.now` versus `action.expiresAt` — a **different** class: two `Verified<number>`
- *   compared with `>=` rather than through `combine2`, so two reads at different blocks decide
- *   an expiry that is true of neither. It is app-code rule 2's rule B, not this one.
+ * - `context.now` versus `action.expiresAt` — a **different** class, also closed 2026-08-09:
+ *   two `Verified<number>` compared with a bare `>=` gave an expiry verdict whose provenance
+ *   was neither operand's. It goes through `combine2` now. That is app-code rule 2's rule B
+ *   rather than this note's subject rule, and it is fixed here because the two share a screen,
+ *   not because they share a cause.
  *
  * ## The approval is counted, and "already approved" is a distinct refusal
  *
@@ -471,14 +470,43 @@ export function isMetered(power: GuardianPower): power is MeteredPower {
  * `Guardian.Allowances` is a single storage value (`AllowanceState`), so requiring all three
  * costs one read — and §11.8.2's propose row asks for *"allowance meters displayed"*, plural.
  */
-export type AllowanceBook = Readonly<Record<MeteredPower, AllowanceReading>>;
+export type AllowanceBook = Readonly<Record<MeteredPower, AllowanceReading>> & {
+  readonly [METER_BOOK]: true;
+};
 
-/** Remaining allowance for a power, and whether a proposal fits under it. */
-export interface AllowanceMeter<P extends MeteredPower = MeteredPower> {
+declare const METER_BOOK: unique symbol;
+declare const METER_PAIR: unique symbol;
+
+/**
+ * Remaining allowance for a power, and whether a proposal fits under it.
+ *
+ * ## Branded, because a declared power is not a read one (2026-08-09)
+ *
+ * `power` is narrowed by the arm this sits in, so a meter cannot claim the wrong power. It
+ * could still carry **another counter's figures under the right name**: `used` and `limit` were
+ * bare `Verified<number>`, `meterFor` existed precisely to stop that, and nothing forced its
+ * use. `allowanceBlocks` raises nothing while `limit - used > 0`, so a limit borrowed from a
+ * larger budget offers a power the chain refuses with `AllowanceExhausted` at the threshold
+ * approval — the same shape as `EpochClosure.open`, one screen over, and the same repair.
+ *
+ * **Both levels carry a brand, and one without the other would be theatre.** Brand the meter
+ * alone and a hand-assembled `AllowanceBook` still feeds `meterFor` fabricated figures under a
+ * genuine pairing; brand the book alone and a caller can still pair `delay_once` with
+ * `pause_intake`'s numbers by hand. So `allowanceBook` is the only producer of a book — from
+ * the nine reads, with the windowed `pause_intake` correction applied — and `meterFor` is the
+ * only producer of a meter, from a book. `check:casts` discovers both brands and refuses
+ * `as AllowanceMeter` everywhere outside this file
+ * (`tests/firewall/fixtures/guardian-meter-assembled-by-hand.ts`).
+ *
+ * `AllowanceReading` stays unbranded on purpose: it is a field of the branded book and has no
+ * independent producer to protect, so branding it would add a symbol and no control.
+ */
+export type AllowanceMeter<P extends MeteredPower = MeteredPower> = {
   readonly power: P;
   readonly used: Verified<number>;
   readonly limit: Verified<number>;
-}
+  readonly [METER_PAIR]: true;
+};
 
 /**
  * The frozen surfaces each metered power's meter is read from — 02 §7.4 and §9, contract v30.
@@ -650,7 +678,7 @@ export function allowanceBook(reads: AllowanceReads): AllowanceBookState {
         used: reads.forceRerunUsedThisEpoch,
         limit: reads.forceRerunAllowancePerEpoch,
       },
-    },
+    } as AllowanceBook,
   };
 }
 
@@ -660,7 +688,7 @@ export function meterFor<P extends MeteredPower>(
   power: P,
 ): AllowanceMeter<P> {
   const reading = book[power];
-  return { power, used: reading.used, limit: reading.limit };
+  return { power, used: reading.used, limit: reading.limit } as AllowanceMeter<P>;
 }
 
 export interface GuardianBlock {
@@ -719,11 +747,31 @@ export function approvalBlocks(context: ApprovalContext): readonly GuardianBlock
   // one no approval this client signs can reach, and it is refused here for the same reason
   // `horizonBlocks` refuses a hold ending at B′. See that function for the argument and for
   // why no further inclusion margin is applied.
-  if (context.now.value >= context.action.expiresAt.value) {
+  //
+  // **Through `combine2`, since 2026-08-09.** This was a bare `>=` between two
+  // `Verified<number>`, which is app-code rule 2's rule B: a comparison of two reads taken at
+  // different blocks yields a definite verdict that is true of neither, and no badge and no
+  // brand can see it. The unsafe direction is the permitting one — a `now` pinned earlier than
+  // the record makes an expired action look live, and the guardian signs an `ActionExpired`.
+  const sinceExpiry = combine2(
+    context.now,
+    context.action.expiresAt,
+    (now, expires) => now - expires,
+  );
+  if (sinceExpiry.kind === 'incomparable') {
     blocks.push({
       check: 'Expiry',
       detail:
-        context.now.value === context.action.expiresAt.value
+        `This client cannot establish whether this action has expired. ${sinceExpiry.reason} ` +
+        'An expiry is a comparison of two readings, and two readings that do not describe the ' +
+        'same block decide nothing — so the approval is refused rather than offered on a ' +
+        'verdict neither of them supports.',
+    });
+  } else if (sinceExpiry.datum.value >= 0) {
+    blocks.push({
+      check: 'Expiry',
+      detail:
+        sinceExpiry.datum.value === 0
           ? 'This action expires at the block these readings were taken at, which is already ' +
             'final. An approval can only be included at a later block, by which time the ' +
             'chain treats the action as expired.'

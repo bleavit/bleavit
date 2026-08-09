@@ -782,7 +782,7 @@ export function RegistryFilingForm({
         <span>{String(inputs.epochClosed.subject.specVersion)}</span>
       </Field>
       <Field label="Filings this epoch">
-        <Count datum={inputs.filingsUsed} />
+        <Count datum={inputs.filingsUsed.used} />
         <Count datum={inputs.filingsBound} name="of" />
       </Field>
 

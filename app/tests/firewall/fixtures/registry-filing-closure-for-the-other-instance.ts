@@ -18,12 +18,12 @@
 // `EpochClosure<'incident'>` and `EpochClosure<'milestone'>`, so the mismatch is not a value
 // that exists. This is `TriggerState<'GateBreach'>`'s device in another domain.
 import { filingBlocks } from '@bleavit/features-tx';
-import type { BondQuoteState, EpochClosure, FrozenSpecVersions } from '@bleavit/features-tx';
+import type { BondQuoteState, EpochClosure, FilingOccupancy, FrozenSpecVersions } from '@bleavit/features-tx';
 import type { Verified } from '@bleavit/shared-types';
 
 declare const freeUsdc: Verified<bigint>;
 declare const filingBond: BondQuoteState;
-declare const filingsUsed: Verified<number>;
+declare const filingsUsed: FilingOccupancy<'incident'>;
 declare const filingsBound: Verified<number>;
 declare const frozenSpecVersions: FrozenSpecVersions;
 /** A real read, taken through the real producer — of the **other** instance's map. */

@@ -104,14 +104,11 @@
  * no `specVersion` of its own, because a second copy is a second thing to disagree. See
  * `EpochClosure`'s note for why those two means are different.
  *
- * **Two readings in this file still name no subject, and both are the same shape.** They are
- * recorded here rather than left for a fifth review to rediscover:
+ * `filingsUsed` was the third instance and is closed the same way — see
+ * {@link FilingOccupancy}, whose key is `(instance, epoch)` and deliberately not the closure's
+ * three fields. **One reading in this file still names no subject**, recorded here rather than
+ * left for a fifth review to rediscover:
  *
- * - `filingsUsed` is `FilingCount[epoch]` on this instance and is a bare `Verified<number>`.
- *   `used < bound` is a permitting comparison, so a count read for another epoch — or for the
- *   sibling registry — opens the bonded control. (`filingsBound` needs no subject: it is a
- *   kernel constant.) Binding it to the closure subject is the same repair as
- *   `FrozenSpecVersions` got here.
  * - the whole **challenge** row (`ChallengeFilingInputs`) names no filing at all: not the
  *   epoch, not the `filing_id`, on a call whose signature is
  *   `challenge_filing(epoch, filing_id, evidence_hash)`. So `windowOpen` and `challengeBond`
@@ -349,8 +346,8 @@ interface FilingInputsBase<K extends FilingKind> {
    * there is no shape of these inputs in which an unpriced filing proceeds.
    */
   readonly filingBond: BondQuoteState;
-  /** Current occupancy and its bound, both read. */
-  readonly filingsUsed: Verified<number>;
+  /** Current occupancy, keyed — see {@link FilingOccupancy} — and its unkeyed bound. */
+  readonly filingsUsed: FilingOccupancy<K>;
   readonly filingsBound: Verified<number>;
   /**
    * Whether this instance has already closed out `(epoch, spec_version)` — `AlreadyFinal`.
@@ -448,13 +445,44 @@ export type EpochClosure<K extends FilingKind = FilingKind> =
  * did not land, and *"a read did not land"* is only a fact once it says which read: a refusal
  * naming the wrong epoch sends an operator to retry something they were never blocked on.
  */
-export interface ClosureSubject<K extends FilingKind = FilingKind> {
-  /** Which of the two `pallet-registry` instances. Independent allocators, independent maps. */
-  readonly registry: K;
-  /** `ClosedAt`'s outer key, and `file`'s first argument. */
-  readonly epoch: number;
+export interface ClosureSubject<K extends FilingKind = FilingKind> extends RegistrySubject<K> {
   /** `ClosedAt`'s inner key, and `file`'s fifth argument. */
   readonly specVersion: number;
+}
+
+/**
+ * The key shape every **per-instance, per-epoch** registry item shares.
+ *
+ * Factored out rather than repeated because the two items this module reads are keyed
+ * differently and saying so is the point: `ClosedAt` is `(instance, epoch, spec_version)` and
+ * `FilingCount` is `(instance, epoch)` — no version. A shared three-field subject would make an
+ * occupancy read claim it was keyed to a version it was never keyed to, which is the same
+ * false precision this repair exists to remove. `Epoch.CohortSchedules` is on a third key
+ * again — the epoch alone, since it is the Epoch pallet's and not a registry's — so
+ * {@link FrozenSpecVersions} carries a bare `epoch` and no instance.
+ */
+export interface RegistrySubject<K extends FilingKind = FilingKind> {
+  /** Which of the two `pallet-registry` instances. Independent allocators, independent maps. */
+  readonly registry: K;
+  /** The outer key of both per-instance maps, and `file`'s first argument. */
+  readonly epoch: number;
+}
+
+/**
+ * `FilingCount[epoch]` on this instance, and the epoch it was counted for.
+ *
+ * `used < bound` is a **permitting** comparison on a bonded action, and `filingsUsed` was a
+ * bare `Verified<number>`: a count read for another epoch — or for the sibling registry, whose
+ * allocator is independent — opened the control. Same defect as {@link EpochClosure}'s, same
+ * two means: the instance by the type parameter, the epoch by comparison against the key the
+ * filing is actually against.
+ *
+ * The **bound** needs no subject and does not get one: it is a kernel constant, true of every
+ * epoch and both instances, so a subject on it would be a claim with nothing behind it.
+ */
+export interface FilingOccupancy<K extends FilingKind = FilingKind> {
+  readonly subject: RegistrySubject<K>;
+  readonly used: Verified<number>;
 }
 
 /**
@@ -649,7 +677,20 @@ export function filingBlocks(inputs: FilingInputs): readonly FilingBlock[] {
         'it. A sibling version’s close would say nothing about this one.',
     });
   }
-  if (inputs.filingsUsed.value >= inputs.filingsBound.value) {
+  if (inputs.filingsUsed.subject.epoch !== epoch) {
+    // `FilingCount` is keyed `(instance, epoch)` and `used < bound` is the permitting
+    // comparison, so a count from a quiet neighbouring epoch opens a bonded control. The
+    // instance half needs no test here: the type parameter already made it unbuildable.
+    blocks.push({
+      check: 'Registry bounds',
+      detail:
+        `The filings this client counted were counted for epoch ` +
+        `${inputs.filingsUsed.subject.epoch}, and this filing is against epoch ${epoch}. ` +
+        'Each epoch has its own count and its own room, so that number says nothing about ' +
+        'this one — the control stays closed rather than posting a bond on a check that ran ' +
+        'against a different epoch.',
+    });
+  } else if (inputs.filingsUsed.used.value >= inputs.filingsBound.value) {
     blocks.push({
       check: 'Registry bounds',
       detail:

@@ -13,12 +13,12 @@
 // discovers brands rather than listing them, so `as EpochClosure` is refused outside
 // `registry-filing.ts` too — the assertion a brand alone can never stop.
 import { filingBlocks } from '@bleavit/features-tx';
-import type { BondQuoteState, ClosureSubject, FrozenSpecVersions } from '@bleavit/features-tx';
+import type { BondQuoteState, ClosureSubject, FilingOccupancy, FrozenSpecVersions } from '@bleavit/features-tx';
 import type { Verified } from '@bleavit/shared-types';
 
 declare const freeUsdc: Verified<bigint>;
 declare const filingBond: BondQuoteState;
-declare const filingsUsed: Verified<number>;
+declare const filingsUsed: FilingOccupancy<'incident'>;
 declare const filingsBound: Verified<number>;
 declare const frozenSpecVersions: FrozenSpecVersions;
 /** Some other finalized read that happens to carry `undefined`. It is not this one. */
