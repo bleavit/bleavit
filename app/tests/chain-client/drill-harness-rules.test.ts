@@ -31,6 +31,8 @@ import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { FUNDING_READS } from '@bleavit/features-tx';
+
 const APP = join(dirname(fileURLToPath(import.meta.url)), '../..');
 
 interface HarnessRules {
@@ -41,6 +43,8 @@ interface HarnessRules {
   assertBootReport(report: unknown): unknown;
   assertWrongChainReport(report: unknown): unknown;
   assertFundingReport(report: unknown): unknown;
+  /** Exported so this suite can bind the harness's restatement to the frozen `FUNDING_READS`. */
+  readonly REQUIRED_SURFACES: { readonly withdraw: readonly string[]; readonly deposit: readonly string[] };
 }
 
 const load = createRequire(import.meta.url);
@@ -115,7 +119,13 @@ test('only a genesis header is accepted — zero parent, block 0, long enough', 
 
 /* ------------------------------------------------------------------- the boot leg's acceptance */
 
-const BOOT = { compat: 'classified', compatMode: 'full', finalizedHash: `0x${'11'.repeat(32)}` };
+const BOOT = {
+  compat: 'classified',
+  compatMode: 'full',
+  genesisHash: `0x${'22'.repeat(32)}`,
+  finalizedHash: `0x${'11'.repeat(32)}`,
+  assetHubVerdict: { kind: 'classified', mode: 'wrong-chain' },
+};
 
 test('the boot leg asserts the 10 §5.2 MODE, not the verdict wrapper', () => {
   rules.assertBootReport(BOOT);
@@ -133,6 +143,62 @@ test('a classifier that ran without a chain is a boot that did not happen', () =
 test('a boot with no finalized head is refused, however it is classified', () => {
   for (const hash of [undefined, '', 'not-a-hash', 42]) {
     assert.throws(() => rules.assertBootReport({ ...BOOT, finalizedHash: hash }), /no finalized head/);
+  }
+  // `startsWith("0x")` accepted the bare prefix, which is a hash of nothing. A block hash is 32
+  // bytes and the report is machine-written, so the length is a fact rather than a preference.
+  for (const hash of ['0x', `0x${'11'.repeat(31)}`, `0x${'11'.repeat(33)}`]) {
+    assert.throws(() => rules.assertBootReport({ ...BOOT, finalizedHash: hash }), /no finalized head/, hash);
+  }
+});
+
+test('a finalized head equal to genesis is a chain that never produced a block', () => {
+  // `firstFinalized` waits for a **delivered** finalized head, and a live parachain delivers
+  // one derived from relay-finalized para-inclusion. Genesis coming back is what a transport
+  // that answers from the value it was opened with looks like, and the classifier above would
+  // still say `full` — the verdict describes the runtime, not the block it was read at.
+  assert.throws(
+    () => rules.assertBootReport({ ...BOOT, finalizedHash: BOOT.genesisHash }),
+    /the genesis block/,
+  );
+  // And the comparison must not go vacuous by the other side going missing.
+  for (const genesisHash of [undefined, '', '0x', 42]) {
+    assert.throws(() => rules.assertBootReport({ ...BOOT, genesisHash }), /genesis hash/, String(genesisHash));
+  }
+});
+
+test('the boot leg refuses an Asset Hub CLASSIFIED as anything but `wrong-chain` — 15 §4.8', () => {
+  // The same rule as the funding leg's, one leg over. The boot leg attaches and classifies Asset
+  // Hub too, and its verdict went into the report as a log line nothing read — so the
+  // development-label bug was invisible here even after the funding leg started refusing it.
+  for (const mode of ['full', 'restricted', 'unsupported', 'unreachable']) {
+    assert.throws(
+      () => rules.assertBootReport({ ...BOOT, assetHubVerdict: { kind: 'classified', mode } }),
+      /can only ever reach "wrong-chain"/,
+      `accepted ${mode}`,
+    );
+  }
+});
+
+test('a boot-time Asset Hub that has not attached yet PASSES, because that is timing', () => {
+  // Measured on 2026-08-08: this leg reported `unavailable` at one minute of network age, and
+  // the funding leg attached the same chain and read it at block 49 six minutes later. Asset
+  // Hub finality derives from relay-finalized para-inclusion, so the wait is the relay's.
+  // A flat assertion here would fail the drill on network timing rather than on the client.
+  for (const refusal of ['unavailable', 'wrong-chain']) {
+    rules.assertBootReport({ ...BOOT, assetHubVerdict: { kind: 'not-attached', refusal } });
+  }
+  rules.assertBootReport({ ...BOOT, assetHubVerdict: { kind: 'unestablished' } });
+});
+
+test('a boot report carrying no Asset Hub verdict at all is refused', () => {
+  // Otherwise the rule above goes vacuous the day the producer stops writing the field, which
+  // is the failure this whole file was extracted to make impossible.
+  for (const verdict of [undefined, 'classified: wrong-chain', {}, { kind: 'invented' }]) {
+    assert.throws(
+      () => rules.assertBootReport({ ...BOOT, assetHubVerdict: verdict }),
+      /Asset Hub verdict/,
+      `accepted ${JSON.stringify(verdict)}`,
+    );
   }
 });
 
@@ -168,6 +234,11 @@ test('the wrong-chain leg accepts only a refusal about the pin it corrupted', ()
 /* ------------------------------------------------------------------ the funding leg (F18) */
 
 const READ = { surface: 'ForeignAssets.Account', key: `0x${'de'.repeat(20)}`, decoded: '0' };
+const DEPOSIT_READS = [
+  { surface: 'Assets.Account', key: `0x${'a1'.repeat(20)}`, decoded: '0' },
+  { surface: 'System.Account', key: `0x${'a2'.repeat(20)}`, decoded: 'assetHubReady=false' },
+  { surface: 'Constitution.PhaseFlags', key: `0x${'a3'.repeat(20)}`, decoded: 'sudoPresent=true' },
+];
 const FUNDING = {
   mode: 'funding',
   publishedKeyAgrees: true,
@@ -180,7 +251,7 @@ const FUNDING = {
     localBlockNumber: 7,
     assetHubBlockNumber: 9,
     foreignMode: 'wrong-chain',
-    reads: [READ, READ],
+    reads: DEPOSIT_READS,
     undecodable: [],
     blocks: ['Asset Hub connection: …'],
   },
@@ -340,6 +411,51 @@ test('a ready deposit carrying any verdict but `wrong-chain` is refused — 15 �
       `accepted ${foreignMode}`,
     );
   }
+});
+
+test('a ready leg that skipped a required surface is refused, and an extra read is not', () => {
+  // **Superset, not exact set.** A dropped read falsifies the drill's claim directly — the path
+  // was not walked and the leg said it was. An added read does not: the client may legitimately
+  // read more, 02's frozen set grows by design, and an exact-set rule would go red on every
+  // correct addition until somebody unblocking themselves loosened it. That is how this
+  // function came to accept six foreign verdicts where one is reachable.
+  const deposit = { ...FUNDING.deposit, reads: DEPOSIT_READS };
+  rules.assertFundingReport({ ...FUNDING, deposit });
+  for (const surface of rules.REQUIRED_SURFACES.deposit) {
+    assert.throws(
+      () =>
+        rules.assertFundingReport({
+          ...FUNDING,
+          deposit: { ...deposit, reads: DEPOSIT_READS.filter((read) => read.surface !== surface) },
+        }),
+      new RegExp(`never read ${surface.replace('.', '\\.')}`),
+      `a deposit leg missing ${surface} was accepted`,
+    );
+  }
+  // The withdraw leg has its own required set, and it is not the deposit leg's.
+  assert.throws(
+    () => rules.assertFundingReport({ ...FUNDING, withdraw: { ...FUNDING.withdraw, reads: DEPOSIT_READS } }),
+    /never read ForeignAssets\.Account/,
+  );
+  // An extra read passes, which is the half that keeps this a certification rather than a
+  // change-detector.
+  rules.assertFundingReport({
+    ...FUNDING,
+    deposit: { ...deposit, reads: [...DEPOSIT_READS, { surface: 'Assets.Asset', key: `0x${'ff'.repeat(20)}` }] },
+  });
+});
+
+test('the required surfaces ARE the frozen funding set, in both directions', () => {
+  // The harness is CommonJS outside the workspace and cannot import `FUNDING_READS`, so it
+  // restates the names — the same trade `FORCED_DEPOSIT_REFUSALS` makes for `DepositBlockCause`.
+  // What stops a restatement from drifting is this test, not care: every frozen surface must be
+  // required by exactly one leg, and every required surface must be a frozen one. A surface
+  // added to `FUNDING_READS` therefore fails here, where a person can assign it to a leg, rather
+  // than at the release tier where the report would simply carry a read nobody demanded.
+  const frozen = [...Object.values(FUNDING_READS.assetHub), ...Object.values(FUNDING_READS.local)];
+  const required = [...rules.REQUIRED_SURFACES.withdraw, ...rules.REQUIRED_SURFACES.deposit];
+  assert.deepEqual([...required].sort(), [...frozen].sort());
+  assert.equal(new Set(required).size, required.length, 'a surface is required by two legs');
 });
 
 test('the happy shape passes, so none of the refusals above is refusing everything', () => {

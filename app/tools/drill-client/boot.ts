@@ -45,7 +45,8 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { WrongChainError, type BundledChain } from '@bleavit/chain-client';
 import { startNodeLightClient } from '@bleavit/chain-client/node-light-client';
 import type { LightClient } from '@bleavit/chain-client/light-client';
-import { classifyChain, classifyAssetHubFor } from '@bleavit/application';
+import { classifyChain, classifyAssetHubFor, type ForeignVerdict } from '@bleavit/application';
+import type { ForeignMode } from '@bleavit/descriptors';
 import { assetHubLabel } from './foreign-label.ts';
 
 /** The `bleavit.dev-chain-pin.v1` document `app/tools/dev-chain-pin.ts` writes. */
@@ -125,8 +126,43 @@ export interface DrillReport {
    * only that would pass on exactly the regression it exists to catch.
    */
   readonly compatMode: string | undefined;
+  /** The Asset Hub leg as a **sentence**, for a person reading the log. Never matched on. */
   readonly assetHub: string | undefined;
+  readonly assetHubVerdict: AssetHubVerdictReport | undefined;
   readonly finalizedHash: string;
+}
+
+/**
+ * The Asset Hub leg as a **value** beside that sentence — F18; 15 §4.8.
+ *
+ * `assetHub` used to be the whole of it, written as `` `classified: ${mode}` `` — so a harness
+ * rule about the verdict could only match prose, which is the pattern this branch already
+ * removed from the funding leg, where five different blocked causes arrived as one nonempty
+ * sentence. The code rides **beside** the sentence rather than replacing it, for the reason
+ * `DepositBlockCause` gives: a code is not a diagnosis.
+ *
+ * The three arms are kept apart because two of them carry the same word about different facts.
+ * `not-attached` with `refusal: 'wrong-chain'` is `attachAssetHub` refusing the **bundled pin**,
+ * and `classified` with `mode: 'wrong-chain'` is `classifyForeign` refusing the **release pin**
+ * — a local Asset Hub attaches correctly and is still not the chain 02 §7.7 pins. Folding them
+ * would report a pin mismatch this drill causes as one it exists to detect.
+ */
+export type AssetHubVerdictReport =
+  | { readonly kind: 'classified'; readonly mode: ForeignMode }
+  | { readonly kind: 'unestablished' }
+  | { readonly kind: 'not-attached'; readonly refusal: string };
+
+/**
+ * The verdict, as the report carries it.
+ *
+ * Exported and named, so the mapping is drivable per commit. `bootAndClassify` needs a light
+ * client and three chains, so nothing inside it can be exercised before a release-tier run —
+ * and the decision it makes here is exactly the kind that shipped broken twice already.
+ */
+export function assetHubVerdictOf(foreign: ForeignVerdict): AssetHubVerdictReport {
+  return foreign.kind === 'classified'
+    ? { kind: 'classified', mode: foreign.classification.mode }
+    : { kind: 'unestablished' };
 }
 
 /**
@@ -205,6 +241,7 @@ async function bootAndClassify(
     stage(`local verdict: ${compat.kind}`);
 
     let assetHub: string | undefined;
+    let assetHubVerdict: AssetHubVerdictReport | undefined;
     if (document.assetHub !== undefined) {
       const leg = bundled(document.assetHub);
       stage('attaching Asset Hub');
@@ -229,6 +266,7 @@ async function bootAndClassify(
       if (connection.kind !== 'attached') {
         stage(`Asset Hub did not attach: ${connection.kind}`);
         assetHub = `${connection.kind}: ${connection.reason}`;
+        assetHubVerdict = { kind: 'not-attached', refusal: connection.kind };
       } else {
         stage('classifying Asset Hub (02 §7.7)');
         // **The pin's label, not the connected spec's id** — F18. `classifyForeign` finds its
@@ -247,6 +285,7 @@ async function bootAndClassify(
         );
         assetHub =
           foreign.kind === 'classified' ? `${foreign.kind}: ${foreign.classification.mode}` : foreign.kind;
+        assetHubVerdict = assetHubVerdictOf(foreign);
       }
     }
 
@@ -258,6 +297,7 @@ async function bootAndClassify(
       compat: compat.kind,
       compatMode: compat.kind === 'classified' ? compat.classification.mode : undefined,
       assetHub,
+      assetHubVerdict,
       finalizedHash,
     };
   } finally {

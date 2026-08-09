@@ -503,6 +503,49 @@ test('the harness refuses the verdict the development-label bug produced', async
   harnessRules.assertFundingReport(pinned);
 });
 
+test('the harness refuses a produced report with a required surface missing', async () => {
+  // The drop is applied to a report `runFunding` built, and it is expressed in the producer's
+  // own vocabulary — the field is `reads`, the member field is `surface`, and the values are the
+  // frozen `FUNDING_READS` names. So a producer that renamed any of the three does not quietly
+  // satisfy this test: the intact control at the end stops passing.
+  const built = await runFunding(
+    pinDocument(),
+    NO_BOOTNODES,
+    OPTIONS,
+    deps(connection({ local: await decodableLocal() })),
+  );
+  assert.equal(built.deposit.kind, 'ready');
+  if (built.deposit.kind !== 'ready') return;
+  assert.deepEqual(
+    built.deposit.reads.map((read) => read.surface),
+    ['Assets.Account', 'System.Account', 'Constitution.PhaseFlags'],
+  );
+
+  for (const surface of ['Assets.Account', 'System.Account', 'Constitution.PhaseFlags']) {
+    const short = {
+      ...built,
+      deposit: { ...built.deposit, reads: built.deposit.reads.filter((read) => read.surface !== surface) },
+    };
+    assert.throws(
+      () => harnessRules.assertFundingReport(short),
+      new RegExp(`never read ${surface.replace('.', '\\.')}`),
+      `a report missing ${surface} was accepted`,
+    );
+  }
+
+  // The withdraw leg's own required surface, dropped the same way.
+  assert.equal(built.withdraw.kind, 'ready');
+  if (built.withdraw.kind !== 'ready') return;
+  assert.throws(
+    () => harnessRules.assertFundingReport({ ...built, withdraw: { ...built.withdraw, reads: [] } }),
+    /reported ready with no reads at all/,
+  );
+
+  // The intact report the producer built passes, so none of the refusals above refuses
+  // everything — and this is the assertion that fails if a surface name ever moves.
+  harnessRules.assertFundingReport(built);
+});
+
 /* ------------------------------------------------------------------------- the arguments */
 
 test('the four figures the chain cannot state are required, and never parsed loosely', () => {

@@ -108,11 +108,97 @@ function missingReportError(label, file, stdout) {
 }
 
 /**
- * The `boot` leg's acceptance rule — 10 §5.2.
+ * The **only** foreign verdict a Zombienet topology can produce — 15 §4.8; 02 §7.7.
+ *
+ * The same paragraph, read the other way round. It says `ForeignMode` *"can only ever reach
+ * `wrong-chain` in any Zombienet topology, however correct the client is"* — and that is a
+ * statement about **every** run of this drill, not an excuse for one outcome. So the four other
+ * modes are each a defect rather than weather: `full`, `restricted` and `unsupported` all claim
+ * the genesis matched a pin no local chain can carry, and `unreachable` claims the classifier
+ * never got an answer from a chain whose reader opened one line earlier.
+ *
+ * `unreachable` is the one that shipped, which is why this is a value rather than a shape.
+ * `boot.ts` passed the connected spec's id (`asset-hub-paseo-local`) as the chain label,
+ * `classifyForeign` finds its pin by label, and a label naming no pin answers `unreachable` —
+ * *retryable*, where a locally generated Asset Hub is terminally the wrong chain. 15 §4.8 names
+ * *"the terminal classification"* among the four things the Zombienet row does certify, and a
+ * rule accepting any nonempty string certifies none of it.
+ *
+ * **`unreachable` has a second cause, and refusing it is still right.** `classifyForeign` also
+ * answers `unreachable` when no genesis was observed, which happens if
+ * `assetHubCompatProvider`'s `attachAssetHub({ reuse: false })` — a *second* handle beside the
+ * reader's — fails. Both legs reach the classifier only after Asset Hub attached and delivered
+ * a finalized block, so a second attach failing there is a defect this drill should report
+ * rather than the relay sync time it must not fail on. The message below names both causes,
+ * because the two verdicts are one word and a person reading a red drill needs the difference.
+ *
+ * **Both legs classify Asset Hub**, so both are bound to this constant. The funding leg's
+ * verdict rides on a `ready` deposit; the boot leg's is {@link assertAssetHubVerdict}.
+ */
+const ONLY_REACHABLE_FOREIGN_MODE = 'wrong-chain';
+
+/** Said once, because both legs raise it about the same one-word verdict. */
+const UNREACHABLE_CAUSES =
+  'An "unreachable" verdict here is one of two things and they are not the same defect: the ' +
+  'chain label matched no pin (10 §5.2 finds its pin by label, and the connected spec id is ' +
+  'not one), or `assetHubCompatProvider` failed to attach its second handle to a chain this ' +
+  'run had already synced';
+
+/** A 32-byte hash, as every hash in these reports is. */
+const HASH = /^0x[0-9a-f]{64}$/i;
+
+/**
+ * The boot leg's Asset Hub verdict — 15 §4.8, and **conditionally**.
+ *
+ * `not-attached` must pass, and that is measured rather than cautious. Asset Hub finality
+ * derives from relay-finalized para-inclusion, so its first finalized block cannot arrive before
+ * the relay has synced: on 2026-08-08 this leg reported `unavailable` at one minute of network
+ * age while the `funding` leg attached the same chain and read it at block 49 six minutes later.
+ * A flat assertion would fail the drill on the relay's sync time rather than on anything the
+ * client did, and a drill that fails for reasons its subject cannot control gets disabled.
+ *
+ * `unestablished` passes for the narrower reason that 15 §4.8 constrains what a **classified**
+ * Asset Hub can be, and says nothing about one this run never established.
+ *
+ * What must not pass is a *classification* that no local topology can produce. The arms are
+ * checked against a closed list first, so the rule cannot go quiet the day the producer stops
+ * writing the field — which is how the funding leg's verdict went unchecked for a whole
+ * milestone.
+ */
+const ASSET_HUB_VERDICT_KINDS = ['classified', 'unestablished', 'not-attached'];
+
+function assertAssetHubVerdict(report) {
+  const verdict = report.assetHubVerdict;
+  if (!verdict || typeof verdict !== 'object' || !ASSET_HUB_VERDICT_KINDS.includes(verdict.kind)) {
+    throw new Error(
+      'the boot leg carries no Asset Hub verdict this rule can read. It must be one of ' +
+        `${JSON.stringify(ASSET_HUB_VERDICT_KINDS)} — a sentence is not a verdict, and a pin ` +
+        `document with no Asset Hub role is a boot that never classified one: ${JSON.stringify(report)}`,
+    );
+  }
+  if (verdict.kind === 'classified' && verdict.mode !== ONLY_REACHABLE_FOREIGN_MODE) {
+    throw new Error(
+      `the boot leg classified this Asset Hub as ${JSON.stringify(verdict.mode)}. 15 §4.8 rules ` +
+        'that a locally generated Asset Hub has its own genesis by construction, so the 02 §7.7 ' +
+        `verdict can only ever reach "wrong-chain" here. ${UNREACHABLE_CAUSES}: ` +
+        JSON.stringify(report),
+    );
+  }
+}
+
+/**
+ * The `boot` leg's acceptance rule — 10 §5.2; 15 §4.8.
  *
  * Asserts the **mode**, not the wrapper. `CompatVerdict.kind` is `classified | unestablished`,
  * so checking only that a chain answered would pass on a `read-only-incompatible` runtime,
  * which is precisely the regression this leg exists to catch.
+ *
+ * The finalized head is asserted as a **value**, twice. A 32-byte length, because
+ * `startsWith("0x")` accepted the bare prefix — a hash of nothing. And *not the genesis block*,
+ * because `firstFinalized` waits for a delivered head derived from relay-finalized
+ * para-inclusion: genesis coming back is what a transport answering from the value it was
+ * opened with looks like, and 10 §5.2's verdict would still read `full`, since it describes the
+ * runtime rather than the block it was read at.
  */
 function assertBootReport(report) {
   if (!report || typeof report !== 'object') throw new Error(`the boot leg produced no report object`);
@@ -126,9 +212,22 @@ function assertBootReport(report) {
         `the frozen critical surface and the runtime disagree: ${JSON.stringify(report)}`,
     );
   }
-  if (typeof report.finalizedHash !== 'string' || !report.finalizedHash.startsWith('0x')) {
+  if (typeof report.finalizedHash !== 'string' || !HASH.test(report.finalizedHash)) {
     throw new Error(`no finalized head was delivered: ${JSON.stringify(report)}`);
   }
+  // Asserted rather than assumed present: the comparison below is the whole check, and a report
+  // that stopped carrying one side would pass it while comparing nothing.
+  if (typeof report.genesisHash !== 'string' || !HASH.test(report.genesisHash)) {
+    throw new Error(`the boot leg carries no genesis hash to compare its head against: ${JSON.stringify(report)}`);
+  }
+  if (report.finalizedHash.toLowerCase() === report.genesisHash.toLowerCase()) {
+    throw new Error(
+      'the finalized head is the genesis block, so this chain never produced one. A delivered ' +
+        'finalized head derives from relay-finalized para-inclusion, and 10 §5.2 would classify ' +
+        `this runtime "full" either way: ${JSON.stringify(report)}`,
+    );
+  }
+  assertAssetHubVerdict(report);
   return report;
 }
 
@@ -182,23 +281,30 @@ function assertWrongChainReport(report) {
 const FORCED_DEPOSIT_REFUSALS = ['asset-hub-unavailable', 'asset-hub-wrong-chain'];
 
 /**
- * The **only** foreign verdict a Zombienet topology can produce — 15 §4.8; 02 §7.7.
+ * The surfaces each leg must have read, per leg — 02 §7.7; 11 §11.9; 15 §4.8.
  *
- * The same paragraph, read the other way round. It says `ForeignMode` *"can only ever reach
- * `wrong-chain` in any Zombienet topology, however correct the client is"* — and that is a
- * statement about **every** run of this drill, not an excuse for one outcome. So the four other
- * modes are each a defect rather than weather: `full`, `restricted` and `unsupported` all claim
- * the genesis matched a pin no local chain can carry, and `unreachable` claims the classifier
- * never got an answer from a chain whose reader opened one line earlier.
+ * **A superset rule, and the asymmetry is the point.** A *dropped* read falsifies this drill's
+ * claim directly: the funding path was not walked and the leg reported that it was. An *added*
+ * read does not — a client may legitimately read more, and 02's frozen set grows by design. An
+ * exact-set rule would therefore go red on every correct addition, and a check that cries wolf
+ * on correct changes gets loosened by whoever is unblocking themselves that day. This function
+ * accepting six foreign verdicts where one is reachable is what that looks like afterwards.
  *
- * `unreachable` is the one that shipped, which is why this is a value rather than a shape.
- * `boot.ts` passed the connected spec's id (`asset-hub-paseo-local`) as the chain label,
- * `classifyForeign` finds its pin by label, and a label naming no pin answers `unreachable` —
- * *retryable*, where a locally generated Asset Hub is terminally the wrong chain. 15 §4.8 names
- * *"the terminal classification"* among the four things the Zombienet row does certify, and a
- * rule accepting any nonempty string certifies none of it.
+ * Split per leg because the legs are not two halves of one read set. The withdraw leg takes no
+ * Asset Hub reader at all (11 §11.9.2), and the deposit leg reads Asset Hub's two surfaces plus
+ * this chain's `PhaseFlags` — so a rule keyed on "local" and "foreign" would demand the wrong
+ * things of both.
+ *
+ * The names are **restated** here rather than imported, because this module may require nothing
+ * outside Node's builtins. What stops a restatement from drifting is not care but
+ * `drill-harness-rules.test.ts`, which asserts this object against the frozen `FUNDING_READS` in
+ * both directions — so a surface added there fails per commit, where a person can assign it to a
+ * leg, rather than at the release tier where the report would carry a read nobody demanded.
  */
-const ONLY_REACHABLE_FOREIGN_MODE = 'wrong-chain';
+const REQUIRED_SURFACES = {
+  withdraw: ['ForeignAssets.Account'],
+  deposit: ['Assets.Account', 'System.Account', 'Constitution.PhaseFlags'],
+};
 
 /**
  * The `funding` leg's acceptance rule — 11 §11.9; 02 §7.7; 15 §4.8.
@@ -264,7 +370,7 @@ function assertFundingReport(report) {
         `the deposit leg classified this Asset Hub as ${JSON.stringify(deposit.foreignMode)}. ` +
           '15 §4.8 rules that a locally generated Asset Hub has its own genesis by construction, ' +
           'so the 02 §7.7 verdict can only ever reach "wrong-chain" here — every other mode is ' +
-          'the terminal classification this leg certifies, failing: ' +
+          `the terminal classification this leg certifies, failing. ${UNREACHABLE_CAUSES}: ` +
           JSON.stringify(deposit),
       );
     }
@@ -302,6 +408,9 @@ function assertFundingReport(report) {
  *    `PhaseFlags` could each be undecodable with the drill green. It is refused here rather
  *    than in the client: an undecodable read is INV-FE-12's correct **client** behaviour —
  *    render it raw with a warning, never guess — and a *drill* accepting it certifies nothing.
+ *  - **the surfaces this leg exists to read.** See {@link REQUIRED_SURFACES}. The three claims
+ *    above are all satisfied by *any* nonempty array of keyed reads, so a leg that stopped
+ *    reading Asset Hub's balance entirely and kept one local read passed every one of them.
  */
 function requireReads(leg, arm) {
   if (!Array.isArray(arm.reads) || arm.reads.length === 0) {
@@ -310,6 +419,16 @@ function requireReads(leg, arm) {
   for (const read of arm.reads) {
     if (!read || typeof read.key !== 'string' || !read.key.startsWith('0x')) {
       throw new Error(`the ${leg} leg reported a read with no storage key: ${JSON.stringify(read)}`);
+    }
+  }
+  const surfaces = arm.reads.map((read) => read.surface);
+  for (const required of REQUIRED_SURFACES[leg]) {
+    if (!surfaces.includes(required)) {
+      throw new Error(
+        `the ${leg} leg reported ready but never read ${required}, which 02 §7.7 and 11 §11.9 ` +
+          'put on this leg. A key built for one surface says nothing about another, so this run ' +
+          `attempted part of the funding path and reported all of it: ${JSON.stringify(surfaces)}`,
+      );
     }
   }
   // An absent list is not an empty one: a report that stopped carrying the field would
@@ -334,4 +453,7 @@ module.exports = {
   assertBootReport,
   assertWrongChainReport,
   assertFundingReport,
+  // Exported for one reason: `drill-harness-rules.test.ts` binds this restatement to the frozen
+  // `FUNDING_READS`. Nothing in the drill reads it from here.
+  REQUIRED_SURFACES,
 };
