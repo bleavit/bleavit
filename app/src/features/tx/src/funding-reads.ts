@@ -470,6 +470,15 @@ export interface CapParamView {
 export interface CapsDecoders {
   /** The whole `params(keys)` answer — a `BoundedVec<ParamView, 64>` (02 §3/§4). */
   readonly paramViews: (raw: string) => Decoded<readonly CapParamView[]>;
+  /**
+   * The FE-P2 witness — `Constitution.Params`' own entries, read at the same pin (10 §11).
+   *
+   * A decoder of its own rather than a reuse of {@link paramViews}, because the two shapes are
+   * genuinely different: `params()` answers `ParamView`s that the runtime computes, and the
+   * storage prefix holds `ParamRecord`s. Only the scalar the cap check consumes is common to
+   * both, which is exactly what makes the comparison meaningful rather than circular.
+   */
+  readonly paramEntries: (items: readonly StorageItem[]) => Decoded<readonly CapParamView[]>;
   /** `InflowCaps.CumulativeDeposits` — a bare `u128` meter. */
   readonly cumulativeDeposits: (raw: string) => Decoded<bigint>;
   /** `ForeignAssets.Asset` — `AssetDetails`, of which only `supply` is read. */
@@ -535,6 +544,25 @@ export async function readDepositCaps(
       reason: views.reason,
     });
   }
+  // **FE-P2's other half, which this reader fetched and discarded until 2026-08-09.**
+  //
+  // `crossCheckedCall` reads `Constitution.Params` at the same pin as `params()` precisely so
+  // the view can be admitted *alongside the prefix it must agree with* (10 §11's fourth
+  // bullet, 10 §4.2). Fetching the witness and never comparing it is the shape this repository
+  // keeps finding: a check that cannot fail reports the same thing as one that passed, and the
+  // module's own note already said the FE-P2 pairing is not optional here.
+  const witness = decoders.paramEntries(paramsRead.value.witness);
+  if (!witness.ok) {
+    undecodable.push({
+      label: CAPS_READS.params,
+      rawHex: paramsRead.value.witness.map((item) => item.value ?? '0x').join(''),
+      reason: witness.reason,
+    });
+  }
+  const stored: ReadonlyMap<string, bigint> = witness.ok
+    ? new Map(witness.value.map((row) => [row.key, row.value] as const))
+    : new Map();
+
   const capOf = (key: string): Verified<bigint> | undefined => {
     if (!views.ok) return undefined;
     const view = views.value.find((row) => row.key === key);
@@ -548,6 +576,33 @@ export async function readDepositCaps(
           'presenting it as unbounded. Either way the cap is unknown, not absent.',
       });
       return undefined;
+    }
+    // The witness decides nothing on its own — it is the second view that has to agree. A key
+    // the runtime answered and the prefix does not hold is a **disagreement**, not an absence:
+    // `params()` omits a key it holds no record for (13 rule 7), so a view row implies a stored
+    // record, and the two were read at one pin so a difference cannot be a race.
+    // An unreadable second view is **not** agreement. 10 §11 admits the API result only
+    // *alongside* the prefix it must agree with, so a prefix this release cannot decode leaves
+    // the view uncorroborated rather than corroborated. The failure is already reported once,
+    // above, against the prefix itself — reporting it again per key would say the same thing
+    // three times about one read.
+    if (!witness.ok) return undefined;
+    {
+      const fromStorage = stored.get(key);
+      if (fromStorage !== view.value) {
+        undecodable.push({
+          label: `${CAPS_READS.paramsApi}(${key})`,
+          rawHex: paramsRead.value.result,
+          reason:
+            `${CAPS_READS.paramsApi}() reports ${view.value} for this key and ` +
+            `${CAPS_READS.params} reports ` +
+            `${fromStorage === undefined ? 'no record' : String(fromStorage)} at the same ` +
+            'finalized block. The runtime view and its own storage disagree, so the cap is ' +
+            'not established and the deposit is refused rather than checked against the ' +
+            'lower of the two (10 §4.2, FE-P2).',
+        });
+        return undefined;
+      }
     }
     return derive(paramsRead, () => view.value);
   };

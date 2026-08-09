@@ -410,7 +410,16 @@ function capsReader(
       return finalize(value === undefined ? [] : [{ key, value }], at);
     },
     async crossCheckedCall(source) {
-      return finalize({ result: `${source.api}|${source.storagePrefix}|${source.argsHex}`, witness: [] }, at);
+      return finalize(
+        {
+          result: `${source.api}|${source.storagePrefix}|${source.argsHex}`,
+          // The FE-P2 witness is **not** empty by default. An empty `Constitution.Params`
+          // prefix beside a `params()` answer is a real disagreement, so a stub that returned
+          // one would make every agreeing test exercise the refusal path instead.
+          witness: [{ key: 'params-witness', value: WITNESS_STATE ?? PARAM_STATE ?? '' }],
+        },
+        at,
+      );
     },
   };
 }
@@ -423,6 +432,14 @@ const CAPS_KEYS: CapsKeys = {
 
 /** What the `params()` stub answers with. Set per test; an omitted key is 13 rule 7's silence. */
 let PARAM_STATE: string | undefined;
+
+/**
+ * What the `Constitution.Params` witness holds.
+ *
+ * `undefined` means *the same as `PARAM_STATE`* — the agreeing case, which is what every test
+ * about something else wants. A test sets it to force the FE-P2 disagreement, and resets it.
+ */
+let WITNESS_STATE: string | undefined;
 
 /** A `params()` stub reading `key=value;key=value` out of whatever the call returned. */
 function capsDecoderStub(patch: Partial<CapsDecoders> = {}): CapsDecoders {
@@ -440,6 +457,22 @@ function capsDecoderStub(patch: Partial<CapsDecoders> = {}): CapsDecoders {
           return { key: String(key), value: BigInt(String(value)) };
         });
       return { ok: true, value: rows };
+    },
+    paramEntries: (items) => {
+      const body = items.map((entry) => entry.value ?? '').join('');
+      if (body.startsWith('bad')) {
+        return { ok: false, reason: 'the Constitution.Params prefix did not decode' };
+      }
+      return {
+        ok: true,
+        value: body
+          .split(';')
+          .filter((row) => row.length > 0)
+          .map((row) => {
+            const [key, value] = row.split('=');
+            return { key: String(key), value: BigInt(String(value)) };
+          }),
+      };
     },
     cumulativeDeposits: (raw) =>
       raw.startsWith('bad') ? { ok: false, reason: 'not a u128' } : { ok: true, value: BigInt(raw) },
@@ -576,5 +609,96 @@ test('an undecodable read of ANY leaf leaves the whole set absent', async () => 
       xcmHealthy: true,
     });
     assert.ok(blocks.some((b) => b.check === 'Phase-3 exposure caps'), label);
+  }
+});
+
+/* ------------------------------------------------- FE-P2: the witness has to be able to say no */
+
+test('a params() view the Constitution.Params prefix DISAGREES with is refused, not averaged', async () => {
+  // 10 §11's fourth bullet admits a runtime-API view only alongside the storage prefix it must
+  // agree with, and both legs come from one pin, so a difference is a difference rather than a
+  // race. Until 2026-08-09 this reader fetched the witness and never compared it — the check
+  // could not fail, which reports exactly what a passing check reports.
+  //
+  // The refusal is total on purpose. Taking the lower of the two figures would be a client
+  // inventing a cap the chain does not hold, and 11 §11.4 rule 2 forbids a client computation
+  // standing in for an exact chain read.
+  PARAM_STATE = 'phase3.tvl_cap=2000000;phase3.dep_cap=20000';
+  WITNESS_STATE = 'phase3.tvl_cap=2000000;phase3.dep_cap=999';
+  try {
+    const { caps, undecodable } = await readDepositCaps(
+      capsReader(CAPS_VALUES),
+      CAPS_KEYS,
+      capsDecoderStub(),
+      { who: WHO },
+    );
+    assert.equal(caps, undefined, 'a disagreeing witness still produced a cap set');
+    const reported = undecodable.find((row) => row.label.includes('phase3.dep_cap'));
+    assert.ok(reported !== undefined, 'the disagreement was not reported against its key');
+    assert.match(reported.reason, /20000/, 'the reason does not carry what params\\(\\) said');
+    assert.match(reported.reason, /999/, 'the reason does not carry what storage said');
+    // The key that DID agree is not implicated by name — only the deposit is refused.
+    assert.equal(undecodable.some((row) => row.label.includes('phase3.tvl_cap')), false);
+  } finally {
+    WITNESS_STATE = undefined;
+  }
+});
+
+test('a key params() answers and the prefix does not hold is a disagreement, not an absence', async () => {
+  // 13 rule 7: `params()` OMITS a key it holds no record for. So a view row implies a stored
+  // record, and a missing one is the runtime's view contradicting the runtime's own storage.
+  PARAM_STATE = 'phase3.tvl_cap=2000000;phase3.dep_cap=20000';
+  WITNESS_STATE = 'phase3.tvl_cap=2000000';
+  try {
+    const { caps, undecodable } = await readDepositCaps(
+      capsReader(CAPS_VALUES),
+      CAPS_KEYS,
+      capsDecoderStub(),
+      { who: WHO },
+    );
+    assert.equal(caps, undefined);
+    const reported = undecodable.find((row) => row.label.includes('phase3.dep_cap'));
+    assert.ok(reported !== undefined);
+    assert.match(reported.reason, /no record/);
+  } finally {
+    WITNESS_STATE = undefined;
+  }
+});
+
+test('an UNDECODABLE witness refuses the caps — an unreadable second view is not agreement', async () => {
+  PARAM_STATE = 'phase3.tvl_cap=2000000;phase3.dep_cap=20000';
+  WITNESS_STATE = 'bad';
+  try {
+    const { caps, undecodable } = await readDepositCaps(
+      capsReader(CAPS_VALUES),
+      CAPS_KEYS,
+      capsDecoderStub(),
+      { who: WHO },
+    );
+    assert.equal(caps, undefined, 'an unreadable witness was treated as a passing cross-check');
+    assert.ok(undecodable.some((row) => row.label === 'Constitution.Params'));
+  } finally {
+    WITNESS_STATE = undefined;
+  }
+});
+
+test('an AGREEING witness establishes the caps — the refusal is not unconditional', async () => {
+  // The anti-vacuity half. Without it every assertion above is satisfied by a reader that
+  // refuses everything, which is the failure mode a fail-closed check invites.
+  PARAM_STATE = 'phase3.tvl_cap=2000000;phase3.dep_cap=20000';
+  WITNESS_STATE = 'phase3.dep_cap=20000;phase3.tvl_cap=2000000';
+  try {
+    const { caps, undecodable } = await readDepositCaps(
+      capsReader(CAPS_VALUES),
+      CAPS_KEYS,
+      capsDecoderStub(),
+      { who: WHO },
+    );
+    assert.deepEqual(undecodable, [], 'an agreeing witness reported a problem');
+    assert.ok(caps !== undefined, 'an agreeing witness did not establish the caps');
+    assert.equal(caps.globalTvlCap.value, 2_000_000n);
+    assert.equal(caps.perAccountCap.value, 20_000n);
+  } finally {
+    WITNESS_STATE = undefined;
   }
 });

@@ -35,7 +35,15 @@
  */
 
 import type { ChainApiCodecs, ChainCodecs, ChainMetadata, StorageKeyBuilder } from '@bleavit/chain-client';
-import { apiArgs, apiDecoder, storageDecoder, storageKeyBuilder } from '@bleavit/chain-client';
+import {
+  apiArgs,
+  apiDecoder,
+  concatDigestBytes,
+  storageDecoder,
+  storageHashers,
+  storageKeyBuilder,
+  type StorageItem,
+} from '@bleavit/chain-client';
 import {
   CAPS_READS,
   FUNDING_READS,
@@ -310,6 +318,81 @@ function asParamViews(value: unknown): Decoded<readonly CapParamView[]> {
   return { ok: true, value: rows };
 }
 
+/** The stored `ParamRecord`, narrowed to the scalar `ParamView.value` restates (02 §4). */
+function asParamRecordValue(value: unknown): Decoded<bigint> {
+  if (typeof value !== 'object' || value === null) {
+    return { ok: false, reason: 'Constitution.Params did not decode to a ParamRecord' };
+  }
+  const scalar = (value as { value?: unknown }).value;
+  if (typeof scalar !== 'bigint') {
+    return {
+      ok: false,
+      reason:
+        'a stored ParamRecord carries no bigint `value`. The witness exists to disagree with ' +
+        'params() when the runtime view and its own storage differ, and a record this release ' +
+        'cannot read is not evidence that they agree.',
+    };
+  }
+  return { ok: true, value: scalar };
+}
+
+/**
+ * The FE-P2 witness decoder for `Constitution.Params` — 10 §11's fourth bullet, 10 §4.2.
+ *
+ * `params()` answers a `ParamView` the runtime **computes**; this prefix holds the
+ * `ParamRecord` it stores. Reducing both to `(name, scalar)` is what makes the comparison
+ * meaningful rather than circular — the one field a cap check consumes, from two sources.
+ *
+ * The name is read out of the storage **key**, because a `ParamRecord` does not carry its own.
+ * `ParamKey` is `[u8; 16]`, so its SCALE encoding is exactly those sixteen bytes with no length
+ * prefix, and the width is asserted rather than assumed. The offset it starts at comes from the
+ * hasher in this chain's own metadata (`concatDigestBytes`) rather than from a tabulated
+ * constant, so a runtime that hashed this map differently is read at the right offset instead
+ * of a fixed number of bytes late — the same discipline `keySplitter` applies to `Positions`.
+ */
+function paramWitnessDecoder(local: CapsChain): CapsDecoders['paramEntries'] {
+  const [pallet, item] = split(CAPS_READS.params);
+  const hashers = storageHashers(local.metadata, pallet, item);
+  const [hasher] = hashers;
+  if (hashers.length !== 1 || hasher === undefined) {
+    throw new Error(
+      `"${CAPS_READS.params}" is keyed by ${hashers.length} hashed position(s); 02 §7.3 ` +
+        'declares it `ParamKey -> ParamRecord`, one hash. A key read at the wrong offset ' +
+        'names the wrong parameter with a perfectly well-formed string.',
+    );
+  }
+  /** `storagePrefix` is `twox128(pallet) ‖ twox128(item)` — two 16-byte digests. */
+  const PREFIX_BYTES = 32;
+  const digestBytes = concatDigestBytes(hasher);
+  const keyOffset = PREFIX_BYTES + digestBytes;
+  const scalarOf = decoderFor(local, CAPS_READS.params, asParamRecordValue);
+
+  return (items: readonly StorageItem[]): Decoded<readonly CapParamView[]> => {
+    const rows: CapParamView[] = [];
+    for (const entry of items) {
+      // A key with no value carries no scalar to compare. Skipping it here is what makes it
+      // surface as `no record` on the comparison side rather than as a silent agreement.
+      if (entry.value === undefined) continue;
+      const body = entry.key.startsWith('0x') ? entry.key.slice(2) : entry.key;
+      const keyHex = body.slice(keyOffset * 2);
+      if (keyHex.length !== PARAM_KEY_BYTES * 2) {
+        return {
+          ok: false,
+          reason:
+            `${CAPS_READS.params}: a key carries ${keyHex.length / 2} byte(s) after its ` +
+            `${digestBytes}-byte digest, and a ParamKey is ${PARAM_KEY_BYTES}`,
+        };
+      }
+      const name = paramKeyName(`0x${keyHex}`);
+      if (!name.ok) return name;
+      const scalar = scalarOf(entry.value);
+      if (!scalar.ok) return scalar;
+      rows.push({ key: name.value, value: scalar.value });
+    }
+    return { ok: true, value: rows };
+  };
+}
+
 /** `InflowCaps.CumulativeDeposits` — a bare `u128`, and nothing else is accepted for it. */
 function asMeter(value: unknown): Decoded<bigint> {
   if (typeof value !== 'bigint') {
@@ -348,6 +431,7 @@ export function capsDecoders(local: CapsChain): CapsDecoders {
       apiDecoder(local.codecs, FUTARCHY_API, CAPS_READS.paramsApi),
       asParamViews,
     ),
+    paramEntries: paramWitnessDecoder(local),
     cumulativeDeposits: decoderFor(local, CAPS_READS.cumulativeDeposits, asMeter),
     usdcAsset: decoderFor(local, CAPS_READS.usdcAsset, asAssetDetails),
   };
