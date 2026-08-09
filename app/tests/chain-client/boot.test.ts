@@ -29,7 +29,7 @@ import {
   signingEnabled,
   transitionEdges,
 } from '@bleavit/chain-client';
-import type { BootEvent, BootSession, BootState } from '@bleavit/chain-client';
+import type { BootEvent, BootSession, BootState, CompatMode } from '@bleavit/chain-client';
 
 /**
  * Every event that carries no payload beyond its name.
@@ -41,6 +41,26 @@ import type { BootEvent, BootSession, BootState } from '@bleavit/chain-client';
  * would have *passed*.
  */
 type PayloadFreeEvent = Exclude<BootEvent, { type: 'compat-classified' }>['type'];
+
+/**
+ * All of them, at run time, exhaustive **by the compiler** rather than by hand.
+ *
+ * Keyed by the union for the reason `transitionEdges` is keyed by it: a hand-kept list of a
+ * closed union stops checking the moment the union grows. That matters more here than
+ * elsewhere, because the resting-state tests below use this list to prove a state cannot be
+ * moved — and a forgotten event would quietly turn that proof into a weaker one that passes.
+ */
+const PAYLOAD_FREE_EVENTS = Object.keys({
+  'shell-parsed': true, 'storage-open': true, 'storage-failed': true, 'worker-up': true,
+  'worker-failed': true, 'relay-added': true, 'wasm-failed': true, 'relay-finality-verified': true,
+  'peers-lost': true, 'peer-acquired': true, 'first-finalized-para-head': true,
+  'genesis-matches': true, 'genesis-mismatch': true, 'compat-unavailable': true,
+  'compat-retry': true, 'health-degraded': true, 'health-recovered': true,
+  'newer-release-loaded': true, 'user-retry': true,
+} satisfies Record<PayloadFreeEvent, true>) as readonly PayloadFreeEvent[];
+
+/** The three payloads `compat-classified` can carry — the machine's only non-trivial event. */
+const COMPAT_MODES = ['full', 'restricted', 'read-only-incompatible'] as const satisfies readonly CompatMode[];
 
 /** A session parked in one state — where every transition test starts. */
 const sessionAt = (state: BootState): BootSession => ({ ...INITIAL_SESSION, state });
@@ -77,6 +97,18 @@ function theSpecLine(needle: string): string {
   const lines = readFileSync(DOC, 'utf8').split('\n').filter((line) => line.includes(needle));
   assert.equal(lines.length, 1, `expected exactly one line of doc 10 containing ${JSON.stringify(needle)}`);
   return lines[0] as string;
+}
+
+/** A real boot, driven event by event, parked in one of the two syncing states. */
+function bootToSyncing(state: 'RelaySyncing' | 'ParaSyncing'): BootSession {
+  const path = [
+    'shell-parsed', 'storage-open', 'worker-up', 'relay-added',
+  ] as const satisfies readonly PayloadFreeEvent[];
+  let s = INITIAL_SESSION;
+  for (const type of path) s = reduce(s, { type });
+  if (state === 'ParaSyncing') s = reduce(s, { type: 'relay-finality-verified' });
+  assert.equal(s.state, state, 'the boot path no longer reaches this syncing state');
+  return s;
 }
 
 /** A real boot, driven event by event, parked at `CompatCheck` with the probe still out. */
@@ -316,4 +348,62 @@ test('a retry that succeeds stops stating a reason that no longer holds', () => 
   assert.equal(s.state, 'Ready');
   assert.equal(s.memoryOnly, true);
   assert.equal(s.lastError, 'FE-BOOT-001', 'the compat edge cleared an error it did not resolve');
+});
+
+/* -------------------------------------------- SyncDegraded: the same omission, one state over
+ *
+ * Found by the tests above rather than by review: `CompatUnavailable` was one instance of a
+ * defect with two, and §3.1 grants this state its surface in the same shape — *"the same
+ * peer-diagnostics panel as post-`Ready` `Degraded`"*, where `Degraded` renders and this did
+ * not. The masking was identical too. `SyncDegraded` walks back to `RelaySyncing` and on to
+ * `Ready`, so the reachability test found a rendering surface for it and reported it healthy,
+ * while §3.1's own headline case — *"cannot reach peers on first load"* — is a session that
+ * never gets there and sat looking at nothing.
+ *
+ * The state is where such a session **rests**: only `peer-acquired` moves it, and a client with
+ * no peers never fires that. So the test below drives every other event the machine has and
+ * asserts the session is still there, still rendering — the resting half is the one the user
+ * lives in, and the transient half is a session that has just found peers and is syncing.
+ */
+
+test('SyncDegraded renders the panel 10 §3.1 hands it, not a blank screen', () => {
+  const bullet = theSpecLine('**`SyncDegraded`**');
+  // Same shape as `CompatUnavailable`'s: §3.1 does not describe this state's surface, it
+  // assigns it another state's. Read the donor out of the sentence rather than naming it.
+  const named = /same peer-diagnostics panel as post-`Ready` `([A-Za-z]+)`/.exec(bullet);
+  assert.ok(named, `10 §3.1 no longer assigns SyncDegraded a peer-diagnostics panel: ${bullet}`);
+  const donor = named[1] as BootState;
+  assert.ok(RENDERING_STATES.has(donor), `${donor} does not itself render — the sentence is being read wrong`);
+  assert.ok(
+    RENDERING_STATES.has('SyncDegraded'),
+    `10 §3.1 gives SyncDegraded ${donor}'s peer-diagnostics panel, and the machine renders nothing there`,
+  );
+});
+
+test('a first load that never finds a peer still renders — SyncDegraded is where it rests', () => {
+  // Both entries, because §3.1 draws one from each syncing state and a first load can stall
+  // at either: no relay peers for 60 s, or no para peers for 30 s once the relay is final.
+  for (const from of ['RelaySyncing', 'ParaSyncing'] as const) {
+    const degraded = reduce(bootToSyncing(from), { type: 'peers-lost' });
+    assert.equal(degraded.state, 'SyncDegraded', `${from} did not degrade`);
+    assert.ok(rendersUsableSurface(degraded), `SyncDegraded renders nothing, entered from ${from}`);
+    assert.equal(signingEnabled(degraded), false, 'a session with no peers has no verified read to sign against');
+
+    // Nothing but a peer moves it. Driven rather than assumed: a walk that slipped out of the
+    // state on some other edge would be measuring renderability somewhere the user is not.
+    for (const type of PAYLOAD_FREE_EVENTS.filter((t) => t !== 'peer-acquired')) {
+      const next = reduce(degraded, { type });
+      assert.equal(next.state, 'SyncDegraded', `${type} moved a session that still has no peers`);
+      assert.ok(rendersUsableSurface(next), `SyncDegraded renders nothing after ${type}`);
+    }
+    for (const mode of COMPAT_MODES) {
+      const next = reduce(degraded, { type: 'compat-classified', mode });
+      assert.equal(next.state, 'SyncDegraded', `a ${mode} classification moved a session with no peers`);
+      assert.equal(next.compat, undefined, 'a session that never probed acquired a mode');
+    }
+
+    // ...and the one event that does move it hands the session back to the relay, which is the
+    // only edge out. So the state is a rest, not a stall: the panel is the screen, not a gap.
+    assert.equal(reduce(degraded, { type: 'peer-acquired' }).state, 'RelaySyncing');
+  }
 });

@@ -125,6 +125,22 @@ export const TERMINAL_STATES: ReadonlySet<BootState> = new Set<BootState>(['Wron
  * itself for the two states this defect lived in. What a retried probe owes the user instead is
  * continuity, and that is a property of the session rather than of the state name — see
  * {@link rendersUsableSurface}.
+ *
+ * **`SyncDegraded` is here for the same reason, and it was the same defect** (added
+ * 2026-08-09). §3.1 grants it *"the same peer-diagnostics panel as post-`Ready` `Degraded`"*
+ * — per-bootnode dial results, the port-443 note, add-bootnode, the expert RPC option — and
+ * `Degraded` renders while this did not. The masking was identical: `SyncDegraded` walks back
+ * to `RelaySyncing` and on to `Ready`, so a reachability test found it a surface and called it
+ * healthy, while §3.1's own headline case for the state — *"cannot reach peers on first load"*
+ * — is a session that never gets there. Only `peer-acquired` moves it, and a client with no
+ * peers never fires that, so this is precisely where such a session lives.
+ *
+ * It needs no session clause, unlike the compat cycle, and the asymmetry is in the cycles
+ * rather than in the reasoning. That one *rests in the retry*, so continuity across the edge is
+ * the whole experience; this one rests in the state that renders, and its transient half is a
+ * session that has just found peers and is syncing normally — which is not when a user wants
+ * peer diagnostics. There is also no error code for peer loss to carry across the edge, and
+ * inventing a session field for a problem this cycle shape does not have is the wrong trade.
  */
 export const RENDERING_STATES: ReadonlySet<BootState> = new Set<BootState>([
   'Ready',
@@ -134,6 +150,7 @@ export const RENDERING_STATES: ReadonlySet<BootState> = new Set<BootState>([
   'WorkerFailed',
   'WasmFailed',
   'CompatUnavailable',
+  'SyncDegraded',
 ]);
 
 /**
