@@ -31,8 +31,9 @@ import type {
   RuntimeVersionReport,
   StorageItem,
 } from '@bleavit/chain-client';
-import type { ForeignVerdict } from '@bleavit/application';
+import { foreignIdentityVerdict, type ForeignVerdict } from '@bleavit/application';
 
+import { assetHubLabel } from '../../tools/drill-client/foreign-label.ts';
 import {
   DrillFundingError,
   amountArg,
@@ -463,6 +464,43 @@ test('the harness refuses a ready report whose reads did not decode', async () =
   if (sighted.deposit.kind !== 'ready') return;
   assert.deepEqual(sighted.deposit.undecodable, []);
   harnessRules.assertFundingReport(sighted);
+});
+
+test('the harness refuses the verdict the development-label bug produced', async () => {
+  // Both verdicts below come from the **real** classifier over the real pin list, so neither is
+  // a mode string somebody typed: `foreignIdentityVerdict` is the same call `classifyAssetHub`
+  // makes for a chain whose genesis is not the pinned one, and the only input that differs is
+  // the label it is asked about.
+  //
+  // `asset-hub-paseo-local` is the connected spec's id, which is what `boot.ts` passed until
+  // F18. No pin carries that name, so `classifyForeign` answers `unreachable` — *retryable*,
+  // where a locally generated Asset Hub is terminally the wrong chain. That is the regression
+  // 15 §4.8 says this leg exists to catch, and a nonempty-string rule cannot see it.
+  const bugged = await runFunding(
+    pinDocument(),
+    NO_BOOTNODES,
+    OPTIONS,
+    deps(connection({ local: await decodableLocal(), verdict: foreignIdentityVerdict('asset-hub-paseo-local', AH_CHAIN) })),
+  );
+  assert.equal(bugged.deposit.kind, 'ready');
+  if (bugged.deposit.kind !== 'ready') return;
+  assert.equal(bugged.deposit.foreignMode, 'unreachable');
+  assert.throws(() => harnessRules.assertFundingReport(bugged), /can only ever reach "wrong-chain"/);
+
+  // The negative control, and it is what binds the rule to the topology: asked about the label
+  // the pin itself carries, the real classifier returns `wrong-chain` for a locally generated
+  // Asset Hub — so the value the harness demands is the value 15 §4.8 says is the only one
+  // reachable, rather than a constant that happens to match today.
+  const pinned = await runFunding(
+    pinDocument(),
+    NO_BOOTNODES,
+    OPTIONS,
+    deps(connection({ local: await decodableLocal(), verdict: foreignIdentityVerdict(assetHubLabel(), AH_CHAIN) })),
+  );
+  assert.equal(pinned.deposit.kind, 'ready');
+  if (pinned.deposit.kind !== 'ready') return;
+  assert.equal(pinned.deposit.foreignMode, 'wrong-chain');
+  harnessRules.assertFundingReport(pinned);
 });
 
 /* ------------------------------------------------------------------------- the arguments */

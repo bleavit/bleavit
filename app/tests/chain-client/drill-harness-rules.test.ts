@@ -322,6 +322,26 @@ test('a ready deposit with no 02 §7.7 verdict is refused', () => {
   }
 });
 
+test('a ready deposit carrying any verdict but `wrong-chain` is refused — 15 §4.8', () => {
+  // The third instance of this defect in one function. A nonempty string is not a verdict: 15
+  // §4.8 rules that `ForeignMode` can only ever reach `wrong-chain` in a Zombienet topology,
+  // because 02 §7.7 pins the Asset Hub of the relay a release targets and a locally generated
+  // one has its own genesis. So the four other modes are not weather — each is the terminal
+  // classification the drill exists to certify, failing.
+  //
+  // `unreachable` is the one that shipped: `boot.ts` passed the connected spec's id as the
+  // chain label, no pin carries that name, and `classifyForeign` answers a label it does not
+  // pin with `unreachable` — *retryable*, where the truth is terminal. That regression would
+  // leave this leg green with a nonempty-string rule.
+  for (const foreignMode of ['full', 'restricted', 'unsupported', 'unreachable', 'unestablished']) {
+    assert.throws(
+      () => rules.assertFundingReport({ ...FUNDING, deposit: { ...FUNDING.deposit, foreignMode } }),
+      /can only ever reach "wrong-chain"/,
+      `accepted ${foreignMode}`,
+    );
+  }
+});
+
 test('the happy shape passes, so none of the refusals above is refusing everything', () => {
   assert.equal(rules.assertFundingReport(FUNDING), FUNDING);
 });

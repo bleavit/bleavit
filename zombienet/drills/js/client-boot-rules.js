@@ -182,6 +182,25 @@ function assertWrongChainReport(report) {
 const FORCED_DEPOSIT_REFUSALS = ['asset-hub-unavailable', 'asset-hub-wrong-chain'];
 
 /**
+ * The **only** foreign verdict a Zombienet topology can produce — 15 §4.8; 02 §7.7.
+ *
+ * The same paragraph, read the other way round. It says `ForeignMode` *"can only ever reach
+ * `wrong-chain` in any Zombienet topology, however correct the client is"* — and that is a
+ * statement about **every** run of this drill, not an excuse for one outcome. So the four other
+ * modes are each a defect rather than weather: `full`, `restricted` and `unsupported` all claim
+ * the genesis matched a pin no local chain can carry, and `unreachable` claims the classifier
+ * never got an answer from a chain whose reader opened one line earlier.
+ *
+ * `unreachable` is the one that shipped, which is why this is a value rather than a shape.
+ * `boot.ts` passed the connected spec's id (`asset-hub-paseo-local`) as the chain label,
+ * `classifyForeign` finds its pin by label, and a label naming no pin answers `unreachable` —
+ * *retryable*, where a locally generated Asset Hub is terminally the wrong chain. 15 §4.8 names
+ * *"the terminal classification"* among the four things the Zombienet row does certify, and a
+ * rule accepting any nonempty string certifies none of it.
+ */
+const ONLY_REACHABLE_FOREIGN_MODE = 'wrong-chain';
+
+/**
  * The `funding` leg's acceptance rule — 11 §11.9; 02 §7.7; 15 §4.8.
  *
  * **A blocked deposit is not a failure here, and that is the point.** 02 §7.7 requires an
@@ -205,6 +224,11 @@ const FORCED_DEPOSIT_REFUSALS = ['asset-hub-unavailable', 'asset-hub-wrong-chain
  *    so a second local `FinalizedReader.open` that failed left `ready` withdraw beside a
  *    `blocked` deposit and read exactly like the expected Asset Hub refusal, and drill 14 could
  *    pass without ever completing the two-chain deposit read path it advertises.
+ *  - **a ready deposit's verdict must be the one this topology forces.** See
+ *    {@link ONLY_REACHABLE_FOREIGN_MODE}. The same defect as the row above, one field over: a
+ *    nonempty string admitted `full`, `restricted`, `unsupported` and `unreachable` alike, so
+ *    restoring the development-label bug — which reported a chain that had attached and
+ *    answered as `unreachable` — would leave this leg green.
  */
 function assertFundingReport(report) {
   if (!report || typeof report !== 'object') throw new Error('the funding leg produced no report object');
@@ -234,6 +258,15 @@ function assertFundingReport(report) {
     }
     if (typeof deposit.foreignMode !== 'string' || deposit.foreignMode.length === 0) {
       throw new Error(`the deposit leg carries no 02 §7.7 foreign verdict: ${JSON.stringify(deposit)}`);
+    }
+    if (deposit.foreignMode !== ONLY_REACHABLE_FOREIGN_MODE) {
+      throw new Error(
+        `the deposit leg classified this Asset Hub as ${JSON.stringify(deposit.foreignMode)}. ` +
+          '15 §4.8 rules that a locally generated Asset Hub has its own genesis by construction, ' +
+          'so the 02 §7.7 verdict can only ever reach "wrong-chain" here — every other mode is ' +
+          'the terminal classification this leg certifies, failing: ' +
+          JSON.stringify(deposit),
+      );
     }
   } else {
     if (deposit.kind !== 'blocked' || typeof deposit.reason !== 'string' || deposit.reason.length === 0) {
