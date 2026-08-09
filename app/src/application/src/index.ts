@@ -26,7 +26,22 @@ export {
   type Screen,
   type ScreenArea,
 } from './screens.js';
-export { CompatNotice, EpochHeader, Shell, sudoBannerFor, type ShellChainState } from './shell.js';
+export {
+  CompatNotice,
+  EpochHeader,
+  NewerReleasePointer,
+  Shell,
+  sudoBannerFor,
+  type ShellChainState,
+} from './shell.js';
+export {
+  RELEASE_CHANNEL_READ,
+  decodeReleaseChannel,
+  readReleaseChannel,
+  releaseChannelKey,
+  type ReleaseChannelPointer,
+  type ReleaseChannelReader,
+} from './release-channel.js';
 export {
   COMPAT_RETRY_MAX_MS,
   COMPAT_RETRY_MIN_MS,

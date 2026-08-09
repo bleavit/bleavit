@@ -34,6 +34,7 @@ import {
   AlwaysVisible,
   BlockRef,
   Field,
+  Identifier,
   Notice,
   Panel,
   Phrase,
@@ -45,6 +46,7 @@ import { navigationFor, type Navigation, type Screen } from './screens.js';
 import { sudoActive } from './phase-flags.js';
 import { CRITICAL_SURFACE } from '@bleavit/descriptors';
 import { verdictAllowsSigning, verdictProvesSurface, type CompatVerdict } from './compat-session.js';
+import type { ReleaseChannelPointer } from './release-channel.js';
 
 /**
  * What the shell knows about the chain's phase.
@@ -170,6 +172,91 @@ function SurfaceUnavailable({ what, why }: { readonly what: string; readonly why
 const SIGNING_HEADING = 'Runtime compatibility';
 
 /**
+ * 10 §5.3's newer-release pointer, rendered where the notice names it as the remedy.
+ *
+ * ## The sentence above this was a promise nothing kept
+ *
+ * `read-only-incompatible` says signing is unavailable *"until a newer release is loaded"*, and
+ * until this component existed **nothing in the client read `Constitution.ReleaseChannel`** —
+ * so the remedy was named and never pointed at, on the one screen whose entire subject is being
+ * stranded. §5.3 does not leave the shape open: the pointer is that key, read raw, because a
+ * client with no descriptors for the runtime in front of it has no typed read left.
+ *
+ * ## Every arm but one says what it does **not** know
+ *
+ * The three failing arms are not variations on *"no update available"*. A client that could not
+ * read the channel has established nothing about whether a newer release exists, and a screen
+ * that let the user infer otherwise would leave them sitting on a stranded build believing it
+ * is current — a worse outcome than the one the notice is already reporting. Each therefore
+ * states the gap in its own words and says outright that it is not the absence of a release.
+ *
+ * `undefined` is the fourth of those: no read was attempted. It is optional rather than
+ * required because every call site that has not been wired yet must land in the fail-closed
+ * case by default, and here the closed direction is *say nothing was read*.
+ *
+ * `data-compat-pointer` carries the **arm**, so a test can tell "the pointer is on screen" from
+ * "some sentence about releases is on screen" — the four differ only in their words.
+ */
+export function NewerReleasePointer({
+  pointer,
+}: {
+  readonly pointer: ReleaseChannelPointer | undefined;
+}) {
+  if (pointer === undefined) {
+    return (
+      <p className="compat__pointer" data-compat-pointer="not-attempted">
+        This client has not read the chain’s release channel, so it cannot name the canonical
+        release. That is not a statement that none exists.
+      </p>
+    );
+  }
+  if (pointer.kind === 'named') {
+    return (
+      <div className="compat__pointer" data-compat-pointer="named">
+        <p>
+          The chain names this release as the canonical one. Load it — this build cannot decode
+          the runtime it is connected to (10 §5.3).
+        </p>
+        <Field label="Canonical release">
+          <Phrase datum={pointer.version} />
+        </Field>
+        <Field label="Arweave TXID">
+          <Identifier datum={pointer.manifestTxid} />
+        </Field>
+        <Field label="Channel last updated">
+          <BlockRef datum={pointer.updatedAt} />
+        </Field>
+      </div>
+    );
+  }
+  if (pointer.kind === 'unnamed') {
+    return (
+      <p className="compat__pointer" data-compat-pointer="unnamed">
+        The chain’s release channel names no canonical release ({pointer.reason}). This client is
+        reporting what the record says rather than concluding that no newer release exists —
+        a release that has not been published on chain may still have been published.
+      </p>
+    );
+  }
+  if (pointer.kind === 'undecodable') {
+    return (
+      <p className="compat__pointer" data-compat-pointer="undecodable">
+        The chain’s release-channel record is not in the layout this client can read (
+        {pointer.reason}), so it is shown as raw bytes rather than guessed at:{' '}
+        <code>{pointer.rawHex}</code>. Nothing is being inferred about whether a newer release
+        exists.
+      </p>
+    );
+  }
+  return (
+    <p className="compat__pointer" data-compat-pointer="unread">
+      This client could not read the chain’s release channel ({pointer.reason}), so it cannot
+      name the canonical release. That is a failed read, not evidence that none exists.
+    </p>
+  );
+}
+
+/**
  * What the shell says about 10 §5.2's verdict — the surface F26 produced and never rendered.
  *
  * Four outcomes and four sentences, because §3.1 and §5.2 give each a different recovery and a
@@ -186,8 +273,24 @@ const SIGNING_HEADING = 'Runtime compatibility';
  *
  * `data-compat-mode` carries the **mode**, not the arm: 10 §5.2's verdict *is* the mode, and a
  * marker saying only that some chain answered would be satisfied by every one of these four.
+ *
+ * **`read-only-incompatible` now carries the pointer its own sentence promises** — see
+ * {@link NewerReleasePointer}. It is rendered on that arm alone, because it is the only one
+ * whose remedy is a different release: `restricted` is a *runtime* that dropped a surface this
+ * release depends on, and telling that user to go and load a newer app would send them after a
+ * fix that is not theirs to make.
  */
-export function CompatNotice({ compat }: { readonly compat: CompatVerdict | undefined }) {
+export function CompatNotice({
+  compat,
+  channel,
+}: {
+  readonly compat: CompatVerdict | undefined;
+  /**
+   * 10 §5.3's `ReleaseChannel` reading. Optional, and the default is the fail-closed one:
+   * `undefined` renders *"this client has not read the channel"*, never *"you are current"*.
+   */
+  readonly channel?: ReleaseChannelPointer | undefined;
+}) {
   if (compat === undefined) return null;
   if (compat.kind !== 'classified') {
     return (
@@ -218,6 +321,7 @@ export function CompatNotice({ compat }: { readonly compat: CompatVerdict | unde
           ))}
         </ul>
       ) : null}
+      {mode === 'read-only-incompatible' ? <NewerReleasePointer pointer={channel} /> : null}
     </Notice>
   );
 }
@@ -338,6 +442,7 @@ export function EpochHeader({
 export function Shell({
   chain,
   compat,
+  channel,
   handoffEnabled,
   activeScreen,
   children,
@@ -353,6 +458,16 @@ export function Shell({
    * second input rather than a fourth leaf.
    */
   readonly compat?: CompatVerdict | undefined;
+  /**
+   * 10 §5.3's `ReleaseChannel` reading, for the `read-only-incompatible` arm of the notice.
+   *
+   * A prop of its own for the same reason `compat` is one: it is not a leaf of
+   * `ShellChainState`. `assertOnePin` requires every leaf of that model to carry the shell
+   * reader's pin, and this is a raw-key read a stranded client makes when the typed reads that
+   * fill the header are exactly what is unavailable — so binding it into that model would tie
+   * the pointer to the reads it exists to survive.
+   */
+  readonly channel?: ReleaseChannelPointer | undefined;
   readonly handoffEnabled: boolean;
   readonly activeScreen: string;
   readonly children: ReactNode;
@@ -364,7 +479,7 @@ export function Shell({
       {banner === null ? null : (
         <AlwaysVisible fold={aboveTheFold('sudo-era-banner', banner)} />
       )}
-      <CompatNotice compat={compat} />
+      <CompatNotice compat={compat} channel={channel} />
       <header className="shell__header">
         <EpochHeader chain={chain} compat={compat} />
       </header>

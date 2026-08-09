@@ -26,12 +26,18 @@ import assert from 'node:assert/strict';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { createElement as h } from 'react';
 
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
 import {
   COMPAT_RETRY_MAX_MS,
   COMPAT_RETRY_MIN_MS,
   CompatNotice,
   Shell,
   compatRetryDelayMs,
+  decodeReleaseChannel,
+  readReleaseChannel,
+  releaseChannelKey,
   signingBlockedReason,
   startShell,
   verdictAllowsSigning,
@@ -39,12 +45,16 @@ import {
   type BootedShell,
   type CompatVerdict,
   type ConnectedChain,
+  type ReleaseChannelPointer,
   type ScheduleDelay,
   type ShellChainState,
 } from '@bleavit/application';
 import { CRITICAL_SURFACE, type CompatClassification } from '@bleavit/descriptors';
-import type { RuntimeVersionReport } from '@bleavit/chain-client';
-import { DOC_10, architecture, theLineContaining } from './spec-sources.ts';
+import type { FinalizedBlockRef, RuntimeVersionReport } from '@bleavit/chain-client';
+// `finalize` is test-only on purpose — see packages/chain-client/src/testing.ts.
+import { finalize } from '@bleavit/chain-client/testing';
+import type { HexString } from '@bleavit/shared-types';
+import { APP_ROOT, DOC_10, REPO_ROOT, architecture, theLineContaining } from './spec-sources.ts';
 
 /* ------------------------------------------------------------------------------- fixtures */
 
@@ -552,4 +562,407 @@ test('signingBlockedReason answers exactly where verdictAllowsSigning refuses', 
     );
     if (blocked !== undefined) assert.ok(blocked.length > 0, 'a refusal with no reason');
   }
+});
+
+/* ---------------------------------------- 10 §5.3's newer-release pointer (F26) */
+
+/**
+ * The `read-only-incompatible` arm told the user to load a newer release and pointed at
+ * nothing: no module in `src` or `packages` read `Constitution.ReleaseChannel` at all. These
+ * tests bind the repair to the two things that can make it wrong — the frozen key it reads, and
+ * the frozen offsets it parses — and to the rule that matters more than either: an unread
+ * channel must never render as *"there is no newer release"*.
+ */
+
+/** The block every pointer fixture is read at. */
+const CHANNEL_PIN: FinalizedBlockRef = {
+  chain: `0x${'ce'.repeat(32)}` as HexString,
+  blockHash: '0xfeed',
+  blockNumber: 909,
+};
+
+/**
+ * A `ReleaseChannel` value at 02 §12's frozen layout — 168 bytes, fixed width, no prefixes.
+ *
+ * The offsets are written out here rather than imported, and that is the point of the fixture:
+ * a builder that asked the module under test where the fields are would agree with it whatever
+ * it said. `version` is `[u8; 32]` at 1 and `manifest_txid` is `[u8; 43]` at **33**, so a reader
+ * that took 32 bytes for the TXID would produce a truncated Arweave address that fetches
+ * nothing — and would look completely plausible on screen.
+ */
+function releaseChannelBytes(
+  over: { readonly version?: string; readonly txid?: string; readonly updatedAt?: number } = {},
+): string {
+  const bytes = new Uint8Array(168);
+  bytes[0] = 1; // schema
+  const put = (text: string, at: number, width: number): void => {
+    const encoded = new TextEncoder().encode(text);
+    assert.ok(encoded.length <= width, `${text} does not fit in ${width} bytes`);
+    bytes.set(encoded, at);
+  };
+  put(over.version ?? '', 1, 32);
+  put(over.txid ?? '', 33, 43);
+  const updatedAt = over.updatedAt ?? 0;
+  bytes[108] = updatedAt & 0xff;
+  bytes[109] = (updatedAt >>> 8) & 0xff;
+  bytes[110] = (updatedAt >>> 16) & 0xff;
+  bytes[111] = (updatedAt >>> 24) & 0xff;
+  let hex = '0x';
+  for (const byte of bytes) hex += byte.toString(16).padStart(2, '0');
+  return hex;
+}
+
+const channelRead = (raw: string | undefined) => finalize(raw, CHANNEL_PIN);
+
+/** A canonical release, as a chain that has repointed publishes it. */
+const NAMED_CHANNEL = releaseChannelBytes({
+  version: '1.4.0',
+  txid: 'A'.repeat(43),
+  updatedAt: 4_242,
+});
+
+test('the pointer reads the key 02 §12 freezes, not one this client invented', () => {
+  // A wrong storage key does not fail — it returns no value, which this module would report as
+  // "the chain names no release". So the derivation is pinned against the key the recorder
+  // actually sent to the node, and against the raw key the surface manifest freezes.
+  const fixture: unknown = JSON.parse(
+    readFileSync(
+      resolve(APP_ROOT, 'fixtures/chainhead/storage.constitution.release_channel.json'),
+      'utf8',
+    ),
+  );
+  const requests = (fixture as { requests: { method: string; params: unknown }[] }).requests;
+  // Read per method rather than by scanning for anything hex-shaped: the pinned block hash is
+  // also a 32-byte hex string in these params, and a scan that swept it up would compare the
+  // derived key against a block and report a mismatch that means nothing.
+  const recorded = requests.flatMap((request) => {
+    const params = Array.isArray(request.params) ? request.params : [];
+    if (request.method === 'chainHead_v1_storage') {
+      const items = params[2];
+      return (Array.isArray(items) ? items : []).map((item) =>
+        String((item as { key: unknown }).key),
+      );
+    }
+    if (request.method === 'state_getStorage') return [String(params[0])];
+    return [];
+  });
+  assert.equal(recorded.length, 2, 'the recorded exchange no longer sends both storage requests');
+  for (const key of recorded) {
+    assert.equal(key, releaseChannelKey(), 'the derived key is not the one the node was asked');
+  }
+
+  const manifest: unknown = JSON.parse(
+    readFileSync(resolve(REPO_ROOT, 'tools/release/surface-manifest.json'), 'utf8'),
+  );
+  const entry = (manifest as { entries: { id: string; raw_key?: string }[] }).entries.find(
+    (row) => row.id === 'storage.constitution.release_channel',
+  );
+  assert.ok(entry !== undefined, '02 §12 freezes no release-channel entry any more');
+  assert.equal(entry.raw_key, releaseChannelKey(), 'the frozen raw key and the derived key differ');
+});
+
+test('the recorded chain bytes decode at 02 §12’s offsets, and name no release yet', () => {
+  // The genesis record: `schema = 1` and every published field empty. This is the arm a real
+  // chain answers with today, and it is a chain fact rather than a defect — which is exactly
+  // why it must not render as "you are up to date".
+  const recorded: unknown = JSON.parse(
+    readFileSync(
+      resolve(APP_ROOT, 'fixtures/chainhead/storage.constitution.release_channel.json'),
+      'utf8',
+    ),
+  );
+  const value = (recorded as { requests: { response: unknown }[] }).requests
+    .map((request) => request.response)
+    .find((response): response is string => typeof response === 'string');
+  assert.ok(value !== undefined, 'the fixture records no raw release-channel value');
+  assert.equal((value.length - 2) / 2, 168, 'the recorded record is not the frozen 168 bytes');
+
+  const pointer = decodeReleaseChannel(channelRead(value));
+  assert.equal(pointer.kind, 'unnamed');
+});
+
+test('a repointed channel yields the version, the TXID and the block, each pinned', () => {
+  const pointer = decodeReleaseChannel(channelRead(NAMED_CHANNEL));
+  assert.equal(pointer.kind, 'named');
+  assert.ok(pointer.kind === 'named');
+  assert.equal(pointer.version.value, '1.4.0');
+  assert.equal(pointer.manifestTxid.value, 'A'.repeat(43));
+  assert.equal(pointer.updatedAt.value, 4_242);
+  // Every field descends from the read, so a pointer cannot be shown at a block nothing read.
+  for (const datum of [pointer.version, pointer.manifestTxid, pointer.updatedAt]) {
+    assert.equal(datum.status.kind, 'verified-finalized');
+    assert.equal(
+      'blockHash' in datum.status ? datum.status.blockHash : undefined,
+      CHANNEL_PIN.blockHash,
+    );
+  }
+});
+
+test('half a pointer is no pointer: a version with no TXID cannot be fetched', () => {
+  assert.equal(decodeReleaseChannel(channelRead(releaseChannelBytes({ version: '1.4.0' }))).kind, 'unnamed');
+  assert.equal(
+    decodeReleaseChannel(channelRead(releaseChannelBytes({ txid: 'A'.repeat(43) }))).kind,
+    'unnamed',
+  );
+});
+
+test('bytes that are not the frozen layout are shown raw, never guessed at', () => {
+  // App-code rule 10 and INV-FE-12. A guess here sends a stranded user after an artifact
+  // nobody published, which is worse than telling them the record is unreadable.
+  const short = decodeReleaseChannel(channelRead('0x0100'));
+  assert.equal(short.kind, 'undecodable');
+  assert.ok(short.kind === 'undecodable');
+  assert.match(short.reason, /168/);
+  assert.equal(short.rawHex, '0x0100');
+
+  // An interior NUL is a refusal rather than a truncation: `"1.4.0\0evil"` cut at the NUL would
+  // put a version on screen that the record does not name.
+  const spliced = releaseChannelBytes({ version: '1.4.0', txid: 'A'.repeat(43) });
+  const bytes = [...(spliced.slice(2).match(/../g) ?? [])];
+  bytes[1 + 6] = '65'; // a byte past the version's terminating NUL
+  assert.equal(decodeReleaseChannel(channelRead(`0x${bytes.join('')}`)).kind, 'undecodable');
+});
+
+test('a read that did not land is `unread`, and never silence', async () => {
+  const pointer = await readReleaseChannel({
+    storage: () => Promise.reject(new Error('the transport is down')),
+  });
+  assert.equal(pointer.kind, 'unread');
+  assert.ok(pointer.kind === 'unread');
+  assert.match(pointer.reason, /the transport is down/);
+});
+
+test('readReleaseChannel asks for the frozen key and decodes what comes back', async () => {
+  const asked: string[] = [];
+  const pointer = await readReleaseChannel({
+    storage: (key: string) => {
+      asked.push(key);
+      return Promise.resolve(finalize([{ key, value: NAMED_CHANNEL }], CHANNEL_PIN));
+    },
+  });
+  assert.deepEqual(asked, [releaseChannelKey()]);
+  assert.equal(pointer.kind, 'named');
+});
+
+test('read-only-incompatible renders the pointer the mode’s own sentence promises', () => {
+  const html = renderToStaticMarkup(
+    h(CompatNotice, {
+      compat: classified('read-only-incompatible', 4_242),
+      channel: decodeReleaseChannel(channelRead(NAMED_CHANNEL)),
+    }),
+  );
+  assert.ok(html.includes('data-compat-pointer="named"'), html);
+  assert.match(html, /1\.4\.0/, 'the canonical release version is not on screen');
+  assert.ok(html.includes('A'.repeat(43)), 'the Arweave TXID is not on screen');
+  assert.match(html, /#4,?242/, 'the block the channel was last written at is not on screen');
+});
+
+test('the three arms that establish nothing say so, and never imply there is nothing', () => {
+  // The defect class this repair is part of: answering from the absence of evidence. A client
+  // that could not read the channel has established nothing about whether a newer release
+  // exists, and a stranded user who reads "no newer release" stops looking.
+  const arms: readonly (ReleaseChannelPointer | undefined)[] = [
+    undefined,
+    { kind: 'unread', reason: 'the transport is down' },
+    { kind: 'unnamed', reason: 'the record names none' },
+    { kind: 'undecodable', reason: 'six bytes', rawHex: '0xdeadbeef' },
+  ];
+  for (const channel of arms) {
+    const html = renderToStaticMarkup(
+      h(CompatNotice, { compat: classified('read-only-incompatible'), channel }),
+    );
+    assert.ok(/data-compat-pointer="/.test(html), `no pointer arm rendered for ${channel?.kind}`);
+    assert.ok(
+      /not (a statement that none exists|evidence that none exists)|Nothing is being inferred|may still have been published/.test(
+        html,
+      ),
+      `an arm that established nothing did not say so: ${html}`,
+    );
+  }
+});
+
+test('the pointer is rendered on read-only-incompatible ALONE', () => {
+  // `restricted` is a runtime that dropped a surface this release depends on. Telling that user
+  // to load a newer app sends them after a fix that is not theirs to make, and `full` renders
+  // no notice at all.
+  const restricted = renderToStaticMarkup(
+    h(CompatNotice, {
+      compat: classified('restricted'),
+      channel: decodeReleaseChannel(channelRead(NAMED_CHANNEL)),
+    }),
+  );
+  assert.ok(!restricted.includes('data-compat-pointer'), restricted);
+  assert.ok(!restricted.includes('1.4.0'), restricted);
+  assert.equal(
+    renderToStaticMarkup(
+      h(CompatNotice, {
+        compat: classified('full'),
+        channel: decodeReleaseChannel(channelRead(NAMED_CHANNEL)),
+      }),
+    ),
+    '',
+  );
+});
+
+test('the shell passes the channel through, so no route can lose the pointer', () => {
+  // §11.10's argument for the banner, applied here: the notice is rendered once in the shell,
+  // outside the outlet. A `Shell` that accepted the reading and dropped it would render the
+  // "load a newer release" sentence with nothing under it on every route.
+  const html = renderToStaticMarkup(
+    h(Shell, {
+      chain: CHAIN,
+      compat: classified('read-only-incompatible'),
+      channel: decodeReleaseChannel(channelRead(NAMED_CHANNEL)),
+      handoffEnabled: true,
+      activeScreen: 'S21',
+      children: h('p', null, 'content'),
+    }),
+  );
+  assert.ok(html.includes('data-compat-pointer="named"'), html);
+  assert.ok(html.includes('A'.repeat(43)), html);
+});
+
+test('10 §5.3 is what this reads, and it still says the raw key', () => {
+  // The binding that makes the tests above non-vacuous: if the specification stopped naming the
+  // fixed-layout raw key, a client reading it would be implementing a deleted mechanism.
+  const line = theLineContaining(
+    architecture(DOC_10),
+    'fixed-layout raw storage key',
+  );
+  assert.match(line, /ReleaseChannel/);
+  assert.match(line, /without current metadata/);
+  assert.match(line, /newer-release pointer/);
+});
+
+/* -------------------------------------- the pointer reaches the shell, on every stranded verdict */
+
+/** A `BootedShell` double that records what it was shown, verdict and pointer together. */
+function recordingShell(): {
+  readonly booted: BootedShell;
+  readonly shown: { compat: CompatVerdict; channel: ReleaseChannelPointer | undefined }[];
+} {
+  const shown: { compat: CompatVerdict; channel: ReleaseChannelPointer | undefined }[] = [];
+  return {
+    shown,
+    booted: {
+      worker: { kind: 'unavailable', reason: 'no service worker in this suite' },
+      showCompat: (compat, channel) => shown.push({ compat, channel }),
+      unmount: () => {},
+    },
+  };
+}
+
+test('a stranded boot verdict is shown at once, then again with the pointer', async () => {
+  // Two renders, in this order, and the order is the requirement rather than an artefact: the
+  // notice explains why nothing works and must not wait on a round trip, and the pointer is the
+  // remedy and must not be skipped because the notice already painted.
+  const { booted, shown } = recordingShell();
+  const pointer = decodeReleaseChannel(channelRead(NAMED_CHANNEL));
+  let reads = 0;
+  await startShell({}, {
+    mount: async () => booted,
+    connect: async () => ({
+      compat: classified('read-only-incompatible', 9),
+      readChannel: async () => {
+        reads += 1;
+        return pointer;
+      },
+    }),
+    onFailure: (_container, error) => {
+      throw error;
+    },
+  });
+  assert.equal(reads, 1, 'the release channel was not read for a stranded verdict');
+  assert.equal(shown.length, 2, `expected verdict-then-pointer: ${JSON.stringify(shown.length)}`);
+  assert.equal(shown[0]?.channel, undefined, 'the notice waited on the pointer read');
+  assert.equal(shown[1]?.channel, pointer);
+});
+
+test('a healthy verdict reads no channel at all', async () => {
+  // §5.3 gives this key to a stranded client. A chain that answers everything else needs no
+  // rescue read, and issuing one on every boot would be a round trip for nobody.
+  const { booted, shown } = recordingShell();
+  let reads = 0;
+  for (const mode of ['full', 'restricted'] as const) {
+    await startShell({}, {
+      mount: async () => booted,
+      connect: async () => ({
+        compat: classified(mode),
+        readChannel: async () => {
+          reads += 1;
+          return { kind: 'unnamed', reason: 'nothing' };
+        },
+      }),
+      onFailure: (_container, error) => {
+        throw error;
+      },
+    });
+  }
+  assert.equal(reads, 0, 'a healthy session read the release channel');
+  assert.ok(shown.every((row) => row.channel === undefined), JSON.stringify(shown));
+});
+
+test('a session that becomes stranded MID-SESSION gets the pointer too', async () => {
+  // The ordinary way a client is stranded: it booted fine and a runtime upgrade moved the
+  // `spec_version` past what this release ships descriptors for. §3.2 re-runs the classifier on
+  // every `CodeUpdated`, so a pointer read once at connect would be the one thing missing at
+  // exactly the moment the mode it exists for arrives.
+  const { booted, shown } = recordingShell();
+  let publish: ((verdict: CompatVerdict) => void) | undefined;
+  const pointer = decodeReleaseChannel(channelRead(NAMED_CHANNEL));
+  await startShell({}, {
+    mount: async () => booted,
+    connect: async () => ({
+      compat: classified('full'),
+      readChannel: async () => pointer,
+      watch: (each) => {
+        publish = each;
+        return () => {};
+      },
+    }),
+    onFailure: (_container, error) => {
+      throw error;
+    },
+  });
+  assert.ok(publish, 'the §3.2 watch never started');
+  publish(classified('read-only-incompatible', 9));
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(
+    shown.map((row) => row.channel),
+    [undefined, undefined, pointer],
+    'the mid-session stranded verdict never got its pointer',
+  );
+});
+
+test('a channel read that throws still renders a pointer, and it is `unread`', async () => {
+  // The injected function may reject where the real one does not, and an unhandled rejection
+  // behind the `void` at the call site would leave the pointer silently absent — the state this
+  // whole repair removes.
+  const { booted, shown } = recordingShell();
+  await startShell({}, {
+    mount: async () => booted,
+    connect: async () => ({
+      compat: classified('read-only-incompatible', 9),
+      readChannel: () => Promise.reject(new Error('the worker died')),
+    }),
+    onFailure: (_container, error) => {
+      throw error;
+    },
+  });
+  const last = shown[shown.length - 1];
+  assert.equal(last?.channel?.kind, 'unread');
+  assert.match(
+    last?.channel?.kind === 'unread' ? last.channel.reason : '',
+    /the worker died/,
+  );
+});
+
+test('a boot that never connected offers no channel read', async () => {
+  // `not-attempted` has no transport, so there is nothing to read through — the same arm, and
+  // the same reason, as its missing `watch`.
+  const { connectAndClassify } = await import('@bleavit/application');
+  const connected = await connectAndClassify();
+  assert.equal(connected.compat.kind, 'not-attempted');
+  assert.equal(connected.readChannel, undefined, 'a chainless boot offered a channel read');
 });
