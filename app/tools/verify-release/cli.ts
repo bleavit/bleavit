@@ -11,8 +11,13 @@
  * Three subcommands:
  *
  *   verify-release signers audit        — 12 §2.2's disjointness check over the registry
- *   verify-release diff-scope A B       — 12 §1.5's expedited-lane admissibility
+ *   verify-release diff-scope --against — 12 §1.5's expedited-lane admissibility
  *   verify-release compare …            — 12 §1.3's fetch, byte-compare and verdict
+ *
+ * Each one is spelled the way the document that mandates it spells it. That is not a courtesy:
+ * a published command line is the whole interface a stranger has, and three of them have now
+ * been unrunnable as printed — §1.3's `ar://` scheme, §1.3's unnamed gateway set, and §1.5's
+ * `--against`, which this file read as a local file name and then failed to open.
  *
  * ## What `compare` does and does not reach
  *
@@ -86,7 +91,10 @@ import {
   fetchGatewayTree,
   fetchTransaction,
   finalManifestFindings,
+  formatUrl,
+  gatewayIdentityProblems,
   hashDirectory,
+  sha256Hex,
 } from './compare.ts';
 import { liveGateway, readTranscript, transcriptGateway } from './gateway.ts';
 import { checkControllerQuorum, checkDisjointness, parseRegistry } from './registry.ts';
@@ -148,29 +156,164 @@ function signersAudit(strict: boolean): number {
   return 0;
 }
 
-function diffScopeCommand(incumbentPath: string, candidatePath: string): number {
-  // A document with no `perFileHashes` is refused rather than read as `{}`. Typing this
-  // exposed the hole: `{}` against `{}` yields zero out-of-scope files, so `diff-scope`
-  // would have printed "the delta is confined to the scope 12 §1.5 admits" and exited 0
-  // having compared nothing — a false pass on the gate that decides whether a release may
-  // skip the standard lane's 72 h soak.
-  const read = (path: string): FileHashes => {
-    const document: unknown = JSON.parse(readFileSync(path, 'utf8'));
-    const hashes = isRecord(document) ? document['perFileHashes'] : undefined;
-    if (!isRecord(hashes) || Object.keys(hashes).length === 0) {
-      throw new Error(`${path} carries no perFileHashes; there is nothing to compare`);
-    }
-    const out: Record<string, string> = {};
-    for (const [file, hash] of Object.entries(hashes)) {
-      if (typeof hash !== 'string') throw new Error(`${path}: perFileHashes[${file}] is not a digest`);
-      out[file] = hash;
-    }
-    return out;
-  };
-  const result = diffScope(read(incumbentPath), read(candidatePath));
+/**
+ * `verify-release diff-scope --against <incumbent-txid> --local <dir>` — 12 §1.5.
+ *
+ * ## The published command is the interface, and it was not the one implemented
+ *
+ * §1.5 publishes exactly this: *"mechanically checked by `verify-release diff-scope --against
+ * <incumbent-txid>`, which byte-compares the trees and fails if any out-of-scope file
+ * differs"*. It used to destructure two positional file names, so the published line read
+ * `--against` as a local incumbent file and the transaction id as a local candidate file, then
+ * failed opening `--against`. The **mandatory** check on the lane that skips the 72 h soak had
+ * no runnable implementation at its own published interface — the third time a §1 command line
+ * has been unrunnable as printed, after §1.3's `ar://` scheme and its unnamed gateway set.
+ *
+ * ## What each half is, and why
+ *
+ * **The incumbent** is fetched, because a transaction id is not a local file. `<incumbent-txid>`
+ * is the incumbent release's **immutable address** — 12 §1.4 gate 4's *"the immutable TXID"*,
+ * §1.7's `<previous-manifest-txid>`, and `ReleaseChannel.manifest_txid` (§3.1) are all the same
+ * address: `M′`, the manifest the name is repointed to. §1.2's second pass exists to put
+ * `release.json` inside it, so the incumbent's signed per-file map is one read away. Passing
+ * `M` instead — the asset manifest `release.json` pins — finds no `release.json` there, and the
+ * refusal says so rather than reporting a gateway fault.
+ *
+ * The comparison is against what the incumbent **published**, not against what a gateway serves
+ * for it today. §1.5's question is whether the delta against the incumbent *release* is in
+ * scope, and the signed map is that release's own byte-level description of its tree.
+ *
+ * **The candidate** is the local built tree — §1.5's *"every other file in the built tree"*,
+ * named the way §1.3 names it, as `--local <dir>`. Hashed from disk rather than read out of a
+ * document, because a document is a claim about a tree and this check is about the tree.
+ *
+ * ## Every configured gateway is asked, and they must agree
+ *
+ * This is the gate that decides whether a release may skip the standard lane's soak. One
+ * gateway serving a doctored incumbent map — one whose `assets/app.js` hash happens to equal
+ * the candidate's — turns an app-code delta into an admissible descriptor-only one. So the
+ * document is fetched through every configured gateway and a disagreement is a refusal rather
+ * than a first-answer-wins. No floor is imposed here beyond the operator's own list: §1.5
+ * states none, and inventing one would be adding a requirement rather than implementing one.
+ *
+ * What this command does **not** do is verify the incumbent's signatures; that is `compare`.
+ * It answers admissibility, and it says which gateways corroborated the answer.
+ */
+async function diffScopeCommand(argv: readonly string[]): Promise<number> {
+  const againstArg = option(argv, '--against');
+  const local = option(argv, '--local');
+  if (againstArg === undefined || local === undefined) {
+    throw new Error(
+      'diff-scope needs --against <incumbent-manifest-txid> and --local <dir>. 12 §1.5 checks ' +
+        'that a release admitted to the expedited lane differs from the incumbent production ' +
+        'release only inside the descriptor and release-metadata scope, so it needs both: the ' +
+        'incumbent, named by the immutable TXID §1.4 gate 4 publishes, and the tree you built.',
+    );
+  }
+  const incumbentTxid = assertTxid(bareTxid(againstArg), '--against');
+  const { gateways, get } = transport(argv, 'diff-scope');
+
+  const incumbent = await incumbentPerFileHashes(get, gateways, incumbentTxid);
+  const candidate = hashDirectory(local);
+  if (Object.keys(candidate).length === 0) {
+    // `{}` against a real map reports every incumbent file removed, which fails — but it fails
+    // saying the release deleted its whole tree. A `--local` pointed at the wrong directory is
+    // a different fact and says so here.
+    throw new Error(`${local} contains no files, so there is no built tree to compare`);
+  }
+
+  const result = diffScope(incumbent, candidate);
   console.log(result.detail);
   for (const entry of result.outOfScope) console.error(`  ${entry.change}: ${entry.path}`);
   return result.admissible ? 0 : 1;
+}
+
+/**
+ * The incumbent release's signed per-file map, corroborated across the configured gateways.
+ *
+ * A gateway that would not answer is reported and the run continues on the ones that did — one
+ * unreachable gateway is not a reason to refuse an admissibility check — but a gateway that
+ * answered *differently* is a refusal, because there is then no fact about the incumbent to
+ * compare against and picking one is picking which answer to trust.
+ */
+async function incumbentPerFileHashes(
+  get: GatewayGet,
+  gateways: readonly Gateway[],
+  incumbentTxid: string,
+): Promise<FileHashes> {
+  const answers = new Map<string, { readonly gateways: string[]; readonly bytes: Uint8Array }>();
+  const failures: string[] = [];
+  for (const gateway of gateways) {
+    const url = formatUrl(gateway.txUrl, { txid: incumbentTxid, path: RELEASE_JSON_PATH });
+    try {
+      const response = await get(url);
+      if (response.status < 200 || response.status >= 300) {
+        failures.push(
+          `${gateway.name} answered ${String(response.status)} for ${RELEASE_JSON_PATH} under ${incumbentTxid}`,
+        );
+        continue;
+      }
+      const digest = sha256Hex(response.body);
+      const seen = answers.get(digest);
+      if (seen === undefined) answers.set(digest, { gateways: [gateway.name], bytes: response.body });
+      else seen.gateways.push(gateway.name);
+    } catch (error) {
+      failures.push(
+        `${gateway.name} would not serve ${RELEASE_JSON_PATH} under ${incumbentTxid}: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+  for (const failure of failures) console.error(`incumbent  ${failure}`);
+
+  if (answers.size === 0) {
+    throw new Error(
+      `no configured gateway served ${RELEASE_JSON_PATH} under ${incumbentTxid} (12 §1.5). ` +
+        "--against takes the incumbent's **immutable** address — the manifest the ArNS name " +
+        'was repointed to, which 12 §1.2\'s second pass puts release.json inside, and which ' +
+        '§1.4 gate 4 publishes as the release notes\' immutable TXID. The asset manifest that ' +
+        'release.json pins does not contain it.',
+    );
+  }
+  if (answers.size > 1) {
+    const detail = [...answers.entries()]
+      .map(([digest, answer]) => `${answer.gateways.join('+')}=${digest.slice(0, 12)}`)
+      .join(' ');
+    throw new Error(
+      `the gateways disagree about the incumbent release document under ${incumbentTxid}: ` +
+        `${detail} (12 §1.5). This check decides whether a release may skip the standard lane's ` +
+        '72 h soak, so a disagreement about what the incumbent published is a refusal rather ' +
+        'than a choice of which gateway to believe.',
+    );
+  }
+
+  const [answer] = [...answers.values()];
+  if (answer === undefined) throw new Error('unreachable: one answer was counted and none held');
+  let document: unknown;
+  try {
+    document = JSON.parse(Buffer.from(answer.bytes).toString('utf8'));
+  } catch (error) {
+    throw new Error(
+      `the incumbent ${RELEASE_JSON_PATH} under ${incumbentTxid} is not JSON: ` +
+        `${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  const pins = readPerFileHashes(document);
+  if (pins.kind === 'refused') {
+    // A document with no `perFileHashes` is refused rather than read as `{}`: `{}` against `{}`
+    // yields zero out-of-scope files, so `diff-scope` would print "the delta is confined to the
+    // scope 12 §1.5 admits" and exit 0 having compared nothing — a false pass on the gate that
+    // decides whether a release may skip the soak.
+    throw new Error(
+      `the incumbent ${RELEASE_JSON_PATH} under ${incumbentTxid} cannot be compared: ${pins.detail}`,
+    );
+  }
+  console.log(
+    `incumbent ${incumbentTxid}: ${String(Object.keys(pins.perFileHashes).length)} signed ` +
+      `file(s), corroborated by ${String(answer.gateways.length)} gateway(s) ` +
+      `(${answer.gateways.join(', ')})`,
+  );
+  return pins.perFileHashes;
 }
 
 function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
@@ -306,8 +449,6 @@ async function compareCommand(argv: readonly string[]): Promise<number> {
   const manifestArg = option(argv, '--arweave');
   const finalManifestArg = option(argv, '--final-manifest');
   const releaseJsonArg = option(argv, '--release-json');
-  const transcriptPath = option(argv, '--transcript');
-  const gatewayConfigPath = option(argv, '--gateways');
   if (
     local === undefined ||
     manifestArg === undefined ||
@@ -340,34 +481,7 @@ async function compareCommand(argv: readonly string[]): Promise<number> {
         'contain it, and checking one address twice checks one address.',
     );
   }
-  if ((transcriptPath === undefined) === (gatewayConfigPath === undefined)) {
-    // Neither is as much a refusal as both, and it is the one §1.3's published command hits.
-    // The gateway set is not this repository's to default: 12 §1.4 gate 4 publishes it per
-    // release, and 12 §5.1 rules that naming gateway operators is the operator's decision
-    // rather than an implementation choice. So the refusal carries the source and the shape,
-    // because a verifier following the published line has been given no other way to learn it.
-    throw new Error(
-      'compare needs exactly one of --transcript <path> (replay, what the suite runs) or ' +
-        '--gateways <config.json> (the live call, which no suite in this repository exercises).' +
-        '\n\nThe gateway set is a per-release published input, like the credential transaction ' +
-        'ids: 12 §1.4 gate 4 lists "the multi-gateway URL set" in the release notes, and 12 ' +
-        '§5.1 leaves naming operators to the operator. Write those URLs into a file:\n\n' +
-        '  { "gateways": [ { "name": "<operator>", "rawUrl": "<https://…/{txid}>", ' +
-        '"txUrl": "<https://…/{txid}/{path}>" } ] }\n\n' +
-        `and pass it as --gateways <path>. 12 §1.3 verifies through at least ${String(GATEWAY_FLOOR)}.`,
-    );
-  }
-
-  let gateways: readonly Gateway[];
-  let get: GatewayGet;
-  if (transcriptPath !== undefined) {
-    const transcript = readTranscript(transcriptPath);
-    gateways = transcript.gateways;
-    get = transcriptGateway(transcript);
-  } else {
-    gateways = readGatewayConfig(gatewayConfigPath ?? '');
-    get = liveGateway(globalThis.fetch);
-  }
+  const { gateways, get } = transport(argv, 'compare');
 
   // §1.3 addresses `release.json` by its own transaction id. The first gateway that serves it
   // supplies the bytes the signatures are over; the others are then checked against the map
@@ -546,12 +660,65 @@ function publishedRegistry(path: string): ReturnType<typeof parseRegistry> {
   return parseRegistry(document);
 }
 
-/** `{ "gateways": [{ "name": …, "rawUrl": …, "txUrl": … }] }` — the live-call configuration. */
-function readGatewayConfig(path: string): readonly Gateway[] {
+/**
+ * Where the bytes come from — the replay or the live call, and never both.
+ *
+ * Shared by `compare` and `diff-scope` because they need it for the same reason and would
+ * otherwise refuse in two different sentences. The gateway set is not this repository's to
+ * default: 12 §1.4 gate 4 publishes it per release, and 12 §5.1 rules that naming gateway
+ * operators is the operator's decision rather than an implementation choice. So the refusal
+ * carries the source and the shape, because a verifier following a published command line has
+ * been given no other way to learn it.
+ */
+interface Transport {
+  readonly gateways: readonly Gateway[];
+  readonly get: GatewayGet;
+}
+
+function transport(argv: readonly string[], command: string): Transport {
+  const transcriptPath = option(argv, '--transcript');
+  const gatewayConfigPath = option(argv, '--gateways');
+  if ((transcriptPath === undefined) === (gatewayConfigPath === undefined)) {
+    // Neither is as much a refusal as both, and it is the one the published commands hit.
+    throw new Error(
+      `${command} needs exactly one of --transcript <path> (replay, what the suite runs) or ` +
+        '--gateways <config.json> (the live call, which no suite in this repository exercises).' +
+        '\n\nThe gateway set is a per-release published input, like the credential transaction ' +
+        'ids: 12 §1.4 gate 4 lists "the multi-gateway URL set" in the release notes, and 12 ' +
+        '§5.1 leaves naming operators to the operator. Write those URLs into a file:\n\n' +
+        '  { "gateways": [ { "name": "<operator>", "rawUrl": "<https://…/{txid}>", ' +
+        '"txUrl": "<https://…/{txid}/{path}>" } ] }\n\n' +
+        `and pass it as --gateways <path>. 12 §1.3 verifies through at least ${String(GATEWAY_FLOOR)}.`,
+    );
+  }
+  if (transcriptPath !== undefined) {
+    const transcript = readTranscript(transcriptPath);
+    return { gateways: transcript.gateways, get: transcriptGateway(transcript) };
+  }
+  return {
+    gateways: readGatewayConfig(gatewayConfigPath ?? ''),
+    get: liveGateway(globalThis.fetch),
+  };
+}
+
+/**
+ * `{ "gateways": [{ "name": …, "rawUrl": …, "txUrl": … }] }` — the live-call configuration.
+ *
+ * **Distinct operators at distinct endpoints, or it is refused.** 12 §1.3 verifies through at
+ * least two gateways so that a lying one becomes visible, and this file used to accept the
+ * same endpoint under two rows or two names: the floor was then met by one operator's single
+ * response, and the divergence check compared that response with itself. Measured before the
+ * rule existed — one loopback server listed twice answered all 23 requests of a full run and
+ * the command printed `VERDICT: MATCH` at exit 0.
+ *
+ * Exported so a suite can drive the real parser rather than a re-implementation of it, which
+ * is the discipline this file's four earlier defects were caught by.
+ */
+export function readGatewayConfig(path: string): readonly Gateway[] {
   const document: unknown = JSON.parse(readFileSync(path, 'utf8'));
   const rows = isRecord(document) ? document['gateways'] : undefined;
   if (!Array.isArray(rows) || rows.length === 0) throw new Error(`${path} configures no gateways`);
-  return rows.map((row, index) => {
+  const gateways = rows.map((row, index) => {
     const gateway = isRecord(row) ? row : {};
     const name = gateway['name'];
     const rawUrl = gateway['rawUrl'];
@@ -561,6 +728,9 @@ function readGatewayConfig(path: string): readonly Gateway[] {
     }
     return { name, rawUrl, txUrl };
   });
+  const problems = gatewayIdentityProblems(gateways, `${path}: `);
+  if (problems.length > 0) throw new Error(problems.join('\n'));
+  return gateways;
 }
 
 /**
@@ -685,11 +855,8 @@ export async function main(argv: readonly string[]): Promise<number> {
     case 'signers':
       if (rest[0] !== 'audit') break;
       return signersAudit(rest.includes('--strict'));
-    case 'diff-scope': {
-      const [incumbent, candidate] = rest;
-      if (incumbent === undefined || candidate === undefined) break;
-      return diffScopeCommand(incumbent, candidate);
-    }
+    case 'diff-scope':
+      return diffScopeCommand(rest);
     case 'compare':
       return compareCommand(rest);
     default:
@@ -697,7 +864,8 @@ export async function main(argv: readonly string[]): Promise<number> {
   }
   console.error(
     'usage: verify-release signers audit [--strict]\n' +
-      '   or: verify-release diff-scope <incumbent.json> <candidate.json>\n' +
+      '   or: verify-release diff-scope --against <incumbent-manifest-txid> --local <dir>\n' +
+      '                                 (--transcript <path> | --gateways <config.json>)\n' +
       '   or: verify-release compare --local <dir> --arweave <asset-manifest-txid>\n' +
       '                              --final-manifest <final-manifest-txid>\n' +
       '                              --release-json <txid>\n' +
@@ -714,7 +882,13 @@ export async function main(argv: readonly string[]): Promise<number> {
       '--signature and --attestation name the credential transactions 12 §1.4 gate 4 publishes\n' +
       'in the release notes. Repeat each flag once per transaction. That gate also publishes\n' +
       `the multi-gateway URL set --gateways takes; 12 §1.3 verifies through at least ${String(GATEWAY_FLOOR)}.\n` +
-      '--keyring defaults to the in-repo keyring 12 §2.1 publishes.',
+      '--keyring defaults to the in-repo keyring 12 §2.1 publishes.\n' +
+      '\n' +
+      "diff-scope's --against is the incumbent release's immutable TXID — the manifest the\n" +
+      'ArNS name was repointed to, which 12 §1.2 puts release.json inside, and which 12 §1.4\n' +
+      'gate 4 publishes in the release notes. Not the asset manifest release.json pins.\n' +
+      'It fetches that document through every configured gateway and refuses if they disagree,\n' +
+      'then compares the incumbent\'s signed per-file map against the tree at --local.',
   );
   return 64;
 }

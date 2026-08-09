@@ -27,14 +27,25 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { fetchGatewayTree, fetchManifestPaths } from '../../tools/verify-release/compare.ts';
-import { readTranscript, transcriptGateway } from '../../tools/verify-release/gateway.ts';
-import { main } from '../../tools/verify-release/cli.ts';
+import type { Gateway, ServedTree } from '../../tools/verify-release/compare.ts';
+import {
+  GATEWAY_FLOOR,
+  crossGatewayFindings,
+  fetchGatewayTree,
+  fetchManifestPaths,
+} from '../../tools/verify-release/compare.ts';
+import {
+  TranscriptError,
+  parseTranscript,
+  readTranscript,
+  transcriptGateway,
+} from '../../tools/verify-release/gateway.ts';
+import { main, readGatewayConfig } from '../../tools/verify-release/cli.ts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const FIXTURES = resolve(HERE, '..', '..', 'fixtures', 'gateway-transcript');
@@ -42,6 +53,8 @@ const FIXTURES = resolve(HERE, '..', '..', 'fixtures', 'gateway-transcript');
 const MANIFEST_TXID = 'M'.repeat(43);
 const IMPOSTOR_MANIFEST_TXID = 'N'.repeat(43);
 const FINAL_MANIFEST_TXID = 'F'.repeat(43);
+/** 12 §1.5's `--against` — the incumbent release's immutable address. */
+const INCUMBENT_MANIFEST_TXID = 'I'.repeat(43);
 const SUBSTITUTE_RELEASE_JSON_TXID = 'X'.repeat(43);
 const RELEASE_JSON_TXID = 'R'.repeat(43);
 const SIGNATURE_TXIDS = ['P1'.padEnd(43, 'e'), 'P2'.padEnd(43, 'f')];
@@ -470,6 +483,266 @@ test('a live run takes its gateway set from the release notes, and the refusal s
   assert.match(String(result.thrown?.message), /12 §1\.4 gate 4/);
   assert.match(String(result.thrown?.message), /--gateways/);
   assert.match(String(result.thrown?.message), /"rawUrl"/);
+});
+
+// ---------------------------------------------------------------------------------------
+// 12 §1.5's expedited lane — `verify-release diff-scope --against <incumbent-txid>`.
+//
+// §1.5 publishes that command and calls the check **mechanical**: it is what stands between a
+// release and a lane with **no staging soak**. It could not run at all. The parser took two
+// positional file names, so the published line read `--against` as a local incumbent file and
+// the transaction id as a local candidate file, then failed opening `--against`.
+//
+// Every test below drives `main(argv)` for the reason the header of this file gives: the defect
+// lived in the caller, and a suite over `diffScope` — which this repository has, and which is
+// green — agrees with a caller it never runs.
+// ---------------------------------------------------------------------------------------
+
+/** §1.5's command: the incumbent by transaction id, the candidate as the tree you built. */
+function diffScopeArgv(
+  over: {
+    readonly against?: string;
+    readonly local?: string;
+    readonly transcript?: string | false;
+  } = {},
+): string[] {
+  return [
+    'diff-scope',
+    '--against',
+    over.against ?? INCUMBENT_MANIFEST_TXID,
+    '--local',
+    over.local ?? join(FIXTURES, 'diff-scope-descriptor-tree'),
+    ...(over.transcript === false
+      ? []
+      : ['--transcript', join(FIXTURES, over.transcript ?? 'cli-incumbent.json')]),
+  ];
+}
+
+test('12 §1.5’s published diff-scope command runs, and admits a descriptor-only delta', async () => {
+  const result = await run(diffScopeArgv());
+  assert.equal(result.thrown, undefined, result.thrown?.message);
+  // The incumbent is fetched, not read off disk: `--against` is a transaction id.
+  assert.match(result.out, new RegExp(`incumbent ${INCUMBENT_MANIFEST_TXID}: 4 signed file\\(s\\)`));
+  assert.match(result.out, /corroborated by 2 gateway\(s\) \(alpha, beta\)/);
+  assert.match(result.out, /confined to the descriptor and release-metadata scope 12 §1\.5 admits/);
+  assert.equal(result.code, 0);
+});
+
+test('an app-code delta is refused, so the admissible verdict above is not vacuous', async () => {
+  // The same descriptor refresh with one line of application code carried along. §1.5 requires
+  // every other file to be byte-identical, and the soak exists to catch exactly this.
+  const result = await run(diffScopeArgv({ local: join(FIXTURES, 'diff-scope-app-code-tree') }));
+  assert.equal(result.thrown, undefined, result.thrown?.message);
+  assert.equal(result.code, 1, `expected inadmissible; the command exited ${String(result.code)}`);
+  assert.match(result.err, /changed: assets\/app\.js/);
+  assert.match(result.out, /must use the standard lane with its 72 h soak/);
+});
+
+test('one gateway lying about the incumbent cannot admit a release to the lane', async () => {
+  // `beta` serves an incumbent document whose `assets/app.js` hash is the *candidate's*, so a
+  // verifier that took the first answer — or that happened to ask beta — would find no app-code
+  // delta at all. This is the whole reason the document is fetched through every gateway.
+  const result = await run(
+    diffScopeArgv({
+      local: join(FIXTURES, 'diff-scope-app-code-tree'),
+      transcript: 'cli-incumbent-divergent.json',
+    }),
+  );
+  assert.equal(result.code, undefined, `expected a refusal; got exit ${String(result.code)}`);
+  assert.match(String(result.thrown?.message), /gateways disagree about the incumbent release document/);
+  assert.match(String(result.thrown?.message), /alpha=/);
+  assert.match(String(result.thrown?.message), /beta=/);
+  assert.match(String(result.thrown?.message), /72 h soak/);
+});
+
+test('--against names the immutable address, and the asset manifest is refused as one', async () => {
+  // 12 §1.2 produces two addresses and only `M′` contains `release.json`. Passing `M` — the one
+  // `release.json` pins, and the one a reader of §1.2 might reach for first — must say which
+  // address was wanted rather than report a gateway that would not answer.
+  const result = await run(diffScopeArgv({ against: MANIFEST_TXID, transcript: 'cli-honest.json' }));
+  assert.equal(result.code, undefined, `expected a refusal; got exit ${String(result.code)}`);
+  assert.match(String(result.thrown?.message), /no configured gateway served release\.json/);
+  assert.match(String(result.thrown?.message), /immutable\*\* address/);
+  assert.match(String(result.thrown?.message), /asset manifest that release\.json pins does not contain it/);
+});
+
+test('the ar:// scheme is accepted here too, because §1.3 accepts it', async () => {
+  // One tool, one reading of a transaction id. A scheme that works on `--release-json` and not
+  // on `--against` is the same defect the scheme fix closed, moved one flag over.
+  const result = await run(diffScopeArgv({ against: `ar://${INCUMBENT_MANIFEST_TXID}` }));
+  assert.equal(result.thrown, undefined, result.thrown?.message);
+  assert.equal(result.code, 0);
+});
+
+test('an incumbent document pinning no files is refused, never compared as {}', async () => {
+  // `{}` against `{}` yields zero out-of-scope files, so `diff-scope` would print "the delta is
+  // confined to the scope 12 §1.5 admits" and exit 0 having compared nothing — a false pass on
+  // the gate that decides whether a release may skip the soak.
+  const transcript: unknown = JSON.parse(readFileSync(join(FIXTURES, 'cli-incumbent.json'), 'utf8'));
+  const document = transcript as { responses: Record<string, { body_utf8: string }> };
+  const emptied = {
+    ...document,
+    responses: Object.fromEntries(
+      Object.entries(document.responses).map(([url, response]) => {
+        const body: unknown = JSON.parse(response.body_utf8);
+        return [url, { ...response, body_utf8: JSON.stringify({ ...(body as object), perFileHashes: {} }) }];
+      }),
+    ),
+  };
+  const path = join(SCRATCH, 'incumbent-no-pins.json');
+  writeFileSync(path, `${JSON.stringify(emptied, null, 2)}\n`, 'utf8');
+
+  const result = await run([...diffScopeArgv({ transcript: false }), '--transcript', path]);
+  assert.equal(result.code, undefined, `expected a refusal; got exit ${String(result.code)}`);
+  assert.match(String(result.thrown?.message), /cannot be compared/);
+  assert.match(String(result.thrown?.message), /pins no file hashes/);
+});
+
+test('a --local pointed at an empty directory says so, rather than reporting a deleted tree', async () => {
+  const empty = join(SCRATCH, 'empty-candidate');
+  mkdirSync(empty, { recursive: true });
+  const result = await run(diffScopeArgv({ local: empty }));
+  assert.equal(result.code, undefined, `expected a refusal; got exit ${String(result.code)}`);
+  assert.match(String(result.thrown?.message), /contains no files, so there is no built tree to compare/);
+});
+
+test('diff-scope names both of its inputs when either is missing', async () => {
+  const noLocal = await run(['diff-scope', '--against', INCUMBENT_MANIFEST_TXID]);
+  assert.equal(noLocal.code, undefined, `expected a refusal; got exit ${String(noLocal.code)}`);
+  assert.match(String(noLocal.thrown?.message), /--against <incumbent-manifest-txid> and --local <dir>/);
+
+  // And the gateway set, which §1.5's published line does not name either — the same omission
+  // §1.3's line carried until contract-round three, refused here in the same words.
+  const noGateways = await run(diffScopeArgv({ transcript: false }));
+  assert.equal(noGateways.code, undefined, `expected a refusal; got exit ${String(noGateways.code)}`);
+  assert.match(String(noGateways.thrown?.message), /diff-scope needs exactly one of --transcript/);
+  assert.match(String(noGateways.thrown?.message), /12 §1\.4 gate 4/);
+});
+
+// ---------------------------------------------------------------------------------------
+// One operator is not two gateways — 12 §1.3.
+//
+// §1.3 verifies through at least two gateways, and `crossGatewayFindings` is what that floor
+// buys: a gateway serving wrong bytes is caught by the signed map, and a *pair* that disagree
+// names which one to stop using. Both halves die if one operator is listed twice — the floor is
+// met by one response and the divergence check compares that response with itself.
+//
+// Measured before the rule existed: one loopback server listed under two names answered all 23
+// requests of a full run, and the command printed `VERDICT: MATCH` at exit 0.
+// ---------------------------------------------------------------------------------------
+
+/** Write a `--gateways` configuration and hand back its path. */
+function gatewayConfig(name: string, gateways: readonly Partial<Gateway>[]): string {
+  const path = join(SCRATCH, `${name}.json`);
+  writeFileSync(path, `${JSON.stringify({ gateways }, null, 2)}\n`, 'utf8');
+  return path;
+}
+
+const alpha: Gateway = {
+  name: 'alpha',
+  rawUrl: 'https://alpha.example/raw/{txid}',
+  txUrl: 'https://alpha.example/{txid}/{path}',
+};
+const beta: Gateway = {
+  name: 'beta',
+  rawUrl: 'https://beta.example/raw/{txid}',
+  txUrl: 'https://beta.example/{txid}/{path}',
+};
+
+test('the floor a duplicate would satisfy is live, so refusing one is worth something', () => {
+  // The anti-vacuity control for everything below. `crossGatewayFindings` reports the shortfall
+  // at one gateway and reports nothing at two — which is exactly why two rows naming one
+  // operator was a silent pass rather than a visible one.
+  const tree = (gateway: string): ServedTree => ({ gateway, hashes: { 'index.html': 'aa' }, failures: [] });
+  assert.match(
+    crossGatewayFindings([tree('alpha')]).join('\n'),
+    new RegExp(`1 gateway\\(s\\) answered; 12 §1\\.3 verifies through at least ${String(GATEWAY_FLOOR)}`),
+  );
+  assert.deepEqual(crossGatewayFindings([tree('alpha'), tree('beta')]), []);
+});
+
+test('a config of two genuinely distinct operators is accepted', () => {
+  // Stated first, because a rule that rejects a legitimate set gets loosened rather than fixed.
+  assert.deepEqual([...readGatewayConfig(gatewayConfig('two-operators', [alpha, beta]))], [alpha, beta]);
+});
+
+test('one endpoint under two names is refused, however it is spelled', () => {
+  // The case that motivated the rule: a host name is case-insensitive, a trailing slash is in
+  // the path, and neither makes a second operator.
+  const path = gatewayConfig('one-endpoint-two-names', [
+    alpha,
+    { name: 'beta', rawUrl: 'https://ALPHA.example/raw/{txid}/', txUrl: 'https://ALPHA.example/{txid}/{path}/' },
+  ]);
+  assert.throws(() => readGatewayConfig(path), /both answer at alpha\.example/);
+  assert.throws(() => readGatewayConfig(path), /divergence check — whose whole purpose is catching a lying gateway/);
+});
+
+test('one operator name under two rows is refused, whatever the hosts are', () => {
+  // The other direction. Two real endpoints are still one operator's word, and §1.4 gate 2's
+  // whole vocabulary — independent, different organizations — is about who answers.
+  const path = gatewayConfig('one-name-two-rows', [alpha, { ...beta, name: ' Alpha ' }]);
+  assert.throws(() => readGatewayConfig(path), /name one operator/);
+});
+
+test('the sandboxed {txid} host form is the same operator as its raw host', () => {
+  // `https://{txid}.g/{path}` is what an ar.io gateway serves beside `https://g/raw/{txid}`.
+  // The leading label is a transaction id rather than an identity, so leaving it in would let
+  // one operator reach the floor with two of its own spellings.
+  const path = gatewayConfig('sandboxed', [
+    { name: 'alpha', rawUrl: 'https://alpha.example/raw/{txid}', txUrl: 'https://{txid}.alpha.example/{path}' },
+    { name: 'gamma', rawUrl: 'https://{txid}.alpha.example/', txUrl: 'https://alpha.example/{txid}/{path}' },
+  ]);
+  assert.throws(() => readGatewayConfig(path), /both answer at alpha\.example/);
+});
+
+test('a host shared crosswise between two rows is still one operator', () => {
+  // Row A's tx endpoint is row B's raw endpoint. Both templates are fetched from, so a rule
+  // that compared only like with like would leave this open.
+  const path = gatewayConfig('crosswise', [
+    alpha,
+    { name: 'beta', rawUrl: 'https://alpha.example/raw/{txid}', txUrl: 'https://beta.example/{txid}/{path}' },
+  ]);
+  assert.throws(() => readGatewayConfig(path), /both answer at alpha\.example/);
+});
+
+test('a template that names no operator at all is refused', () => {
+  // A relative template has no host, so there is nobody to count it as; and an unnamed row is
+  // a gateway with no operator, which 12 §1.3 counts by.
+  assert.throws(
+    () => readGatewayConfig(gatewayConfig('relative', [{ ...alpha, rawUrl: '/raw/{txid}' }, beta])),
+    /is not an absolute URL/,
+  );
+  assert.throws(
+    () => readGatewayConfig(gatewayConfig('unnamed', [{ ...alpha, name: '  ' }, beta])),
+    /declares no operator name/,
+  );
+});
+
+test('the transcript parser applies the same rule, so a fixture cannot be looser', () => {
+  // The suite's own corpus feeds the same floor. Sharing the rule is what stops a transcript
+  // being admissible where an operator's file is not.
+  const document: unknown = JSON.parse(readFileSync(join(FIXTURES, 'cli-honest.json'), 'utf8'));
+  const transcript = document as { gateways: Gateway[] };
+  assert.throws(
+    () => parseTranscript({ ...transcript, gateways: [alpha, { ...alpha, name: 'beta' }] }),
+    TranscriptError,
+  );
+  assert.throws(
+    () => parseTranscript({ ...transcript, gateways: [alpha, { ...beta, name: 'alpha' }] }),
+    TranscriptError,
+  );
+});
+
+test('the command refuses a duplicated gateway set before it fetches anything', async () => {
+  // Driven as the command, because that is where the config is read. It must refuse at parse
+  // time: a check that fired after the fetches would already have asked one operator twice.
+  const path = gatewayConfig('cli-duplicate', [alpha, { ...alpha, name: 'beta' }]);
+  const argv = compareArgv().filter(
+    (token, index, all) => token !== '--transcript' && all[index - 1] !== '--transcript',
+  );
+  const result = await run([...argv, '--gateways', path]);
+  assert.equal(result.code, undefined, `expected a refusal; got exit ${String(result.code)}`);
+  assert.match(String(result.thrown?.message), /both answer at alpha\.example/);
 });
 
 test('the usage text names the credential flags, because nothing else does', async () => {

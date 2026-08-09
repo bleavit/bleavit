@@ -113,6 +113,120 @@ export class CompareError extends Error {
 }
 
 /**
+ * The host a configured template reaches, reduced to the operator it identifies.
+ *
+ * Four normalizations, and each one closes a spelling of the same endpoint:
+ *
+ * 1. **Case**, because a host name is case-insensitive: `ONE.example` is `one.example`.
+ * 2. **The port**, dropped entirely rather than defaulted. The question here is *which
+ *    operator answers*, not which socket — two ports on one host name is one operator.
+ * 3. **Everything after the authority**, so a trailing slash or a different path prefix on
+ *    the same host is the same operator. `https://g/raw/{txid}` and `https://g/{txid}` are
+ *    one gateway offering two routes.
+ * 4. **A leading label that carries a placeholder.** `https://{txid}.g/{path}` is the
+ *    sandboxed form an ar.io gateway serves beside `https://g/raw/{txid}`; the label is a
+ *    transaction id rather than an identity, so leaving it in would let one operator reach
+ *    §1.3's floor with two of its own spellings.
+ *
+ * The placeholders are not URL syntax, so a template is parsed with each one replaced by a
+ * single character that is legal in both a host label and a path segment. A template that is
+ * not an absolute http(s) URL is refused here rather than at fetch time: an endpoint whose
+ * operator cannot be identified cannot be counted, and `formatUrl` would otherwise hand a
+ * relative string to `fetch`.
+ */
+function endpointHost(template: string, field: string, where: string): string {
+  let url: URL;
+  try {
+    url = new URL(template.replace(/\{[^{}]*\}/g, '0'));
+  } catch {
+    throw new CompareError(
+      `${where}: ${field} ${JSON.stringify(template)} is not an absolute URL, so the operator ` +
+        'it reaches cannot be identified — and 12 §1.3 counts gateways by operator.',
+    );
+  }
+  if (url.protocol !== 'https:' && url.protocol !== 'http:') {
+    throw new CompareError(
+      `${where}: ${field} ${JSON.stringify(template)} is not an http(s) endpoint`,
+    );
+  }
+  const authority = /:\/\/(?:[^@/?#]*@)?([^/?#]*)/.exec(template)?.[1] ?? '';
+  const labels = url.hostname.split('.');
+  const sandboxed = authority.split('.')[0]?.includes('{') === true && labels.length > 1;
+  return (sandboxed ? labels.slice(1) : labels).join('.');
+}
+
+/**
+ * Why a configured gateway set is not the several gateways it claims to be — 12 §1.3.
+ *
+ * §1.3 verifies through at least two gateways, and `crossGatewayFindings` is what that floor
+ * is for: a single gateway serving wrong bytes is caught by the signed map, and a *pair* that
+ * disagree names which one to stop using. Both halves die if one operator is listed twice.
+ * The floor is then satisfied by one response, and the divergence check compares that response
+ * with itself and reports agreement — a lying gateway corroborating its own lie, reported as a
+ * multi-gateway verification.
+ *
+ * So a set is admissible only when its rows are **distinct operators at distinct endpoints**,
+ * and both halves are required because either alone leaves the hole open: one name against two
+ * rows is caught by the name, and two names against one host is caught by the host.
+ *
+ * ## What this does not catch, stated rather than implied
+ *
+ * Distinct host names are a *necessary* condition for independent operators, never a
+ * sufficient one. One organization holding two domains, a CDN fronting several names, two
+ * names resolving to one address, an internationalized name and its punycode alias reaching
+ * one server — none of these is decidable from the configuration text, and a checker that
+ * guessed at them would refuse legitimate sets. 12 §5.1 leaves *which* operators are
+ * independent to the operator naming them; this refuses only the sets that are self-evidently
+ * one operator answering twice.
+ *
+ * Returned as problems rather than thrown, because the two callers report a malformed set in
+ * their own error type — a transcript is a fixture defect and a `--gateways` file is an
+ * operator's.
+ */
+export function gatewayIdentityProblems(gateways: readonly Gateway[], where: string): string[] {
+  const problems: string[] = [];
+  const operators = new Map<string, string>();
+  const hosts = new Map<string, string>();
+  for (const [index, gateway] of gateways.entries()) {
+    const label = `gateways[${String(index)}] ${JSON.stringify(gateway.name)}`;
+    const folded = gateway.name.trim().replace(/\s+/g, ' ').toLowerCase();
+    if (folded.length === 0) {
+      problems.push(
+        `${where}${label} declares no operator name. 12 §1.3 counts gateways by operator, so a ` +
+          'row nobody is named for cannot be counted as one.',
+      );
+    } else {
+      const seen = operators.get(folded);
+      if (seen === undefined) operators.set(folded, label);
+      else {
+        problems.push(
+          `${where}${label} and ${seen} name one operator. Two rows for one operator satisfy ` +
+            `12 §1.3's floor of ${GATEWAY_FLOOR} with one response, and the divergence check ` +
+            'then compares that response with itself.',
+        );
+      }
+    }
+    const rowHosts = new Set([
+      endpointHost(gateway.rawUrl, 'rawUrl', `${where}${label}`),
+      endpointHost(gateway.txUrl, 'txUrl', `${where}${label}`),
+    ]);
+    for (const host of rowHosts) {
+      const seen = hosts.get(host);
+      if (seen === undefined || seen === label) hosts.set(host, label);
+      else {
+        problems.push(
+          `${where}${label} and ${seen} both answer at ${host}. One endpoint under two names is ` +
+            `one operator: it satisfies 12 §1.3's floor of ${GATEWAY_FLOOR} with a single ` +
+            'response, and the divergence check — whose whole purpose is catching a lying ' +
+            'gateway — then has nothing to compare it against.',
+        );
+      }
+    }
+  }
+  return problems;
+}
+
+/**
  * Interpolate a configured template, refusing one that cannot carry what it is given.
  *
  * A template with no `{path}` would fetch the same URL for every file in the tree and the

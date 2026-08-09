@@ -51,6 +51,29 @@ reason: the counting only ever ran against a document shape this repository does
 | `cli-final-omits-release-json.json` | The same, except `M′` contains no `release.json` at all — the release naming a manifest that does not contain it |
 | `cli-local-tree/` | The `--local dist/` side of §1.3's command: the tree a third party built |
 
+### The expedited lane
+
+`verify-release diff-scope --against <incumbent-txid>` is what 12 §1.5 calls the *mechanical*
+check on the lane with **no staging soak**. `--against` is a transaction id, so the incumbent is
+fetched rather than read off disk, and these are what it is fetched from. The incumbent carries a
+descriptor file the rest of this corpus has none of: a scope check whose admissible class is
+empty in the fixture can only ever show its refusing half.
+
+| File | What it is |
+|---|---|
+| `cli-incumbent.json` | Both gateways serving the incumbent release's `release.json` from inside its immutable manifest (`III…`), which is where 12 §1.2's second pass puts it |
+| `cli-incumbent-divergent.json` | The same, except `beta` serves an incumbent whose `assets/app.js` hash is the **candidate's** — so a verifier that believed it would find no app-code delta and admit the release to the lane |
+| `diff-scope-descriptor-tree/` | A candidate whose only delta is the descriptor bundle. Admissible |
+| `diff-scope-app-code-tree/` | The same descriptor refresh with one line of application code carried along. Standard lane, with its soak |
+
+### One operator is not two gateways
+
+Every transcript here declares two gateways at two hosts, and `parseTranscript` now enforces
+that: it shares `compare.ts`'s rule with the `--gateways` configuration rather than restating it,
+so a fixture cannot be admissible where an operator's file is not. The rule refuses two rows that
+name one operator or reach one host — 12 §1.3's floor of two is met by one response otherwise,
+and the divergence check compares that response with itself.
+
 ### The two manifest addresses
 
 12 §1.2 produces two, and says the verification CLI checks both. Every transcript here serves

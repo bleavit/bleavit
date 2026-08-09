@@ -50,6 +50,15 @@ const IMPOSTOR_MANIFEST_TXID = 'N'.repeat(43);
 const FINAL_MANIFEST_TXID = 'F'.repeat(43);
 /** A release.json sibling nobody signed, for the substitution case below. */
 const SUBSTITUTE_RELEASE_JSON_TXID = 'X'.repeat(43);
+/**
+ * The **incumbent** production release's immutable address, for 12 §1.5's `diff-scope`.
+ *
+ * `--against` names this one: §1.4 gate 4's *"immutable TXID"*, §1.7's
+ * `<previous-manifest-txid>` and `ReleaseChannel.manifest_txid` are the same address, and
+ * §1.2's second pass is what puts `release.json` inside it. So the only path a `diff-scope`
+ * transcript has to serve under it is that document.
+ */
+const INCUMBENT_MANIFEST_TXID = 'I'.repeat(43);
 /** The path 12 §1.2's second pass adds. Written once, read by every M′ fixture. */
 const RELEASE_JSON_PATH = 'release.json';
 const GATEWAYS = [
@@ -444,4 +453,105 @@ for (const [path, bytes] of Object.entries(files)) {
   mkdirSync(dirname(target), { recursive: true });
   writeFileSync(target, Buffer.from(bytes));
 }
+
+// ---------------------------------------------------------------------------------------
+// The expedited lane — 12 §1.5's `diff-scope --against <incumbent-txid>`.
+//
+// §1.5 admits a release to a lane with **no staging soak** when its delta against the
+// incumbent production release is confined to descriptors and release metadata. So the two
+// sides are the incumbent's *published* per-file map, fetched from the `release.json` inside
+// its immutable manifest, and the tree the attestor built, hashed from disk.
+//
+// The corpus therefore needs an incumbent that carries a descriptor file — the tree above has
+// none, and a scope check whose admissible class is empty in the fixture can only ever show
+// the refusing half.
+// ---------------------------------------------------------------------------------------
+
+const DESCRIPTOR_PATH = 'assets/descriptors/bleavit.js';
+
+/** A producer-built `release.json` over one tree. The same call `cli-release.json` comes from. */
+function producerRelease(tree: Record<string, Uint8Array>, manifestTxid: string): Uint8Array {
+  return jsonBytes({
+    ...buildReleaseJson({
+      version: '0.1.0',
+      sourceCommit: 'a'.repeat(40),
+      buildRecipe: sha256(utf8('fixture build recipe')),
+      files: Object.fromEntries(Object.entries(tree).map(([path, bytes]) => [path, sha256(bytes)])),
+      chainFeed: {
+        specVersionRange: { primary: 2, recovery: 3 },
+        descriptorMetadataHashes: { 2: sha256(utf8('metadata 2')), 3: sha256(utf8('metadata 3')) },
+        contractVersion: 23,
+      },
+      chainIdentity: {
+        chainSpecHashes: { relay: `0x${'c'.repeat(64)}`, para: `0x${'d'.repeat(64)}` },
+        genesisHashes: { relay: `0x${'e'.repeat(64)}`, para: `0x${'f'.repeat(64)}` },
+        ss58Prefix: 7777,
+        paraId: 4242,
+        decimals: { VIT: 12, USDC: 6 },
+      },
+      connectSrc: ['https://alpha.example'],
+      sbomSha256: sha256(utf8('fixture sbom')),
+      signing: { keyringGeneration: 4, keyIds: [signers[0]!.keyId, signers[1]!.keyId] },
+      blockers: [],
+    }),
+    arweaveManifestTxId: manifestTxid,
+  });
+}
+
+/** The incumbent production tree: the app, plus the descriptor bundle a refresh would move. */
+const incumbentFiles: Record<string, Uint8Array> = {
+  ...files,
+  [DESCRIPTOR_PATH]: utf8('export const descriptors = "spec_version 2..3";\n'),
+};
+const incumbentBytes = producerRelease(incumbentFiles, 'J'.repeat(43));
+
+/**
+ * A second incumbent document, served by one gateway only — the reason every gateway is asked.
+ *
+ * Its per-file map is the incumbent's with `assets/app.js` replaced by the *candidate's* hash.
+ * A verifier that took the first answer and got this one would find no app-code delta at all
+ * and admit an app-code release to the lane that skips the 72 h soak.
+ */
+const divergentIncumbentBytes = producerRelease(
+  { ...incumbentFiles, 'assets/app.js': utf8('export const boot = () => steal();\n') },
+  'J'.repeat(43),
+);
+
+function incumbentTranscript(divergent: boolean): unknown {
+  const { responses, put } = recorder();
+  for (const gateway of GATEWAYS) {
+    put(
+      gateway.txUrl.replace('{txid}', INCUMBENT_MANIFEST_TXID).replace('{path}', RELEASE_JSON_PATH),
+      divergent && gateway.name === 'beta' ? divergentIncumbentBytes : incumbentBytes,
+    );
+  }
+  return { schema: 'bleavit.gateway-transcript.v1', gateways: GATEWAYS, responses };
+}
+
+write('cli-incumbent.json', incumbentTranscript(false));
+write('cli-incumbent-divergent.json', incumbentTranscript(true));
+
+/** The candidate trees the two `diff-scope` outcomes are decided over. */
+const candidateTrees: Record<string, Record<string, Uint8Array>> = {
+  // Descriptors only: exactly what §1.5's lane exists for.
+  'diff-scope-descriptor-tree': {
+    ...incumbentFiles,
+    [DESCRIPTOR_PATH]: utf8('export const descriptors = "spec_version 3..4";\n'),
+  },
+  // The same descriptor refresh, with one line of application code carried along. §1.5 requires
+  // every other file to be byte-identical, so this belongs in the standard lane with its soak.
+  'diff-scope-app-code-tree': {
+    ...incumbentFiles,
+    [DESCRIPTOR_PATH]: utf8('export const descriptors = "spec_version 3..4";\n'),
+    'assets/app.js': utf8('export const boot = () => steal();\n'),
+  },
+};
+for (const [name, tree] of Object.entries(candidateTrees)) {
+  for (const [path, bytes] of Object.entries(tree)) {
+    const target = join(OUT, name, path);
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, Buffer.from(bytes));
+  }
+}
+
 console.log(`wrote the gateway transcript fixture to ${OUT}`);

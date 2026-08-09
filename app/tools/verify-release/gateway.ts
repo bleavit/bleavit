@@ -34,6 +34,7 @@
 import { readFileSync } from 'node:fs';
 
 import type { Gateway, GatewayGet, GatewayResponse } from './compare.ts';
+import { gatewayIdentityProblems } from './compare.ts';
 
 export const TRANSCRIPT_SCHEMA = 'bleavit.gateway-transcript.v1';
 
@@ -89,23 +90,22 @@ export function parseTranscript(document: unknown): Transcript {
     throw new TranscriptError('a gateway transcript names no gateways');
   }
   const gateways: Gateway[] = [];
-  const names = new Set<string>();
   for (const [index, raw] of rawGateways.entries()) {
     const where = `gateways[${index}]`;
     if (!isRecord(raw)) throw new TranscriptError(`${where} is not an object`);
-    const gateway: Gateway = {
+    gateways.push({
       name: readString(raw, 'name', where),
       rawUrl: readString(raw, 'rawUrl', where),
       txUrl: readString(raw, 'txUrl', where),
-    };
-    if (names.has(gateway.name)) {
-      // Two gateways under one name makes the divergence check compare a gateway with itself
-      // and report agreement, which is the shape of every vacuous check in this repository.
-      throw new TranscriptError(`the transcript names the gateway ${gateway.name} twice`);
-    }
-    names.add(gateway.name);
-    gateways.push(gateway);
+    });
   }
+  // Two gateways under one name — or, which the name check alone never saw, two names over one
+  // endpoint — make the divergence check compare a gateway with itself and report agreement,
+  // which is the shape of every vacuous check in this repository. The rule is
+  // `compare.ts`'s, shared with the `--gateways` configuration rather than restated, so a
+  // fixture cannot be admissible where an operator's file is not.
+  const problems = gatewayIdentityProblems(gateways, 'the transcript: ');
+  if (problems.length > 0) throw new TranscriptError(problems.join('\n'));
 
   const rawResponses = document['responses'];
   if (!isRecord(rawResponses) || Object.keys(rawResponses).length === 0) {

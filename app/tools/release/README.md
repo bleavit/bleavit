@@ -128,6 +128,13 @@ Record a ruling in PLAN.md's decision log, which is what reads it back.
   minisign keys and no ANT controller shares by design (§1.4), so nothing here can sign, and
   §1.4 gate 2's two attestations are two *organizations* rebuilding the tree — which is what
   the two-environment gate above is evidence for and not a substitute for.
-- **The `verify-release compare` subcommand.** F13; it needs a published keyring and FE-P7's
-  gateway behaviour, and `packages/verify` already holds the comparison it will run. Its
-  `signers audit` and `diff-scope` halves are live.
+- **The live gateway call.** F13's `verify-release` decides everything else over supplied
+  bytes and the suite drives it against a transcript, so the fetch loop, the byte comparison,
+  the divergence check, the signature counting and the verdict all run per commit. What no
+  suite executes is `liveGateway` — four lines and no decision. `compare` and `diff-scope`
+  both need a gateway set for the same reason: 12 §1.4 gate 4 publishes it per release and
+  12 §5.1 leaves naming operators to the operator, so neither may default one.
+- **A real keyring.** F13 (12 §1.3, §2). Verifying a real release needs the key ceremony: CI
+  holds no minisign keys and no ANT controller shares by design (§1.4), so the published
+  keyring is empty, every floor is counted over zero, and `compare` refuses — by counting,
+  which is the honest arithmetic rather than a declaration.
