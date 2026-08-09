@@ -90,6 +90,35 @@
  *   two instances take disjoint class types, so a milestone filing carrying `S2` does not
  *   typecheck.
  *
+ * ## Evidence that does not name its subject is evidence about something else (2026-08-09)
+ *
+ * The repair above made `open` carry proof that a read happened, and a fourth-round review
+ * found the obvious next question unanswered: proof of *which* read. `ClosedAt` is a
+ * per-instance `(epoch, spec_version)` double map, so a finalized absence read of the milestone
+ * instance — or of a sibling version, or of last epoch — produced an identical branded `open`
+ * and `filingBlocks` raised nothing on a **bonded** action.
+ *
+ * Both readings this module decides on now name their key: {@link ClosureSubject} on every arm
+ * of {@link EpochClosure}, and the epoch on both arms of {@link FrozenSpecVersions}. The
+ * instance is enforced by the **type** and the key by **derivation** — `FilingInputs` carries
+ * no `specVersion` of its own, because a second copy is a second thing to disagree. See
+ * `EpochClosure`'s note for why those two means are different.
+ *
+ * **Two readings in this file still name no subject, and both are the same shape.** They are
+ * recorded here rather than left for a fifth review to rediscover:
+ *
+ * - `filingsUsed` is `FilingCount[epoch]` on this instance and is a bare `Verified<number>`.
+ *   `used < bound` is a permitting comparison, so a count read for another epoch — or for the
+ *   sibling registry — opens the bonded control. (`filingsBound` needs no subject: it is a
+ *   kernel constant.) Binding it to the closure subject is the same repair as
+ *   `FrozenSpecVersions` got here.
+ * - the whole **challenge** row (`ChallengeFilingInputs`) names no filing at all: not the
+ *   epoch, not the `filing_id`, on a call whose signature is
+ *   `challenge_filing(epoch, filing_id, evidence_hash)`. So `windowOpen` and `challengeBond`
+ *   are both per-filing reads with nowhere to say which filing, and both decide the control.
+ *   That is a modelling gap of the kind `class` and `points` were, not only a subject gap, so
+ *   it is a row to implement rather than a field to add.
+ *
  * Three stay open and are named rather than hidden (SQ-1031): the **filing window**
  * (`WindowClosed`, from `Epoch::filing_window_end(epoch)`, which no frozen surface publishes),
  * the **milestone target** (`MilestoneTargetUnset`, from `Epoch::milestone_target(epoch,
@@ -261,9 +290,19 @@ export function admitRegistryWindowEvent(
  * be right by accident while treating it as *"nothing to check"* would be the defect this
  * clause exists to remove.
  */
+/**
+ * ## The set is read **per epoch**, so the reading names the epoch it was keyed to
+ *
+ * `Epoch.CohortSchedules` is an epoch-keyed map, and this union carried no epoch at all — so a
+ * set read for epoch 40, where version 3 was live, admitted a filing in epoch 41 whose cohorts
+ * froze something else entirely. The `read` arm is the **permitting** one: `includes` returning
+ * true raises no block, and the bond is committed before the chain disagrees. `filingBlocks`
+ * therefore compares this epoch against the one the closure read was keyed to (see
+ * {@link ClosureSubject}), which is the single home of `file`'s `(epoch, spec_version)` pair.
+ */
 export type FrozenSpecVersions =
-  | { readonly kind: 'read'; readonly versions: Verified<readonly number[]> }
-  | { readonly kind: 'unread'; readonly reason: string };
+  | { readonly kind: 'read'; readonly epoch: number; readonly versions: Verified<readonly number[]> }
+  | { readonly kind: 'unread'; readonly epoch: number; readonly reason: string };
 
 /**
  * `file`'s second argument — `registry_core::FilingClass`, and **the instance decides it**.
@@ -287,17 +326,20 @@ export interface MilestoneClass {
 /** The three incident severities, as data — so a form offers exactly the admissible set. */
 export const INCIDENT_CLASSES: readonly IncidentClass[] = Object.freeze(['S1', 'S2', 'S3']);
 
-/** What every filing carries whichever instance it is against. */
-interface FilingInputsBase {
+/**
+ * What every filing carries whichever instance it is against.
+ *
+ * `file`'s `epoch` and `spec_version` arguments have **no field here**, and that absence is the
+ * 2026-08-09 repair rather than an omission: they live in `epochClosed.subject`, the key the
+ * `ClosedAt` read was actually taken against. A form value beside the read would be a second
+ * home for the same pair, and two homes for one fact is precisely how a finalized read of the
+ * wrong key came to satisfy a precondition about another. This is `guardianCall`'s device in
+ * another domain — *the value evaluated and the value dispatched are one value* — and it is
+ * why an encoder for `file` (still absent; `points` has no home either, SQ-1031) must take both
+ * from {@link ClosureSubject} and from nowhere else.
+ */
+interface FilingInputsBase<K extends FilingKind> {
   readonly freeUsdc: Verified<bigint>;
-  /**
-   * `file`'s fifth argument, as the filer supplies it. A form value, not a chain read.
-   *
-   * Required rather than optional: `file(epoch, class, points, evidence_hash, spec_version)`
-   * takes it, so a filing without one cannot be encoded and *"absent"* is not a state the
-   * chain can be asked about.
-   */
-  readonly specVersion: number;
   /** What the cohorts froze — see `FrozenSpecVersions`. */
   readonly frozenSpecVersions: FrozenSpecVersions;
   /**
@@ -320,7 +362,7 @@ interface FilingInputsBase {
    * chain has closed. Build the two read arms with {@link epochClosure} — *open* is a chain
    * answer and cannot be written by hand.
    */
-  readonly epochClosed: EpochClosure;
+  readonly epochClosed: EpochClosure<K>;
   /** The evidence hash the filer supplies. Absent is a refusal, not a default. */
   readonly evidenceHash: string | undefined;
 }
@@ -351,13 +393,44 @@ declare const CLOSURE_READ: unique symbol;
  * puts this type under `check:casts`, which discovers brands rather than listing them, so
  * `as EpochClosure` is refused everywhere except the file below.
  *
- * The sibling arms of `BondQuoteState` and `RerunState` are **deliberately** left structural:
- * `undeterminable`, `unread` and `absent` all refuse, so writing one by hand can only cost a
- * user an action they could have taken, never a bond on a transaction that cannot land.
+ * The sibling arms of `BondQuoteState` are **deliberately** left structural: `undeterminable`
+ * and `unread` both refuse, so writing one by hand can only cost a user an action they could
+ * have taken, never a bond on a transaction that cannot land.
+ *
+ * ## A read is proof of nothing until it says **which key** it read (2026-08-09)
+ *
+ * The brand established that a read happened. It did not establish what the read was *of* — and
+ * a finalized absence read of the wrong key is still a finalized absence read, so the brand
+ * admitted it and the control opened on evidence about something else. Three ways to be wrong,
+ * all of them producing an identical `open`:
+ *
+ * - **the other instance.** `pallet-registry` is instantiated twice and each instance keeps its
+ *   own `ClosedAt`; the milestone map being empty says nothing about the incident one;
+ * - **a sibling `spec_version`.** The map is a double map and a close is per pair — this
+ *   module's own `closed` sentence already said *"a sibling version's close would say nothing
+ *   about this one"*, while the `open` arm could be produced by exactly that;
+ * - **another epoch.** Same argument, outer key.
+ *
+ * Each is closed by the strongest means available to it, and the two means are different:
+ *
+ * - the **instance** is a type. `EpochClosure<K>` is parameterised on the registry and
+ *   `FilingInputs`' two arms take `EpochClosure<'incident'>` and `EpochClosure<'milestone'>`,
+ *   so a milestone reading in an incident filing does not typecheck at all. That is the device
+ *   `TriggerState<'GateBreach'>` already uses one module over
+ *   (`tests/firewall/fixtures/registry-filing-closure-for-the-other-instance.ts`);
+ * - the **key** is a derivation. `epoch` and `spec_version` are numbers, so no type can hold
+ *   them — but they need no comparison either, because `FilingInputs` no longer carries a
+ *   second copy to disagree with: the subject **is** `file`'s `(epoch, spec_version)` pair and
+ *   `filingBlocks` reads it from here
+ *   (`tests/firewall/fixtures/registry-filing-spec-version-beside-its-read.ts`).
+ *
+ * A comparison someone can forget to call is weaker than a shape they cannot build, and one
+ * value is weaker still than nothing to compare.
  */
-export type EpochClosure =
+export type EpochClosure<K extends FilingKind = FilingKind> =
   | {
       readonly kind: 'open';
+      readonly subject: ClosureSubject<K>;
       /**
        * The read that established the absence — `Verified<undefined>` because the key held
        * nothing at that block, not because nothing was read.
@@ -365,8 +438,24 @@ export type EpochClosure =
       readonly read: Verified<undefined>;
       readonly [CLOSURE_READ]: true;
     }
-  | { readonly kind: 'closed'; readonly at: Verified<number> }
-  | { readonly kind: 'unread'; readonly reason: string };
+  | { readonly kind: 'closed'; readonly subject: ClosureSubject<K>; readonly at: Verified<number> }
+  | { readonly kind: 'unread'; readonly subject: ClosureSubject<K>; readonly reason: string };
+
+/**
+ * Which `ClosedAt` key a closure reading answers about — instance, epoch and spec version.
+ *
+ * On **every** arm, including the two that refuse. `unread` is this client's report that a read
+ * did not land, and *"a read did not land"* is only a fact once it says which read: a refusal
+ * naming the wrong epoch sends an operator to retry something they were never blocked on.
+ */
+export interface ClosureSubject<K extends FilingKind = FilingKind> {
+  /** Which of the two `pallet-registry` instances. Independent allocators, independent maps. */
+  readonly registry: K;
+  /** `ClosedAt`'s outer key, and `file`'s first argument. */
+  readonly epoch: number;
+  /** `ClosedAt`'s inner key, and `file`'s fifth argument. */
+  readonly specVersion: number;
+}
 
 /**
  * `ClosedAt[epoch][spec_version]` as the chain answers it — and the only producer of `open`.
@@ -375,15 +464,23 @@ export type EpochClosure =
  * results is the chain's answer and not the caller's claim. A caller holding no read has
  * nothing to pass in, which is the property `derive` has for the same reason (10 §2.2).
  *
+ * The **subject comes first** because it is the question, not a label on the answer: a caller
+ * writes down which key it is about before it has a result, and the same three values are then
+ * what the filing itself is about. There is nowhere else to put them.
+ *
  * Two arms are reachable without it and both refuse, which is why neither is branded: a
  * `closed` literal can only block a lawful filing, and `unread` is the client's own report
- * that the read did not land rather than a chain datum at all.
+ * that the read did not land rather than a chain datum at all. Both still carry the subject,
+ * because a refusal that names the wrong key is a refusal an operator cannot act on.
  */
-export function epochClosure(read: Verified<number | undefined>): EpochClosure {
+export function epochClosure<K extends FilingKind>(
+  subject: ClosureSubject<K>,
+  read: Verified<number | undefined>,
+): EpochClosure<K> {
   const { value, status } = read;
   return value === undefined
-    ? ({ kind: 'open', read: { value: undefined, status } } as EpochClosure)
-    : { kind: 'closed', at: { value, status } };
+    ? ({ kind: 'open', subject, read: { value: undefined, status } } as EpochClosure<K>)
+    : { kind: 'closed', subject, at: { value, status } };
 }
 
 /**
@@ -394,8 +491,8 @@ export function epochClosure(read: Verified<number | undefined>): EpochClosure {
  * than it would elsewhere, because the refusal lands after the bond is committed.
  */
 export type FilingInputs =
-  | (FilingInputsBase & { readonly kind: 'incident'; readonly class: IncidentClass })
-  | (FilingInputsBase & { readonly kind: 'milestone'; readonly class: MilestoneClass });
+  | (FilingInputsBase<'incident'> & { readonly kind: 'incident'; readonly class: IncidentClass })
+  | (FilingInputsBase<'milestone'> & { readonly kind: 'milestone'; readonly class: MilestoneClass });
 
 export interface FilingBlock {
   readonly check: string;
@@ -474,6 +571,9 @@ export const FILING_BOND_IS_A_QUOTE = BOND_QUOTE_IS_A_QUOTE;
 
 export function filingBlocks(inputs: FilingInputs): readonly FilingBlock[] {
   const blocks: FilingBlock[] = [];
+  // `file`'s `(epoch, spec_version)` pair, taken from the read that was keyed to it. There is
+  // no second copy on `FilingInputs` to disagree with — see `FilingInputsBase`.
+  const { epoch, specVersion } = inputs.epochClosed.subject;
   // The arm comes from `inputs.kind`, the instance this filing is against — the two
   // registries are separate pallet instances and each asks `bond_quote` its own question.
   const refusal = bondQuoteRefusal(
@@ -495,7 +595,20 @@ export function filingBlocks(inputs: FilingInputs): readonly FilingBlock[] {
   // until 2026-08-07: `clauseGroupsFor` reports an undeclared read as vacuously passed, so
   // O-8 claimed complete coverage of a precondition nothing evaluated and a filer could be
   // walked to a bonded signature the runtime refuses.
-  if (inputs.frozenSpecVersions.kind === 'unread') {
+  if (inputs.frozenSpecVersions.epoch !== epoch) {
+    // `Epoch.CohortSchedules` is epoch-keyed, so a set read for another epoch answers another
+    // question. The `read` arm is the permitting one, which is what makes an unnamed subject
+    // expensive here: `includes` returning true raises no block at all.
+    blocks.push({
+      check: 'Cohort schedule',
+      detail:
+        `The frozen MetricSpec versions this client holds were read for epoch ` +
+        `${inputs.frozenSpecVersions.epoch}, and this filing is against epoch ${epoch}. ` +
+        'Cohorts freeze their versions per epoch, so that set says nothing about this one — ' +
+        'the control stays closed rather than posting a bond on a check that ran against a ' +
+        'different question.',
+    });
+  } else if (inputs.frozenSpecVersions.kind === 'unread') {
     blocks.push({
       check: 'MetricSpec version',
       detail:
@@ -504,11 +617,11 @@ export function filingBlocks(inputs: FilingInputs): readonly FilingBlock[] {
         'refuses any other — so the control stays closed rather than posting a bond on a ' +
         'check that did not run.',
     });
-  } else if (!inputs.frozenSpecVersions.versions.value.includes(inputs.specVersion)) {
+  } else if (!inputs.frozenSpecVersions.versions.value.includes(specVersion)) {
     blocks.push({
       check: 'MetricSpec version',
       detail:
-        `No live cohort in this epoch froze MetricSpec version ${inputs.specVersion}. A ` +
+        `No live cohort in this epoch froze MetricSpec version ${specVersion}. A ` +
         'filing is scored against the version its cohort committed to, so one naming any ' +
         'other version is refused on chain and the bond is posted for nothing.',
     });
@@ -521,8 +634,8 @@ export function filingBlocks(inputs: FilingInputs): readonly FilingBlock[] {
     blocks.push({
       check: 'Epoch closed',
       detail:
-        `This client could not read whether this epoch has already been closed out at ` +
-        `MetricSpec version ${inputs.specVersion} (${inputs.epochClosed.reason}). A closed ` +
+        `This client could not read whether epoch ${epoch} has already been closed out at ` +
+        `MetricSpec version ${specVersion} (${inputs.epochClosed.reason}). A closed ` +
         'epoch is terminal and a filing behind one is refused on chain, so the control stays ' +
         'closed rather than posting a bond on a check that did not run.',
     });
@@ -531,7 +644,7 @@ export function filingBlocks(inputs: FilingInputs): readonly FilingBlock[] {
       check: 'Epoch closed',
       detail:
         `This epoch was closed out at block ${inputs.epochClosed.at.value} for MetricSpec ` +
-        `version ${inputs.specVersion}, and a close is terminal: the welfare input has ` +
+        `version ${specVersion}, and a close is terminal: the welfare input has ` +
         'already been derived, so a filing now cannot land behind it and the chain refuses ' +
         'it. A sibling version’s close would say nothing about this one.',
     });

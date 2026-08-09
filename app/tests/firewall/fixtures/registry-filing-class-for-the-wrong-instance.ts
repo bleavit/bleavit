@@ -21,7 +21,7 @@ declare const filingBond: BondQuoteState;
 declare const filingsUsed: Verified<number>;
 declare const filingsBound: Verified<number>;
 declare const frozenSpecVersions: FrozenSpecVersions;
-declare const epochClosed: EpochClosure;
+declare const epochClosed: EpochClosure<'milestone'>;
 
 export const blocks = filingBlocks({
   kind: 'milestone',
@@ -31,7 +31,6 @@ export const blocks = filingBlocks({
   filingBond,
   filingsUsed,
   filingsBound,
-  specVersion: 3,
   frozenSpecVersions,
   epochClosed,
   evidenceHash: '0xevidence',

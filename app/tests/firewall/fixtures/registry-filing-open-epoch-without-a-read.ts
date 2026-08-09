@@ -32,7 +32,6 @@ export const blocks = filingBlocks({
   filingBond,
   filingsUsed,
   filingsBound,
-  specVersion: 3,
   frozenSpecVersions,
   // No read happened. This is the assertion the type must refuse.
   epochClosed: { kind: 'open' },

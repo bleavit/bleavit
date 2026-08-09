@@ -43,6 +43,38 @@
  * the `OracleDeadlock` arm: there is no way to answer that question without saying which
  * cohort was asked about, and no way to answer the other question in its name.
  *
+ * ## Every reading that decides a control names its own subject (2026-08-09)
+ *
+ * `TriggerSubject` closed this for the trigger; a fourth-round review found the same shape in
+ * `RegistrationReading` (a boolean with no playbook id), and the sweep it asked for found it
+ * again in `RerunState` (a proposal record with no pid). Both are now keyed, by the two means
+ * the two flows admit: **derived** on propose, where the client chooses the subject and then
+ * reads it, so the arm has no second field; **compared** on approve, where the subject is
+ * decoded from somebody else's bytes and two values genuinely exist.
+ *
+ * The sweep's remaining findings are recorded rather than left for a fifth round:
+ *
+ * - `ActivePlaybookReading` — **safe**, and it is the one that looks least safe. Its read has
+ *   no key at all: `Guardian.ActivePlaybooks` is a single value and `dispatch` asks it for
+ *   membership, so there is no wrong subject to supply. The residual risk is *completeness*
+ *   rather than subject — a partial read makes `includes` false, which permits — and that is a
+ *   property of the transport, not of this type.
+ * - `HoldHorizon`, and `GateBreach`'s subject — **safe**. Both are chain-wide reads with no
+ *   action-side key to disagree with. (`GateBreachFlags` is epoch-keyed, but the power names
+ *   no epoch: the runtime tests the current one, so the exposure is staleness, which INV-FE-2's
+ *   pre-sign refresh owns.)
+ * - `AllowanceMeter` — **weaker than it looks, and not a subject gap.** Its `power` field is
+ *   narrowed by the arm, so a meter cannot claim the wrong power; but `used` and `limit` are
+ *   bare `Verified<number>`, so a hand-built meter can carry another counter's figures under
+ *   the right name. `meterFor` exists to prevent exactly that and nothing forces its use. The
+ *   repair is the one `EpochClosure` got: brand the meter so the producer is the only source.
+ * - `ReviewReferendum` and the justification `EvidenceState` — **display-side**. Neither
+ *   raises a block, so neither opens a control; both can still describe another action's
+ *   review or another action's document, which §11.8.2 cares about for its own reasons.
+ * - `context.now` versus `action.expiresAt` — a **different** class: two `Verified<number>`
+ *   compared with `>=` rather than through `combine2`, so two reads at different blocks decide
+ *   an expiry that is true of neither. It is app-code rule 2's rule B, not this one.
+ *
  * ## The approval is counted, and "already approved" is a distinct refusal
  *
  * Approving twice is not a no-op to a user — they believe they have moved the count. So
@@ -147,6 +179,23 @@ export type TriggerState<T extends PlaybookTrigger = PlaybookTrigger> =
 /** The variant a reading answers about. One accessor, so no call site re-derives it. */
 export function triggerOf(reading: TriggerState): PlaybookTrigger {
   return reading.subject.trigger;
+}
+
+/**
+ * The playbook an activation names — the id its registration read was keyed to.
+ *
+ * `triggerOf`'s counterpart, and it exists for the same reason: the value is a property of the
+ * reading, and one accessor means no call site re-derives it or reaches for a second copy.
+ */
+export function activationPlaybook(
+  proposal: Extract<GuardianProposal, { readonly power: 'activate_playbook' }>,
+): PlaybookId {
+  return proposal.registration.id;
+}
+
+/** The proposal a rerun power acts on — the pid its `Epoch.Proposals` read was keyed to. */
+export function rerunPid(reading: RerunState): string {
+  return reading.pid;
 }
 
 /**
@@ -333,10 +382,34 @@ export type PlaybookAdmissibility =
     }
   | { readonly kind: 'not-applicable' };
 
-/** `Guardian.PlaybookRegistered[id]` for the playbook this action names (02 §7.4). */
+/**
+ * `Guardian.PlaybookRegistered[id]` for the playbook this action names (02 §7.4).
+ *
+ * ## The reading names the id it was keyed to (2026-08-09)
+ *
+ * It carried a boolean and nothing else, so a successful read for one playbook was
+ * indistinguishable from a successful read for another and could be paired with an action
+ * naming a third. The map is keyed by id and `approve_action` queries the action's **own** id,
+ * so with `PB-HALT-INTAKE` disabled and `PB-RESERVE` still registered, `registrationBlocks`
+ * saw `true`, enabled the control, and the threshold approval reverted anyway.
+ *
+ * That is `TriggerSubject` one field over, and the two flows close it by the two different
+ * means for the same reason they do there:
+ *
+ * - **propose** — the client chooses the playbook and then reads its key, so the arm has no
+ *   separate `id` field at all and `guardianCall` derives the call's `id` from this reading.
+ *   Nothing to compare, because there is one value
+ *   (`tests/firewall/fixtures/guardian-activation-id-beside-its-registration-read.ts`);
+ * - **approve** — the id is decoded from somebody else's bytes and the reading is this
+ *   client's own, so they genuinely are two values and `registrationBlocks` compares them,
+ *   exactly as `subjectMismatch` compares a trigger subject.
+ *
+ * The `unread` arm carries the id too: *"the read failed"* is only a fact once it says which
+ * read, and a refusal naming a playbook the operator never asked about is unactionable.
+ */
 export type RegistrationReading =
-  | { readonly kind: 'read'; readonly registered: Verified<boolean> }
-  | { readonly kind: 'unread'; readonly reason: string };
+  | { readonly kind: 'read'; readonly id: PlaybookId; readonly registered: Verified<boolean> }
+  | { readonly kind: 'unread'; readonly id: PlaybookId; readonly reason: string };
 
 /**
  * `Guardian.ActivePlaybooks`, as the ids it holds records for (02 §7.4).
@@ -887,6 +960,24 @@ function registrationBlocks(
   id: PlaybookId,
   reading: RegistrationReading,
 ): readonly GuardianBlock[] {
+  if (reading.id !== id) {
+    // Wrong-subject evidence, refused rather than counted — `subjectMismatch`'s rule for the
+    // other keyed reading on this screen. The pallet queries `PlaybookRegistered[id]` for the
+    // action's own id, so a `true` read of another key says nothing here; and because that is
+    // the **permitting** answer, believing it walks a council to a revert on the fifth
+    // signature. The comparison lives inside this one function, which both flows call, so it
+    // is not something a call site can forget to perform.
+    return [
+      {
+        check: 'Playbook registration',
+        detail:
+          `This action activates ${id} and the registration read supplied was taken for ` +
+          `${reading.id}. The chain looks up the map under the action's own id, so this ` +
+          'reading says nothing about it — a check performed against a different question is ' +
+          'not this action’s check, and it is refused rather than counted.',
+      },
+    ];
+  }
   if (reading.kind === 'unread') {
     return [
       {
@@ -1659,18 +1750,26 @@ export function rerunnable(status: GuardianProposalStatus): boolean {
  * `absent` is its own arm: a pid with no proposal is what the runtime answers
  * `(ProposalStatus::Other, false)` for, and a form that treated it as *nothing known* would
  * offer a delay of something that does not exist.
+ *
+ * **Every arm names the pid it was read for (2026-08-09).** `Epoch.Proposals` is keyed by pid
+ * and this union named none, so a `Queued`, never-delayed, never-re-run reading of `p9` — the
+ * permitting shape — admitted a `delay_once` of `p7`, and `check_and_consume` then refused the
+ * proposal the *call* names. It is `RegistrationReading`'s defect one field over, closed the
+ * same two ways: derived on the propose flow (the arm has no `pid`), compared on the approve
+ * flow, where the pid is decoded from somebody else's bytes.
  */
 export type RerunState =
   | {
       readonly kind: 'read';
+      readonly pid: string;
       readonly state: Verified<ProposalStateName>;
       /** `Proposal.rerun` — this proposal already is a rerun. */
       readonly rerun: Verified<boolean>;
       /** `Proposal.delayed_once` — the once-ever delay has been spent. */
       readonly delayedOnce: Verified<boolean>;
     }
-  | { readonly kind: 'absent' }
-  | { readonly kind: 'unread'; readonly reason: string };
+  | { readonly kind: 'absent'; readonly pid: string }
+  | { readonly kind: 'unread'; readonly pid: string; readonly reason: string };
 
 /**
  * A proposal in flight, as `RuntimeGuardianStatus::status` computes `DispatchContext.in_rerun`.
@@ -1714,13 +1813,19 @@ export type GuardianProposal =
   | {
       readonly power: 'delay_once';
       readonly meter: AllowanceMeter<'delay_once'>;
-      readonly pid: string;
+      /**
+       * **No `pid` field.** The proposal this power acts on is the pid its `proposal` read was
+       * keyed to (`rerunPid`), for the same reason the activation arm has no `id`: a `Queued`
+       * reading of `p9` beside a `delay_once` of `p7` passed both this function and the
+       * runtime's own predicates, and `check_and_consume` refuses the proposal the *call*
+       * names. One value, so there is nothing to disagree.
+       */
       readonly proposal: RerunState;
     }
   | {
       readonly power: 'force_rerun';
       readonly meter: AllowanceMeter<'force_rerun'>;
-      readonly pid: string;
+      /** Same as `delay_once` above: the pid lives in the reading, never beside it. */
       readonly proposal: RerunState;
     }
   | {
@@ -1729,8 +1834,13 @@ export type GuardianProposal =
        * **No meter.** 06 §5.2's Allowance column reads *"per-playbook"* for this power and
        * `check_and_consume` charges nothing — see `MeteredPower`. A meter here was a refusal
        * the chain does not make.
+       *
+       * **And no `id` either, since 2026-08-09.** The playbook this activation names is the id
+       * its `registration` read was keyed to — `activationPlaybook` is the one accessor — for
+       * the same reason `trigger` and `target` are not fields here: two homes for one value is
+       * two values, and a registration read of `PB-RESERVE` beside an activation of
+       * `PB-HALT-INTAKE` is exactly the shape that reached `ready`.
        */
-      readonly id: PlaybookId;
       /**
        * The reading this client performed. Its subject **is** the call's `trigger` argument,
        * and — for `OracleDeadlock` — its cohort **is** the call's `target`.
@@ -1781,14 +1891,14 @@ export function guardianCall(proposal: GuardianProposal): GuardianCall {
     case 'pause_intake':
       return { power: 'pause_intake', until: proposal.until } as GuardianCall;
     case 'delay_once':
-      return { power: 'delay_once', pid: proposal.pid } as GuardianCall;
+      return { power: 'delay_once', pid: rerunPid(proposal.proposal) } as GuardianCall;
     case 'force_rerun':
-      return { power: 'force_rerun', pid: proposal.pid } as GuardianCall;
+      return { power: 'force_rerun', pid: rerunPid(proposal.proposal) } as GuardianCall;
     case 'activate_playbook': {
       const subject = proposal.trigger.subject;
       return {
         power: 'activate_playbook',
-        id: proposal.id,
+        id: proposal.registration.id,
         trigger: subject.trigger,
         expiry: proposal.expiry,
         target: subject.trigger === 'OracleDeadlock' ? subject.cohort : undefined,
@@ -1869,9 +1979,16 @@ export function proposalBlocks(inputs: ProposeInputs): readonly GuardianBlock[] 
     case 'delay_once':
     case 'force_rerun':
       blocks.push(...allowanceBlocks(proposal.meter));
-      blocks.push(...rerunBlocks(proposal.power, proposal.pid, proposal.proposal));
+      // The pid comes from the reading, so the comparison inside `rerunBlocks` is vacuous
+      // here by construction — which is the point: on this flow there is one pid.
+      blocks.push(
+        ...rerunBlocks(proposal.power, rerunPid(proposal.proposal), proposal.proposal),
+      );
       break;
     case 'activate_playbook': {
+      // Both from the readings this client performed: the trigger from its subject and the
+      // playbook from the key its registration read was taken under. Neither has a second home.
+      const id = activationPlaybook(proposal);
       const named = triggerOf(proposal.trigger);
       const refusal = triggerRefusal(proposal.trigger);
       if (refusal !== undefined) blocks.push({ check: 'Trigger condition', detail: refusal });
@@ -1886,17 +2003,17 @@ export function proposalBlocks(inputs: ProposeInputs): readonly GuardianBlock[] 
       // that is easy to get wrong — registration applies to the playbook this activation names,
       // the active-record refusal to `PB-LEDGER-FREEZE` alone, and an unread record set narrows
       // with it — so there is one implementation of each and no propose-side copy to drift.
-      blocks.push(...registrationBlocks(proposal.id, proposal.registration));
-      blocks.push(...activeRecordBlocks(proposal.id, proposal.active));
+      blocks.push(...registrationBlocks(id, proposal.registration));
+      blocks.push(...activeRecordBlocks(id, proposal.active));
       // The pairing the chain checks as `BadPlaybookTrigger`. A client holding the trigger
       // enum and not this map walks a council through five signatures on a refusal — and
       // because `target` is derived from this same reading, the pairing also settles the
       // two-sided `BadPlaybookTarget` rule.
-      if (!PLAYBOOK_TRIGGERS[proposal.id].includes(named)) {
+      if (!PLAYBOOK_TRIGGERS[id].includes(named)) {
         blocks.push({
           check: 'Trigger',
           detail:
-            `${proposal.id} is not activated by the ${named} condition. Each playbook answers ` +
+            `${id} is not activated by the ${named} condition. Each playbook answers ` +
             'a specific failure and the chain refuses any other pairing, so this call would ' +
             'be rejected after signing.',
         });
@@ -2022,6 +2139,23 @@ function rerunBlocks(
   pid: string,
   state: RerunState,
 ): readonly GuardianBlock[] {
+  if (state.pid !== pid) {
+    // `registrationBlocks`' rule for the other keyed reading on this screen, and the same
+    // asymmetry: on the propose flow the pid comes *from* this reading so the two cannot
+    // differ, and on the approve flow it is decoded from somebody else's bytes so they can.
+    // `check_and_consume` reads the proposal the **call** names, so a clean reading of another
+    // pid is a check that ran against a different question — and it is the permitting answer.
+    return [
+      {
+        check: 'Proposal state',
+        detail:
+          `This action acts on proposal ${pid} and the proposal reading supplied was taken ` +
+          `for ${state.pid}. The chain reads the record the call names, so this reading says ` +
+          'nothing about it — the approval is refused rather than collected on a check that ' +
+          'ran against a different proposal.',
+      },
+    ];
+  }
   if (state.kind === 'unread') {
     return [
       {

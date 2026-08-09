@@ -13,7 +13,7 @@
 // discovers brands rather than listing them, so `as EpochClosure` is refused outside
 // `registry-filing.ts` too — the assertion a brand alone can never stop.
 import { filingBlocks } from '@bleavit/features-tx';
-import type { BondQuoteState, FrozenSpecVersions } from '@bleavit/features-tx';
+import type { BondQuoteState, ClosureSubject, FrozenSpecVersions } from '@bleavit/features-tx';
 import type { Verified } from '@bleavit/shared-types';
 
 declare const freeUsdc: Verified<bigint>;
@@ -23,6 +23,8 @@ declare const filingsBound: Verified<number>;
 declare const frozenSpecVersions: FrozenSpecVersions;
 /** Some other finalized read that happens to carry `undefined`. It is not this one. */
 declare const someOtherRead: Verified<undefined>;
+/** A perfectly well-formed subject, so the fixture fails on the brand and not on the key. */
+declare const subject: ClosureSubject<'incident'>;
 
 export const blocks = filingBlocks({
   kind: 'incident',
@@ -31,8 +33,7 @@ export const blocks = filingBlocks({
   filingBond,
   filingsUsed,
   filingsBound,
-  specVersion: 3,
   frozenSpecVersions,
-  epochClosed: { kind: 'open', read: someOtherRead },
+  epochClosed: { kind: 'open', subject, read: someOtherRead },
   evidenceHash: '0xevidence',
 });

@@ -51,6 +51,7 @@ import {
   meterFor,
   obligationSubjectOf,
   pendingPowerName,
+  activationPlaybook,
   playbookAdvisory,
   proposalBlocks,
   ratificationCopy,
@@ -430,7 +431,9 @@ export function ProposeAction({
   const proposal = inputs.proposal;
   const fields = POWER_FIELDS[proposal.power];
   const advisory =
-    proposal.power === 'activate_playbook' ? playbookAdvisory(proposal.id) : undefined;
+    proposal.power === 'activate_playbook'
+      ? playbookAdvisory(activationPlaybook(proposal))
+      : undefined;
   // `power` is a release-defined literal — which form the user opened — not a chain read, so
   // it belongs in the title. Borrowing the meter's status for it would claim the chain told
   // us which button was pressed. It now comes from the proposal rather than from a meter, so

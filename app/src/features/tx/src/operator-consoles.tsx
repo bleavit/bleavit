@@ -772,8 +772,14 @@ export function RegistryFilingForm({
       <Field label="Class">
         <span>{inputs.kind === 'incident' ? inputs.class : `Scope ${inputs.class.scope}`}</span>
       </Field>
+      {/* The version and the epoch come from the key the `ClosedAt` read was taken under —
+          `FilingInputs` holds no second copy (2026-08-09). So the number on screen is the
+          number the precondition was evaluated for, and the one an encoder must emit. */}
+      <Field label="Epoch this filing is against">
+        <span>{String(inputs.epochClosed.subject.epoch)}</span>
+      </Field>
       <Field label="MetricSpec version this filing names">
-        <span>{String(inputs.specVersion)}</span>
+        <span>{String(inputs.epochClosed.subject.specVersion)}</span>
       </Field>
       <Field label="Filings this epoch">
         <Count datum={inputs.filingsUsed} />

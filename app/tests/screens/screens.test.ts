@@ -272,6 +272,9 @@ import type {
   Stream,
   ArtifactSource,
   ChallengeFilingInputs,
+  ClosureSubject,
+  EpochClosure,
+  FilingKind,
   FrozenSpecVersions,
   EvidenceState,
   FetchProgress,
@@ -1587,19 +1590,44 @@ const UNDETERMINABLE: BondQuoteState = { kind: 'undeterminable' };
 /** The call did not answer. A different state with a different remedy. */
 const UNREAD_QUOTE: BondQuoteState = { kind: 'unread', reason: 'the state call timed out' };
 
+/**
+ * The `(epoch, spec_version)` key every filing fixture is about.
+ *
+ * Named constants rather than literals at each site, because the whole point of the 2026-08-09
+ * repair is that a precondition read must name the key it was taken against: a fixture that
+ * spelled the epoch out four times would let three of them drift and would then be testing
+ * exactly the mismatch it is supposed to refuse.
+ */
+const FILING_EPOCH = 41;
+const FILING_SPEC_VERSION = 3;
+
+/** `ClosedAt[epoch][spec_version]` as this instance answers it — absent, so the epoch is open. */
+const OPEN_EPOCH = <K extends FilingKind>(
+  registry: K,
+  over: Partial<Omit<ClosureSubject, 'registry'>> = {},
+): EpochClosure<K> =>
+  epochClosure(
+    { registry, epoch: FILING_EPOCH, specVersion: FILING_SPEC_VERSION, ...over },
+    finalized<number | undefined>(undefined),
+  );
+
 /** What both instances carry — the clean path, so a refusal elsewhere is not this fixture. */
-const FILING_BASE = () => ({
+const FILING_BASE = <K extends FilingKind>(registry: K) => ({
   freeUsdc: finalized(10_000_000n),
   filingBond: QUOTED(1_000_000n, 40_000_000n),
   filingsUsed: finalized(1),
   filingsBound: finalized(8),
   // §11.8.6's frozen-version clause (contract v29): the version the filing names, and the
   // set `Epoch.CohortSchedules[epoch].specs` says the live cohorts committed to.
-  specVersion: 3,
-  frozenSpecVersions: { kind: 'read', versions: finalized([2, 3]) } as FrozenSpecVersions,
+  specVersion: FILING_SPEC_VERSION,
+  frozenSpecVersions: {
+    kind: 'read',
+    epoch: FILING_EPOCH,
+    versions: finalized([2, 3]),
+  } as FrozenSpecVersions,
   // `registry_core::file`'s `AlreadyFinal` — read from `ClosedAt[epoch][spec_version]`. The
   // read arms have one producer, so even a fixture states which chain answer it stands for.
-  epochClosed: epochClosure(finalized<number | undefined>(undefined)),
+  epochClosed: OPEN_EPOCH(registry),
   evidenceHash: '0xevidence' as string | undefined,
 });
 
@@ -1612,10 +1640,10 @@ const FILING_BASE = () => ({
  * union exists to make unbuildable.
  */
 const FILING = (over: Partial<Extract<FilingInputs, { kind: 'incident' }>> = {}): FilingInputs =>
-  ({ ...FILING_BASE(), kind: 'incident', class: 'S2', ...over });
+  ({ ...FILING_BASE('incident'), kind: 'incident', class: 'S2', ...over });
 const MILESTONE_FILING = (
   over: Partial<Extract<FilingInputs, { kind: 'milestone' }>> = {},
-): FilingInputs => ({ ...FILING_BASE(), kind: 'milestone', class: { scope: 1 }, ...over });
+): FilingInputs => ({ ...FILING_BASE('milestone'), kind: 'milestone', class: { scope: 1 }, ...over });
 
 /** A fee the account covers — the neutral case, so a refusal elsewhere is not this one. */
 const COVERED_FEE = (): UpgradeFeeInputs => ({
@@ -2818,13 +2846,23 @@ const bookOf = (reads: AllowanceReads): AllowanceBook => {
   return state.book;
 };
 
-/** The registration and active-record reads an activation is admitted on (02 §7.4, v30). */
-const ADMISSIBLE = (over: Partial<{
+/** `Guardian.PlaybookRegistered[id]` answering for **that** id — the read names its own key. */
+const REGISTERED = (id: PlaybookId, registered = true): RegistrationReading =>
+  ({ kind: 'read', id, registered: finalized(registered) });
+
+/**
+ * The registration and active-record reads an activation is admitted on (02 §7.4, v30).
+ *
+ * The playbook is a **required** argument, not a default: the registration read is keyed by
+ * id on chain, so a fixture that did not say which id it had read would be building the exact
+ * value the 2026-08-09 repair refuses.
+ */
+const ADMISSIBLE = (id: PlaybookId, over: Partial<{
   readonly registration: RegistrationReading;
   readonly active: ActivePlaybookReading;
 }> = {}): PlaybookAdmissibility => ({
   kind: 'activation',
-  registration: { kind: 'read', registered: finalized(true) },
+  registration: REGISTERED(id),
   active: { kind: 'read', ids: finalized<readonly PlaybookId[]>([]) },
   ...over,
 });
@@ -2850,8 +2888,12 @@ const APPROVE = (over: Partial<ApprovalContext> = {}): ApprovalContext => {
     condition: { kind: 'trigger', reading: active('LedgerDrift') },
     // The default action is an activation, so the default dispatch evidence is its hold window.
     dispatch: { kind: 'hold', horizon: HORIZON },
-    // …and, since contract v30 froze both maps, its registration and active-record reads.
-    playbooks: action.power.kind === 'activate_playbook' ? ADMISSIBLE() : { kind: 'not-applicable' },
+    // …and, since contract v30 froze both maps, its registration and active-record reads —
+    // keyed to the playbook the action itself names, which is the whole 2026-08-09 repair.
+    playbooks:
+      action.power.kind === 'activate_playbook'
+        ? ADMISSIBLE(action.power.id.value)
+        : { kind: 'not-applicable' },
     ...over,
   };
 };
@@ -2876,9 +2918,12 @@ const gateReading = (kind: 'active' | 'inactive' | 'unread' = 'active'): Trigger
 const METER = <P extends MeteredPower>(power: P, used = 0, limit = 3): AllowanceMeter<P> =>
   ({ power, used: finalized(used), limit: finalized(limit) });
 
-/** A `Epoch.Proposals` reading that admits both rerun powers. */
-const RERUNNABLE = (state: ProposalStateName = 'Queued'): RerunState => ({
-  kind: 'read', state: finalized(state), rerun: finalized(false), delayedOnce: finalized(false),
+/** The proposal id every rerun fixture is about — see `FILING_EPOCH` for why it is named once. */
+const RERUN_PID = 'p7';
+
+/** A `Epoch.Proposals` reading that admits both rerun powers, and names the pid it read. */
+const RERUNNABLE = (state: ProposalStateName = 'Queued', pid = RERUN_PID): RerunState => ({
+  kind: 'read', pid, state: finalized(state), rerun: finalized(false), delayedOnce: finalized(false),
 });
 
 /**
@@ -2890,17 +2935,24 @@ const RERUNNABLE = (state: ProposalStateName = 'Queued'): RerunState => ({
  * its absence, so the propose-side refusals are asserted on their own fixtures below (V30-14,
  * V30-15) rather than being assumed to ride along.
  */
-const ACTIVATION = (over: Partial<Extract<GuardianProposal, { power: 'activate_playbook' }>> = {}):
-  GuardianProposal => ({
-  power: 'activate_playbook',
-  id: 'PB-HALT-INTAKE',
-  trigger: active('GateBreach'),
-  expiry: 9_000,
-  horizon: HORIZON,
-  registration: { kind: 'read', registered: finalized(true) },
-  active: { kind: 'read', ids: finalized<readonly PlaybookId[]>([]) },
-  ...over,
-});
+const ACTIVATION = (
+  over: Partial<Extract<GuardianProposal, { power: 'activate_playbook' }>> & {
+    readonly id?: PlaybookId;
+  } = {},
+): GuardianProposal => {
+  const { id = 'PB-HALT-INTAKE', ...rest } = over;
+  return {
+    power: 'activate_playbook',
+    trigger: active('GateBreach'),
+    expiry: 9_000,
+    horizon: HORIZON,
+    // Keyed to the id above rather than written beside it: a fixture that could name one
+    // playbook and read another would build the value this arm exists to make unbuildable.
+    registration: REGISTERED(id),
+    active: { kind: 'read', ids: finalized<readonly PlaybookId[]>([]) },
+    ...rest,
+  };
+};
 
 const PROPOSE = (proposal: GuardianProposal = ACTIVATION()): ProposeInputs =>
   ({ proposal, justificationHash: '0xj' });
@@ -2993,6 +3045,38 @@ test('the encoded call is DERIVED, so `target` follows the runtime’s two-sided
     guardianCall({ power: 'pause_intake', meter: METER('pause_intake'), until: 5_000, horizon: HORIZON }),
     { power: 'pause_intake', until: 5_000 },
   );
+  // The two rerun powers derive their `pid` from the proposal reading, exactly as an
+  // activation derives its `id` from the registration read (2026-08-09). Asserted rather
+  // than assumed: a first pass left this unpinned, and a `guardianCall` returning a constant
+  // pid survived the whole suite — the client would then have read one proposal and delayed
+  // another, which is the defect the pid-in-the-reading repair exists to make unbuildable.
+  assert.deepEqual(
+    guardianCall({
+      power: 'delay_once',
+      meter: METER('delay_once'),
+      proposal: RERUNNABLE('Queued', 'p42'),
+    }),
+    { power: 'delay_once', pid: 'p42' },
+    'delay_once encoded a pid it did not read',
+  );
+  assert.deepEqual(
+    guardianCall({
+      power: 'force_rerun',
+      meter: METER('force_rerun'),
+      proposal: RERUNNABLE('Queued', 'p42'),
+    }),
+    { power: 'force_rerun', pid: 'p42' },
+    'force_rerun encoded a pid it did not read',
+  );
+  // …and the activation's id likewise, over every playbook rather than the fixture default.
+  for (const [id] of Object.entries(PLAYBOOK_TRIGGERS) as [PlaybookId, unknown][]) {
+    const call = guardianCall(ACTIVATION({ id, trigger: active(PLAYBOOK_TRIGGERS[id][0]!, 42) }));
+    assert.equal(
+      call.power === 'activate_playbook' ? call.id : undefined,
+      id,
+      `${id} encoded a playbook it did not read the registration of`,
+    );
+  }
 });
 
 test('the trigger verdict is DRIVEN by TRIGGER_READS, not by the caller’s arm (SQ-730)', () => {
@@ -3593,7 +3677,7 @@ test('M4 — the two powers the chain does NOT meter are not refused on a meter 
 const ACTIVATION_OF = (
   id: PlaybookId,
   trigger: PlaybookTrigger,
-  playbooks: PlaybookAdmissibility = ADMISSIBLE(),
+  playbooks: PlaybookAdmissibility = ADMISSIBLE(id),
 ): ApprovalContext =>
   APPROVE({
     action: ACTION({
@@ -3614,7 +3698,7 @@ test('V30-9 — an unregistered playbook is refused, on the approval the chain r
       ACTIVATION_OF(
         'PB-RESERVE',
         'ReserveHealth',
-        ADMISSIBLE({ registration: { kind: 'read', registered: finalized(false) } }),
+        ADMISSIBLE('PB-RESERVE', { registration: REGISTERED('PB-RESERVE', false) }),
       ),
     ).map((b) => b.check),
     ['Playbook registration'],
@@ -3627,7 +3711,9 @@ test('V30-9 — an unregistered playbook is refused, on the approval the chain r
       ACTIVATION_OF(
         'PB-RESERVE',
         'ReserveHealth',
-        ADMISSIBLE({ registration: { kind: 'unread', reason: 'the storage read failed' } }),
+        ADMISSIBLE('PB-RESERVE', {
+          registration: { kind: 'unread', id: 'PB-RESERVE', reason: 'the storage read failed' },
+        }),
       ),
     ).map((b) => b.check),
     ['Playbook registration'],
@@ -3649,7 +3735,7 @@ test('V30-10 — presence in ActivePlaybooks blocks PB-LEDGER-FREEZE ALONE (02 �
   // Five, and the count is the point — 02 §7.4's own sentence is about exactly these.
   assert.equal(renewals.length, 5);
   for (const [id, trigger] of renewals) {
-    const alreadyActive = ADMISSIBLE({
+    const alreadyActive = ADMISSIBLE(id, {
       active: { kind: 'read', ids: finalized<readonly PlaybookId[]>([id, 'PB-LEDGER-FREEZE']) },
     });
     assert.ok(
@@ -3668,7 +3754,7 @@ test('V30-10 — presence in ActivePlaybooks blocks PB-LEDGER-FREEZE ALONE (02 �
     /if self\.active_playbooks\.iter\(\)\.any\(\|p\| p\.id == id\) \{\s*ensure!\(\s*!matches!\(id, PlaybookId::LedgerFreeze\),/,
     'dispatch no longer narrows PlaybookAlreadyActive to LedgerFreeze — rescope the client',
   );
-  const freeze = ADMISSIBLE({
+  const freeze = ADMISSIBLE('PB-LEDGER-FREEZE', {
     active: { kind: 'read', ids: finalized<readonly PlaybookId[]>(['PB-LEDGER-FREEZE']) },
   });
   assert.deepEqual(
@@ -3679,12 +3765,16 @@ test('V30-10 — presence in ActivePlaybooks blocks PB-LEDGER-FREEZE ALONE (02 �
   // that decides nothing about an action cannot make it unsafe by failing. Blocking a
   // PB-RESERVE renewal on it would refuse what the chain accepts, through a failure instead
   // of through a value.
-  const unreadSet = ADMISSIBLE({
-    active: { kind: 'unread', reason: 'the storage read failed' },
-  });
-  assert.deepEqual(approvalBlocks(ACTIVATION_OF('PB-RESERVE', 'ReserveHealth', unreadSet)), []);
+  const unreadSet = (id: PlaybookId) =>
+    ADMISSIBLE(id, { active: { kind: 'unread', reason: 'the storage read failed' } });
   assert.deepEqual(
-    approvalBlocks(ACTIVATION_OF('PB-LEDGER-FREEZE', 'LedgerDrift', unreadSet)).map((b) => b.check),
+    approvalBlocks(ACTIVATION_OF('PB-RESERVE', 'ReserveHealth', unreadSet('PB-RESERVE'))),
+    [],
+  );
+  assert.deepEqual(
+    approvalBlocks(
+      ACTIVATION_OF('PB-LEDGER-FREEZE', 'LedgerDrift', unreadSet('PB-LEDGER-FREEZE')),
+    ).map((b) => b.check),
     ['Playbook already active'],
   );
 });
@@ -3709,7 +3799,7 @@ test('V30-11 — registration is admissibility and can never stand in for a trig
           }),
         }),
         condition: { kind: 'trigger', reading: inactiveAt('ReserveHealth') },
-        playbooks: ADMISSIBLE(),
+        playbooks: ADMISSIBLE('PB-RESERVE'),
       }),
     ).map((b) => b.check),
     ['Trigger condition'],
@@ -3721,7 +3811,7 @@ test('V30-11 — registration is admissibility and can never stand in for a trig
       ACTIVATION_OF(
         'PB-RESERVE',
         'ReserveHealth',
-        ADMISSIBLE({ registration: { kind: 'read', registered: finalized(false) } }),
+        ADMISSIBLE('PB-RESERVE', { registration: REGISTERED('PB-RESERVE', false) }),
       ),
     ).map((b) => b.check),
     ['Playbook registration'],
@@ -3739,7 +3829,7 @@ test('V30-12 — admissibility evidence must describe THIS action, in both direc
         action: pause,
         condition: { kind: 'no-condition' },
         dispatch: { kind: 'hold', horizon: HORIZON },
-        playbooks: ADMISSIBLE(),
+        playbooks: ADMISSIBLE('PB-RESERVE'),
       }),
     ).map((b) => b.check),
     ['Playbook admissibility'],
@@ -3781,18 +3871,20 @@ test('V30-14 — the PROPOSE flow refuses both playbook conditions too, and on t
 
   assert.deepEqual(propose({}), [], 'the clean path must stay clean');
   assert.deepEqual(
-    propose({ registration: { kind: 'read', registered: finalized(false) } }),
+    propose({ registration: REGISTERED('PB-HALT-INTAKE', false) }),
     ['Playbook registration'],
   );
   assert.deepEqual(
-    propose({ registration: { kind: 'unread', reason: 'the storage read failed' } }),
+    propose({
+      registration: { kind: 'unread', id: 'PB-HALT-INTAKE', reason: 'the storage read failed' },
+    }),
     ['Playbook registration'],
   );
   // The one playbook whose re-activation `dispatch` refuses. `PB-LEDGER-FREEZE` pairs with
   // `LedgerDrift` alone, so the trigger moves with the id.
   assert.deepEqual(
     propose({
-      id: 'PB-LEDGER-FREEZE',
+      registration: REGISTERED('PB-LEDGER-FREEZE'),
       trigger: active('LedgerDrift'),
       active: { kind: 'read', ids: finalized<readonly PlaybookId[]>(['PB-LEDGER-FREEZE']) },
     }),
@@ -3800,7 +3892,7 @@ test('V30-14 — the PROPOSE flow refuses both playbook conditions too, and on t
   );
   assert.deepEqual(
     propose({
-      id: 'PB-LEDGER-FREEZE',
+      registration: REGISTERED('PB-LEDGER-FREEZE'),
       trigger: active('LedgerDrift'),
       active: { kind: 'unread', reason: 'the storage read failed' },
     }),
@@ -3869,13 +3961,13 @@ test('V30-16 — the four non-activation powers have NO field for a playbook rea
   );
   assert.deepEqual(
     proposalBlocks(
-      PROPOSE({ power: 'delay_once', meter: METER('delay_once'), pid: 'p1', proposal: RERUNNABLE() }),
+      PROPOSE({ power: 'delay_once', meter: METER('delay_once'), proposal: RERUNNABLE() }),
     ),
     [],
   );
   assert.deepEqual(
     proposalBlocks(
-      PROPOSE({ power: 'force_rerun', meter: METER('force_rerun'), pid: 'p1', proposal: RERUNNABLE() }),
+      PROPOSE({ power: 'force_rerun', meter: METER('force_rerun'), proposal: RERUNNABLE() }),
     ),
     [],
   );
@@ -3891,6 +3983,70 @@ test('V30-16 — the four non-activation powers have NO field for a playbook rea
     assert.ok(!('registration' in proposal), proposal.power);
     assert.ok(!('active' in proposal), proposal.power);
   }
+});
+
+test('P2 — a registration read for ANOTHER playbook must not admit this activation', () => {
+  // The 2026-08-09 P2, second face. `RegistrationReading` carried a boolean and nothing else,
+  // so a successful read of `Guardian.PlaybookRegistered[PB-RESERVE]` paired with an action
+  // naming `PB-HALT-INTAKE` looked exactly like a read of the action's own key. The pallet
+  // queries the map for the action's **own** id, so if the named playbook has been disabled
+  // while a different one is still registered, `registrationBlocks` sees `true`, the control
+  // opens, and the threshold approval reverts with `PlaybookNotRegistered` anyway.
+  //
+  // A finalized read of the wrong key is still a finalized read. The brand admits it.
+  const wrongKey = ADMISSIBLE('PB-HALT-INTAKE', { registration: REGISTERED('PB-RESERVE') });
+  assert.notDeepEqual(
+    approvalBlocks(ACTIVATION_OF('PB-HALT-INTAKE', 'GateBreach', wrongKey)).map((b) => b.check),
+    [],
+    'a registration read taken for PB-RESERVE must not admit an activation of PB-HALT-INTAKE',
+  );
+  // The unread arm names its key for the same reason: "we could not read PB-RESERVE" is not a
+  // statement about PB-HALT-INTAKE, and it is the arm that blocks — so getting it wrong costs
+  // an operator a refusal whose sentence names a playbook they never asked about.
+  const wrongUnread = ADMISSIBLE('PB-HALT-INTAKE', {
+    registration: { kind: 'unread', id: 'PB-RESERVE', reason: 'the storage read failed' },
+  });
+  assert.match(
+    approvalBlocks(ACTIVATION_OF('PB-HALT-INTAKE', 'GateBreach', wrongUnread))
+      .map((b) => b.detail)
+      .join(' '),
+    /PB-RESERVE/,
+  );
+});
+
+test('P2 — a proposal state read for ANOTHER pid must not admit a rerun power', () => {
+  // The same defect one field over, found by the neighbour sweep the P2 round asked for.
+  // `rerunBlocks(power, pid, state)` took the pid from the action and the state from a read
+  // that named no pid at all, so `Epoch.Proposals[p9]` — Queued, never delayed, never re-run —
+  // admitted a `delay_once` of `p7`. `check_and_consume` reads the record the *call* names, so
+  // the refusal (`NotRerunnable` / `AlreadyRerun`) still lands, on the fifth signature.
+  //
+  // The approve flow compares, because the pid is decoded from somebody else's bytes and the
+  // reading is this client's own — two values, genuinely. The propose flow has one value and
+  // the wrong shape does not compile
+  // (`tests/firewall/fixtures/guardian-rerun-pid-beside-its-proposal-read.ts`).
+  const approveDelay = (pid: string, proposal: RerunState) =>
+    approvalBlocks(
+      APPROVE({
+        action: ACTION({ power: { kind: 'delay_once', pid: finalized(pid) } }),
+        condition: { kind: 'no-condition' },
+        dispatch: { kind: 'rerun', proposal },
+        playbooks: { kind: 'not-applicable' },
+      }),
+    );
+  assert.deepEqual(approveDelay('p7', RERUNNABLE('Queued', 'p7')), [], 'the clean path is clean');
+  const crossed = approveDelay('p7', RERUNNABLE('Queued', 'p9'));
+  assert.deepEqual(
+    crossed.map((b) => b.check),
+    ['Proposal state'],
+    'a Queued reading of p9 must not admit a delay_once of p7',
+  );
+  assert.match(nth(crossed, 0, 'block').detail, /acts on proposal p7/);
+  assert.match(nth(crossed, 0, 'block').detail, /taken for p9/);
+  // The refusing arms carry the pid for the same reason the permitting one does: a retry
+  // instruction naming a proposal the operator never asked about is unactionable.
+  const absent = approveDelay('p7', { kind: 'absent', pid: 'p9' });
+  assert.match(nth(absent, 0, 'block').detail, /taken for p9/);
 });
 
 test('V30-13 — O-3 declares both frozen maps and cites SQ-1030 nowhere', () => {
@@ -4099,7 +4255,6 @@ test('a power whose remaining allowance cannot be established is not offered', (
         used: finalized(0, 1_000_000),
         limit: { value: 5, status: { kind: 'verified-finalized', chain: TEST_CHAIN, blockHash: '0xbeef', blockNumber: 999_000 } },
       },
-      pid: 'p7',
       proposal: RERUNNABLE(),
     }),
   );
@@ -4315,8 +4470,8 @@ test('SQ-1018 — a rerun power reads the proposal, and the two powers take diff
   // allowance alone.
   const rerunProposal = (power: 'delay_once' | 'force_rerun', proposal: RerunState): GuardianProposal =>
     power === 'delay_once'
-      ? { power, meter: METER('delay_once'), pid: 'p7', proposal }
-      : { power, meter: METER('force_rerun'), pid: 'p7', proposal };
+      ? { power, meter: METER('delay_once'), proposal }
+      : { power, meter: METER('force_rerun'), proposal };
   const checks = (power: 'delay_once' | 'force_rerun', proposal: RerunState) =>
     proposalBlocks(PROPOSE(rerunProposal(power, proposal))).map((b) => b.check);
 
@@ -4339,8 +4494,11 @@ test('SQ-1018 — a rerun power reads the proposal, and the two powers take diff
     );
   }
   // An unreadable or absent proposal refuses rather than passing on nothing.
-  assert.deepEqual(checks('delay_once', { kind: 'unread', reason: 'x' }), ['Proposal state']);
-  assert.deepEqual(checks('delay_once', { kind: 'absent' }), ['Proposal state']);
+  assert.deepEqual(
+    checks('delay_once', { kind: 'unread', pid: RERUN_PID, reason: 'x' }),
+    ['Proposal state'],
+  );
+  assert.deepEqual(checks('delay_once', { kind: 'absent', pid: RERUN_PID }), ['Proposal state']);
 });
 
 test('the propose control CANNOT reach ready on an unevaluated trigger', () => {
@@ -6098,7 +6256,15 @@ test('M7 — a filing behind a CLOSED epoch is refused (AlreadyFinal), which not
   // removed by `reap_epoch` in the same call that removes it. It has been frozen since
   // contract v28 (02 §7.4) and O-9 already cited it.
   assert.deepEqual(filingBlocks(FILING()), [], 'the clean fixture must name an open epoch');
-  const closed = filingBlocks(FILING({ epochClosed: { kind: 'closed', at: finalized(88_000) } }));
+  const closed = filingBlocks(
+    FILING({
+      epochClosed: {
+        kind: 'closed',
+        subject: { registry: 'incident', epoch: FILING_EPOCH, specVersion: FILING_SPEC_VERSION },
+        at: finalized(88_000),
+      },
+    }),
+  );
   assert.deepEqual(closed.map((b) => b.check), ['Epoch closed']);
   assert.match(nth(closed, 0, 'block').detail, /closed out at block 88,?000/);
   assert.match(nth(closed, 0, 'block').detail, /terminal/);
@@ -6109,7 +6275,13 @@ test('M7 — a filing behind a CLOSED epoch is refused (AlreadyFinal), which not
   // An unread answer fails closed and says which silence it is, exactly as the frozen-spec
   // clause does: retrying a read and choosing another epoch are different remedies.
   const unread = filingBlocks(
-    FILING({ epochClosed: { kind: 'unread', reason: 'the storage read failed' } }),
+    FILING({
+      epochClosed: {
+        kind: 'unread',
+        subject: { registry: 'incident', epoch: FILING_EPOCH, specVersion: FILING_SPEC_VERSION },
+        reason: 'the storage read failed',
+      },
+    }),
   );
   assert.deepEqual(unread.map((b) => b.check), ['Epoch closed']);
   assert.match(nth(unread, 0, 'block').detail, /could not read/);
@@ -6120,8 +6292,15 @@ test('M7 — a filing behind a CLOSED epoch is refused (AlreadyFinal), which not
   // per-instance for exactly that reason.
   assert.deepEqual(filingBlocks(MILESTONE_FILING()), []);
   assert.deepEqual(
-    filingBlocks(MILESTONE_FILING({ epochClosed: { kind: 'closed', at: finalized(1) } }))
-      .map((b) => b.check),
+    filingBlocks(
+      MILESTONE_FILING({
+        epochClosed: {
+          kind: 'closed',
+          subject: { registry: 'milestone', epoch: FILING_EPOCH, specVersion: FILING_SPEC_VERSION },
+          at: finalized(1),
+        },
+      }),
+    ).map((b) => b.check),
     ['Epoch closed'],
   );
 
@@ -6145,7 +6324,11 @@ test('an OPEN epoch is a finalized read, and the arm that PERMITS is the one tha
   // The repair is the type, not a check. `epochClosure` is the only producer of `open`, so the
   // unproven state cannot be written; the hand-assembled literal is a compile error, held in
   // `tests/firewall/fixtures/registry-filing-open-epoch-without-a-read.ts`.
-  const answer = (closedAt: number | undefined) => epochClosure(finalized<number | undefined>(closedAt, 4_242));
+  const answer = (closedAt: number | undefined) =>
+    epochClosure(
+      { registry: 'incident', epoch: FILING_EPOCH, specVersion: FILING_SPEC_VERSION },
+      finalized<number | undefined>(closedAt, 4_242),
+    );
 
   // The chain's answer decides the arm — a caller cannot report open from a read that found a
   // closure, because it hands over the read rather than the conclusion.
@@ -6176,6 +6359,93 @@ test('an OPEN epoch is a finalized read, and the arm that PERMITS is the one tha
       ? closed.at.status.blockNumber
       : undefined,
     4_242,
+  );
+});
+
+test('P2 — the closure read NAMES its key, and the filing has no second copy of it', () => {
+  // The 2026-08-09 P2, first face. The 08-08 repair made `open` carry proof that a read
+  // happened; it did not make that proof name **which** read. `ClosedAt` is a per-instance
+  // `(epoch, spec_version)` double map, so a finalized absence read of the milestone map, of a
+  // sibling version, or of another epoch produced the very same branded `open` and
+  // `filingBlocks` raised nothing — on a **bonded** action the chain then reverts.
+  //
+  // Two means, because the two halves admit different ones, and both are stronger than a
+  // comparison a call site could forget:
+  //
+  //   * the INSTANCE is a type. `EpochClosure<'milestone'>` in an incident filing does not
+  //     compile — `tests/firewall/fixtures/registry-filing-closure-for-the-other-instance.ts`.
+  //   * the KEY is a derivation. `FilingInputs` no longer carries a `specVersion`, so there is
+  //     nothing to disagree with the subject — `registry-filing-spec-version-beside-its-read`.
+  //
+  // What is asserted here is that the derivation is load-bearing: changing ONLY the subject
+  // changes the answer, which is the property a field nobody read would not have.
+  const named = (over: Partial<Omit<ClosureSubject, 'registry'>>) =>
+    filingBlocks(FILING({ epochClosed: OPEN_EPOCH('incident', over) }));
+  assert.deepEqual(named({}), [], 'the clean fixture reads the key it files against');
+
+  // The frozen-version clause is evaluated against the subject's version, not a form value.
+  const nine = named({ specVersion: 9 });
+  assert.deepEqual(nine.map((b) => b.check), ['MetricSpec version']);
+  assert.match(nth(nine, 0, 'block').detail, /MetricSpec version 9/);
+
+  // …and the epoch likewise: the cohort-schedule set is keyed by epoch, so moving the subject
+  // alone puts the two reads on different questions and the filing is refused.
+  const shifted = named({ epoch: FILING_EPOCH - 1 });
+  assert.deepEqual(shifted.map((b) => b.check), ['Cohort schedule']);
+  assert.match(nth(shifted, 0, 'block').detail, /read for epoch 41/);
+  assert.match(nth(shifted, 0, 'block').detail, /against epoch 40/);
+
+  // The refusing arms name the key too — a retry instruction that names the wrong epoch is
+  // one an operator cannot act on.
+  const unread = filingBlocks(
+    FILING({
+      epochClosed: {
+        kind: 'unread',
+        // Version 2 rather than 3: the cohorts froze both, so this fixture reaches the
+        // closure refusal alone and the sentence below is provably built from the subject
+        // rather than from the fixture's default.
+        subject: { registry: 'incident', epoch: FILING_EPOCH, specVersion: 2 },
+        reason: 'the storage read failed',
+      },
+    }),
+  );
+  assert.deepEqual(unread.map((b) => b.check), ['Epoch closed']);
+  assert.match(nth(unread, 0, 'block').detail, /epoch 41/);
+  assert.match(nth(unread, 0, 'block').detail, /MetricSpec version 2/);
+
+  // …and the `closed` sentence likewise. Asserted against a NON-default version because the
+  // incumbent M7 test uses the fixture's own 3, so a hardcoded `3` survived mutation there:
+  // a field the sentence merely happens to agree with is a field nothing reads.
+  const closed = filingBlocks(
+    FILING({
+      epochClosed: {
+        kind: 'closed',
+        subject: { registry: 'incident', epoch: FILING_EPOCH, specVersion: 2 },
+        at: finalized(88_000),
+      },
+    }),
+  );
+  assert.deepEqual(closed.map((b) => b.check), ['Epoch closed']);
+  assert.match(nth(closed, 0, 'block').detail, /MetricSpec version 2/);
+});
+
+test('P2 — the frozen-version set must be the one read for THIS epoch', () => {
+  // The same shape one field over, found by the neighbour sweep. `Epoch.CohortSchedules` is
+  // epoch-keyed and `FrozenSpecVersions` named no epoch, so a set read for the previous epoch
+  // — where version 3 was live — admitted a filing in an epoch whose cohorts froze something
+  // else. The `read` arm is the permitting one, which is what makes it expensive.
+  assert.notDeepEqual(
+    filingBlocks(
+      FILING({
+        frozenSpecVersions: {
+          kind: 'read',
+          epoch: FILING_EPOCH - 1,
+          versions: finalized([FILING_SPEC_VERSION]),
+        },
+      }),
+    ),
+    [],
+    'a cohort-schedule read for another epoch must not admit this filing',
   );
 });
 
@@ -6239,14 +6509,20 @@ test('O-8 refuses a spec_version no live cohort froze, and refuses an unread set
   // coverage of a check nothing performed and a filer could post a bond the runtime refuses.
   // Contract v29 freezes `Epoch.CohortSchedules` (02 §7.1) and this is the check it enables.
   assert.deepEqual(filingBlocks(FILING()), [], 'the clean fixture must name a frozen version');
-  const wrong = filingBlocks(FILING({ specVersion: 9 }));
+  const wrong = filingBlocks(FILING({ epochClosed: OPEN_EPOCH('incident', { specVersion: 9 }) }));
   assert.deepEqual(wrong.map((b) => b.check), ['MetricSpec version']);
   assert.match(nth(wrong, 0, 'block').detail, /No live cohort in this epoch froze MetricSpec version 9/);
 
   // An unread set fails closed and says which silence it is: waiting on a read and naming the
   // wrong version are different remedies, and an empty array is a third fact again.
   const unread = filingBlocks(
-    FILING({ frozenSpecVersions: { kind: 'unread', reason: 'the storage read failed' } }),
+    FILING({
+      frozenSpecVersions: {
+        kind: 'unread',
+        epoch: FILING_EPOCH,
+        reason: 'the storage read failed',
+      },
+    }),
   );
   assert.deepEqual(unread.map((b) => b.check), ['MetricSpec version']);
   assert.match(nth(unread, 0, 'block').detail, /could not read the versions/);
@@ -6255,7 +6531,9 @@ test('O-8 refuses a spec_version no live cohort froze, and refuses an unread set
 
   // An epoch whose cohorts froze nothing refuses every version rather than admitting any —
   // the empty set is data, and it is not the same value as a failed read.
-  const none = filingBlocks(FILING({ frozenSpecVersions: { kind: 'read', versions: finalized([]) } }));
+  const none = filingBlocks(
+    FILING({ frozenSpecVersions: { kind: 'read', epoch: FILING_EPOCH, versions: finalized([]) } }),
+  );
   assert.deepEqual(none.map((b) => b.check), ['MetricSpec version']);
 
   // The row declares the clause, so the gate re-reads it at B′ rather than trusting this
