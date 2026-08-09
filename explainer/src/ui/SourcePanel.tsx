@@ -16,15 +16,52 @@ export function SourcePanel() {
   const open = useUi((s) => s.sourcePanelOpen);
   const setOpen = useUi((s) => s.setSourcePanel);
   const closeRef = useRef<HTMLButtonElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     if (!open) return;
+
+    // Whoever opened it gets the focus back. Without this the caret lands at
+    // the top of the document on close, and a keyboard reader has to tab the
+    // whole page again to return to where they were.
+    const opener = document.activeElement;
     closeRef.current?.focus();
+
+    // `aria-modal` is a promise to assistive technology, not a mechanism. On its
+    // own the page behind the overlay keeps its tab order and stays readable to
+    // a screen reader, so a keyboard user tabs into controls they cannot see.
+    // `inert` is the mechanism: it removes a subtree from focus, from hit
+    // testing and from the accessibility tree at once.
+    //
+    // It is applied to every SIBLING on the path from the panel up to `<body>`,
+    // never to an ancestor — an inert ancestor would take the dialog with it,
+    // which is the way this is usually got wrong. Walking the path matters
+    // because the panel is mounted deep inside `#root` rather than beside it,
+    // so marking only the body's own children would mark nothing at all.
+    //
+    // Elements that were already inert are left untouched and never restored,
+    // so this cannot re-open something another component is holding closed.
+    const inerted: Element[] = [];
+    for (let node: Element | null = panelRef.current; node; node = node.parentElement) {
+      const parent = node.parentElement;
+      if (!parent) break;
+      for (const sibling of Array.from(parent.children)) {
+        if (sibling === node || sibling.hasAttribute('inert')) continue;
+        sibling.setAttribute('inert', '');
+        inerted.push(sibling);
+      }
+      if (parent === document.body) break;
+    }
+
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') setOpen(false);
     };
     window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      for (const node of inerted) node.removeAttribute('inert');
+      if (opener instanceof HTMLElement && opener.isConnected) opener.focus();
+    };
   }, [open, setOpen]);
 
   if (!open) return null;
@@ -35,6 +72,7 @@ export function SourcePanel() {
       role="dialog"
       aria-modal="true"
       aria-label="What would be verified here"
+      ref={panelRef}
       onClick={(e) => {
         if (e.target === e.currentTarget) setOpen(false);
       }}

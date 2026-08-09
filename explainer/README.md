@@ -63,7 +63,13 @@ directly: *"The backend differential suites and the frontend TypeScript port bot
 against this one artifact."*
 
 `npm run fixtures` derives a trimmed, checked-in copy so tests never reach outside this
-directory. Tolerance policy, stated in each test file:
+directory — and `npm run verify` runs `npm run fixtures -- --check`, which re-derives in
+memory and compares byte-for-byte. Without that leg the certification claim decays silently:
+regenerate the corpus, add a genesis key, re-record the quote fixture, and every suite here
+keeps replaying yesterday's copy and keeps passing. The check names the source that moved,
+never the copy that did not, and it never writes.
+
+Tolerance policy, stated in each test file:
 
 | Family | Tolerance |
 | --- | --- |
@@ -121,12 +127,18 @@ npm install
 npm run fixtures    # regenerate test fixtures from the repository's corpus
 npm run math        # re-typeset the formulas (KaTeX, at build time)
 npm run dev
-npm run verify      # generated-math check · lint · typecheck · test · build
+npm run verify      # fixture check · generated-math check · lint · typecheck · test · build
 ```
 
-Node `^20.19 || >=22.12`. This project is intentionally outside the repository's CI: it adds
-no job to [.github/workflows/ci.yml](../.github/workflows/ci.yml) and touches none of the
-existing gates.
+Node `^20.19 || >=22.12`. This project runs **no CI job of its own**: it adds nothing to
+[.github/workflows/ci.yml](../.github/workflows/ci.yml), and `npm run verify` is a local gate.
+
+It is not outside every gate, and the exception is worth knowing before adding a dependency.
+`package-lock.json` is a committed lockfile, so `tools/ci/audited-workspaces.toml` classifies
+it and the release-blocking **Supply chain** job scans it on every commit — the same terms
+`app/` gets. An advisory in anything here therefore turns the whole repository's CI red, and
+the fix is to update the package. `tools/ci/npm-advisory-waivers.toml` refuses a waiver whose
+`reaches_bundle` is `"yes"`, and a browser executes this bundle.
 
 ## Architecture
 

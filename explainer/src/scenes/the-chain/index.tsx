@@ -59,15 +59,16 @@ import './the-chain.css';
  * regeneration that moves the ceiling breaks this scene's test rather than
  * leaving it quietly wrong.
  *
- * One published figure is deliberately *not* reproduced. Doc 13 §5 states the
- * normal-class proof budget as 3,932,160 B and derives `decide` = 19.0 % from
- * it. That budget is 75 % of a **5 MiB** PoV ceiling, and the pinned SDK's
- * `MAX_POV_SIZE` has been **10 MiB** since well before this line; the runtime's
- * own `MAX_TRADED_EVENTS_PER_BLOCK` = 93 is only reproducible against 10 MiB
- * (against 5 MiB the same arithmetic yields 46, and the primary ceiling 35
- * rather than the pinned 70). So this scene uses 10,485,760 B and reports the
- * halved shares, and the drawer says so rather than silently disagreeing with
- * the specification.
+ * Recomputing rather than transcribing is also what found a defect in the
+ * specification. Doc 13 §5 stated the normal-class proof budget as 3,932,160 B
+ * and derived `decide` = 19.0 % from it. The runtime's own pinned ceilings are
+ * not reachable from that number: `MAX_TRADED_EVENTS_PER_BLOCK` = 93 and its
+ * primary share 70 need a 10 MiB `MAX_POV_SIZE`, and against 3,932,160 B the
+ * same arithmetic yields 46 and 35. The divisor turned out to be the normal
+ * class's **`BlockLength`** ceiling — a bound on how long an extrinsic may be,
+ * not on how much proof running it generates. Doc 13 §5 was corrected on
+ * 2026-08-09 to 7,864,320 B, so this scene and the specification now agree, and
+ * the drawer keeps the story because the two budgets are worth telling apart.
  */
 
 // ---------------------------------------------------------------------------
@@ -1041,17 +1042,22 @@ function WeightPanel() {
         </tbody>
       </table>
 
-      <h3>One number here disagrees with the specification, on purpose</h3>
+      <h3>Two budgets that are easy to confuse, and once were</h3>
       <p className="panel__note">
-        Doc 13 §5 states the ordinary-business evidence budget as{' '}
-        <span className="mono">3,932,160 B</span> and derives{' '}
-        <span className="mono">decide</span> = 19.0 % from it. That figure is three quarters of a{' '}
-        <strong>5 MiB</strong> ceiling, and the pinned platform has used{' '}
-        <strong>10 MiB</strong> for some time. The runtime&rsquo;s own pinned trade ceiling settles
-        it: <Value of={derived(TRADES_PER_BLOCK, C_CEILING)} /> per block, and{' '}
-        <Value of={derived(TRADES_PRIMARY, C_CEILING)} /> on the ordinary-business share, are only
-        reproducible against 10 MiB — the smaller budget yields half of each. This page therefore
-        uses the larger figure, and every share above is consequently half of what doc 13 prints (
+        A block has a second ceiling that is <em>not</em> on this page: how many bytes the
+        instructions themselves may occupy. That one is{' '}
+        <span className="mono">3,932,160 B</span>. It is a limit on how <em>long</em> a request is,
+        while everything above is a limit on how much <em>evidence</em> carrying it out produces.
+        The two are enforced by different code and are not even shared out in the same proportions.
+      </p>
+      <p className="panel__note">
+        They were confused. Doc 13 §5 divided a proof figure by the length ceiling and published{' '}
+        <span className="mono">decide</span> = 19.0 %, twice the true share. Recomputing this page
+        from the runtime is what caught it: <Value of={derived(TRADES_PER_BLOCK, C_CEILING)} />{' '}
+        trades per block, and <Value of={derived(TRADES_PRIMARY, C_CEILING)} /> on the
+        ordinary-business share, are unreachable from the smaller number — it yields half of each.
+        The specification was corrected on 2026-08-09 and now states{' '}
+        <Value of={derived(PRIMARY_PROOF_BYTES, C_LIMITS)} format={bytes} /> (
         <span className="cite">{formatCitation(C_CEILING)}</span>).
       </p>
     </section>

@@ -108,3 +108,22 @@ ships = "the browser bundle every user loads (10 §10.1), plus the app's own bui
 # on every npm waiver: the lockfile itself cannot tell a browser dependency from a
 # dependency of the tool that measures the browser, and the whole triage turns on which
 # one a finding is.
+
+[[workspace]]
+name = "explainer-npm"
+ecosystem = "npm"
+directory = "explainer"
+lockfile = "explainer/package-lock.json"
+audit_config = ""
+ships = "the static teaching site under explainer/ — its build tooling and its browser bundle alike"
+# The explainer is not the canonical client (that is `app/`, 10 §10.1) and nothing it renders
+# is a place a user signs a transaction. Its bundle is still code a browser executes from a
+# Bleavit-published page, so TH-44 reaches it and it is audited on the same terms as `app-npm`.
+#
+# A SECOND npm PACKAGE MANAGER, DELIBERATELY. `app/` is one pnpm workspace of 50 projects; this
+# is a standalone npm project with its own lockfile, so that a dependency added for a teaching
+# animation can never enter the tree the canonical client resolves from. The cost of that
+# isolation is exactly this row: `LOCKFILE_NAMES` already admitted `package-lock.json`
+# precisely so a second manager fails the gate instead of shipping unscanned, and it did —
+# this row exists because the coverage check reported the lockfile, not because anyone
+# remembered to add it.

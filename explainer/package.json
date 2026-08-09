@@ -16,7 +16,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "verify": "npm run math -- --check && npm run lint && npm run typecheck && npm test && vite build",
+    "verify": "npm run fixtures -- --check && npm run math -- --check && npm run lint && npm run typecheck && npm test && vite build",
     "math": "node scripts/build-math.mjs"
   },
   "dependencies": {

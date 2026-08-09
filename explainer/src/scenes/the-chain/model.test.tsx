@@ -35,9 +35,13 @@ import { BLOCKS_PER_HOUR, MAX_NESTED_CALLS, MAX_NESTED_LEVELS } from '../../prot
  * recomputes all five from weight components, so a regeneration that moves one
  * addend fails here rather than leaving the page confidently wrong.
  *
- * The 93 and 70 figures are also what settles the block-size question the
- * scene's own drawer discusses: neither is reachable from doc 13 §5's
- * 3,932,160 B budget, which yields exactly half of each.
+ * The 93 and 70 figures are also what settled the block-size question the
+ * scene's own drawer discusses. Doc 13 §5 measured these proof figures against
+ * 3,932,160 B until 2026-08-09, and neither ceiling is reachable from that
+ * number — it yields exactly half of each. The divisor was the normal class's
+ * **length** limit rather than its proof budget, and the specification now
+ * states 7,864,320 B. The recomputation below is what made the disagreement
+ * legible in the first place, so it stays as it is.
  */
 
 const scenario = SCENARIOS['normal-execution'];
