@@ -23,9 +23,16 @@ import tailwindcss from '@tailwindcss/vite';
  *
  * Both relaxations therefore happen in `serve` mode only, in a plugin that **cannot** run at
  * build time (`apply: 'serve'`), rather than by widening the policy in the file that ships.
- * The `--dev-only` marker is there to be greppable: a policy that leaked into a built tree
- * can be found by searching for it, and `app/tests/release/pipeline.test.ts` asserts the
- * built `index.html` still carries `style-src 'self'` exactly.
+ * The `--dev-only` marker is there to be greppable: a policy that leaked into a built tree can
+ * be found by searching for it, and `app/tests/release/pipeline.test.ts` asserts the built
+ * `index.html` still carries `style-src 'self'` exactly and contains no marker.
+ *
+ * **The marker is an HTML comment, and it used to be inside the policy.** A CSP source list
+ * has no comment syntax, so `/* --dev-only *\/` written between sources does not annotate the
+ * directive — it parses as the host-source `*` with path `/`, which widens the dev policy to
+ * every host rather than to the two things this plugin means to allow. It was a comment only
+ * to a human reader. Marking the document instead keeps the greppability and leaves both
+ * directives saying exactly what they permit.
  */
 function devOnlyCsp(): Plugin {
   return {
@@ -33,8 +40,9 @@ function devOnlyCsp(): Plugin {
     apply: 'serve',
     transformIndexHtml(html) {
       return html
-        .replace("style-src 'self'", "style-src 'self' 'unsafe-inline' /* --dev-only */")
-        .replace('__CONNECT_SRC__', "'self' ws: wss: https: /* --dev-only */");
+        .replace('<head>', '<head>\n    <!-- bleavit --dev-only CSP relaxation is active -->')
+        .replace("style-src 'self'", "style-src 'self' 'unsafe-inline'")
+        .replace('__CONNECT_SRC__', "'self' ws: wss: https:");
     },
   };
 }

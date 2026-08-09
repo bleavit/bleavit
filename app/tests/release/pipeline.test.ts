@@ -123,6 +123,26 @@ test('the emitted policy has exactly one connect-src, and it is the derived allo
   assert.ok(!indexHtml.includes('--dev-only'), 'the dev-only CSP relaxation must never ship');
 });
 
+test('the stylesheet is linked, and it carries an SRI digest like every other subresource', () => {
+  /*
+   * 12 §5.3 requires build-generated `integrity` on every `<script>` **and `<link>`**, and
+   * until F28 the tree emitted no stylesheet, so the `<link>` half of that sentence was
+   * untested. The existing SRI test iterates `<script … src>` only, and `build.ts`'s
+   * post-condition is satisfied by any single `integrity="sha384-` in the document — which
+   * the scripts already supply. So a stylesheet shipping with no digest would have passed.
+   *
+   * The existence assertion is the load-bearing half. Without it, a change that routed CSS
+   * back through a JS-injected `<style>` element would leave this file with nothing to check,
+   * and the only thing left to notice would be the browser refusing it at run time under
+   * `style-src 'self'` — in production, not in CI.
+   */
+  const links = [...indexHtml.matchAll(/<link\b[^>]*rel="stylesheet"[^>]*>/g)].map((m) => m[0]);
+  assert.ok(links.length >= 1, 'the built document links at least one stylesheet');
+  for (const link of links) {
+    assert.match(link, /integrity="sha384-/, `stylesheet link carries no SRI digest: ${link}`);
+  }
+});
+
 test('every script in the entry document carries an SRI digest of the file that was emitted', () => {
   const scripts = [...indexHtml.matchAll(/<script\b[^>]*src="([^"]+)"[^>]*>/g)];
   assert.ok(scripts.length > 0, 'the entry document loads at least one script');

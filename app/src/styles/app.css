@@ -20,12 +20,33 @@
  * says there is **"no unlabeled rendering path"**. So no rule in this file may hide a badge,
  * a `data-status` treatment, a refusal or a notice — not with `display: none`, not with
  * `opacity: 0`, not behind `:hover`. Provenance is quiet here, never absent: the marker
- * always renders and always has its text equivalent, and it is the *detail* that expands on
- * hover and focus. A future rule that hides one of these is a spec violation, not a
- * restyling.
+ * always renders and always has its text equivalent. A future rule that hides one of these is
+ * a spec violation, not a restyling.
+ *
+ * **On "the detail expands on hover":** it does, and only on hover. The detail is the native
+ * `title` on `ProvenanceBadge`'s `<span>`, and a `<span>` is not focusable, so a sighted
+ * keyboard user reaches it by no route at all. The accessibility tree is covered — the badge
+ * carries `aria-label` — which is why this is a gap rather than a violation of INV-FE-9. It
+ * is recorded as such rather than described away: an earlier draft of this comment claimed
+ * "hover and focus", and the focus half was never built.
  */
 
-@import 'tailwindcss';
+/*
+ * `source(none)` is load-bearing, and the first version of this file did not have it.
+ *
+ * `@source` **adds** to Tailwind's automatic detection; it does not replace it. So the two
+ * directives below documented an intent the build did not implement: auto-detection stayed on
+ * and scanned every non-ignored file under `app/`, which is how `.ordinal`, `.row-4`,
+ * `.start-3` and `.end-2` reached the published stylesheet. Those four are not classes any
+ * component renders — they are words that happen to appear in `tests/screens/`,
+ * `tests/mock-runtime/` and `tests/local-index/` prose, read as utility candidates.
+ *
+ * That is a 12 §1.1 problem rather than a tidiness one: it made the emitted CSS a function of
+ * every untracked or test file present in a build environment, so two environments differing
+ * by a scratch file would emit different stylesheets. `source(none)` turns detection off and
+ * makes the two `@source` lines the whole input.
+ */
+@import 'tailwindcss' source(none);
 
 /*
  * Explicit sources rather than auto-detection, and narrowed to `.tsx` under the two source
@@ -106,6 +127,18 @@
   --color-surface-sunken: var(--surface-sunken);
   --color-hairline: var(--surface-hairline);
   --color-body: var(--text-body);
+  /*
+   * State **text** colours indirect exactly like the surfaces do, and for the same reason.
+   * The `-600` steps are tuned against white; reusing them verbatim on a dark ground put
+   * five pairs under 3:1, three of them provenance badges — a label that renders and
+   * cannot be read meets 10 §2.1's obligation nominally and not in fact.
+   */
+  --color-affirm-text: var(--state-affirm);
+  --color-deny-text: var(--state-deny);
+  --color-caution-text: var(--state-caution);
+  --color-brand-text: var(--state-brand);
+  --color-info-text: var(--state-info);
+  --color-neutral-text: var(--state-neutral);
   --color-muted: var(--text-muted);
   --color-faint: var(--text-faint);
 
@@ -134,7 +167,13 @@
   --surface-hairline: oklch(0.9 0.008 275);
   --text-body: oklch(0.26 0.017 275);
   --text-muted: oklch(0.5 0.015 275);
-  --text-faint: oklch(0.63 0.013 275);
+  --text-faint: oklch(0.53 0.014 275);
+  --state-affirm: oklch(0.53 0.13 155);
+  --state-deny: oklch(0.5 0.18 25);
+  --state-caution: oklch(0.5 0.12 65);
+  --state-brand: oklch(0.51 0.21 275);
+  --state-info: oklch(0.52 0.14 240);
+  --state-neutral: oklch(0.45 0.015 275);
   --elevation: var(--shadow-card);
   color-scheme: light;
 }
@@ -149,6 +188,12 @@
     --text-muted: oklch(0.73 0.012 275);
     --text-faint: oklch(0.6 0.013 275);
     /* Shadow does almost nothing on a dark canvas; elevation becomes a lighter surface. */
+  --state-affirm: oklch(0.8 0.15 155);
+    --state-deny: oklch(0.75 0.16 25);
+    --state-caution: oklch(0.84 0.14 82);
+    --state-brand: oklch(0.79 0.11 278);
+    --state-info: oklch(0.78 0.11 240);
+    --state-neutral: oklch(0.78 0.012 275);
     --elevation: 0 1px 0 oklch(1 0 0 / 0.04) inset, 0 8px 24px oklch(0 0 0 / 0.35);
     color-scheme: dark;
   }
@@ -161,7 +206,13 @@
   --surface-hairline: oklch(0.9 0.008 275);
   --text-body: oklch(0.26 0.017 275);
   --text-muted: oklch(0.5 0.015 275);
-  --text-faint: oklch(0.63 0.013 275);
+  --text-faint: oklch(0.53 0.014 275);
+  --state-affirm: oklch(0.53 0.13 155);
+  --state-deny: oklch(0.5 0.18 25);
+  --state-caution: oklch(0.5 0.12 65);
+  --state-brand: oklch(0.51 0.21 275);
+  --state-info: oklch(0.52 0.14 240);
+  --state-neutral: oklch(0.45 0.015 275);
   --elevation: var(--shadow-card);
   color-scheme: light;
 }
@@ -174,6 +225,12 @@
   --text-body: oklch(0.95 0.006 275);
   --text-muted: oklch(0.73 0.012 275);
   --text-faint: oklch(0.6 0.013 275);
+  --state-affirm: oklch(0.8 0.15 155);
+  --state-deny: oklch(0.75 0.16 25);
+  --state-caution: oklch(0.84 0.14 82);
+  --state-brand: oklch(0.79 0.11 278);
+  --state-info: oklch(0.78 0.11 240);
+  --state-neutral: oklch(0.78 0.012 275);
   --elevation: 0 1px 0 oklch(1 0 0 / 0.04) inset, 0 8px 24px oklch(0 0 0 / 0.35);
   color-scheme: dark;
 }
@@ -262,10 +319,22 @@
  * ------------------------------------------------------------------------------------- */
 
 @layer components {
+  /*
+   * A column flexbox, not `grid-template-rows: auto 1fr`.
+   *
+   * The grid version named two rows for a shell that renders three or four children — the
+   * §11.10 sudo banner, the header, the nav, then `main` — so the `1fr` track landed on
+   * whichever child happened to be second. With the banner present, which is the fail-closed
+   * default while `PhaseFlags` is unread, that was the **header**: it absorbed all the slack
+   * on any screen shorter than the viewport and pushed the page body to the bottom edge.
+   *
+   * Flex makes the growing child a property of the child rather than of its position, so
+   * adding or removing a banner cannot move the stretch onto something else.
+   */
   .shell {
     @apply min-h-screen;
-    display: grid;
-    grid-template-rows: auto 1fr;
+    display: flex;
+    flex-direction: column;
   }
 
   .shell__header {
@@ -277,6 +346,8 @@
 
   .shell__main {
     @apply mx-auto w-full max-w-5xl px-6 py-10;
+    /* The child that absorbs the slack, named here rather than positionally. */
+    flex: 1 1 auto;
     display: flex;
     flex-direction: column;
     gap: 1.75rem;
@@ -317,7 +388,7 @@
 
   .nav__link--active:hover,
   .nav__link[aria-current='page']:hover {
-    background-color: var(--color-brand-600);
+    background-color: var(--color-brand-text);
     color: oklch(1 0 0);
   }
 
@@ -338,7 +409,7 @@
   }
 
   .link {
-    color: var(--color-brand-600);
+    color: var(--color-brand-text);
     text-decoration-color: color-mix(in oklch, var(--color-brand-500) 40%, transparent);
     text-underline-offset: 0.2em;
   }
@@ -425,14 +496,14 @@
   }
 
   .badge--verified-finalized {
-    color: var(--color-affirm-600);
+    color: var(--color-affirm-text);
     background-color: color-mix(in oklch, var(--color-affirm-500) 12%, transparent);
     border-color: color-mix(in oklch, var(--color-affirm-500) 22%, transparent);
   }
 
   /* Display-only (10 §2.1): a hollow marker, so "best head" never looks settled. */
   .badge--verified-best {
-    color: var(--color-info-500);
+    color: var(--color-info-text);
     background-color: color-mix(in oklch, var(--color-info-500) 10%, transparent);
     border-color: color-mix(in oklch, var(--color-info-500) 24%, transparent);
   }
@@ -443,26 +514,26 @@
   }
 
   .badge--derived-local {
-    color: var(--color-brand-600);
+    color: var(--color-brand-text);
     background-color: color-mix(in oklch, var(--color-brand-500) 10%, transparent);
     border-color: color-mix(in oklch, var(--color-brand-500) 22%, transparent);
   }
 
   .badge--provider {
-    color: var(--color-caution-600);
+    color: var(--color-caution-text);
     background-color: color-mix(in oklch, var(--color-caution-500) 16%, transparent);
     border-color: color-mix(in oklch, var(--color-caution-500) 34%, transparent);
   }
 
   .badge--stale-cache {
-    color: var(--color-ink-600);
+    color: var(--color-neutral-text);
     background-color: var(--color-surface-sunken);
     border-color: var(--color-hairline);
   }
 
   /* Bottom of the lattice — a request, true at no block. Dashed, so it never reads as read. */
   .badge--external-proposal {
-    color: var(--color-deny-600);
+    color: var(--color-deny-text);
     background-color: color-mix(in oklch, var(--color-deny-500) 10%, transparent);
     border-color: color-mix(in oklch, var(--color-deny-500) 40%, transparent);
     border-style: dashed;
@@ -547,12 +618,12 @@
   }
 
   .notice--info {
-    border-left-color: var(--color-info-500);
+    border-left-color: var(--color-info-text);
     background-color: color-mix(in oklch, var(--color-info-500) 7%, var(--color-surface));
   }
 
   .notice--info .notice__heading {
-    color: var(--color-info-500);
+    color: var(--color-info-text);
   }
 
   .notice--caution {
@@ -561,7 +632,7 @@
   }
 
   .notice--caution .notice__heading {
-    color: var(--color-caution-600);
+    color: var(--color-caution-text);
   }
 
   .notice--danger {
@@ -570,7 +641,7 @@
   }
 
   .notice--danger .notice__heading {
-    color: var(--color-deny-600);
+    color: var(--color-deny-text);
   }
 
   /*
@@ -589,7 +660,7 @@
   .refusal__code {
     @apply inline-flex w-fit rounded-md px-2 py-0.5 text-xs font-semibold tracking-wider;
     font-family: var(--font-mono);
-    color: var(--color-deny-600);
+    color: var(--color-deny-text);
     background-color: color-mix(in oklch, var(--color-deny-500) 15%, transparent);
     border: 1px solid color-mix(in oklch, var(--color-deny-500) 30%, transparent);
   }
@@ -619,7 +690,7 @@
 
   .undecodable__label {
     @apply text-sm font-semibold;
-    color: var(--color-caution-600);
+    color: var(--color-caution-text);
   }
 
   .undecodable__reason {
@@ -686,6 +757,14 @@
     @apply cursor-pointer list-none px-4 py-3 text-sm font-medium select-none;
     color: var(--color-body);
     transition: background-color 140ms ease;
+    /*
+     * Inset, because `.disclosure` clips. The summary's border box is the disclosure's
+     * padding box, so the base `outline-offset: 2px` drew the focus ring entirely outside the
+     * clip rect and `overflow: hidden` removed it — on the control that opens the decoded
+     * payload before signing. The base rule's own comment says the focus treatment is never
+     * removed, so the fix belongs here rather than as an exception to it.
+     */
+    outline-offset: -3px;
   }
 
   .disclosure__summary::-webkit-details-marker {
@@ -745,13 +824,22 @@
   }
 
   /*
-   * A disabled control in this application is almost always a *refusal* — a precondition
-   * the chain would reject. It stays fully readable rather than fading to grey, because
-   * the user needs to read the reason beside it.
+   * A disabled control in this application is almost always a *refusal* — a precondition the
+   * chain would reject — so it stays readable rather than fading out.
+   *
+   * **This rule said that and did the opposite until a review measured it.** It carried
+   * `opacity: 0.62`, and opacity composites the background and the label as one group, so the
+   * pair fell to 2.41:1 for `button--primary` and 2.61:1 for `button--danger` — the fading the
+   * comment above disclaims, arrived at by the one property that cannot be reasoned about
+   * per-colour. The state is now two stated colours, so the contrast is a value someone chose
+   * rather than one that emerged.
    */
   .button:disabled {
     @apply cursor-not-allowed;
-    opacity: 0.62;
+    background-color: var(--color-surface-sunken);
+    color: var(--color-muted);
+    border-color: var(--color-hairline);
+    box-shadow: none;
   }
 
   .button--primary {
@@ -761,7 +849,7 @@
   }
 
   .button--primary:hover:not(:disabled) {
-    background-color: var(--color-brand-600);
+    background-color: var(--color-brand-text);
   }
 
   .button--secondary {
@@ -781,7 +869,7 @@
   }
 
   .button--danger:hover:not(:disabled) {
-    background-color: var(--color-deny-600);
+    background-color: var(--color-deny-text);
   }
 
   .confirm__actions,
@@ -805,7 +893,7 @@
 
   .field__reason {
     @apply text-xs;
-    color: var(--color-caution-600);
+    color: var(--color-caution-text);
   }
 
   .power-fields {
@@ -876,13 +964,13 @@
 
   /* `pinned` is what the release claims; `observed` is what the chain answered. */
   .verification__row[data-kind='observed'] .verification__value {
-    color: var(--color-affirm-600);
+    color: var(--color-affirm-text);
   }
 
   .verification__warnings {
     @apply mt-3 flex flex-col gap-1.5 rounded-xl p-3 text-sm;
     list-style: none;
-    color: var(--color-caution-600);
+    color: var(--color-caution-text);
     background-color: color-mix(in oklch, var(--color-caution-500) 9%, transparent);
     border: 1px solid color-mix(in oklch, var(--color-caution-500) 26%, transparent);
   }
@@ -934,12 +1022,12 @@
    * money back, so they are three visually distinct things rather than three labels.
    */
   .void-recovery__par {
-    color: var(--color-affirm-600);
+    color: var(--color-affirm-text);
     font-weight: 600;
   }
 
   .void-recovery__part-par {
-    color: var(--color-caution-600);
+    color: var(--color-caution-text);
     font-weight: 600;
   }
 
@@ -949,7 +1037,7 @@
 
   .coverage__edge-caveat {
     @apply text-xs;
-    color: var(--color-caution-600);
+    color: var(--color-caution-text);
   }
 
   .reach__counts {
@@ -1044,6 +1132,6 @@
 
   .asked-vs-encoded__note {
     @apply text-xs;
-    color: var(--color-caution-600);
+    color: var(--color-caution-text);
   }
 }

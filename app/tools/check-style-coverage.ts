@@ -105,10 +105,10 @@ interface Usage {
   readonly families: Map<string, string[]>;
 }
 
-function collectUsage(): Usage {
+function collectUsage(roots: readonly string[]): Usage {
   const statics = new Map<string, string[]>();
   const families = new Map<string, string[]>();
-  for (const root of ROOTS) {
+  for (const root of roots) {
     for (const file of walk(join(APP, root))) {
       const where = relative(APP, file);
       const text = readFileSync(file, 'utf8');
@@ -136,12 +136,12 @@ function collectUsage(): Usage {
   return { statics, families };
 }
 
-function definedSelectors(): Set<string> {
+function definedSelectors(stylesheet: string): Set<string> {
   // Comments and quoted strings first. The file explains itself at length and names `.tsx`
   // files and class names in prose, and its `@source '../../src/**/*.tsx'` directives are
   // globs — a scan that reads either reports rules that do not exist. `.tsx` was reported as
   // a dead rule until this line stripped the glob it came from.
-  const css = readFileSync(STYLESHEET, 'utf8')
+  const css = readFileSync(stylesheet, 'utf8')
     .replace(/\/\*[\s\S]*?\*\//g, ' ')
     .replace(/'[^']*'|"[^"]*"/g, ' ');
   // A class selector cannot begin with a digit, and the dot must not be a decimal point.
@@ -152,14 +152,31 @@ function definedSelectors(): Set<string> {
   );
 }
 
-function main(): void {
-  const witness = process.argv.includes('--witness');
-  const { statics, families } = collectUsage();
-  const defined = definedSelectors();
+interface Analysis {
+  readonly errors: readonly string[];
+  readonly statics: number;
+  readonly families: number;
+  readonly selectors: number;
+}
+
+/**
+ * The whole check, over an arbitrary pair of source roots and stylesheet.
+ *
+ * Extracted so the witness can run the *same* code over a deliberately broken fixture. A
+ * witness that exercises a different path than the gate proves the path it exercises.
+ */
+function analyse(
+  roots: readonly string[],
+  stylesheet: string,
+  dynamicFamilies: Readonly<Record<string, readonly string[]>>,
+  withoutRules: Readonly<Record<string, string>>,
+): Analysis {
+  const { statics, families } = collectUsage(roots);
+  const defined = definedSelectors(stylesheet);
   const errors: string[] = [];
 
   const expected = new Set<string>();
-  for (const [stem, variants] of Object.entries(DYNAMIC_FAMILIES)) {
+  for (const [stem, variants] of Object.entries(dynamicFamilies)) {
     expected.add(stem);
     for (const variant of variants) expected.add(`${stem}--${variant}`);
   }
@@ -171,7 +188,7 @@ function main(): void {
   }
 
   for (const [stem, where] of families) {
-    if (!(stem in DYNAMIC_FAMILIES)) {
+    if (!(stem in dynamicFamilies)) {
       errors.push(
         `undeclared dynamic family \`${stem}--\${…}\` in ${[...new Set(where)].join(', ')} — ` +
           'add it to DYNAMIC_FAMILIES with the exact variants its source can emit, so the ' +
@@ -180,16 +197,16 @@ function main(): void {
     }
   }
 
-  for (const [stem, variants] of Object.entries(DYNAMIC_FAMILIES)) {
+  for (const [stem, variants] of Object.entries(dynamicFamilies)) {
     for (const variant of variants) {
       const full = `${stem}--${variant}`;
-      if (!defined.has(full) && !(full in VARIANTS_WITHOUT_RULES)) {
+      if (!defined.has(full) && !(full in withoutRules)) {
         errors.push(
-          `declared variant \`${full}\` has no rule in app.css — style it, or record in ` +
+          `declared variant \`${full}\` has no rule — style it, or record in ` +
             'VARIANTS_WITHOUT_RULES why the base class is already its appearance',
         );
       }
-      if (defined.has(full) && full in VARIANTS_WITHOUT_RULES) {
+      if (defined.has(full) && full in withoutRules) {
         errors.push(
           `\`${full}\` has a rule but is listed in VARIANTS_WITHOUT_RULES — one of the two is ` +
             'stale, and the list is what a reader trusts',
@@ -199,42 +216,71 @@ function main(): void {
   }
 
   const used = new Set([...statics.keys(), ...expected]);
-  // Rules that belong to the framework or to element/state selectors are not class usage.
+  // Framework and state selectors are not class usage.
   const IGNORED = /^(tw-|dark$|group$|peer$|sr-only$)/;
   for (const selector of defined) {
     if (!used.has(selector) && !IGNORED.test(selector)) {
-      errors.push(`dead rule \`.${selector}\` in app.css matches no rendered class`);
+      errors.push(`dead rule \`.${selector}\` matches no rendered class`);
     }
   }
 
-  if (witness) {
-    // The gate has three rules; each must be shown to fire, or a green run proves nothing.
-    const shown = [
-      statics.size > 0 && 'markup classes were collected',
-      families.size > 0 && 'dynamic families were collected',
-      defined.size > 0 && 'stylesheet selectors were collected',
-    ].filter(Boolean);
-    if (shown.length !== 3) {
-      console.error(`witness: only ${shown.length}/3 collectors produced anything — ${shown}`);
+  return { errors, statics: statics.size, families: families.size, selectors: defined.size };
+}
+
+/**
+ * The witness fixture, and what each of its four defects must produce.
+ *
+ * The previous witness asserted only that the three collectors returned something non-empty,
+ * which proves the tool can read files and nothing about whether any rule fires. That is the
+ * weaker half of the very control this gate argues for, and every other `:witness` in this
+ * workspace does the stronger thing — `depcruise:witness` inverts an exit code on a known-bad
+ * edge, `check-no-html-sinks` requires each marked line to be detected, and 15 §4.1 requires
+ * the model checker's witness configs to actually violate.
+ */
+const WITNESS_ROOTS = ['tools/fixtures/style-coverage-witness'];
+const WITNESS_STYLESHEET = join(APP, 'tools/fixtures/style-coverage-witness/witness.css');
+const WITNESS_FAMILIES = Object.freeze({ 'witness-declared': ['present', 'gone'] });
+const WITNESS_EXPECTATIONS: readonly (readonly [string, RegExp])[] = [
+  ['an unstyled class is reported', /unstyled class `witness-unstyled-class`/],
+  ['an undeclared dynamic family is reported', /undeclared dynamic family `witness-undeclared--/],
+  ['a declared variant with no rule is reported', /declared variant `witness-declared--gone`/],
+  ['a dead rule is reported', /dead rule `\.witness-dead-rule`/],
+];
+
+function main(): void {
+  if (process.argv.includes('--witness')) {
+    const { errors } = analyse(WITNESS_ROOTS, WITNESS_STYLESHEET, WITNESS_FAMILIES, {});
+    const missed = WITNESS_EXPECTATIONS.filter(([, pattern]) => !errors.some((e) => pattern.test(e)));
+    if (missed.length > 0) {
+      console.error('witness: the gate did not fire on its own fixture:');
+      for (const [what] of missed) console.error(`  - ${what}`);
+      console.error('  reported instead:');
+      for (const error of errors) console.error(`    ${error}`);
       process.exit(1);
     }
     console.log(
-      `witness fired: ${statics.size} class(es), ${families.size} dynamic family/families, ` +
-        `${defined.size} selector(s); all three collectors non-empty`,
+      `witness fired on all ${WITNESS_EXPECTATIONS.length} declared expectations ` +
+        `(${errors.length} finding(s) over the fixture): unstyled class, undeclared family, ` +
+        'declared variant without a rule, dead rule.',
     );
     return;
   }
 
+  const { errors, statics, families, selectors } = analyse(
+    ROOTS,
+    STYLESHEET,
+    DYNAMIC_FAMILIES,
+    VARIANTS_WITHOUT_RULES,
+  );
   if (errors.length > 0) {
     console.error('Style coverage errors:');
-    for (const error of errors.sort()) console.error(`  - ${error}`);
+    for (const error of [...errors].sort()) console.error(`  - ${error}`);
     process.exit(1);
   }
-
   console.log(
-    `Style coverage OK — ${statics.size} rendered class(es), ` +
-      `${families.size} dynamic family/families over ${Object.keys(DYNAMIC_FAMILIES).length} ` +
-      `declared, ${defined.size} selector(s), no unstyled markup and no dead rules.`,
+    `Style coverage OK — ${statics} rendered class(es), ${families} dynamic family/families ` +
+      `over ${Object.keys(DYNAMIC_FAMILIES).length} declared, ${selectors} selector(s), ` +
+      'no unstyled markup and no dead rules.',
   );
 }
 
