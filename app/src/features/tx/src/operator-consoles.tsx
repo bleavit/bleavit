@@ -112,11 +112,9 @@ import {
 import {
   REGISTRY_HOLDS_SETTLEMENT,
   challengeWindowCopy,
-  mayChallenge,
   noOpWarning,
   snapshotCrankState,
   stalenessCopy,
-  type ChallengeWindow,
   type SnapshotStaleness,
 } from './registry-crank.js';
 import {
@@ -800,8 +798,6 @@ export function RegistryFilingForm({
 }
 
 export function RegistryFiling({
-  filingId,
-  window,
   inputs,
   decimals,
   symbol,
@@ -809,15 +805,22 @@ export function RegistryFiling({
   session,
   onChallenge,
 }: {
-  readonly filingId: Verified<string>;
-  readonly window: ChallengeWindow;
   /**
-   * The challenge's own preconditions. **Required**: §11.8.6's row names a challenge bond
-   * balance, and the panel tested only the window — so it offered a challenge to an account
-   * that cannot post the bond, on the one screen where the user has a deadline and one
-   * attempt inside it.
+   * The challenge's own preconditions, **and the filing they were read for**.
+   *
+   * Required, and it is now the only description of the filing this panel has. §11.8.6's row
+   * names a challenge bond balance and the panel tested only the window — so it offered a
+   * challenge to an account that cannot post the bond, on the one screen where the user has a
+   * deadline and one attempt inside it. It then named no filing at all, so a window and a bond
+   * read for two different filings decided one bonded control (2026-08-09).
+   *
+   * The separate `filingId` and `window` props are gone with that repair rather than beside it.
+   * A `Verified<string>` identifier next to a `u32` `filingId` in the subject was a second
+   * identity for one filing — the panel could title itself after one and refuse for another —
+   * and a `ChallengeWindow` prop beside a model built from another copy of it is the same
+   * defect on the row's other reading.
    */
-  readonly inputs: Omit<ChallengeFilingInputs, 'windowOpen' | 'windowReason'>;
+  readonly inputs: ChallengeFilingInputs;
   readonly decimals: number;
   readonly symbol: string;
   /** The filing's evidence — §11.8.6 applies §11.8.1's rules to its display. */
@@ -825,20 +828,29 @@ export function RegistryFiling({
   readonly session: TxSession;
   readonly onChallenge: (window: GatePassed) => void;
 }): ReactNode {
-  const blocks = challengeFilingBlocks({
-    ...inputs,
-    windowOpen: mayChallenge(window),
-    windowReason: challengeWindowCopy(window),
-  });
+  const blocks = challengeFilingBlocks(inputs);
   const gate = operatorGate('registry.challenge', session, blocks);
+  const subject = inputs.window.subject;
+  const window = inputs.window.window;
   return (
-    <Panel title="Registry filing" subject={<Identifier datum={filingId} />}>
+    <Panel
+      title="Registry filing"
+      /* The filing the preconditions were evaluated for, and the pair an encoder must emit —
+         `challenge_filing(epoch, filing_id, …)`. Plain text rather than a badged datum for the
+         reason `RegistryFilingForm` renders its epoch that way: this is the key the reading was
+         taken under, not a value read at it, and a provenance badge on a key would claim the
+         chain answered a question nobody asked it. */
+      subject={<span>{`${subject.registry} filing ${subject.filingId}`}</span>}
+    >
       {/* §11.8.6's required statement, and it renders unconditionally: the natural reading
           of "a challenge is open" is that governance is paused, and it is not. */}
       <Notice severity="info" heading="What a challenge holds">
         {REGISTRY_HOLDS_SETTLEMENT}
       </Notice>
 
+      <Field label="Epoch this filing is against">
+        <span>{String(subject.epoch)}</span>
+      </Field>
       <Field label="Challenge window">{challengeWindowCopy(window)}</Field>
       {window.kind === 'open' ? (
         <Field label="Closes at">
@@ -847,7 +859,7 @@ export function RegistryFiling({
       ) : null}
 
       <Field label="Challenge bond">
-        <Amount datum={inputs.challengeBond} decimals={decimals} symbol={symbol} />
+        <Amount datum={inputs.bond.amount} decimals={decimals} symbol={symbol} />
       </Field>
       <Field label="Your free balance">
         <Amount datum={inputs.freeUsdc} decimals={decimals} symbol={symbol} />

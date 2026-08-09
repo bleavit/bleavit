@@ -273,6 +273,7 @@ import type {
   Stream,
   ArtifactSource,
   ChallengeFilingInputs,
+  ChallengeSubject,
   ClosureSubject,
   EpochClosure,
   FilingOccupancy,
@@ -1591,13 +1592,31 @@ const noSubmit = (_window: GatePassed): void => {};
 const fieldPresent = (html: string, label: string): boolean =>
   html.includes(`<span class="field__label">${label}</span>`);
 
-/** §11.8.6 row 2's inputs, minus the two the panel derives from its own window. */
-const CHALLENGE_FILING = (
-  over: Partial<Omit<ChallengeFilingInputs, 'windowOpen' | 'windowReason'>> = {},
-): Omit<ChallengeFilingInputs, 'windowOpen' | 'windowReason'> => ({
-  kind: 'incident',
+/**
+ * The `(instance, epoch, filing_id)` every challenge fixture is about.
+ *
+ * One constant for the same reason `FILING_EPOCH` is one: the 2026-08-09 repair makes the two
+ * per-filing readings compare their subjects, so a fixture spelling the filing out twice would
+ * let one drift and would then be testing the mismatch it is supposed to refuse.
+ */
+const CHALLENGE_SUBJECT: ChallengeSubject = Object.freeze({
+  registry: 'incident',
+  epoch: 41,
+  filingId: 7,
+});
+
+/** An open 72 h window on this filing, read from `Filings` — the clean path. */
+const OPEN_WINDOW: ChallengeWindow = {
+  kind: 'open',
+  closesAt: finalized(900),
+  extended: false,
+};
+
+/** §11.8.6 row 2's inputs, both readings keyed to the filing being challenged. */
+const CHALLENGE_FILING = (over: Partial<ChallengeFilingInputs> = {}): ChallengeFilingInputs => ({
+  window: { subject: CHALLENGE_SUBJECT, window: OPEN_WINDOW },
+  bond: { subject: CHALLENGE_SUBJECT, amount: finalized(1_000_000n) },
   freeUsdc: finalized(10_000_000n),
-  challengeBond: finalized(1_000_000n),
   evidenceHash: '0xevidence',
   ...over,
 });
@@ -5495,9 +5514,7 @@ test('a registry filing states what a challenge holds — on every arm of the wi
   ] satisfies readonly ChallengeWindow[]) {
     const html = renderToStaticMarkup(
       h(RegistryFiling, {
-        filingId: finalized('0xfile'),
-        window,
-        inputs: CHALLENGE_FILING(),
+        inputs: CHALLENGE_FILING({ window: { subject: CHALLENGE_SUBJECT, window } }),
         decimals: 6,
         symbol: 'USDC',
         evidence: EVIDENCE_FIXTURE,
@@ -5512,9 +5529,12 @@ test('a registry filing states what a challenge holds — on every arm of the wi
 test('an indeterminate challenge window disables the challenge rather than guessing', () => {
   const html = renderToStaticMarkup(
     h(RegistryFiling, {
-      filingId: finalized('0xfile'),
-      window: { kind: 'indeterminate', reason: 'the watchtower read failed' },
-      inputs: CHALLENGE_FILING(),
+      inputs: CHALLENGE_FILING({
+        window: {
+          subject: CHALLENGE_SUBJECT,
+          window: { kind: 'indeterminate', reason: 'the watchtower read failed' },
+        },
+      }),
       decimals: 6,
       symbol: 'USDC',
       evidence: EVIDENCE_FIXTURE,
@@ -8606,34 +8626,67 @@ test('registry.challenge checks the bond balance, not only the window', () => {
   // and `mayChallenge` tested only the window — so the client offered a challenge to an
   // account that cannot post the bond, on the screen where the user has a deadline and one
   // attempt inside it.
+  assert.deepEqual(challengeFilingBlocks(CHALLENGE_FILING()), []);
   assert.deepEqual(
-    challengeFilingBlocks({ ...CHALLENGE_FILING(), windowOpen: true, windowReason: 'open' }),
-    [],
-  );
-  assert.deepEqual(
-    challengeFilingBlocks({
-      ...CHALLENGE_FILING({ freeUsdc: finalized(1n) }),
-      windowOpen: true,
-      windowReason: 'open',
-    }).map((block) => block.check),
+    challengeFilingBlocks(CHALLENGE_FILING({ freeUsdc: finalized(1n) })).map((b) => b.check),
     ['Challenge bond'],
   );
   // Both directions together, and the window's own reason travels with it.
   assert.deepEqual(
-    challengeFilingBlocks({
-      ...CHALLENGE_FILING({ freeUsdc: finalized(1n), evidenceHash: undefined }),
-      windowOpen: false,
-      windowReason: 'the watchtower extension could not be read',
-    }).map((block) => block.check),
+    challengeFilingBlocks(
+      CHALLENGE_FILING({
+        freeUsdc: finalized(1n),
+        evidenceHash: undefined,
+        window: {
+          subject: CHALLENGE_SUBJECT,
+          window: { kind: 'indeterminate', reason: 'the watchtower extension could not be read' },
+        },
+      }),
+    ).map((block) => block.check),
     ['Challenge window', 'Challenge bond', 'Evidence'],
   );
+  assert.match(
+    challengeFilingBlocks(
+      CHALLENGE_FILING({
+        window: {
+          subject: CHALLENGE_SUBJECT,
+          window: { kind: 'indeterminate', reason: 'the watchtower extension could not be read' },
+        },
+      }),
+    )[0]?.detail ?? '',
+    /watchtower extension could not be read/,
+    'the window states its own reason rather than a sentence this row invented',
+  );
+});
+
+test('a challenge bond read for another filing blocks, it does not decide', () => {
+  // The 2026-08-09 repair. `freeUsdc >= bond` is the PERMITTING comparison on a bonded
+  // control, and every filing is bonded at its own value — so a bond read from a cheaper
+  // filing in the same epoch opens a challenge whose real bond the account cannot post, and
+  // the chain refuses it after the signature. Each of the three key components is moved on
+  // its own, because a check comparing two of them passes for the third.
+  const elsewhere: readonly (readonly [string, ChallengeSubject])[] = [
+    ['another filing', { ...CHALLENGE_SUBJECT, filingId: CHALLENGE_SUBJECT.filingId + 1 }],
+    ['another epoch', { ...CHALLENGE_SUBJECT, epoch: CHALLENGE_SUBJECT.epoch + 1 }],
+    // The instances allocate independently, so milestone filing 7 is a different filing.
+    ['the other registry', { ...CHALLENGE_SUBJECT, registry: 'milestone' }],
+  ];
+  for (const [what, subject] of elsewhere) {
+    const blocks = challengeFilingBlocks(
+      // Deliberately enough free USDC to cover it: the mismatch must block on its own, not
+      // because the shortfall rule happened to fire as well.
+      CHALLENGE_FILING({ bond: { subject, amount: finalized(1_000_000n) } }),
+    );
+    assert.deepEqual(blocks.map((block) => block.check), ['Challenge bond'], what);
+    assert.match(blocks[0]?.detail ?? '', /says nothing about this one/, what);
+    // The refusal names both filings, or an operator cannot act on it.
+    assert.match(blocks[0]?.detail ?? '', /incident filing 7 in epoch 41/, what);
+  }
 });
 
 test('a challenge with no bond is disabled on the screen, not only in the model', () => {
   const html = renderToStaticMarkup(
     h(RegistryFiling, {
-      filingId: finalized('0xfile'),
-      window: { kind: 'open', closesAt: finalized(900), extended: false },
       inputs: CHALLENGE_FILING({ freeUsdc: finalized(1n) }),
       decimals: 6, symbol: 'USDC', evidence: EVIDENCE_FIXTURE,
       session: readySession('O-9'), onChallenge: noSubmit,
@@ -8641,6 +8694,22 @@ test('a challenge with no bond is disabled on the screen, not only in the model'
   );
   assert.ok(buttonDisabled(html, 'Challenge this filing'), html);
   assert.match(html, /does not cover the challenge bond/);
+});
+
+test('the filing panel names the filing its preconditions were read for', () => {
+  // The panel used to take a `Verified<string>` identifier of its own beside a model that
+  // named no filing, so its title and its refusals described different things and nothing
+  // could disagree. Both now come from the window reading's subject.
+  const html = renderToStaticMarkup(
+    h(RegistryFiling, {
+      inputs: CHALLENGE_FILING(),
+      decimals: 6, symbol: 'USDC', evidence: EVIDENCE_FIXTURE,
+      session: readySession('O-9'), onChallenge: noSubmit,
+    }),
+  );
+  assert.match(html, /incident filing 7/, html);
+  assert.ok(fieldPresent(html, 'Epoch this filing is against'), html);
+  assert.match(html, />41</, 'the epoch the challenge is against is not on screen');
 });
 
 test('S19 has a filing screen, and it renders the bond, the bounds and the evidence', () => {
