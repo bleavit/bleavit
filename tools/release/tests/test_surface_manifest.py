@@ -880,6 +880,111 @@ class SurfaceManifestTests(unittest.TestCase):
             "0x" + (2**63).to_bytes(8, "little").hex(),
         )
 
+    def test_guardian_allowance_limits_are_the_frozen_meter_halves(self) -> None:
+        """02 §9 (v30): an allowance meter is a used counter and a limit.
+
+        ``Guardian.Allowances`` publishes only the counters, so before v30 the
+        11 §11.8.2 propose precondition had no right-hand side and a client could
+        satisfy it only by inventing one — which 15 §2's INV-FE-1 forbids. Each
+        expectation below is **derived from ``crates/guardian-core/src/lib.rs``**,
+        the values' single Rust home, rather than copied out of the manifest: a
+        test that restates the shipped bytes agrees with a wrong value exactly as
+        readily as a right one, and these four decide whether the console offers
+        a guardian a power the chain would refuse.
+        """
+        core = (ROOT.parents[1] / "crates" / "guardian-core" / "src" / "lib.rs").read_text(
+            encoding="utf-8"
+        )
+
+        def kernel(name: str) -> int:
+            match = re.search(
+                rf"^pub const {name}: \w+ = ([\d_]+);", core, re.MULTILINE
+            )
+            self.assertIsNotNone(match, f"{name} not found in guardian-core")
+            return int(match.group(1).replace("_", ""))
+
+        by_id = {entry["id"]: entry for entry in self.entries}
+        for identifier, constant, width, kernel_name in (
+            (
+                "constant.guardian.delay_once_allowance_per_epoch",
+                "DelayOnceAllowancePerEpoch",
+                1,
+                "DELAY_ONCE_ALLOWANCE_PER_EPOCH",
+            ),
+            (
+                "constant.guardian.force_rerun_allowance_per_epoch",
+                "ForceRerunAllowancePerEpoch",
+                1,
+                "FORCE_RERUN_ALLOWANCE_PER_EPOCH",
+            ),
+            (
+                "constant.guardian.pause_intake_allowance",
+                "PauseIntakeAllowance",
+                1,
+                "PAUSE_INTAKE_ALLOWANCE",
+            ),
+            (
+                "constant.guardian.pause_intake_allowance_window_epochs",
+                "PauseIntakeAllowanceWindowEpochs",
+                4,
+                "PAUSE_INTAKE_ALLOWANCE_WINDOW_EPOCHS",
+            ),
+        ):
+            entry = by_id[identifier]
+            self.assertEqual(entry["pallet"], "Guardian", identifier)
+            self.assertEqual(entry["constant"], constant, identifier)
+            self.assertTrue(entry["required"], identifier)
+            self.assertEqual(entry["layout"]["type"], f"u{width * 8}", identifier)
+            self.assertEqual(
+                entry["layout"]["value"],
+                "0x" + kernel(kernel_name).to_bytes(width, "little").hex(),
+                identifier,
+            )
+
+        # The counter half, and 06 §5.2's numbers themselves. The row above
+        # would agree with a kernel constant that had drifted; 13 §1 makes this
+        # row entrenched with no amendment path, so a moved value is a
+        # specification change rather than a tuning.
+        self.assertEqual(
+            (
+                kernel("DELAY_ONCE_ALLOWANCE_PER_EPOCH"),
+                kernel("FORCE_RERUN_ALLOWANCE_PER_EPOCH"),
+                kernel("PAUSE_INTAKE_ALLOWANCE"),
+                kernel("PAUSE_INTAKE_ALLOWANCE_WINDOW_EPOCHS"),
+            ),
+            (2, 1, 1, 4),
+            "06 §5.2: delay_once 2/epoch, force_rerun 1/epoch, pause_intake 1 per 4 epochs",
+        )
+        self.assertIn("storage.guardian.allowances", by_id)
+
+    def test_guardian_playbook_admissibility_reads_are_frozen(self) -> None:
+        """02 §7.4 (v30): ``PlaybookNotRegistered`` and ``PlaybookAlreadyActive``
+        are raised inside ``guardian.approve_action`` on the **dispatching**
+        approval, so a client blind to these two items walks a 5-of-7 council
+        through four signatures to a guaranteed revert on the fifth."""
+        by_id = {entry["id"]: entry for entry in self.entries}
+        registered = by_id["storage.guardian.playbook_registered"]
+        self.assertEqual(registered["pallet"], "Guardian")
+        self.assertEqual(registered["item"], "PlaybookRegistered")
+        self.assertEqual(registered["query"], "prefix")
+        self.assertTrue(registered["required"])
+        self.assertEqual(registered["layout"]["hashers"], ["Blake2_128Concat"])
+        self.assertEqual(registered["layout"]["value"], "bool")
+        self.assertIn("guardian_core::PlaybookId", registered["layout"]["key"])
+
+        active = by_id["storage.guardian.active_playbooks"]
+        self.assertEqual(active["pallet"], "Guardian")
+        self.assertEqual(active["item"], "ActivePlaybooks")
+        self.assertEqual(active["query"], "value")
+        self.assertTrue(active["required"])
+        self.assertEqual(active["layout"]["hashers"], [])
+        self.assertIsNone(active["layout"]["key"])
+        # The `renewals_used` field is what distinguishes a renewal from a fresh
+        # activation, and 06 §6.2 makes presence blocking for PB-LEDGER-FREEZE
+        # alone — a client reading only `id` cannot tell those cases apart.
+        for field in ("id:", "expiry:u32", "renewals_used:u8"):
+            self.assertIn(field, active["layout"]["value"])
+
     def test_all_sixteen_runtime_api_methods_are_present(self) -> None:
         methods = {
             entry["method"]

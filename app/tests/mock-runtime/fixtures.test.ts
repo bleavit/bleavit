@@ -187,7 +187,7 @@ test('FE-R1 bounds are exactly 02 §9\'s frozen values', () => {
     'constant.epoch.max_intake_queue': 64n,            // IntakeQueue
     'constant.ledger.max_positions_per_account': 64n,  // MaxPositionsPerAccount
     'constant.identity.ss58_prefix': 7777n,
-    'constant.identity.contract_version': 29n,         // INTEGRATION_CONTRACT_VERSION (v29: bond_quote, treasury_streams, the §11.8.2 trigger reads)
+    'constant.identity.contract_version': 30n,         // INTEGRATION_CONTRACT_VERSION (v30: the guardian allowance limits and the two playbook reads)
     'constant.market.max_live_markets': 196n,
     'constant.market.max_stored_markets': 2240n,
     'constant.market.max_live_external_markets': 128n,
@@ -202,6 +202,52 @@ test('FE-R1 bounds are exactly 02 §9\'s frozen values', () => {
     assert.equal(presence.present, true, `${surface} absent from metadata`);
     const actual = decodeUint(layoutValue(presence));
     assert.equal(actual, expected, `${surface}: chain says ${actual}, 02 §9 freezes ${expected}`);
+  }
+});
+
+test('the guardian allowance meters have both halves on chain (02 §9 v30; 11 §11.8.2)', () => {
+  // An allowance meter is a *used counter* and a *limit*. `Guardian.Allowances` carries
+  // only the counters, so until contract v30 the propose precondition of 11 §11.8.2
+  // ("allowance remaining for the power") had no right-hand side and the only client that
+  // could render it was one that supplied the numbers itself — which 15 §2's INV-FE-1
+  // forbids twice over: an unsourced value must not be shown as verified and must not
+  // satisfy a precondition.
+  //
+  // The expectations are transcribed from 06 §5.2's allowance table, NOT read back from
+  // the recording. Reading them back would assert that the chain agrees with itself.
+  const limits = {
+    'constant.guardian.delay_once_allowance_per_epoch': 2n,          // delay_once, per epoch
+    'constant.guardian.force_rerun_allowance_per_epoch': 1n,         // force_rerun, per epoch
+    'constant.guardian.pause_intake_allowance': 1n,                  // pause_intake, per window
+    'constant.guardian.pause_intake_allowance_window_epochs': 4n,    // ...and the window
+  };
+  const runtime = createMockRuntime(bundle);
+  for (const [surface, expected] of Object.entries(limits)) {
+    const presence = metadataPresence(runtime, surface, 'constant');
+    assert.equal(presence.present, true, `${surface} absent from metadata`);
+    const actual = decodeUint(layoutValue(presence));
+    assert.equal(actual, expected, `${surface}: chain says ${actual}, 06 §5.2 states ${expected}`);
+  }
+  // The counter half must be frozen too, or the limits above measure nothing. A meter
+  // needs both reads, and 11 §11.8.2 forbids falling back to a literal when either fails.
+  assert.ok(bundle.fixtures.has('storage.guardian.allowances'), 'the used-counter half');
+  // `pause_intake` is windowed, not per-epoch, so its limit is two constants: a count
+  // without its window is not a rate, and a client comparing `pause_used_in_window`
+  // against the count alone shows an exhausted meter for a power that is available.
+  assert.equal(Object.keys(limits).filter((s) => s.includes('pause_intake')).length, 2);
+});
+
+test('the two playbook admissibility reads are frozen (02 §7.4 v30)', () => {
+  // `PlaybookNotRegistered` and `PlaybookAlreadyActive` are raised inside
+  // `guardian.approve_action` on the **dispatching** approval. A client that cannot read
+  // these two items collects four of the five signatures the emergency path is built on
+  // and is refused on the fifth — the scarcest signatures the protocol has.
+  const runtime = createMockRuntime(bundle);
+  for (const surface of ['storage.guardian.playbook_registered', 'storage.guardian.active_playbooks']) {
+    assert.ok(bundle.fixtures.has(surface), `${surface} has no fixture`);
+    const presence = metadataPresence(runtime, surface, 'storage');
+    assert.equal(presence.present, true, `${surface}: ${presence.detail}`);
+    assert.equal(presence.layout_matches, true, `${surface}: ${presence.detail}`);
   }
 });
 

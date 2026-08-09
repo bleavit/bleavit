@@ -347,14 +347,15 @@ class FrontendBudgets(unittest.TestCase):
 
     def test_a_drifted_raw_blob_size_fails(self) -> None:
         # 470_546 -> 472_998 at contract v29: `bond_quote` and `treasury_streams` and their
-        # view types enter the metadata, so the committed blob is larger. The anchor moves
-        # with the measurement by design — this test proves the gate notices a drift, and a
-        # stale anchor would make it silently unable to apply its own mutation.
+        # view types enter the metadata, so the committed blob is larger. 472_998 -> 473_749
+        # at v30, which adds four guardian allowance metadata constants and their docs. The
+        # anchor moves with the measurement by design — this test proves the gate notices a
+        # drift, and a stale anchor would make it silently unable to apply its own mutation.
         self.assert_mutation_caught(
             ARTIFACT_GATE,
-            "const MEASURED_BLOB_RAW_BYTES = 472_998;",
+            "const MEASURED_BLOB_RAW_BYTES = 473_749;",
             "const MEASURED_BLOB_RAW_BYTES = 500_000;",
-            "publishes measured blob raw size as 472998",
+            "publishes measured blob raw size as 473749",
         )
 
     def test_moving_the_published_metadata_cell_without_the_gate_fails(self) -> None:

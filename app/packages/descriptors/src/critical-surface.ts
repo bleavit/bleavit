@@ -1,5 +1,5 @@
 /**
- * GENERATED — do not edit. Source: `tools/release/surface-manifest.json` (contract v29).
+ * GENERATED — do not edit. Source: `tools/release/surface-manifest.json` (contract v30).
  * Regenerate: `pnpm -C app run surface:generate`; verified by `pnpm -C app run surface:check`.
  *
  * 10 §5.2's `CRITICAL_SURFACE`: every runtime API, storage item, constant and event the
@@ -29,7 +29,7 @@ export interface CriticalSurfaceEntry {
   readonly citation: string;
 }
 
-export const INTEGRATION_CONTRACT_VERSION = 29;
+export const INTEGRATION_CONTRACT_VERSION = 30;
 
 /** Manifest entries with no metadata surface to probe (raw fixed-layout key, chain properties). */
 export const UNPROBED_MANIFEST_ENTRIES = 2;
@@ -91,9 +91,13 @@ export type SurfaceId =
   | "constant.execution_guard.max_payload_bytes"
   | "constant.execution_guard.max_runtime_code_bytes"
   | "constant.execution_guard.timelock_floor"
+  | "constant.guardian.delay_once_allowance_per_epoch"
+  | "constant.guardian.force_rerun_allowance_per_epoch"
   | "constant.guardian.guardian_bond"
   | "constant.guardian.guardian_seats"
   | "constant.guardian.guardian_threshold"
+  | "constant.guardian.pause_intake_allowance"
+  | "constant.guardian.pause_intake_allowance_window_epochs"
   | "constant.guardian.playbook_freeze_window_blocks"
   | "constant.identity.contract_version"
   | "constant.identity.ss58_prefix"
@@ -292,10 +296,12 @@ export type SurfaceId =
   | "storage.execution_guard.queue"
   | "storage.execution_guard.ratifications"
   | "storage.foreign_assets.account"
+  | "storage.guardian.active_playbooks"
   | "storage.guardian.allowances"
   | "storage.guardian.approvals"
   | "storage.guardian.members"
   | "storage.guardian.pending_actions"
+  | "storage.guardian.playbook_registered"
   | "storage.identity.parachain_id"
   | "storage.identity.usdc_asset"
   | "storage.identity.usdc_metadata"
@@ -386,9 +392,13 @@ export const CRITICAL_SURFACE: readonly CriticalSurfaceEntry[] = [
   { id: "constant.execution_guard.max_payload_bytes", compatGroup: "constants", pallet: "ExecutionGuard", member: "MaxPayloadBytes", required: true, citation: "02 §9" },
   { id: "constant.execution_guard.max_runtime_code_bytes", compatGroup: "constants", pallet: "ExecutionGuard", member: "MaxRuntimeCodeBytes", required: true, citation: "02 §9" },
   { id: "constant.execution_guard.timelock_floor", compatGroup: "constants", pallet: "ExecutionGuard", member: "ExecutionTimelockFloor", required: true, citation: "02 §9" },
+  { id: "constant.guardian.delay_once_allowance_per_epoch", compatGroup: "constants", pallet: "Guardian", member: "DelayOnceAllowancePerEpoch", required: true, citation: "02 §9" },
+  { id: "constant.guardian.force_rerun_allowance_per_epoch", compatGroup: "constants", pallet: "Guardian", member: "ForceRerunAllowancePerEpoch", required: true, citation: "02 §9" },
   { id: "constant.guardian.guardian_bond", compatGroup: "constants", pallet: "Guardian", member: "GuardianBond", required: true, citation: "02 §9" },
   { id: "constant.guardian.guardian_seats", compatGroup: "constants", pallet: "Guardian", member: "GuardianSeats", required: true, citation: "02 §9" },
   { id: "constant.guardian.guardian_threshold", compatGroup: "constants", pallet: "Guardian", member: "GuardianThreshold", required: true, citation: "02 §9" },
+  { id: "constant.guardian.pause_intake_allowance", compatGroup: "constants", pallet: "Guardian", member: "PauseIntakeAllowance", required: true, citation: "02 §9" },
+  { id: "constant.guardian.pause_intake_allowance_window_epochs", compatGroup: "constants", pallet: "Guardian", member: "PauseIntakeAllowanceWindowEpochs", required: true, citation: "02 §9" },
   { id: "constant.guardian.playbook_freeze_window_blocks", compatGroup: "constants", pallet: "Guardian", member: "PlaybookFreezeWindowBlocks", required: true, citation: "02 §9" },
   { id: "constant.identity.contract_version", compatGroup: "constants", pallet: "Constitution", member: "INTEGRATION_CONTRACT_VERSION", required: true, citation: "02 §8; 02 §13" },
   { id: "constant.identity.ss58_prefix", compatGroup: "constants", pallet: "System", member: "SS58Prefix", required: true, citation: "02 §8" },
@@ -587,10 +597,12 @@ export const CRITICAL_SURFACE: readonly CriticalSurfaceEntry[] = [
   { id: "storage.execution_guard.queue", compatGroup: "query", pallet: "ExecutionGuard", member: "Queue", required: true, citation: "02 §7.4" },
   { id: "storage.execution_guard.ratifications", compatGroup: "query", pallet: "ExecutionGuard", member: "Ratifications", required: true, citation: "02 §7.4" },
   { id: "storage.foreign_assets.account", compatGroup: "query", pallet: "ForeignAssets", member: "Account", required: true, citation: "02 §7.4; 02 §8" },
+  { id: "storage.guardian.active_playbooks", compatGroup: "query", pallet: "Guardian", member: "ActivePlaybooks", required: true, citation: "02 §7.4 guardian active playbooks; 11 §11.8.2 approve row (PlaybookAlreadyActive)" },
   { id: "storage.guardian.allowances", compatGroup: "query", pallet: "Guardian", member: "Allowances", required: true, citation: "02 §7.4 guardian allowances" },
   { id: "storage.guardian.approvals", compatGroup: "query", pallet: "Guardian", member: "Approvals", required: true, citation: "02 §7.4 guardian approvals; 11 §11.8.2 row 3" },
   { id: "storage.guardian.members", compatGroup: "query", pallet: "Guardian", member: "Members", required: true, citation: "02 §7.4 guardian membership" },
   { id: "storage.guardian.pending_actions", compatGroup: "query", pallet: "Guardian", member: "PendingActions", required: true, citation: "02 §7.4 guardian pending actions; 11 §11.8.2 row 1" },
+  { id: "storage.guardian.playbook_registered", compatGroup: "query", pallet: "Guardian", member: "PlaybookRegistered", required: true, citation: "02 §7.4 guardian playbook registry; 11 §11.8.2 approve row (PlaybookNotRegistered)" },
   { id: "storage.identity.parachain_id", compatGroup: "query", pallet: "ParachainInfo", member: "ParachainId", required: true, citation: "02 §8" },
   { id: "storage.identity.usdc_asset", compatGroup: "query", pallet: "ForeignAssets", member: "Asset", required: true, citation: "02 §8" },
   { id: "storage.identity.usdc_metadata", compatGroup: "query", pallet: "ForeignAssets", member: "Metadata", required: true, citation: "02 §8" },

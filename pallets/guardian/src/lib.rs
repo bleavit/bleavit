@@ -1037,6 +1037,33 @@ pub mod pallet {
         fn playbook_freeze_window_blocks() -> BlockNumber {
             futarchy_primitives::kernel::PLAYBOOK_FREEZE_WINDOW_BLOCKS
         }
+        /// 06 §5.2 allowance table: `delay_once`, 2 per epoch.
+        ///
+        /// [`Allowances`] stores the *used* counter alone, so the limit a client
+        /// compares it against has no storage representation. 02 §9 freezes this
+        /// name for that comparison (13 §1 reading rule 3).
+        #[pallet::constant_name(DelayOnceAllowancePerEpoch)]
+        fn delay_once_allowance_per_epoch() -> u8 {
+            guardian_core::DELAY_ONCE_ALLOWANCE_PER_EPOCH
+        }
+        /// 06 §5.2 allowance table: `force_rerun`, 1 per epoch.
+        #[pallet::constant_name(ForceRerunAllowancePerEpoch)]
+        fn force_rerun_allowance_per_epoch() -> u8 {
+            guardian_core::FORCE_RERUN_ALLOWANCE_PER_EPOCH
+        }
+        /// 06 §5.2 allowance table: the `pause_intake` window, 4 epochs. The
+        /// pair below is one allowance — `PauseIntakeAllowance` uses per
+        /// `PauseIntakeAllowanceWindowEpochs`-epoch window — so a client that
+        /// reads one without the other cannot render the meter.
+        #[pallet::constant_name(PauseIntakeAllowanceWindowEpochs)]
+        fn pause_intake_allowance_window_epochs() -> EpochId {
+            guardian_core::PAUSE_INTAKE_ALLOWANCE_WINDOW_EPOCHS
+        }
+        /// 06 §5.2 allowance table: `pause_intake`, 1 per window.
+        #[pallet::constant_name(PauseIntakeAllowance)]
+        fn pause_intake_allowance() -> u8 {
+            guardian_core::PAUSE_INTAKE_ALLOWANCE
+        }
     }
 
     #[pallet::genesis_config]
