@@ -25,6 +25,7 @@ import {
   RENDERING_STATES,
   TERMINAL_STATES,
   reduce,
+  rendersUsableSurface,
   signingEnabled,
   transitionEdges,
 } from '@bleavit/chain-client';
@@ -64,6 +65,30 @@ function diagramEdges(): ReadonlySet<string> {
   }
   assert.ok(edges.size > 15, `parsed only ${edges.size} edges — the parser has stopped matching`);
   return edges;
+}
+
+/**
+ * The one line of doc 10 containing `needle`, refusing if there is not exactly one.
+ *
+ * Zero matches is the vacuity case: the assertion below it then holds over nothing. Two is
+ * worse — it silently picks the first, so an edit elsewhere changes which sentence binds.
+ */
+function theSpecLine(needle: string): string {
+  const lines = readFileSync(DOC, 'utf8').split('\n').filter((line) => line.includes(needle));
+  assert.equal(lines.length, 1, `expected exactly one line of doc 10 containing ${JSON.stringify(needle)}`);
+  return lines[0] as string;
+}
+
+/** A real boot, driven event by event, parked at `CompatCheck` with the probe still out. */
+function bootToCompatCheck(): BootSession {
+  const path = [
+    'shell-parsed', 'storage-open', 'worker-up', 'relay-added', 'relay-finality-verified',
+    'first-finalized-para-head', 'genesis-matches',
+  ] as const satisfies readonly PayloadFreeEvent[];
+  let s = INITIAL_SESSION;
+  for (const type of path) s = reduce(s, { type });
+  assert.equal(s.state, 'CompatCheck', 'the boot path no longer reaches the compat probe');
+  return s;
 }
 
 const SPEC = diagramEdges();
@@ -195,4 +220,100 @@ test('every non-terminal state can still reach a rendering state', () => {
     .filter((s) => !TERMINAL_STATES.has(s) && !reaches(s))
     .sort();
   assert.deepEqual(stranded, [], 'states from which no rendering surface is reachable');
+});
+
+/* ---------------------------------------------- FE-COMPAT-003: the state that renders nothing
+ *
+ * The test above is reachability, and reachability is exactly what masked this. `CompatCheck`
+ * can classify successfully, so a breadth-first walk out of `CompatUnavailable` reaches `Ready`
+ * and reports the state healthy — while a user whose probe never completes sits in the
+ * `CompatUnavailable` ⇄ `CompatCheck` cycle looking at nothing. A walk that passes *through* a
+ * state on its way somewhere better cannot say whether the state itself renders, and this state
+ * was added for precisely the person who never gets somewhere better.
+ *
+ * So the three tests below drive the cycle as a place to **live**, never as a place to pass.
+ */
+
+test('CompatUnavailable renders the surface 10 §3.1 hands it, not a blank screen', () => {
+  const bullet = theSpecLine('**`CompatUnavailable`**');
+  // §3.1 does not describe this state's surface, it *assigns* it another state's. The donor is
+  // read out of the sentence rather than named here, so moving the surface moves the binding.
+  const named = /renderable surface is `([A-Za-z]+)`'s/.exec(bullet);
+  assert.ok(named, `10 §3.1 no longer assigns CompatUnavailable a renderable surface: ${bullet}`);
+  const donor = named[1] as BootState;
+  assert.ok(RENDERING_STATES.has(donor), `${donor} does not itself render — the sentence is being read wrong`);
+  assert.ok(
+    RENDERING_STATES.has('CompatUnavailable'),
+    `10 §3.1 gives CompatUnavailable ${donor}'s renderable surface, and the machine renders nothing there`,
+  );
+});
+
+test('a probe that keeps failing still renders — the cycle is where the session lives', () => {
+  let s = reduce(bootToCompatCheck(), { type: 'compat-unavailable' });
+  assert.equal(s.state, 'CompatUnavailable');
+
+  const visited: BootState[] = [];
+  const holds = (session: BootSession, note: string): void => {
+    visited.push(session.state);
+    assert.ok(rendersUsableSurface(session), `${session.state} renders nothing ${note}`);
+    // The three properties §3.1 attaches to the outcome, checked wherever the cycle rests.
+    assert.equal(signingEnabled(session), false, `${session.state} permitted signing ${note}`);
+    assert.equal(session.compat, undefined, `${session.state} carried a mode nothing established ${note}`);
+    assert.equal(session.lastError, 'FE-COMPAT-003', `${session.state} lost the stated reason ${note}`);
+  };
+  holds(s, 'on the first failure');
+
+  // Ten probes, each one failing again. Nothing here ever classifies: a walk that ends at
+  // `Ready` would prove nothing about the state it passed through, which is the whole finding.
+  const cycle = ['compat-retry', 'compat-unavailable'] as const satisfies readonly PayloadFreeEvent[];
+  for (let attempt = 1; attempt <= 10; attempt += 1) {
+    for (const type of cycle) {
+      s = reduce(s, { type });
+      holds(s, `on attempt ${attempt}`);
+    }
+  }
+  // ...and the walk really did sit in the cycle rather than escaping it.
+  assert.deepEqual([...new Set(visited)].sort(), ['CompatCheck', 'CompatUnavailable']);
+});
+
+test('the first CompatCheck is a probe in flight, and claims no surface', () => {
+  // The control for the test above: `rendersUsableSurface` returning true everywhere satisfies
+  // it. A first boot has shown nothing but the skeleton §3.1's diagram opens with, and 10 §3.1
+  // assigns a renderable surface to `CompatUnavailable` and to nothing else on this path.
+  const first = bootToCompatCheck();
+  assert.equal(first.lastError, undefined);
+  assert.equal(rendersUsableSurface(first), false, 'a probe in flight claimed a surface it has not shown');
+
+  // The *retry* of a failed probe is the other case, and it is the one the finding names: the
+  // surface is already on screen, and a re-probe that blanked it would flicker the diagnostics
+  // away on every backoff — worse than the wrong verdict this state was added to stop.
+  const retry = reduce(reduce(first, { type: 'compat-unavailable' }), { type: 'compat-retry' });
+  assert.equal(retry.state, 'CompatCheck');
+  assert.ok(rendersUsableSurface(retry), 'the retry blanked a surface the user was already reading');
+
+  // `CompatCheck` stays out of the state-keyed set either way. It is not a place to rest — it
+  // is bounded by the probe's own timeout — and putting it in the reachability goal set above
+  // would make that test agree with itself for its two most interesting states.
+  assert.equal(RENDERING_STATES.has('CompatCheck'), false);
+});
+
+test('a retry that succeeds stops stating a reason that no longer holds', () => {
+  const retry = reduce(reduce(bootToCompatCheck(), { type: 'compat-unavailable' }), { type: 'compat-retry' });
+  const ready = reduce(retry, { type: 'compat-classified', mode: 'full' });
+  assert.equal(ready.state, 'Ready');
+  assert.equal(ready.compat, 'full');
+  assert.equal(ready.lastError, undefined, 'a healthy session kept reporting a probe that has since completed');
+
+  // ...and it clears the compat code only. A classification says nothing about storage, so
+  // `FE-BOOT-001` survives it — the session would otherwise forget why it is memory-only.
+  let s = reduce(INITIAL_SESSION, { type: 'shell-parsed' });
+  s = reduce(s, { type: 'storage-failed' });
+  const rest = [
+    'worker-up', 'relay-added', 'relay-finality-verified', 'first-finalized-para-head', 'genesis-matches',
+  ] as const satisfies readonly PayloadFreeEvent[];
+  for (const type of rest) s = reduce(s, { type });
+  s = reduce(s, { type: 'compat-classified', mode: 'full' });
+  assert.equal(s.state, 'Ready');
+  assert.equal(s.memoryOnly, true);
+  assert.equal(s.lastError, 'FE-BOOT-001', 'the compat edge cleared an error it did not resolve');
 });

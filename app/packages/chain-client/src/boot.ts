@@ -109,6 +109,22 @@ export const TERMINAL_STATES: ReadonlySet<BootState> = new Set<BootState>(['Wron
  * deliberately: 10 §5.3 makes it an *exceptional* state indicating process failure, but a
  * bounded and navigable one — it displays the newer-release pointer read from the
  * fixed-layout `ReleaseChannel` raw key, which is readable without current metadata.
+ *
+ * **`CompatUnavailable` is here because §3.1 puts it here** (added 2026-08-09). That bullet
+ * does not describe the state's surface, it *assigns* it another state's: *"the renderable
+ * surface is `WorkerFailed`'s, with the stated reason"*. Leaving it out was the SQ-1011 repair
+ * producing a silent screen in place of a wrong one — the state exists for the user whose probe
+ * never completes, and that user is exactly the one it rendered nothing to. Nothing caught it:
+ * `RENDERING_STATES` is the goal set of a *reachability* test, and `CompatCheck` can classify,
+ * so a walk out of `CompatUnavailable` reached `Ready` and reported the state healthy.
+ *
+ * `CompatCheck` is deliberately **not** here, and the distinction is *resting* rather than
+ * *passing through*. It is bounded by the probe's own timeout and always leaves — to a mode, or
+ * to `CompatUnavailable` — so a first boot sitting in it has shown the skeleton the diagram
+ * opens with and claims nothing. Adding it would also make the reachability test agree with
+ * itself for the two states this defect lived in. What a retried probe owes the user instead is
+ * continuity, and that is a property of the session rather than of the state name — see
+ * {@link rendersUsableSurface}.
  */
 export const RENDERING_STATES: ReadonlySet<BootState> = new Set<BootState>([
   'Ready',
@@ -117,7 +133,28 @@ export const RENDERING_STATES: ReadonlySet<BootState> = new Set<BootState>([
   'ReadOnlyIncompatible',
   'WorkerFailed',
   'WasmFailed',
+  'CompatUnavailable',
 ]);
+
+/**
+ * Whether this session has a usable surface on screen, rather than the boot skeleton.
+ *
+ * Takes a session and not a bare state, because one state's answer depends on how it was
+ * reached. `CompatUnavailable` retries into `CompatCheck` on a 1 s→60 s backoff (10 §3.1), so a
+ * probe that keeps failing leaves the session cycling between the two for as long as the fault
+ * lasts. Answering from the state name alone would tear the diagnostics down on every attempt
+ * and put them back — a flicker, once per backoff, forever, on the one screen whose whole job
+ * is to explain why nothing else works.
+ *
+ * The session distinguishes the two `CompatCheck`s by the reason it is still stating: a first
+ * probe carries no compat error, and a re-probe of an unestablished one carries `FE-COMPAT-003`
+ * until a classification completes. So this adds no state, no compatibility mode, and no row to
+ * §3.2's table — the fourth outcome stays a claim about the client, exactly as §3.1 requires.
+ */
+export function rendersUsableSurface(session: BootSession): boolean {
+  if (RENDERING_STATES.has(session.state)) return true;
+  return session.state === 'CompatCheck' && session.lastError === 'FE-COMPAT-003';
+}
 
 /**
  * Signing availability. `Degraded` is a health flag orthogonal to compat (10 §3.2), so it
@@ -197,7 +234,13 @@ export function reduce(session: BootSession, event: BootEvent): BootSession {
       // *directly* into restricted with named disabled surfaces rather than claiming
       // Ready and failing lazily.
       if (event.type === 'compat-classified') {
-        return at(COMPAT_TARGET[event.mode], { compat: event.mode });
+        // A completed classification retires `FE-COMPAT-003` and **only** that code: it is the
+        // one error this edge resolves. Clearing `lastError` outright would also erase
+        // `FE-BOOT-001`, and a session that forgot why it is memory-only would stop labelling it.
+        return at(COMPAT_TARGET[event.mode], {
+          compat: event.mode,
+          lastError: session.lastError === 'FE-COMPAT-003' ? undefined : session.lastError,
+        });
       }
       // The probe could not complete. **`compat` is cleared, not left**: §3.2 forbids
       // carrying a previously established mode across a check the client was unable to
@@ -210,7 +253,14 @@ export function reduce(session: BootSession, event: BootEvent): BootSession {
       // Non-terminal by ruling: the client retries into `CompatCheck` on the same backoff
       // `SyncDegraded` uses. Nothing else moves it, and it names no disabled surface on the
       // way out because nothing was examined.
-      return event.type === 'compat-retry' ? at('CompatCheck', { lastError: undefined }) : session;
+      //
+      // **The retry keeps `FE-COMPAT-003`**, unlike the `user-retry` edges below, and the
+      // asymmetry is deliberate. Those restart a boot a user asked to restart, so a cleared
+      // banner is the answer to a button. This one fires on a timer nobody pressed, and
+      // compatibility stays unestablished until a classification *completes* — so dropping the
+      // code here would retract §3.1's *"with the stated reason"* mid-cycle and, through
+      // `rendersUsableSurface`, blank the surface the retry exists to keep.
+      return event.type === 'compat-retry' ? at('CompatCheck') : session;
 
     case 'Ready':
     case 'ReadyRestricted':
