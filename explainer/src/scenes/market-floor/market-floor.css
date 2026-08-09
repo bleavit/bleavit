@@ -1,0 +1,121 @@
+/* Scene-local rules only. Everything structural comes from ui/theme.css. */
+
+/* A dense books table cannot be narrowed without losing a column, so it scrolls
+   inside its own panel rather than forcing the rail wider. */
+.mf-scroll {
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.mf-scroll > table {
+  min-width: 460px;
+}
+
+/* The theme's `th` is written for column headers — uppercase, 11px, nowrap. A
+   row header is a label for its row, so it reads as a cell that happens to name
+   the row rather than as a second header band. */
+.mf-rail tbody th[scope='row'] {
+  background: var(--well);
+  padding: var(--sp-2);
+  vertical-align: top;
+  font-size: var(--t-caption);
+  color: var(--ink);
+  text-transform: none;
+  letter-spacing: -0.006em;
+  white-space: normal;
+}
+
+.mf-book {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.mf-book__name {
+  font-family: var(--font-mono);
+  font-size: var(--t-caption);
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+
+.mf-book__q {
+  color: var(--ink-2);
+  font-size: var(--t-micro);
+  line-height: var(--lh-micro);
+  max-width: 30ch;
+}
+
+.mf-formula {
+  font-family: var(--font-mono);
+  font-size: var(--t-caption);
+  line-height: var(--lh-body);
+  background: var(--surface);
+  padding: var(--sp-2) var(--sp-3);
+  margin: 0 0 var(--sp-3);
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+/* Definition lists are the right element for a named quantity and its reading:
+   the pairing is in the markup, not only in the layout. */
+.mf-dl {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 2px var(--sp-3);
+  margin: 0;
+  font-size: var(--t-caption);
+}
+
+.mf-dl dt {
+  padding: var(--sp-1) 0;
+  color: var(--ink-2);
+  min-width: 0;
+}
+
+.mf-dl dd {
+  padding: var(--sp-1) 0;
+  margin: 0;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.mf-dl dt.mf-dl__rule,
+.mf-dl dd.mf-dl__rule {
+  border-top: 1px solid var(--ink-3);
+  margin-top: var(--sp-2);
+  padding-top: var(--sp-2);
+}
+
+.mf-ol {
+  margin: 0 0 var(--sp-3);
+  padding-left: 1.4em;
+  font-size: var(--t-caption);
+  line-height: var(--lh-body);
+}
+
+.mf-ol li + li {
+  margin-top: var(--sp-1);
+}
+
+.mf-pair {
+  white-space: nowrap;
+}
+
+/* Which doc 13 key a bound came from. It sits under the number because the two
+   are one reading: the threshold is meaningless without the rule that set it. */
+.mf-boundkey {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: var(--t-micro);
+  line-height: var(--lh-micro);
+  letter-spacing: 0;
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+
+/* The spot/TWAP pair is a pair: the separator is part of the reading, so it is
+   drawn rather than left to a gap that a wrapping cell would swallow. */
+.mf-pair__sep {
+  color: var(--ink-3);
+  padding: 0 4px;
+}

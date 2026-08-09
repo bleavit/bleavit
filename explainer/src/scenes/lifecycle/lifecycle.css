@@ -1,0 +1,75 @@
+/* Scene-local rules only. Everything colour-bearing stays in the design system:
+   nothing in here may introduce a branch tint, because a proposal state is never
+   a branch instrument. */
+
+.lc-chipline {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  margin-bottom: var(--sp-2);
+}
+
+.lc-scroll {
+  overflow-x: auto;
+}
+
+.lc-id {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.lc-state {
+  white-space: nowrap;
+}
+
+/* A walked row is marked structurally, not by hue: a 3px ink edge on the row's
+   leading cell, plus a glyph in the id cell that survives greyscale. The glyph is
+   decoration — the fact itself is carried to assistive technology by an `sr-only`
+   span in the same cell, because generated content is not a dependable channel. */
+.lc-walked > td {
+  box-shadow: inset 3px 0 0 var(--ink);
+}
+
+.lc-walked .lc-id::before {
+  content: '\25B8\00a0';
+}
+
+.lc-note,
+.lc-blurb {
+  color: var(--ink-2);
+  font-size: var(--t-micro);
+  line-height: var(--lh-micro);
+}
+
+.lc-blurb {
+  padding-top: 0;
+}
+
+/* The guard/blurb continuation row carries no top gap of its own so it reads as
+   the second line of the row above it rather than as a row in its own right. */
+.lc-cont > td {
+  padding-top: 0;
+}
+
+.lc-ol {
+  margin: 0;
+  padding-left: var(--sp-4);
+  font-size: var(--t-caption);
+  line-height: var(--lh-body);
+}
+
+.lc-ol li + li {
+  margin-top: var(--sp-2);
+}
+
+/* This scene sets protocol type names in prose more than any other, so `code` needs
+   the design system's mono rather than the browser default. `.lc-note` is added
+   alongside the shared `panel__note` on the notes that carry them, so the rule stays
+   scene-local instead of restyling a class the whole app owns. */
+.lc-ol code,
+.lc-note code {
+  font-family: var(--font-mono);
+  font-size: 0.95em;
+}

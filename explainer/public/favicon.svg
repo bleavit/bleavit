@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-14 -9 118 118" width="32" height="32">
+  <!-- The Bleavit mark: a B split by a vertical seam, with a chevron notch
+       meeting that seam from either side. Traced from assets/Bleavit-logo.png. -->
+  <rect x="-14" y="-9" width="118" height="118" fill="#0a0f24"/>
+  <path fill="#eef2ff" d="M34.33 0 L43 0 L43 42.5 L49.67 49.17 L43 55.83 L43 100 L34.33 100 L34.33 55.83 L27.67 49.17 L34.33 42.5 Z M0 4.5 L27 4.5 L27 34.5 L12.5 48.67 L27 63.33 L27 94.33 L0 94.33 Z M50.17 4.5 L72.33 4.5 A17.4 20.35 0 0 1 72.33 45.2 L57.17 45.33 L52.17 40.33 L72 23.83 L50.17 23.67 Z M57.5 53.33 L72.5 53.33 A18 20.6 0 0 1 72.5 94.5 L50.17 94.5 L50.17 74 L72 73.83 L52.33 58.33 Z"/>
+</svg>

@@ -1,0 +1,89 @@
+/*
+ * Scene-local rules for scene 01.
+ *
+ * Three of these are semantic rather than cosmetic:
+ *
+ *  - `.chain-plain` prints the plain-language gloss under a technical name —
+ *    the module's own identifier, or the exact call the runtime refuses. Both
+ *    columns have to be on screen at once: a reader who only ever sees
+ *    "Write straight into the chain's memory" cannot search for the rule, and a
+ *    reader who only sees `system.set_storage` has not been told anything. This
+ *    rule is the join between the two vocabularies.
+ *  - `.chain-grouprow` marks the runtime's own grouping of its modules. The
+ *    groups are the blank lines in `construct_runtime!` and carry real meaning
+ *    — everything above index 50 exists on other chains too — so they are a
+ *    heading inside the table rather than a colour on its rows.
+ *  - `.chain-calls` is a list, not a comma-joined string, because these are
+ *    identifiers a reader will want to copy one at a time.
+ */
+
+.chain-scroll {
+  overflow-x: auto;
+  margin: var(--sp-3) 0;
+}
+
+/* Row headers keep the plate so a table does not look torn along its left edge. */
+.chain-table th[scope='row'] {
+  background: var(--well);
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: var(--t-caption);
+  font-weight: 500;
+  color: var(--ink);
+  white-space: normal;
+  vertical-align: top;
+}
+
+.chain-table th[scope='row'].numeric {
+  font-family: var(--font-mono);
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+
+.chain-table td {
+  vertical-align: top;
+}
+
+.chain-grouprow th {
+  background: var(--surface);
+  border-top: 1px solid var(--line);
+  text-transform: none;
+  letter-spacing: 0;
+  text-align: left;
+  padding-top: var(--sp-3);
+}
+
+.chain-groupname {
+  display: block;
+  font-size: var(--t-body);
+  font-weight: 650;
+  color: var(--ink);
+}
+
+.chain-callname {
+  display: block;
+  font-size: var(--t-caption);
+  color: var(--ink);
+}
+
+.chain-plain {
+  display: block;
+  margin-top: 2px;
+  font-family: var(--font-sans);
+  font-size: var(--t-caption);
+  line-height: var(--lh-caption);
+  font-weight: 400;
+  color: var(--ink-2);
+}
+
+.chain-calls {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.chain-calls li {
+  font-size: var(--t-caption);
+  line-height: var(--lh-caption);
+  white-space: nowrap;
+}

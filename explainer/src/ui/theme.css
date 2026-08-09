@@ -1,0 +1,541 @@
+/*
+ * The Bleavit explainer design system — "deep field, five materials".
+ *
+ * The first version of this app was grey: a cool drafting film with two accents
+ * used sparingly. It was disciplined and it was unreadable as a *machine* — every
+ * scene looked like the same tax form, and nothing told you what kind of thing
+ * you were looking at.
+ *
+ * This version puts the colour to work instead of removing it. The protocol is
+ * built out of exactly five kinds of material, and each one owns a hue:
+ *
+ *   TIME       blue     epochs, phases, windows, timelocks, the dial
+ *   ACCEPT     teal     the ACCEPT branch and its instruments
+ *   REJECT     amber    the REJECT branch and its instruments
+ *   JUDGEMENT  violet   gates, decision steps, guard checks, dispute rounds
+ *   DANGER     rose     freeze, dead-man, veto, haircut — safety states only
+ *
+ * Everything unconditional — the Baseline book, plain USDC, a settled fact —
+ * takes the page's own accent rather than a material hue. The rule that matters
+ * is that it may not wear a *branch* colour, and the accent is neither.
+ *
+ * Two consequences worth stating, because they constrain every screen:
+ *
+ *  1. `--accept` / `--reject` are reserved to *branch instruments*. They are
+ *     forbidden on buttons, links, focus rings, "success"/"danger", and above
+ *     all on `Rejected(RejectReason)` chips. Rejection followed by measurement is
+ *     the most common healthy path in this protocol; colouring it as failure
+ *     would misteach it.
+ *  2. `--alarm` is reserved, exhaustively, to genuine safety states. Not to
+ *     rejections, not to form validation, not to the standing simulated-data
+ *     disclosure.
+ *
+ * The five hues sit at roughly 168 / 32 / 214 / 268 / 344 degrees — far enough
+ * apart that the branch pair also differs in luminance, which is what carries it
+ * through deuteranopia and protanopia.
+ */
+
+/* Archivo Variable carries both axes we use: weight 100–900 and width 62–125%.
+   One 90 KB latin file does display, UI and data, and the width axis is the
+   typographic signature — condensed 88% for labels, expanded 112–118% for
+   titles and headline numbers. IBM Plex Mono carries parameter keys, storage
+   keys, citations and hashes, where a fixed advance is the point. */
+@font-face {
+  font-family: 'Archivo Variable';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 100 900;
+  font-stretch: 62% 125%;
+  src: url('@fontsource-variable/archivo/files/archivo-latin-wdth-normal.woff2')
+    format('woff2-variations');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+    U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215,
+    U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: 'IBM Plex Mono';
+  font-style: normal;
+  font-display: swap;
+  font-weight: 400;
+  src: url('@fontsource/ibm-plex-mono/files/ibm-plex-mono-latin-400-normal.woff2')
+    format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC,
+    U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215,
+    U+FEFF, U+FFFD;
+}
+
+:root {
+  --font-sans:
+    'Archivo Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto,
+    sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  /* A data scale: every step exists for one named job, all on a 4px rhythm. */
+  --t-micro: 0.6875rem; /* 11px — provenance tags, units, axis ticks. Hard floor. */
+  --t-caption: 0.8125rem; /* 13px — dense table cells, chips */
+  --t-body: 0.9375rem; /* 15px — default UI */
+  --t-prose: 1rem; /* 16px — explainer paragraphs, max 66ch */
+  --t-lede: 1.1875rem; /* 19px — the plain-language answer. Deliberately larger. */
+  --t-sub: 1.375rem; /* 22px — section headings, key numbers */
+  --t-head: 2rem; /* 32px — scene titles */
+  --t-hero: 3.25rem; /* 52px — the one big number per scene */
+
+  --lh-micro: 1rem;
+  --lh-caption: 1.125rem;
+  --lh-body: 1.375rem;
+  --lh-prose: 1.5rem;
+  --lh-lede: 1.75rem;
+  --lh-sub: 1.75rem;
+  --lh-head: 2.25rem;
+  --lh-hero: 3.25rem;
+
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+  --sp-7: 48px;
+
+  /* Motion. Four durations, no others. Time-representing motion is linear:
+     easing a countdown would be a lie about the rate of time. */
+  --d-1: 120ms;
+  --d-2: 240ms;
+  --d-3: 320ms;
+  --d-4: 400ms;
+  --ease-in: cubic-bezier(0.2, 0, 0, 1);
+  --ease-out: cubic-bezier(0.4, 0, 1, 1);
+
+  --grid-columns: 21;
+  --grid-gutter: 16px;
+  --content-max: 1560px;
+
+  /* Sticky offsets. The stage pins below the header and the scene nav, so both
+     heights have to be tokens rather than magic numbers in three files. */
+  --h-header: 60px;
+  --h-nav: 44px;
+
+  color-scheme: dark light;
+}
+
+/*
+ * Dark is the default here, and it is a *field*, not an absence: a deep indigo
+ * that all five hues sit on at full chroma. Light is a cool blue paper, where
+ * the same five hues must darken to hold contrast — different colours, same
+ * meanings, same names.
+ */
+:root,
+:root[data-theme='dark'] {
+  --ground: #0a0f24;
+  --surface: #121a38;
+  --well: #1a2450;
+  --line: #2b3868;
+  --ink: #eef2ff;
+  --ink-2: #a7b4e0;
+  --ink-3: #6675ab; /* ticks, rules, leader lines. NEVER body text. */
+
+  --time: #4a9eff;
+  --accept: #1fd9b4;
+  --reject: #ff9f45;
+  --judge: #a382ff;
+  --alarm: #ff5c84;
+
+  /* Chrome hues — page wayfinding, never data. See registry.ts. */
+  --c-clock: #3ba9ff;
+  --c-path: #9b7bff;
+  --c-flow: #e07ae8;
+  --c-guard: #a8d93b;
+
+  --on-accent: #06091a; /* text drawn on a filled accent field */
+  --hatch-ink: rgb(167 180 224 / 34%);
+  --shadow: 0 1px 0 rgb(255 255 255 / 4%);
+}
+
+:root[data-theme='light'] {
+  --ground: #dde4f7;
+  --surface: #ffffff;
+  --well: #eaeffc;
+  --line: #b9c5e6;
+  --ink: #0a0f24;
+  --ink-2: #4a5680;
+  --ink-3: #8b97bd;
+
+  --time: #0b62c4;
+  --accept: #00786a;
+  --reject: #a2530a;
+  --judge: #5b3fc4;
+  --alarm: #c1114b;
+
+  --c-clock: #0e6ec9;
+  --c-path: #6741d9;
+  --c-flow: #a52bad;
+  --c-guard: #5a7a08;
+
+  --on-accent: #ffffff;
+  --hatch-ink: rgb(10 15 36 / 26%);
+  --shadow: 0 1px 2px rgb(10 15 36 / 8%);
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme='dark']) {
+    --ground: #dde4f7;
+    --surface: #ffffff;
+    --well: #eaeffc;
+    --line: #b9c5e6;
+    --ink: #0a0f24;
+    --ink-2: #4a5680;
+    --ink-3: #8b97bd;
+
+    --time: #0b62c4;
+    --accept: #00786a;
+    --reject: #a2530a;
+    --judge: #5b3fc4;
+    --alarm: #c1114b;
+
+    --c-clock: #0e6ec9;
+    --c-path: #6741d9;
+    --c-flow: #a52bad;
+    --c-guard: #5a7a08;
+
+    --on-accent: #ffffff;
+    --hatch-ink: rgb(10 15 36 / 26%);
+    --shadow: 0 1px 2px rgb(10 15 36 / 8%);
+  }
+}
+
+/*
+ * The scene accent. Each scene sets `--accent` to the hue of the material it is
+ * mostly made of, so the page changes colour as you move through the machine and
+ * you always know which room you are in. It is wayfinding, not decoration — and
+ * it never overrides a reserved hue locally: an ACCEPT plate is teal in every
+ * scene, including the violet ones.
+ */
+:root {
+  --accent: var(--time);
+  --accent-line: color-mix(in srgb, var(--accent) 55%, transparent);
+  --accent-wash: color-mix(in srgb, var(--accent) 12%, transparent);
+  --accent-glow: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: var(--t-body);
+  line-height: var(--lh-body);
+  font-weight: 400;
+  font-stretch: 100%;
+  letter-spacing: -0.004em;
+  /* Slashed zero is global, not decorative: an unslashed 0 beside an O in an
+     SS58 address is a phishing surface (doc 14, TH-39). */
+  font-variant-numeric: tabular-nums slashed-zero;
+  font-feature-settings: 'tnum' 1, 'zero' 1;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Re-asserted on numeric containers so a resetting style cannot strip it. */
+.num,
+td,
+th,
+[data-role='readout'] {
+  font-variant-numeric: tabular-nums slashed-zero;
+  font-feature-settings: 'tnum' 1, 'zero' 1;
+  letter-spacing: 0;
+}
+
+/* The protocol's constitution is written in ratios, so the app writes them the
+   same way: 3/21, not 0.143. */
+.kernel-fraction {
+  font-feature-settings: 'frac' 1, 'tnum' 1;
+  font-variant-numeric: diagonal-fractions;
+}
+
+.mono {
+  font-family: var(--font-mono);
+  letter-spacing: 0;
+  font-size: 0.94em;
+}
+
+/* Headings run expanded and heavy — the width axis is the signature, and it
+   echoes the wordmark's wide geometric stance. */
+h1,
+h2,
+h3,
+h4 {
+  margin: 0;
+  font-weight: 750;
+  font-stretch: 112%;
+  letter-spacing: -0.015em;
+}
+h1 {
+  font-size: var(--t-head);
+  line-height: var(--lh-head);
+  font-stretch: 118%;
+  font-weight: 800;
+}
+h2 {
+  font-size: var(--t-sub);
+  line-height: var(--lh-sub);
+}
+h3 {
+  font-size: var(--t-body);
+  line-height: var(--lh-body);
+  font-stretch: 106%;
+}
+
+p {
+  margin: 0 0 var(--sp-3);
+  max-width: 66ch;
+  text-wrap: pretty;
+}
+
+/* Labels run condensed — the opposite end of the same axis. Uppercase at 11/650
+   stands in for small caps; Archivo has none. Never a full sentence. */
+.label {
+  font-size: var(--t-micro);
+  line-height: var(--lh-micro);
+  font-weight: 650;
+  font-stretch: 88%;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--ink-2);
+}
+
+/* Radii are 0 everywhere. The only curves in this system are the dial's arcs and
+   the position chips — both curved because the thing they depict is. */
+button,
+input,
+select {
+  border-radius: 0;
+  font: inherit;
+  color: inherit;
+}
+
+/* Focus rides the scene accent. It is the one place the accent is allowed to act
+   as chrome, because a focus ring must be the loudest thing on screen and the
+   accent is already the loudest hue in the room. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 4px var(--ground);
+}
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+.skip-link {
+  position: absolute;
+  left: -9999px;
+  top: 0;
+  z-index: 100;
+  padding: var(--sp-2) var(--sp-4);
+  background: var(--accent);
+  color: var(--on-accent);
+  font-weight: 700;
+}
+.skip-link:focus {
+  left: 0;
+}
+
+/* --- Plates ---------------------------------------------------------------- */
+
+.plate {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  padding: var(--sp-4);
+}
+
+.plate--tight {
+  padding: var(--sp-3);
+}
+
+hr {
+  border: 0;
+  height: 1px;
+  background: var(--line);
+  margin: var(--sp-4) 0;
+}
+
+/* --- Material semantics ---------------------------------------------------- */
+
+.branch-accept {
+  color: var(--accept);
+}
+.branch-reject {
+  color: var(--reject);
+}
+.branch-baseline {
+  color: var(--ink);
+}
+.material-time {
+  color: var(--time);
+}
+.material-judge {
+  color: var(--judge);
+}
+
+.alarm {
+  color: var(--alarm);
+}
+
+/* --- The provenance hatch: 45 degrees, 1px on a 4px pitch ------------------- */
+
+.hatch {
+  background-image: repeating-linear-gradient(
+    45deg,
+    var(--hatch-ink) 0,
+    var(--hatch-ink) 1px,
+    transparent 1px,
+    transparent 4px
+  );
+}
+
+/* --- Tables ---------------------------------------------------------------- */
+
+table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: var(--t-caption);
+}
+
+th {
+  text-align: left;
+  font-size: var(--t-micro);
+  font-weight: 650;
+  font-stretch: 88%;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--ink-2);
+  padding: var(--sp-2);
+  white-space: nowrap;
+  border-bottom: 1px solid var(--line);
+}
+
+td {
+  background: transparent;
+  padding: var(--sp-2);
+  vertical-align: top;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 55%, transparent);
+}
+
+tbody tr:hover td {
+  background: var(--accent-wash);
+}
+
+td.numeric,
+th.numeric {
+  text-align: right;
+}
+
+/* --- Motion policy --------------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* --- The 21-column instrument plate ---------------------------------------
+
+   The named risk of this design: 21 has no halves. Every "50/50" resolves to
+   13+8 or 10+11, and every component library assumes 12. It is taken because
+   the 3D stage is 21 world units, the page is 21 columns and the epoch is 21
+   kernel fractions — so a tick in the canvas lands on a column edge in the DOM.
+   The stage/rail split is 12/9 because the diagram must stay square enough to
+   read while the rail stays wide enough for a table.                        */
+
+.grid21 {
+  display: grid;
+  grid-template-columns: repeat(var(--grid-columns), minmax(0, 1fr));
+  gap: var(--grid-gutter);
+  max-width: var(--content-max);
+  margin: 0 auto;
+  padding: 0 var(--sp-5);
+  align-items: start;
+}
+
+.col-stage {
+  grid-column: span 12;
+  min-width: 0;
+  /* The fix for the app's worst layout defect: the rail used to scroll for
+     thousands of pixels beside a column that had gone empty. Pinning the stage
+     turns that dead space into the thing the text is about. */
+  position: sticky;
+  top: calc(var(--h-header) + var(--h-nav) + var(--sp-4));
+}
+.col-rail {
+  grid-column: span 9;
+  min-width: 0;
+}
+.col-full {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+
+/* The two-column layout holds down to 1040px. It used to break at 1280, which
+   put a 1180px laptop — a very common width — into the stacked layout, where a
+   full-bleed 21:13 stage swallows the whole viewport and the rail is below the
+   fold entirely. */
+@media (max-width: 1039px) {
+  .col-stage,
+  .col-rail {
+    grid-column: 1 / -1;
+  }
+  /* Stacked, the stage sits above the rail, and a sticky element taller than
+     the viewport traps the scroll. */
+  .col-stage {
+    position: static;
+  }
+  /* It also has no reason to be 60% of the screen when it is full-bleed. */
+  .col-stage .stage {
+    max-height: 58vh;
+  }
+}
+
+@media (max-width: 767px) {
+  :root {
+    --grid-columns: 7; /* 21 / 3 preserves divisibility */
+    --grid-gutter: 10px;
+    --h-header: 54px;
+    --h-nav: 40px;
+    --t-head: 1.625rem;
+    --lh-head: 1.875rem;
+    --t-lede: 1.0625rem;
+    --lh-lede: 1.5rem;
+  }
+  .grid21 {
+    padding: 0 var(--sp-3);
+  }
+}
+
+/* --- Visually hidden, still announced -------------------------------------- */
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}

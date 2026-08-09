@@ -1,0 +1,259 @@
+{
+  "schema": "bleavit.chain-quote-agreement.v1",
+  "fee_bps": "30",
+  "trade_bounds": {
+    "min_trade": "1000000",
+    "max_trade_numerator": "1",
+    "max_trade_denominator": "4"
+  },
+  "cases": [
+    {
+      "name": "symmetric_start",
+      "q_long": "0",
+      "q_short": "0",
+      "b": "10000000000",
+      "amount": "1000000000",
+      "buy_long": {
+        "cost": "512494796",
+        "fee": "1537485",
+        "p_after_1e9": "524979187",
+        "max_trade": "2500000000",
+        "within_domain": true
+      },
+      "buy_short": {
+        "cost": "512494796",
+        "fee": "1537485",
+        "p_after_1e9": "475020812",
+        "max_trade": "2500000000",
+        "within_domain": true
+      },
+      "sell_long": {
+        "error": "ArithmeticOverflow"
+      },
+      "sell_short": {
+        "error": "ArithmeticOverflow"
+      },
+      "cost_raw_64x64": "127863086452026556600000",
+      "price_long_raw_64x64": "9223372036854775808"
+    },
+    {
+      "name": "after_v1_buy",
+      "q_long": "1000000000",
+      "q_short": "0",
+      "b": "10000000000",
+      "amount": "500000000",
+      "buy_long": {
+        "cost": "265603878",
+        "fee": "796812",
+        "p_after_1e9": "537429845",
+        "max_trade": "2500000000",
+        "within_domain": true
+      },
+      "buy_short": {
+        "cost": "240629880",
+        "fee": "721890",
+        "p_after_1e9": "512497396",
+        "max_trade": "2500000000",
+        "within_domain": true
+      },
+      "sell_long": {
+        "cost": "259370120",
+        "fee": "778111",
+        "p_after_1e9": "512497396",
+        "max_trade": "2500000000",
+        "within_domain": true
+      },
+      "sell_short": {
+        "error": "ArithmeticOverflow"
+      },
+      "cost_raw_64x64": "137316946777013275016000",
+      "price_long_raw_64x64": "9684156715447991831"
+    },
+    {
+      "name": "sub_unit_both_sides",
+      "q_long": "1234567",
+      "q_short": "7654321",
+      "b": "10000000000",
+      "amount": "3333333",
+      "buy_long": {
+        "cost": "1666271",
+        "fee": "4999",
+        "p_after_1e9": "499922839",
+        "max_trade": "2500000000",
+        "within_domain": true
+      },
+      "buy_short": {
+        "cost": "1667341",
+        "fee": "5003",
+        "p_after_1e9": "499756172",
+        "max_trade": "2500000000",
+        "within_domain": true
+      },
+      "sell_long": {
+        "error": "ArithmeticOverflow"
+      },
+      "sell_short": {
+        "cost": "1667062",
+        "fee": "5002",
+        "p_after_1e9": "499922839",
+        "max_trade": "2500000000",
+        "within_domain": true
+      },
+      "cost_raw_64x64": "127945081476170789048834",
+      "price_long_raw_64x64": "9220411447980101031"
+    },
+    {
+      "name": "sub_unit_small_book",
+      "q_long": "999999",
+      "q_short": "1",
+      "b": "4000000000",
+      "amount": "1000001",
+      "buy_long": {
+        "cost": "500095",
+        "fee": "1501",
+        "p_after_1e9": "500124999",
+        "max_trade": "1000000000",
+        "within_domain": true
+      },
+      "buy_short": {
+        "cost": "499970",
+        "fee": "1500",
+        "p_after_1e9": "499999999",
+        "max_trade": "1000000000",
+        "within_domain": true
+      },
+      "sell_long": {
+        "error": "ArithmeticOverflow"
+      },
+      "sell_short": {
+        "error": "ArithmeticOverflow"
+      },
+      "cost_raw_64x64": "51154458529305922373906",
+      "price_long_raw_64x64": "9224524956047534882"
+    },
+    {
+      "name": "max_trade_on_a_large_book",
+      "q_long": "0",
+      "q_short": "0",
+      "b": "25000000000",
+      "amount": "6250000000",
+      "buy_long": {
+        "cost": "3319805983",
+        "fee": "9959418",
+        "p_after_1e9": "562176500",
+        "max_trade": "6250000000",
+        "within_domain": true
+      },
+      "buy_short": {
+        "cost": "3319805983",
+        "fee": "9959418",
+        "p_after_1e9": "437823499",
+        "max_trade": "6250000000",
+        "within_domain": true
+      },
+      "sell_long": {
+        "error": "ArithmeticOverflow"
+      },
+      "sell_short": {
+        "error": "ArithmeticOverflow"
+      },
+      "cost_raw_64x64": "319657716130066391500000",
+      "price_long_raw_64x64": "9223372036854775808"
+    },
+    {
+      "name": "deep_book_both_sides",
+      "q_long": "123456789012",
+      "q_short": "98765432109",
+      "b": "250000000000",
+      "amount": "12345678901",
+      "buy_long": {
+        "cost": "6553376415",
+        "fee": "19660130",
+        "p_after_1e9": "536969443",
+        "max_trade": "62500000000",
+        "within_domain": true
+      },
+      "buy_short": {
+        "cost": "5944331854",
+        "fee": "17832996",
+        "p_after_1e9": "512343169",
+        "max_trade": "62500000000",
+        "within_domain": true
+      },
+      "sell_long": {
+        "cost": "6401347047",
+        "fee": "19204042",
+        "p_after_1e9": "512343169",
+        "max_trade": "62500000000",
+        "within_domain": true
+      },
+      "sell_short": {
+        "cost": "5792302486",
+        "fee": "17376908",
+        "p_after_1e9": "536969443",
+        "max_trade": "62500000000",
+        "within_domain": true
+      },
+      "cost_raw_64x64": "5251836247197559137025635",
+      "price_long_raw_64x64": "9678477290764654389"
+    },
+    {
+      "name": "book_smaller_than_the_trade",
+      "q_long": "7",
+      "q_short": "3",
+      "b": "1000000",
+      "amount": "1000000",
+      "buy_long": {
+        "cost": "620116",
+        "fee": "1861",
+        "p_after_1e9": "731059365",
+        "max_trade": "250000",
+        "within_domain": true
+      },
+      "buy_short": {
+        "cost": "620114",
+        "fee": "1861",
+        "p_after_1e9": "268942207",
+        "max_trade": "250000",
+        "within_domain": true
+      },
+      "sell_long": {
+        "error": "ArithmeticOverflow"
+      },
+      "sell_short": {
+        "error": "ArithmeticOverflow"
+      },
+      "cost_raw_64x64": "12786400878959917695",
+      "price_long_raw_64x64": "9223390483598849492"
+    },
+    {
+      "name": "exactly_on_the_domain_edge",
+      "q_long": "48000000000",
+      "q_short": "0",
+      "b": "1000000000",
+      "amount": "1000000",
+      "buy_long": {
+        "error": "PriceBoundExceeded"
+      },
+      "buy_short": {
+        "cost": "0",
+        "fee": "0",
+        "p_after_1e9": "1000000000",
+        "max_trade": "250000000",
+        "within_domain": true
+      },
+      "sell_long": {
+        "cost": "1000000",
+        "fee": "3000",
+        "p_after_1e9": "1000000000",
+        "max_trade": "250000000",
+        "within_domain": true
+      },
+      "sell_short": {
+        "error": "ArithmeticOverflow"
+      },
+      "cost_raw_64x64": "885443715538058477568000",
+      "price_long_raw_64x64": "18446744073709551616"
+    }
+  ]
+}

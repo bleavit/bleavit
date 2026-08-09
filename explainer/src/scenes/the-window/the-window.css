@@ -1,0 +1,93 @@
+/* Scene-local rules only.
+
+   Nothing here introduces a colour. This scene is about a boundary and a list,
+   and neither is a branch instrument or a safety state — so every mark it makes
+   takes the page accent or the neutral ink the design system already owns. The
+   one visual idea it adds is the monospace treatment of names that must be typed
+   exactly: a method signature, a module name, a storage key. Where an exact
+   string is the point, a fixed advance is the point too. */
+
+.tw-scroll {
+  overflow-x: auto;
+}
+
+/* Method signatures, storage item names and telemetry method names: all things
+   a reader might copy character for character. */
+.tw-id {
+  font-family: var(--font-mono);
+  font-size: 0.95em;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+/* The ceiling column. It is a statement about size, so it reads as data rather
+   than prose, but it is words rather than digits — hence right alignment without
+   the tabular figures `.numeric` would bring. */
+.tw-ceiling {
+  white-space: nowrap;
+  color: var(--ink-2);
+}
+
+.tw-where {
+  font-family: var(--font-mono);
+  font-size: var(--t-micro);
+  white-space: nowrap;
+  color: var(--ink-2);
+}
+
+/* The raw storage key, set as a display line of its own. It is deliberately
+   allowed to wrap on a narrow screen — a key that runs off the edge teaches
+   nothing, and this one is short enough that breaking it costs no clarity. */
+.tw-key {
+  font-family: var(--font-mono);
+  font-size: var(--t-caption);
+  line-height: var(--lh-body);
+  overflow-wrap: anywhere;
+  margin: var(--sp-3) 0;
+  padding: var(--sp-3);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--accent);
+  background: var(--well);
+}
+
+/* The continuation row under each table row. It carries no top gap of its own,
+   so it reads as the second line of the row above rather than as a row. */
+.tw-cont > td {
+  padding-top: 0;
+}
+
+.tw-blurb,
+.tw-note {
+  color: var(--ink-2);
+  font-size: var(--t-micro);
+  line-height: var(--lh-micro);
+}
+
+.tw-blurb {
+  padding-top: 0;
+}
+
+.tw-note {
+  line-height: var(--lh-body);
+}
+
+.tw-note code,
+.tw-blurb code {
+  font-family: var(--font-mono);
+  font-size: 0.95em;
+}
+
+/* What was missing, in the completeness table. Left to wrap: these are
+   sentences, not identifiers. */
+.tw-gap {
+  min-width: 18ch;
+}
+
+/* "not promised" — marked by a dashed edge rather than by a hue, because the
+   palette reserves every colour it has to branches and to safety states, and
+   "outside the contract" is neither. The dash is the same signal the drawing
+   uses for the line under the fifth opening. */
+.tw-out {
+  border-style: dashed;
+  color: var(--ink-2);
+}

@@ -1,0 +1,325 @@
+.scene-region {
+  margin-bottom: var(--sp-4);
+}
+
+.stage {
+  position: relative;
+  background:
+    radial-gradient(120% 90% at 50% 0%, var(--accent-wash), transparent 68%),
+    var(--surface);
+  border: 1px solid var(--line);
+  /* Matches the SVG's viewBox (22.6 x 15.4) rather than the stage's own 21 x 12,
+     so the drawing fills the box instead of letterboxing inside it. */
+  aspect-ratio: 3 / 2;
+  width: 100%;
+  /* Pinned beside a scrolling rail, the stage must never be taller than the
+     space left under the two sticky bars — otherwise the bottom of the drawing
+     is unreachable at every scroll position. */
+  max-height: calc(100vh - var(--h-header) - var(--h-nav) - 190px);
+  overflow: hidden;
+}
+
+.stage__caption {
+  margin: 0 0 var(--sp-2);
+  max-width: none;
+  font-size: var(--t-caption);
+  line-height: var(--lh-caption);
+  color: var(--ink-2);
+}
+
+@media (max-width: 767px) {
+  .stage {
+    max-height: 46vh;
+  }
+}
+
+.stage__canvas,
+.scene2d {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* Text in the SVG is set in stage units, so it scales with the drawing: at a
+   21-unit-wide stage the scale factor is (container px / 22.6).
+
+   Below roughly 11 device px a label is **dropped, not shrunk** — an unreadable
+   label is worse than an absent one, and the rail carries every fact anyway.
+
+   `paint-order: stroke` draws a halo of the stage colour behind every glyph, so
+   a label crossing a grid line or a connector stays readable without needing a
+   solid plate behind it.
+
+   The halo width is in **user units**, not device pixels — an SVG `px` inside a
+   viewBox is a user unit. At 0.14 against a 0.46 font it was 30% of the type
+   size, wide enough to close up the word spaces: "Cohort 41" rendered as
+   "Cohort41". Anything past about 15% of the font size does that. */
+.scene__label,
+.scene__sublabel,
+.scene__tick,
+.scene__axislabel,
+.scene__edgelabel {
+  paint-order: stroke;
+  stroke: var(--surface);
+  stroke-width: 0.05px;
+  stroke-linejoin: round;
+  font-variant-numeric: tabular-nums;
+
+  /* This reset is the fix for the reported "overlapping text", and it is not
+     cosmetic. `body` sets `letter-spacing: -0.004em`, which computes **once**,
+     against the body's 15px font, to `-0.06px` — and then inherits into the SVG
+     as that absolute length. Inside a viewBox a CSS px is a user unit, so a
+     0.36-unit label was being tracked at -17% of its own size: enough to close
+     the word spaces outright ("not open" rendered as "notopen") and to run
+     adjacent glyphs together. Any relative unit set on an ancestor with a
+     different font-size does this; the only safe value here is `normal`. */
+  letter-spacing: normal;
+  word-spacing: normal;
+}
+
+/* Node label sizes are set as an SVG attribute by `Scene2D`, not here, so the
+   placement pass and the painter cannot disagree about how wide a label is.
+   Everything else about them is styling and stays in CSS. */
+.scene__label {
+  font-weight: 700;
+  font-stretch: 94%;
+  fill: var(--ink);
+}
+
+.scene__sublabel {
+  font-weight: 500;
+  fill: var(--ink-2);
+}
+
+.scene__tick,
+.scene__axislabel {
+  font-size: 0.34px;
+  fill: var(--ink-2);
+}
+
+/* Tick size is set as an attribute by `Scene2D` so the stagger pass and the
+   painter agree; the CSS value above is the fallback for anything that does
+   not set one. */
+
+.scene__edgelabel {
+  font-family: var(--font-mono);
+  font-size: 0.3px;
+  fill: var(--ink-3);
+}
+
+@media (max-width: 767px) {
+  /* Tick values go last: they are the scale, and the scale is the reason a
+     quantity reads as a quantity. Below this width the diagram is a schematic
+     and the rail's tables are the measurement. */
+  .scene__tick,
+  .scene__axislabel {
+    display: none;
+  }
+}
+
+/* --- The animated views ---------------------------------------------------- */
+
+/* Screen-space labels over a motion: the page's own type, at a constant size,
+   never tilted or scaled with the geometry. A label that rotates with its object
+   is a reticle that turns with the barrel, and instruments do not do that.
+
+   Deliberately few. The five motions each carry one relation and hand every
+   quantity to the readout below, so a motion that needs a dozen labels to be
+   read is a motion that should have stayed a diagram. */
+.m3-tag {
+  display: block;
+  white-space: nowrap;
+  font-size: var(--t-micro);
+  line-height: 1.2;
+  font-weight: 700;
+  font-stretch: 94%;
+  color: var(--ink);
+  background: color-mix(in srgb, var(--surface) 90%, transparent);
+  border: 1px solid var(--line);
+  padding: 1px 5px;
+  user-select: none;
+  letter-spacing: normal;
+}
+
+.m3-tag--accept {
+  color: var(--accept);
+  border-color: color-mix(in srgb, var(--accept) 45%, transparent);
+}
+.m3-tag--reject {
+  color: var(--reject);
+  border-color: color-mix(in srgb, var(--reject) 45%, transparent);
+}
+.m3-tag--alarm {
+  color: var(--alarm);
+  border-color: color-mix(in srgb, var(--alarm) 55%, transparent);
+}
+.m3-tag--dim {
+  color: var(--ink-3);
+}
+
+/* The numbers, in real DOM. A moving picture is a bad place to read a quantity
+   off, and a screen reader cannot reach geometry at all — so every motion prints
+   its state here instead of annotating itself. */
+.m3-readout {
+  position: absolute;
+  inset: auto var(--sp-3) var(--sp-2) var(--sp-3);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px var(--sp-3);
+  pointer-events: none;
+  font-size: var(--t-micro);
+  line-height: var(--lh-micro);
+  color: var(--ink-2);
+  text-shadow: 0 1px 3px var(--ground);
+}
+
+.m3-readout b {
+  font-weight: 700;
+  font-stretch: 108%;
+  color: var(--ink);
+}
+
+.stage__tabs {
+  display: flex;
+  gap: var(--sp-1);
+  padding: 0 0 var(--sp-2);
+}
+
+.stage__tabs .vp-btn[aria-selected='true'] {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-wash);
+}
+
+/* --- The drawing's key ----------------------------------------------------- */
+
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-4);
+  list-style: none;
+  margin: var(--sp-2) 0 0;
+  padding: 0;
+}
+
+.legend__row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  font-size: var(--t-caption);
+  color: var(--ink-2);
+}
+
+.legend__mark {
+  flex: none;
+  width: 13px;
+  height: 13px;
+  border: 1.5px solid currentColor;
+  background: color-mix(in srgb, currentColor 22%, transparent);
+}
+
+.legend__mark--round {
+  border-radius: 50%;
+}
+
+.legend__mark--ink {
+  color: var(--ink);
+}
+.legend__mark--dim {
+  color: var(--ink-3);
+}
+.legend__mark--accept {
+  color: var(--accept);
+}
+.legend__mark--reject {
+  color: var(--reject);
+}
+.legend__mark--alarm {
+  color: var(--alarm);
+}
+.legend__mark--frozen {
+  color: var(--ink-3);
+  background: transparent;
+  border-style: dashed;
+}
+.legend__mark--hatch {
+  color: var(--ink-3);
+  background-image: repeating-linear-gradient(
+    45deg,
+    var(--hatch-ink) 0,
+    var(--hatch-ink) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+}
+
+.scene__caption {
+  padding: var(--sp-3) 0 0;
+  font-size: var(--t-caption);
+  line-height: var(--lh-caption);
+  color: var(--ink-2);
+  max-width: 70ch;
+}
+
+.scene__caption strong {
+  color: var(--ink);
+  font-weight: 700;
+}
+
+/* --- Stage chrome ---------------------------------------------------------- */
+
+.stage__notice {
+  margin: 0;
+  max-width: none;
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--well);
+  border: 1px solid var(--line);
+  border-top: 0;
+  font-size: var(--t-micro);
+  line-height: var(--lh-micro);
+  color: var(--ink-2);
+}
+
+.stage__controls {
+  display: flex;
+  gap: var(--sp-1);
+  padding: var(--sp-2) 0 0;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.vp-btn {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--ink-2);
+  padding: 4px var(--sp-2);
+  font-size: var(--t-micro);
+  font-weight: 650;
+  font-stretch: 88%;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  cursor: pointer;
+}
+
+.vp-btn[aria-pressed='true'] {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--accent-wash);
+}
+
+.vp-btn:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--ink);
+}
+
+.vp-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.vp-btn--go {
+  border-color: var(--accent);
+  color: var(--accent);
+  flex: none;
+}

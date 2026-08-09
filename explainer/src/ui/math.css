@@ -1,0 +1,62 @@
+/*
+ * Formula styling.
+ *
+ * KaTeX ships its own metrics and must keep them — overriding its font sizes or
+ * line heights breaks the alignment it computed. What this file does is place
+ * the block on the page and let a wide formula scroll rather than overflow,
+ * which is the one failure mode a typeset formula has on a narrow column.
+ */
+
+.math {
+  color: var(--ink);
+}
+
+.math--display {
+  margin: 0 0 var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--well);
+  border-left: 3px solid var(--accent);
+  /* A formula cannot wrap, so on a narrow rail it either scrolls or it spills
+     over everything to its right. It scrolls. */
+  overflow-x: auto;
+  overflow-y: hidden;
+  /* Keeps the scrollbar from cropping the descenders of the last line. */
+  padding-bottom: var(--sp-3);
+}
+
+.math--display .katex-display {
+  margin: 0;
+}
+
+/* KaTeX's own `\displaystyle` block is centred; against a left rule and a column
+   of prose, left-aligned reads as part of the argument rather than as an
+   ornament dropped into it. */
+.math--display .katex-display > .katex {
+  text-align: left;
+}
+
+.math--inline {
+  /* Inline maths sits in a sentence and must not change its line height. */
+  display: inline-block;
+  vertical-align: baseline;
+  white-space: nowrap;
+}
+
+/* KaTeX sizes itself in `em`, so it inherits the surrounding text size. Display
+   formulas get a small step up because they are the subject of their paragraph. */
+.math--display .katex {
+  font-size: 1.12em;
+}
+
+.math--inline .katex {
+  font-size: 1.05em;
+}
+
+@media (max-width: 767px) {
+  .math--display {
+    padding: var(--sp-2) var(--sp-3);
+  }
+  .math--display .katex {
+    font-size: 1em;
+  }
+}

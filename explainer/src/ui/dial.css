@@ -1,0 +1,154 @@
+.dial {
+  display: inline-block;
+  line-height: 0;
+}
+
+.dial__svg {
+  display: block;
+  overflow: visible;
+}
+
+/* The hand moves; the scale does not. Easing a clock would be a lie about the
+   rate of time, so the tween is linear — and under reduced motion it does not
+   tween at all, it cuts. */
+.dial__index {
+  transition: transform var(--d-4) linear;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dial__index {
+    transition: none;
+  }
+}
+
+.dial--paused .dial__index {
+  transition: none;
+}
+
+/* The dial is the app's time instrument, so its arcs are drawn in the time hue
+   rather than in ink — and the phase you are actually in takes the scene's own
+   accent, which is the one thing on the dial that has to be found instantly. */
+.dial__arc {
+  fill: var(--time);
+  fill-opacity: 0.06;
+  stroke: var(--time);
+  stroke-width: 0.8;
+  opacity: 0.5;
+}
+
+.dial__arc.is-elapsed {
+  fill-opacity: 0.2;
+  opacity: 1;
+}
+
+.dial__arc.is-current {
+  fill: var(--accent);
+  fill-opacity: 0.42;
+  stroke: var(--accent);
+  stroke-width: 1.6;
+  opacity: 1;
+}
+
+/* The decision window is an inner concentric band, never a wedge of its own.
+   It is judgement, not time, so it takes the judgement hue. */
+.dial__window {
+  fill: var(--judge);
+  fill-opacity: 0.75;
+  stroke: none;
+}
+
+.dial__tick {
+  stroke: var(--time);
+  stroke-width: 1;
+  opacity: 0.5;
+}
+
+.dial__tick.is-boundary {
+  stroke: var(--time);
+  stroke-width: 2.2;
+  opacity: 1;
+}
+
+.dial__phaselabel {
+  font-size: 6px;
+  font-weight: 650;
+  fill: var(--ink-2);
+  letter-spacing: 0.04em;
+}
+
+/* The fixed index. It is drawn as the same vertical seam that splits the
+   wordmark — the instrument and the mark are the same idea at two sizes. */
+.dial__seam {
+  stroke: var(--ink);
+  stroke-width: 1.5;
+}
+
+.dial__seam--alarm,
+.dial--paused .dial__seam {
+  stroke: var(--alarm);
+}
+
+.dial__pointer {
+  fill: var(--ink);
+}
+
+.dial--paused .dial__pointer {
+  fill: var(--alarm);
+}
+
+.dial--frozen .dial__arc.is-elapsed {
+  fill: var(--alarm);
+  fill-opacity: 0.08;
+}
+
+.dial__center {
+  font-size: 16px;
+  font-weight: 750;
+  fill: var(--ink);
+}
+
+.dial--nav .dial__arc {
+  stroke-width: 1.2;
+}
+
+/* --- Readout --------------------------------------------------------------- */
+
+.dial-readout {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  font-size: var(--t-caption);
+  min-width: 0;
+}
+
+.dial-readout__epoch {
+  font-size: var(--t-body);
+  font-weight: 750;
+  color: var(--time);
+}
+
+.dial-readout__phase {
+  font-weight: 700;
+  font-stretch: 88%;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  font-size: var(--t-micro);
+  padding: 2px var(--sp-2);
+  background: var(--accent-wash);
+  border: 1px solid var(--accent-line);
+  color: var(--accent);
+}
+
+.dial-readout__count {
+  color: var(--ink-2);
+}
+
+.dial-readout__sep {
+  margin: 0 var(--sp-1);
+  color: var(--ink-3);
+}
+
+.dial-readout__paused {
+  font-weight: 600;
+}

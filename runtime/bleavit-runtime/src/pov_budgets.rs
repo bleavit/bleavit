@@ -988,11 +988,21 @@ fn recovery_qualifier_and_mandatory_hooks_fit_absolute_class_budgets() {
 /// because its pin is dominated by the collator-compensation term below rather
 /// than by its own proposal reads.
 ///
-/// The capacity cost that buys is real and quantified: `decide` is now 19.0 % of
-/// the 3,932,160 B normal-class budget and `settle_cohort(12)` 23.9 %, so a
-/// crank charges ~389 KB of proof for a payout that fires once an epoch. The fix
-/// is the post-dispatch refund 15 §4.5 already mandates for payload-executing
+/// The capacity cost that buys is real and quantified: `decide` is now 9.5 % of
+/// the 7,864,320 B normal-class proof budget and `settle_cohort(12)` 12.0 %, so
+/// a crank charges ~389 KB of proof for a payout that fires once an epoch. The
+/// fix is the post-dispatch refund 15 §4.5 already mandates for payload-executing
 /// extrinsics; it is recorded as its own row rather than done here.
+///
+/// Both shares read 19.0 % and 23.9 % until 2026-08-09, because both were taken
+/// against 3,932,160 B. That divisor is this runtime's normal-class
+/// **`BlockLength`** ceiling — 75 % of 5 MiB — and it bounds an extrinsic's
+/// encoded length, not the proof its execution generates. The proof budget is
+/// `normal_class_budget()` above, which is `primary_capacity()`: `MAX_POV_SIZE`
+/// (10 MiB) less the quarter the resource partition reserves for the external
+/// domain. Nothing this test asserts was affected, because every assertion here
+/// already compared against that helper rather than against the prose — the
+/// error lived only in the sentence, and doc 13 §5 carried the same one.
 #[test]
 fn decide_and_settle_cohort_pov_pinned_below_map_scaling() {
     use frame_support::dispatch::GetDispatchInfo;
