@@ -45,7 +45,9 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { WrongChainError, type BundledChain } from '@bleavit/chain-client';
 import { startNodeLightClient } from '@bleavit/chain-client/node-light-client';
 import type { LightClient } from '@bleavit/chain-client/light-client';
-import { classifyChain, classifyAssetHubFor } from '@bleavit/application';
+import { classifyChain, classifyAssetHubFor, type ForeignVerdict } from '@bleavit/application';
+import type { ForeignMode } from '@bleavit/descriptors';
+import { assetHubLabel } from './foreign-label.ts';
 
 /** The `bleavit.dev-chain-pin.v1` document `app/tools/dev-chain-pin.ts` writes. */
 interface DevPinRole {
@@ -125,20 +127,43 @@ export interface DrillReport {
    * pass on exactly the regression it exists to catch.
    */
   readonly compatMode: string | undefined;
+  /** The Asset Hub leg as a **sentence**, for a person reading the log. Never matched on. */
   readonly assetHub: string | undefined;
-  /**
-   * 02 §7.7's foreign lattice — `full` / `restricted` / `unsupported` / `wrong-chain` /
-   * `unreachable`.
-   *
-   * **This field exists because the line above it was the same defect one chain over (R-6
-   * review, 2026-08-08).** `assetHub` recorded `ForeignVerdict.kind` alone, so a
-   * `wrong-chain` Asset Hub, an `unsupported` one and a `restricted` one all reported
-   * `"classified"` — and this drill is the only place `classifyForeign` runs against a real
-   * chain. The reasoning that produced `compatMode` was written down two fields up and was
-   * not carried across, which is how a fix stays local to the instance that prompted it.
-   */
-  readonly assetHubMode: string | undefined;
+  readonly assetHubVerdict: AssetHubVerdictReport | undefined;
   readonly finalizedHash: string;
+}
+
+/**
+ * The Asset Hub leg as a **value** beside that sentence — F18; 15 §4.8.
+ *
+ * `assetHub` used to be the whole of it, written as `` `classified: ${mode}` `` — so a harness
+ * rule about the verdict could only match prose, which is the pattern this branch already
+ * removed from the funding leg, where five different blocked causes arrived as one nonempty
+ * sentence. The code rides **beside** the sentence rather than replacing it, for the reason
+ * `DepositBlockCause` gives: a code is not a diagnosis.
+ *
+ * The three arms are kept apart because two of them carry the same word about different facts.
+ * `not-attached` with `refusal: 'wrong-chain'` is `attachAssetHub` refusing the **bundled pin**,
+ * and `classified` with `mode: 'wrong-chain'` is `classifyForeign` refusing the **release pin**
+ * — a local Asset Hub attaches correctly and is still not the chain 02 §7.7 pins. Folding them
+ * would report a pin mismatch this drill causes as one it exists to detect.
+ */
+export type AssetHubVerdictReport =
+  | { readonly kind: 'classified'; readonly mode: ForeignMode }
+  | { readonly kind: 'unestablished' }
+  | { readonly kind: 'not-attached'; readonly refusal: string };
+
+/**
+ * The verdict, as the report carries it.
+ *
+ * Exported and named, so the mapping is drivable per commit. `bootAndClassify` needs a light
+ * client and three chains, so nothing inside it can be exercised before a release-tier run —
+ * and the decision it makes here is exactly the kind that shipped broken twice already.
+ */
+export function assetHubVerdictOf(foreign: ForeignVerdict): AssetHubVerdictReport {
+  return foreign.kind === 'classified'
+    ? { kind: 'classified', mode: foreign.classification.mode }
+    : { kind: 'unestablished' };
 }
 
 /**
@@ -217,55 +242,51 @@ async function bootAndClassify(
     stage(`local verdict: ${compat.kind}`);
 
     let assetHub: string | undefined;
-    let assetHubMode: string | undefined;
+    let assetHubVerdict: AssetHubVerdictReport | undefined;
     if (document.assetHub !== undefined) {
       const leg = bundled(document.assetHub);
       stage('attaching Asset Hub');
-      // **Bounded, and the bound is a finding rather than a convenience.** `connectAssetHub`
-      // awaits a genesis probe on a chain smoldot is still initialising, and a foreign chain
-      // that never answers would leave the caller waiting forever. 11 E17 requires the deposit
-      // flow to be *"blocked with diagnostics"*, and an unbounded await is not that: it renders
-      // as a spinner that never resolves. **This was fixed in the client** rather than left as
-      // a spec question — `assetHubConnector.connect` takes a `deadlineMs` and abandons the
-      // attempt at it, detaching the chain and closing any transport that lands afterwards.
-      // The bound below is this harness's own, because a drill must fail rather than hang.
+      // **The connector's own bound, not a race around it** — F18, 2026-08-08. This used to
+      // `Promise.race` `connectAssetHub()` against a timer, which is the exact anti-pattern
+      // `assetHubConnector`'s header records: a wrapper can only abandon the *wait*, so the
+      // attach kept running, the connector kept it as the answer to every later `connect`, and
+      // E17's `R: retry AH sync` could never start a new one. `connect` takes a `deadlineMs`
+      // and abandons the work — detaching the chain and closing any transport the abandoned
+      // attempt goes on to open — so passing it down is both correct and simpler.
       //
-      // The Asset Hub genesis is ~189k raw entries (a 79 MB spec), and smoldot warns that a
-      // large `genesis.raw` slows initialisation substantially — so the honest bound here is
-      // generous, and a timeout is reported as `unavailable` rather than as a failure.
-      const connection = await Promise.race([
-        client.connectAssetHub(leg),
-        new Promise<'timed-out'>((resolve) =>
-          setTimeout(() => resolve('timed-out'), timeoutSeconds * 1000),
-        ),
-      ]);
-      if (connection === 'timed-out') {
-        stage(`Asset Hub did not attach within ${timeoutSeconds}s`);
-        return {
-          mode: 'boot',
-          chain: document.para.pinned.id,
-          genesisHash: document.para.pinned.genesisHash,
-          specVersion: runtime?.specVersion,
-          compat: compat.kind,
-          compatMode: compat.kind === 'classified' ? compat.classification.mode : undefined,
-          assetHub: `unavailable: no genesis answer within ${timeoutSeconds}s`,
-          assetHubMode: undefined,
-          finalizedHash,
-        };
-      }
+      // It also fixes the **diagnosis**, which the race got wrong. The timeout arm reported
+      // *"no genesis answer within 300s"*, and the genesis probe was not what it was waiting
+      // for: with the trimmed spec `addChain` and the probe are milliseconds, and what takes
+      // the time is `openTransport` waiting for Asset Hub's **first finalized block**, which
+      // derives from relay-finalized para-inclusion and therefore cannot arrive until the relay
+      // has synced. Measured in the same run on 2026-08-08: this leg still reported unavailable
+      // at one minute of network age, while the `funding` leg attached the same chain and read
+      // it at block 49 six minutes later. Reporting the connector's own sentence is what stops
+      // the next reader spending a day on genesis size again.
+      const connection = await client.connectAssetHub(leg, { deadlineMs: timeoutSeconds * 1000 });
       if (connection.kind !== 'attached') {
-        assetHub = `not-attached: ${connection.kind}`;
+        stage(`Asset Hub did not attach: ${connection.kind}`);
+        assetHub = `${connection.kind}: ${connection.reason}`;
+        assetHubVerdict = { kind: 'not-attached', refusal: connection.kind };
       } else {
         stage('classifying Asset Hub (02 §7.7)');
+        // **The pin's label, not the connected spec's id** — F18. `classifyForeign` finds its
+        // pin with `pins.find((p) => p.label === chainLabel)`, and a label naming no pin yields
+        // `unreachable`: *"this release pins no `<label>` runtime"*. This call passed
+        // `document.assetHub.pinned.id`, which on any development topology is
+        // `asset-hub-paseo-local` and matches nothing — so a chain that attached, synced and
+        // answered was classified as unreachable, and the `wrong-chain` verdict that is the
+        // true one never appeared. `assetHubLabel()` reads the label off the pin list.
         const foreign = await classifyAssetHubFor(
           client,
           leg,
-          document.assetHub.pinned.id,
+          assetHubLabel(),
           connection.transport.finalizedRuntime(),
           () => connection.transport.finalizedRuntime(),
         );
-        assetHub = foreign.kind;
-        assetHubMode = foreign.kind === 'classified' ? foreign.classification.mode : undefined;
+        assetHub =
+          foreign.kind === 'classified' ? `${foreign.kind}: ${foreign.classification.mode}` : foreign.kind;
+        assetHubVerdict = assetHubVerdictOf(foreign);
       }
     }
 
@@ -277,7 +298,7 @@ async function bootAndClassify(
       compat: compat.kind,
       compatMode: compat.kind === 'classified' ? compat.classification.mode : undefined,
       assetHub,
-      assetHubMode,
+      assetHubVerdict,
       finalizedHash,
     };
   } finally {

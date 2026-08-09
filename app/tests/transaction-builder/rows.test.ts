@@ -29,6 +29,8 @@ import {
   operatorRowsFor,
   OPERATOR_SURFACE_ROWS,
   blockingObligationsFor,
+  obligationAppliesTo,
+  scopedObligationsFor,
   unreadableObligationsFor,
   NO_WRAPPER,
   PRECONDITION_ROWS,
@@ -50,9 +52,11 @@ import type {
   CrankCall,
   FeeAsset,
   GovernanceRowId,
+  ObligationScope,
   OperatorRowId,
   PreconditionClause,
   PreconditionRowId,
+  UnreadableObligation,
 } from '@bleavit/transaction-builder';
 import { CRITICAL_SURFACE } from '@bleavit/descriptors';
 import { blake2b } from '@noble/hashes/blake2b';
@@ -1031,6 +1035,46 @@ test('O-4 declares every readable trigger item, not the one the form happens to 
   assert.deepEqual(unreadableObligationsFor('O-4'), []);
 });
 
+test('m9 — the pending-action COUNT is a propose obligation, so O-4 declares it (SQ-1022)', () => {
+  // SQ-1022's own text says the count is readable and points at O-3 for the declaration. But
+  // `guardian_core::propose_action` is what refuses on `pending.len() >= 64`, so the count is
+  // a **propose**-side precondition and O-3 is the approve row — which declares
+  // `PendingActions` because an approval reads the action itself, not because anybody counts.
+  // The clause was therefore declared on the row that does not need it and missing from the
+  // one that does, and `clauseGroupsFor` reports an undeclared read as vacuously passed.
+  const o4 = rowsFor('O-4', 'USDC').find((clause) => clause.key === 'pending-count');
+  assert.ok(o4 !== undefined, 'O-4 does not read the pending-action queue');
+  assert.equal(o4.surface, 'storage.guardian.pending_actions');
+  assert.equal(o4.subject, 'chain');
+  // O-3 keeps its own, for its own reason — the action, not the count.
+  const o3 = rowsFor('O-3', 'USDC').find(
+    (clause) => clause.surface === 'storage.guardian.pending_actions',
+  );
+  assert.ok(o3 !== undefined, 'O-3 stopped reading the action it is approving');
+  assert.equal(o3.key, 'pending');
+});
+
+test('m10 — the allowance is a GLOBAL StorageValue, so its clause is chain-scoped on both rows', () => {
+  // `pallet_guardian` declares `Allowances: StorageValue<_, AllowanceState>` — one value with
+  // no account key at all, and the counters inside it are per power and per epoch, never per
+  // guardian. Both rows marked it `subject: 'acting'`, so `accountForClause` resolved an
+  // account for a read that has none: a proxy or multisig wrapper silently changed which key
+  // a keyless read was attributed to, and a refresh could then compare two different answers
+  // to a question that has exactly one.
+  for (const row of ['O-3', 'O-4'] as const) {
+    const allowance = rowsFor(row, 'USDC').find((clause) => clause.key === 'allowance');
+    assert.ok(allowance !== undefined, `${row} declares no allowance clause`);
+    assert.equal(allowance.surface, 'storage.guardian.allowances');
+    assert.equal(allowance.subject, 'chain', `${row}'s allowance clause resolves an account`);
+    // Anti-vacuity: the same row still has genuinely account-scoped clauses, so this is not a
+    // sweep that made every subject `chain`.
+    assert.ok(
+      rowsFor(row, 'USDC').some((clause) => clause.subject === 'acting'),
+      `${row} has no acting-scoped clause left, so the subject check proves nothing`,
+    );
+  }
+});
+
 test('P-13 splits "round open" from "report window not elapsed"', () => {
   // §11.5 writes them with a semicolon between them, and they come apart on a live round: a
   // round still open whose report window has elapsed refuses the report, and one collapsed
@@ -1087,16 +1131,17 @@ test('an unreadable obligation names an OPEN spec question, and blocking ones cl
   );
   // `stated` is §11.8.1's SQ-564 posture — the transaction is offered and the gap is named.
   assert.ok(all.some((entry) => entry.disposition === 'stated'));
-  // **`blocking` is empty at contract v29, and that is asserted rather than assumed.** Every
-  // one of the four rows that carried one (SQ-598, SQ-601, SQ-730, SQ-731) got a published
-  // read, so INV-FE-12's arm has nothing left to close. The arm itself is not dead code — it
-  // is exercised in `tests/screens`, where `operatorGate` is driven over the declarations and
-  // asserted to close exactly the rows that declare one — but a `blocking` entry appearing
-  // here again must be a deliberate act, so this states the current fact and its reason.
+  // **`blocking` is empty again.** It was empty at contract v29, two entries on 2026-08-08
+  // (both `O-3`, both SQ-1030 — `approve_action` reads `Guardian.PlaybookRegistered[id]` and
+  // `dispatch` reads `Guardian.ActivePlaybooks`, both **after** the fifth approval is counted),
+  // and empty from 2026-08-09 because contract v30 froze both maps. It is asserted rather than
+  // assumed in either direction: a blocking entry closes an operator control, so appearing here
+  // must be a deliberate act — and disappearing must be a freeze rather than a deletion, which
+  // is what the replacement-clause assertions below check.
   assert.deepEqual(
     all.filter((entry) => entry.disposition === 'blocking').map((entry) => entry.row),
     [],
-    'a blocking obligation is back; contract v29 published a read for every row that had one',
+    'the blocking set changed; every entry closes an operator control, so this is deliberate',
   );
   // Each retired row's replacement read is present, so "no obligation" is not "no check".
   // O-6 (SQ-615, contract v28): §11.8.4 steps 1 and 4 became ordinary clauses.
@@ -1127,6 +1172,159 @@ test('an unreadable obligation names an OPEN spec question, and blocking ones cl
   assert.ok(
     rowsFor('O-4', 'USDC').filter((clause) => clause.key?.startsWith('trigger-')).length >= 6,
     'O-4 declares no trigger reads, so §11.8.2’s precondition was dropped rather than bound',
+  );
+  // O-3 (SQ-1030), contract v30: the two maps `approve_action` and `dispatch` refuse on.
+  assert.deepEqual(blockingObligationsFor('O-3'), [], 'S15 is still closed on a resolved question');
+  // **Both guardian rows, not only the approve one.** The refusals fall on the dispatching
+  // approval and the runtime checks neither at propose time — which is exactly what it does
+  // with `PB-MIGRATION`'s empty admissible call set, and the client blocks that at propose
+  // time because 06 §6.2 guarantees the fifth approval reverts and records nothing. Same cost,
+  // same signatures; a propose row declaring every other dispatch input and not these two
+  // leaves them undeclared, which `clauseGroupsFor` reports as vacuously passed.
+  for (const row of ['O-3', 'O-4'] as const) {
+    for (const surface of ['storage.guardian.playbook_registered', 'storage.guardian.active_playbooks'] as const) {
+      assert.ok(
+        rowsFor(row, 'USDC').some((clause) => clause.surface === surface),
+        `${row} declares no ${surface} clause, so its check was retired rather than replaced`,
+      );
+    }
+  }
+});
+
+test('a meter is a pair, so both guardian rows declare the limit as well as the counter', () => {
+  // Contract v30's own words in 02 §9's binding row: the four constants are read "**together
+  // with** §7.4's `Guardian.Allowances`, which stores the used counters alone. A meter is the
+  // pair; neither half is a meter."
+  //
+  // Before the freeze no constant published a bound, so `AllowanceMeter.limit` had no producer
+  // and the only way to satisfy §11.8.2's "allowance remaining for the power" precondition was
+  // to invent one — INV-FE-1 twice over. A row declaring the counter and not the limit leaves
+  // the other half undeclared, which `clauseGroupsFor` reports as vacuously passed.
+  const required = [
+    'constant.guardian.delay_once_allowance_per_epoch',
+    'constant.guardian.force_rerun_allowance_per_epoch',
+    'constant.guardian.pause_intake_allowance',
+    // Two for `pause_intake`, because a count without its window is not a rate: the counter is
+    // reset lazily at consume time, so a client holding it without the window length and the
+    // epoch to measure from reads an exhausted meter for a power the chain would accept.
+    'constant.guardian.pause_intake_allowance_window_epochs',
+    'storage.epoch.epoch_of',
+    'storage.guardian.allowances',
+  ] as const;
+  for (const row of ['O-3', 'O-4'] as const) {
+    const declared = new Set(rowsFor(row, 'USDC').map((clause) => clause.surface));
+    for (const surface of required) {
+      assert.ok(declared.has(surface), `${row} does not declare ${surface}`);
+    }
+    // The window read is its own clause rather than sharing the trigger clause's requirement
+    // sentence — O-5's `api.nav` precedent: one read can answer two questions, and two
+    // refusals with different remedies cannot share one sentence.
+    const epochClauses = rowsFor(row, 'USDC').filter(
+      (clause) => clause.surface === 'storage.epoch.epoch_of',
+    );
+    assert.deepEqual(
+      epochClauses.map((clause) => clause.key).sort(),
+      ['allowance-window-epoch', 'trigger-epoch'],
+      `${row} folded the allowance window's epoch read into the trigger clause`,
+    );
+  }
+});
+
+test('an obligation is scoped by ONE predicate, so the two lists cannot describe different actions', () => {
+  // A row is one id for a whole call. `guardian.approve_action` is `O-3` for all five powers,
+  // and the runtime does not evaluate one set of conditions for all five — so an obligation
+  // attached to the row unconditionally closes the control for powers whose dispatch never
+  // reads it. That is the inverse of the defect this list exists to prevent, and it is not the
+  // harmless direction: 09 §1.2's mirror is about a client refusing what the runtime accepts.
+  //
+  // The Codex review of #287 found the repair **half applied**: the filter was on
+  // `blockingObligationsFor` alone, while `operatorGate.unreadable` — which `GateControl`
+  // renders unconditionally — kept the unscoped set. So the control opened for a `pause_intake`
+  // and the caveat panel beside it still described a playbook activation's dispatch. There is
+  // one predicate now, and both lists take it.
+  //
+  // **The scoped users are gone and the machinery stays.** Contract v30 froze both maps, so
+  // `O-3`'s two scoped obligations became clauses; `ObligationScope` is kept because `O-3` is
+  // still one row for five powers and the next narrow obligation needs it, and because
+  // re-adding a control after deleting it is how the half-applied state arose. That makes this
+  // test synthetic by necessity: the real table carries no scoped entry, so a test over it
+  // would agree vacuously and prove nothing.
+  const scoped = (scope?: ObligationScope): UnreadableObligation => ({
+    row: 'O-3',
+    requirement: 'a condition only one dispatch arm reads',
+    reason: 'synthetic — this exercises the predicate, not the table',
+    specQuestion: 'SQ-1022',
+    disposition: 'blocking',
+    ...(scope === undefined ? {} : { scope }),
+  });
+  const unscoped = scoped();
+  const anyActivation = scoped({ power: 'activate_playbook' });
+  const freezeOnly = scoped({ power: 'activate_playbook', playbook: 'PB-LEDGER-FREEZE' });
+
+  // An unscoped obligation is about the whole call and survives every subject.
+  for (const power of ['pause_intake', 'delay_once', 'force_rerun', 'suspend_on_gate', 'activate_playbook'] as const) {
+    assert.equal(obligationAppliesTo(unscoped, { power }), true, power);
+  }
+  // No subject at all: everything is kept. A caller that cannot name the power has not shown
+  // the narrow obligations do not apply, and dropping one on that would be fail-open.
+  assert.equal(obligationAppliesTo(freezeOnly, undefined), true);
+  // A positive match failure on the power…
+  for (const power of ['pause_intake', 'delay_once', 'force_rerun', 'suspend_on_gate'] as const) {
+    assert.equal(obligationAppliesTo(anyActivation, { power }), false, power);
+  }
+  assert.equal(obligationAppliesTo(anyActivation, { power: 'activate_playbook' }), true);
+  // …and on the playbook, which is the narrower half. A power-scoped obligation is NOT
+  // narrowed by a playbook it does not name — dropping it there would soften an obligation
+  // rather than scope it.
+  assert.equal(obligationAppliesTo(anyActivation, { power: 'activate_playbook', playbook: 'PB-DEPEG' }), true);
+  assert.equal(obligationAppliesTo(freezeOnly, { power: 'activate_playbook', playbook: 'PB-DEPEG' }), false);
+  assert.equal(
+    obligationAppliesTo(freezeOnly, { power: 'activate_playbook', playbook: 'PB-LEDGER-FREEZE' }),
+    true,
+  );
+
+  // Both public lists route through it, and `scopedObligationsFor` filters on **scope, never
+  // on disposition**: a `stated` obligation does not close a control and must still be shown.
+  for (const subject of [
+    undefined,
+    { power: 'pause_intake' },
+    { power: 'activate_playbook' },
+    { power: 'activate_playbook', playbook: 'PB-LEDGER-FREEZE' },
+  ] as const) {
+    const shown = scopedObligationsFor('O-3', subject);
+    assert.deepEqual(
+      blockingObligationsFor('O-3', subject),
+      shown.filter((entry) => entry.disposition === 'blocking'),
+      'the blocking list and the displayed list disagree about which action they describe',
+    );
+    assert.ok(
+      shown.some((entry) => entry.disposition === 'stated'),
+      'a stated obligation was filtered out — the filter is on scope, not on disposition',
+    );
+  }
+});
+
+test('the pallet still guards both playbook refusals where the client evaluates them', () => {
+  // The scoping moved from `O-3`'s obligations into `guardian.ts`'s model when contract v30
+  // froze the maps, and the runtime claim it rests on did not change: `approve_action` guards
+  // `PlaybookRegistered` behind `ActivatePlaybook`, and `dispatch` narrows
+  // `PlaybookAlreadyActive` to `LedgerFreeze` alone.
+  //
+  // Asserted against the **pallet**, not restated from the client. If a future change widens
+  // either check to every power or every playbook, this fails and says which way the client
+  // must move — the only way a claim and the code it describes can be kept from drifting
+  // apart in silence.
+  const pallet = readFileSync(join(REPO, 'pallets/guardian/src/lib.rs'), 'utf8');
+  const core = readFileSync(join(REPO, 'crates/guardian-core/src/lib.rs'), 'utf8');
+  assert.match(
+    pallet,
+    /if let GuardianPower::ActivatePlaybook \{ id, \.\. \} = action\.power \{\s*ensure!\(\s*PlaybookRegistered::<T>::get\(id\),/,
+    'approve_action no longer guards PlaybookRegistered behind ActivatePlaybook — rescope the client',
+  );
+  assert.match(
+    core,
+    /if self\.active_playbooks\.iter\(\)\.any\(\|p\| p\.id == id\) \{\s*ensure!\(\s*!matches!\(id, PlaybookId::LedgerFreeze\),/,
+    'dispatch no longer narrows PlaybookAlreadyActive to LedgerFreeze — rescope the client',
   );
 });
 

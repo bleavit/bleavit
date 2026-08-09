@@ -33,14 +33,27 @@ Two readings are ruled out, each for its own reason. The version MUST NOT track 
 Anyone MUST be able to reproduce the verdict with no project infrastructure:
 
 ```bash
-git clone https://github.com/<org>/futarchy-app && cd futarchy-app && git checkout <commit>
-docker run --rm -v $PWD:/src futarchy/build@sha256:<digest> ./tools/release/build.sh
-./tools/verify-release compare --local dist/ --arweave <manifest-txid> \
-    --release-json ar://<release-json-txid> --require-attestations 2
-# fetches via ≥2 gateways with hash verification, byte-compares every file,
-# verifies minisign signatures against the published keyring, checks the
-# on-chain revocation set (§3.1) when a node is reachable, prints VERDICT
+git clone https://github.com/<org>/bleavit && cd bleavit && git checkout <commit>
+docker run --rm -v $PWD:/src futarchy/build@sha256:<digest> ./app/tools/release/build.sh
+# §1.4 gate 4's release notes publish everything per-release below: both §1.2 manifest
+# addresses, the release.json transaction, every credential transaction, and the
+# multi-gateway URL set. Write that URL set into a config file:
+#   { "gateways": [ { "name": "<operator>", "rawUrl": "https://…/{txid}",
+#                     "txUrl": "https://…/{txid}/{path}" } ] }
+./tools/verify-release compare --local dist/ \
+    --arweave <asset-manifest-txid> --final-manifest <final-manifest-txid> \
+    --release-json ar://<release-json-txid> --gateways gateways.json \
+    --signature <txid> --signature <txid> \
+    --attestation <txid> --attestation <txid> \
+    --release-channel <release-channel.bin> --require-attestations 2
+# fetches BOTH §1.2 manifest addresses via ≥2 gateways with hash verification,
+# byte-compares every file, binds the final manifest's release.json entry to the
+# signed sibling, verifies minisign signatures against the published keyring
+# (--keyring, defaulting to the in-repo one of §2.1), checks the on-chain
+# revocation set (§3.1) when a node is reachable, prints VERDICT
 ```
+
+**What the verifier is handed, and what the tool already holds (normative; added 2026-08-09).** §1.3's promise is a verdict reproducible with no *private* infrastructure, not one with no inputs. Two inputs have a fixed home this repository publishes and MUST default to it: the signer registry (§2.2 point 1) and the keyring (§2.1, *"Keyring published in-repo, in-app, and on Arweave"*). The rest describe one release rather than the project and MUST be supplied per run from gate 4's release notes: both §1.2 manifest addresses, the `release.json` transaction, every release-signature and attestation transaction, and the multi-gateway URL set. `verify-release` MUST NOT ship a default gateway set — §5.1 leaves naming gateway operators to the operator — and MUST refuse with that source and the config shape named, rather than with a bare option error. A run that cannot read the `ReleaseChannel` record MUST name the unchecked condition and MUST NOT exit 0 (§2.3 point 3).
 
 `tools/verify-release` is also published standalone. It MUST fail on any signature from a key marked revoked in the on-chain `ReleaseChannel` record (§2.3) and MUST include the signer-registry disjointness check (§2.2) in its `signers audit` subcommand.
 
@@ -51,7 +64,7 @@ A repoint of the production name `futarchy` to a new release MUST NOT occur unti
 1. **Green release gates** per [15](15-invariants-and-testing.md) (reproducible-build gate, descriptor drift gate, wallet/browser matrices, degradation-matrix suite, attestation verification from a clean container).
 2. **≥ 2 independent attestations**: builders in different organizations/infrastructure reproduce the tree hash and publish minisign-signed attestation TXs on Arweave.
 3. **72 h staging soak** on `staging_futarchy` against the live target network.
-4. **Changelog TX** published; release notes list the immutable TXID, attestation TXIDs, and the multi-gateway URL set.
+4. **Changelog TX** published; release notes list the immutable TXID, **release-signature TXIDs**, attestation TXIDs, and the multi-gateway URL set.
 5. **3-of-5 ArNS repoint** (§4.2) executed by the controller quorum via one ANT `setRecord`.
 6. **`ReleaseChannel` update** submitted per §3 within 600 blocks of the repoint; the release author MUST preserve the execution guard's offsets 112–119 and `URGENT_UPGRADE` bit exactly as §3.1 requires.
 
@@ -59,13 +72,24 @@ CI can neither sign nor repoint: CI holds **no** minisign keys and **no** ANT co
 
 **Release-signature floor (normative; added 2026-07-20).** Gate 2 fixes a floor for *attestations*; the checklist previously fixed none for the release-key signatures over `release.json` itself, leaving §1.1's plural "signing key IDs" unquantified. The floor is **≥ 2 valid release-key signatures from distinct active keys of the current keyring generation** (§2.1), counted after excluding every key marked revoked in `ReleaseChannel` (§2.3) — the same floor as attestations, for the same reason: a canonical release must survive the loss or compromise of any single release key without becoming unverifiable, and a one-signature release would make a single key a unilateral shipping authority, which is precisely the concentration §2.2 exists to prevent. `verify-release` (§1.3) and the out-of-band monitor (§5.2) MUST treat fewer than two valid signatures as a verification failure. A deployment MAY require more and MUST state its minimum explicitly rather than inherit one silently; it MUST NOT configure fewer.
 
+**Where the credential transaction ids live, and why not in `release.json` (normative; added 2026-08-09).** Gate 4 lists them because `release.json` **cannot** carry them. §2.1 has release keys sign that document's SHA-256 hash, and §1.3 and §5.2 both verify against the *served bytes* — so a signature transaction exists only once those bytes are final. Writing its id back into the document changes the bytes the signature covers and invalidates it. The same argument applies to attestation transaction ids, which sign the same tree hash. A verifier therefore takes both sets from gate 4's release notes, not from the document: `verify-release compare` accepts them as repeated `--signature <txid>` and `--attestation <txid>` arguments, and MUST report naming none as *no credentials named* rather than as a release that published none. A future machine-readable index of the credential transactions MUST be addressed independently of `release.json` for this reason (SQ-1035).
+
 ### 1.5 Expedited descriptor-only release (D-14)
 
 A second, faster lane exists. It is **admissible only** for releases whose delta against the incumbent production release is confined to: `packages/descriptors/**` (including the Asset Hub descriptor set), descriptor metadata hashes and the supported `spec_version` range in `release.json`, and release metadata files (changelog, release history data). **Zero app-code delta**: every other file in the built tree MUST be byte-identical to the incumbent release.
 
-Requirements: the same reproducible build and **2 attestations** — where each attestor additionally attests to the **delta scope** (mechanically checked by `verify-release diff-scope --against <incumbent-txid>`, which byte-compares the trees and fails if any out-of-scope file differs) — then a **3-of-5 repoint**. **No staging soak is required.** The `ReleaseChannel` update sets the writer-(b)-owned `EXPEDITED` flag while preserving every guard-owned byte and bit (§3.1); every expedited release MUST be followed by a retrospective entry in the release log stating why the lane was used.
+Requirements: the same reproducible build and **2 attestations** — where each attestor additionally attests to the **delta scope** (mechanically checked by `verify-release diff-scope --against <incumbent-txid> --local dist/ --gateways gateways.json`, which byte-compares the trees and fails if any out-of-scope file differs) — then a **3-of-5 repoint**. **No staging soak is required.** The `ReleaseChannel` update sets the writer-(b)-owned `EXPEDITED` flag while preserving every guard-owned byte and bit (§3.1); every expedited release MUST be followed by a retrospective entry in the release log stating why the lane was used.
+
+**What `diff-scope` is handed, and which address `--against` takes (normative; added 2026-08-09).** `<incumbent-txid>` is the incumbent production release's **immutable** address — the manifest the name was repointed to, which §1.4 gate 4 publishes in the release notes and which §3.1 carries as `ReleaseChannel.manifest_txid`. It is **not** the asset-tree manifest `release.json` pins: §1.2's second pass is what puts `release.json` inside the immutable one, and that document's signed per-file map is what the delta is measured against. A transaction id is not a local file, so this command takes the multi-gateway URL set for the same reason §1.3 does and MUST NOT default one (§5.1). It MUST fetch the incumbent document through **every** configured gateway and MUST refuse when they disagree, rather than taking the first answer — a lane that skips the soak may not rest on one gateway's account of what the incumbent published, and a single gateway serving an incumbent map whose hash for one file happens to equal the candidate's would turn an app-code delta into an admissible descriptor-only one. The candidate is the local built tree, named as §1.3 names it (`--local <dir>`). Verifying the incumbent's own signatures is §1.3's `compare`, not this command.
 
 Rationale (honest scope): the soak exists to catch app-behavior regressions; a descriptor-only delta has no app-code surface to regress, while descriptor lateness is itself a live risk (§1.6). Any change touching app code — however small — MUST use the standard lane.
+
+**The lane is unavailable until the build emits a separately identifiable descriptor artifact (normative; added 2026-08-09, SQ-1039).** This section states the admissible delta over **source** paths (`packages/descriptors/**`) and has `diff-scope` check it over the **built tree**, and under §1.1 those two are not the same statement. §1.1 gives every emitted chunk a content-hash-only name, and a bundler's chunk hash covers the filenames of the chunks that chunk imports. So a descriptor refresh renames its own chunk, then renames every chunk that imports it, up to the entry chunk and `index.html`. No descriptor-only source delta therefore produces a built-tree delta confined to any path prefix. Two consequences follow, and the first is a rule about the checker rather than about a release:
+
+1. **`diff-scope` MUST NOT allowlist a descriptor path prefix.** Until 2026-08-09 it allowlisted `assets/descriptors/`, which the build has never emitted — the path existed only in the tool's fixtures. An allowlist entry naming an output that does not exist makes the lane look decidable while authorizing nothing, and the fixtures agreed with the code because both were written from the same wrong premise.
+2. **Until the build emits a separately identifiable descriptor artifact, the expedited lane is unavailable.** `diff-scope` MUST refuse every candidate whose built-tree delta reaches app assets, and that release MUST take the standard lane with its soak. The refusal is the safe direction, and it is the only safe direction available: skipping a 72 h soak on a false premise is the failure this section cannot afford, while taking a soak that was not strictly required costs time alone.
+
+What would restore the lane is a build that gives descriptors a path stable across refreshes, or a signed declaration in `release.json` of which built files are descriptor-derived. SQ-1039 owns that choice. Neither is a change to this section's policy — the policy stands, and what is missing is a built tree that can evidence it.
 
 ### 1.6 Descriptor lead-time gating (D-14, D-12)
 
@@ -89,6 +113,7 @@ Every release is a permanent Arweave transaction; per-release undernames plus in
 Two disjoint key populations:
 
 - **Release minisign keys**: sign `release.json`'s hash. Keyring published in-repo, in-app, and on Arweave. Attestor keys are minisign keys of the independent builders.
+- **An attestation signs the same message a release signature does — `release.json`'s SHA-256 hash (normative; added 2026-08-09).** §1.4 gate 2 says independent builders *"reproduce the tree hash"*, and that phrase describes the **check the builder performs**, not the message they sign. This document defines no tree hash anywhere, and it does not need one: `release.json` carries the per-file SHA-256 map, so a signature over that document's hash is already a commitment to the exact tree. Neither message would prove a rebuild in any case — an attestor could sign either value without building — so the independence claim rests where §2.2 puts it, on the two disjoint key populations, and never on the choice of message. A verifier MUST therefore verify both credential sets over the same digest, and MUST separate them by the signing key's declared **role**: a release key's signature is not an attestation, whatever it covers.
 - **ArNS controller keys**: control the ANT that resolves `futarchy` (§4.2).
 
 Both: hardware-backed, geographically distributed, documented ceremony, annual rotation with overlap; old keyrings are retained in-app for verifying historical releases, tagged by **keyring generation** (a monotonically increasing `u32` carried in `release.json` and in `ReleaseChannel`). CI holds neither population (§1.4).
@@ -200,7 +225,7 @@ Carried forward unchanged: release-scoped SW; cache name = manifest TXID; assets
 **Compensating control — out-of-band attestation monitor (required):** ≥ 2 independent monitor operators, **disjoint from ArNS controllers** (§2.2), run a headless fetcher (no service worker, no browser cache) that, on every finalized `ReleaseChannel` change and at least hourly:
 
 1. resolves `futarchy` via ≥ 3 independent gateways and fetches the full served bundle by resolved TXID and by name;
-2. byte-compares every file against the per-file SHA-256 map of the *signed* `release.json`, verifies the minisign signatures and ≥ 2 attestations against the current keyring generation, and cross-checks `manifest_txid` against `ReleaseChannel`;
+2. byte-compares every file against the per-file SHA-256 map of the *signed* `release.json`, verifies the minisign signatures and ≥ 2 attestations against the current keyring generation — **counted by organization, exactly as §1.4 gate 2 counts them, and not merely by distinct key** (SQ-1032, ruled 2026-08-08) — and cross-checks `manifest_txid` against `ReleaseChannel`;
 3. on any mismatch, fires the **release-integrity alerting channel**: the monitoring stack's paging route (§6.3, `RB-RELEASE`), the public static status page, community channels, and — on confirmed compromise — the incident path of §6.4 (repoint/rollback + `ReleaseChannel` `SECURITY` flag, which reaches even users whose SW suppresses in-app banners only if they load a clean context; the status page and wallet-community channels are the honest remainder).
 
 The monitor detects hostile *distribution* (wrong bytes served for the canonical name) from outside any SW's reach; it cannot reach into a browser profile already running a hostile SW — that residual stands as declared.

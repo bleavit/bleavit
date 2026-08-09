@@ -8,5 +8,14 @@
     "monitor-operator": "out-of-band attestation-monitor operators (12 §5.2) — MUST NOT be ArNS controllers",
     "attestor": "independent builders' minisign keys (12 §1.4 gate 2) — MAY overlap release signers"
   },
+  "_entry_schema": {
+    "id": "the minisign key id, or the ANT controller address, or the monitor operator's published identity",
+    "population": "one of the four names above",
+    "operator": "the natural person 12 §2.2 point 1 requires. Disjointness is evaluated over this field and no other",
+    "organization": "the organization 12 §1.4 gate 2 counts attestations by, and the one D-16 separates. Never derived from the operator name",
+    "generation": "12 §2.1's keyring generation. Required for release-signer and attestor, refused for the other two — an ANT address belongs to no keyring",
+    "revocationIndex": "the 0..63 index this key occupies in 02 §12's `revoked_key_bits` bitmask. Required for release-signer and attestor. Without it a verifier holding the on-chain bits cannot name a single revoked key, so 12 §2.3 point 2 would be unimplementable"
+  },
+  "_mirror": "SIGNERS.md at the repository root is the human rendering of this file, and `python3 tools/deploy/check-signers.py` binds the two in both directions. An entry here with no row there is a key nobody published; a row there with no entry here is a person no check can see.",
   "entries": []
 }

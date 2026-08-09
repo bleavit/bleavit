@@ -65,6 +65,7 @@ class RunEvidenceTests(unittest.TestCase):
         self.report = self.root / "target" / "env" / "run-report.json"
         self.logs = self.root / "target" / "env" / "logs"
         self.invocations = self.root / "target" / "env" / "zombienet-invocations"
+        self.drill_tiers = self.root / "target" / "env" / "zombienet-drill-tiers"
         self._make_fixture()
 
     def tearDown(self) -> None:
@@ -314,6 +315,12 @@ class RunEvidenceTests(unittest.TestCase):
                 if [ -n "${{FAKE_ZOMBIENET_MARKER:-}}" ]; then
                     printf '%s\\n' "$phase" >> "$FAKE_ZOMBIENET_MARKER"
                 fi
+                # The tier the drill harness will read. Recorded separately so the phase
+                # assertions above stay a list of phases.
+                if [ -n "${{FAKE_ZOMBIENET_TIER_MARKER:-}}" ]; then
+                    printf '%s %s\\n' "$phase" "${{BLEAVIT_DRILL_TIER:-unset}}" \\
+                      >> "$FAKE_ZOMBIENET_TIER_MARKER"
+                fi
                 if [ "$phase" = spawn ]; then
                     if [ "${{FAKE_ZOMBIENET_SPAWN_MODE:-pass}}" = nospec ]; then
                         exit 0
@@ -502,6 +509,7 @@ class RunEvidenceTests(unittest.TestCase):
             str(self.root / "fixture-bin") + os.pathsep + process_environment["PATH"]
         )
         process_environment["FAKE_ZOMBIENET_MARKER"] = str(self.invocations)
+        process_environment["FAKE_ZOMBIENET_TIER_MARKER"] = str(self.drill_tiers)
         if environment:
             process_environment.update(environment)
         return subprocess.run(
@@ -670,6 +678,30 @@ class RunEvidenceTests(unittest.TestCase):
         self.assertEqual(
             self.invocations.read_text(encoding="utf-8").splitlines(),
             ["spawn", "test"],
+        )
+
+    def test_the_drill_tier_is_pinned_and_the_environment_cannot_lower_it(self) -> None:
+        """An evidence run always demands certification — see CERTIFYING_DRILL_TIER.
+
+        Drill 14's harness treats the two documented environmental refusals as
+        legitimate outcomes at its lower tier, and a run that takes one certifies
+        none of what 15 §4.8 says its Zombienet row certifies. So an ambient
+        ``BLEAVIT_DRILL_TIER`` must not reach the drill: a variable set in a CI
+        environment would otherwise downgrade release evidence into a run that
+        proved less than the evidence reports, with nothing red anywhere.
+        """
+        result = self.run_runner(
+            "--kind",
+            "zombienet",
+            "--suites",
+            "01-smoke",
+            environment={"BLEAVIT_DRILL_TIER": "exploratory"},
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            self.drill_tiers.read_text(encoding="utf-8").splitlines(),
+            ["spawn release", "test release"],
         )
 
     def test_missing_network_spec_fails_the_suite(self) -> None:

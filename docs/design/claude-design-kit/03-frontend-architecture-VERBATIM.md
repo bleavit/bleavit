@@ -1,12 +1,21 @@
 > **DERIVED COPY for design-tool context — DO NOT EDIT.**
 > Verbatim copy of `docs/architecture/10-frontend-architecture.md` (the source of truth),
-> regenerated 2026-08-08 for the SQ-1011/SQ-1012/SQ-1013 rulings (F26): §3.1 gains a
-> **`CompatUnavailable`** state under a new code `FE-COMPAT-003`, for a compatibility probe
-> that could not complete — fail-closed, non-terminal, naming **no** disabled surface because
-> none was examined. §3.2 keeps its three rows and now says why the fourth outcome is not a
-> mode. §4.1 gains the normative rule for a compatibility probe's own `Chain` handle, and
-> §9.4's mobile-CPU row gains the line that handle actually costs. The previous
-> regeneration was 2026-08-07 and carried three changes that landed that day. From **F1**:
+> regenerated 2026-08-09 for two changes that landed together. From **F26**, the
+> SQ-1011/SQ-1012/SQ-1013 rulings: §3.1 gains a **`CompatUnavailable`** state under a new code
+> `FE-COMPAT-003`, for a compatibility probe that could not complete — fail-closed,
+> non-terminal, naming **no** disabled surface because none was examined. §3.2 keeps its three
+> rows and now says why the fourth outcome is not a mode. §4.1 gains the normative rule for a
+> compatibility probe's own `Chain` handle, and §9.4's mobile-CPU row gains the line that
+> handle actually costs. From **F18**: §4.1 also states **which genesis form a bundled chain
+> spec carries**, and that the two roles differ — a relay needs `genesis.raw` or a
+> `lightSyncState` checkpoint, a parachain or foreign spec may carry a bare
+> `genesis.stateRootHash`. Measured against the pinned client, the two forms yield the same
+> genesis hash, while `addChain` takes 23,644 ms on a 79.4 MB raw spec and 3 ms on the
+> state-root form. From **F17**: §2.1's brand rule is **corrected**. It claimed no spread
+> could produce a brand, and a spread can — so the rule now requires a member a spread
+> cannot reproduce wherever a control permits on a payload field read beside a brand.
+> The previous regeneration was 2026-08-07 and carried three changes that
+> landed that day. From **F1**:
 > §5.2's rewritten depth paragraph, now that FE-P5 is resolved. What bounds historical
 > depth is **hash acquisition, not state retrieval** — `chain_getBlockHash(height)`
 > returns `null` for every height except `0` and the best block — and §5.2 gains two
@@ -96,7 +105,7 @@ export type Finalized<T> = Verified<T>
 
 Three implementation constraints follow, and all three are normative because the invariant is silent when they are violated:
 
-- **The brand is part of the type, not a remark about it.** A structural intersection over `status.kind` alone is satisfied by any object literal, so a package that never touches the light client could mint a value the transaction path accepts. The non-exported `unique symbol` field is what makes the type nominal; it is unnameable outside `chain-client`, so no literal, spread, or `satisfies` can produce it, and only a deliberate double assertion can — which is grep-able and lint-banned.
+- **The brand is part of the type, not a remark about it.** A structural intersection over `status.kind` alone is satisfied by any object literal, so a package that never touches the light client could mint a value the transaction path accepts. The non-exported `unique symbol` field is what makes the type nominal; it is unnameable outside `chain-client`, so no literal or `satisfies` can produce it, and only a deliberate double assertion can — which is grep-able and lint-banned. **A brand is not carried by construction alone, and this sentence said otherwise until 2026-08-09** (corrected under R-1 after the claim was compiled): object spread copies symbol-keyed properties, so `{ ...genuine, field: substituted }` retains the brand with **no assertion at all**, and a cast checker cannot see an expression that contains no cast. A brand therefore proves that *some producer ran*; it does not prove the payload beside it is what that producer emitted. Where a control **permits** on a payload field read beside a brand, the type MUST additionally carry a member a spread cannot reproduce — a non-exported marker class with a `#private` member, which TypeScript drops from a spread type while keeping every ordinary property. For `Finalized<T>` specifically this is deliberately **not** required: `derive(read, compute)` already grants exactly that power by design (§2.2's *"computed client-side purely from such values"*), so the spread is the sanctioned operation spelled differently rather than an escalation, and a spread still cannot forge a pin.
 - **`Verified<T>` and `VerificationStatus` live in the dependency-free `shared-types` package; `Finalized<T>`'s brand MUST NOT.** If the brand lives in the package every other package depends on, every package can construct it, and this section's guarantee is void — silently, with green CI. `chain-client` imports `Verified<T>` and defines `Finalized<T>` locally.
 - **The brand is a module-private phantom, not a class private member.** These values cross `postMessage` from the smoldot worker (§4.1) and are written to IndexedDB (§7). Structured clone strips prototypes, so a class instance arrives as a plain object and nominality is lost at exactly the one boundary that matters. A phantom field has no runtime representation, so structured clone is a no-op on it. The single assignment site, an ESLint ban on `Finalized`-shaped type assertions and on `as unknown as`, and a `package.json` `exports` map restricted to `"."` and `"./testing"` are the three enforcement layers; the production build aliases `"./testing"` to a module that throws at import. The §10.2 negative-compilation corpus carries a fixture that **forges a finalized-shaped object literal and asserts it fails to typecheck** — without it the brand is a claim rather than a tested property.
 
@@ -232,6 +241,8 @@ Unchanged: one smoldot instance hosting the relay light client (GRANDPA warp syn
 
 1. **A probe handle is transient and is released when its verdict is produced.** The same client *"tries to distribute CPU resources equally between all active `Chain` objects"*, so the cost of an extra handle is **CPU share, not sync state or memory** — a handle held for the session permanently dilutes the reader's share of one core (§9.4's CPU row, which names this line).
 2. **Releasing it stops every chain the probe added, not only the one whose provider was handed out.** A factory that adds a relay and a parachain and then releases one leaks the other, and §3.2 re-runs the classifier on **every** `CodeUpdated` — so a partially transient client is worse than a persistent one, because nothing counts the remainder.
+
+**Which genesis form a bundled spec carries is normative, and the two roles differ (added 2026-08-08, F18).** A chain spec states its genesis either as the full `genesis.raw` storage map or as a bare `genesis.stateRootHash`, and the pinned client accepts both — measured against `smoldot@3.3.2`, the two forms yield the **same** genesis hash, while `addChain` takes 23,644 ms on a 79.4 MB `raw` Asset Hub spec and 3 ms on the state-root form. The published light specs a release pins for foreign chains use the second, so a client that admitted only `raw` could not load the very artifact [02](02-integration-contract.md) §7.7 pins. Never both at once. The asymmetry: a **relay** spec MUST carry `genesis.raw` or a `lightSyncState` checkpoint, because it is the root of finality and a bare state root gives a light client nothing to verify against; a **parachain** or foreign spec may carry either, since its finality derives from relay-finalized para-inclusion. The identity check is unaffected either way — it compares the pinned genesis hash, which both forms produce identically.
 
 ### 4.2 What smoldot can and cannot serve — stated plainly
 

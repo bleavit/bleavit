@@ -297,6 +297,101 @@ test('an unreadable chain names WHICH chain could not be read', async () => {
   assert.match(local.reason, /This chain could not be read/);
 });
 
+test('every blocked deposit says WHY as a value, not only as a sentence', async () => {
+  // The reason is written for a person and it is the only thing a caller could act on, so a
+  // caller wanting to separate *the Asset Hub refused* from *a reader did not open* had to
+  // match on prose. `zombienet/drills/js/client-boot-rules.js` did exactly that and could not:
+  // only an absent or unpinned Asset Hub is environmental, and a nonempty sentence is what every
+  // arm here produces. The four other causes are defects in the path 15 §4.8 says the Zombienet
+  // row *does* certify.
+  //
+  // The connector's `wrong-chain` arm maps to `asset-hub-bundle-pin-mismatch` and not to a cause
+  // spelled `wrong-chain`: that arm compares against `BundledChain.pinned.genesisHash`, while 10
+  // §5.2's identically named `ForeignMode` compares against the release's `FOREIGN_CHAIN_PINS`.
+  // Two comparisons, two pins, and in a development topology two opposite meanings.
+  const base = {
+    local: transport(LOCAL_CHAIN),
+    artifacts: ARTIFACTS,
+    pins: PINS,
+    classifyAssetHub: classifiesFull,
+  };
+  const cases: readonly (readonly [string, Parameters<typeof openDepositLeg<FakeTransport>>[0]])[] = [
+    [
+      'asset-hub-unavailable',
+      { ...base, openReader, connectAssetHub: async () => ({ kind: 'unavailable', reason: 'not synced' }) },
+    ],
+    [
+      'asset-hub-bundle-pin-mismatch',
+      {
+        ...base,
+        openReader,
+        connectAssetHub: async () => ({
+          kind: 'wrong-chain',
+          genesisHash: `0x${'ff'.repeat(32)}` as HexString,
+          reason: 'retrying will not change this',
+        }),
+      },
+    ],
+    [
+      'asset-hub-connect-failed',
+      {
+        ...base,
+        openReader,
+        connectAssetHub: async (): Promise<never> => {
+          throw new Error('the topology was already torn down');
+        },
+      },
+    ],
+    [
+      'asset-hub-unreadable',
+      {
+        ...base,
+        openReader: async (t: FakeTransport) => {
+          if (t.chain === AH_CHAIN) throw new Error('no finalized block on Asset Hub');
+          return openReader(t);
+        },
+        connectAssetHub: async () => attached(assetHubTransport()),
+      },
+    ],
+    [
+      'local-unreadable',
+      {
+        ...base,
+        openReader: async (t: FakeTransport) => {
+          if (t.chain === LOCAL_CHAIN) throw new Error('no finalized block here');
+          return openReader(t);
+        },
+        connectAssetHub: async () => attached(assetHubTransport()),
+      },
+    ],
+    [
+      'classification-failed',
+      {
+        ...base,
+        openReader,
+        connectAssetHub: async () => attached(assetHubTransport()),
+        classifyAssetHub: async (): Promise<never> => {
+          throw new Error('PAPI could not map this runtime');
+        },
+      },
+    ],
+  ];
+
+  const seen: string[] = [];
+  for (const [cause, deps] of cases) {
+    const leg = await openDepositLeg(deps);
+    assert.ok(leg.kind === 'blocked', `${cause} did not block`);
+    assert.equal(leg.cause, cause);
+    // Still a sentence as well: E17 asks for the flow blocked *with diagnostics*, and a code
+    // is not a diagnosis.
+    assert.ok(leg.reason.length > 0, `${cause} carried no diagnostics`);
+    seen.push(leg.cause);
+  }
+  // Every arm distinguishable from every other. One cause covering two arms would put a local
+  // failure and an Asset Hub refusal back in the same bucket, which is the whole defect.
+  assert.equal(new Set(seen).size, cases.length, `causes collapsed: ${JSON.stringify(seen)}`);
+});
+
 test('two readers on one chain THROW rather than blocking politely', async () => {
   // `attachAssetHub` already refuses a bundle pinning our own genesis, so reaching this needs
   // the LOCAL transport to be on Asset Hub — at which point every futarchy figure on every

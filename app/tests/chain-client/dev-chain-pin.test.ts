@@ -28,7 +28,15 @@ const APP = join(dirname(fileURLToPath(import.meta.url)), '../..');
 
 import { verifyBundledChainSpec } from '@bleavit/chain-client';
 import type { PinnedChainSpec } from '@bleavit/chain-client';
-import { DevPinError, buildDevPin, main, refuseReleasePath, sha256Hex } from '../../tools/dev-chain-pin.ts';
+import {
+  DevPinError,
+  buildDevPin,
+  genesisStateRoot,
+  lightChainSpec,
+  main,
+  refuseReleasePath,
+  sha256Hex,
+} from '../../tools/dev-chain-pin.ts';
 
 const genesis = (byte: string): string => `0x${byte.repeat(32)}`;
 
@@ -115,10 +123,10 @@ test('a genesis hash that is not one is refused, with the reason it cannot be co
 
 /* -------------------------------------------------------------- the refusals a drill needs */
 
-test('a non-raw spec is refused here rather than as a chain that never finalises', async () => {
+test('a spec carrying neither genesis form is refused rather than never finalising', async () => {
   await assert.rejects(
     () => buildDevPin(inputs({ relay: { chainSpec: JSON.stringify({ id: 'x', genesis: { runtimeGenesis: {} } }), genesisHash: genesis('a1') } })),
-    /not a raw spec/,
+    /neither a `genesis.raw` map nor a 32-byte `genesis.stateRootHash`/,
   );
 });
 
@@ -224,4 +232,181 @@ test('the CLI reads the specs off disk and writes a document a harness can injec
 
 test('a missing argument is named rather than producing a pin over `undefined`', async () => {
   await assert.rejects(() => main(['--relay', '/nowhere']), /--relay-genesis is required/);
+});
+
+/* ------------------------------------------------- the state-root genesis form (F18, 2026-08-08) */
+
+/**
+ * A genesis header, as `polkadot-parachain export-genesis-head` prints it.
+ *
+ * 32 zero bytes of parent hash, a single-byte compact `0` block number, the state root, the
+ * empty-trie extrinsics root, and an empty digest — the exact shape the real binary produced
+ * for the drill's Asset Hub spec.
+ */
+const header = (stateRoot: string, options: { number?: string; parent?: string } = {}): string =>
+  `0x${options.parent ?? '00'.repeat(32)}${options.number ?? '00'}${stateRoot.slice(2)}${'03'.repeat(32)}00`;
+
+const STATE_ROOT = '0xeae389d53bcab9a4aff8a4196a68288cbb14ba51414db804dc11582a088d846c';
+
+test('the genesis state root is decoded out of the header the exporter printed', () => {
+  assert.equal(genesisStateRoot(header(STATE_ROOT)), STATE_ROOT);
+});
+
+test('a header for any block but genesis is refused, in both of the ways it can be one', () => {
+  // The two fields are asserted rather than skipped because `export-genesis-head` and
+  // `chain_getHeader` differ only in which block they are asked about, and a state root taken
+  // from block N anchors the light client on a state the genesis hash does not describe.
+  assert.throws(
+    () => genesisStateRoot(header(STATE_ROOT, { parent: `${'ab'.repeat(32)}` })),
+    /not a genesis header/,
+  );
+  // Compact-encoded 1 is `0x04`; a reader that skipped one byte without decoding would take
+  // the state root from an offset that happens to be right here and wrong for block 64.
+  assert.throws(() => genesisStateRoot(header(STATE_ROOT, { number: '04' })), /for block 1, not genesis/);
+});
+
+test('a malformed header is refused rather than yielding 32 bytes of something', () => {
+  for (const bad of ['', 'deadbeef', '0xzz', `0x${'00'.repeat(40)}`]) {
+    assert.throws(() => genesisStateRoot(bad), DevPinError, `accepted ${JSON.stringify(bad)}`);
+  }
+});
+
+test('the trimmed spec keeps everything but the genesis map, bootnodes above all', () => {
+  // A genesis of real shape rather than one entry: the size claim is the whole reason this
+  // transformation exists (79.4 MB and ~189k entries on the drill's Asset Hub), and a
+  // one-entry fixture would let a version that pretty-printed the map back out still pass.
+  const top: Record<string, string> = {};
+  for (let i = 0; i < 2_000; i += 1) top[`0x${i.toString(16).padStart(64, '0')}`] = `0x${'ab'.repeat(32)}`;
+  const full = JSON.stringify({
+    id: 'asset_hub_local',
+    name: 'Asset Hub Local',
+    relay_chain: 'paseo_local',
+    para_id: 1000,
+    bootNodes: ['/ip4/127.0.0.1/tcp/30333/p2p/12D3KooWA'],
+    genesis: { raw: { top } },
+  });
+  const trimmed = lightChainSpec(full, STATE_ROOT);
+  const light = JSON.parse(trimmed) as Record<string, unknown>;
+  assert.deepEqual(light['genesis'], { stateRootHash: STATE_ROOT });
+  // Without these the light client has nothing to dial and `startTopology` refuses outright.
+  assert.deepEqual(light['bootNodes'], ['/ip4/127.0.0.1/tcp/30333/p2p/12D3KooWA']);
+  assert.equal(light['relay_chain'], 'paseo_local');
+  assert.equal(light['para_id'], 1000);
+  assert.ok(trimmed.length * 100 < full.length, `the trimmed spec is ${trimmed.length} of ${full.length} bytes`);
+  assert.ok(!trimmed.includes('ab'.repeat(32)), 'a genesis storage value survived the trim');
+});
+
+test('trimming refuses a spec with no genesis map to trim', () => {
+  // The state root would then be an unchecked assertion about storage this tool never saw.
+  assert.throws(
+    () => lightChainSpec(JSON.stringify({ id: 'x', genesis: { stateRootHash: STATE_ROOT } }), STATE_ROOT),
+    /nothing to replace/,
+  );
+});
+
+test('a parachain may be pinned on a bare state root; a relay may not', async () => {
+  const light = spec({ id: 'asset_hub_local', relayChain: 'paseo_local', genesis: { stateRootHash: STATE_ROOT } });
+  const document = await buildDevPin({
+    relay: { chainSpec: RELAY, genesisHash: genesis('a1') },
+    para: { chainSpec: PARA, genesisHash: genesis('b2') },
+    assetHub: { chainSpec: light, genesisHash: genesis('c3') },
+  });
+  assert.equal(document.assetHub?.pinned.id, 'asset_hub_local');
+
+  // A relay establishes its own finality from the GRANDPA authority set in genesis storage.
+  await assert.rejects(
+    () =>
+      buildDevPin(
+        inputs({ relay: { chainSpec: spec({ id: 'paseo_local', genesis: { stateRootHash: STATE_ROOT } }), genesisHash: genesis('a1') } }),
+      ),
+    /sync and never finalize/,
+  );
+});
+
+test('a spec declaring both genesis forms is refused rather than resolved', async () => {
+  await assert.rejects(
+    () =>
+      buildDevPin(
+        inputs({
+          para: {
+            chainSpec: spec({
+              id: 'bleavit_dev',
+              relayChain: 'paseo_local',
+              genesis: { raw: { top: {} }, stateRootHash: STATE_ROOT },
+            }),
+            genesisHash: genesis('b2'),
+          },
+        }),
+      ),
+    /declares both/,
+  );
+});
+
+test('the CLI trims and pins the SAME bytes, which is what the boot path then hashes', async () => {
+  // The property that makes this safe: `verifyBundledChainSpec` hashes the spec it is handed,
+  // so writing the light spec while pinning the untrimmed one would ship a `sha256` no file
+  // matches — a boot refused for a packaging reason that reads like a substituted spec.
+  const dir = mkdtempSync(join(tmpdir(), 'bleavit-dev-pin-light-'));
+  const { writeFileSync } = await import('node:fs');
+  const paths = { relay: join(dir, 'relay.json'), para: join(dir, 'para.json'), ah: join(dir, 'ah.json') };
+  writeFileSync(paths.relay, RELAY);
+  writeFileSync(paths.para, PARA);
+  writeFileSync(paths.ah, ASSET_HUB);
+  const lightPath = join(dir, 'ah-light.json');
+  const outPath = join(dir, 'dev-pin.json');
+
+  await main([
+    '--relay', paths.relay, '--relay-genesis', genesis('a1'),
+    '--para', paths.para, '--para-genesis', genesis('b2'),
+    '--asset-hub', paths.ah, '--asset-hub-genesis', genesis('c3'),
+    '--asset-hub-genesis-head', header(STATE_ROOT),
+    '--asset-hub-light-out', lightPath,
+    '--out', outPath,
+  ]);
+
+  const written = JSON.parse(readFileSync(outPath, 'utf8')) as {
+    assetHub: { pinned: PinnedChainSpec; chainSpec: string };
+  };
+  const onDisk = readFileSync(lightPath, 'utf8');
+  assert.equal(written.assetHub.chainSpec, onDisk);
+  assert.equal(written.assetHub.pinned.sha256, await sha256Hex(onDisk));
+  // And the real consumer accepts it — the discipline this suite's header states.
+  await verifyBundledChainSpec(onDisk, written.assetHub.pinned);
+});
+
+test('a light-spec destination inside a release tree is refused like any other pin path', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'bleavit-dev-pin-light-'));
+  const { writeFileSync } = await import('node:fs');
+  writeFileSync(join(dir, 'relay.json'), RELAY);
+  writeFileSync(join(dir, 'para.json'), PARA);
+  writeFileSync(join(dir, 'ah.json'), ASSET_HUB);
+  await assert.rejects(
+    () =>
+      main([
+        '--relay', join(dir, 'relay.json'), '--relay-genesis', genesis('a1'),
+        '--para', join(dir, 'para.json'), '--para-genesis', genesis('b2'),
+        '--asset-hub', join(dir, 'ah.json'), '--asset-hub-genesis', genesis('c3'),
+        '--asset-hub-genesis-head', header(STATE_ROOT),
+        '--asset-hub-light-out', join(APP, 'fixtures/chain-feed/2/asset-hub.json'),
+        '--out', join(dir, 'dev-pin.json'),
+      ]),
+    /refusing to write a development pin/,
+  );
+});
+
+test('the two trim flags are used together or not at all', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'bleavit-dev-pin-light-'));
+  const { writeFileSync } = await import('node:fs');
+  writeFileSync(join(dir, 'relay.json'), RELAY);
+  writeFileSync(join(dir, 'para.json'), PARA);
+  // A header with no destination would pin bytes that exist only inside that process.
+  await assert.rejects(
+    () =>
+      main([
+        '--relay', join(dir, 'relay.json'), '--relay-genesis', genesis('a1'),
+        '--para', join(dir, 'para.json'), '--para-genesis', genesis('b2'),
+        '--asset-hub-genesis-head', header(STATE_ROOT),
+      ]),
+    /used together/,
+  );
 });

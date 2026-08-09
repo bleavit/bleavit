@@ -122,8 +122,34 @@ declare const GATE_PASSED: unique symbol;
  * encode `window.prep.scaleHex`; taking bytes from anywhere else is then a visible mismatch
  * rather than an invisible one, and `reduce` refuses a proof minted for a preparation other
  * than the session's own.
+ *
+ * ## The proof cannot be **re-pinned** either (2026-08-09)
+ *
+ * A `unique symbol` stops a literal and it does not stop a spread: object spread copies own
+ * enumerable properties including symbol-keyed ones, so `{ ...passed, at: anotherBlock }`
+ * compiles with no cast and is still a `GatePassed`. The paragraph above is about `prep`, and
+ * `reduce`/`operatorGate` both compare `prep` by **identity**, so that field defends itself —
+ * a substituted `prep` is a different object and the comparison fires. `at` has no such
+ * comparison anywhere and three consumers read it in a permitting position:
+ *
+ * - `mortalityFor` anchors the era at `passed.at.blockNumber`, which **is** the staleness
+ *   bound — an era anchored to the wrong block is the bound not being applied;
+ * - the raw external signer is told `atBlock: request.window.at.blockNumber`, so the number a
+ *   hardware device shows its holder comes from here;
+ * - `estimateFee` and `signedNonce` refuse a fee or a nonce read at a different block by
+ *   comparing `read.status.blockHash !== passed.at.blockHash` — and a re-pinned `at` makes
+ *   both comparisons agree with whatever block the read really came from.
+ *
+ * So `GatePassed` intersects a phantom marker whose `#private` member a spread type drops.
+ * See `ProducedByEpochClosure` in `src/features/tx/src/registry-filing.ts` for the mechanism
+ * and for why the `unique symbol` stays beside it
+ * (`tests/firewall/fixtures/gate-proof-repinned-by-spread.ts`).
  */
-export interface GatePassed {
+declare class ProducedByGate {
+  readonly #producedByGate: true;
+}
+
+export interface GatePassed extends ProducedByGate {
   readonly at: FinalizedBlockRef;
   /** The exact preparation these results were evaluated for — bytes, rows and fee asset. */
   readonly prep: TxPreparation;

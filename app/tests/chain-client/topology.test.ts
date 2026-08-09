@@ -172,9 +172,10 @@ test('a spec whose bytes do not match the release pin is refused', async () => {
   );
 });
 
-test('a non-raw spec is refused here rather than inside addChain', async () => {
-  // smoldot accepts raw specs only, and its failure for a non-raw one reads like a
-  // connectivity problem — an hour spent on the network for a packaging defect.
+test('a spec carrying neither genesis form is refused here rather than inside addChain', async () => {
+  // smoldot accepts a `genesis.raw` map or a `genesis.stateRootHash` and nothing else; its
+  // failure for a third form reads like a connectivity problem — an hour spent on the network
+  // for a packaging defect.
   const text = specText({ genesis: { runtimeGenesis: { code: '0x00' } } });
   const pinned: PinnedChainSpec = {
     id: 'bleavit',
@@ -186,6 +187,90 @@ test('a non-raw spec is refused here rather than inside addChain', async () => {
     () => verifyBundledChainSpec(text, pinned),
     (error) => error instanceof ChainSpecIntegrityError && /raw/.test(error.message),
   );
+});
+
+test('a PARACHAIN anchored on a bare state root is accepted — F18, 2026-08-08', async () => {
+  // The correction. This file used to refuse anything without `genesis.raw`, on the ground that
+  // *"smoldot accepts only raw chain specifications"*. The pinned smoldot@3.3.2 says otherwise
+  // in its own words — handed a raw genesis it logs that initialisation time *"can be
+  // significantly improved by replacing the `raw` field with `stateRootHash`"* — and executing
+  // both forms of one dev Asset Hub spec returned the identical genesis hash with `addChain`
+  // resolving in 3 ms instead of 23,644 ms. Every published light-client spec uses this form,
+  // so the old rule also meant this client could not load the artifact 02 §7.7 will pin.
+  const text = specText({
+    id: 'asset-hub',
+    relay_chain: 'paseo-local',
+    genesis: { stateRootHash: `0x${'ee'.repeat(32)}` },
+  });
+  const parsed = await verifyBundledChainSpec(text, {
+    id: 'asset-hub',
+    kind: 'para',
+    sha256: await chainSpecHash(text),
+    genesisHash: ASSET_HUB_GENESIS,
+    relayChainId: 'paseo-local',
+  });
+  assert.equal(parsed.id, 'asset-hub');
+});
+
+test('a RELAY anchored on a bare state root is refused unless it carries a checkpoint', async () => {
+  // A relay establishes its own finality from the GRANDPA authority set in genesis storage.
+  // Without that storage and without a `lightSyncState` it syncs and never finalizes — which
+  // on screen, and in a drill log, is indistinguishable from slow sync.
+  const bare = specText({ id: 'paseo-local', genesis: { stateRootHash: `0x${'ee'.repeat(32)}` } });
+  const pin = async (text: string): Promise<PinnedChainSpec> => ({
+    id: 'paseo-local',
+    kind: 'relay',
+    sha256: await chainSpecHash(text),
+    genesisHash: RELAY_GENESIS,
+  });
+  await assert.rejects(
+    async () => verifyBundledChainSpec(bare, await pin(bare)),
+    (error) => error instanceof ChainSpecIntegrityError && /never finalize/.test(error.message),
+  );
+  // …and a checkpoint makes it admissible, so the refusal is about the missing finality source
+  // rather than about the form.
+  const checkpointed = specText({
+    id: 'paseo-local',
+    genesis: { stateRootHash: `0x${'ee'.repeat(32)}` },
+    lightSyncState: { finalizedBlockHeader: '0x00', grandpaAuthoritySet: '0x00' },
+  });
+  await verifyBundledChainSpec(checkpointed, await pin(checkpointed));
+});
+
+test('a spec declaring BOTH genesis forms is refused rather than resolved', async () => {
+  // `relayChainOf`'s argument, applied to the anchor: two declarations of one fact are a spec
+  // that has been edited, and the two need not describe the same state.
+  const text = specText({ genesis: { raw: { top: {} }, stateRootHash: `0x${'ee'.repeat(32)}` } });
+  await assert.rejects(
+    async () =>
+      verifyBundledChainSpec(text, {
+        id: 'bleavit',
+        kind: 'relay',
+        sha256: await chainSpecHash(text),
+        genesisHash: RELAY_GENESIS,
+      }),
+    (error) => error instanceof ChainSpecIntegrityError && /declares both/.test(error.message),
+  );
+});
+
+test('a `stateRootHash` that is not a 32-byte hash is not a genesis form at all', async () => {
+  // The shape check is what stops `"stateRootHash": "soon"` reading as an anchor. smoldot would
+  // reject it inside `addChain`, where the message names neither the field nor the file.
+  for (const stateRootHash of ['', '0xdeadbeef', 32, null]) {
+    const text = specText({ id: 'asset-hub', relay_chain: 'paseo-local', genesis: { stateRootHash } });
+    await assert.rejects(
+      async () =>
+        verifyBundledChainSpec(text, {
+          id: 'asset-hub',
+          kind: 'para',
+          sha256: await chainSpecHash(text),
+          genesisHash: ASSET_HUB_GENESIS,
+          relayChainId: 'paseo-local',
+        }),
+      (error) => error instanceof ChainSpecIntegrityError && /neither/.test(error.message),
+      `accepted ${JSON.stringify(stateRootHash)}`,
+    );
+  }
 });
 
 test('a relay spec that declares a relayChain is refused', async () => {

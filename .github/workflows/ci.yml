@@ -204,6 +204,16 @@ jobs:
         # can be added there with no alert row and no runbook, and check-runbooks.py reads
         # that heading only as a boundary marker.
         run: python3 tools/deploy/check-ops-handbook.py
+      - name: Signer registry — SIGNERS.md against what the code reads (12 §2.2, F13)
+        # 12 §2.2 point 1 requires SIGNERS.md by name, and it is an *input* to point 2 rather
+        # than a rendering of it: disjointness is evaluated over natural persons, so the
+        # operator mapping is what stops the check comparing key ids and passing forever.
+        # Bidirectional — a key in the JSON with no row is a key nobody published, a row with
+        # no entry is a person no check can see — and it binds the document's populations,
+        # entry schema, floors and quorum to the code that reads each. Today every population
+        # is unseated, which it reports as `unseated` and never as a separation; `--strict`,
+        # what a release gate runs, refuses that outright.
+        run: python3 tools/deploy/check-signers.py
 
   # S1 formal models — 15 §4.1; 03 §11.
   model-checking:

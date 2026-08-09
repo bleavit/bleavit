@@ -1,0 +1,169 @@
+{
+  "schema": "bleavit.gateway-transcript.v1",
+  "gateways": [
+    {
+      "name": "alpha",
+      "rawUrl": "https://alpha.example/raw/{txid}",
+      "txUrl": "https://alpha.example/{txid}/{path}"
+    },
+    {
+      "name": "beta",
+      "rawUrl": "https://beta.example/raw/{txid}",
+      "txUrl": "https://beta.example/{txid}/{path}"
+    }
+  ],
+  "responses": {
+    "https://alpha.example/raw/RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR": {
+      "status": 200,
+      "body_utf8": "{\n  \"schema\": \"bleavit.app-release.v1\",\n  \"version\": \"0.1.0\",\n  \"sourceCommit\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n  \"buildRecipeDigest\": \"b536b3720431922d1be0a6882d8b95e840df239774a7a06e842302a2ce252ae9\",\n  \"arweaveManifestTxId\": \"MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM\",\n  \"perFileHashes\": {\n    \"index.html\": \"c5b52b3954cd2bd3d3c1fa019c569c69692b997d6943056c60aed3177d47d7b2\",\n    \"assets/app.js\": \"17d407d29ed5a6adbf766c0633777306289e205b11f363dbe69e9c9b27b10411\",\n    \"assets/logo.png\": \"289c77a179831309c3d4505952b0e5ff6bb91c0b4c6f68a9da8b1ed6d38c5e64\"\n  },\n  \"specVersionRange\": {\n    \"primary\": 2,\n    \"recovery\": 3\n  },\n  \"descriptorMetadataHashes\": {\n    \"2\": \"bbf98dda918f709d5fba62bf9b7342c21d8492a268d3cc8bdda99775a63584f8\",\n    \"3\": \"d279364aadad3b3104518bbfcbbdbb1d5302b3eb1d1eebce1b7efd0d32c2011f\"\n  },\n  \"assetHub\": {\n    \"network\": null,\n    \"descriptorMetadataHashes\": {}\n  },\n  \"integrationContractVersion\": 23,\n  \"chainSpecHashes\": {\n    \"relay\": \"0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\n    \"para\": \"0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"\n  },\n  \"genesisHashes\": {\n    \"relay\": \"0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\n    \"para\": \"0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"\n  },\n  \"chainIdentity\": {\n    \"ss58Prefix\": 7777,\n    \"paraId\": 4242,\n    \"decimals\": {\n      \"VIT\": 12,\n      \"USDC\": 6\n    }\n  },\n  \"connectSrc\": [\n    \"https://alpha.example\"\n  ],\n  \"sbomSha256\": \"959f8d981f45b7e5829529a9118a2f41a09701788a7d70a132c5d4bfa5722428\",\n  \"keyringGeneration\": 4,\n  \"signingKeyIds\": [\n    \"1111111111111111\",\n    \"2222222222222222\"\n  ],\n  \"readiness\": {\n    \"productionReady\": true,\n    \"blockers\": [],\n    \"note\": \"Every entry is a pin this tree cannot yet make. `release:check --production` exits non-zero while any remain; an ordinary build still runs, so the pipeline is exercised on every commit rather than first debugged during a release.\"\n  }\n}\n"
+    },
+    "https://alpha.example/raw/P1eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee": {
+      "status": 200,
+      "body_utf8": "untrusted comment: signature from the bleavit fixture keyring\nRUQRERERERERESV9V1uRaxZudSACQ/5xFwRo8hgZLOAyoJ67UX0dCHEAUwGfdUfQ+fDdxfBhXFF280UI3xaUBQ6pfRq3NAoHzAU=\ntrusted comment: bleavit release 0.1.0\nopbTr7gDF4zszYMPJSzJyrYwnX4WpdBMTRnqF0m7NSuPq1SzZX5SVBAgbznEHGGPTm2M7hVkr6ytxDx13VfyCA==\n"
+    },
+    "https://alpha.example/raw/P2fffffffffffffffffffffffffffffffffffffffff": {
+      "status": 200,
+      "body_utf8": "untrusted comment: signature from the bleavit fixture keyring\nRUQiIiIiIiIiIrFXFNzBMn0jGWWupdHxGEnHaav8WkiiExBlZ2OhHcvhZMU/HAu3ji1RwYM8LY9Vjc7/eAdalHW+7elVUeDLqAE=\ntrusted comment: bleavit release 0.1.0\n+5bb0Dsf+qGcvAmwJMifUlYwM9rhMjJuMu8Oze5XL7u2EUOUsDZmB0t5uOEdAezvmTdJi7ZgeherR2uJJUQ4CQ==\n"
+    },
+    "https://alpha.example/raw/Q1ggggggggggggggggggggggggggggggggggggggggg": {
+      "status": 200,
+      "body_utf8": "untrusted comment: signature from the bleavit fixture keyring\nRUQzMzMzMzMzM3t87rU2sU7RgugGVapoeCyCYcqSruj2WGo5M6LNvsmyOvjHAVqPZ/BlRvdBN9zIDkknyEKgm8gM6bpTmdWzFgg=\ntrusted comment: reproduced by pallas\nbFMiM0hdJYtTleIGL3p4M8/YbfU8+b3N0cNaZfF2J3RBJ39STHbQpnSAkfQMXOFlHBWHmKusCZXTlj+Bh3RECg==\n"
+    },
+    "https://alpha.example/raw/Q2hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh": {
+      "status": 200,
+      "body_utf8": "untrusted comment: signature from the bleavit fixture keyring\nRURERERERERERJoIBOqE6sR9MxdIYF9qu6QWmG8REPBJuLJvwAkiTPbekDYShdipO0WZ4HW4yM95ptaSfaW2vZiuQ5G7H6soTAY=\ntrusted comment: reproduced by rhea\n6LI7PpduNFWy+AOGrXEgP5iDidXxDUHEtx7EAdcuVGP6i8K2V/2Zjo1OjBSoVq1StO2eaFPFTeClvS739RWOBQ==\n"
+    },
+    "https://alpha.example/raw/MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM": {
+      "status": 200,
+      "body_utf8": "{\n  \"manifest\": \"arweave/paths\",\n  \"version\": \"0.2.0\",\n  \"index\": {\n    \"path\": \"index.html\"\n  },\n  \"paths\": {\n    \"assets/app.js\": {\n      \"id\": \"PATH0zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\"\n    },\n    \"assets/logo.png\": {\n      \"id\": \"PATH1zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\"\n    },\n    \"index.html\": {\n      \"id\": \"PATH2zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\"\n    }\n  }\n}\n"
+    },
+    "https://alpha.example/raw/NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN": {
+      "status": 200,
+      "body_utf8": "{\n  \"manifest\": \"arweave/paths\",\n  \"version\": \"0.2.0\",\n  \"index\": {\n    \"path\": \"index.html\"\n  },\n  \"paths\": {\n    \"assets/app.js\": {\n      \"id\": \"PATH0zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\"\n    },\n    \"assets/logo.png\": {\n      \"id\": \"PATH1zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\"\n    },\n    \"index.html\": {\n      \"id\": \"PATH2zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\"\n    }\n  }\n}\n"
+    },
+    "https://alpha.example/raw/FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF": {
+      "status": 200,
+      "body_utf8": "{\n  \"manifest\": \"arweave/paths\",\n  \"version\": \"0.2.0\",\n  \"index\": {\n    \"path\": \"index.html\"\n  },\n  \"paths\": {\n    \"assets/app.js\": {\n      \"id\": \"FILE0zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\"\n    },\n    \"assets/logo.png\": {\n      \"id\": \"FILE1zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\"\n    },\n    \"index.html\": {\n      \"id\": \"FILE2zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\"\n    },\n    \"release.json\": {\n      \"id\": \"XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX\"\n    }\n  }\n}\n"
+    },
+    "https://alpha.example/MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM/index.html": {
+      "status": 200,
+      "body_utf8": "<!doctype html><title>bleavit</title>\n"
+    },
+    "https://alpha.example/NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN/index.html": {
+      "status": 200,
+      "body_utf8": "<!doctype html><title>bleavit</title>\n"
+    },
+    "https://alpha.example/FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF/index.html": {
+      "status": 200,
+      "body_utf8": "<!doctype html><title>bleavit</title>\n"
+    },
+    "https://alpha.example/MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM/assets/app.js": {
+      "status": 200,
+      "body_utf8": "export const boot = () => undefined;\n"
+    },
+    "https://alpha.example/NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN/assets/app.js": {
+      "status": 200,
+      "body_utf8": "export const boot = () => undefined;\n"
+    },
+    "https://alpha.example/FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF/assets/app.js": {
+      "status": 200,
+      "body_utf8": "export const boot = () => undefined;\n"
+    },
+    "https://alpha.example/MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM/assets/logo.png": {
+      "status": 200,
+      "body_base64": "iVBORw0KGgoAAQ=="
+    },
+    "https://alpha.example/NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN/assets/logo.png": {
+      "status": 200,
+      "body_base64": "iVBORw0KGgoAAQ=="
+    },
+    "https://alpha.example/FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF/assets/logo.png": {
+      "status": 200,
+      "body_base64": "iVBORw0KGgoAAQ=="
+    },
+    "https://alpha.example/FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF/release.json": {
+      "status": 200,
+      "body_utf8": "{\n  \"schema\": \"bleavit.app-release.v1\",\n  \"version\": \"0.1.0\",\n  \"sourceCommit\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n  \"buildRecipeDigest\": \"b536b3720431922d1be0a6882d8b95e840df239774a7a06e842302a2ce252ae9\",\n  \"arweaveManifestTxId\": \"MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM\",\n  \"perFileHashes\": {\n    \"index.html\": \"c5b52b3954cd2bd3d3c1fa019c569c69692b997d6943056c60aed3177d47d7b2\",\n    \"assets/app.js\": \"17d407d29ed5a6adbf766c0633777306289e205b11f363dbe69e9c9b27b10411\",\n    \"assets/logo.png\": \"289c77a179831309c3d4505952b0e5ff6bb91c0b4c6f68a9da8b1ed6d38c5e64\"\n  },\n  \"specVersionRange\": {\n    \"primary\": 2,\n    \"recovery\": 3\n  },\n  \"descriptorMetadataHashes\": {\n    \"2\": \"bbf98dda918f709d5fba62bf9b7342c21d8492a268d3cc8bdda99775a63584f8\",\n    \"3\": \"d279364aadad3b3104518bbfcbbdbb1d5302b3eb1d1eebce1b7efd0d32c2011f\"\n  },\n  \"assetHub\": {\n    \"network\": null,\n    \"descriptorMetadataHashes\": {}\n  },\n  \"integrationContractVersion\": 23,\n  \"chainSpecHashes\": {\n    \"relay\": \"0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\n    \"para\": \"0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"\n  },\n  \"genesisHashes\": {\n    \"relay\": \"0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\n    \"para\": \"0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"\n  },\n  \"chainIdentity\": {\n    \"ss58Prefix\": 7777,\n    \"paraId\": 4242,\n    \"decimals\": {\n      \"VIT\": 12,\n      \"USDC\": 6\n    }\n  },\n  \"connectSrc\": [\n    \"https://alpha.example\"\n  ],\n  \"sbomSha256\": \"959f8d981f45b7e5829529a9118a2f41a09701788a7d70a132c5d4bfa5722428\",\n  \"keyringGeneration\": 4,\n  \"signingKeyIds\": [\n    \"1111111111111111\",\n    \"2222222222222222\"\n  ],\n  \"readiness\": {\n    \"productionReady\": true,\n    \"blockers\": [],\n    \"note\": \"Every entry is a pin this tree cannot yet make. `release:check --production` exits non-zero while any remain; an ordinary build still runs, so the pipeline is exercised on every commit rather than first debugged during a release.\"\n  }\n}\n"
+    },
+    "https://alpha.example/raw/XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX": {
+      "status": 200,
+      "body_utf8": "{\n  \"schema\": \"bleavit.app-release.v1\",\n  \"version\": \"0.1.0\",\n  \"sourceCommit\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n  \"buildRecipeDigest\": \"b536b3720431922d1be0a6882d8b95e840df239774a7a06e842302a2ce252ae9\",\n  \"arweaveManifestTxId\": \"MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM\",\n  \"perFileHashes\": {\n    \"index.html\": \"c5b52b3954cd2bd3d3c1fa019c569c69692b997d6943056c60aed3177d47d7b2\",\n    \"assets/app.js\": \"17d407d29ed5a6adbf766c0633777306289e205b11f363dbe69e9c9b27b10411\",\n    \"assets/logo.png\": \"289c77a179831309c3d4505952b0e5ff6bb91c0b4c6f68a9da8b1ed6d38c5e64\"\n  },\n  \"specVersionRange\": {\n    \"primary\": 2,\n    \"recovery\": 3\n  },\n  \"descriptorMetadataHashes\": {\n    \"2\": \"bbf98dda918f709d5fba62bf9b7342c21d8492a268d3cc8bdda99775a63584f8\",\n    \"3\": \"d279364aadad3b3104518bbfcbbdbb1d5302b3eb1d1eebce1b7efd0d32c2011f\"\n  },\n  \"assetHub\": {\n    \"network\": null,\n    \"descriptorMetadataHashes\": {}\n  },\n  \"integrationContractVersion\": 23,\n  \"chainSpecHashes\": {\n    \"relay\": \"0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\n    \"para\": \"0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"\n  },\n  \"genesisHashes\": {\n    \"relay\": \"0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\n    \"para\": \"0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"\n  },\n  \"chainIdentity\": {\n    \"ss58Prefix\": 7777,\n    \"paraId\": 4242,\n    \"decimals\": {\n      \"VIT\": 12,\n      \"USDC\": 6\n    }\n  },\n  \"connectSrc\": [\n    \"https://alpha.example\"\n  ],\n  \"sbomSha256\": \"959f8d981f45b7e5829529a9118a2f41a09701788a7d70a132c5d4bfa5722428\",\n  \"keyringGeneration\": 4,\n  \"signingKeyIds\": [\n    \"1111111111111111\",\n    \"2222222222222222\"\n  ],\n  \"readiness\": {\n    \"productionReady\": true,\n    \"blockers\": [],\n    \"note\": \"Every entry is a pin this tree cannot yet make. `release:check --production` exits non-zero while any remain; an ordinary build still runs, so the pipeline is exercised on every commit rather than first debugged during a release.\"\n  }\n}\n"
+    },
+    "https://beta.example/raw/RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR": {
+      "status": 200,
+      "body_utf8": "{\n  \"schema\": \"bleavit.app-release.v1\",\n  \"version\": \"0.1.0\",\n  \"sourceCommit\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n  \"buildRecipeDigest\": \"b536b3720431922d1be0a6882d8b95e840df239774a7a06e842302a2ce252ae9\",\n  \"arweaveManifestTxId\": \"MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM\",\n  \"perFileHashes\": {\n    \"index.html\": \"c5b52b3954cd2bd3d3c1fa019c569c69692b997d6943056c60aed3177d47d7b2\",\n    \"assets/app.js\": \"17d407d29ed5a6adbf766c0633777306289e205b11f363dbe69e9c9b27b10411\",\n    \"assets/logo.png\": \"289c77a179831309c3d4505952b0e5ff6bb91c0b4c6f68a9da8b1ed6d38c5e64\"\n  },\n  \"specVersionRange\": {\n    \"primary\": 2,\n    \"recovery\": 3\n  },\n  \"descriptorMetadataHashes\": {\n    \"2\": \"bbf98dda918f709d5fba62bf9b7342c21d8492a268d3cc8bdda99775a63584f8\",\n    \"3\": \"d279364aadad3b3104518bbfcbbdbb1d5302b3eb1d1eebce1b7efd0d32c2011f\"\n  },\n  \"assetHub\": {\n    \"network\": null,\n    \"descriptorMetadataHashes\": {}\n  },\n  \"integrationContractVersion\": 23,\n  \"chainSpecHashes\": {\n    \"relay\": \"0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\n    \"para\": \"0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"\n  },\n  \"genesisHashes\": {\n    \"relay\": \"0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\n    \"para\": \"0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"\n  },\n  \"chainIdentity\": {\n    \"ss58Prefix\": 7777,\n    \"paraId\": 4242,\n    \"decimals\": {\n      \"VIT\": 12,\n      \"USDC\": 6\n    }\n  },\n  \"connectSrc\": [\n    \"https://alpha.example\"\n  ],\n  \"sbomSha256\": \"959f8d981f45b7e5829529a9118a2f41a09701788a7d70a132c5d4bfa5722428\",\n  \"keyringGeneration\": 4,\n  \"signingKeyIds\": [\n    \"1111111111111111\",\n    \"2222222222222222\"\n  ],\n  \"readiness\": {\n    \"productionReady\": true,\n    \"blockers\": [],\n    \"note\": \"Every entry is a pin this tree cannot yet make. `release:check --production` exits non-zero while any remain; an ordinary build still runs, so the pipeline is exercised on every commit rather than first debugged during a release.\"\n  }\n}\n"
+    },
+    "https://beta.example/raw/P1eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee": {
+      "status": 200,
+      "body_utf8": "untrusted comment: signature from the bleavit fixture keyring\nRUQRERERERERESV9V1uRaxZudSACQ/5xFwRo8hgZLOAyoJ67UX0dCHEAUwGfdUfQ+fDdxfBhXFF280UI3xaUBQ6pfRq3NAoHzAU=\ntrusted comment: bleavit release 0.1.0\nopbTr7gDF4zszYMPJSzJyrYwnX4WpdBMTRnqF0m7NSuPq1SzZX5SVBAgbznEHGGPTm2M7hVkr6ytxDx13VfyCA==\n"
+    },
+    "https://beta.example/raw/P2fffffffffffffffffffffffffffffffffffffffff": {
+      "status": 200,
+      "body_utf8": "untrusted comment: signature from the bleavit fixture keyring\nRUQiIiIiIiIiIrFXFNzBMn0jGWWupdHxGEnHaav8WkiiExBlZ2OhHcvhZMU/HAu3ji1RwYM8LY9Vjc7/eAdalHW+7elVUeDLqAE=\ntrusted comment: bleavit release 0.1.0\n+5bb0Dsf+qGcvAmwJMifUlYwM9rhMjJuMu8Oze5XL7u2EUOUsDZmB0t5uOEdAezvmTdJi7ZgeherR2uJJUQ4CQ==\n"
+    },
+    "https://beta.example/raw/Q1ggggggggggggggggggggggggggggggggggggggggg": {
+      "status": 200,
+      "body_utf8": "untrusted comment: signature from the bleavit fixture keyring\nRUQzMzMzMzMzM3t87rU2sU7RgugGVapoeCyCYcqSruj2WGo5M6LNvsmyOvjHAVqPZ/BlRvdBN9zIDkknyEKgm8gM6bpTmdWzFgg=\ntrusted comment: reproduced by pallas\nbFMiM0hdJYtTleIGL3p4M8/YbfU8+b3N0cNaZfF2J3RBJ39STHbQpnSAkfQMXOFlHBWHmKusCZXTlj+Bh3RECg==\n"
+    },
+    "https://beta.example/raw/Q2hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh": {
+      "status": 200,
+      "body_utf8": "untrusted comment: signature from the bleavit fixture keyring\nRURERERERERERJoIBOqE6sR9MxdIYF9qu6QWmG8REPBJuLJvwAkiTPbekDYShdipO0WZ4HW4yM95ptaSfaW2vZiuQ5G7H6soTAY=\ntrusted comment: reproduced by rhea\n6LI7PpduNFWy+AOGrXEgP5iDidXxDUHEtx7EAdcuVGP6i8K2V/2Zjo1OjBSoVq1StO2eaFPFTeClvS739RWOBQ==\n"
+    },
+    "https://beta.example/raw/MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM": {
+      "status": 200,
+      "body_utf8": "{\n  \"manifest\": \"arweave/paths\",\n  \"version\": \"0.2.0\",\n  \"index\": {\n    \"path\": \"index.html\"\n  },\n  \"paths\": {\n    \"assets/app.js\": {\n      \"id\": \"PATH0zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\"\n    },\n    \"assets/logo.png\": {\n      \"id\": \"PATH1zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\"\n    },\n    \"index.html\": {\n      \"id\": \"PATH2zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\"\n    }\n  }\n}\n"
+    },
+    "https://beta.example/raw/NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN": {
+      "status": 200,
+      "body_utf8": "{\n  \"manifest\": \"arweave/paths\",\n  \"version\": \"0.2.0\",\n  \"index\": {\n    \"path\": \"index.html\"\n  },\n  \"paths\": {\n    \"assets/app.js\": {\n      \"id\": \"PATH0zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\"\n    },\n    \"assets/logo.png\": {\n      \"id\": \"PATH1zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\"\n    },\n    \"index.html\": {\n      \"id\": \"PATH2zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\"\n    }\n  }\n}\n"
+    },
+    "https://beta.example/raw/FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF": {
+      "status": 200,
+      "body_utf8": "{\n  \"manifest\": \"arweave/paths\",\n  \"version\": \"0.2.0\",\n  \"index\": {\n    \"path\": \"index.html\"\n  },\n  \"paths\": {\n    \"assets/app.js\": {\n      \"id\": \"FILE0zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\"\n    },\n    \"assets/logo.png\": {\n      \"id\": \"FILE1zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\"\n    },\n    \"index.html\": {\n      \"id\": \"FILE2zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\"\n    },\n    \"release.json\": {\n      \"id\": \"XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX\"\n    }\n  }\n}\n"
+    },
+    "https://beta.example/MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM/index.html": {
+      "status": 200,
+      "body_utf8": "<!doctype html><title>bleavit</title>\n"
+    },
+    "https://beta.example/NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN/index.html": {
+      "status": 200,
+      "body_utf8": "<!doctype html><title>bleavit</title>\n"
+    },
+    "https://beta.example/FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF/index.html": {
+      "status": 200,
+      "body_utf8": "<!doctype html><title>bleavit</title>\n"
+    },
+    "https://beta.example/MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM/assets/app.js": {
+      "status": 200,
+      "body_utf8": "export const boot = () => undefined;\n"
+    },
+    "https://beta.example/NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN/assets/app.js": {
+      "status": 200,
+      "body_utf8": "export const boot = () => undefined;\n"
+    },
+    "https://beta.example/FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF/assets/app.js": {
+      "status": 200,
+      "body_utf8": "export const boot = () => undefined;\n"
+    },
+    "https://beta.example/MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM/assets/logo.png": {
+      "status": 200,
+      "body_base64": "iVBORw0KGgoAAQ=="
+    },
+    "https://beta.example/NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN/assets/logo.png": {
+      "status": 200,
+      "body_base64": "iVBORw0KGgoAAQ=="
+    },
+    "https://beta.example/FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF/assets/logo.png": {
+      "status": 200,
+      "body_base64": "iVBORw0KGgoAAQ=="
+    },
+    "https://beta.example/FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF/release.json": {
+      "status": 200,
+      "body_utf8": "{\n  \"schema\": \"bleavit.app-release.v1\",\n  \"version\": \"0.1.0\",\n  \"sourceCommit\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n  \"buildRecipeDigest\": \"b536b3720431922d1be0a6882d8b95e840df239774a7a06e842302a2ce252ae9\",\n  \"arweaveManifestTxId\": \"MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM\",\n  \"perFileHashes\": {\n    \"index.html\": \"c5b52b3954cd2bd3d3c1fa019c569c69692b997d6943056c60aed3177d47d7b2\",\n    \"assets/app.js\": \"17d407d29ed5a6adbf766c0633777306289e205b11f363dbe69e9c9b27b10411\",\n    \"assets/logo.png\": \"289c77a179831309c3d4505952b0e5ff6bb91c0b4c6f68a9da8b1ed6d38c5e64\"\n  },\n  \"specVersionRange\": {\n    \"primary\": 2,\n    \"recovery\": 3\n  },\n  \"descriptorMetadataHashes\": {\n    \"2\": \"bbf98dda918f709d5fba62bf9b7342c21d8492a268d3cc8bdda99775a63584f8\",\n    \"3\": \"d279364aadad3b3104518bbfcbbdbb1d5302b3eb1d1eebce1b7efd0d32c2011f\"\n  },\n  \"assetHub\": {\n    \"network\": null,\n    \"descriptorMetadataHashes\": {}\n  },\n  \"integrationContractVersion\": 23,\n  \"chainSpecHashes\": {\n    \"relay\": \"0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\n    \"para\": \"0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"\n  },\n  \"genesisHashes\": {\n    \"relay\": \"0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\n    \"para\": \"0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"\n  },\n  \"chainIdentity\": {\n    \"ss58Prefix\": 7777,\n    \"paraId\": 4242,\n    \"decimals\": {\n      \"VIT\": 12,\n      \"USDC\": 6\n    }\n  },\n  \"connectSrc\": [\n    \"https://alpha.example\"\n  ],\n  \"sbomSha256\": \"959f8d981f45b7e5829529a9118a2f41a09701788a7d70a132c5d4bfa5722428\",\n  \"keyringGeneration\": 4,\n  \"signingKeyIds\": [\n    \"1111111111111111\",\n    \"2222222222222222\"\n  ],\n  \"readiness\": {\n    \"productionReady\": true,\n    \"blockers\": [],\n    \"note\": \"Every entry is a pin this tree cannot yet make. `release:check --production` exits non-zero while any remain; an ordinary build still runs, so the pipeline is exercised on every commit rather than first debugged during a release.\"\n  }\n}\n"
+    },
+    "https://beta.example/raw/XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX": {
+      "status": 200,
+      "body_utf8": "{\n  \"schema\": \"bleavit.app-release.v1\",\n  \"version\": \"0.1.0\",\n  \"sourceCommit\": \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\n  \"buildRecipeDigest\": \"b536b3720431922d1be0a6882d8b95e840df239774a7a06e842302a2ce252ae9\",\n  \"arweaveManifestTxId\": \"MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM\",\n  \"perFileHashes\": {\n    \"index.html\": \"c5b52b3954cd2bd3d3c1fa019c569c69692b997d6943056c60aed3177d47d7b2\",\n    \"assets/app.js\": \"17d407d29ed5a6adbf766c0633777306289e205b11f363dbe69e9c9b27b10411\",\n    \"assets/logo.png\": \"289c77a179831309c3d4505952b0e5ff6bb91c0b4c6f68a9da8b1ed6d38c5e64\"\n  },\n  \"specVersionRange\": {\n    \"primary\": 2,\n    \"recovery\": 3\n  },\n  \"descriptorMetadataHashes\": {\n    \"2\": \"bbf98dda918f709d5fba62bf9b7342c21d8492a268d3cc8bdda99775a63584f8\",\n    \"3\": \"d279364aadad3b3104518bbfcbbdbb1d5302b3eb1d1eebce1b7efd0d32c2011f\"\n  },\n  \"assetHub\": {\n    \"network\": null,\n    \"descriptorMetadataHashes\": {}\n  },\n  \"integrationContractVersion\": 23,\n  \"chainSpecHashes\": {\n    \"relay\": \"0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\n    \"para\": \"0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\"\n  },\n  \"genesisHashes\": {\n    \"relay\": \"0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee\",\n    \"para\": \"0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\"\n  },\n  \"chainIdentity\": {\n    \"ss58Prefix\": 7777,\n    \"paraId\": 4242,\n    \"decimals\": {\n      \"VIT\": 12,\n      \"USDC\": 6\n    }\n  },\n  \"connectSrc\": [\n    \"https://alpha.example\"\n  ],\n  \"sbomSha256\": \"959f8d981f45b7e5829529a9118a2f41a09701788a7d70a132c5d4bfa5722428\",\n  \"keyringGeneration\": 4,\n  \"signingKeyIds\": [\n    \"1111111111111111\",\n    \"2222222222222222\"\n  ],\n  \"readiness\": {\n    \"productionReady\": true,\n    \"blockers\": [],\n    \"note\": \"Every entry is a pin this tree cannot yet make. `release:check --production` exits non-zero while any remain; an ordinary build still runs, so the pipeline is exercised on every commit rather than first debugged during a release.\"\n  }\n}\n"
+    }
+  }
+}

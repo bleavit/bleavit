@@ -14,14 +14,19 @@
 
 import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import test from 'node:test';
+import { fileURLToPath } from 'node:url';
 
 import { WrongChainError, chainSpecHash, relayChainOf, verifyBundledChainSpec } from '@bleavit/chain-client';
+import { foreignIdentityVerdict } from '@bleavit/application';
 
+import { assetHubLabel } from '../../tools/drill-client/foreign-label.ts';
 import {
   DrillBootError,
+  assetHubVerdictOf,
   corruptGenesis,
   main,
   type DrillReport,
@@ -128,8 +133,11 @@ test('the wrong-chain leg fails when the client boots anyway', async () => {
     specVersion: 2,
     compat: 'classified',
     compatMode: 'full',
+    // Both undefined because this pin document carries no Asset Hub role, which is what the
+    // producer writes for one. The report never reaches `assertBootReport` here — the leg under
+    // test refuses it for having booted at all.
     assetHub: undefined,
-    assetHubMode: undefined,
+    assetHubVerdict: undefined,
     finalizedHash: GENESIS,
   };
   await assert.rejects(
@@ -253,4 +261,76 @@ test('a refusal about a chain this leg did not corrupt is rejected', async () =>
     (error: unknown) =>
       error instanceof DrillBootError && /did not corrupt/.test(error.message),
   );
+});
+
+/* ------------------------------- the Asset Hub verdict, and the harness rule it feeds (F18) */
+
+/**
+ * The rule the drill applies, loaded the way the drill loads it.
+ *
+ * The same binding `drill-client-funding.test.ts` makes for the funding leg, for the same
+ * reason: a rule keyed on `assetHubVerdict.mode` beside a producer writing `assetHubMode` leaves
+ * both suites green while the drill checks nothing. `bootAndClassify` itself needs a light
+ * client and three chains, so what is bound here is the decision it delegates.
+ */
+const harnessRules = createRequire(import.meta.url)(
+  join(dirname(fileURLToPath(import.meta.url)), '../..', '..', 'zombienet', 'drills', 'js', 'client-boot-rules.js'),
+) as { assertBootReport(report: unknown): unknown };
+
+const CLASSIFIED: DrillReport = {
+  mode: 'boot',
+  chain: 'bleavit_local_drills',
+  genesisHash: GENESIS,
+  specVersion: 2,
+  compat: 'classified',
+  compatMode: 'full',
+  assetHub: undefined,
+  assetHubVerdict: { kind: 'unestablished' },
+  finalizedHash: corruptGenesis(GENESIS),
+};
+
+test('the Asset Hub verdict reaches the report as a value, not as a sentence', () => {
+  // It used to be written as `classified: wrong-chain` — one string, and a harness rule about it
+  // could only match prose. This branch already removed that pattern once from the funding leg,
+  // where a blocked deposit reported five different causes as one nonempty sentence.
+  const local = '0xa5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5';
+  assert.deepEqual(assetHubVerdictOf(foreignIdentityVerdict(assetHubLabel(), local)), {
+    kind: 'classified',
+    mode: 'wrong-chain',
+  });
+});
+
+test('the development-label verdict is refused by the boot rule, through the real mapping', () => {
+  // Real classifier, real pin list, real mapping, real harness rule — the chain of custody the
+  // funding leg already has. `asset-hub-paseo-local` is the connected spec's id, which matches no
+  // pin, so `classifyForeign` answers `unreachable`: retryable, where a locally generated Asset
+  // Hub is terminally the wrong chain.
+  const local = '0xa5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5';
+  const bugged = assetHubVerdictOf(foreignIdentityVerdict('asset-hub-paseo-local', local));
+  assert.deepEqual(bugged, { kind: 'classified', mode: 'unreachable' });
+  assert.throws(
+    () => harnessRules.assertBootReport({ ...CLASSIFIED, assetHubVerdict: bugged }),
+    /can only ever reach "wrong-chain"/,
+  );
+
+  // The negative control, through the same mapping.
+  const pinned = assetHubVerdictOf(foreignIdentityVerdict(assetHubLabel(), local));
+  harnessRules.assertBootReport({ ...CLASSIFIED, assetHubVerdict: pinned });
+});
+
+test('an Asset Hub that never answered still classifies, and the rule accepts it', () => {
+  // `unestablished` is what a metadata pull that failed or timed out produces. The boot leg is
+  // allowed to report it: 15 §4.8 constrains the verdict a *classified* Asset Hub can carry, and
+  // says nothing about one this run never established.
+  //
+  // **`code` is required, and this line is why F26's ruling made it a literal.** SQ-1011/SQ-1012
+  // put `FE-COMPAT-003` on the arm rather than leaving it to each construction site, and its
+  // comment in `compat-session.ts` says a site that omits it must not compile. This site omitted
+  // it — written on a branch where the field did not exist yet — and neither branch's own CI
+  // could see it, because the field and the site only met on the integration branch.
+  assert.deepEqual(
+    assetHubVerdictOf({ kind: 'unestablished', code: 'FE-COMPAT-003', reason: 'no metadata' }),
+    { kind: 'unestablished' },
+  );
+  harnessRules.assertBootReport(CLASSIFIED);
 });

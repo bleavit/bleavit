@@ -40,6 +40,18 @@ TRY_STATE_CHECK = "try-state"
 # evidence bundle may name its scenario; SQ-203 lands it.
 CARD_CHECK = "card"
 DEFAULT_TRY_RUNTIME_BINARY = Path("zombienet/bin/try-runtime")
+# The tier every drill this runner starts is held to — see
+# `zombienet/drills/js/client-boot-rules.js` · `drillTier`.
+#
+# Pinned rather than inherited, and that is the point. A drill harness may treat the documented
+# environmental refusals (an absent or unpinned Asset Hub, 02 §7.7) as legitimate outcomes at a
+# lower tier, and drill 14 does — but a run that takes one certifies none of what 15 §4.8 says
+# its row certifies, so it must never be the basis of release evidence. Every suite this runner
+# selects is a gate (`suites.json` files each one `release` or `g1`), so the mapping is constant.
+# Passing it explicitly means an ambient `BLEAVIT_DRILL_TIER=exploratory` in a CI environment
+# cannot quietly downgrade an evidence run into one that proved less than it reports.
+CERTIFYING_DRILL_TIER = "release"
+DRILL_TIER_VAR = "BLEAVIT_DRILL_TIER"
 # The closing check runs `on-runtime-upgrade --checks try-state` over a state
 # snapshot pulled from the live endpoint, exactly as the env READMEs mandate.
 TRY_STATE_BLOCKTIME_MS = "6000"
@@ -777,6 +789,9 @@ def run_zombienet(
         "--monitor",
     ]
     deadline = time.monotonic() + suite.timeout_seconds
+    # See `CERTIFYING_DRILL_TIER`: pinned, so an ambient variable cannot downgrade the claim a
+    # release-evidence run makes about itself.
+    drill_environment = {**os.environ, DRILL_TIER_VAR: CERTIFYING_DRILL_TIER}
     process: subprocess.Popen[Any] | None = None
     with log_path.open("wb") as log:
         try:
@@ -786,6 +801,7 @@ def run_zombienet(
                     cwd=root,
                     stdout=log,
                     stderr=subprocess.STDOUT,
+                    env=drill_environment,
                     start_new_session=True,
                 )
             except OSError as error:
@@ -820,6 +836,7 @@ def run_zombienet(
                             cwd=root,
                             stdout=drill_log,
                             stderr=subprocess.STDOUT,
+                            env=drill_environment,
                             # Own session so a SIGTERM-ignoring descendant of the
                             # drill is still reachable by the group kill below.
                             start_new_session=True,

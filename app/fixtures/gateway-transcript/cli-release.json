@@ -1,0 +1,55 @@
+{
+  "schema": "bleavit.app-release.v1",
+  "version": "0.1.0",
+  "sourceCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "buildRecipeDigest": "b536b3720431922d1be0a6882d8b95e840df239774a7a06e842302a2ce252ae9",
+  "arweaveManifestTxId": "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM",
+  "perFileHashes": {
+    "index.html": "c5b52b3954cd2bd3d3c1fa019c569c69692b997d6943056c60aed3177d47d7b2",
+    "assets/app.js": "17d407d29ed5a6adbf766c0633777306289e205b11f363dbe69e9c9b27b10411",
+    "assets/logo.png": "289c77a179831309c3d4505952b0e5ff6bb91c0b4c6f68a9da8b1ed6d38c5e64"
+  },
+  "specVersionRange": {
+    "primary": 2,
+    "recovery": 3
+  },
+  "descriptorMetadataHashes": {
+    "2": "bbf98dda918f709d5fba62bf9b7342c21d8492a268d3cc8bdda99775a63584f8",
+    "3": "d279364aadad3b3104518bbfcbbdbb1d5302b3eb1d1eebce1b7efd0d32c2011f"
+  },
+  "assetHub": {
+    "network": null,
+    "descriptorMetadataHashes": {}
+  },
+  "integrationContractVersion": 23,
+  "chainSpecHashes": {
+    "relay": "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "para": "0xdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+  },
+  "genesisHashes": {
+    "relay": "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+    "para": "0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+  },
+  "chainIdentity": {
+    "ss58Prefix": 7777,
+    "paraId": 4242,
+    "decimals": {
+      "VIT": 12,
+      "USDC": 6
+    }
+  },
+  "connectSrc": [
+    "https://alpha.example"
+  ],
+  "sbomSha256": "959f8d981f45b7e5829529a9118a2f41a09701788a7d70a132c5d4bfa5722428",
+  "keyringGeneration": 4,
+  "signingKeyIds": [
+    "1111111111111111",
+    "2222222222222222"
+  ],
+  "readiness": {
+    "productionReady": true,
+    "blockers": [],
+    "note": "Every entry is a pin this tree cannot yet make. `release:check --production` exits non-zero while any remain; an ordinary build still runs, so the pipeline is exercised on every commit rather than first debugged during a release."
+  }
+}

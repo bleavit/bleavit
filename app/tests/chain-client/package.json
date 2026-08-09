@@ -7,8 +7,10 @@
     "test": "node --test"
   },
   "dependencies": {
+    "@bleavit/application": "workspace:*",
     "@bleavit/chain-client": "workspace:*",
     "@bleavit/descriptors": "workspace:*",
+    "@bleavit/features-tx": "workspace:*",
     "@bleavit/mock-runtime": "workspace:*",
     "@bleavit/shared-types": "workspace:*",
     "@polkadot-api/descriptors": "workspace:*"

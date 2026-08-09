@@ -44,16 +44,24 @@ QUESTION_HEADER = ("ID", "Question", "Spec ref", "Raised", "Status")
 QUESTION_ID_RE = re.compile(r"^SQ-\d+$")
 SEPARATOR_CELL_RE = re.compile(r"^:?-+:?$")
 
-# `unread(row, requirement, reason, specQuestion, disposition)` — the id and the
-# disposition are the last two arguments and both are string literals. Matched on
-# the pair rather than on the id alone so a malformed entry is reported rather
-# than skipped.
+# `unread(row, requirement, reason, specQuestion, disposition, scope?)` — the id
+# and the disposition are string literals in the fourth and fifth positions.
+# Matched on the pair rather than on the id alone so a malformed entry is
+# reported rather than skipped.
+#
+# The optional sixth argument is an `ObligationScope` object literal, which
+# narrows a blocking obligation to the dispatch arm that actually reads the
+# condition. It is skipped rather than parsed: this checker's one rule is about
+# the cited question's status, and a scope changes *which pending actions* an
+# obligation speaks about, never *whether it has expired*. Tolerating it here
+# keeps that separation — a scoped entry whose question closes is still caught.
 UNREAD_RE = re.compile(
     r"\bunread\(\s*(?P<body>.*?)\)\s*,\s*\n",
     re.DOTALL,
 )
 TAIL_RE = re.compile(
-    r"'(?P<sq>SQ-\d+)'\s*,\s*'(?P<disposition>stated|blocking)'\s*,\s*$",
+    r"'(?P<sq>SQ-\d+)'\s*,\s*'(?P<disposition>stated|blocking)'\s*,"
+    r"(?:\s*\{[^{}]*\}\s*,?)?\s*$",
     re.DOTALL,
 )
 
