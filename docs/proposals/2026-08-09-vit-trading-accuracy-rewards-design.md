@@ -2,6 +2,9 @@
 
 Date: 2026-08-09
 Status: **design approved, not implemented.** No milestone row exists yet.
+Revision: **round 2**, after the PR #296 Codex review. Four P1 findings and one P2 were
+accepted in full, and one of them showed a claim in round 1 to be wrong rather than merely
+incomplete. What each changed is recorded where it changed, not in a separate changelog.
 Owner decision record: this document. Normative text stays in `docs/architecture/`.
 
 ## 1. Scope
@@ -96,15 +99,25 @@ The per-epoch budget is a call argument rather than a registry row, so it adds n
 | Call | Origin | Effect |
 |---|---|---|
 | `enroll(bond)` | Signed | Holds `bond` USDC and opens a participant record |
-| `top_up_bond(amount)` | Signed | Increases the hold and the earning cap |
-| `withdraw_bond()` | Signed | Releases the hold once the account has no unfolded market scores |
+| `top_up_bond(amount)` | Signed | Increases the hold. The earning cap moves only at the next epoch |
+| `withdraw_bond()` | Signed | Releases the hold once every epoch the account participated in has settled |
 
 "Program epoch" throughout this document means the protocol epoch of `epoch.length`, which
 is 302,400 blocks at the genesis registry. The design adds no separate clock.
 
-`withdraw_bond` is gated on state rather than on elapsed time. It refuses while any
-`(account, market)` score entry is unfolded, because those entries are what a debit is
-computed from. No new cooldown parameter is introduced.
+**The earning bond is snapshotted, and the snapshot is what a debit takes from.** Two
+findings from the first review make this load-bearing rather than tidy.
+
+- Folding deletes the last score entry, but reward and debit settle at epoch close. A
+  participant who folded a losing epoch could satisfy a fold-based withdrawal gate and
+  release the whole bond before the debit ran. `withdraw_bond` is therefore gated on **epoch
+  settlement**, not on folding.
+- `top_up_bond` raising the cap immediately would let a wash operator wait until the outcome
+  is known, enlarge only the winning account's cap, and leave the loser at the minimum. A
+  top-up therefore takes effect from the **next** epoch.
+
+An epoch's cap is fixed by the bond held when the epoch opened, and that amount stays held
+until the epoch settles. No caller-visible action inside an epoch can change either side.
 
 The bond does two separate jobs, and separating them removes a parameter.
 
@@ -123,12 +136,28 @@ Per enrolled account, per market, `pallet-market` accumulates two unsigned count
 net branch position. Unsigned counters keep signed arithmetic out of runtime code and make
 claimant-adverse rounding straightforward.
 
-1. On a buy, add `cost + fee` to `spent`, rounded up.
-2. On a sell, add proceeds to `received`, rounded down.
-3. At settlement, add `position × settled_value` to `received`, rounded down. Here
-   `settled_value` is the branch's terminal redemption value per unit, which the book already
-   resolves to when it settles.
+1. On a buy, add `cost + fee` to `spent`, rounded up, and add the filled quantity to
+   `book_acquired` for that branch.
+2. On a sell, add proceeds to `received`, rounded down, **but only for the part of the sale
+   covered by `book_acquired`**, and decrement `book_acquired` by that quantity. Proceeds
+   beyond it are ignored.
+3. At settlement, add `min(position, book_acquired) × settled_value` to `received`, rounded
+   down. Here `settled_value` is the branch's terminal redemption value per unit, which the
+   book already resolves to when it settles.
 4. The market score is `received − spent`, and it may be negative.
+
+**Why `book_acquired` exists, and why the first draft was wrong.** That draft recorded
+acquisition cost only on a book buy and called off-book inventory an out-of-scope limit. It
+is not a limit, it is a hole. The ledger has five `split*` calls and a signed `transfer`
+(`pallets/conditional-ledger/src/lib.rs:728`, `:834`), so an enrolled account can receive a
+complete branch set created outside the book, sell every leg, and post the whole proceeds to
+`received` against a `spent` of zero. That manufactures a positive score with no forecast in
+it and no dependence on the outcome.
+
+Counting only book-acquired units closes it without leaving `pallet-market`. Units that
+arrive by split or transfer carry no credit, so selling them scores nothing. The direction of
+error is conservative: a genuine trader who funds a position off-book is under-credited
+rather than over-credited, which is the R-7 direction.
 
 **Folding is pull-based.** A permissionless `settle_market_score(who, market)` folds one
 settled market into the account's epoch total and deletes the entry. No hook iterates a
@@ -140,12 +169,29 @@ collection. The keeper already cranks permissionless extrinsics
 At epoch close, per participant, over their folded markets:
 
 ```
-net     = epoch_received − epoch_spent
-scored  = clamp(net, −bond/r, +bond/r)
+net     = epoch_received − epoch_spent               // USDC
+cap     = snapshot_bond / (r × RATE_HEADROOM)        // USDC
+scored  = clamp(net, −cap, +cap)                     // USDC
 
-scored > 0  →  accrue  r × scored  in VIT
-scored < 0  →  debit   r × |scored|  from the bond
+scored > 0  →  accrue  r × scored  USDC-denominated, paid in VIT at claim
+scored < 0  →  debit   r × |scored|  USDC from the snapshot bond
 ```
+
+**Both legs are computed in USDC, and only the payout converts.** The first draft accrued
+`r × scored` "in VIT" while debiting the same number in USDC, so the neutrality argument
+compared two different units. At the 0.05 USDC/VIT placeholder that made the reward worth a
+twentieth of the matching debit, and — the part that matters — it made the anti-farm
+invariant **depend on the VIT price**, which is exactly the reflexivity doc 08 §2.2 and D-18
+keep out of every sizing formula.
+
+The fix has two halves:
+
+- The score, the cap and the debit are all USDC. Conversion to VIT happens once, at
+  `claim_rewards`, using the live `fee.vit_usdc_rate` with rounding against the claimant.
+- `RATE_HEADROOM` is the top of that key's `[0.1×, 10×]` envelope. Sizing the cap against the
+  **most** favourable rate the envelope admits means the snapshot bond covers the reward even
+  if VIT reprices to the ceiling before the claim lands. The cost is a conservative cap. The
+  alternative is an invariant that a governed price can open.
 
 - When accruals exceed the authorized budget, **both legs scale by the same factor**. A
   scaled reward against an unscaled debit would over-punish, and a pro-rata reward with no
@@ -157,14 +203,17 @@ scored < 0  →  debit   r × |scored|  from the bond
 - `claim_rewards()` transfers accrued VIT with no vesting. The epoch lag of up to 21 days is
   already a real holding period, and the bond already selects for committed participants.
 
-### 4.6 Two accepted costs
+### 4.6 Accepted costs
 
 1. **Every trade pays one extra storage read**, including trades by accounts that never
    enroll. The market pallet must check enrollment before it can skip the accumulator. This
    enters the trade weight and must be benchmarked there.
-2. **Positions acquired by `split` are out of scope.** Splitting is at par, so realizing a
-   gain still goes through the book and still scores. The score measures trading skill rather
-   than total portfolio return, and that limit is documented rather than hidden.
+2. **Off-book inventory earns nothing**, per the `book_acquired` rule of §4.4. A trader who
+   funds a position by `split` and sells it through the book is under-credited. That is a
+   real cost, and it is the safe direction.
+3. **The earning cap is conservative by the width of the rate envelope**, per §4.5. Sizing
+   against the top of `fee.vit_usdc_rate`'s `[0.1×, 10×]` band means a participant at the
+   placeholder rate can earn on less score than their bond would otherwise support.
 
 ## 5. Parameters and bounds
 
@@ -191,7 +240,19 @@ is a separate values act, taken when the calibration exists.
 | Bound | Value | Derivation |
 |---|---|---|
 | `MaxParticipants` | 4,096 | The sibling allocation pot's lifetime bound for community schedules |
-| `MaxScoredMarketsPerAccount` | 64 | `MaxPositionsPerAccount` — no account can score more markets than it can hold positions in |
+| Score-entry absolute timeout | above the longest lawful settlement horizon | §6's escape — it must be unreachable by any settling market |
+| `MaxScoredMarketsPerAccount` | 196 | `MaxLiveMarkets` — the count of books that can be open at once, which is what an unfolded score row tracks |
+
+**`MaxPositionsPerAccount` was the wrong anchor and the first draft used it.** That bound
+counts simultaneous nonzero ledger entries. A score row lives from the first fill until the
+fold, so a trader who sells out of a market frees the ledger slot while the score row stays.
+Sequentially trading more than 64 markets across the settlement lag would then hit a bound
+derived from a quantity it does not measure. `MaxLiveMarkets` counts the right thing.
+
+**Overflow behavior is specified rather than left to the bound.** A fill in a market beyond
+the cap **records no score and never rejects the trade**. Refusing a lawful trade to protect
+a rewards-program bound is the wrong direction under G-1, and silence about which of the two
+happens is how a bound becomes a liveness bug.
 
 ## 6. Failure behavior (G-1, R-7)
 
@@ -199,9 +260,19 @@ is a separate values act, taken when the calibration exists.
 - Budget exhausted — both legs scale, so nothing strands and the pot never overdraws.
 - Debit above the bond — take the whole bond, suspend the participant, never go negative.
 - Arithmetic edge — no-op, status quo.
-- **A market that never settles must not lock a bond forever.** After `ledger.archive` the
-  score entry drops at zero and releases the bond. That escape is anchored to an existing row
-  rather than a new timeout.
+- **A market that never settles must not lock a bond forever, and the first draft's escape
+  was circular.** It anchored to `ledger.archive`, but doc 03 §5.4 admits the archive sweep
+  only once the vault is **terminal** and `RedemptionArchiveDelay` has elapsed
+  (`docs/architecture/03-conditional-ledger.md:370`). A market that never settles never
+  becomes terminal, so the escape could never fire in exactly the case it existed for, and
+  the participant's USDC stayed locked indefinitely.
+
+  The escape is therefore an **absolute block-height timeout measured from the score entry's
+  creation**, independent of the market's state. On expiry the entry drops at zero and stops
+  blocking withdrawal. Two properties make dropping-at-zero safe rather than an exit from a
+  live debit: the timeout is sized above the longest lawful settlement horizon, so no
+  settling market can reach it, and settlement is oracle-driven, so no participant can push a
+  market past it. The timeout is a 13 §4 bound derived from that horizon, not a new §1 row.
 
 ## 7. Spec changes the implementation must make
 
@@ -225,10 +296,18 @@ direction already. The screen is scoped out of v1 deliberately.
 
 - Mock-runtime tests per call: error paths, origin misuse, wrapper-filter negatives.
 - **The anti-farm property suite**, at the ≥ 10⁶ case level in `property-gates.sh`: for any
-  set of accounts holding offsetting positions, total payout minus total forfeit is ≤ 0. The
-  whole design rests on this invariant, so it gets a proptest shard rather than unit tests.
+  set of accounts holding offsetting positions, total payout minus total forfeit is ≤ 0,
+  **evaluated in USDC at every rate the `fee.vit_usdc_rate` envelope admits**. The whole
+  design rests on this invariant, so it gets a proptest shard rather than unit tests.
+- **A regression test per finding of the first review round**, because each was a way the
+  invariant above could read as satisfied while failing:
+  - selling a `split`-acquired or transferred-in set scores zero;
+  - a fold followed by `withdraw_bond` cannot escape that epoch's debit;
+  - a `top_up_bond` after settlement does not raise the current epoch's cap;
+  - a score entry whose market never settles releases the bond on the absolute timeout.
 - `try-state`: held bonds equal the pallet's USDC holdings, accruals never exceed the
-  authorized budget, no bond below `ledger.pos_dep`, no score entry for a reaped market.
+  authorized budget, no bond below `ledger.pos_dep`, no score entry for a reaped market, and
+  every unsettled epoch's snapshot cap is backed by a still-held bond.
 - A reference-model module mirroring the score arithmetic, plus differential vectors.
 - Benchmarks for every call **and for the per-fill trait call**, because that one enters every
   trade's weight.
