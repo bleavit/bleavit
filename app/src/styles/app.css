@@ -666,6 +666,20 @@
   }
 
   /*
+   * 10 §5.3's newer-release pointer, inside the notice that names loading one as the remedy.
+   * Styled like the disabled list and not like a second notice, for the same reason: this is
+   * the evidence behind the sentence above it, and a user stranded on an undecodable runtime
+   * has one problem rather than two. The word-break is load-bearing — an Arweave TXID is 43
+   * unbroken characters and would otherwise push the notice past the viewport on a phone,
+   * which is where a stranded user is most likely to be reading it.
+   */
+  .compat__pointer {
+    @apply mt-2 flex flex-col gap-1 text-sm;
+    color: var(--color-muted);
+    overflow-wrap: anywhere;
+  }
+
+  /*
    * A refusal is the most important thing on the screen when it appears: the client has
    * declined to do something the user asked for. It gets full contrast, the machine code
    * kept legible for a bug report, and the recovery line emphasised over the explanation —
