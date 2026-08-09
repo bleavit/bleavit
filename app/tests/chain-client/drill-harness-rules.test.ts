@@ -32,7 +32,7 @@ import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { FUNDING_READS } from '@bleavit/features-tx';
+import { CAPS_READS, FUNDING_READS } from '@bleavit/features-tx';
 
 const APP = join(dirname(fileURLToPath(import.meta.url)), '../..');
 
@@ -507,6 +507,32 @@ test('the required surfaces ARE the frozen funding set, in both directions', () 
   const required = [...rules.REQUIRED_SURFACES.withdraw, ...rules.REQUIRED_SURFACES.deposit];
   assert.deepEqual([...required].sort(), [...frozen].sort());
   assert.equal(new Set(required).size, required.length, 'a surface is required by two legs');
+});
+
+test('D-13’s cap surfaces are deliberately OUTSIDE the required set, and stay outside', () => {
+  // `CAPS_READS` is a third reader on one chain — `readDepositCaps`, 11 §11.9.1's Phase-3 row —
+  // and this drill opens no constitution reader, so requiring its surfaces of a leg would
+  // demand a read the run never makes and turn every green drill red. Asserted rather than
+  // left implicit, because the test above is a two-way binding and a set sitting beside it
+  // with no statement either way is exactly how a surface escapes one.
+  //
+  // Two consequences, both intended. A caps surface that appears in `REQUIRED_SURFACES`
+  // without the drill being extended fails here. And a caps surface moved into
+  // `FUNDING_READS` fails the test above, where a person assigns it to a leg — which is what
+  // wiring `readDepositCaps` into `drill-client/funding.ts` would properly involve.
+  const required: readonly string[] = [
+    ...rules.REQUIRED_SURFACES.withdraw,
+    ...rules.REQUIRED_SURFACES.deposit,
+  ];
+  for (const surface of Object.values(CAPS_READS)) {
+    assert.ok(
+      !required.includes(surface),
+      `${surface} is required of a drill leg that never opens a constitution reader`,
+    );
+  }
+  // `params` is the cross-check *prefix* and `Constitution.Params` is a real frozen item, so
+  // the exclusion is about which reader performs it, never about the surface being unfrozen.
+  assert.equal(CAPS_READS.params, 'Constitution.Params');
 });
 
 test('the happy shape passes, so none of the refusals above is refusing everything', () => {

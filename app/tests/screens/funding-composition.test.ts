@@ -32,8 +32,8 @@ import { dirname, join } from 'node:path';
 
 import { bleavit, assethub_paseo } from '@polkadot-api/descriptors';
 import { UnknownStorageItemError, loadCodecs, loadMetadata } from '@bleavit/chain-client';
-import { fundingDecoders, fundingKeys } from '@bleavit/features-tx';
-import type { FundingChain } from '@bleavit/features-tx';
+import { PHASE3_CAP_KEYS, capsDecoders, capsKeys, fundingDecoders, fundingKeys } from '@bleavit/features-tx';
+import type { CapsChain, FundingChain } from '@bleavit/features-tx';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const APP = join(HERE, '..', '..');
@@ -67,10 +67,13 @@ const entry = (name: string): RuntimeEntry => {
   return found;
 };
 
-const local: FundingChain = {
+// `satisfies` rather than an annotation: `FundingChain` names only the storage half of the
+// codec surface, and D-13's caps read `params()` too. Annotating would discard `apis` from the
+// inferred type and leave the caps composition unable to reach the runtime-API codecs at all.
+const local = {
   codecs: await loadCodecs(bleavit),
   metadata: loadMetadata(readFileSync(join(APP, 'fixtures', 'chain-feed', '2', 'metadata.scale'))),
-};
+} satisfies FundingChain;
 const assetHub: FundingChain = {
   codecs: await loadCodecs(assethub_paseo),
   metadata: loadMetadata(
@@ -351,4 +354,157 @@ test('a decoded asset account yields a bigint balance, and a bad shape is refuse
 
   const short = decoders.localFreeUsdc('0x00');
   assert.equal(short.ok, false);
+});
+
+/* --------------------------------------------------- D-13's caps (11 §11.9.1, SQ-1034) */
+
+const capsChain: CapsChain = local;
+const caps = capsKeys({ local: capsChain, usdcLocation: USDC_LOCATION });
+const capsDec = capsDecoders(capsChain);
+
+/** One `FutarchyApi` method's codec pair, from the committed descriptors. */
+function apiCodec(method: string): {
+  readonly args: { dec(raw: string): unknown };
+  readonly value: { enc(value: unknown): Uint8Array };
+} {
+  const apis = capsChain.codecs.apis as Record<string, Record<string, unknown> | undefined>;
+  const codec = apis.FutarchyApi?.[method];
+  assert.ok(codec, `the descriptors carry no FutarchyApi.${method}`);
+  return codec as { args: { dec(raw: string): unknown }; value: { enc(value: unknown): Uint8Array } };
+}
+
+/** One storage item's value codec, from the same descriptors. */
+function storageValueCodec(pallet: string, item: string): { enc(value: unknown): Uint8Array } {
+  const query = capsChain.codecs.query as Record<string, Record<string, unknown> | undefined>;
+  const entry = query[pallet]?.[item];
+  assert.ok(entry, `the descriptors carry no ${pallet}.${item}`);
+  return (entry as { value: { enc(value: unknown): Uint8Array } }).value;
+}
+
+/** The recorder's own key for a surface, from the committed chainHead transcript. */
+function recordedPrefix(file: string): string {
+  const doc = JSON.parse(readFileSync(join(APP, 'fixtures', 'chainhead', file), 'utf8')) as {
+    requests: { method: string; params: unknown[] }[];
+  };
+  const items = doc.requests
+    .filter((r) => r.method === 'chainHead_v1_storage')
+    .flatMap((r) => r.params[2] as { key: string }[]);
+  const prefix = items.map((i) => i.key.toLowerCase()).find((key) => (key.length - 2) / 2 === 32);
+  assert.ok(prefix, `${file} records no 32-byte prefix read`);
+  return prefix;
+}
+
+test('the USDC asset key extends the prefix the RECORDER asked a live node for', () => {
+  // `ForeignAssets.Asset(USDC)` is where total local issuance comes from, and 09 §5.2 makes
+  // that the quantity `phase3.tvl_cap` bounds. A key one hash short is a map prefix, which
+  // `descendantsValues` answers with the whole map and `value` answers with nothing at all —
+  // and nothing renders as unlimited headroom. So the prefix is taken from an independent
+  // producer: `tools/release/record-chainhead-fixtures.py` computed it in Python and a booted
+  // node accepted it, which is not this key builder's own opinion of itself.
+  const key = caps.usdcAsset().toLowerCase();
+  assert.ok(key.startsWith(recordedPrefix('storage.identity.usdc_asset.json')), key);
+  // Prefix + blake2_128 (16 bytes) + the Location's own encoding, so it is a FULL key.
+  assert.ok((key.length - 2) / 2 > 32 + 16, `a full key, not a prefix: ${key}`);
+});
+
+test('the per-account meter key is account-specific and extends its own pallet prefix', () => {
+  // `InflowCaps.CumulativeDeposits` has no recorded transcript to compare against — the
+  // manifest entry the frozen surface gained has no `app/fixtures/chainhead/` fixture yet — so
+  // this checks the two properties that can be checked without one: the key is built over the
+  // right item, and it varies with the account. A key that did not vary would report one
+  // user's Phase-3 meter for every user.
+  // The second account is the runtime's own pre-image with its first byte cleared, decoded
+  // back through the same `AccountId32` codec — every account this fixture publishes is the
+  // same one, and a hand-written SS58 string would fail its checksum rather than contrast.
+  const published = entry('system_account').preimages[0];
+  assert.ok(published, 'the runtime fixture publishes no System.Account pre-image');
+  const item = (local.codecs as { query: Record<string, Record<string, unknown>> }).query.System?.Account;
+  const inner = (item as { args?: { inner?: unknown } } | undefined)?.args?.inner;
+  assert.ok(Array.isArray(inner), 'System.Account has no per-position codecs');
+  const other = (inner[0] as { dec(raw: string): unknown }).dec(`0x00${published.slice(4)}`) as string;
+  assert.notEqual(other, WHO, 'the contrast account is the same account');
+
+  const mine = caps.cumulativeDeposits(WHO).toLowerCase();
+  const theirs = caps.cumulativeDeposits(other).toLowerCase();
+  assert.notEqual(mine, theirs, 'the meter key does not depend on the account');
+  assert.equal(mine.slice(0, 66), theirs.slice(0, 66), 'the two keys are not the same map');
+  // Prefix + blake2_128 + AccountId32 = 32 + 16 + 32 bytes.
+  assert.equal((mine.length - 2) / 2, 80, mine);
+});
+
+test('a params() request carries the 16-byte canonical keys, and 13 rule 6 bounds them', () => {
+  // `constitution_core::key16` is ASCII zero-padded to 16 bytes, and the constitution is
+  // indexed by that. Asserted against the encoding rather than against this builder's own
+  // output: the argument bytes are decoded back through the chain's `FutarchyApi.params`
+  // codec, so what is checked is what the runtime would receive.
+  const argsHex = caps.paramsArgs([PHASE3_CAP_KEYS.globalTvl, PHASE3_CAP_KEYS.perAccount]);
+  const [decoded] = apiCodec('params').args.dec(argsHex) as [readonly string[]];
+  assert.deepEqual(
+    decoded.map((key) => key.toLowerCase()),
+    [
+      `0x${Buffer.from('phase3.tvl_cap', 'ascii').toString('hex')}0000`,
+      `0x${Buffer.from('phase3.dep_cap', 'ascii').toString('hex')}0000`,
+    ],
+  );
+
+  // And the row heading 13 prints beside the canonical key is refused rather than silently
+  // truncated: `phase3.deposit_cap` is 18 bytes, and a truncated request would be answered
+  // by omission — the one failure mode a fail-closed reader turns into "no cap applies".
+  assert.throws(() => caps.paramsArgs(['phase3.deposit_cap']), /13 rule 6|ParamKey/);
+});
+
+test('a params() view decodes back to the 13 key NAME, padding removed', () => {
+  // The round trip is what binds the request to the answer: the reader matches the view's key
+  // against the name it asked for, so a decoder that returned the padded hex would match
+  // nothing and every cap would read as omitted — fail-closed, permanently, which is exactly
+  // the state SQ-1034 records.
+  const view = {
+    key: `0x${Buffer.from('phase3.tvl_cap', 'ascii').toString('hex')}0000`,
+    value: 2_000_000_000_000n,
+    min: 0n,
+    max: 0n,
+    max_delta: 0n,
+    cooldown_blocks: 0,
+    last_change: 0,
+    class: { type: 'Meta', value: undefined },
+    min_next: 0n,
+    max_next: 0n,
+  };
+  const raw = `0x${Buffer.from(apiCodec('params').value.enc([view])).toString('hex')}`;
+  const decoded = capsDec.paramViews(raw);
+  assert.ok(decoded.ok, decoded.ok ? '' : decoded.reason);
+  assert.deepEqual(decoded.value, [{ key: 'phase3.tvl_cap', value: 2_000_000_000_000n }]);
+});
+
+test('the meter and the asset record decode through the chain’s own codecs', () => {
+  // Both values come back through the runtime's committed descriptors rather than a shape
+  // written here, so a runtime that changed either encoding fails this rather than yielding a
+  // plausible number.
+  const meterCodec = storageValueCodec('InflowCaps', 'CumulativeDeposits');
+  const meterRaw = `0x${Buffer.from(meterCodec.enc(4_000n)).toString('hex')}`;
+  const meter = capsDec.cumulativeDeposits(meterRaw);
+  assert.ok(meter.ok, meter.ok ? '' : meter.reason);
+  assert.equal(meter.value, 4_000n);
+  assert.equal(capsDec.cumulativeDeposits('0x00').ok, false, 'a short meter must not decode');
+
+  const details = {
+    owner: WHO,
+    issuer: WHO,
+    admin: WHO,
+    freezer: WHO,
+    supply: 900_000n,
+    deposit: 0n,
+    min_balance: 10_000n,
+    is_sufficient: true,
+    accounts: 1,
+    sufficients: 1,
+    approvals: 0,
+    status: { type: 'Live', value: undefined },
+  };
+  const assetCodec = storageValueCodec('ForeignAssets', 'Asset');
+  const assetRaw = `0x${Buffer.from(assetCodec.enc(details)).toString('hex')}`;
+  const asset = capsDec.usdcAsset(assetRaw);
+  assert.ok(asset.ok, asset.ok ? '' : asset.reason);
+  assert.equal(asset.value.supply, 900_000n);
+  assert.equal(capsDec.usdcAsset('0x00').ok, false, 'a short asset record must not decode');
 });

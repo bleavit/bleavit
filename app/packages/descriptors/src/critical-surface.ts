@@ -308,6 +308,7 @@ export type SurfaceId =
   | "storage.incident_registry.ack_records"
   | "storage.incident_registry.closed_at"
   | "storage.incident_registry.filings"
+  | "storage.inflow_caps.cumulative_deposits"
   | "storage.ledger.baseline_vaults"
   | "storage.ledger.ledger_drifted"
   | "storage.ledger.position_totals"
@@ -609,6 +610,7 @@ export const CRITICAL_SURFACE: readonly CriticalSurfaceEntry[] = [
   { id: "storage.incident_registry.ack_records", compatGroup: "query", pallet: "IncidentRegistry", member: "AckRecords", required: true, citation: "02 §7.4 watchtower acknowledgments; 11 §11.8.6" },
   { id: "storage.incident_registry.closed_at", compatGroup: "query", pallet: "IncidentRegistry", member: "ClosedAt", required: true, citation: "02 §7.4 registry closure; 11 §11.8.6" },
   { id: "storage.incident_registry.filings", compatGroup: "query", pallet: "IncidentRegistry", member: "Filings", required: true, citation: "02 §7.4 registry filings; 11 §11.8.6" },
+  { id: "storage.inflow_caps.cumulative_deposits", compatGroup: "query", pallet: "InflowCaps", member: "CumulativeDeposits", required: true, citation: "02 §7.4; 09 §5.2" },
   { id: "storage.ledger.baseline_vaults", compatGroup: "query", pallet: "ConditionalLedger", member: "BaselineVaults", required: true, citation: "02 §7.4" },
   { id: "storage.ledger.ledger_drifted", compatGroup: "query", pallet: "ConditionalLedger", member: "LedgerDrifted", required: true, citation: "02 §7.4; 11 §11.8.2" },
   { id: "storage.ledger.position_totals", compatGroup: "query", pallet: "ConditionalLedger", member: "PositionTotals", required: true, citation: "02 §7.4" },
