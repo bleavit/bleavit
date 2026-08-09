@@ -1,0 +1,10 @@
+{
+  "_doc": "The fixture keyring: key id to minisign public-key packet. Generation 4.",
+  "generation": 4,
+  "keys": {
+    "1111111111111111": "untrusted comment: fixture key 17\nRWQREREREREREdBKsjJ0K7SrOhNovUYV5ObQIkq3GgFrr4UgozLJd4c3\n",
+    "2222222222222222": "untrusted comment: fixture key 34\nRWQiIiIiIiIiIqCapfR6Z1mAL/lV+NwtKhSlyZ0jvpf4ZBJ/+Tg0VaTw\n",
+    "3333333333333333": "untrusted comment: fixture key 51\nRWQzMzMzMzMzMxfLefsrQSDysexl5BmNbgiyjoE/6wHkpACDm4XhgIDO\n",
+    "4444444444444444": "untrusted comment: fixture key 68\nRWRERERERERERNdZeTu8E6KBmoJ8dq22+6ikmu4Af0ny0JktmbglrSxI\n"
+  }
+}

@@ -1,0 +1,49 @@
+{
+  "_doc": "A fixture registry with fictional holders, for tests/release/compare.test.ts. The real registry is app/tools/release/sources/signers.json and it is deliberately empty until a ceremony is held. Nothing here is a key, a person or an organization of this project.",
+  "entries": [
+    {
+      "id": "1111111111111111",
+      "population": "release-signer",
+      "operator": "Fixture Ada",
+      "organization": "Pallas",
+      "generation": 4,
+      "revocationIndex": 0
+    },
+    {
+      "id": "2222222222222222",
+      "population": "release-signer",
+      "operator": "Fixture Grace",
+      "organization": "Rhea",
+      "generation": 4,
+      "revocationIndex": 1
+    },
+    {
+      "id": "3333333333333333",
+      "population": "attestor",
+      "operator": "Fixture Linus",
+      "organization": "Pallas",
+      "generation": 4,
+      "revocationIndex": 2
+    },
+    {
+      "id": "4444444444444444",
+      "population": "attestor",
+      "operator": "Fixture Margaret",
+      "organization": "Rhea",
+      "generation": 4,
+      "revocationIndex": 3
+    },
+    {
+      "id": "ar://fixture-ant-1",
+      "population": "arns-controller",
+      "operator": "Fixture Hedy",
+      "organization": "Thebe"
+    },
+    {
+      "id": "fixture-monitor-1",
+      "population": "monitor-operator",
+      "operator": "Fixture Katherine",
+      "organization": "Metis"
+    }
+  ]
+}

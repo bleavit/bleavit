@@ -322,8 +322,15 @@ test('an Asset Hub that never answered still classifies, and the rule accepts it
   // `unestablished` is what a metadata pull that failed or timed out produces. The boot leg is
   // allowed to report it: 15 §4.8 constrains the verdict a *classified* Asset Hub can carry, and
   // says nothing about one this run never established.
-  assert.deepEqual(assetHubVerdictOf({ kind: 'unestablished', reason: 'no metadata' }), {
-    kind: 'unestablished',
-  });
+  //
+  // **`code` is required, and this line is why F26's ruling made it a literal.** SQ-1011/SQ-1012
+  // put `FE-COMPAT-003` on the arm rather than leaving it to each construction site, and its
+  // comment in `compat-session.ts` says a site that omits it must not compile. This site omitted
+  // it — written on a branch where the field did not exist yet — and neither branch's own CI
+  // could see it, because the field and the site only met on the integration branch.
+  assert.deepEqual(
+    assetHubVerdictOf({ kind: 'unestablished', code: 'FE-COMPAT-003', reason: 'no metadata' }),
+    { kind: 'unestablished' },
+  );
   harnessRules.assertBootReport(CLASSIFIED);
 });

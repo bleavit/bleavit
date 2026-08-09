@@ -26,13 +26,18 @@
  * means — including its third finding kind, the *unexpected* served file that a
  * manifest-driven loop cannot see.
  *
- * ## `diff-scope` is a two-directional comparison
+ * ## `diff-scope` is a two-directional comparison, over a scope that holds no asset path
  *
- * §1.5's expedited lane is admissible only when the delta is confined to descriptors,
- * descriptor metadata and release metadata, with **zero app-code delta**: "every other file
- * in the built tree MUST be byte-identical to the incumbent release". A checker that
- * iterated the new tree would miss a *deleted* file, and a deletion outside the permitted
- * scope is exactly as much of an app-code delta as an edit.
+ * §1.5's expedited lane is admissible only when the delta is confined to its permitted scope
+ * with **zero app-code delta**: "every other file in the built tree MUST be byte-identical to
+ * the incumbent release". A checker that iterated the new tree would miss a *deleted* file,
+ * and a deletion outside the permitted scope is exactly as much of an app-code delta as an
+ * edit.
+ *
+ * The permitted scope itself is release metadata and nothing else, because §1.5 names its
+ * admissible class over **source** paths and has it checked over the **built** tree — and
+ * under §1.1 no descriptor-only release produces a built-tree delta confined to any fixed
+ * path. `EXPEDITED_SCOPE` carries that argument in full.
  */
 
 import type { SelfCheckResult } from '@bleavit/verify';
@@ -122,6 +127,23 @@ export interface Attestation {
   readonly keyId: string;
   readonly organization?: unknown;
   readonly valid: boolean;
+  /**
+   * The keyring generation this attestor key belongs to (§2.1).
+   *
+   * Required, and required for the same reason `countReleaseSignatures` reads it: §5.2 has the
+   * monitor verify *"the minisign signatures and ≥ 2 attestations against the current keyring
+   * generation"*, so an attestation carrying none cannot be counted against one. It was absent
+   * until 2026-08-08, which made §2.3's revocation rule unreachable for attestors — see
+   * `countAttestations`.
+   */
+  readonly generation: number;
+  /**
+   * Why it did not verify, when it did not — the same field `ReleaseSignature` carries, for
+   * the same reason. *"The attestation signature does not verify"* is the wrong sentence for
+   * an attestation by a key the registry never published, and an operator told the bytes are
+   * wrong goes and checks bytes that are intact.
+   */
+  readonly why?: string | undefined;
 }
 
 /** Why one signature or attestation did not count. Reported, never merely subtracted. */
@@ -193,13 +215,50 @@ export function countReleaseSignatures(
 /**
  * Count attestations by **organization**, per §1.4 gate 2's "different
  * organizations/infrastructure". Two attestations from one org is one reproduction.
+ *
+ * ## The keyring is a parameter, and it was missing
+ *
+ * §2.3 point 2 names the three verifications a revoked key must be invalid for: *"self-check,
+ * update verification, **attestation counting**"*. Until 2026-08-08 this function took no
+ * keyring at all, so a revoked attestor key kept counting toward gate 2 — the one credential
+ * class where §2.3's own sentence spells the requirement out. The sibling implementation in
+ * `tools/monitoring/attestation_monitor.py` applies the bitmask to release keys and attestor
+ * keys alike, so the two disagreed and only one was right.
+ *
+ * The keyring is **required** rather than optional for the reason this repository has closed
+ * three times over: an optional keyring is a revocation check that defaults off, and a caller
+ * that forgets it gets a verdict, not a type error.
  */
-export function countAttestations(attestations: readonly Attestation[]): AttestationCount {
+export function countAttestations(
+  attestations: readonly Attestation[],
+  keyring: Keyring,
+): AttestationCount {
+  if (!Number.isInteger(keyring?.generation)) {
+    throw new VerifyError('the keyring declares no generation; §2.1 carries it as a u32');
+  }
+  const revoked = new Set<string>(keyring.revokedKeyIds ?? []);
   const organizations = new Set<string>();
   const rejected: RejectedCredential[] = [];
   for (const attestation of attestations) {
     if (!attestation.valid) {
-      rejected.push({ keyId: attestation.keyId, why: 'the attestation signature does not verify' });
+      rejected.push({
+        keyId: attestation.keyId,
+        why: attestation.why ?? 'the attestation signature does not verify',
+      });
+      continue;
+    }
+    if (attestation.generation !== keyring.generation) {
+      // §5.2: attestations are verified against the *current* keyring generation. An
+      // attestation under a previous one reproduces a build against a keyring this release
+      // did not publish.
+      rejected.push({
+        keyId: attestation.keyId,
+        why: `attested under keyring generation ${attestation.generation}, not the current ${keyring.generation}`,
+      });
+      continue;
+    }
+    if (revoked.has(attestation.keyId)) {
+      rejected.push({ keyId: attestation.keyId, why: 'the key is marked revoked in ReleaseChannel' });
       continue;
     }
     if (typeof attestation.organization !== 'string' || attestation.organization.trim().length === 0) {
@@ -223,6 +282,16 @@ export interface VerdictInputs {
   readonly keyring: Keyring;
   readonly attestations: readonly Attestation[];
   readonly minimumSignatures?: number;
+  /**
+   * §1.3's `--require-attestations N`, held to the same rule as the signature minimum.
+   *
+   * §1.4 states that rule about a deployment's minimum: it MAY require more, MUST state its
+   * minimum explicitly rather than inherit one silently, and MUST NOT configure fewer. The
+   * sentence sits in the release-signature paragraph, and the flag that makes an attestation
+   * minimum configurable is §1.3's — so a configurable minimum with no floor under it would
+   * be the one place a release could be told to accept a single reproduction.
+   */
+  readonly minimumAttestations?: number;
 }
 
 export interface Verdict {
@@ -238,6 +307,7 @@ export function releaseVerdict({
   keyring,
   attestations,
   minimumSignatures = SIGNATURE_FLOOR,
+  minimumAttestations = ATTESTATION_FLOOR,
 }: VerdictInputs): Verdict {
   if (minimumSignatures < SIGNATURE_FLOOR) {
     // §1.4: "A deployment MAY require more and MUST state its minimum explicitly rather than
@@ -247,9 +317,15 @@ export function releaseVerdict({
         'may require more and must not configure fewer',
     );
   }
+  if (minimumAttestations < ATTESTATION_FLOOR) {
+    throw new VerifyError(
+      `a minimum of ${minimumAttestations} attestation(s) is below 12 §1.4 gate 2's floor of ` +
+        `${ATTESTATION_FLOOR}; a deployment may require more and must not configure fewer`,
+    );
+  }
   const failures: string[] = [];
   const sigs = countReleaseSignatures(signatures, keyring);
-  const atts = countAttestations(attestations);
+  const atts = countAttestations(attestations, keyring);
 
   if (!selfCheck.ok) {
     failures.push(
@@ -263,22 +339,60 @@ export function releaseVerdict({
         `(12 §1.4). Rejected: ${sigs.rejected.map((r) => `${r.keyId} — ${r.why}`).join('; ') || 'none'}`,
     );
   }
-  if (atts.independentOrganizations < ATTESTATION_FLOOR) {
+  if (atts.independentOrganizations < minimumAttestations) {
     failures.push(
-      `${atts.independentOrganizations} independent attesting organization(s); ${ATTESTATION_FLOOR} required ` +
+      `${atts.independentOrganizations} independent attesting organization(s); ${minimumAttestations} required ` +
         '(12 §1.4 gate 2 — builders in different organizations/infrastructure)',
     );
   }
   return { ok: failures.length === 0, failures, signatures: sigs, attestations: atts };
 }
 
-/** §1.5's admissible delta scope for the expedited lane. */
+/**
+ * §1.5's admissible delta scope for the expedited lane — **release metadata, and nothing else**.
+ *
+ * ## Why no descriptor path is listed here
+ *
+ * §1.5 states its admissible class over **source** paths (`packages/descriptors/**`) and then has
+ * it checked over the **built** tree: *"every other file in the built tree MUST be byte-identical
+ * to the incumbent release"*. Those are two different sets of names, and 12 §1.1 is what
+ * separates them. The release build emits every chunk under a content hash **alone** —
+ * `entryFileNames: 'assets/[hash].js'`, `chunkFileNames: 'assets/[hash].js'` — so refreshing a
+ * descriptor does not *edit* a published file, it **renames** one. And because a Rollup chunk's
+ * hash covers the file names of the chunks it imports, the rename cascades up through every
+ * importer to the entry chunk and into `index.html`, which carries the entry's name and one
+ * `modulepreload` link per static chunk.
+ *
+ * So there is no path prefix under which a real descriptor-only release's built-tree delta is
+ * confined, and this list cannot contain one.
+ *
+ * ## The defect this closes
+ *
+ * `'assets/descriptors/'` was listed here, and the build has never emitted that path — the
+ * fixtures invented an output, this list allowlisted it, and the suites agreed with both while
+ * all three disagreed with the build. An entry in this list is not a description, it is an
+ * **authorization**: it is what lets `diffScope` call a delta admissible, on the one gate that
+ * decides whether a release may skip the standard lane's 72 h soak.
+ *
+ * ## The lane is therefore unavailable, and that is the safe direction
+ *
+ * Until the build emits a separately identifiable descriptor artifact whose published path is
+ * stable across refreshes, `diffScope` refuses every candidate whose built-tree delta touches
+ * app assets. The only unsafe error available here is skipping a soak on a false premise, so a
+ * refusal is R-7's status-quo default rather than a gap: a release this lane cannot admit is not
+ * blocked, it takes the standard lane and the soak §1.5 says that lane carries.
+ */
 export const EXPEDITED_SCOPE: readonly string[] = Object.freeze([
-  'assets/descriptors/',
   'release.json',
   'CHANGELOG.md',
   'release-history.json',
 ]);
+
+/** The published tree's asset directory — where 12 §1.1's `assets/[hash]` output lands. */
+const ASSET_PREFIX = 'assets/';
+
+/** The document that names the entry chunk, so every rename cascade ends here. */
+const ENTRY_DOCUMENT = 'index.html';
 
 /** Path → sha256 over a built tree, as `release.json`'s `perFileHashes` carries it. */
 export type FileHashes = Readonly<Record<string, string>>;
@@ -299,12 +413,55 @@ function inScope(path: string, scope: readonly string[]): boolean {
 }
 
 /**
+ * Does this out-of-scope set have the shape a 12 §1.1 content-hash rename makes?
+ *
+ * A published chunk is named by its content alone, so an edited chunk never arrives as
+ * `changed`: the old name disappears and a new one takes its place. The signature is therefore
+ * an `assets/` **pair** — at least one addition and at least one removal — optionally with
+ * `index.html` changed, since the entry chunk's name is written into that document.
+ *
+ * This is a classification of the *explanation*, never of the verdict: both arms refuse, and the
+ * sentence it selects says the delta is **indistinguishable** from an app-code delta rather than
+ * claiming it is a descriptor refresh. That reading stays true when it really is app code, which
+ * is what keeps a nicer-sounding message from becoming a quieter one.
+ *
+ * An `assets/` path reported as `changed` fails the test on purpose: a name that survived its
+ * own bytes is not something §1.1's output can do, so it is a fact worth the generic sentence.
+ */
+function isContentHashRename(changes: readonly ScopeChange[]): boolean {
+  let added = 0;
+  let removed = 0;
+  for (const entry of changes) {
+    if (entry.path.startsWith(ASSET_PREFIX)) {
+      if (entry.change === 'added') added += 1;
+      else if (entry.change === 'removed') removed += 1;
+      else return false;
+      continue;
+    }
+    if (entry.path === ENTRY_DOCUMENT && entry.change === 'changed') continue;
+    return false;
+  }
+  return added > 0 && removed > 0;
+}
+
+/**
  * `verify-release diff-scope --against <incumbent-txid>`.
  *
  * Compares **both directions**. A loop over the new tree misses a *deleted* file, and a
  * deletion outside the permitted scope is exactly as much of an app-code delta as an edit —
  * §1.5's requirement is that every other file be *byte-identical*, which a missing file is
- * not.
+ * not. Under §1.1 that second direction is not an edge case either: a content-hash rename is
+ * *always* a removal paired with an addition, so a one-directional checker would report half
+ * of every real delta.
+ *
+ * `scope` defaults to `EXPEDITED_SCOPE`, which holds release metadata and no asset path — see
+ * its comment for why one cannot be added. The practical consequence is stated to the operator
+ * rather than left to be inferred from a list of hashes: a descriptor refresh is
+ * indistinguishable from an app-code delta in the published tree, so the expedited lane is
+ * unavailable and the standard lane with its soak applies.
+ *
+ * Pure and total. It fetches nothing, reads no clock and throws on no input, because §1.3's
+ * promise is a verdict reproducible with no project infrastructure.
  */
 export function diffScope(
   incumbent: FileHashes,
@@ -324,13 +481,25 @@ export function diffScope(
     outOfScope.push({ path, change: 'added' });
   }
   outOfScope.sort((a, b) => (a.path < b.path ? -1 : a.path > b.path ? 1 : 0));
-  return {
-    admissible: outOfScope.length === 0,
-    outOfScope,
-    detail:
-      outOfScope.length === 0
-        ? 'the delta is confined to the descriptor and release-metadata scope 12 §1.5 admits'
-        : `${outOfScope.length} out-of-scope file(s); §1.5 requires zero app-code delta, so this ` +
-          'release must use the standard lane with its 72 h soak',
-  };
+  return { admissible: outOfScope.length === 0, outOfScope, detail: explain(outOfScope) };
+}
+
+/** The operator-facing sentence for a scope verdict. Three cases, and each says a different thing. */
+function explain(outOfScope: readonly ScopeChange[]): string {
+  if (outOfScope.length === 0) {
+    return 'the delta is confined to the release-metadata files 12 §1.5 admits, and no published app asset moved';
+  }
+  if (isContentHashRename(outOfScope)) {
+    return (
+      `${outOfScope.length} out-of-scope file(s), and their shape is a content-hash rename. 12 §1.1 ` +
+      'publishes every chunk as `assets/<hash>.js`, so a descriptor refresh renames the descriptor ' +
+      'chunk, then every chunk that imports it, then index.html — which makes a descriptor-only ' +
+      'release indistinguishable from an app-code delta in the published tree. The expedited lane ' +
+      'is therefore unavailable, and this release must use the standard lane with its 72 h soak'
+    );
+  }
+  return (
+    `${outOfScope.length} out-of-scope file(s); §1.5 requires zero app-code delta, so this ` +
+    'release must use the standard lane with its 72 h soak'
+  );
 }
