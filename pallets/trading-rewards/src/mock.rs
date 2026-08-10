@@ -123,6 +123,9 @@ impl pallet_trading_rewards::BenchmarkHelper<AccountId32> for MockBenchmarkHelpe
 pub const MARKET_A: MarketId = 11;
 pub const MARKET_B: MarketId = 12;
 
+/// The mock USDC asset's `min_balance`.
+pub const USDC_MIN_BALANCE: Balance = 10;
+
 pub fn account(seed: u8) -> AccountId32 {
     AccountId32::new([seed; 32])
 }
@@ -233,9 +236,12 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
     .assimilate_storage(&mut storage);
     assert!(balances.is_ok(), "mock balances genesis must assimilate");
     let assets = pallet_assets::GenesisConfig::<Test> {
-        // `min_balance` 1 keeps the asset floor out of the way of the bond
-        // floor, so a test that moves `ledger.pos_dep` moves the only gate.
-        assets: vec![(UsdcAssetId::get(), alice(), true, 1)],
+        // USDC is genesis-declared `is_sufficient` on this chain (03 §7 R-4,
+        // enforced by `validate-chain-spec.py`), so the sovereign needs no
+        // native provider to custody it. `min_balance` sits below the bond
+        // floor but above 1, so both the asset floor and `ledger.pos_dep`
+        // are reachable gates and the tests can tell them apart.
+        assets: vec![(UsdcAssetId::get(), alice(), true, USDC_MIN_BALANCE)],
         metadata: vec![],
         accounts: vec![
             (UsdcAssetId::get(), alice(), 1_000_000),

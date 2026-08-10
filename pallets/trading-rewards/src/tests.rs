@@ -194,6 +194,67 @@ fn enroll_refuses_a_bond_the_funder_cannot_pay_and_moves_nothing() {
 }
 
 #[test]
+fn the_minimum_bond_never_falls_below_the_usdc_asset_minimum() {
+    // A bond under the asset's own `min_balance` cannot create the sovereign's
+    // USDC account at all, so the live floor is the larger of the two rows.
+    new_test_ext().execute_with(|| {
+        PositionDeposit::set(USDC_MIN_BALANCE - 1);
+        assert_noop!(
+            TradingRewards::enroll(RuntimeOrigin::signed(alice()), USDC_MIN_BALANCE - 1),
+            Error::<Test>::BondBelowMinimum
+        );
+        assert_ok!(TradingRewards::enroll(
+            RuntimeOrigin::signed(alice()),
+            USDC_MIN_BALANCE
+        ));
+    });
+}
+
+#[test]
+fn enroll_refuses_a_bond_that_would_dust_the_funder() {
+    // Between "pays the whole balance" and "keeps a live account" lies a band
+    // the asset layer would reap. Refusing is the status-quo default; a
+    // silently reaped funder is not the participant's intent.
+    new_test_ext().execute_with(|| {
+        let funds = usdc_balance(&alice());
+        let bond = funds - (USDC_MIN_BALANCE - 1);
+        assert_noop!(
+            TradingRewards::enroll(RuntimeOrigin::signed(alice()), bond),
+            Error::<Test>::BondFundingWouldDust
+        );
+        assert_eq!(usdc_balance(&alice()), funds);
+        assert_eq!(sovereign_usdc(), 0);
+        // One unit less leaves exactly the asset minimum behind, and passes.
+        assert_ok!(TradingRewards::enroll(
+            RuntimeOrigin::signed(alice()),
+            bond - 1
+        ));
+        assert_eq!(usdc_balance(&alice()), USDC_MIN_BALANCE);
+    });
+}
+
+#[test]
+fn a_top_up_that_would_overflow_the_bond_is_refused_before_custody_moves() {
+    // Rule 1: checked arithmetic with a typed error, never a wrap. The bound
+    // is unreachable through the dispatch surface, so it is seeded directly.
+    new_test_ext().execute_with(|| {
+        assert_ok!(TradingRewards::enroll(
+            RuntimeOrigin::signed(alice()),
+            1_000
+        ));
+        Participants::<Test>::mutate(alice(), |slot| {
+            slot.as_mut().expect("record").bond = u128::MAX;
+        });
+        let funds = usdc_balance(&alice());
+        assert_noop!(
+            TradingRewards::top_up_bond(RuntimeOrigin::signed(alice()), 1),
+            Error::<Test>::AccountingOverflow
+        );
+        assert_eq!(usdc_balance(&alice()), funds, "no custody moved");
+    });
+}
+
+#[test]
 fn enroll_admits_a_funder_who_spends_their_whole_usdc_balance() {
     // `Preservation::Preserve` on a full-balance move would refuse a lawful
     // bond; the funder-side preservation must fall back to `Expendable`
