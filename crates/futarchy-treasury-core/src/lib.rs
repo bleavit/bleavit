@@ -1615,21 +1615,22 @@ pub fn stream_claimable_at(stream: &Stream, now: BlockNumber) -> Result<Balance,
         .ok_or(Error::Overflow)
 }
 
-/// Credit a returned headroom sweep back into a bounded genesis-pot
-/// allocation (08 §2.6: *"unspent budget returns to the pot at epoch
-/// close"*). Pairs with the ordinary decrement every bounded PARAM leaf
-/// already does inline (`create_community_schedule`,
+/// Credit an unspent budget remainder back into a bounded genesis-pot
+/// allocation (08 §2.6: *"The return of unspent budget carries the same
+/// authority as the authorization"*). Pairs with the ordinary decrement every
+/// bounded PARAM leaf already does inline (`create_community_schedule`,
 /// `fund_trading_rewards`) — this is the return direction neither of those
-/// calls needed before the trading-reward program's headroom sweep.
+/// calls needed before the trading-reward program, and in
+/// `fund_trading_rewards` it runs first, before that same call's own debit.
 ///
 /// Infallible and saturating on both sides: crediting money back must never
-/// be the reason a sweep call fails (G-1), and the result never exceeds
+/// be the reason the funding call fails (G-1), and the result never exceeds
 /// `cap` — the pot's own genesis allocation. That ceiling is defensive
-/// rather than a path reachable in ordinary operation: every VIT a sweep
-/// returns is VIT this same pot sent out through a bounded authorization, so
+/// rather than a path reachable in ordinary operation: every VIT a return
+/// moves is VIT this same pot sent out through a bounded authorization, so
 /// `remaining + amount` cannot exceed `cap` unless an unrelated direct
-/// donation to the paying sovereign inflated the swept amount past what any
-/// authorization ever moved. Capping rather than letting the stored
+/// donation to the paying sovereign inflated the returned amount past what
+/// any authorization ever moved. Capping rather than letting the stored
 /// allocation overstate its own genesis charter is the R-7 direction: the
 /// alternative would let a donation manufacture spendable budget no
 /// governance decision ever authorized.

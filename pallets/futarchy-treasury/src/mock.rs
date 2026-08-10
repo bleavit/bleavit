@@ -546,6 +546,10 @@ impl pallet_futarchy_treasury::BenchmarkHelper<RuntimeOrigin, AccountId32> for T
     fn community_origin() -> RuntimeOrigin {
         RuntimeOrigin::signed(treasury_acc())
     }
+    fn prime_trading_reward_headroom(amount: u128) -> frame_support::dispatch::DispatchResult {
+        donate_to_trading_reward_sovereign(amount);
+        Ok(())
+    }
     fn account(seed: u8) -> AccountId32 {
         AccountId32::new([seed; 32])
     }

@@ -356,12 +356,14 @@ fn all_futarchy_call_weights() -> alloc::vec::Vec<(&'static str, Weight)> {
         }),
     );
     all.extend(
-        // `create_community_schedule` was missing from this sweep until SQ-490.
+        // `create_community_schedule` was missing from this sweep until SQ-490,
+        // and `fund_trading_rewards` until the TR6 review — the derived
+        // inventory below is what reported the second one, exactly as designed.
         pallet_call_weights!(pallet_futarchy_treasury as pallet_futarchy_treasury::WeightInfo {
             spend, open_stream, claim_stream, cancel_stream, fund_budget_line, issue_vit,
             recover_foreign, execute_coretime_renewal, note_coretime_quote,
             prune_coretime_quote, set_coretime_authority, sweep_insurance,
-            reconcile_insurance, create_community_schedule,
+            reconcile_insurance, create_community_schedule, fund_trading_rewards,
         }),
     );
     all.extend(

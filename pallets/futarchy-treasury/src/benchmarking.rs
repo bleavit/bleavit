@@ -327,31 +327,35 @@ mod benches {
         _(T::BenchmarkHelper::community_origin(), beneficiary, amount);
     }
 
-    /// 08 §2.6: the bounded PARAM-origin trading-reward funding call. Worst
-    /// case is an ordinary authorization well inside the remaining
-    /// allocation and lifetime count, matching `create_community_schedule`'s
-    /// own fixture shape.
+    /// 08 §2.6: the bounded PARAM-origin trading-reward funding call, whose
+    /// worst case runs **both** of its legs — the folded-in return of the
+    /// previous authorization's remainder and the new authorization itself.
+    /// `prime_trading_reward_headroom` is what makes the return leg real: a
+    /// fixture that only seeds `IncentiveRemaining` measures a call with
+    /// nothing to give back, so the adapter move, the extra
+    /// `IncentiveRemaining` write and the return event are charged to nobody.
+    /// The post-call assertions below fail loudly rather than let a
+    /// half-exercised fixture regenerate this weight downward in silence.
     #[benchmark]
     fn fund_trading_rewards() {
         IncentiveRemaining::<T>::put(T::IncentiveAllocationAmount::get());
+        let returned = 500_000 * VIT;
+        let primed = T::BenchmarkHelper::prime_trading_reward_headroom(returned);
+        assert!(primed.is_ok());
         let amount = 1_000_000 * VIT;
 
         #[extrinsic_call]
         _(T::BenchmarkHelper::trading_reward_origin(), amount);
-    }
 
-    /// 08 §2.6: the permissionless trading-reward headroom sweep. The
-    /// paying path (a nonzero headroom, moving custody and crediting
-    /// `IncentiveRemaining`) is the worst case; the at-or-below-reserve
-    /// no-op is strictly cheaper, exactly as `reconcile_insurance`'s own
-    /// comment states for its no-op floor.
-    #[benchmark]
-    fn sweep_trading_reward_headroom() {
-        IncentiveRemaining::<T>::put(T::IncentiveAllocationAmount::get());
-        let caller: T::AccountId = T::BenchmarkHelper::account(10);
-
-        #[extrinsic_call]
-        _(RawOrigin::Signed(caller));
+        // The authorization leg ran.
+        assert_eq!(TradingRewardBudgetCount::<T>::get(), 1);
+        // And so did the return leg. Asserting the sovereign's post-call
+        // balance is what distinguishes the two shapes: with the remainder
+        // returned first the sovereign holds exactly the new authorization,
+        // while a fixture that primed nothing (or an adapter that reported
+        // nothing) leaves the same `IncentiveRemaining` figure behind and
+        // would satisfy an allocation-only assertion.
+        assert_eq!(T::TradingRewardFunding::reward_sovereign_balance(), amount);
     }
 
     #[benchmark]

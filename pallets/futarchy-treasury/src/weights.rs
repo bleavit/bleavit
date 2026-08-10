@@ -46,16 +46,13 @@ pub trait WeightInfo {
     /// Weight of `create_community_schedule` (bounded allocation state plus
     /// the SDK vesting/currency adapter).
     fn create_community_schedule() -> Weight;
-    /// Weight of `fund_trading_rewards` (`IncentiveRemaining` +
-    /// `TradingRewardBudgetCount` r:2 w:2, plus the funding adapter move).
+    /// Weight of `fund_trading_rewards` (08 §2.6), whose worst case runs
+    /// **both** of its legs: the folded-in return (two adapter reads, the
+    /// adapter move, `IncentiveRemaining` w:1) and the authorization
+    /// (`IncentiveRemaining` r:1 w:1, `TradingRewardBudgetCount` r:1 w:1, the
+    /// funding adapter move). A zero-amount wind-down and a call with nothing
+    /// to return are each strictly cheaper.
     fn fund_trading_rewards() -> Weight;
-    /// Weight of `sweep_trading_reward_headroom` (08 §2.6): two adapter
-    /// reads (sovereign balance, accrual reserve) every call, plus
-    /// `IncentiveRemaining` r:1 w:1 and the adapter move on the paying path.
-    /// The at-or-below-reserve no-op is strictly cheaper, so this is the
-    /// worst case exactly as `reconcile_insurance`'s comment states for its
-    /// own no-op floor.
-    fn sweep_trading_reward_headroom() -> Weight;
     /// Weight of the per-authored-block `note_collator_block` authorship
     /// callback (worst case: full bounded accumulator moved aside at an epoch
     /// boundary, then a fresh accumulator started). Registered as Mandatory
@@ -146,14 +143,9 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
             .saturating_add(T::DbWeight::get().writes(3))
     }
     fn fund_trading_rewards() -> Weight {
-        Weight::from_parts(40_000_000, STATE_POV)
-            .saturating_add(T::DbWeight::get().reads(2))
-            .saturating_add(T::DbWeight::get().writes(2))
-    }
-    fn sweep_trading_reward_headroom() -> Weight {
-        Weight::from_parts(40_000_000, STATE_POV)
-            .saturating_add(T::DbWeight::get().reads(3))
-            .saturating_add(T::DbWeight::get().writes(1))
+        Weight::from_parts(60_000_000, STATE_POV)
+            .saturating_add(T::DbWeight::get().reads(4))
+            .saturating_add(T::DbWeight::get().writes(3))
     }
     fn note_collator_block() -> Weight {
         Weight::from_parts(30_000_000, COLLATOR_ACCUMULATOR_POV)
@@ -233,14 +225,9 @@ impl WeightInfo for () {
             .saturating_add(RocksDbWeight::get().writes(3))
     }
     fn fund_trading_rewards() -> Weight {
-        Weight::from_parts(40_000_000, STATE_POV)
-            .saturating_add(RocksDbWeight::get().reads(2))
-            .saturating_add(RocksDbWeight::get().writes(2))
-    }
-    fn sweep_trading_reward_headroom() -> Weight {
-        Weight::from_parts(40_000_000, STATE_POV)
-            .saturating_add(RocksDbWeight::get().reads(3))
-            .saturating_add(RocksDbWeight::get().writes(1))
+        Weight::from_parts(60_000_000, STATE_POV)
+            .saturating_add(RocksDbWeight::get().reads(4))
+            .saturating_add(RocksDbWeight::get().writes(3))
     }
     fn note_collator_block() -> Weight {
         Weight::from_parts(30_000_000, COLLATOR_ACCUMULATOR_POV)

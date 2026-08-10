@@ -770,17 +770,7 @@ fn project_inner(call: &RuntimeCall, budget: &mut ProjectionBudget) -> FilterCal
             // place — `MAIN` — so a caller has nothing to steer; the only thing
             // a Signed origin buys is that somebody pays for the block space.
             | pallet_futarchy_treasury::Call::reconcile_insurance { .. }
-            | pallet_futarchy_treasury::Call::prune_coretime_quote { .. }
-            // 08 §2.6: the trading-reward headroom sweep is the same shape as
-            // `reconcile_insurance` for the same reason — it names no
-            // beneficiary (the `incentiv` pot is fixed), chooses no amount
-            // (computed as the sovereign's balance less its accrual reserve),
-            // and can move value to exactly one place, so a Signed caller has
-            // nothing to steer. Not yet a 06 §3.2 row (owed to the controller,
-            // 08 §2.6 names no call for the sweep it requires); classified
-            // here to match the call's actual origin check
-            // (`ensure_signed`, no narrower gate).
-            | pallet_futarchy_treasury::Call::sweep_trading_reward_headroom { .. } => {
+            | pallet_futarchy_treasury::Call::prune_coretime_quote { .. } => {
                 leaf(CallDomain::Public)
             }
             pallet_futarchy_treasury::Call::__Ignore(_, _) => denied(),

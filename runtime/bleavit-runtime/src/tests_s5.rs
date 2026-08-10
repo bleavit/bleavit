@@ -252,7 +252,11 @@ inventory! {
     "FutarchyTreasury" {
         leaf treasury => ["fund_budget_line", "spend", "open_stream", "cancel_stream", "issue_vit", "recover_foreign", "set_coretime_authority", "sweep_insurance"];
         leaf public => ["claim_stream", "execute_coretime_renewal", "note_coretime_quote", "prune_coretime_quote", "reconcile_insurance"];
-        leaf param => ["create_community_schedule"];
+        // 06 §3.2 / 08 §2.6: the two bounded genesis-pot PARAM leaves. The
+        // trading-reward budget return is folded into `fund_trading_rewards`
+        // and is deliberately not a call of its own — a public crank would be
+        // a one-extrinsic denial of the program's payout for an epoch.
+        leaf param => ["create_community_schedule", "fund_trading_rewards"];
     }
     "Guardian" {
         leaf values => ["set_members", "ratify_action", "renew_playbook", "uphold_veto", "recall", "set_playbook_registered"];

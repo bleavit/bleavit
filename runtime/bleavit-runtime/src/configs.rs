@@ -243,8 +243,9 @@ parameter_types! {
 /// movement that never happened (G-1) — the same discipline
 /// [`TreasuryOutflowCustody`]'s unwired default already uses for the four
 /// ordinary outflow calls — and reports no balance and no reserve, which
-/// makes `sweep_trading_reward_headroom` the harmless no-op that shape
-/// implies. TR7 replaces this with a real adapter over
+/// makes `fund_trading_rewards`'s folded return leg a harmless no-op and
+/// leaves its zero-amount wind-down the one shape that still succeeds. TR7
+/// replaces this with a real adapter over
 /// `pallet_trading_rewards::Pallet::<Runtime>`.
 pub struct RuntimeTradingRewardFunding;
 impl pallet_futarchy_treasury::TradingRewardFunding<AccountId> for RuntimeTradingRewardFunding {
