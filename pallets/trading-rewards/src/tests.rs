@@ -735,7 +735,19 @@ fn a_retained_record_is_still_gated_on_settlement() {
             "the score row keeps the record open"
         );
         assert_eq!(ParticipantCount::<Test>::get(), 1);
-        assert_ok!(TradingRewards::do_try_state());
+        // **Amended by TR4.** This fixture injects a score row *after* the
+        // withdrawal, which no production path can do: `withdraw_bond` refuses
+        // unless the prefix is empty, and the fill observer refuses to open a
+        // row for an account with no bond. TR4 made that implication a
+        // `try-state` invariant, because it is what keeps the observer's
+        // bond gate loss-symmetric — so the state this test builds on purpose
+        // is now a *detected* one. The two refusals above are the point of the
+        // test and are unchanged; what changed is that the trailing check now
+        // states which of the two claims about this state is true.
+        assert!(
+            TradingRewards::do_try_state().is_err(),
+            "a score row under a zero bond is unreachable, and try-state says so"
+        );
     });
 }
 
@@ -1282,14 +1294,25 @@ fn selling_off_book_inventory_scores_nothing_and_takes_no_entry() {
 fn a_partly_off_book_sale_still_keeps_its_entry() {
     // The complement: the skip above must key on "the score did not move", not
     // on "this was a sale". A sale that credits anything at all is recorded.
+    //
+    // The quantities are chosen so the net and the gross readings disagree.
+    // An earlier version bought 10 units against a 1,000-unit sale, where
+    // floor(981 x 10 / 1000) and floor(990 x 10 / 1000) are both 9 — so it
+    // passed against a gross-crediting implementation, and it also happened to
+    // make `spent` and `received` equal. Here 100 book-acquired units give 98
+    // for the net reading and 99 for the gross one.
     new_test_ext().execute_with(|| {
         enrolled_alice(1_000);
-        observe(&alice(), MARKET_A, SCORE_SIDE_LONG, 10, 8, 1, true);
+        observe(&alice(), MARKET_A, SCORE_SIDE_LONG, 100, 50, 3, true);
         observe(&alice(), MARKET_A, SCORE_SIDE_LONG, 1_000, 990, 9, false);
         let score = Scores::<Test>::get(alice(), MARKET_A).expect("the entry survives");
-        assert_eq!(score.spent, 9);
-        // 10 of the 1,000 units sold were book-acquired: (990 - 9) * 10 / 1000.
-        assert_eq!(score.received, 9);
+        assert_eq!(score.spent, 53);
+        // 100 of the 1,000 units sold were book-acquired, and the seller
+        // received 990 - 9 = 981: floor(981 * 100 / 1000) = 98. Crediting the
+        // gross proceeds gives 99, crediting units gives 100, and crediting the
+        // whole sale gives 981.
+        assert_eq!(score.received, 98);
+        assert_ne!(score.received, score.spent);
         assert_eq!(score.book_acquired, [0, 0]);
         assert_eq!(ScoreCount::<Test>::get(alice()), 1);
         assert_ok!(TradingRewards::do_try_state());
@@ -1355,6 +1378,27 @@ fn try_state_catches_score_entries_over_the_per_account_bound() {
         // Exactly at the bound is a lawful state.
         assert_ok!(TradingRewards::do_try_state());
         record_test_score(&alice(), u64::from(MAX_SCORED_MARKETS_PER_ACCOUNT), 1, 0);
+        assert!(TradingRewards::do_try_state().is_err());
+    });
+}
+
+#[test]
+fn try_state_catches_a_score_row_under_a_zero_bond() {
+    // The precondition `scores_fills` rests on. A live row under a zero bond
+    // is the one state where skipping the fill is not symmetric — the buy leg
+    // is recorded and the matching sale would lose its credit — and it is
+    // unreachable only because two separate gates say so, one of which TR5 has
+    // not written yet.
+    new_test_ext().execute_with(|| {
+        enrolled_alice(1_000);
+        record_test_score(&alice(), MARKET_A, 10, 0);
+        assert_ok!(TradingRewards::do_try_state());
+        Participants::<Test>::mutate(alice(), |slot| {
+            if let Some(record) = slot.as_mut() {
+                record.bond = 0;
+                record.snapshot_bond = 0;
+            }
+        });
         assert!(TradingRewards::do_try_state().is_err());
     });
 }

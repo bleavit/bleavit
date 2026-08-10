@@ -583,22 +583,36 @@ pub mod pallet {
         /// **Enrolment alone is the wrong predicate, and a live bond is the
         /// right one.** `withdraw_bond` retains the record at `bond = 0` while
         /// an accrual is unclaimed, and a debit that takes the whole bond
-        /// leaves the same shape. Such a record scores nothing that can ever
-        /// pay: `try-state` holds `snapshot_bond <= bond`, so a zero bond is a
-        /// zero snapshot, and 08 §2.6's cap `snapshot_bond / (r × headroom)` is
-        /// then zero — every outcome is `Neutral` in both directions. What
-        /// scoring it would cost is real: each row it creates blocks its own
-        /// `claim_rewards` from closing the record (that path requires
-        /// `ScoreCount == 0`), so a bond-free account could hold a roster slot
-        /// against [`MAX_PARTICIPANTS`] indefinitely by trading.
+        /// leaves the same shape. Scoring such a record costs something real:
+        /// each row it creates blocks its own `claim_rewards` from closing the
+        /// record (that path requires `ScoreCount == 0`), so a bond-free
+        /// account could hold a roster slot against [`MAX_PARTICIPANTS`]
+        /// indefinitely, just by trading.
+        ///
+        /// **What makes skipping safe is the `book_acquired` rule, not the
+        /// zero cap.** The cap argument is tempting and does not carry: a zero
+        /// `snapshot_bond` makes every outcome `Neutral` for the epoch *in
+        /// flight*, but a score folds into whichever epoch is open when its
+        /// market settles, by which time a top-up and an epoch boundary can
+        /// have restored a real cap. The load-bearing property is that an
+        /// unscored buy raises no `book_acquired`, so 08 §2.6 rule 3 credits
+        /// `min(position, book_acquired) × settled_value` = 0 at settlement for
+        /// exactly the units whose `spent` was skipped. The omission is
+        /// therefore symmetric, and where it is not symmetric it only
+        /// under-credits — the R-7 direction.
+        ///
+        /// The one asymmetric case is a **sale** of book-acquired units while
+        /// `bond == 0`, which would drop a credit rule 2 mandates. That state
+        /// is unreachable: both routes to a zero bond pass a gate requiring
+        /// `ScoreCount == 0`, and `do_try_state` asserts the implication so a
+        /// later milestone cannot quietly open it.
         ///
         /// The predicate is `bond`, never `snapshot_bond`. A participant who
         /// was debited to zero and then topped up carries `bond > 0` with
         /// `snapshot_bond` still 0 until settlement re-snapshots it, and their
         /// fills MUST be scored: 08 §2.6 defers the *cap* to the next epoch,
-        /// not the accounting, and a fill folds into whichever epoch is open
-        /// when its market settles. Skipping them would drop the losses too,
-        /// which is the direction that costs the program money.
+        /// not the accounting. Skipping them would drop the losses too, which
+        /// is the direction that costs the program money.
         ///
         /// Reading the record rather than probing for the key costs the same
         /// one storage access.
@@ -682,6 +696,22 @@ pub mod pallet {
                     TryRuntimeError::Other(
                         "trading-rewards: score entries over MaxScoredMarketsPerAccount"
                     )
+                );
+                // The precondition [`Pallet::scores_fills`] rests on. A live
+                // score row under a zero bond would be the one state where the
+                // narrowing is not symmetric: the buy leg is already recorded,
+                // while the matching sale would be skipped and so lose the
+                // credit 08 §2.6 rule 2 mandates, leaving a full-notional loss.
+                //
+                // It is unreachable today, and by two different gates:
+                // `withdraw_bond` refuses unless `ScoreCount == 0`, and 08 §2.6
+                // requires `settle_epoch` to refuse a participant who "still
+                // holds an unfolded score entry". TR5 writes that second gate,
+                // which is exactly why this is checked here rather than argued
+                // in a comment (rule 8).
+                ensure!(
+                    record.bond > 0 || score_count == 0,
+                    TryRuntimeError::Other("trading-rewards: score rows under a zero bond")
                 );
             }
 
@@ -806,6 +836,15 @@ pub mod pallet {
             // `claim_rewards`. So an account holding only split-created or
             // transferred-in units could lock its own bond behind markets it
             // has no stake in. Nothing is lost, because the score is identical.
+            //
+            // **TR5 must revisit this when `MarketScore` gains the creation
+            // height** that 08 §2.6's "absolute block-height timeout measured
+            // from the score entry's creation" needs. `before` is
+            // `unwrap_or_default()`, so a new entry stamped with the current
+            // height would never compare equal and the skip would silently stop
+            // firing. Either compare the accounting fields alone, or stamp the
+            // height here — this insert is the only place that knows an entry
+            // is being created.
             if score == before {
                 return;
             }

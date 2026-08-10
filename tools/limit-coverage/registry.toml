@@ -1148,8 +1148,8 @@ reason = "13 §4 / 08 §2.6: the 4,097th enrolment is refused before its USDC ho
 [[entry]]
 key = "MaxScoredMarketsPerAccount"
 class = "dispatch-limit"
-behavior = "records_no_score_and_never_refuses"
-reason = "13 §4 / 08 §2.6: the fill observer admits the 196th market and records nothing for the 197th, while the trade itself is never refused — the marked test pins both directions of the boundary and also proves the bound blocks only a new entry, so a fill into an already-scored market at the bound still accumulates."
+behavior = "MAX_SCORED_MARKETS_PER_ACCOUNT"
+reason = "13 §4 / 08 §2.6: the fill observer admits the 196th market and records nothing for the 197th, while the trade itself is never refused — the marked test pins both directions of the boundary and also proves the bound blocks only a new entry, so a fill into an already-scored market at the bound still accumulates. The marked test drives the observer directly rather than an extrinsic, because the bound is enforced on a trait call and no runtime binds that trait until TR7 adds the pallet to construct_runtime!; TR7 owns the extrinsic-level leg, where a buy past the 196th market must still succeed."
 
 [[entry]]
 key = "Pending collator authored-share entries"

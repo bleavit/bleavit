@@ -5426,6 +5426,53 @@ fn an_observation_reports_no_fill() {
 }
 
 #[test]
+fn the_reported_fee_is_the_book_s_own_accrual_in_every_book_kind() {
+    // The fee is *recomputed* at the call site rather than threaded out of the
+    // core, so it is only exact while every book kind charges the same
+    // `fee_up(cost, mkt.fee)`. `fees_accrued` is the book's own record of what
+    // it charged, which makes it an oracle independent of that recomputation:
+    // a per-book-kind fee would break this test rather than silently
+    // understate `spent` for one kind. Decision and Baseline are the two
+    // distinct fee-custody shapes of 04 §6.1.
+    new_test_ext().execute_with(|| {
+        create_decision();
+        seed(MARKET_ID);
+        create_baseline();
+        seed(BASELINE_ID);
+        System::set_block_number(10);
+
+        assert_ok!(Market::buy(
+            signed(ALICE),
+            MARKET_ID,
+            ScalarSide::Long,
+            TRADE,
+            600 * UNIT,
+        ));
+        assert_ok!(Market::buy(
+            signed(BOB),
+            BASELINE_ID,
+            ScalarSide::Short,
+            TRADE,
+            600 * UNIT,
+        ));
+
+        let fills = observed_fills();
+        assert_eq!(fills.len(), 2);
+        for (fill, id) in fills.iter().zip([MARKET_ID, BASELINE_ID]) {
+            let book = Markets::<Test>::get(id).expect("created market exists");
+            assert_eq!(fill.market, id);
+            assert!(fill.fee > 0);
+            assert_eq!(
+                fill.fee, book.fees_accrued,
+                "the reported fee is the fee the book accrued on its first trade",
+            );
+        }
+        assert_eq!(fills[1].side, market_core::SCORE_SIDE_SHORT);
+        assert_try_state();
+    });
+}
+
+#[test]
 fn a_refused_trade_reports_nothing() {
     // G-1: the report follows a completed fill. A trade that never executed
     // must leave no score behind it.
