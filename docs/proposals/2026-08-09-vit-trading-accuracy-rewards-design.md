@@ -450,6 +450,19 @@ blocked — but the record belongs in PLAN.md's Decision log when the edit lands
 
 ## 9. Out of scope for v1
 
+- **The hosted question service earns nothing.** A fill in a `BookKind::External` book records no
+  score. This started as a sizing question from the TR4 implementer — the score bound is anchored
+  to `MaxLiveMarkets` = 196 while an account can hold positions in up to 324 live books — and the
+  answer turned out not to be a number. [16](../architecture/16-hosted-question-service.md) §6.5
+  accepts that a client controlling a majority of its own named attestors can move the settled
+  value, and bounds what that costs to *that question's own escrow*, with every Bleavit market
+  untouched. An accuracy reward on such a book would extend the blast radius to the `incentiv`
+  pot, and neither defense reaches it: the bond does not, because a client who sets the outcome
+  never loses, and the rate coupling does not, because there is no offsetting loser. The pot also
+  exists to raise Bleavit's own `L̂`, which an external book does not touch, and rule 3 has no
+  `settled_value` to read there anyway — external books settle through the separate service
+  ledger. If the service ever wants a trading incentive, `svc.fee_bps` is what must fund it.
+  Recorded as SQ-1049, ruled 2026-08-10.
 - No vesting on rewards.
 - No tournament pool where forfeits fund winners. Ruled out by the owner on 2026-08-10 rather
   than merely deferred, so the note below records a closed decision.

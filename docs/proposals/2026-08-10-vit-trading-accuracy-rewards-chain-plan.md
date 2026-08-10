@@ -792,6 +792,16 @@ Re-snapshot the bond whenever an epoch closes for that participant, **including 
 3. **Close the never-claim roster squat, or accept it in writing.** TR3's `claim_rewards` auto-close returns a retained record's `MaxParticipants` slot when an honest claimant collects. It does **not** stop a griefer: withdraw with `accrued > 0`, never call `claim_rewards`, and the slot is held forever at **zero marginal cost** from that point — they forfeit only a reward they never wanted. The ordinary squat costs 409.6 USDC of *continuously held* capital; this one costs a one-time price to make `accrued` nonzero and nothing thereafter. It is not fund-unsafe and not reachable until your own work makes `accrued` reachable, which is exactly why it lands here. Either add a permissionless sweep or a bounded dormancy expiry for `bond == 0` records, or record the accepted residual in the design document. Do not leave it undecided.
 4. **Do not attach a penalty to `suspended` that re-enrolment can launder.** `withdraw_bond` does not consult the flag, so a suspended zero-bond account can close and re-enroll to clear it. That costs the same as the lawful top-up which would also clear it, so TR3 is fine as it stands — but any penalty you add on top of `suspended` inherits a free reset.
 
+**A fifth obligation arrives from the TR4 review, and it changes behavior rather than adding to it.**
+
+5. **Exclude `BookKind::External` from scoring.** Today the accumulator scores every book kind, because `deposit_trade_event` is the single fill site for all of them. That is wrong, and the ruling is SQ-1049 in PLAN.md with the normative text in 08 §2.6 (*"Only primary books are scored"*). Read the ruling before you implement it — the short version is that [16](../architecture/16-hosted-question-service.md) §6.5 accepts a client moving its own settled value and bounds the cost to that question's own escrow, and paying an accuracy reward there would extend the blast radius to the `incentiv` pot, defended by neither the bond nor the rate coupling.
+
+   **Implement it at the `buy`/`sell` call sites, not inside the observer, and not by reading the market.** `pallets/market/src/lib.rs`'s `deposit_trade_event` holds only a `MarketId`; loading the book there would add a storage read to the hot path of every trade and contradict 08 §2.6's *"one extra storage read"*. Both callers already hold `book` in scope. Capture the decision before `Markets::<T>::insert(market, book)` moves it — for example `let scores = !matches!(book.kind, BookKind::External { .. });` — and thread that one bool through. `crank_observe` needs nothing: it emits `Observed`, which the observer arm already ignores.
+
+   Two tests, and the second is the one that matters:
+   - an enrolled account filling an external book gets **no** `Scores` entry and **no** `ScoreCount` increment, and the trade still executes;
+   - an enrolled account filling a **primary** book still scores, in the same test file, so a mutation that hardcodes the bool to `false` cannot pass. Prove that by running the mutation.
+
 - [ ] **Step 5: Run the tests and confirm they pass**
 
 Run: `cargo test -p pallet-trading-rewards`

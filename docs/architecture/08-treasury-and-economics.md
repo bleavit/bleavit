@@ -380,9 +380,29 @@ The sizing rules are fixed here, and they are what a §4 row MUST follow.
   simultaneous nonzero ledger entries, while a score row lives from the first fill until the
   fold, so a trader who sells out of a market frees the ledger slot and keeps the score row.
   Sequential trading across the settlement lag would then hit a bound derived from a quantity it
-  does not measure.
+  does not measure. `MaxLiveExternalMarkets` is **not** added to the anchor, and the reason is the
+  exclusion above rather than an omission: an external fill records no score, so no score row can
+  exist for one. The anchor is therefore exact, not merely conservative.
 - The **score-entry timeout** sits above the longest lawful settlement horizon, per the escape
   above.
+
+**Only primary books are scored, and the hosted service is excluded on purpose (added 2026-08-10,
+SQ-1049).** A fill in a `BookKind::External` book records nothing. The exclusion is decided where
+the book is already loaded, so it costs no storage read, and it is not a sizing choice.
+[16](16-hosted-question-service.md) §6.5 states that a client controlling a majority of its own
+named attestors can move the settled value, declines to repair it, and bounds what that costs:
+*"the blast radius is that question's own escrow, minus forfeited bonds, with Bleavit's ledger
+instance and every Bleavit market untouched."* Paying an accuracy reward on such a book would
+break that bound, because the same client could convert an accepted, self-funded residual into a
+claim on the `incentiv` pot — risk-free, since neither defense reaches it. The bond does not,
+because a client who sets the outcome never loses. The rate coupling does not, because there is no
+offsetting loser to pay the other half. Two further reasons agree on their own. The pot buys
+Bleavit's **own** decision liquidity, which is the `L̂` argument below, and an external book raises
+no `L̂` while its client already pays `svc.fee_bps` for the venue. And rule 3 has no source for
+`settled_value` on an external book, which settles through the separate service-ledger instance
+this subsection never reads. Should the hosted service ever want a trading incentive, it is the
+client's fee that must fund it, not this pot. [14](14-threat-model.md) carries this as **TH-79**,
+separately from TH-78's wash farm, because the two share no defense.
 
 **Scope.** Audit scope A is not opened. The conditional ledger is not touched, and no hook is
 added where [03](03-conditional-ledger.md) §10 says there is none.
