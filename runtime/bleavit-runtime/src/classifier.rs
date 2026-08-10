@@ -147,6 +147,18 @@ fn derive_resource_inner(
             // and make the second one fail after adoption.
             singleton_resource(0x0C)
         }
+        // 05 §1.4 family `0x0D`: singleton, for the reason `0x0C` is one.
+        // `fund_trading_rewards` mutates the single remaining-allocation and
+        // lifetime-count pool of the genesis `incentiv` allocation, whatever
+        // amount it names, so a key derived from the amount would let two
+        // PARAM proposals pass T5 concurrently and make the second fail only
+        // after adoption. Without this arm the leaf is `Unclassifiable` and
+        // T4 screening refunds or slashes every lawful funding proposal —
+        // the second half of the same unreachability the capability arm in
+        // `configs.rs` carried (found in TR6 review).
+        RuntimeCall::FutarchyTreasury(pallet_futarchy_treasury::Call::fund_trading_rewards {
+            ..
+        }) => singleton_resource(0x0D),
         RuntimeCall::FutarchyTreasury(pallet_futarchy_treasury::Call::cancel_stream { id }) => {
             keyed_resource(0x08, &id.encode())
         }

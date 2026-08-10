@@ -9546,8 +9546,18 @@ impl RuntimeCapabilities {
                         | futarchy_primitives::ProposalClass::Meta
                 ) && Self::enabled(class, pallet_constitution::Capability::AuthorizeUpgrade)
             }
+            // 06 §3.2: the two bounded genesis-pot PARAM leaves, and the only
+            // two. Each spends one fixed genesis allocation with a stored
+            // remaining balance, fixes its own payment shape, and carries a
+            // lifetime count — the three properties that earn the exception.
+            // Neither inherits `TreasurySpend`, and the generic arm below
+            // fails every `CallDomain::Param` leaf closed, so a call missing
+            // from here is unreachable by its only origin (found in TR6
+            // review: `fund_trading_rewards` was classified PARAM and had no
+            // row here, so the milestone's deliverable could never execute).
             RuntimeCall::FutarchyTreasury(
-                pallet_futarchy_treasury::Call::create_community_schedule { .. },
+                pallet_futarchy_treasury::Call::create_community_schedule { .. }
+                | pallet_futarchy_treasury::Call::fund_trading_rewards { .. },
             ) => matches!(class, futarchy_primitives::ProposalClass::Param),
             RuntimeCall::FutarchyTreasury(
                 pallet_futarchy_treasury::Call::fund_budget_line { .. }

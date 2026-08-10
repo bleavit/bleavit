@@ -1454,3 +1454,162 @@ fn the_custody_guard_does_not_touch_the_wired_treasury_paths() {
         );
     });
 }
+
+// ------------- TR6: the PARAM decision must actually reach the call ---------
+//
+// `fund_trading_rewards` is 08 §2.6's whole delivery mechanism and its only
+// origin is `EnsureFutarchyParam`, which nothing but the execution guard can
+// produce. The guard consults `RuntimeCapabilities::call_enabled`, whose
+// generic arm maps every `CallDomain::Param` leaf to `false`, and T4 screening
+// consults `derive_resource_footprint`, whose generic arm is `Unclassifiable`.
+// Both were missing an arm for this call, so the milestone's deliverable was
+// unreachable by its only origin — twice over, and silently, because each half
+// fails closed. These tests walk the path a real PARAM decision takes, so a
+// classifier row without its enforcing row can never pass again.
+
+fn fund_trading_rewards_call(amount: Balance) -> RuntimeCall {
+    RuntimeCall::FutarchyTreasury(pallet_futarchy_treasury::Call::fund_trading_rewards { amount })
+}
+
+/// 05 §1.4 family `0x0D`: the leaf must classify, or T4 cancels the payload.
+#[test]
+fn fund_trading_rewards_derives_its_canonical_resource_key() {
+    development_ext().execute_with(|| {
+        let call = fund_trading_rewards_call(1_000 * currency::VIT);
+        let footprint = crate::classifier::derive_resource_footprint(std::slice::from_ref(&call));
+        assert!(
+            footprint.is_ok(),
+            "fund_trading_rewards must be classifiable (05 §1.4 `0x0D`), not Unclassifiable"
+        );
+        let Ok(footprint) = footprint else { return };
+        assert_eq!(footprint.len(), 1);
+        assert_eq!(footprint[0][0], 0x0D, "family tag must be 05 §1.4 `0x0D`");
+        // Singleton: the amount must not enter the discriminator, so two
+        // authorizations contend on the one `incentiv` allocation pool.
+        let Ok(other) = crate::classifier::derive_resource_footprint(&[fund_trading_rewards_call(
+            7 * currency::VIT,
+        )]) else {
+            panic!("a second authorization must classify");
+        };
+        assert_eq!(footprint[0], other[0]);
+    });
+}
+
+/// 06 §3.2: PARAM carries this leaf and no other class may.
+#[test]
+fn fund_trading_rewards_is_payload_admissible_only_for_the_param_class() {
+    use pallet_execution_guard::Capabilities;
+
+    development_ext().execute_with(|| {
+        let call = fund_trading_rewards_call(1_000 * currency::VIT);
+        assert!(
+            crate::configs::RuntimeCapabilities::call_enabled(ProposalClass::Param, &call),
+            "PARAM must be able to carry 08 §2.6's funding call"
+        );
+        for class in [
+            ProposalClass::Treasury,
+            ProposalClass::Code,
+            ProposalClass::Meta,
+        ] {
+            assert!(
+                !crate::configs::RuntimeCapabilities::call_enabled(class, &call),
+                "{class:?} must not be able to carry a trading-reward funding payload"
+            );
+        }
+    });
+}
+
+/// The capability gap that would have cancelled every lawful authorization.
+#[test]
+fn a_trading_reward_funding_proposal_passes_static_screening() {
+    development_ext().execute_with(|| {
+        let call = fund_trading_rewards_call(1_000 * currency::VIT);
+        let Ok(footprint) =
+            crate::classifier::derive_resource_footprint(std::slice::from_ref(&call))
+        else {
+            panic!("the funding call must classify");
+        };
+        let Some((payload_hash, payload_len)) = crate::tests::note_runtime_batch(vec![call]) else {
+            panic!("payload must note");
+        };
+
+        let mut proposal = crate::tests::empty_param_proposal(
+            9_401,
+            crate::tests::account(78),
+            payload_hash,
+            payload_len,
+        );
+        let Ok(resources) = futarchy_primitives::BoundedVec::try_from(footprint.to_vec()) else {
+            panic!("footprint must fit the 05 §1.4 lock bound");
+        };
+        proposal.resources = resources;
+
+        let disposition =
+            <crate::configs::RuntimeConstitutionAccess as pallet_epoch::ConstitutionAccess<
+                AccountId,
+            >>::static_check(&proposal);
+        assert_eq!(
+            disposition,
+            pallet_epoch::StaticCheckDisposition::Eligible,
+            "a lawful trading-reward authorization must screen clean — an omitted \
+             capability arm previously made this SlashAll(ConstitutionViolation)"
+        );
+    });
+}
+
+/// Screening clean is not the same as executing. This is the half a
+/// classifier-only test cannot see: the guard's own dispatch path must carry a
+/// PARAM decision into the pallet body. The zero-amount wind-down is the shape
+/// that proves it end to end, because it is the one authorization the unwired
+/// TR7 custody stub can still complete.
+#[test]
+fn a_param_decision_dispatches_into_the_funding_call_body() {
+    use pallet_execution_guard::BatchDispatcher;
+
+    development_ext().execute_with(|| {
+        let wind_down = fund_trading_rewards_call(0);
+        assert!(crate::classifier::RuntimeDispatcher::safety_filter(
+            ProposalClass::Param,
+            &wind_down
+        ));
+        assert_ok!(
+            crate::classifier::RuntimeDispatcher::dispatch_with_class_origin(
+                wind_down,
+                ProposalClass::Param,
+            )
+        );
+
+        // A positive authorization reaches the pallet body too — it stops at
+        // the unwired custody adapter, which is a different refusal from the
+        // guard's own filter, and TR7's real adapter turns it into a success.
+        let funding = fund_trading_rewards_call(1_000 * currency::VIT);
+        assert_ne!(
+            crate::classifier::RuntimeDispatcher::dispatch_with_class_origin(
+                funding.clone(),
+                ProposalClass::Param,
+            ),
+            Err(sp_runtime::DispatchError::Other(
+                "guard dispatch-time safety filter"
+            )),
+            "the PARAM decision must reach the call body, not be refused by the filter"
+        );
+
+        // And no other class may dispatch it at all.
+        for class in [
+            ProposalClass::Treasury,
+            ProposalClass::Code,
+            ProposalClass::Meta,
+        ] {
+            assert_eq!(
+                crate::classifier::RuntimeDispatcher::dispatch_with_class_origin(
+                    funding.clone(),
+                    class,
+                ),
+                Err(sp_runtime::DispatchError::Other(
+                    "guard dispatch-time safety filter"
+                )),
+                "{class:?} must not reach the funding call at all"
+            );
+        }
+    });
+}
