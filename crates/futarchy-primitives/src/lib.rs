@@ -1186,6 +1186,12 @@ pub mod bounds {
     pub const MAX_TWAP_WINDOWS_PER_MARKET: u32 = 8;
     /// 13 §4: maximum successful Phase-4 community vesting schedules.
     pub const MAX_COMMUNITY_SCHEDULES: u32 = 4_096;
+    /// 13 §4: enrolled trading-accuracy-reward participants (08 §2.6). The
+    /// sizing rule is fixed normatively in 08 §2.6 — it reuses the sibling
+    /// allocation pot's lifetime bound, because it caps a permissionless
+    /// roster against one bounded allocation pot for the same reason. It is
+    /// derived from that constant rather than restated so the two cannot drift.
+    pub const MAX_TRADING_REWARD_PARTICIPANTS: u32 = MAX_COMMUNITY_SCHEDULES;
     /// 13 §4: `pallet-migrations` may consume at most half the block service
     /// weight while a multi-block migration is active.
     pub const MIGRATION_SERVICE_WEIGHT_PERCENT: u32 = 50;

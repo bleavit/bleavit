@@ -8449,6 +8449,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "pallet-trading-rewards"
+version = "0.1.0"
+dependencies = [
+ "frame-benchmarking",
+ "frame-support",
+ "frame-system",
+ "futarchy-primitives",
+ "pallet-assets",
+ "pallet-balances",
+ "parity-scale-codec",
+ "scale-info",
+ "sp-core",
+ "sp-io",
+ "sp-runtime",
+ "trading-rewards-core",
+]
+
+[[package]]
 name = "pallet-transaction-payment"
 version = "49.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -15616,6 +15634,8 @@ name = "trading-rewards-core"
 version = "0.1.0"
 dependencies = [
  "futarchy-primitives",
+ "parity-scale-codec",
+ "scale-info",
 ]
 
 [[package]]

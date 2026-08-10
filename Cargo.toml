@@ -38,6 +38,7 @@ members = [
   "pallets/client-registry",
   "pallets/bleavit-client",
   "pallets/question-service",
+  "pallets/trading-rewards",
   "pallets/inflow-caps",
   "pallets/welfare",
   "pallets/epoch",

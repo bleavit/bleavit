@@ -1,0 +1,50 @@
+[package]
+name = "pallet-trading-rewards"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+trading-rewards-core = { path = "../../crates/trading-rewards-core", default-features = false }
+futarchy-primitives = { path = "../../crates/futarchy-primitives", default-features = false }
+parity-scale-codec = { version = "3.7.5", default-features = false, features = ["derive", "max-encoded-len"] }
+scale-info = { version = "2.11.6", default-features = false, features = ["derive"] }
+frame-support = { workspace = true }
+frame-system = { workspace = true }
+sp-runtime = { workspace = true }
+frame-benchmarking = { workspace = true, optional = true }
+
+[dev-dependencies]
+pallet-assets = { workspace = true, features = ["std"] }
+pallet-balances = { workspace = true, features = ["std"] }
+sp-core = { workspace = true, features = ["std"] }
+sp-io = { workspace = true, features = ["std"] }
+
+[features]
+default = ["std"]
+std = [
+  "frame-benchmarking?/std",
+  "frame-support/std",
+  "frame-system/std",
+  "futarchy-primitives/std",
+  "pallet-assets/std",
+  "pallet-balances/std",
+  "parity-scale-codec/std",
+  "scale-info/std",
+  "sp-runtime/std",
+  "trading-rewards-core/std",
+]
+runtime-benchmarks = [
+  "dep:frame-benchmarking",
+  "frame-benchmarking/runtime-benchmarks",
+  "frame-support/runtime-benchmarks",
+  "frame-system/runtime-benchmarks",
+  "sp-runtime/runtime-benchmarks",
+  "trading-rewards-core/runtime-benchmarks",
+]
+try-runtime = [
+  "frame-support/try-runtime",
+  "frame-system/try-runtime",
+  "sp-runtime/try-runtime",
+]

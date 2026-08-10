@@ -3,6 +3,8 @@
 //! Design: `docs/proposals/2026-08-09-vit-trading-accuracy-rewards-design.md` §4.4–§4.5.
 
 use futarchy_primitives::{kernel::RATE_HEADROOM, Balance};
+use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
+use scale_info::TypeInfo;
 
 const PERBILL: u128 = 1_000_000_000;
 
@@ -11,14 +13,41 @@ pub enum CoreError {
     Overflow,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// The per-(account, market) accumulator. TR3 stores this in
+/// `pallet-trading-rewards`, so it carries the SCALE derives a frame-free
+/// kernel does not otherwise need; the arithmetic above is unchanged.
+#[derive(
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Encode,
+    Decode,
+    DecodeWithMemTracking,
+    TypeInfo,
+    MaxEncodedLen,
+)]
 pub struct MarketScore {
     pub spent: Balance,
     pub received: Balance,
     pub book_acquired: [Balance; 2],
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// The folded per-account epoch total. Stored inside TR3's participant record,
+/// hence the same SCALE derives as [`MarketScore`].
+#[derive(
+    Clone,
+    Debug,
+    Default,
+    PartialEq,
+    Eq,
+    Encode,
+    Decode,
+    DecodeWithMemTracking,
+    TypeInfo,
+    MaxEncodedLen,
+)]
 pub struct EpochScore {
     pub spent: Balance,
     pub received: Balance,
