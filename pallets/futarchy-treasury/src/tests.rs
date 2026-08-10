@@ -601,13 +601,13 @@ fn funding_refuses_a_signed_origin() {
 
 #[test]
 fn funding_rejects_invalid_origin_amount_and_bound_without_mutation() {
-    // Not yet `// limit-coverage:`-marked: the lifetime-authorization bound
-    // this test pins is owned by 08 §2.6's *Bounds* paragraph and reuses
-    // `MaxCommunitySchedules` directly (08 §2.6: "the authorization count
-    // reuses the community schedule's lifetime bound"), but the 13 §4 row
-    // for it is not yet written — see the task report. The checker fails a
-    // marker naming an unclassified key, so marking this test ahead of that
-    // row would break the gate rather than close it.
+    // limit-coverage: Trading-reward budget authorizations
+    //
+    // 13 §4 / 08 §2.6's *Bounds* paragraph: the lifetime authorization count
+    // reuses `MaxCommunitySchedules` as its value, through the `Config` item
+    // rather than a re-derived constant, but keeps its own counter — so
+    // consuming one does not reduce the other's headroom. The 4,097th call
+    // refuses `TooManyTradingRewardAuthorizations` before any VIT moves.
     new_test_ext().execute_with(|| {
         assert_noop!(
             Treasury::fund_trading_rewards(RuntimeOrigin::root(), VIT),

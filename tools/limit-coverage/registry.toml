@@ -1134,6 +1134,12 @@ error = "Vesting::AtMaxVestingSchedules"
 reason = "13 §4; 15 §4.6: dispatch-path limit coverage."
 
 [[entry]]
+key = "Trading-reward budget authorizations"
+class = "dispatch-limit"
+error = "Treasury::TooManyTradingRewardAuthorizations"
+reason = "13 §4 / 08 §2.6: the bounded PARAM-origin trading-reward funding path rejects the 4,097th lifetime authorization before any VIT moves; completed authorizations do not replenish the bound. The marked test dispatches past the bound and also pins the two adjacent refusals — a non-PARAM origin and an amount above the remaining allocation — so a mutation that widens any one of the three is caught here rather than by the boundary alone."
+
+[[entry]]
 key = "Community distribution schedules"
 class = "dispatch-limit"
 error = "Treasury::TooManyCommunitySchedules"
