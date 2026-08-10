@@ -782,6 +782,10 @@ Permissionless. It computes `epoch_outcome`, applies the budget scale factor to 
 
 Each of the three needs its own test.
 
+**A fourth obligation arrives from TR3, and without it the design's §4.3 promise is only half kept.** TR3's `top_up_bond` correctly never raises the current epoch's cap. But nothing re-snapshots the bond *except* `settle_epoch`, so an account that tops up during an epoch with nothing to settle keeps the smaller cap indefinitely. The error direction is safe — a cap that is too small only under-rewards — but "a top-up takes effect from the next epoch" is not what the code does.
+
+Re-snapshot the bond whenever an epoch closes for that participant, **including when the epoch had nothing to settle**. TR3's report carries the exact condition; read it at `.superpowers/sdd/2026-08-10-vit-trading-accuracy-rewards-chain-plan/task-3-report.md` rather than deriving it again.
+
 - [ ] **Step 5: Run the tests and confirm they pass**
 
 Run: `cargo test -p pallet-trading-rewards`
@@ -1071,13 +1075,24 @@ Then update PLAN.md — a milestone row for this work, a Session log row, and a 
 > **Priority raised 2026-08-10: this task is load-bearing, not a refinement, and the program
 > must not open without it.** The TR2 review proved the earning cap does not deliver the
 > anti-farm invariant under asymmetric bonds (design §5.3). The screen below is what does.
-> **This task therefore also owns the spec correction**, in three places that currently
-> misattribute the invariant to the cap: 08 §2.6, 14 TH-78's mitigations and residual-risk
-> columns, and 15 §4.1's normative obligation. TH-78's residual column is the sharpest — it
-> currently dismisses a lowered `mkt.fee` with "Nothing breaks there, because the bond still
-> covers it", which is false. Each must say the rate coupling delivers the invariant and the
-> cap bounds exposure. Do the correction in the same commit as the screen, so no revision
-> exists in which the claim and the mechanism disagree.
+> **This task therefore also owns the spec correction**, in **four** places that currently
+> misattribute the invariant to the cap. Do not trust this list — **run
+> `grep -rn "rate-independent\|second defense\|holds at every rate" docs/architecture/` first**
+> and fix what it returns. The list has been wrong twice: I named three locations and the TR3
+> implementer found a fourth.
+>
+> | Location | The false claim |
+> |---|---|
+> | 08 §2.6 (around `:336`) | "Two independent defenses… The bond is rate-independent" |
+> | **13 §1, the `rwd.rate` row (`:38`)** | "The bond is the second defense, it is rate-independent, and it holds at every rate" |
+> | 14 TH-78, mitigations **and** residual-risk columns | The residual is the sharpest: it dismisses a lowered `mkt.fee` with "Nothing breaks there, because the bond still covers it", which is false |
+> | 15 §4.1's normative obligation | Attributes the invariant to the cap |
+>
+> Each must say the rate coupling delivers the invariant and the cap bounds exposure. Do the
+> correction in the **same commit** as the screen, so no revision exists in which the claim
+> and the mechanism disagree. The TR3 implementer deliberately left 13 §1 alone rather than
+> fix one of four and leave the set inconsistent — that was the right call, and it is why
+> they land together.
 
 **Files:**
 - Modify: `crates/constitution-core/src/lib.rs:91-145` (add the sibling screen next to `screen_redeem_fee_coupling`)
