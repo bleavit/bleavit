@@ -15612,6 +15612,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "trading-rewards-core"
+version = "0.1.0"
+dependencies = [
+ "futarchy-primitives",
+]
+
+[[package]]
 name = "trie-db"
 version = "0.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

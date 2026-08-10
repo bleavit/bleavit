@@ -1230,6 +1230,15 @@ pub mod chain_identity {
 }
 
 pub mod kernel {
+    /// Top of the `fee.vit_usdc_rate` `[0.1×, 10×]` envelope (13 §1), used to
+    /// size the trading-accuracy-rewards earning cap (08 §2.6). Both legs of
+    /// the reward arithmetic are USDC; only the payout converts to VIT at
+    /// claim time using the governed rate. The exposure sized against is not
+    /// a market reprice but the governed rate **diverging from the market
+    /// price**, and only in the direction that understates VIT — bounded by
+    /// the envelope's width, so sizing the cap against its top keeps reward
+    /// value at or below debit value.
+    pub const RATE_HEADROOM: u128 = 10;
     /// First identifier reserved for hosted-question-service questions, vaults,
     /// and books (03 §1a; 13 §3.5; 16 §7.1). Primary-domain allocators
     /// stay strictly below this boundary; service allocators start at it.
