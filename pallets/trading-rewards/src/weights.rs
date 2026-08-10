@@ -22,26 +22,26 @@ pub struct SubstrateWeight<T>(PhantomData<T>);
 impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
     fn enroll() -> Weight {
         Weight::from_parts(65_000_000, 3_640)
-            .saturating_add(T::DbWeight::get().reads(6))
+            .saturating_add(T::DbWeight::get().reads(12))
             .saturating_add(T::DbWeight::get().writes(5))
     }
 
     fn top_up_bond() -> Weight {
         Weight::from_parts(62_000_000, 3_640)
-            .saturating_add(T::DbWeight::get().reads(5))
+            .saturating_add(T::DbWeight::get().reads(8))
             .saturating_add(T::DbWeight::get().writes(4))
     }
 
     fn withdraw_bond() -> Weight {
         Weight::from_parts(62_000_000, 3_640)
-            .saturating_add(T::DbWeight::get().reads(5))
-            .saturating_add(T::DbWeight::get().writes(5))
+            .saturating_add(T::DbWeight::get().reads(7))
+            .saturating_add(T::DbWeight::get().writes(6))
     }
 
     fn claim_rewards() -> Weight {
         Weight::from_parts(60_000_000, 3_640)
-            .saturating_add(T::DbWeight::get().reads(4))
-            .saturating_add(T::DbWeight::get().writes(4))
+            .saturating_add(T::DbWeight::get().reads(8))
+            .saturating_add(T::DbWeight::get().writes(6))
     }
 
     fn settle_market_score() -> Weight {
@@ -52,7 +52,7 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
 
     fn settle_epoch() -> Weight {
         Weight::from_parts(65_000_000, 3_640)
-            .saturating_add(T::DbWeight::get().reads(6))
+            .saturating_add(T::DbWeight::get().reads(11))
             .saturating_add(T::DbWeight::get().writes(4))
     }
 }
@@ -60,26 +60,26 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
 impl WeightInfo for () {
     fn enroll() -> Weight {
         Weight::from_parts(65_000_000, 3_640)
-            .saturating_add(RocksDbWeight::get().reads(6))
+            .saturating_add(RocksDbWeight::get().reads(12))
             .saturating_add(RocksDbWeight::get().writes(5))
     }
 
     fn top_up_bond() -> Weight {
         Weight::from_parts(62_000_000, 3_640)
-            .saturating_add(RocksDbWeight::get().reads(5))
+            .saturating_add(RocksDbWeight::get().reads(8))
             .saturating_add(RocksDbWeight::get().writes(4))
     }
 
     fn withdraw_bond() -> Weight {
         Weight::from_parts(62_000_000, 3_640)
-            .saturating_add(RocksDbWeight::get().reads(5))
-            .saturating_add(RocksDbWeight::get().writes(5))
+            .saturating_add(RocksDbWeight::get().reads(7))
+            .saturating_add(RocksDbWeight::get().writes(6))
     }
 
     fn claim_rewards() -> Weight {
         Weight::from_parts(60_000_000, 3_640)
-            .saturating_add(RocksDbWeight::get().reads(4))
-            .saturating_add(RocksDbWeight::get().writes(4))
+            .saturating_add(RocksDbWeight::get().reads(8))
+            .saturating_add(RocksDbWeight::get().writes(6))
     }
 
     fn settle_market_score() -> Weight {
@@ -90,7 +90,7 @@ impl WeightInfo for () {
 
     fn settle_epoch() -> Weight {
         Weight::from_parts(65_000_000, 3_640)
-            .saturating_add(RocksDbWeight::get().reads(6))
+            .saturating_add(RocksDbWeight::get().reads(11))
             .saturating_add(RocksDbWeight::get().writes(4))
     }
 }

@@ -1680,8 +1680,6 @@ fn fills_in_two_markets_take_two_entries() {
 // Folding one settled market (08 §2.6; TR5)
 // ---------------------------------------------------------------------------
 
-/// `rwd.rate` as the mock seeds it, in parts per billion.
-const RATE_PPB: u128 = 2_500_000;
 /// `fee.vit_usdc_rate`'s stored `FixedU64` integer at the 13 §1 placeholder.
 const VIT_RATE: u64 = 50_000_000;
 
@@ -2029,8 +2027,11 @@ fn a_winning_epoch_accrues_the_reward_in_usdc_and_re_snapshots() {
 
         // cap = 1_000 × 1e9 / (2_500_000 × 10) = 40_000, so the reward is
         // floor(40_000 × 0.25 %) = 100. Uncapped it would have been 247, so the
-        // cap is visibly binding rather than incidental.
-        assert_eq!((40_000u128 * RATE_PPB) / 1_000_000_000, 100);
+        // cap is visibly binding rather than incidental. `rwd.rate` is read
+        // live rather than pinned, so a later change to the mock default moves
+        // this assertion with it instead of silently disagreeing.
+        let rate_ppb = u128::from(RewardRate::get().expect("mock reward rate is set"));
+        assert_eq!((40_000u128 * rate_ppb) / 1_000_000_000, 100);
         let record = record(&alice());
         assert_eq!(record.accrued, 100);
         assert_eq!(TotalAccrued::<Test>::get(), 100);

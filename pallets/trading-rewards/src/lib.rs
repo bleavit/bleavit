@@ -254,8 +254,10 @@ pub mod pallet {
             market: futarchy_primitives::MarketId,
             timed_out: bool,
         },
-        /// One participant's epoch closed. `accrued` and `forfeited` are the
-        /// scaled legs, and `snapshot_bond` is the cap the next epoch carries.
+        /// One participant's epoch closed. `accrued` is the reward, clamped to
+        /// the authorized budget's unpromised remainder; `forfeited` is the
+        /// debit, which budget pressure never reduces. `snapshot_bond` is the
+        /// cap the next epoch carries.
         EpochSettled {
             who: T::AccountId,
             epoch: EpochId,
@@ -307,9 +309,13 @@ pub mod pallet {
         /// The account still holds an unfolded score entry for the epoch, so
         /// settling would apply the arithmetic to part of its own score.
         UnfoldedScore,
-        /// The scaled accrual would promise more than the authorized budget.
-        /// Unreachable while the clamp is in place, and refused rather than
-        /// over-promised if it ever is not.
+        /// The accrual would promise more than the authorized budget.
+        /// Unreachable by construction while the reward clamp
+        /// (`budget_headroom_usdc`) is in place; kept as a tripwire against a
+        /// future change that breaks it. If it ever fires, the failure mode is
+        /// a stuck settlement, not a skipped reward: the whole dispatch
+        /// aborts, so the epoch stays unclosed and the bond stays locked until
+        /// a later call succeeds.
         BudgetExceeded,
     }
 
@@ -693,11 +699,18 @@ pub mod pallet {
                     Error::<T>::UnfoldedScore
                 );
 
-                // An unset `rwd.rate` is the program switched off, which 13 §1
-                // calls the safe direction. A zero rate gives a zero cap and a
-                // `Neutral` outcome, so the epoch closes with neither leg —
-                // never a refusal, because a refusal here would hold the bond
-                // behind a governed row the participant cannot move.
+                // An unset or zero `rwd.rate` gives a zero cap, so the epoch
+                // closes at `Neutral` whatever the folded score. That is not a
+                // neutral consequence: a loss already folded into the epoch
+                // accumulator is discharged in full and the bond released
+                // untouched, which is the under-punishing direction that funds
+                // the farm (08 §2.6) — a real cost of the G-1 direction, not a
+                // side effect. 13 §1 calls a zero rate "off, the safe
+                // direction" for *new* scoring only; that reading does not
+                // cover a debit already folded. The behaviour stands anyway:
+                // refusing would hold the bond behind a governed row the
+                // participant cannot move, which the *bond MUST NOT be locked
+                // forever* rule forbids.
                 let rate = T::RewardRate::get().unwrap_or_default();
                 let outcome =
                     trading_rewards_core::epoch_outcome(&record.epoch, record.snapshot_bond, rate);
@@ -715,12 +728,15 @@ pub mod pallet {
                             let total = TotalAccrued::<T>::get()
                                 .checked_add(accrued)
                                 .ok_or(Error::<T>::AccountingOverflow)?;
-                            // The post-condition 08 §2.6 places at accrual
-                            // time: *"an exhausted budget scales both legs, so
-                            // nothing strands and the pot never overdraws"*.
-                            // The clamp above already establishes it; this
-                            // refuses rather than over-promises if the clamp
-                            // ever stops doing so.
+                            // 08 §2.6: an exhausted budget clamps the reward
+                            // and leaves the debit whole, so nothing strands
+                            // and the pot never overdraws. The clamp above
+                            // already establishes it, so this is unreachable
+                            // by construction — a tripwire, not a reachable
+                            // refusal. Unlike a skipped reward, tripping it
+                            // fails the *whole* dispatch: the epoch stays
+                            // unclosed and the bond stays locked until a later
+                            // call succeeds.
                             ensure!(
                                 total <= Self::authorized_budget_usdc().unwrap_or_default(),
                                 Error::<T>::BudgetExceeded
@@ -1117,11 +1133,11 @@ pub mod pallet {
             // this hook red on a state no code here created, and a try-state a
             // parameter amendment can break is one that blocks an upgrade for
             // the wrong reason. And 08 §2.6 puts the real property at accrual
-            // time rather than at rest: *"when accruals exceed the authorized
-            // budget, both legs scale by the same factor"*, which is a
-            // post-condition `settle_epoch` establishes.
+            // time rather than at rest: the reward is clamped to the budget's
+            // unpromised remainder and the debit is never reduced by budget
+            // pressure, which is a post-condition `settle_epoch` establishes.
             //
-            // **The real leg is TR5's**, and it belongs beside the scaling that
+            // **The real leg is TR5's**, and it belongs beside the clamp that
             // creates it. What this one buys meanwhile is the precondition that
             // makes the real one checkable at all: an accrual total TR5 can
             // compare a budget against, bound to the records it summarises so
