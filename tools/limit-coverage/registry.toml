@@ -1152,6 +1152,12 @@ behavior = "MAX_SCORED_MARKETS_PER_ACCOUNT"
 reason = "13 §4 / 08 §2.6: the fill observer admits the 196th market and records nothing for the 197th, while the trade itself is never refused — the marked test pins both directions of the boundary and also proves the bound blocks only a new entry, so a fill into an already-scored market at the bound still accumulates. The marked test drives the observer directly rather than an extrinsic, because the bound is enforced on a trait call and no runtime binds that trait until TR7 adds the pallet to construct_runtime!; TR7 owns the extrinsic-level leg, where a buy past the 196th market must still succeed."
 
 [[entry]]
+key = "ScoreEntryLifetime"
+class = "dispatch-limit"
+behavior = "SCORE_ENTRY_LIFETIME_BLOCKS"
+reason = "13 §4 / 08 §2.6: the absolute score-entry timeout, measured from the entry's creation and independent of the market's state. The marked test pins the boundary in both directions — one block short, `settle_market_score` still refuses with `MarketNotSettled`; at the boundary exactly, it admits the call, drops the entry at zero and releases the bond. Pinning both sides is what makes it a bound rather than an eventuality, and the release leg is the reason the bound exists: 08 §2.6 requires that a market which never settles MUST NOT lock a bond forever. The companion test proves the timeout never pre-empts a real settlement, so the escape cannot become an exit from a live debit."
+
+[[entry]]
 key = "Pending collator authored-share entries"
 class = "value"
 reason = "13 §4 / 08 §2.4: the authored-share accumulators are bounded storage values (current epoch plus at most one pending completed epoch, 120 entries each, 240 worst case); a 121st distinct author is fail-closed and is not admitted into state, so there is no separate dispatch error surface."

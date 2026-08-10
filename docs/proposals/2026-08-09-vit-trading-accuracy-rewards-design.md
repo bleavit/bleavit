@@ -250,10 +250,16 @@ The fix has two halves:
   width, so sizing the cap against its top is what keeps reward value ≤ debit value. The cost
   is a conservative cap. The alternative is an invariant a stale governed price can open.
 
-- When accruals exceed the authorized budget, **both legs scale by the same factor**. A
-  scaled reward against an unscaled debit would over-punish, and a pro-rata reward with no
-  fixed rate would let one pair in a thin epoch take the whole budget against a fixed small
-  forfeit. Scaling both keeps a wash pair neutral at every budget level.
+- When accruals exceed the authorized budget, **the reward is clamped to the budget's
+  unpromised remainder at the rate `r`, and the debit is never reduced by budget pressure**
+  *(amended 2026-08-10 — this said both legs scale by one factor, which pull-based settlement
+  cannot compute and which every approximation makes farmable: settle the winner while the
+  budget is full for `k = 1`, wait for others to exhaust it, settle the loser into a headroom
+  of zero for `k = 0`, and the pair nets positive)*. The rate stays fixed at `r` and only the
+  total is capped, so no pair in a thin epoch can take the whole budget against a small
+  forfeit. Under budget pressure a loser pays in full while a winner is clamped, which is the
+  R-7 direction. A thin budget is first-come-first-served — a fairness cost, never a solvency
+  one. Owning text: 08 §2.6.
 - A debit never drives the bond below zero. It suspends the participant until they top up.
 - Forfeited USDC goes to `INSURANCE`, doc 13's standing destination for USDC taken from an
   account.
@@ -419,7 +425,7 @@ MUST be corrected with the screen.
 ## 6. Failure behavior (G-1, R-7)
 
 - Rate unset — `enroll` fails closed with a typed error, before any hold.
-- Budget exhausted — both legs scale, so nothing strands and the pot never overdraws.
+- Budget exhausted — the reward clamps, the debit stays whole, nothing strands and the pot never overdraws.
 - Debit above the bond — take the whole bond, suspend the participant, never go negative.
 - Arithmetic edge — no-op, status quo.
 - **A market that never settles must not lock a bond forever, and the first draft's escape

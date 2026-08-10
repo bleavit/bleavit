@@ -1790,6 +1790,7 @@ fn folding_refuses_an_unknown_entry_and_an_unenrolled_account() {
 
 #[test]
 fn a_market_that_never_settles_releases_the_bond_on_the_absolute_timeout() {
+    // limit-coverage: ScoreEntryLifetime
     // Design §6, review finding 4: the `ledger.archive` escape was circular,
     // because the archive sweep needs a terminal vault and a market that never
     // settles never becomes one.
@@ -1799,16 +1800,21 @@ fn a_market_that_never_settles_releases_the_bond_on_the_absolute_timeout() {
         let created = Scores::<Test>::get(alice(), MARKET_A)
             .expect("entry")
             .created_at;
+        // Read straight from the 13 §4 constant rather than through the mock's
+        // helper, so the boundary this test pins is the bound itself and a
+        // drifting helper cannot quietly move it.
+        let lifetime = u64::from(futarchy_primitives::bounds::SCORE_ENTRY_LIFETIME_BLOCKS);
+        assert_eq!(lifetime, score_entry_timeout());
 
         // One block short of the lifetime it is still refused, so the boundary
         // is exact rather than "eventually".
-        run_to_block(created + score_entry_timeout() - 1);
+        run_to_block(created + lifetime - 1);
         assert_noop!(
             TradingRewards::settle_market_score(RuntimeOrigin::signed(bob()), alice(), MARKET_A),
             Error::<Test>::MarketNotSettled
         );
 
-        run_to_block(created + score_entry_timeout());
+        run_to_block(created + lifetime);
         assert_ok!(TradingRewards::settle_market_score(
             RuntimeOrigin::signed(bob()),
             alice(),

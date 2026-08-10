@@ -362,10 +362,26 @@ the reflexivity §2.2 and D-18 keep out of every sizing formula.
 
 Four further rules bind the settlement, and each is a G-1 direction rather than a preference.
 
-- When accruals exceed the authorized budget, **both legs scale by the same factor**. A scaled
-  reward against an unscaled debit over-punishes. A pro-rata reward at no fixed rate lets one
-  pair in a thin epoch take the whole budget against a fixed small forfeit. Scaling both keeps a
-  wash pair neutral at every budget level.
+- When accruals exceed the authorized budget, **the reward is clamped to the budget's unpromised
+  remainder at the rate `r`, and the debit is never reduced by budget pressure** *(amended
+  2026-08-10; this bullet required both legs to scale by one factor, and that rule is neither
+  implementable here nor safe in any approximation of it)*. Two things defeat the original. **The
+  factor does not exist at settlement time:** settlement is pull-based and per-participant, so an
+  epoch's total accrual is unknown until the last participant settles, and there is no moment at
+  which one `k` could be applied to both legs. **Every per-call approximation of `k` is
+  orderable:** a wash operator settles the winning account while the budget is full and takes
+  `k = 1`, waits for other participants to exhaust it, then settles the losing account into a
+  headroom of zero and takes `k = 0`. The pair nets `+r × scored` — the exact failure the scaling
+  rule existed to prevent, reached through the rule itself. The two legs also draw on **different
+  pots**, the reward on the authorized VIT budget and the forfeit on `INSURANCE`, so no
+  conservation identity ever linked them. The clamp keeps this bullet's second protection intact,
+  because the rate stays fixed at `r` and only the total is capped, so no pair in a thin epoch can
+  take the whole budget against a small forfeit. It gives up the first: under budget pressure a
+  losing participant pays in full while a winner is clamped. That is the R-7 direction —
+  over-punishing cannot create an unbacked claim, and under-punishing funds the farm. **The
+  residual is that a thin budget is first-come-first-served**, so a late settler may receive less
+  than `r × scored`. That is a fairness cost rather than a solvency one, it cannot make any pair
+  net positive, and governance's remedy is to authorize a budget that covers the epoch.
 - A debit never drives the bond below zero. It takes the whole bond and suspends the participant
   until they top up. **Suspension suspends scoring, and the accumulator MUST test the suspension
   flag rather than infer it from a nonzero bond** *(added 2026-08-10, SQ-1050)*. The two are not
@@ -406,8 +422,8 @@ pays the manipulator alongside everyone else, and this one charges them twice. T
 the program attracts is real capital an attacker must overcome, so §5.2's `L̂` rises honestly.
 
 **Failure behaviour (G-1, R-7).** An unset `rwd.rate` fails `enroll` closed with a typed error,
-before any hold. An exhausted budget scales both legs, so nothing strands and the pot never
-overdraws. A debit above the bond takes the whole bond and suspends. An arithmetic edge is a
+before any hold. An exhausted budget clamps the reward and leaves the debit whole, so nothing strands and the pot
+never overdraws. A debit above the bond takes the whole bond and suspends. An arithmetic edge is a
 no-op. A fill in a market beyond the per-account score-entry bound **records no score and never
 rejects the trade**, because refusing a lawful trade to protect a rewards bound is the wrong
 direction under G-1.
