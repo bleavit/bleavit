@@ -59,14 +59,16 @@ pub mod pallet {
     use frame_support::traits::{
         fungible::{Inspect as InspectNative, Mutate as MutateNative},
         fungibles::{Inspect as InspectAsset, Mutate as MutateAsset},
-        tokens::Preservation,
+        tokens::{Fortitude, Preservation},
     };
     use frame_support::{pallet_prelude::*, PalletId};
     use frame_system::pallet_prelude::*;
     use sp_runtime::traits::{AccountIdConversion, UniqueSaturatedInto};
     #[cfg(any(feature = "try-runtime", test))]
     use sp_runtime::TryRuntimeError;
-    use trading_rewards_core::{EpochScore, MarketScore, SettledMarkets};
+    use trading_rewards_core::{
+        BranchDisposition, EpochScore, MarketScore, Outcome, SettledMarkets,
+    };
 
     const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
 
@@ -233,6 +235,34 @@ pub mod pallet {
             paid: Balance,
             record_closed: bool,
         },
+        /// A settled market was folded into the epoch total and its entry
+        /// deleted. `spent` and `received` are what the fold contributed, which
+        /// is not the entry's own pair when 08 §2.6 rule 4's annulled arm
+        /// substitutes the mirror leg for the sale credits.
+        MarketScoreFolded {
+            who: T::AccountId,
+            market: futarchy_primitives::MarketId,
+            spent: Balance,
+            received: Balance,
+        },
+        /// A score entry was deleted without folding anything: the proposal was
+        /// VOIDed, or the absolute timeout elapsed on a market that never
+        /// settled. `timed_out` separates the two, because one is a resolved
+        /// constitutional emergency and the other is a liveness escape.
+        MarketScoreDropped {
+            who: T::AccountId,
+            market: futarchy_primitives::MarketId,
+            timed_out: bool,
+        },
+        /// One participant's epoch closed. `accrued` and `forfeited` are the
+        /// scaled legs, and `snapshot_bond` is the cap the next epoch carries.
+        EpochSettled {
+            who: T::AccountId,
+            epoch: EpochId,
+            accrued: Balance,
+            forfeited: Balance,
+            snapshot_bond: Balance,
+        },
     }
 
     #[pallet::error]
@@ -265,6 +295,22 @@ pub mod pallet {
         RewardCustody,
         /// Transferring the bond would leave the funder below the asset minimum.
         BondFundingWouldDust,
+        /// No score entry exists for that account and market.
+        NoScoreEntry,
+        /// The book has not reached a terminal state and the absolute timeout
+        /// has not elapsed, so there is nothing to fold and nothing to escape.
+        MarketNotSettled,
+        /// The account's epoch in flight has not closed. This is also the
+        /// refusal a second `settle_epoch` for a settled epoch meets, because
+        /// settling re-snapshots the record onto the current epoch.
+        EpochNotClosed,
+        /// The account still holds an unfolded score entry for the epoch, so
+        /// settling would apply the arithmetic to part of its own score.
+        UnfoldedScore,
+        /// The scaled accrual would promise more than the authorized budget.
+        /// Unreachable while the clamp is in place, and refused rather than
+        /// over-promised if it ever is not.
+        BudgetExceeded,
     }
 
     #[pallet::hooks]
@@ -512,6 +558,213 @@ pub mod pallet {
                 Ok(())
             })
         }
+
+        /// Fold one settled market into the account's epoch total and delete
+        /// the entry (08 §2.6).
+        ///
+        /// **Permissionless, and it names a target rather than the caller.**
+        /// That is safe because it acts only on already-recorded values: every
+        /// caller reaches the same result and no caller can choose it. The
+        /// keeper cranks it (01 §4.2).
+        ///
+        /// It succeeds on one of exactly two conditions. Either the book has
+        /// reached a terminal state, in which case rule 3 credits the
+        /// book-acquired remainder and rule 4 selects the arm from the branch's
+        /// disposition; or the **absolute timeout** has elapsed, in which case
+        /// the entry drops at zero without folding. Settlement is checked
+        /// first: §2.6 sizes the timeout above the longest lawful settlement
+        /// horizon precisely so no settling market reaches it, and dropping a
+        /// settled market would turn the liveness escape into an exit from a
+        /// live debit.
+        #[pallet::call_index(4)]
+        #[pallet::weight(T::WeightInfo::settle_market_score())]
+        pub fn settle_market_score(
+            origin: OriginFor<T>,
+            who: T::AccountId,
+            market: futarchy_primitives::MarketId,
+        ) -> DispatchResult {
+            ensure_signed(origin)?;
+            frame_support::storage::with_storage_layer(|| {
+                let mut record = Participants::<T>::get(&who).ok_or(Error::<T>::NotEnrolled)?;
+                let mut score = Scores::<T>::get(&who, market).ok_or(Error::<T>::NoScoreEntry)?;
+
+                let event = match T::SettledMarkets::settlement(&who, market) {
+                    Some(settlement) => {
+                        // Rule 3 runs only on the arm that keeps `received`.
+                        // The annulled arm discards every credit and VOID folds
+                        // nothing, so crediting them is work whose only
+                        // reachable effect would be an overflow refusing a
+                        // lawful fold.
+                        if matches!(settlement.disposition, BranchDisposition::Realized) {
+                            trading_rewards_core::on_settle(
+                                &mut score,
+                                settlement.position,
+                                settlement.settled_value,
+                            )
+                            .map_err(|_| Error::<T>::AccountingOverflow)?;
+                        }
+                        let before = record.epoch.clone();
+                        // `fold` stays the single owner of rule 4's arms; what
+                        // follows only reports what it did.
+                        trading_rewards_core::fold(
+                            &mut record.epoch,
+                            &score,
+                            settlement.disposition,
+                        )
+                        .map_err(|_| Error::<T>::AccountingOverflow)?;
+                        if matches!(settlement.disposition, BranchDisposition::Void) {
+                            Event::MarketScoreDropped {
+                                who: who.clone(),
+                                market,
+                                timed_out: false,
+                            }
+                        } else {
+                            Event::MarketScoreFolded {
+                                who: who.clone(),
+                                market,
+                                spent: record.epoch.spent.saturating_sub(before.spent),
+                                received: record.epoch.received.saturating_sub(before.received),
+                            }
+                        }
+                    }
+                    None => {
+                        ensure!(
+                            trading_rewards_core::score_entry_expired(
+                                score.created_at,
+                                Self::now_u64()
+                            ),
+                            Error::<T>::MarketNotSettled
+                        );
+                        Event::MarketScoreDropped {
+                            who: who.clone(),
+                            market,
+                            timed_out: true,
+                        }
+                    }
+                };
+
+                Scores::<T>::remove(&who, market);
+                // Saturating rather than checked: the counter is an O(1) mirror
+                // that `try-state` binds to the map, and a counter that had
+                // drifted low must not be able to hold a bond behind a row that
+                // no longer exists.
+                ScoreCount::<T>::mutate(&who, |count| *count = count.saturating_sub(1));
+                Participants::<T>::insert(&who, record);
+                Self::deposit_event(event);
+                Ok(())
+            })
+        }
+
+        /// Close one participant's epoch, applying the reward or the debit
+        /// exactly once (08 §2.6). Permissionless and named-target for the same
+        /// reason as [`Pallet::settle_market_score`].
+        ///
+        /// Three obligations §2.6 states normatively, and each is a refusal
+        /// above rather than a correction below:
+        ///
+        /// 1. **Idempotent per participant per epoch.** Settling re-snapshots
+        ///    the record onto the current epoch, so a second call meets the
+        ///    closed-epoch refusal. There is no separate settled marker to keep
+        ///    in step with the snapshot.
+        /// 2. **Refuses an epoch that has not closed.**
+        /// 3. **Refuses while an unfolded score entry remains** — otherwise a
+        ///    partially folded account settles on part of its own score, which
+        ///    is the one ordering in which a losing epoch pays a reward.
+        ///
+        /// It also re-snapshots the bond **whenever an epoch closes, including
+        /// when there was nothing to settle**. Nothing else re-snapshots, so
+        /// without that an account that tops up in a quiet epoch would keep the
+        /// smaller cap indefinitely and §2.6's "a top-up takes effect from the
+        /// next epoch" would not be what the code does (TR3 §6.2).
+        #[pallet::call_index(5)]
+        #[pallet::weight(T::WeightInfo::settle_epoch())]
+        pub fn settle_epoch(origin: OriginFor<T>, who: T::AccountId) -> DispatchResult {
+            ensure_signed(origin)?;
+            frame_support::storage::with_storage_layer(|| {
+                let mut record = Participants::<T>::get(&who).ok_or(Error::<T>::NotEnrolled)?;
+                let epoch = T::CurrentEpoch::get();
+                ensure!(record.snapshot_epoch < epoch, Error::<T>::EpochNotClosed);
+                // The counter is the O(1) mirror; the prefix probe is the real
+                // guard, exactly as `withdraw_bond` reads the same pair, so a
+                // drifted counter can never let a score settle unfolded.
+                ensure!(ScoreCount::<T>::get(&who) == 0, Error::<T>::UnfoldedScore);
+                ensure!(
+                    Scores::<T>::iter_key_prefix(&who).next().is_none(),
+                    Error::<T>::UnfoldedScore
+                );
+
+                // An unset `rwd.rate` is the program switched off, which 13 §1
+                // calls the safe direction. A zero rate gives a zero cap and a
+                // `Neutral` outcome, so the epoch closes with neither leg —
+                // never a refusal, because a refusal here would hold the bond
+                // behind a governed row the participant cannot move.
+                let rate = T::RewardRate::get().unwrap_or_default();
+                let outcome =
+                    trading_rewards_core::epoch_outcome(&record.epoch, record.snapshot_bond, rate);
+
+                let mut accrued: Balance = 0;
+                let mut forfeited: Balance = 0;
+                match outcome {
+                    Outcome::Reward(demand) => {
+                        accrued = core::cmp::min(demand, Self::budget_headroom_usdc());
+                        if accrued > 0 {
+                            record.accrued = record
+                                .accrued
+                                .checked_add(accrued)
+                                .ok_or(Error::<T>::AccountingOverflow)?;
+                            let total = TotalAccrued::<T>::get()
+                                .checked_add(accrued)
+                                .ok_or(Error::<T>::AccountingOverflow)?;
+                            // The post-condition 08 §2.6 places at accrual
+                            // time: *"an exhausted budget scales both legs, so
+                            // nothing strands and the pot never overdraws"*.
+                            // The clamp above already establishes it; this
+                            // refuses rather than over-promises if the clamp
+                            // ever stops doing so.
+                            ensure!(
+                                total <= Self::authorized_budget_usdc().unwrap_or_default(),
+                                Error::<T>::BudgetExceeded
+                            );
+                            TotalAccrued::<T>::put(total);
+                        }
+                    }
+                    Outcome::Debit(demand) => {
+                        // "A debit never drives the bond below zero. It takes
+                        // the whole bond and suspends the participant until they
+                        // top up."
+                        forfeited = core::cmp::min(demand, record.bond);
+                        if forfeited > 0 {
+                            Self::forfeit_to_insurance(forfeited)?;
+                            record.bond = record.bond.saturating_sub(forfeited);
+                            // Conditional on a debit having actually been taken:
+                            // a record `withdraw_bond` retained at a zero bond
+                            // must not be suspended by a settlement that took
+                            // nothing from it.
+                            if record.bond == 0 {
+                                record.suspended = true;
+                            }
+                        }
+                    }
+                    Outcome::Neutral => {}
+                }
+
+                record.epoch = EpochScore::default();
+                // After the debit, so the snapshot never claims a cap the bond
+                // no longer backs — the `snapshot_bond <= bond` try-state leg.
+                record.snapshot_bond = record.bond;
+                record.snapshot_epoch = epoch;
+                let snapshot_bond = record.snapshot_bond;
+                Participants::<T>::insert(&who, record);
+                Self::deposit_event(Event::EpochSettled {
+                    who: who.clone(),
+                    epoch,
+                    accrued,
+                    forfeited,
+                    snapshot_bond,
+                });
+                Ok(())
+            })
+        }
     }
 
     impl<T: Config> Pallet<T> {
@@ -541,6 +794,78 @@ pub mod pallet {
                     .map_err(|_| Error::<T>::BondCustody)?;
             ensure!(moved == amount, Error::<T>::BondCustody);
             Ok(())
+        }
+
+        /// Move a forfeited bond to `INSURANCE` — 08 §1.2/§1.4's standing
+        /// destination for USDC taken from an account.
+        ///
+        /// `Expendable` on the sovereign side for the same reason
+        /// [`Pallet::release_bond`] uses it: every tracked bond is at least the
+        /// asset minimum, so the only balance a reap there can dust is donated
+        /// surplus, while `Preserve` would let a one-unit donation wedge the
+        /// last forfeit for good.
+        fn forfeit_to_insurance(amount: Balance) -> DispatchResult {
+            if amount == 0 {
+                return Ok(());
+            }
+            let moved = T::Collateral::transfer(
+                T::UsdcAssetId::get(),
+                &Self::account_id(),
+                &T::InsuranceAccount::get(),
+                amount,
+                Preservation::Expendable,
+            )
+            .map_err(|_| Error::<T>::BondCustody)?;
+            ensure!(moved == amount, Error::<T>::BondCustody);
+            Ok(())
+        }
+
+        /// The authorized budget, valued in USDC — the VIT the treasury moved
+        /// into this pallet's sovereign account (08 §2.6: the funding call
+        /// "transfers VIT to the reward pallet's own sovereign account", so the
+        /// budget *is* that balance).
+        ///
+        /// `Preserve`/`Polite`, so the existential deposit is never counted as
+        /// budget and a payout can never reap the account that also custodies
+        /// every USDC bond. Floored, and `None` on an unreadable rate or an
+        /// arithmetic edge — both are the claimant-adverse direction, because a
+        /// budget that cannot be valued promises nothing.
+        pub fn authorized_budget_usdc() -> Option<Balance> {
+            let rate = u128::from(T::VitUsdcRate::get()?);
+            let vit = T::Rewards::reducible_balance(
+                &Self::account_id(),
+                Preservation::Preserve,
+                Fortitude::Polite,
+            );
+            // The exact inverse of `usdc_to_vit`, arranged so the product is
+            // `vit x rate` rather than a triple: the divisor is derived from
+            // the same three constants that function divides by.
+            let divisor = FIXED_DIV
+                .checked_mul(futarchy_primitives::currency::VIT)?
+                .checked_div(futarchy_primitives::currency::USDC)?;
+            vit.checked_mul(rate)?.checked_div(divisor)
+        }
+
+        /// What the authorized budget can still promise: the part of it no
+        /// outstanding accrual already claims.
+        ///
+        /// **Only the reward leg reads this, and the debit leg deliberately
+        /// does not.** Scaling a debit by budget consumption would be farmable
+        /// by settlement timing, because both settlement steps are pull-based
+        /// and the caller chooses when to crank: a wash operator settles the
+        /// winning account while the budget is full, waits for other
+        /// participants to exhaust it, and settles the losing account into a
+        /// headroom of zero. The pair then nets **positive**, which is the one
+        /// invariant the whole design rests on. An unscaled debit keeps the
+        /// pair non-positive at every budget level and in every settlement
+        /// order. The cost is the one 08 §2.6 names — a loser in a starved
+        /// epoch is over-punished relative to a scaled winner — and it is the
+        /// R-7 direction. See the TR5 report for the derivation and for what
+        /// closing it properly would need from TR6.
+        pub fn budget_headroom_usdc() -> Balance {
+            Self::authorized_budget_usdc()
+                .unwrap_or_default()
+                .saturating_sub(TotalAccrued::<T>::get())
         }
 
         /// Return `amount` USDC from the sovereign to the participant.
@@ -925,5 +1250,10 @@ pub mod pallet {
         /// Seed `fee.vit_usdc_rate`. The row is unseeded at genesis, so the
         /// claim benchmark cannot run without this.
         fn prime_vit_rate(rate: u64);
+        /// Close the epoch in flight. `settle_epoch` refuses an epoch that has
+        /// not closed, and the program reads the protocol epoch rather than
+        /// owning a clock, so only the runtime can move it. TR7 implements this
+        /// against `pallet-epoch`.
+        fn advance_epoch();
     }
 }

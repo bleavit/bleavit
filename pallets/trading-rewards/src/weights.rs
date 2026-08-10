@@ -13,6 +13,8 @@ pub trait WeightInfo {
     fn top_up_bond() -> Weight;
     fn withdraw_bond() -> Weight;
     fn claim_rewards() -> Weight;
+    fn settle_market_score() -> Weight;
+    fn settle_epoch() -> Weight;
 }
 
 pub struct SubstrateWeight<T>(PhantomData<T>);
@@ -41,6 +43,18 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
             .saturating_add(T::DbWeight::get().reads(4))
             .saturating_add(T::DbWeight::get().writes(4))
     }
+
+    fn settle_market_score() -> Weight {
+        Weight::from_parts(30_000_000, 3_640)
+            .saturating_add(T::DbWeight::get().reads(3))
+            .saturating_add(T::DbWeight::get().writes(3))
+    }
+
+    fn settle_epoch() -> Weight {
+        Weight::from_parts(65_000_000, 3_640)
+            .saturating_add(T::DbWeight::get().reads(6))
+            .saturating_add(T::DbWeight::get().writes(4))
+    }
 }
 
 impl WeightInfo for () {
@@ -65,6 +79,18 @@ impl WeightInfo for () {
     fn claim_rewards() -> Weight {
         Weight::from_parts(60_000_000, 3_640)
             .saturating_add(RocksDbWeight::get().reads(4))
+            .saturating_add(RocksDbWeight::get().writes(4))
+    }
+
+    fn settle_market_score() -> Weight {
+        Weight::from_parts(30_000_000, 3_640)
+            .saturating_add(RocksDbWeight::get().reads(3))
+            .saturating_add(RocksDbWeight::get().writes(3))
+    }
+
+    fn settle_epoch() -> Weight {
+        Weight::from_parts(65_000_000, 3_640)
+            .saturating_add(RocksDbWeight::get().reads(6))
             .saturating_add(RocksDbWeight::get().writes(4))
     }
 }

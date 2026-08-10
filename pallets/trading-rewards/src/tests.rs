@@ -15,6 +15,7 @@ use frame_support::{assert_noop, assert_ok};
 use futarchy_primitives::Balance;
 use market_core::{TradeObserver, SCORE_SIDE_LONG, SCORE_SIDE_SHORT};
 use sp_runtime::DispatchError;
+use trading_rewards_core::BranchDisposition;
 
 fn events() -> Vec<Event<Test>> {
     System::events()
@@ -977,6 +978,16 @@ fn every_call_refuses_an_unsigned_and_a_root_origin() {
                 TradingRewards::claim_rewards(RuntimeOrigin::none()),
                 TradingRewards::claim_rewards(RuntimeOrigin::root()),
             ),
+            (
+                "settle_market_score",
+                TradingRewards::settle_market_score(RuntimeOrigin::none(), alice(), MARKET_A),
+                TradingRewards::settle_market_score(RuntimeOrigin::root(), alice(), MARKET_A),
+            ),
+            (
+                "settle_epoch",
+                TradingRewards::settle_epoch(RuntimeOrigin::none(), alice()),
+                TradingRewards::settle_epoch(RuntimeOrigin::root(), alice()),
+            ),
         ] {
             assert_eq!(none, Err(DispatchError::BadOrigin), "{name} took none");
             assert_eq!(root, Err(DispatchError::BadOrigin), "{name} took root");
@@ -1661,6 +1672,800 @@ fn fills_in_two_markets_take_two_entries() {
                 .spent,
             41
         );
+        assert_ok!(TradingRewards::do_try_state());
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Folding one settled market (08 §2.6; TR5)
+// ---------------------------------------------------------------------------
+
+/// `rwd.rate` as the mock seeds it, in parts per billion.
+const RATE_PPB: u128 = 2_500_000;
+/// `fee.vit_usdc_rate`'s stored `FixedU64` integer at the 13 §1 placeholder.
+const VIT_RATE: u64 = 50_000_000;
+
+type Account = sp_core::crypto::AccountId32;
+
+/// One buy through the observer, exactly as `pallet-market` reports it.
+fn buy(
+    who: &Account,
+    market: futarchy_primitives::MarketId,
+    qty: Balance,
+    cost: Balance,
+    fee: Balance,
+) {
+    observe(who, market, SCORE_SIDE_LONG, qty, cost, fee, true);
+}
+
+/// A buy, then the book reaching a realized terminal state worth `unit_value`
+/// per unit on the branch that was traded.
+fn buy_and_settle(
+    who: &Account,
+    market: futarchy_primitives::MarketId,
+    qty: Balance,
+    cost: Balance,
+    fee: Balance,
+    unit_value: Balance,
+) {
+    buy(who, market, qty, cost, fee);
+    settle_book(
+        who,
+        market,
+        BranchDisposition::Realized,
+        [qty, 0],
+        [unit_value, 0],
+    );
+}
+
+fn record(who: &Account) -> crate::ParticipantRecord {
+    Participants::<Test>::get(who).expect("record")
+}
+
+#[test]
+fn folding_moves_a_settled_market_into_the_epoch_and_frees_the_entry() {
+    new_test_ext().execute_with(|| {
+        enrolled_alice(1_000);
+        // 1,000 units for 500 with no fee; the branch realizes at 1 per unit.
+        buy_and_settle(&alice(), MARKET_A, 1_000, 500, 0, 1);
+
+        // Permissionless and named-target: BOB cranks ALICE's fold.
+        assert_ok!(TradingRewards::settle_market_score(
+            RuntimeOrigin::signed(bob()),
+            alice(),
+            MARKET_A
+        ));
+
+        assert!(
+            Scores::<Test>::get(alice(), MARKET_A).is_none(),
+            "entry freed"
+        );
+        assert_eq!(ScoreCount::<Test>::get(alice()), 0);
+        let record = record(&alice());
+        assert_eq!(record.epoch.received, 1_000);
+        assert_eq!(record.epoch.spent, 500);
+        assert!(events().iter().any(|event| matches!(
+            event,
+            Event::MarketScoreFolded {
+                spent: 500,
+                received: 1_000,
+                ..
+            }
+        )));
+        assert_ok!(TradingRewards::do_try_state());
+    });
+}
+
+#[test]
+fn folding_refuses_before_the_book_settles() {
+    new_test_ext().execute_with(|| {
+        enrolled_alice(1_000);
+        buy(&alice(), MARKET_A, 1_000, 500, 0);
+        assert_noop!(
+            TradingRewards::settle_market_score(RuntimeOrigin::signed(bob()), alice(), MARKET_A),
+            Error::<Test>::MarketNotSettled
+        );
+        assert!(
+            Scores::<Test>::get(alice(), MARKET_A).is_some(),
+            "the entry survives"
+        );
+        assert_eq!(record(&alice()).epoch, Default::default());
+    });
+}
+
+#[test]
+fn folding_refuses_an_unknown_entry_and_an_unenrolled_account() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            TradingRewards::settle_market_score(RuntimeOrigin::signed(bob()), alice(), MARKET_A),
+            Error::<Test>::NotEnrolled
+        );
+        enrolled_alice(1_000);
+        assert_noop!(
+            TradingRewards::settle_market_score(RuntimeOrigin::signed(bob()), alice(), MARKET_A),
+            Error::<Test>::NoScoreEntry
+        );
+    });
+}
+
+#[test]
+fn a_market_that_never_settles_releases_the_bond_on_the_absolute_timeout() {
+    // Design §6, review finding 4: the `ledger.archive` escape was circular,
+    // because the archive sweep needs a terminal vault and a market that never
+    // settles never becomes one.
+    new_test_ext().execute_with(|| {
+        enrolled_alice(1_000);
+        buy(&alice(), MARKET_A, 1_000, 500, 3);
+        let created = Scores::<Test>::get(alice(), MARKET_A)
+            .expect("entry")
+            .created_at;
+
+        // One block short of the lifetime it is still refused, so the boundary
+        // is exact rather than "eventually".
+        run_to_block(created + score_entry_timeout() - 1);
+        assert_noop!(
+            TradingRewards::settle_market_score(RuntimeOrigin::signed(bob()), alice(), MARKET_A),
+            Error::<Test>::MarketNotSettled
+        );
+
+        run_to_block(created + score_entry_timeout());
+        assert_ok!(TradingRewards::settle_market_score(
+            RuntimeOrigin::signed(bob()),
+            alice(),
+            MARKET_A
+        ));
+        assert!(Scores::<Test>::get(alice(), MARKET_A).is_none());
+        assert_eq!(ScoreCount::<Test>::get(alice()), 0);
+        let record = record(&alice());
+        assert_eq!(record.epoch, Default::default(), "the entry drops at zero");
+        assert!(events().iter().any(|event| matches!(
+            event,
+            Event::MarketScoreDropped {
+                timed_out: true,
+                ..
+            }
+        )));
+        // And the bond comes back, which is what the escape exists for.
+        assert_ok!(TradingRewards::withdraw_bond(
+            RuntimeOrigin::signed(alice())
+        ));
+        assert_eq!(usdc_balance(&alice()), 1_000_000);
+    });
+}
+
+#[test]
+fn a_settled_market_is_folded_even_past_the_timeout() {
+    // The escape is for markets that never settle. 08 §2.6 sizes it above the
+    // longest lawful settlement horizon precisely so no settling market reaches
+    // it, and a settled book must still be scored if one somehow does —
+    // otherwise the timeout becomes an exit from a live debit.
+    new_test_ext().execute_with(|| {
+        enrolled_alice(1_000);
+        buy_and_settle(&alice(), MARKET_A, 1_000, 900, 0, 0);
+        run_to_block(score_entry_timeout() + 10);
+        assert_ok!(TradingRewards::settle_market_score(
+            RuntimeOrigin::signed(bob()),
+            alice(),
+            MARKET_A
+        ));
+        let record = record(&alice());
+        assert_eq!(record.epoch.spent, 900, "the loss was folded, not dropped");
+        assert_eq!(record.epoch.received, 0);
+    });
+}
+
+#[test]
+fn folding_an_annulled_branch_scores_exactly_the_fees() {
+    // SQ-1051, through the pallet. `−(cost + fee)` is also a debit and it is
+    // the defect, so the assertion is on the exact value.
+    new_test_ext().execute_with(|| {
+        enrolled_alice(1_000);
+        buy(&alice(), MARKET_A, 1_000, 900, 3);
+        // A sale in the branch that is later annulled credits nothing real, so
+        // a large credit here must not change the answer.
+        observe(&alice(), MARKET_A, SCORE_SIDE_LONG, 1_000, 5_000, 0, false);
+        let score = Scores::<Test>::get(alice(), MARKET_A).expect("entry");
+        assert_eq!(
+            score.received, 5_000,
+            "the credit exists, and is discarded below"
+        );
+        settle_book(
+            &alice(),
+            MARKET_A,
+            BranchDisposition::Annulled,
+            [0, 0],
+            [0, 0],
+        );
+
+        assert_ok!(TradingRewards::settle_market_score(
+            RuntimeOrigin::signed(bob()),
+            alice(),
+            MARKET_A
+        ));
+        let record = record(&alice());
+        assert_eq!(record.epoch.spent, 903);
+        assert_eq!(record.epoch.received, 900, "the mirror leg, not the sale");
+        assert_eq!(
+            record.epoch.spent - record.epoch.received,
+            3,
+            "exactly the fees, which is 04 §6.2's G-3 restated"
+        );
+        // What the retired one-arm rule would have charged, for contrast.
+        assert_ne!(record.epoch.spent - record.epoch.received, 903);
+        assert_ok!(TradingRewards::do_try_state());
+    });
+}
+
+#[test]
+fn folding_a_voided_proposal_drops_the_entry_at_zero() {
+    new_test_ext().execute_with(|| {
+        enrolled_alice(1_000);
+        buy_and_settle(&alice(), MARKET_A, 1_000, 900, 3, 1);
+        settle_book(
+            &alice(),
+            MARKET_A,
+            BranchDisposition::Void,
+            [1_000, 0],
+            [1, 0],
+        );
+
+        assert_ok!(TradingRewards::settle_market_score(
+            RuntimeOrigin::signed(bob()),
+            alice(),
+            MARKET_A
+        ));
+        assert!(Scores::<Test>::get(alice(), MARKET_A).is_none());
+        let record = record(&alice());
+        assert_eq!(record.epoch, Default::default(), "VOID folds to nothing");
+        assert!(events().iter().any(|event| matches!(
+            event,
+            Event::MarketScoreDropped {
+                timed_out: false,
+                ..
+            }
+        )));
+    });
+}
+
+#[test]
+fn settlement_credits_only_the_book_acquired_part_of_the_terminal_position() {
+    // 08 §2.6 rule 3, through the pallet. The terminal position exceeds what
+    // the book sold, so an implementation crediting `position` alone lands on
+    // 2,000 instead of 600.
+    new_test_ext().execute_with(|| {
+        enrolled_alice(1_000);
+        buy(&alice(), MARKET_A, 300, 150, 0);
+        settle_book(
+            &alice(),
+            MARKET_A,
+            BranchDisposition::Realized,
+            [1_000, 0],
+            [2, 0],
+        );
+        assert_ok!(TradingRewards::settle_market_score(
+            RuntimeOrigin::signed(bob()),
+            alice(),
+            MARKET_A
+        ));
+        assert_eq!(record(&alice()).epoch.received, 600);
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Closing one participant's epoch (08 §2.6; TR5)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_losing_epoch_debits_the_snapshot_bond_and_cannot_be_escaped_by_folding() {
+    // Design §4.3, review finding 2.
+    new_test_ext().execute_with(|| {
+        enrolled_alice(1_000);
+        buy_and_settle(&alice(), MARKET_A, 1_000, 1_000, 0, 0);
+        assert_ok!(TradingRewards::settle_market_score(
+            RuntimeOrigin::signed(bob()),
+            alice(),
+            MARKET_A
+        ));
+        assert_noop!(
+            TradingRewards::withdraw_bond(RuntimeOrigin::signed(alice())),
+            Error::<Test>::EpochUnsettled
+        );
+
+        let insurance_before = insurance_balance();
+        run_to_epoch_close();
+        assert_ok!(TradingRewards::settle_epoch(
+            RuntimeOrigin::signed(bob()),
+            alice()
+        ));
+
+        let record = record(&alice());
+        assert_eq!(
+            record.bond,
+            1_000 - 3,
+            "0.25 % of 1_000, ceiled against the claimant"
+        );
+        assert_eq!(
+            insurance_balance() - insurance_before,
+            3,
+            "forfeit goes to INSURANCE"
+        );
+        assert_eq!(sovereign_usdc(), 997, "the forfeit really left custody");
+        assert_eq!(record.snapshot_bond, 997, "the cap follows the bond down");
+        assert_eq!(record.snapshot_epoch, CurrentEpoch::get());
+        assert_eq!(record.epoch, Default::default());
+        assert!(!record.suspended, "a partial debit does not suspend");
+        assert_ok!(TradingRewards::do_try_state());
+        // And the bond is releasable now, which the fold alone did not buy.
+        assert_ok!(TradingRewards::withdraw_bond(
+            RuntimeOrigin::signed(alice())
+        ));
+    });
+}
+
+#[test]
+fn a_winning_epoch_accrues_the_reward_in_usdc_and_re_snapshots() {
+    new_test_ext().execute_with(|| {
+        VitUsdcRate::set(Some(VIT_RATE));
+        enrolled_alice(1_000);
+        authorize_budget_usdc(10_000);
+        // Spend 1,000 and take back 100,000: net +99,000, capped at 40,000.
+        buy_and_settle(&alice(), MARKET_A, 1_000, 1_000, 0, 100);
+        assert_ok!(TradingRewards::settle_market_score(
+            RuntimeOrigin::signed(bob()),
+            alice(),
+            MARKET_A
+        ));
+        run_to_epoch_close();
+        assert_ok!(TradingRewards::settle_epoch(
+            RuntimeOrigin::signed(bob()),
+            alice()
+        ));
+
+        // cap = 1_000 × 1e9 / (2_500_000 × 10) = 40_000, so the reward is
+        // floor(40_000 × 0.25 %) = 100. Uncapped it would have been 247, so the
+        // cap is visibly binding rather than incidental.
+        assert_eq!((40_000u128 * RATE_PPB) / 1_000_000_000, 100);
+        let record = record(&alice());
+        assert_eq!(record.accrued, 100);
+        assert_eq!(TotalAccrued::<Test>::get(), 100);
+        assert_eq!(record.bond, 1_000, "a reward takes nothing from the bond");
+        assert_eq!(record.snapshot_bond, 1_000);
+        assert_eq!(record.epoch, Default::default());
+        assert_ok!(TradingRewards::do_try_state());
+        // The accrual is a real claim: it pays out in VIT at the live rate.
+        assert_ok!(TradingRewards::claim_rewards(
+            RuntimeOrigin::signed(alice())
+        ));
+        assert_eq!(TotalAccrued::<Test>::get(), 0);
+    });
+}
+
+#[test]
+fn settle_epoch_refuses_an_epoch_that_has_not_closed() {
+    new_test_ext().execute_with(|| {
+        enrolled_alice(1_000);
+        assert_noop!(
+            TradingRewards::settle_epoch(RuntimeOrigin::signed(bob()), alice()),
+            Error::<Test>::EpochNotClosed
+        );
+        run_to_epoch_close();
+        assert_ok!(TradingRewards::settle_epoch(
+            RuntimeOrigin::signed(bob()),
+            alice()
+        ));
+    });
+}
+
+#[test]
+fn settle_epoch_is_idempotent_per_participant_per_epoch() {
+    // 08 §2.6 obligation 1: a second call for a settled epoch is a no-op, not a
+    // second payout.
+    new_test_ext().execute_with(|| {
+        VitUsdcRate::set(Some(VIT_RATE));
+        enrolled_alice(1_000);
+        authorize_budget_usdc(10_000);
+        buy_and_settle(&alice(), MARKET_A, 1_000, 1_000, 0, 100);
+        assert_ok!(TradingRewards::settle_market_score(
+            RuntimeOrigin::signed(bob()),
+            alice(),
+            MARKET_A
+        ));
+        run_to_epoch_close();
+        assert_ok!(TradingRewards::settle_epoch(
+            RuntimeOrigin::signed(bob()),
+            alice()
+        ));
+        let after_first = record(&alice());
+        assert_eq!(after_first.accrued, 100);
+
+        assert_noop!(
+            TradingRewards::settle_epoch(RuntimeOrigin::signed(bob()), alice()),
+            Error::<Test>::EpochNotClosed
+        );
+        assert_eq!(record(&alice()), after_first, "the record is unchanged");
+        assert_eq!(TotalAccrued::<Test>::get(), 100);
+    });
+}
+
+#[test]
+fn settle_epoch_refuses_while_an_unfolded_score_entry_remains() {
+    // 08 §2.6 obligation 3, and it is load-bearing rather than tidy: settling
+    // on part of a score pays a reward on the market that won while the market
+    // that lost is still unfolded.
+    new_test_ext().execute_with(|| {
+        VitUsdcRate::set(Some(VIT_RATE));
+        enrolled_alice(1_000);
+        authorize_budget_usdc(10_000);
+        buy_and_settle(&alice(), MARKET_A, 1_000, 1_000, 0, 100);
+        // A second market, still open, carrying the loss.
+        buy(&alice(), MARKET_B, 1_000, 1_000, 0);
+        assert_ok!(TradingRewards::settle_market_score(
+            RuntimeOrigin::signed(bob()),
+            alice(),
+            MARKET_A
+        ));
+        run_to_epoch_close();
+
+        assert_noop!(
+            TradingRewards::settle_epoch(RuntimeOrigin::signed(bob()), alice()),
+            Error::<Test>::UnfoldedScore
+        );
+        assert_eq!(
+            record(&alice()).accrued,
+            0,
+            "nothing was paid on the partial score"
+        );
+
+        // Fold the loser too, and the epoch settles on the whole score.
+        settle_book(
+            &alice(),
+            MARKET_B,
+            BranchDisposition::Realized,
+            [1_000, 0],
+            [0, 0],
+        );
+        assert_ok!(TradingRewards::settle_market_score(
+            RuntimeOrigin::signed(bob()),
+            alice(),
+            MARKET_B
+        ));
+        assert_ok!(TradingRewards::settle_epoch(
+            RuntimeOrigin::signed(bob()),
+            alice()
+        ));
+        // Net over both markets is 100_000 − 2_000 = +98_000, still capped.
+        assert_eq!(record(&alice()).accrued, 100);
+    });
+}
+
+#[test]
+fn settle_epoch_reads_the_score_map_itself_and_not_only_the_counter() {
+    // The counter is an O(1) mirror and the prefix probe is the real guard, so
+    // a counter that had drifted low must not be able to let a live score row
+    // settle unfolded. The two are redundant in every lawful state, which is
+    // exactly why the redundancy needs a test of its own: without this, the
+    // probe can be deleted and every other test still passes.
+    new_test_ext().execute_with(|| {
+        enrolled_alice(1_000);
+        Scores::<Test>::insert(
+            alice(),
+            MARKET_A,
+            trading_rewards_core::MarketScore {
+                spent: 500,
+                mirror_principal: 500,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            ScoreCount::<Test>::get(alice()),
+            0,
+            "the mirror is drifted low"
+        );
+        run_to_epoch_close();
+        assert_noop!(
+            TradingRewards::settle_epoch(RuntimeOrigin::signed(bob()), alice()),
+            Error::<Test>::UnfoldedScore
+        );
+    });
+}
+
+#[test]
+fn settle_epoch_re_snapshots_a_bond_even_when_the_epoch_had_nothing_to_settle() {
+    // TR3's §6.2: nothing except `settle_epoch` re-snapshots, so without this
+    // an account that tops up in a quiet epoch keeps the smaller cap forever
+    // and "a top-up takes effect from the next epoch" is not what the code does.
+    new_test_ext().execute_with(|| {
+        enrolled_alice(1_000);
+        assert_ok!(TradingRewards::top_up_bond(
+            RuntimeOrigin::signed(alice()),
+            500
+        ));
+        let before = record(&alice());
+        assert_eq!(before.bond, 1_500);
+        assert_eq!(before.snapshot_bond, 1_000, "the top-up left the cap alone");
+        assert_eq!(
+            before.epoch,
+            Default::default(),
+            "and there is nothing to settle"
+        );
+
+        run_to_epoch_close();
+        assert_ok!(TradingRewards::settle_epoch(
+            RuntimeOrigin::signed(bob()),
+            alice()
+        ));
+
+        let after = record(&alice());
+        assert_eq!(
+            after.snapshot_bond, 1_500,
+            "the next epoch's cap sees the top-up"
+        );
+        assert_eq!(after.snapshot_epoch, CurrentEpoch::get());
+        assert_eq!(after.bond, 1_500);
+        assert_ok!(TradingRewards::do_try_state());
+    });
+}
+
+#[test]
+fn settle_epoch_refuses_an_account_that_never_enrolled() {
+    new_test_ext().execute_with(|| {
+        run_to_epoch_close();
+        assert_noop!(
+            TradingRewards::settle_epoch(RuntimeOrigin::signed(bob()), alice()),
+            Error::<Test>::NotEnrolled
+        );
+    });
+}
+
+#[test]
+fn a_debit_at_or_above_the_whole_bond_takes_it_all_and_suspends() {
+    // 08 §2.6: "A debit never drives the bond below zero. It takes the whole
+    // bond and suspends the participant until they top up."
+    new_test_ext().execute_with(|| {
+        enrolled_alice(1_000);
+        record_test_epoch_score(&alice(), 1_000_000, 0);
+        // A bond smaller than the debit the snapshot admits. Only reachable by
+        // construction, which is exactly why the arm needs its own test.
+        Participants::<Test>::mutate(alice(), |slot| {
+            if let Some(record) = slot.as_mut() {
+                record.bond = 2;
+            }
+        });
+        let insurance_before = insurance_balance();
+        run_to_epoch_close();
+        assert_ok!(TradingRewards::settle_epoch(
+            RuntimeOrigin::signed(bob()),
+            alice()
+        ));
+
+        let record = record(&alice());
+        assert_eq!(record.bond, 0, "the whole bond, and never below zero");
+        assert_eq!(record.snapshot_bond, 0);
+        assert!(record.suspended);
+        assert_eq!(
+            insurance_balance() - insurance_before,
+            2,
+            "only what was actually held"
+        );
+        assert!(!TradingRewards::scores_fills(&alice()));
+    });
+}
+
+#[test]
+fn a_settled_epoch_with_no_debit_never_sets_the_suspension_flag() {
+    // The complement, so an unconditional `suspended = true` cannot pass. A
+    // record `withdraw_bond` retained at zero bond must not become suspended by
+    // a later settlement that took nothing.
+    new_test_ext().execute_with(|| {
+        enrolled_alice(1_000);
+        record_test_accrual(&alice(), 250);
+        assert_ok!(TradingRewards::withdraw_bond(
+            RuntimeOrigin::signed(alice())
+        ));
+        assert_eq!(record(&alice()).bond, 0);
+        run_to_epoch_close();
+        assert_ok!(TradingRewards::settle_epoch(
+            RuntimeOrigin::signed(bob()),
+            alice()
+        ));
+        assert!(!record(&alice()).suspended);
+    });
+}
+
+// ---------------------------------------------------------------------------
+// The authorized budget and its scaling (08 §2.6; obligation 2)
+// ---------------------------------------------------------------------------
+
+/// Settle an offsetting pair over one epoch and return `(reward, forfeit)`.
+/// The winner settles first, which is the order in which a budget-scaled debit
+/// would let the pair net positive.
+fn settle_offsetting_pair(net: Balance, bond: Balance) -> (Balance, Balance) {
+    enrolled_alice(bond);
+    assert_ok!(TradingRewards::enroll(RuntimeOrigin::signed(bob()), bond));
+    record_test_epoch_score(&alice(), 0, net);
+    record_test_epoch_score(&bob(), net, 0);
+    let insurance_before = insurance_balance();
+    run_to_epoch_close();
+    assert_ok!(TradingRewards::settle_epoch(
+        RuntimeOrigin::signed(bob()),
+        alice()
+    ));
+    assert_ok!(TradingRewards::settle_epoch(
+        RuntimeOrigin::signed(alice()),
+        bob()
+    ));
+    (
+        record(&alice()).accrued,
+        insurance_balance() - insurance_before,
+    )
+}
+
+#[test]
+fn an_over_subscribed_epoch_scales_the_reward_and_the_pair_stays_non_positive() {
+    // Design §4.5. The reward is clamped to the authorized budget; the debit is
+    // not, so budget pressure can only make the pair more negative.
+    new_test_ext().execute_with(|| {
+        VitUsdcRate::set(Some(VIT_RATE));
+        let budget = authorize_budget_usdc(10);
+        assert_eq!(budget, 10, "the mock rate converts exactly");
+        let (reward, debit) = settle_offsetting_pair(100_000, 10_000);
+
+        // Unscaled both legs are 250: cap = 10_000 × 1e9 / (2_500_000 × 10) =
+        // 400_000, which does not bind at net 100_000, so 100_000 × 0.25 %.
+        assert_eq!(debit, 250, "the debit is the unscaled leg");
+        assert_eq!(reward, 10, "and the reward is clamped to the whole budget");
+        assert!(
+            reward < debit,
+            "the pair stays strictly non-positive under scaling"
+        );
+        assert_eq!(TotalAccrued::<Test>::get(), 10);
+        assert_ok!(TradingRewards::do_try_state());
+    });
+}
+
+#[test]
+fn a_funded_epoch_pays_the_pair_in_full_and_still_never_nets_positive() {
+    // The unscaled control, in the same shape, so the test above cannot pass
+    // through the budget path being dead.
+    new_test_ext().execute_with(|| {
+        VitUsdcRate::set(Some(VIT_RATE));
+        authorize_budget_usdc(1_000);
+        let (reward, debit) = settle_offsetting_pair(100_000, 10_000);
+        assert_eq!(reward, 250);
+        assert_eq!(debit, 250);
+        assert!(debit >= reward);
+    });
+}
+
+#[test]
+fn a_debit_is_never_reduced_by_budget_pressure() {
+    // Why the debit leg is not scaled. Settlement is pull-based and its timing
+    // is caller-chosen, so a debit that shrank as the budget was consumed could
+    // be escaped by waiting: the winning account settles while the budget is
+    // full, other participants exhaust it, and the losing account settles into
+    // a headroom of zero. That is a wash pair netting positive, which is the
+    // invariant the whole design rests on.
+    new_test_ext().execute_with(|| {
+        VitUsdcRate::set(Some(VIT_RATE));
+        authorize_budget_usdc(300);
+        enrolled_alice(10_000);
+        assert_ok!(TradingRewards::enroll(RuntimeOrigin::signed(bob()), 10_000));
+        record_test_epoch_score(&alice(), 0, 100_000);
+        record_test_epoch_score(&bob(), 100_000, 0);
+        run_to_epoch_close();
+
+        // The winner settles first and takes 250 of the 300.
+        assert_ok!(TradingRewards::settle_epoch(
+            RuntimeOrigin::signed(bob()),
+            alice()
+        ));
+        assert_eq!(record(&alice()).accrued, 250);
+        // A third participant exhausts what is left, so the loser meets a
+        // headroom of 50 rather than 250.
+        let carol = account(3);
+        mint_usdc(&carol, 10_000);
+        assert_ok!(TradingRewards::enroll(
+            RuntimeOrigin::signed(carol.clone()),
+            10_000
+        ));
+        Participants::<Test>::mutate(&carol, |slot| {
+            if let Some(record) = slot.as_mut() {
+                record.snapshot_epoch = CurrentEpoch::get() - 1;
+            }
+        });
+        record_test_epoch_score(&carol, 0, 100_000);
+        assert_ok!(TradingRewards::settle_epoch(
+            RuntimeOrigin::signed(bob()),
+            carol.clone()
+        ));
+        assert_eq!(
+            record(&carol).accrued,
+            50,
+            "the budget really is exhausted by now"
+        );
+
+        let insurance_before = insurance_balance();
+        assert_ok!(TradingRewards::settle_epoch(
+            RuntimeOrigin::signed(alice()),
+            bob()
+        ));
+        assert_eq!(
+            insurance_balance() - insurance_before,
+            250,
+            "the loser pays the full debit whatever the budget is doing",
+        );
+    });
+}
+
+#[test]
+fn an_unreadable_vit_rate_scales_the_reward_to_zero_and_still_settles() {
+    // `fee.vit_usdc_rate` is unseeded at genesis, so the budget cannot be
+    // valued. Fail closed on the reward and settle anyway: refusing would make
+    // the bond hostage to a VIT-side row, which is the defect TR3's review
+    // already removed once from `withdraw_bond`.
+    new_test_ext().execute_with(|| {
+        enrolled_alice(1_000);
+        fund_reward_budget(1_000_000_000_000);
+        assert!(VitUsdcRate::get().is_none());
+        record_test_epoch_score(&alice(), 0, 100_000);
+        run_to_epoch_close();
+        assert_ok!(TradingRewards::settle_epoch(
+            RuntimeOrigin::signed(bob()),
+            alice()
+        ));
+        assert_eq!(
+            record(&alice()).accrued,
+            0,
+            "no budget can be valued, so none is promised"
+        );
+        assert_eq!(
+            record(&alice()).epoch,
+            Default::default(),
+            "and the epoch still closed"
+        );
+        assert_ok!(TradingRewards::withdraw_bond(
+            RuntimeOrigin::signed(alice())
+        ));
+    });
+}
+
+#[test]
+fn accruals_never_exceed_the_authorized_budget_across_many_participants() {
+    // The post-condition 08 §2.6 states where the scale factor is applied, and
+    // the property design §8 asks for. Ten participants each demand more than
+    // the whole budget; the total promised must still fit inside it.
+    new_test_ext().execute_with(|| {
+        VitUsdcRate::set(Some(VIT_RATE));
+        let budget = authorize_budget_usdc(120);
+        for seed in 10u8..20 {
+            let who = account(seed);
+            mint_usdc(&who, 10_000);
+            assert_ok!(TradingRewards::enroll(
+                RuntimeOrigin::signed(who.clone()),
+                10_000
+            ));
+            record_test_epoch_score(&who, 0, 100_000);
+        }
+        run_to_epoch_close();
+        for seed in 10u8..20 {
+            assert_ok!(TradingRewards::settle_epoch(
+                RuntimeOrigin::signed(bob()),
+                account(seed)
+            ));
+        }
+        // Each unscaled demand is 250, so ten of them would have promised 2,500
+        // against a budget of 120.
+        assert_eq!(
+            TotalAccrued::<Test>::get(),
+            budget,
+            "the budget is spent exactly, and never over"
+        );
+        assert_eq!(
+            record(&account(10)).accrued,
+            120,
+            "the first taker gets the headroom"
+        );
+        assert_eq!(record(&account(11)).accrued, 0, "and the rest get nothing");
         assert_ok!(TradingRewards::do_try_state());
     });
 }

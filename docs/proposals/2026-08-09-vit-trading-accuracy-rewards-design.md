@@ -139,6 +139,29 @@ The bond is denominated in **USDC**, not VIT. SQ-560 records that the only exter
 signable VIT at genesis is the founding and ops allocation, so a VIT bond would restrict the
 program to insiders. Traders already hold USDC, because they need it to trade at all.
 
+**An accepted residual: a roster slot held by an account that never claims** (recorded by the
+TR5 implementer, 2026-08-10, under the TR3 review's obligation to decide it rather than leave
+it open). `withdraw_bond` returns the whole bond and **retains** the record when a reward is
+unclaimed, because an accrual outstanding past an epoch boundary routinely meets an empty
+budget and refusing the withdrawal would leave the participant able to neither claim nor
+withdraw. `claim_rewards` then returns the roster slot when an honest claimant collects. That
+closes the honest case and not the hostile one: an account can make `accrued` nonzero once,
+withdraw, never claim, and hold one of the 4,096 slots **at zero marginal cost** from that
+point — it forfeits only a reward it never wanted. The ordinary squat costs 409.6 USDC of
+*continuously held* capital; this one costs a one-time price and nothing thereafter.
+
+**Accepted rather than closed, for three reasons.** It is not fund-unsafe: a retained record
+holds no bond, earns nothing at a zero cap, and can never be paid twice. The attacker's cost
+is not zero either — reaching a nonzero `accrued` needs a real bond, a profitable epoch and a
+settlement, one slot at a time — so exhausting the roster means running the exercise 4,096
+times. And every closure considered costs more than it buys: a permissionless claim crank
+changes a call signature the authority matrix already names; a dormancy expiry needs a
+per-record block stamp, a new 13 §4 bound and a rule for forfeiting a claim the protocol
+promised. **The remedy if it is ever exercised is to raise the roster bound**, which is a 13 §4
+value and needs no new mechanism. Should a v2 want it closed properly, the cheap shape is a
+dormancy expiry keyed on the record's own last-settled epoch, which `settle_epoch` already
+writes.
+
 ### 4.4 The score
 
 Per enrolled account, per market, `pallet-market` accumulates three unsigned counters and the

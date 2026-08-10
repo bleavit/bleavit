@@ -13,7 +13,7 @@ use sp_core::crypto::AccountId32;
 use sp_runtime::{traits::IdentityLookup, BuildStorage};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use trading_rewards_core::MarketSettlement;
+use trading_rewards_core::{BranchDisposition, MarketSettlement};
 
 type Block = frame_system::mocking::MockBlock<Test>;
 
@@ -86,8 +86,56 @@ impl trading_rewards_core::SettledMarkets<AccountId32> for MockSettledMarkets {
     }
 }
 
+/// Declare a book terminal, exactly as TR7's runtime adapter will.
+pub fn settle_book(
+    who: &AccountId32,
+    market: MarketId,
+    disposition: BranchDisposition,
+    position: [Balance; 2],
+    settled_value: [Balance; 2],
+) {
+    SETTLEMENTS.with(|map| {
+        map.borrow_mut().insert(
+            (who.clone(), market),
+            MarketSettlement {
+                disposition,
+                position,
+                settled_value,
+            },
+        )
+    });
+}
+
+/// The 13 §4 absolute lifetime of one score entry, as the pallet reads it.
+pub fn score_entry_timeout() -> u64 {
+    u64::from(futarchy_primitives::bounds::SCORE_ENTRY_LIFETIME_BLOCKS)
+}
+
 pub fn run_to_block(block: u64) {
     System::set_block_number(block);
+}
+
+/// Close the epoch in flight. The program adds no clock of its own, so this is
+/// the protocol epoch moving on.
+pub fn run_to_epoch_close() {
+    CurrentEpoch::set(CurrentEpoch::get().saturating_add(1));
+}
+
+pub fn insurance_balance() -> Balance {
+    usdc_balance(&InsuranceAccount::get())
+}
+
+/// Fund the sovereign with the VIT worth `usdc` of authorized budget at the
+/// live rate, so a test can state a budget in the unit the scaling uses.
+/// Returns what the pallet will read back, which is the figure to assert on.
+pub fn authorize_budget_usdc(usdc: Balance) -> Balance {
+    let vit = pallet_trading_rewards::Pallet::<Test>::usdc_to_vit(usdc)
+        .expect("the mock rate is set before a budget is authorized");
+    // Plus the existential deposit, which the pallet deliberately does not
+    // count as budget: the sovereign also custodies every USDC bond, so its
+    // native account must never be reapable by a payout.
+    fund_reward_budget(vit.saturating_add(VitExistentialDeposit::get()));
+    pallet_trading_rewards::Pallet::<Test>::authorized_budget_usdc().unwrap_or_default()
 }
 
 pub struct MockRewardRate;
@@ -144,6 +192,10 @@ impl pallet_trading_rewards::BenchmarkHelper<AccountId32> for MockBenchmarkHelpe
 
     fn prime_vit_rate(rate: u64) {
         VitUsdcRate::set(Some(rate));
+    }
+
+    fn advance_epoch() {
+        run_to_epoch_close();
     }
 }
 
