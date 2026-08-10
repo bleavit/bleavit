@@ -338,8 +338,14 @@ mod benches {
     /// half-exercised fixture regenerate this weight downward in silence.
     #[benchmark]
     fn fund_trading_rewards() {
-        IncentiveRemaining::<T>::put(T::IncentiveAllocationAmount::get());
+        // A real retire-and-reauthorize cycle: the previous authorization has
+        // already debited the pot, and its unspent remainder is still sitting
+        // in the sovereign. Seeding the allocation at its genesis figure
+        // instead would put the credit under `credit_pot_headroom`'s cap and
+        // leave the return leg invisible in the post-state.
         let returned = 500_000 * VIT;
+        let allocation = T::IncentiveAllocationAmount::get();
+        IncentiveRemaining::<T>::put(allocation.saturating_sub(returned));
         let primed = T::BenchmarkHelper::prime_trading_reward_headroom(returned);
         assert!(primed.is_ok());
         let amount = 1_000_000 * VIT;
@@ -349,13 +355,15 @@ mod benches {
 
         // The authorization leg ran.
         assert_eq!(TradingRewardBudgetCount::<T>::get(), 1);
-        // And so did the return leg. Asserting the sovereign's post-call
-        // balance is what distinguishes the two shapes: with the remainder
-        // returned first the sovereign holds exactly the new authorization,
-        // while a fixture that primed nothing (or an adapter that reported
-        // nothing) leaves the same `IncentiveRemaining` figure behind and
-        // would satisfy an allocation-only assertion.
-        assert_eq!(T::TradingRewardFunding::reward_sovereign_balance(), amount);
+        // And so did the return leg: the pot lands at `allocation − amount`
+        // only because `returned` was credited back before the debit. A
+        // fixture that primed nothing, or an adapter with nothing to report,
+        // lands `returned` lower — which is the whole difference between
+        // measuring this call and measuring half of it.
+        assert_eq!(
+            IncentiveRemaining::<T>::get(),
+            allocation.saturating_sub(amount)
+        );
     }
 
     #[benchmark]
