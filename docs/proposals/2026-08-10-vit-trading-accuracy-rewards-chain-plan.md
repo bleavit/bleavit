@@ -802,6 +802,14 @@ Re-snapshot the bond whenever an epoch closes for that participant, **including 
    - an enrolled account filling an external book gets **no** `Scores` entry and **no** `ScoreCount` increment, and the trade still executes;
    - an enrolled account filling a **primary** book still scores, in the same test file, so a mutation that hardcodes the bool to `false` cannot pass. Prove that by running the mutation.
 
+**A sixth obligation, from the same review and ruled the same day.**
+
+6. **Gate scoring on a conjunction: nonzero bond AND not suspended.** TR4's accumulator tests `bond > 0` alone. 08 §2.6 now states the rule outright (SQ-1050) and neither half implies the other. TR3 clears `suspended` only at the minimum bond `enroll` demands, so a **sub-minimum** top-up leaves a suspended account holding a nonzero bond and the balance gate resumes scoring while the flag still says suspended. Going the other way, a voluntary `withdraw_bond` retains the record at zero bond and never sets the flag, so the flag alone would score an account with nothing behind it.
+
+   Do not argue from the earning cap. A zero `snapshot_bond` makes the reward *round* to zero, which is an accident of the floor rather than a refusal — that is the reasoning TR2's review retired, and TR4's own self-review then rewrote a comment to stop relying on it.
+
+   Test both halves separately, and mutate each one away in turn. A test suite that only exercises the bond half passes with the flag check deleted, and this plan has now produced four tests that could not fail.
+
 - [ ] **Step 5: Run the tests and confirm they pass**
 
 Run: `cargo test -p pallet-trading-rewards`

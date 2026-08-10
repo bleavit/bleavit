@@ -252,9 +252,15 @@ claimant-adverse rounding straightforward.
 
 1. A buy adds `cost + fee` to `spent`, rounded up, and adds the filled quantity to
    `book_acquired` for that branch.
-2. A sell adds proceeds to `received`, rounded down, **but only for the part of the sale covered
-   by `book_acquired`**, and decrements `book_acquired` by that quantity. Proceeds beyond it are
-   ignored.
+2. A sell adds proceeds **net of the fee the book withholds** — `proceeds − fee` — to `received`,
+   rounded down, **but only for the part of the sale covered by `book_acquired`**, and decrements
+   `book_acquired` by that quantity. Proceeds beyond it are ignored. *(Clarified 2026-08-10,
+   SQ-1049's sibling SQ-1048: this rule said only "adds proceeds" while rule 1 spelled its arm out
+   as `cost + fee`, and the two readings differ by the fee on every sale. Net is what the seller
+   actually received. Crediting the gross figure would score a trader on value the protocol took,
+   which is the one rounding direction R-7 forbids, and it would break the symmetry with rule 1 —
+   a buy is charged more than the book cost and a sale is credited less, so the fee is adverse on
+   both sides.)*
 3. Settlement adds `min(position, book_acquired) × settled_value` to `received`, rounded down.
    `settled_value` is the branch's terminal redemption value per unit.
 4. The market score is `received − spent`, and it may be negative.
@@ -319,7 +325,17 @@ Four further rules bind the settlement, and each is a G-1 direction rather than 
   pair in a thin epoch take the whole budget against a fixed small forfeit. Scaling both keeps a
   wash pair neutral at every budget level.
 - A debit never drives the bond below zero. It takes the whole bond and suspends the participant
-  until they top up.
+  until they top up. **Suspension suspends scoring, and the accumulator MUST test the suspension
+  flag rather than infer it from a nonzero bond** *(added 2026-08-10, SQ-1050)*. The two are not
+  the same condition. A top-up clears the flag only at the minimum bond `enroll` already demands,
+  so a **sub-minimum** top-up leaves a suspended participant holding a nonzero bond, and a gate
+  reading the balance alone would resume scoring while the flag says otherwise. The bond must be
+  tested as well, because a voluntary `withdraw_bond` leaves a retained record at zero bond and
+  never sets the flag. The admission condition is therefore **both**: a nonzero bond and no
+  suspension. Stating it as a conjunction rather than deriving one side matters, because the
+  earning cap is *not* a backstop here — a zero cap makes a reward round to zero, which is an
+  arithmetic accident of the floor rather than a refusal, and it is the argument this subsection
+  already retired once.
 - Forfeited USDC goes to `INSURANCE`, the standing destination for USDC taken from an account
   (§1.2, §1.4).
 - Accrued reward is paid from the authorized budget alone. The program never draws on `MAIN`.
