@@ -1178,9 +1178,13 @@ fn a_fill_by_a_non_enrolled_account_records_nothing() {
 #[test]
 fn a_fill_by_a_bond_free_retained_record_records_nothing() {
     // `withdraw_bond` keeps the record alive at `bond = 0` to carry an
-    // unclaimed accrual. Its cap is zero, so a score could never pay — and
-    // every row it created would block `claim_rewards` from closing the record
-    // and returning its roster slot. A bare `contains_key` predicate scores it.
+    // unclaimed accrual. Skipping its fills is safe because an unscored buy
+    // raises no `book_acquired`, so the `book_acquired` rule credits zero at
+    // settlement for exactly the units whose `spent` was skipped — not
+    // because the cap is zero (a score can fold into a later epoch whose cap
+    // is real). Every row it created would also block `claim_rewards` from
+    // closing the record and returning its roster slot. A bare
+    // `contains_key` predicate scores it.
     new_test_ext().execute_with(|| {
         enrolled_alice(1_000);
         record_test_accrual(&alice(), 250);
@@ -1406,14 +1410,23 @@ fn try_state_catches_a_score_row_under_a_zero_bond() {
 #[test]
 fn an_overflowing_fill_leaves_the_entry_byte_identical() {
     // 08 §2.6: "an arithmetic edge is a no-op". `on_buy` bumps `spent` before
-    // it touches the branch slot, so a partially-applied score is exactly what
-    // a careless implementation would persist.
+    // it touches the branch slot, so the case that matters is **partial
+    // application**: `spent`'s `checked_add` succeeds and the branch slot's
+    // `checked_add` then overflows. Seeding `spent = Balance::MAX - 1`
+    // instead (fix round 1, Important 1) fails at the *first* `checked_add`,
+    // before `on_buy` ever touches `score` — the local copy never diverges
+    // from `before`, so the later `score == before` skip absorbs the write
+    // on its own and the `outcome.is_err()` guard this test is named for is
+    // never exercised. Seeding the branch slot instead forces the
+    // divergence: `spent` is written, `book_acquired` is not, and only the
+    // guard being tested stops that half-written score from reaching
+    // storage.
     new_test_ext().execute_with(|| {
         enrolled_alice(1_000);
         observe(&alice(), MARKET_A, SCORE_SIDE_LONG, 700, 500, 3, true);
         Scores::<Test>::mutate(alice(), MARKET_A, |slot| {
             if let Some(score) = slot.as_mut() {
-                score.spent = Balance::MAX - 1;
+                score.book_acquired[SCORE_SIDE_LONG] = Balance::MAX;
             }
         });
         let before = Scores::<Test>::get(alice(), MARKET_A).expect("scored");
