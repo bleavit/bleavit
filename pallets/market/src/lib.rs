@@ -716,6 +716,13 @@ pub mod pallet {
         /// inputs are unavailable.
         type BaselineGrade: crate::BaselineGrade;
 
+        /// Per-fill observer for an incentive program (08 §2.6 *Scope*). The
+        /// book reports each fill and never learns who listens; `()` is the
+        /// no-op, and a runtime that runs no such program binds it.
+        ///
+        /// The trait is infallible, so no observer can refuse a lawful trade.
+        type TradeObserver: market_core::TradeObserver<Self::AccountId>;
+
         /// Cross-pallet keeper-rebate fixture used only by runtime benchmarks.
         #[cfg(feature = "runtime-benchmarks")]
         type BenchmarkHelper: crate::BenchmarkHelper<Self::AccountId>;
@@ -4169,6 +4176,25 @@ pub mod pallet {
             Ok(described)
         }
 
+        /// Deposit one core event, and report a fill to the 08 §2.6 observer.
+        ///
+        /// This is the **single** place a completed fill becomes visible:
+        /// `buy` and `sell` both funnel their core events through it, so one
+        /// hook covers both and there is no second path.
+        ///
+        /// **The fee is recomputed rather than threaded.** `Traded.cost` is
+        /// frozen by 02 §5 and excludes the fee, and `market_core` charges
+        /// exactly `fee_up(cost, fee_bps)` on a buy and withholds exactly
+        /// `fee_up(proceeds, fee_bps)` on a sell — in both cases the argument
+        /// is the very figure the event carries. So the same pure function
+        /// reproduces it here, in the same dispatch, from the same `T::Fee`
+        /// the trade itself priced with. That costs no extra storage access:
+        /// `buy`/`sell` already read `mkt.fee` through `Self::params()` before
+        /// the core call, so this read is served from the overlay.
+        ///
+        /// An arithmetic failure skips the report (G-1). Reporting a zero fee
+        /// instead would understate what the buyer paid, which is the one
+        /// direction that can flatter a score.
         fn deposit_trade_event(event: market_core::Event<T::AccountId>) -> DispatchResult {
             match event {
                 market_core::Event::Traded {
@@ -4178,14 +4204,24 @@ pub mod pallet {
                     amount,
                     cost,
                     p_after,
-                } => Self::deposit_event(Event::Traded {
-                    market,
-                    who,
-                    side,
-                    amount,
-                    cost,
-                    p_after,
-                }),
+                } => {
+                    // Before the deposit only to keep `who` borrowable; the
+                    // observer emits no events, so the order is unobservable.
+                    if let Ok(fee) = market_core::fee_up(cost, T::Fee::get()) {
+                        let (score_side, is_buy) = market_core::observer_parts(side);
+                        <T::TradeObserver as market_core::TradeObserver<T::AccountId>>::observe_fill(
+                            &who, market, score_side, amount, cost, fee, is_buy,
+                        );
+                    }
+                    Self::deposit_event(Event::Traded {
+                        market,
+                        who,
+                        side,
+                        amount,
+                        cost,
+                        p_after,
+                    })
+                }
                 market_core::Event::Observed { market, o_t } => {
                     Self::deposit_event(Event::Observed { market, o_t });
                 }

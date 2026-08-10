@@ -8456,6 +8456,7 @@ dependencies = [
  "frame-support",
  "frame-system",
  "futarchy-primitives",
+ "market-core",
  "pallet-assets",
  "pallet-balances",
  "parity-scale-codec",

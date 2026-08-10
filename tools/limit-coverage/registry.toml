@@ -1146,6 +1146,12 @@ error = "TradingRewards::TooManyParticipants"
 reason = "13 §4 / 08 §2.6: the 4,097th enrolment is refused before its USDC hold, its record, or the roster counter move; the marked test also admits the 4,096th, so the boundary is pinned in both directions."
 
 [[entry]]
+key = "MaxScoredMarketsPerAccount"
+class = "dispatch-limit"
+behavior = "records_no_score_and_never_refuses"
+reason = "13 §4 / 08 §2.6: the fill observer admits the 196th market and records nothing for the 197th, while the trade itself is never refused — the marked test pins both directions of the boundary and also proves the bound blocks only a new entry, so a fill into an already-scored market at the bound still accumulates."
+
+[[entry]]
 key = "Pending collator authored-share entries"
 class = "value"
 reason = "13 §4 / 08 §2.4: the authored-share accumulators are bounded storage values (current epoch plus at most one pending completed epoch, 120 entries each, 240 worst case); a 121st distinct author is fail-closed and is not admitted into state, so there is no separate dispatch error surface."

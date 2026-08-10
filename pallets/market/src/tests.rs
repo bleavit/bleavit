@@ -5220,3 +5220,224 @@ fn try_state_enforces_external_pair_atomicity_and_immutable_funder() {
         assert_err!(Market::do_try_state(), E::TryStateViolation);
     });
 }
+
+// ------------------------------------- 08 §2.6: the loosely-coupled fill report
+//
+// The book reports every fill through `TradeObserver` so an incentive program
+// can score it without the book ever depending on that program. These tests
+// pin what the book reports, against custody rather than against the report's
+// own arithmetic: an implementation that reported the wrong figure but was
+// internally consistent would still fail them.
+
+#[test]
+fn a_buy_reports_one_fill_carrying_the_cost_and_the_fee_the_book_charged() {
+    new_test_ext().execute_with(|| {
+        create_decision();
+        seed(MARKET_ID);
+        System::set_block_number(10);
+        let before = Markets::<Test>::get(MARKET_ID).expect("created market exists");
+        // Independent oracle: the quote a client reads off the pre-trade book,
+        // never the pallet's own report of what it just did.
+        let quoted = market_core::quote(&before, TradeSide::BuyLong, TRADE, Fee::get())
+            .expect("the seeded book quotes this trade");
+        let branch_usdc = position(PROPOSAL, Branch::Accept, PositionKind::BranchUsdc);
+        let fees_before = position_balance(branch_usdc, FEES);
+        let escrow_before = pallet_conditional_ledger::Vaults::<Test>::get(PROPOSAL)
+            .expect("market creation creates its vault")
+            .escrowed;
+
+        assert_ok!(Market::buy(
+            signed(ALICE),
+            MARKET_ID,
+            ScalarSide::Long,
+            TRADE,
+            600 * UNIT,
+        ));
+
+        let fills = observed_fills();
+        // The same dispatch also emits `Observed`; only the fill is reported.
+        assert_eq!(fills.len(), 1, "one Traded event reports exactly one fill");
+        let fill = fills[0];
+        assert_eq!(fill.who, ALICE);
+        assert_eq!(fill.market, MARKET_ID);
+        assert_eq!(fill.side, market_core::SCORE_SIDE_LONG);
+        assert!(fill.is_buy);
+        assert_eq!(fill.qty, TRADE);
+        assert_eq!(fill.cost, quoted.cost);
+        assert_eq!(fill.fee, quoted.fee);
+        // Without these two the assertions below could hold vacuously, and a
+        // report that confused cost with fee would survive.
+        assert!(fill.fee > 0);
+        assert_ne!(fill.cost, fill.fee);
+        assert_ne!(fill.cost, fill.qty);
+        // Custody, not arithmetic. The buyer's split raises the vault escrow by
+        // exactly the plain USDC that left them, so this pins the sum 08 §2.6
+        // adds to `spent` — a report that dropped or double-counted the fee
+        // would miss it by one fee.
+        let escrow_after = pallet_conditional_ledger::Vaults::<Test>::get(PROPOSAL)
+            .expect("vault remains open")
+            .escrowed;
+        assert_eq!(
+            escrow_after - escrow_before,
+            fill.cost + fill.fee,
+            "the buyer paid the reported cost plus the reported fee",
+        );
+        assert_eq!(
+            position_balance(branch_usdc, FEES) - fees_before,
+            fill.fee,
+            "the reported fee is what the fee account received",
+        );
+        assert_try_state();
+    });
+}
+
+#[test]
+fn a_sell_reports_the_gross_proceeds_and_the_fee_the_book_withheld() {
+    new_test_ext().execute_with(|| {
+        create_decision();
+        seed(MARKET_ID);
+        System::set_block_number(10);
+        assert_ok!(Market::buy(
+            signed(ALICE),
+            MARKET_ID,
+            ScalarSide::Long,
+            TRADE,
+            600 * UNIT,
+        ));
+
+        let before = Markets::<Test>::get(MARKET_ID).expect("created market exists");
+        let quoted = market_core::quote(&before, TradeSide::SellLong, TRADE, Fee::get())
+            .expect("the book quotes this sale");
+        let branch_usdc = position(PROPOSAL, Branch::Accept, PositionKind::BranchUsdc);
+        let fees_before = position_balance(branch_usdc, FEES);
+        let escrow_before = pallet_conditional_ledger::Vaults::<Test>::get(PROPOSAL)
+            .expect("market creation creates its vault")
+            .escrowed;
+
+        System::set_block_number(20);
+        assert_ok!(Market::sell(
+            signed(ALICE),
+            MARKET_ID,
+            ScalarSide::Long,
+            TRADE,
+            1,
+        ));
+
+        let fills = observed_fills();
+        assert_eq!(fills.len(), 2, "the buy and the sale each report once");
+        let fill = fills[1];
+        assert_eq!(fill.who, ALICE);
+        assert_eq!(fill.market, MARKET_ID);
+        assert_eq!(fill.side, market_core::SCORE_SIDE_LONG);
+        assert!(!fill.is_buy);
+        assert_eq!(fill.qty, TRADE);
+        assert_eq!(fill.cost, quoted.cost);
+        assert_eq!(fill.fee, quoted.fee);
+        assert!(fill.fee > 0);
+
+        // The escrow the vault released is exactly the plain USDC the seller
+        // was paid (the mirror merge of `decision_sell_round_trip_...`). That
+        // pins the reported `cost` as the **gross** proceeds: a report that
+        // passed the net figure would leave `cost - fee` short by one fee.
+        let escrow_after = pallet_conditional_ledger::Vaults::<Test>::get(PROPOSAL)
+            .expect("vault remains open")
+            .escrowed;
+        let released = escrow_before - escrow_after;
+        assert!(released > 0);
+        assert_eq!(
+            fill.cost - fill.fee,
+            released,
+            "the seller received the reported cost less the reported fee",
+        );
+        assert_eq!(
+            position_balance(branch_usdc, FEES) - fees_before,
+            fill.fee,
+            "the reported fee is what the fee account withheld",
+        );
+        assert_try_state();
+    });
+}
+
+#[test]
+fn a_short_fill_reports_the_short_branch() {
+    // The one place a LONG fill could silently be scored as a SHORT one. Both
+    // sides are traded in the same test, so a report that pinned one index
+    // would fail on the other.
+    new_test_ext().execute_with(|| {
+        create_decision();
+        seed(MARKET_ID);
+        System::set_block_number(10);
+        assert_ok!(Market::buy(
+            signed(ALICE),
+            MARKET_ID,
+            ScalarSide::Short,
+            TRADE,
+            600 * UNIT,
+        ));
+        assert_ok!(Market::buy(
+            signed(BOB),
+            MARKET_ID,
+            ScalarSide::Long,
+            TRADE,
+            600 * UNIT,
+        ));
+
+        let fills = observed_fills();
+        assert_eq!(fills.len(), 2);
+        assert_eq!(fills[0].who, ALICE);
+        assert_eq!(fills[0].side, market_core::SCORE_SIDE_SHORT);
+        assert_eq!(fills[1].who, BOB);
+        assert_eq!(fills[1].side, market_core::SCORE_SIDE_LONG);
+        assert_ne!(fills[0].side, fills[1].side);
+        assert_try_state();
+    });
+}
+
+#[test]
+fn an_observation_reports_no_fill() {
+    // `deposit_trade_event` also carries `Observed`. Reporting that arm would
+    // score a keeper crank as though it were a trade.
+    new_test_ext().execute_with(|| {
+        create_decision();
+        seed(MARKET_ID);
+        System::set_block_number(10);
+        assert_ok!(Market::buy(
+            signed(ALICE),
+            MARKET_ID,
+            ScalarSide::Long,
+            TRADE,
+            600 * UNIT,
+        ));
+        let after_trade = observed_fills().len();
+        assert_eq!(after_trade, 1);
+
+        System::set_block_number(40);
+        assert_ok!(Market::crank_observe(signed(BOB), MARKET_ID));
+        assert!(market_events()
+            .iter()
+            .any(|event| matches!(event, Event::Observed { .. })));
+        assert_eq!(
+            observed_fills().len(),
+            after_trade,
+            "an observation is not a fill",
+        );
+        assert_try_state();
+    });
+}
+
+#[test]
+fn a_refused_trade_reports_nothing() {
+    // G-1: the report follows a completed fill. A trade that never executed
+    // must leave no score behind it.
+    new_test_ext().execute_with(|| {
+        create_decision();
+        seed(MARKET_ID);
+        System::set_block_number(10);
+        assert_noop!(
+            Market::buy(signed(ALICE), MARKET_ID, ScalarSide::Long, TRADE, 1),
+            E::SlippageExceeded,
+        );
+        assert!(observed_fills().is_empty());
+        assert_try_state();
+    });
+}

@@ -5187,6 +5187,10 @@ impl pallet_market::Config for Runtime {
     type MainAccount = TreasuryMainAccount;
     type MainRevenueSink = RuntimeMainRevenueSink;
     type BaselineGrade = RuntimeBaselineGrade;
+    // 08 §2.6's trading-accuracy program is not in `construct_runtime!` yet, so
+    // the book reports its fills to the no-op observer and the trade path pays
+    // nothing for it. TR7 binds `TradingRewards` here and re-benchmarks.
+    type TradeObserver = ();
 }
 
 pub struct RuntimePrimaryProposalIds;

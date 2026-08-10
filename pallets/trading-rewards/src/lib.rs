@@ -40,6 +40,13 @@ use futarchy_primitives::{Balance, EpochId};
 /// the sibling allocation pot's lifetime bound rather than restated here.
 pub const MAX_PARTICIPANTS: u32 = futarchy_primitives::bounds::MAX_TRADING_REWARD_PARTICIPANTS;
 
+/// 13 §4 bound on one account's unfolded score entries. 08 §2.6 fixes the
+/// anchor: it is `MaxLiveMarkets`, "because a score row tracks an open book",
+/// and `MaxPositionsPerAccount` "is the wrong anchor and MUST NOT be used".
+/// Derived from the same constant `pallet-market` bounds itself with, so the
+/// two cannot drift.
+pub const MAX_SCORED_MARKETS_PER_ACCOUNT: u32 = futarchy_primitives::bounds::MAX_LIVE_MARKETS;
+
 /// `FixedU64`'s fixed-point divisor. `fee.vit_usdc_rate` is a 13 §1 `Fixed`
 /// row in USDC per VIT, so its stored integer is the rate times this.
 const FIXED_DIV: u128 = 1_000_000_000;
@@ -264,6 +271,12 @@ pub mod pallet {
         #[pallet::constant_name(MaxParticipants)]
         fn max_participants() -> u32 {
             MAX_PARTICIPANTS
+        }
+
+        /// 13 §4's bound on one account's unfolded score entries.
+        #[pallet::constant_name(MaxScoredMarketsPerAccount)]
+        fn max_scored_markets_per_account() -> u32 {
+            MAX_SCORED_MARKETS_PER_ACCOUNT
         }
     }
 
@@ -563,9 +576,34 @@ pub mod pallet {
                 .ok_or(Error::<T>::VitRateUnset.into())
         }
 
-        /// The single read TR4's hot path makes, once per fill.
-        pub fn is_enrolled(who: &T::AccountId) -> bool {
-            Participants::<T>::contains_key(who)
+        /// The single read the fill observer makes, once per fill, before it
+        /// can do anything else (08 §2.6 *Three accepted costs*: "the book must
+        /// check enrollment before it can skip the accumulator").
+        ///
+        /// **Enrolment alone is the wrong predicate, and a live bond is the
+        /// right one.** `withdraw_bond` retains the record at `bond = 0` while
+        /// an accrual is unclaimed, and a debit that takes the whole bond
+        /// leaves the same shape. Such a record scores nothing that can ever
+        /// pay: `try-state` holds `snapshot_bond <= bond`, so a zero bond is a
+        /// zero snapshot, and 08 §2.6's cap `snapshot_bond / (r × headroom)` is
+        /// then zero — every outcome is `Neutral` in both directions. What
+        /// scoring it would cost is real: each row it creates blocks its own
+        /// `claim_rewards` from closing the record (that path requires
+        /// `ScoreCount == 0`), so a bond-free account could hold a roster slot
+        /// against [`MAX_PARTICIPANTS`] indefinitely by trading.
+        ///
+        /// The predicate is `bond`, never `snapshot_bond`. A participant who
+        /// was debited to zero and then topped up carries `bond > 0` with
+        /// `snapshot_bond` still 0 until settlement re-snapshots it, and their
+        /// fills MUST be scored: 08 §2.6 defers the *cap* to the next epoch,
+        /// not the accounting, and a fill folds into whichever epoch is open
+        /// when its market settles. Skipping them would drop the losses too,
+        /// which is the direction that costs the program money.
+        ///
+        /// Reading the record rather than probing for the key costs the same
+        /// one storage access.
+        pub fn scores_fills(who: &T::AccountId) -> bool {
+            Participants::<T>::get(who).is_some_and(|record| record.bond > 0)
         }
 
         /// The live minimum bond: `ledger.pos_dep`, never below the USDC asset
@@ -630,9 +668,20 @@ pub mod pallet {
                     .ok_or(TryRuntimeError::Other(
                         "trading-rewards: accrual total overflow",
                     ))?;
+                let score_count = ScoreCount::<T>::get(&who);
                 ensure!(
-                    ScoreCount::<T>::get(&who) == score_rows.remove(&who).unwrap_or(0),
+                    score_count == score_rows.remove(&who).unwrap_or(0),
                     TryRuntimeError::Other("trading-rewards: ScoreCount disagrees with Scores")
+                );
+                // 13 §4's per-account score-entry bound. The observer refuses a
+                // new entry at the bound, so no lawful state reaches this; the
+                // check is what makes that a proven property of the state at
+                // rest rather than of one write path (rule 8).
+                ensure!(
+                    score_count <= MAX_SCORED_MARKETS_PER_ACCOUNT,
+                    TryRuntimeError::Other(
+                        "trading-rewards: score entries over MaxScoredMarketsPerAccount"
+                    )
                 );
             }
 
@@ -686,6 +735,84 @@ pub mod pallet {
                 TryRuntimeError::Other("trading-rewards: bond custody under the held total")
             );
             Ok(())
+        }
+    }
+
+    /// The book's per-fill report, accumulated into the 08 §2.6 score.
+    ///
+    /// **Every failure here is a silent no-op, and that is the specified
+    /// direction.** 08 §2.6 puts an over-bound fill and an arithmetic edge at
+    /// "records no score and never rejects the trade": refusing a lawful trade
+    /// to protect a rewards accumulator is the wrong way round under G-1. The
+    /// trait is infallible for the same reason, so there is no channel by
+    /// which this code could refuse one even by mistake.
+    impl<T: Config> market_core::TradeObserver<T::AccountId> for Pallet<T> {
+        fn observe_fill(
+            who: &T::AccountId,
+            market: futarchy_primitives::MarketId,
+            side: usize,
+            qty: Balance,
+            cost: Balance,
+            fee: Balance,
+            is_buy: bool,
+        ) {
+            // The one read every trade pays, enrolled or not (08 §2.6's first
+            // accepted cost). Nothing above it touches storage, so a
+            // non-participant's fill costs exactly this and stops here.
+            if !Self::scores_fills(who) {
+                return;
+            }
+            let existing = Scores::<T>::get(who, market);
+            // Read the counter only when a new entry would be created, so the
+            // ordinary fill — one into a market already scored — pays two reads
+            // rather than three.
+            let count = match existing {
+                Some(_) => None,
+                None => {
+                    let count = ScoreCount::<T>::get(who);
+                    if count >= MAX_SCORED_MARKETS_PER_ACCOUNT {
+                        return;
+                    }
+                    match count.checked_add(1) {
+                        Some(next) => Some(next),
+                        None => return,
+                    }
+                }
+            };
+            let before = existing.unwrap_or_default();
+            let mut score = before.clone();
+            // The accumulator works on a local copy, so a mid-way arithmetic
+            // failure cannot leave a partly-applied score in storage: `on_buy`
+            // raises `spent` before it touches the branch slot.
+            let outcome = if is_buy {
+                trading_rewards_core::on_buy(&mut score, side, qty, cost, fee)
+            } else {
+                // 08 §2.6 credits a sale with what the seller received. The
+                // book withholds the fee out of the gross proceeds `cost`
+                // carries, exactly as the buy leg adds it, so crediting the
+                // gross figure would hand the trader a fee they never got —
+                // the one rounding direction R-7 forbids. `saturating_sub`
+                // keeps that direction even if the two ever disagreed.
+                trading_rewards_core::on_sell(&mut score, side, qty, cost.saturating_sub(fee))
+            };
+            if outcome.is_err() {
+                return;
+            }
+            // A fill that moved nothing writes nothing. The reachable case is a
+            // sale entirely out of off-book inventory, which credits zero by
+            // the `book_acquired` rule: recording it would take a slot against
+            // the 13 §4 per-account bound for a row that folds to nothing, and
+            // an unfolded row blocks both `withdraw_bond` and the close in
+            // `claim_rewards`. So an account holding only split-created or
+            // transferred-in units could lock its own bond behind markets it
+            // has no stake in. Nothing is lost, because the score is identical.
+            if score == before {
+                return;
+            }
+            Scores::<T>::insert(who, market, score);
+            if let Some(next) = count {
+                ScoreCount::<T>::insert(who, next);
+            }
         }
     }
 

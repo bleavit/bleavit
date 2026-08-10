@@ -333,6 +333,7 @@ impl pallet_market::Config for Test {
     type MainAccount = MainAccount;
     type MainRevenueSink = MainRevenue;
     type BaselineGrade = ();
+    type TradeObserver = ();
 }
 
 pub struct ClientBond;

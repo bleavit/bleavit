@@ -8,10 +8,12 @@
 use crate::mock::*;
 use crate::{
     Error, Event, ParticipantCount, Participants, ScoreCount, Scores, TotalAccrued,
-    MAX_PARTICIPANTS,
+    MAX_PARTICIPANTS, MAX_SCORED_MARKETS_PER_ACCOUNT,
 };
 use frame_support::traits::fungibles::Mutate as MutateAsset;
 use frame_support::{assert_noop, assert_ok};
+use futarchy_primitives::Balance;
+use market_core::{TradeObserver, SCORE_SIDE_LONG, SCORE_SIDE_SHORT};
 use sp_runtime::DispatchError;
 
 fn events() -> Vec<Event<Test>> {
@@ -49,7 +51,7 @@ fn enroll_holds_the_bond_and_opens_a_record() {
         // real custody, not a bookkeeping entry.
         assert_eq!(usdc_balance(&alice()), before - 1_000);
         assert_eq!(sovereign_usdc(), 1_000);
-        assert!(TradingRewards::is_enrolled(&alice()));
+        assert!(TradingRewards::scores_fills(&alice()));
         assert_ok!(TradingRewards::do_try_state());
     });
 }
@@ -472,7 +474,7 @@ fn withdraw_releases_the_whole_bond_and_closes_the_record() {
         assert_eq!(sovereign_usdc(), 0);
         assert!(Participants::<Test>::get(alice()).is_none());
         assert_eq!(ParticipantCount::<Test>::get(), 0);
-        assert!(!TradingRewards::is_enrolled(&alice()));
+        assert!(!TradingRewards::scores_fills(&alice()));
         assert!(events().iter().any(|event| matches!(
             event,
             Event::BondWithdrawn {
@@ -1091,5 +1093,349 @@ fn try_state_catches_a_participant_counter_that_drifted() {
         ));
         ParticipantCount::<Test>::put(2);
         assert!(TradingRewards::do_try_state().is_err());
+    });
+}
+
+// ---------------------------------------------------------------------------
+// The fill observer (08 §2.6)
+// ---------------------------------------------------------------------------
+
+/// One fill, reported exactly as `pallet-market` reports it.
+#[allow(clippy::too_many_arguments)]
+fn observe(
+    who: &sp_core::crypto::AccountId32,
+    market: futarchy_primitives::MarketId,
+    side: usize,
+    qty: Balance,
+    cost: Balance,
+    fee: Balance,
+    is_buy: bool,
+) {
+    <TradingRewards as TradeObserver<_>>::observe_fill(who, market, side, qty, cost, fee, is_buy);
+}
+
+fn enrolled_alice(bond: Balance) {
+    assert_ok!(TradingRewards::enroll(RuntimeOrigin::signed(alice()), bond));
+}
+
+#[test]
+fn a_fill_by_an_enrolled_account_records_the_cost_and_the_fee() {
+    new_test_ext().execute_with(|| {
+        enrolled_alice(1_000);
+        // Distinct qty, cost and fee, so a score built from the wrong argument
+        // cannot land on the right number by coincidence.
+        observe(&alice(), MARKET_A, SCORE_SIDE_LONG, 700, 500, 3, true);
+
+        let score = Scores::<Test>::get(alice(), MARKET_A).expect("the fill was scored");
+        // 08 §2.6: "a buy adds `cost + fee` to `spent`". An implementation that
+        // passed `cost` alone would record 500 here.
+        assert_eq!(score.spent, 503);
+        assert_eq!(score.received, 0);
+        assert_eq!(score.book_acquired, [700, 0]);
+        assert_eq!(ScoreCount::<Test>::get(alice()), 1);
+        assert_ok!(TradingRewards::do_try_state());
+    });
+}
+
+#[test]
+fn a_short_fill_credits_the_short_branch() {
+    new_test_ext().execute_with(|| {
+        enrolled_alice(1_000);
+        observe(&alice(), MARKET_A, SCORE_SIDE_SHORT, 700, 500, 3, true);
+        let score = Scores::<Test>::get(alice(), MARKET_A).expect("the fill was scored");
+        assert_eq!(
+            score.book_acquired,
+            [0, 700],
+            "a SHORT buy must not credit the LONG branch",
+        );
+        assert_ok!(TradingRewards::do_try_state());
+    });
+}
+
+#[test]
+fn a_fill_by_a_non_enrolled_account_records_nothing() {
+    new_test_ext().execute_with(|| {
+        observe(&bob(), MARKET_A, SCORE_SIDE_LONG, 700, 500, 3, true);
+        assert!(Scores::<Test>::get(bob(), MARKET_A).is_none());
+        assert_eq!(ScoreCount::<Test>::get(bob()), 0);
+        assert!(Participants::<Test>::get(bob()).is_none());
+        assert_ok!(TradingRewards::do_try_state());
+    });
+}
+
+#[test]
+fn a_fill_by_a_bond_free_retained_record_records_nothing() {
+    // `withdraw_bond` keeps the record alive at `bond = 0` to carry an
+    // unclaimed accrual. Its cap is zero, so a score could never pay — and
+    // every row it created would block `claim_rewards` from closing the record
+    // and returning its roster slot. A bare `contains_key` predicate scores it.
+    new_test_ext().execute_with(|| {
+        enrolled_alice(1_000);
+        record_test_accrual(&alice(), 250);
+        assert_ok!(TradingRewards::withdraw_bond(
+            RuntimeOrigin::signed(alice())
+        ));
+        let record = Participants::<Test>::get(alice()).expect("the record was retained");
+        assert_eq!(record.bond, 0);
+        assert_eq!(record.accrued, 250);
+
+        observe(&alice(), MARKET_A, SCORE_SIDE_LONG, 700, 500, 3, true);
+
+        assert!(Scores::<Test>::get(alice(), MARKET_A).is_none());
+        assert_eq!(ScoreCount::<Test>::get(alice()), 0);
+        assert_ok!(TradingRewards::do_try_state());
+    });
+}
+
+#[test]
+fn a_topped_up_account_is_scored_even_while_its_snapshot_is_still_zero() {
+    // The complement of the test above, and the reason the predicate is the
+    // bond rather than the snapshot. A participant debited to zero and then
+    // topped up carries `bond > 0` with `snapshot_bond` still 0 until
+    // settlement re-snapshots. 08 §2.6 defers the **cap** to the next epoch,
+    // not the accounting: a snapshot predicate would drop these fills, and
+    // with them the losses the bond exists to cover.
+    new_test_ext().execute_with(|| {
+        enrolled_alice(1_000);
+        // What a full debit leaves behind (TR5 writes this shape).
+        Participants::<Test>::mutate(alice(), |slot| {
+            if let Some(record) = slot.as_mut() {
+                record.bond = 0;
+                record.snapshot_bond = 0;
+                record.suspended = true;
+            }
+        });
+        assert_ok!(<Assets as MutateAsset<_>>::transfer(
+            UsdcAssetId::get(),
+            &TradingRewards::account_id(),
+            &alice(),
+            1_000,
+            frame_support::traits::tokens::Preservation::Expendable,
+        ));
+
+        assert_ok!(TradingRewards::top_up_bond(
+            RuntimeOrigin::signed(alice()),
+            1_000
+        ));
+        let record = Participants::<Test>::get(alice()).expect("record survives the debit");
+        assert_eq!(record.bond, 1_000);
+        assert_eq!(
+            record.snapshot_bond, 0,
+            "the top-up must not move the snapshot; the test is vacuous if it does",
+        );
+
+        observe(&alice(), MARKET_A, SCORE_SIDE_LONG, 700, 500, 3, true);
+
+        let score = Scores::<Test>::get(alice(), MARKET_A).expect("the fill was scored");
+        assert_eq!(score.spent, 503);
+        assert_ok!(TradingRewards::do_try_state());
+    });
+}
+
+#[test]
+fn a_sale_credits_the_book_acquired_part_net_of_the_fee() {
+    new_test_ext().execute_with(|| {
+        enrolled_alice(1_000);
+        observe(&alice(), MARKET_A, SCORE_SIDE_LONG, 600, 300, 2, true);
+
+        // Sell 1,000 units when only 600 came from the book, for gross
+        // proceeds of 1,500 with 30 withheld — so the seller received 1,470.
+        observe(&alice(), MARKET_A, SCORE_SIDE_LONG, 1_000, 1_500, 30, false);
+
+        let score = Scores::<Test>::get(alice(), MARKET_A).expect("scored");
+        // 1_470 * 600 / 1_000 = 882. Three wrong implementations land on three
+        // different numbers: crediting the gross proceeds gives 900, crediting
+        // units rather than value gives 600, and crediting the whole sale
+        // rather than the book-acquired part gives 1_470.
+        assert_eq!(score.received, 882);
+        assert_eq!(score.spent, 302, "the buy leg is unchanged by the sale");
+        assert_eq!(score.book_acquired, [0, 0]);
+        assert_eq!(
+            ScoreCount::<Test>::get(alice()),
+            1,
+            "two fills in one market share one entry",
+        );
+        assert_ok!(TradingRewards::do_try_state());
+    });
+}
+
+#[test]
+fn selling_off_book_inventory_scores_nothing_and_takes_no_entry() {
+    // 08 §2.6: the ledger's `split*` family and its signed `transfer` let an
+    // enrolled account hold units the book never sold it. Those carry no
+    // credit, which is what stops a manufactured score with no forecast in it.
+    //
+    // No entry is taken either. A row that folds to nothing would still take a
+    // slot against the 13 §4 per-account bound and still block `withdraw_bond`
+    // and the close in `claim_rewards`, so an account trading only off-book
+    // inventory could lock its own bond behind markets it has no stake in.
+    new_test_ext().execute_with(|| {
+        enrolled_alice(1_000);
+        observe(&alice(), MARKET_A, SCORE_SIDE_LONG, 1_000, 990, 9, false);
+        assert!(Scores::<Test>::get(alice(), MARKET_A).is_none());
+        assert_eq!(ScoreCount::<Test>::get(alice()), 0);
+        assert_ok!(TradingRewards::do_try_state());
+    });
+}
+
+#[test]
+fn a_partly_off_book_sale_still_keeps_its_entry() {
+    // The complement: the skip above must key on "the score did not move", not
+    // on "this was a sale". A sale that credits anything at all is recorded.
+    new_test_ext().execute_with(|| {
+        enrolled_alice(1_000);
+        observe(&alice(), MARKET_A, SCORE_SIDE_LONG, 10, 8, 1, true);
+        observe(&alice(), MARKET_A, SCORE_SIDE_LONG, 1_000, 990, 9, false);
+        let score = Scores::<Test>::get(alice(), MARKET_A).expect("the entry survives");
+        assert_eq!(score.spent, 9);
+        // 10 of the 1,000 units sold were book-acquired: (990 - 9) * 10 / 1000.
+        assert_eq!(score.received, 9);
+        assert_eq!(score.book_acquired, [0, 0]);
+        assert_eq!(ScoreCount::<Test>::get(alice()), 1);
+        assert_ok!(TradingRewards::do_try_state());
+    });
+}
+
+#[test]
+fn a_fill_past_the_score_bound_records_no_score_and_never_refuses() {
+    // limit-coverage: MaxScoredMarketsPerAccount
+    //
+    // 08 §2.6: a fill in a market beyond the per-account bound "records no
+    // score and never rejects the trade". The boundary is asserted in both
+    // directions, so an off-by-one either way fails here.
+    new_test_ext().execute_with(|| {
+        enrolled_alice(1_000);
+        for market in 0..MAX_SCORED_MARKETS_PER_ACCOUNT - 1 {
+            record_test_score(&alice(), u64::from(market), 1, 0);
+        }
+        assert_eq!(
+            ScoreCount::<Test>::get(alice()),
+            MAX_SCORED_MARKETS_PER_ACCOUNT - 1
+        );
+
+        // The last free slot is admitted.
+        let last = u64::from(MAX_SCORED_MARKETS_PER_ACCOUNT);
+        observe(&alice(), last, SCORE_SIDE_LONG, 700, 500, 3, true);
+        assert!(Scores::<Test>::get(alice(), last).is_some());
+        assert_eq!(
+            ScoreCount::<Test>::get(alice()),
+            MAX_SCORED_MARKETS_PER_ACCOUNT
+        );
+
+        // The next new market is not, and the fill is still not refused: the
+        // observer cannot report a failure, and nothing else moved.
+        let beyond = last + 1;
+        observe(&alice(), beyond, SCORE_SIDE_LONG, 700, 500, 3, true);
+        assert!(Scores::<Test>::get(alice(), beyond).is_none());
+        assert_eq!(
+            ScoreCount::<Test>::get(alice()),
+            MAX_SCORED_MARKETS_PER_ACCOUNT
+        );
+
+        // The bound blocks a new entry, never an existing one: a trader at the
+        // bound must still be scored in the markets they already hold.
+        observe(&alice(), last, SCORE_SIDE_LONG, 100, 40, 1, true);
+        let score = Scores::<Test>::get(alice(), last).expect("the existing entry survives");
+        assert_eq!(score.spent, 503 + 41);
+        assert_eq!(
+            ScoreCount::<Test>::get(alice()),
+            MAX_SCORED_MARKETS_PER_ACCOUNT
+        );
+        assert_ok!(TradingRewards::do_try_state());
+    });
+}
+
+#[test]
+fn try_state_catches_score_entries_over_the_per_account_bound() {
+    new_test_ext().execute_with(|| {
+        enrolled_alice(1_000);
+        for market in 0..MAX_SCORED_MARKETS_PER_ACCOUNT {
+            record_test_score(&alice(), u64::from(market), 1, 0);
+        }
+        // Exactly at the bound is a lawful state.
+        assert_ok!(TradingRewards::do_try_state());
+        record_test_score(&alice(), u64::from(MAX_SCORED_MARKETS_PER_ACCOUNT), 1, 0);
+        assert!(TradingRewards::do_try_state().is_err());
+    });
+}
+
+#[test]
+fn an_overflowing_fill_leaves_the_entry_byte_identical() {
+    // 08 §2.6: "an arithmetic edge is a no-op". `on_buy` bumps `spent` before
+    // it touches the branch slot, so a partially-applied score is exactly what
+    // a careless implementation would persist.
+    new_test_ext().execute_with(|| {
+        enrolled_alice(1_000);
+        observe(&alice(), MARKET_A, SCORE_SIDE_LONG, 700, 500, 3, true);
+        Scores::<Test>::mutate(alice(), MARKET_A, |slot| {
+            if let Some(score) = slot.as_mut() {
+                score.spent = Balance::MAX - 1;
+            }
+        });
+        let before = Scores::<Test>::get(alice(), MARKET_A).expect("scored");
+
+        observe(&alice(), MARKET_A, SCORE_SIDE_LONG, 700, 500, 3, true);
+
+        assert_eq!(
+            Scores::<Test>::get(alice(), MARKET_A),
+            Some(before),
+            "an overflowing fill writes nothing at all",
+        );
+        assert_eq!(ScoreCount::<Test>::get(alice()), 1);
+    });
+}
+
+#[test]
+fn an_overflowing_first_fill_creates_no_entry_and_no_counter() {
+    new_test_ext().execute_with(|| {
+        enrolled_alice(1_000);
+        observe(
+            &alice(),
+            MARKET_A,
+            SCORE_SIDE_LONG,
+            1,
+            Balance::MAX,
+            1,
+            true,
+        );
+        assert!(Scores::<Test>::get(alice(), MARKET_A).is_none());
+        assert_eq!(ScoreCount::<Test>::get(alice()), 0);
+        assert_ok!(TradingRewards::do_try_state());
+    });
+}
+
+#[test]
+fn a_fill_on_an_unknown_branch_index_records_nothing() {
+    // `side` is a `usize` on the wire between two crates. An out-of-range one
+    // must be a no-op, never an index panic and never a silent side-0 credit.
+    new_test_ext().execute_with(|| {
+        enrolled_alice(1_000);
+        observe(&alice(), MARKET_A, 2, 700, 500, 3, true);
+        assert!(Scores::<Test>::get(alice(), MARKET_A).is_none());
+        assert_eq!(ScoreCount::<Test>::get(alice()), 0);
+        assert_ok!(TradingRewards::do_try_state());
+    });
+}
+
+#[test]
+fn fills_in_two_markets_take_two_entries() {
+    new_test_ext().execute_with(|| {
+        enrolled_alice(1_000);
+        observe(&alice(), MARKET_A, SCORE_SIDE_LONG, 700, 500, 3, true);
+        observe(&alice(), MARKET_B, SCORE_SIDE_LONG, 100, 40, 1, true);
+        assert_eq!(ScoreCount::<Test>::get(alice()), 2);
+        assert_eq!(
+            Scores::<Test>::get(alice(), MARKET_A)
+                .expect("scored")
+                .spent,
+            503
+        );
+        assert_eq!(
+            Scores::<Test>::get(alice(), MARKET_B)
+                .expect("scored")
+                .spent,
+            41
+        );
+        assert_ok!(TradingRewards::do_try_state());
     });
 }
