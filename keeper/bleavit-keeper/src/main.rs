@@ -157,7 +157,10 @@ async fn run_connection(
             config.max_retries,
             config.retry_base,
             config.cooldown_depth,
-            config.call_hashes.clone(),
+            submit::ShapePolicy {
+                pins: config.call_hashes.clone(),
+                allow_unpinned: config.allow_unpinned_endpoint,
+            },
         );
         submitter.import_cooldowns(std::mem::take(shared_cooldowns));
         submitter
@@ -452,8 +455,8 @@ async fn report_call_shapes(client: &OnlineClient<PolkadotConfig>, config: &Conf
         warn!(
             calls = observed.len(),
             "no call_hashes pinned: every signed call shape is taken from the \
-             node's own metadata. Pin them in the keeper config; the observed \
-             values follow."
+             node's own metadata. Pin them with --call-hash Pallet.call=0x… or \
+             the config file's `call_hashes`; the observed values follow."
         );
         for (key, hash) in &observed {
             info!(call = %key, hash = %config::format_h256(hash), "observed call shape");

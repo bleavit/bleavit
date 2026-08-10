@@ -7,7 +7,7 @@
 
 use crate as pallet_oracle;
 use frame_support::{derive_impl, parameter_types, traits::EnsureOrigin};
-use futarchy_primitives::{Balance, BlockNumber, EpochId, MetricId, MetricSpecVersion};
+use futarchy_primitives::{Balance, BlockNumber, EpochId, FixedU64, MetricId, MetricSpecVersion};
 use oracle_core::OracleParams;
 use sp_runtime::{traits::IdentityLookup, AccountId32, BuildStorage};
 
@@ -219,12 +219,32 @@ impl EnsureOrigin<RuntimeOrigin> for TestAdjudicationOrigin {
     }
 }
 
+/// The model's stand-in evaluator, wired **only** here.
+///
+/// It reads the value out of the payload rather than deriving it under a frozen
+/// `formula_ref`, which is exactly why no production runtime may bind it — see
+/// `pallet_oracle::RecomputeEngine`. The mock binds it so this suite still
+/// exercises the whole 07 §9 transition, and
+/// `runtime/bleavit-runtime` holds the line that the assembled runtime does not.
+pub struct TestRecomputeEngine;
+
+impl pallet_oracle::RecomputeEngine for TestRecomputeEngine {
+    fn evaluate(
+        _: MetricId,
+        _: MetricSpecVersion,
+        proof: &[u8],
+    ) -> Result<FixedU64, pallet_oracle::CoreError> {
+        oracle_core::recompute_value(proof)
+    }
+}
+
 impl pallet_oracle::Config for Test {
     type AdjudicationOrigin = TestAdjudicationOrigin;
     type Reporting = TestReporting;
     type Params = TestParams;
     type Custody = TestCustody;
     type MaxRoundCloseBatch = MaxRoundCloseBatch;
+    type RecomputeEngine = TestRecomputeEngine;
     type ProbeDispatch = TestProbeDispatch;
     type ProbeTimeoutSink = TestProbeTimeoutSink;
     type ReserveHealthSink = TestReserveHealthSink;

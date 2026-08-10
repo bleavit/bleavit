@@ -42,8 +42,14 @@ cd keeper
 cargo run --locked -p bleavit-keeper -- \
   --node-url ws://127.0.0.1:9944 \
   --signer-uri //Alice \
+  --allow-unpinned-endpoint \
   --metrics-bind 127.0.0.1:9616
 ```
+
+`--allow-unpinned-endpoint` belongs in that line because the node is your own,
+on loopback, with a development key. Do not carry it into an operator
+environment. Live mode refuses to start without both pins, and the section below
+says why.
 
 `//Alice` is for local development only. In an operator environment, pass an appropriately funded
 keeper account via `--signer-uri` or put one Substrate secret URI in a permission-restricted file
@@ -94,8 +100,9 @@ retry_base_ms = 500
 # 0.50.2 encodes RFC-78's `CheckMetadataHash` as `Disabled` on every signature
 # — so a compromised endpoint can keep the real genesis, spec and transaction
 # versions and forge only the call. Pinning is what closes that; the genesis pin
-# alone does not, because the forgery never leaves this chain. Start the keeper
-# with no pins and it logs every observed value for you to adopt.
+# alone does not, because the forgery never leaves this chain. Run once with
+# `--dry-run`, which signs nothing, and the keeper logs every observed value for
+# you to adopt.
 #
 # Each value binds the call's metadata shape *and* the pallet/call index pair
 # the encoder prepends. Both are needed: subxt's call hash covers only the
@@ -107,8 +114,18 @@ retry_base_ms = 500
 "Market.crank_observe" = "0x…"
 ```
 
-Start it with `cargo run --locked -p bleavit-keeper -- --config keeper.toml`. Node URLs are tried in
-the listed order. Observation, decision-window, and reserve-probe timing uses the precedence
+Start it with `cargo run --locked -p bleavit-keeper -- --config keeper.toml`.
+
+**Live mode refuses to start unpinned.** Without `genesis_hash` *and* at least
+one `call_hashes` entry, the keeper exits with an error naming the missing pin.
+Two paths remain open, and both are deliberate: `--dry-run` signs nothing and is
+how you collect the values to pin, and `--allow-unpinned-endpoint` (or
+`allow_unpinned_endpoint = true`) restores the old posture for an operator who
+writes that decision down. Pins need no config file — repeat
+`--call-hash Pallet.call=0x…` on the command line, where a flag beats the file
+entry for the same call.
+
+Node URLs are tried in the listed order. Observation, decision-window, and reserve-probe timing uses the precedence
 explicit CLI/TOML override → live `Constitution.Params` row → documented fallback. The dynamic
 reads use the canonical 16-byte keys `mkt.obs_interval`, `dec.window`, `res.probe_int`, and
 `res.probe_to`; their fallbacks are 10, 43,200, 14,400, and 600 blocks respectively. The cooldown
