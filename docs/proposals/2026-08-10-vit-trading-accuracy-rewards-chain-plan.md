@@ -99,10 +99,12 @@ fn rwd_rate_stays_inside_the_wash_breakeven_at_the_mkt_fee_default() {
     let (ParamValue::Perbill(f), ParamValue::Perbill(r)) = (fee.value, rate.value) else {
         panic!("both rows are Perbill");
     };
-    let breakeven = (2u64 * u64::from(f) * 100) / 99;
+    // Cross-multiplied, exactly as TR9's `rwd_rate_coupled` predicate does it,
+    // so the two cannot disagree at the boundary. Equality is admissible: at
+    // exact break-even the wash nets zero rather than positive.
     assert!(
-        u64::from(r) < breakeven,
-        "rwd.rate {r} must stay under the {breakeven} ppb wash break-even",
+        99 * u128::from(r) <= 200 * u128::from(f),
+        "rwd.rate {r} ppb has reached the wash break-even against mkt.fee {f} ppb",
     );
 }
 ```
@@ -181,7 +183,8 @@ git commit -m "feat(spec,constitution): rwd.rate at 0.25% with its bounds and se
 - Test: `crates/trading-rewards-core/src/lib.rs` (inline `#[cfg(test)] mod tests`)
 
 **Interfaces:**
-- Consumes: `futarchy_primitives::{Balance, Perbill}` and the new `futarchy_primitives::kernel::RATE_HEADROOM: u32 = 10`.
+- Consumes: `futarchy_primitives::Balance`.
+- **First adds** `pub const RATE_HEADROOM: u128 = 10;` to `crates/futarchy-primitives/src/lib.rs`'s `kernel` module (line 1232), documented as the top of the `fee.vit_usdc_rate` envelope (13 §1). It is a kernel `K` constant, and the Global Constraints put those in `futarchy-primitives`, never in a consumer crate.
 - Produces, all used by TR3 and TR4:
   - `pub struct MarketScore { pub spent: Balance, pub received: Balance, pub book_acquired: [Balance; 2] }`
   - `pub struct EpochScore { pub spent: Balance, pub received: Balance }`
@@ -312,11 +315,8 @@ Expected: FAIL — the crate does not exist yet.
 //! Frame-free score kernel for the trading accuracy rewards program.
 //! Design: `docs/proposals/2026-08-09-vit-trading-accuracy-rewards-design.md` §4.4–§4.5.
 
-use futarchy_primitives::Balance;
+use futarchy_primitives::{kernel::RATE_HEADROOM, Balance};
 
-/// Top of the `fee.vit_usdc_rate` envelope (13 §1). The earning cap is sized
-/// against it so a VIT reprice to the ceiling cannot open the wash farm.
-pub const RATE_HEADROOM: u128 = 10;
 const PERBILL: u128 = 1_000_000_000;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -575,14 +575,16 @@ git commit -m "feat(rewards): enrollment, bonds and the snapshot cap (TR3)"
 ## Task TR4: The market accumulator
 
 **Files:**
-- Modify: `crates/trading-rewards-core/src/lib.rs` (add the observer trait)
+- Modify: `crates/market-core/src/lib.rs` (define the observer trait)
 - Modify: `pallets/market/src/lib.rs:4172` (`deposit_trade_event`)
 - Modify: `pallets/trading-rewards/src/lib.rs` (implement the trait)
 - Test: `pallets/market/src/tests.rs`, `pallets/trading-rewards/src/tests.rs`
 
 **Interfaces:**
 - Consumes: `MarketScore`, `on_buy`, `on_sell` from TR2; `is_enrolled` from TR3.
-- Produces: `pub trait TradeObserver<AccountId> { fn observe_fill(who: &AccountId, market: MarketId, side: usize, qty: Balance, cost: Balance, fee: Balance, is_buy: bool); }` — `pallet-market` gains an associated type `type TradeObserver: TradeObserver<Self::AccountId>` defaulting to `()` in the mock, and the runtime binds it to `TradingRewards` in TR7.
+- Produces, **in `crates/market-core/`**: `pub trait TradeObserver<AccountId> { fn observe_fill(who: &AccountId, market: MarketId, side: usize, qty: Balance, cost: Balance, fee: Balance, is_buy: bool); }` — `pallet-market` gains an associated type `type TradeObserver: TradeObserver<Self::AccountId>` set to `()` in the mock, and the runtime binds it to `TradingRewards` in TR7.
+
+**The trait lives in `market-core`, not in `trading-rewards-core`.** The consumer owns the interface and the provider implements it, which is the `OnUnbalanced` pattern. Putting it in the rewards crate would make `pallet-market` depend on the rewards program — a backwards dependency that would couple the book to an optional incentive. `pallet-trading-rewards` already needs `market-core` for `MarketId`, so the dependency runs one way only.
 
 **The single call site is `deposit_trade_event`.** Both `buy` (line 1891) and `sell` (line 1932) funnel their events through it, so one hook covers both and there is no second path to forget.
 
