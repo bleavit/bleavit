@@ -976,6 +976,11 @@ Add slot 68, the `Config` impl, the SafetyFilter authority row, and bind `pallet
 
 Bound `settled_value` per unit when you write the adapter, and prove the bound rather than assert it: `settled_value` is a branch's terminal redemption value per unit, so the ledger already caps it, and your job is to show the type the adapter hands over cannot exceed that cap. Add a test at the largest value the adapter can produce against the largest `eligible` the score bound admits, and assert the fold succeeds.
 
+**Two weight residuals from the TR5 re-review, which only become real here.**
+
+- **`pallets/trading-rewards/src/weights.rs` declares 12 reads for `enroll` and the correct count is 11.** The fix round's own itemized derivation sums to 11 and its summary table says 12. Over-declaring is the safe direction and nothing is mispriced today, so this is not urgent — but you are about to replace these fallbacks with generated weights, and a wrong fallback beside a generated one is confusing rather than harmless. Correct it, or delete the fallback if binding the generated artifact makes it dead.
+- **`settle_epoch` reads `authorized_budget_usdc()` twice on the reward arm**, once through `budget_headroom_usdc()` and once in the `BudgetExceeded` guard, so `VitUsdcRate`, the sovereign's VIT balance and `TotalAccrued` are each touched twice in code. The declared 11 counts call sites. **A benchmark will not.** `frame-benchmarking` counts distinct storage keys and charges a second access to an already-tracked key as a repeat read, so the measured figure is **8** — equal to the debit arm. Expect 8 and do not "fix" the benchmark when it disagrees with the comment. The duplicate call is a small real inefficiency: cache one `authorized_budget_usdc()` result locally, which costs nothing and makes the code, the comment and the measurement agree.
+
 - [ ] **Step 4: Re-benchmark `pallet_market::buy` and `::sell` on the worst path**
 
 This step is yours because binding the observer is what makes the cost real. Until
