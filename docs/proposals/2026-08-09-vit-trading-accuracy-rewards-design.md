@@ -2,9 +2,11 @@
 
 Date: 2026-08-09
 Status: **design approved, not implemented.** No milestone row exists yet.
-Revision: **round 2**, after the PR #296 Codex review. Four P1 findings and one P2 were
-accepted in full, and one of them showed a claim in round 1 to be wrong rather than merely
-incomplete. What each changed is recorded where it changed, not in a separate changelog.
+Revision: **round 3.** Round 2 answered the PR #296 Codex review — four P1 findings and one
+P2, accepted in full, one of which showed a round-1 claim to be wrong rather than merely
+incomplete. Round 3 writes in the owner's three decisions of 2026-08-10 (§10) and corrects
+the wash break-even those decisions made load-bearing (§5.1). What each round changed is
+recorded where it changed, not in a separate changelog.
 Owner decision record: this document. Normative text stays in `docs/architecture/`.
 
 ## 1. Scope
@@ -55,8 +57,11 @@ needs to know the outcome.
 | Realized loss on the losing account | −500 USDC |
 | **Net cost of manufacturing a 500 USDC "correct forecast"** | **≈ 6 USDC** |
 
-A reward of `r` times profit pays `r × 500`, so break-even sits near **r ≈ 1.2 %**. The LMSR
-spread raises that threshold, so treat 1.2 % as a floor rather than the line.
+A reward of `r` times profit pays `r × 500`, so break-even sits near **r ≈ 1.2 %** at this
+mid price. **The worst case is tighter and it is the one that binds** — at an extreme price
+the winner's profit approaches the whole notional instead of half of it, which halves the
+break-even to about **0.606 %**. §5.1 derives that figure and sizes the adopted rate against
+it. The LMSR spread raises both thresholds, so each is a floor rather than the line.
 
 The cause is structural. The market payoff is symmetric, and that symmetry is what makes it a
 proper scoring rule. A bonus on the winning side alone removes the loss half, and the farmer
@@ -215,25 +220,87 @@ The fix has two halves:
    against the top of `fee.vit_usdc_rate`'s `[0.1×, 10×]` band means a participant at the
    placeholder rate can earn on less score than their bond would otherwise support.
 
+### 4.7 The client surface (owner decision, 2026-08-10)
+
+**The program is visible in the canonical client at mainnet launch**, showing program status,
+rate, bond, score and reward status. That decision changes the shape of this work, and the
+change is worth stating before the detail: an earlier revision scoped the screen out
+precisely so that 02 would not move. It moves now.
+
+| The screen shows | Read from | New frozen surface? |
+|---|---|---|
+| Rate | `rwd.rate` through the existing `params()` runtime API | **No.** 02 §3 already freezes it |
+| Program status — is a budget authorized, how much of it remains | New `pallet-trading-rewards` storage | Yes |
+| Bond — held amount, this epoch's snapshot cap | New storage, per account | Yes |
+| Score — folded epoch total, unfolded per-market entries | New storage, per account | Yes |
+| Reward status — accrued, claimable, last epoch settled | New storage, per account | Yes |
+
+Four consequences follow, and none of them is optional.
+
+1. **`INTEGRATION_CONTRACT_VERSION` goes from 30 to 31**, per 02 §13. The additions are
+   append-only, which is what §13 requires of them.
+2. **The reads join 02 §7 as their own subsection**, alongside §7.1–§7.6. `params()` carries
+   the rate, so only the four pallet-owned rows are new.
+3. **They join the 10 §5.2 compatibility lattice automatically**, because that classifier
+   probes the frozen set. This is the reason to freeze them rather than read them informally:
+   an unfrozen read is one the lattice cannot fail on, so a runtime upgrade that moved it
+   would leave the client reporting `full` while the panel silently broke.
+4. **`check-client-surface-obligations.py` binds the other direction.** Once docs 10 and 11
+   mandate these reads, the gate fails until 02 freezes them. Writing the workflow before the
+   contract surface is what turns that gate red.
+
+**The screen must render the closed states, not only the running one.** Mainnet launches at
+Phase 3 with sudo present, while the pot is a Phase 3–4 program whose budget governance
+authorizes separately. So at launch the honest states are *enrolled but no budget authorized*
+and *budget authorized, epoch not yet settled*, and the panel has to say which it is rather
+than render an empty reward figure that reads as zero earned.
+
 ## 5. Parameters and bounds
 
 ### 5.1 Exactly one new registry row
 
 | Candidate | Verdict |
 |---|---|
-| `rwd.rate` — reward per unit of net profit | **New row required.** `mkt.fee` is the nearest existing key, but it charges notional rather than sharing realized profit. Binding them would make a fee amendment silently move the reward |
+| `rwd.rate` — reward per unit of net profit, **0.25 %** | **New row required.** `mkt.fee` is the nearest existing key, but it charges notional rather than sharing realized profit. Binding them would make a fee amendment silently move the reward |
 | Minimum bond | **No row.** Reuse `ledger.pos_dep` |
 | Per-epoch budget | **No row.** A call argument on the authorization |
 
-`rwd.rate` has **no anchor**, and this design does not invent one. Under rule R-2 it ships
-`[VERIFY]`, sim-gated, with the consumer **fail-closed**: `enroll` refuses before any hold
-while the row is unset. The precedent is exact — `svc.client_bond` shipped this way, and
-seeding the row was the act that opened the service.
+**`rwd.rate` is adopted at 0.25 % (owner decision, 2026-08-10).** An earlier revision shipped
+it `[VERIFY]` and fail-closed for want of an anchor. The value now has one, and it is the
+wash arithmetic of §3 rather than a calibration.
+
+**Derivation.** A wash pair's reward must stay below the fees it pays to manufacture the
+profit. Writing `f` for the per-leg fee rate and taking the worst case — an extreme price,
+where the winning leg's profit approaches the whole notional `q` rather than half of it —
+the pair collects `r × 0.99q` against fees of `2fq`, so the break-even is:
+
+```
+r_breakeven = 2f / 0.99
+```
+
+At the registry defaults (`mkt.fee` 30 bps, `ledger.redeem_fee` 30 bps) that is **0.606 %**.
+The adopted 0.25 % sits **2.4× inside it**, so the farm loses money on fees alone before the
+bond is consulted.
+
+**§3's 1.2 % was the mid-price case and is corrected here.** At `p = 0.5` the winner's profit
+is only half the notional, which halves the reward and doubles the apparent break-even. The
+worst case is the one a rate must clear, and it is 0.606 %.
+
+**Two independent defenses, and the second one has a boundary.** The bond is
+rate-independent and holds at any `r`. The rate defense holds only while the fee is at or
+above `r × 0.99 / 2` = **12.375 bps** per leg. `mkt.fee` is PARAM-amendable down to **5 bps**
+(13 §1), where the break-even falls to about 0.10 % and 0.25 % becomes farmable on rate
+alone. Nothing breaks — the bond still covers it — but a fee amendment silently retires a
+defense this document relies on, which is the shape doc 13 rule 7 screens at the amendment
+boundary for `ledger.redeem_fee ≤ mkt.fee`. Whether `rwd.rate ≤ 2 × mkt.fee / 0.99` should be
+screened the same way is §10's open question.
 
 The unsafe direction is upward, so the ceiling stays conservative and max-Δ stays at ×2.
 
-**Consequence, stated plainly.** This milestone ships a program that cannot open. Opening it
-is a separate values act, taken when the calibration exists.
+**The row is seeded at genesis, so enrollment works from the start.** Payouts still need a
+second key: governance must authorize an epoch budget (§4.2) before anything accrues to a
+claim. That authorization is also the natural phase gate, since the pot is Phase 3–4 and
+governance simply does not fund it earlier.
 
 ### 5.2 New bounds, both derived
 
@@ -282,15 +349,22 @@ happens is how a bound becomes a liveness bug.
 | 08 (new subsection) | Funding call, score definition, bond, rate, forfeit to `INSURANCE` |
 | 05 §4a | New family key `0x0D`, singleton — the `0x0C` argument applies unchanged, since the call mutates one remaining-allocation pool |
 | 06 §3, §5 | SafetyFilter authority rows, plus the PARAM-leaf exception note §5 already makes for the community call |
-| 13 §1, §4 | `rwd.rate` plus the two bounds |
+| 13 §1, §4 | `rwd.rate` at 0.25 %, seeded in `genesis_params()`, plus the three bounds |
 | 14 | A threat row for the wash farm and its bond mitigation |
 | 15 | The verification obligations of section 8 |
 | `tools/limit-coverage/registry.toml` | Classify `rwd.rate`, with a marked test if it gates a dispatch |
+| **02 §7 (new subsection), §13** | The four frozen client reads of §4.7, and `INTEGRATION_CONTRACT_VERSION` **30 → 31** |
+| **10** | The panel in the client architecture, and its place in the §5.2 compatibility lattice |
+| **11** | The workflow: enroll, top up, claim, and how each closed state renders |
 
-**02 does not change, provided v1 ships with no client surface.** When the frontend shows a
-trader their score, bond or accrual, those become client reads, 02 must freeze them, and
-`INTEGRATION_CONTRACT_VERSION` bumps. `check-client-surface-obligations.py` enforces that
-direction already. The screen is scoped out of v1 deliberately.
+**02 changes, and the order of the edits matters.** Freeze the §7 reads and bump §13 in the
+same pass that adds the docs 10 and 11 text. `check-client-surface-obligations.py` fails on
+any read those documents mandate that 02 has not frozen, so writing the workflow first turns
+the gate red for as long as the two halves are apart.
+
+Per R-1, a 02 edit needs the joint backend-and-frontend sign-off that 02 §13 mandates. The
+owner speaks for both sides and has delegated the call, so this is recorded rather than
+blocked — but the record belongs in PLAN.md's Decision log when the edit lands, not here.
 
 ## 8. Verification obligations
 
@@ -311,20 +385,52 @@ direction already. The screen is scoped out of v1 deliberately.
 - A reference-model module mirroring the score arithmetic, plus differential vectors.
 - Benchmarks for every call **and for the per-fill trait call**, because that one enters every
   trade's weight.
+- **A rate-derivation test that fails if the margin closes.** The 0.25 % adoption rests on
+  `2 × mkt.fee / 0.99`, so a test asserts the live relation rather than the literal, and turns
+  red if a `mkt.fee` amendment carries the pair past it. That is the cheapest available
+  substitute for the amendment-boundary screen §10 asks about.
+- **The `app/` gates**, which bind now that §4.7 puts a panel in the client. The catalogue is
+  `.claude/rules/app-code.md` · *Quality gates for `app/`*, and it is not restated here
+  because it grows with the track. Three obligations are specific to this work: the panel
+  registers in `implementedScreens()`, the four reads are covered by `test:mock-runtime`, and
+  the closed states of §4.7 each get a screen test — a panel that can only render its happy
+  path is one nothing has exercised.
 
 ## 9. Out of scope for v1
 
 - No vesting on rewards.
-- No tournament pool where forfeits fund winners. It is economically appealing and worth
-  revisiting, but it makes each payout depend on the whole field.
+- No tournament pool where forfeits fund winners. Ruled out by the owner on 2026-08-10 rather
+  than merely deferred, so the note below records a closed decision.
 - No cross-epoch score carry.
-- No client screen, and therefore no contract bump.
 
-## 10. Open questions for the owner
+## 10. Decisions taken
 
-1. **`rwd.rate` has no anchor.** It needs either Phase-0/3 calibration evidence or an explicit
-   values ruling. The program stays closed until then, by design.
-2. **Whether the client surfaces the program in a later milestone**, which is the decision
-   that bumps `INTEGRATION_CONTRACT_VERSION`.
-3. **Whether forfeits should fund winners** instead of `INSURANCE`, which would reduce the VIT
-   drain and make the program closer to self-funding.
+All three questions this document opened were decided by the owner on 2026-08-10.
+
+| Question | Decision |
+|---|---|
+| `rwd.rate` | **0.25 %**, seeded at genesis. Derivation and its boundary: §5.1 |
+| Forfeited bonds | **`INSURANCE`**, not the winners. Doc 13's standing destination for USDC taken from an account, and it keeps a payout independent of the field |
+| Client surface | **Visible at mainnet launch**, showing status, rate, bond, score and reward status. Contract v30 → v31: §4.7 |
+
+## 11. The one question that remains
+
+**Should `rwd.rate ≤ 2 × mkt.fee / 0.99` be screened at the amendment boundary?**
+
+It is not a values call and it does not block the work, which is why it is separate from the
+table above. §5.1 shows the rate defense lapsing below 12.375 bps per leg while `mkt.fee`
+stays PARAM-amendable to 5 bps. The bond covers the gap, so the program is safe either way.
+What is at stake is whether a fee amendment may silently retire a defense this document
+relies on.
+
+Three options, in the order I would consider them:
+
+1. **Screen the pair jointly at the amendment boundary**, refusing an amendment of either key
+   that carries the pair out of band. This is the shape doc 13 rule 7 already uses twice, for
+   `gate.v_min ↔ dec.v_min` and `ledger.redeem_fee ≤ mkt.fee`, and it is the only option that
+   makes the relation an invariant.
+2. **Assert it in `try-state` only**, so a breach is loud but not refused.
+3. **Document it and rely on the bond**, which is the status quo of this revision.
+
+The §8 rate-derivation test gives option 3 most of option 2's value for none of the cost, so
+the real choice is between 1 and 3.
