@@ -646,7 +646,7 @@ Expected: FAIL.
 
 - [ ] **Step 3: Add the trait and the blanket no-op**
 
-In `crates/trading-rewards-core/src/lib.rs`, define `TradeObserver` and implement it for `()` as a no-op, so the market mock and any runtime that does not want the program pay nothing but the call.
+In `crates/market-core/src/lib.rs`, define `TradeObserver` and implement it for `()` as a no-op, so the market mock and any runtime that does not want the program pay nothing but the call. (This step said `trading-rewards-core` until 2026-08-10 and contradicted this task's own *Files* and *Interfaces* blocks. `market-core` is correct, for the reason stated above the steps: the consumer owns the interface.)
 
 - [ ] **Step 4: Call it from `deposit_trade_event`**
 
@@ -661,21 +661,18 @@ The implementation returns early when `is_enrolled` is false, returns early when
 Run: `cargo test -p pallet-market -p pallet-trading-rewards`
 Expected: PASS.
 
-- [ ] **Step 7: Re-benchmark the trade path**
+- [ ] **Step 7: Do not re-benchmark here — hand the obligation to TR7**
 
-The hot path gained one storage read for every trade, enrolled or not.
-
-```bash
-export CARGO_TARGET_DIR=/tmp/tr-target
-python3 tools/ci/regenerate-weights.py --write --changed
-python3 tools/ci/check-weight-storage-bounds.py
-```
-Expected: `pallet_market::buy` and `::sell` show one more read, and the storage-bound check passes.
+This step used to ask for a regeneration. It cannot produce a true number yet, and a
+false one is worse than none. The runtime still binds `TradeObserver` to `()`, which
+touches no storage, so a regeneration now measures a delta of zero and freezes it into
+the committed weights. **TR7 owns the re-benchmark**, because TR7 is where the real
+observer gets bound. Record the obligation in your report and move on.
 
 - [ ] **Step 8: Commit**
 
 ```bash
-git add crates/trading-rewards-core pallets/market pallets/trading-rewards runtime
+git add crates/market-core pallets/market pallets/trading-rewards
 git commit -m "feat(market,rewards): observe fills for enrolled accounts (TR4)"
 ```
 
@@ -932,7 +929,49 @@ Expected: FAIL.
 
 Add slot 68, the `Config` impl, the SafetyFilter authority row, and bind `pallet_market::Config::TradeObserver` to `TradingRewards`. Add the pallet to the benchmark list.
 
-- [ ] **Step 4: Run the tests and the runtime gates**
+- [ ] **Step 4: Re-benchmark `pallet_market::buy` and `::sell` on the worst path**
+
+This step is yours because binding the observer is what makes the cost real. Until
+Step 3, `TradeObserver` was `()` and touched no storage — TR4 deliberately did not
+regenerate, since a measurement taken then would have frozen a delta of zero.
+
+**The worst case is 3 reads and 2 writes, not one read.** The observer's cost depends
+on the trader, and the benchmark fixture decides which path gets measured:
+
+| Path | Cost | Where |
+|---|---|---|
+| Not enrolled | 1 read | `pallets/trading-rewards/src/lib.rs:792` |
+| Enrolled, market already scored | 2 reads, 1 write | `:792`, `:795`, `:851` |
+| Enrolled, first fill in this market | 3 reads, 2 writes | `:792`, `:795`, `:802`, `:851`, `:853` |
+
+So **the benchmark's trader must be enrolled, and must fill into a market with no
+existing score row.** A fixture that trades as a non-participant measures only the
+first read, the number changes, and the drift gate goes green on a
+changed-but-wrong figure — after which every trade on the chain is under-weighted.
+`buy` and `sell` are constant-weight functions, which the drift gate hard-gates at
+any fidelity, so nothing downstream catches this.
+
+**Name the pallets — do not use `--changed` here.** That flag selects pallets whose
+*local source* moved, and in this task only `runtime/` moves. `pallet_market`'s own
+files are untouched, so `--changed` would select nothing, print nothing alarming, and
+leave the stale weights committed. The one gate that would catch it is the
+release-blocking drift job, hours later and on somebody else's branch.
+
+```bash
+export CARGO_TARGET_DIR=/tmp/tr-target
+python3 tools/ci/regenerate-weights.py --write --pallet pallet_market --pallet pallet_trading_rewards
+python3 tools/ci/check-weight-storage-bounds.py
+```
+
+Expected: `pallet_market::buy` and `::sell` each gain 3 reads and 2 writes, and the
+storage-bound check passes. If they gain 1 read, your fixture took the wrong path —
+fix the fixture, not the expectation.
+
+Also add the extrinsic-level test that a fill past `MaxScoredMarketsPerAccount`
+records nothing and still executes the trade. TR4 proved that at the observer's
+own boundary with `()` bound; only here can it be proved through a real dispatch.
+
+- [ ] **Step 5: Run the tests and the runtime gates**
 
 ```bash
 cargo test -p bleavit-runtime
@@ -940,7 +979,7 @@ tools/ci/rust-workspace-gates.sh --changed bleavit-runtime pallet-trading-reward
 ```
 Expected: green.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add runtime
