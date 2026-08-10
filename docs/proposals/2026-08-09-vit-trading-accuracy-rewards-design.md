@@ -126,8 +126,12 @@ until the epoch settles. No caller-visible action inside an epoch can change eit
 
 The bond does two separate jobs, and separating them removes a parameter.
 
-- **The earning cap does the anti-farm work.** Rewardable score is clamped to `± bond / r`,
-  so a wash pair's forfeit always covers its reward.
+- **The earning cap bounds exposure. It does *not* deliver the anti-farm invariant**
+  (corrected 2026-08-10, found by the TR2 review — see §5.3). Rewardable score is clamped to
+  `± bond / (r × RATE_HEADROOM)`, which caps what any one account can earn or forfeit in an
+  epoch and makes the program's cost predictable. An earlier revision claimed this clamp made
+  a wash pair neutral. It does not, because the clamp is proportional to each account's
+  **own** bond and one operator funds both.
 - **The minimum bond only prevents state bloat.** `ledger.pos_dep` already does that job at
   0.1 USDC, so the design reuses the live row instead of adding one.
 
@@ -291,14 +295,48 @@ bond is consulted.
 is only half the notional, which halves the reward and doubles the apparent break-even. The
 worst case is the one a rate must clear, and it is 0.606 %.
 
-**Two independent defenses, and the second one has a boundary.** The bond is
-rate-independent and holds at any `r`. The rate defense holds only while the fee is at or
-above `r × 0.99 / 2` = **12.375 bps** per leg. `mkt.fee` is PARAM-amendable down to **5 bps**
-(13 §1), where the break-even falls to about 0.10 % and 0.25 % becomes farmable on rate
-alone. Nothing breaks — the bond still covers it — but a fee amendment silently retires a
-defense this document relies on, which is the shape doc 13 rule 7 screens at the amendment
-boundary for `ledger.redeem_fee ≤ mkt.fee`. Whether `rwd.rate ≤ 2 × mkt.fee / 0.99` should be
-screened the same way is §10's open question.
+### 5.3 There is one anti-farm defense, not two (corrected 2026-08-10)
+
+An earlier revision of this section claimed two independent defenses — the rate and the bond
+— and said the bond was rate-independent and held at any `r`. **The second claim is false,
+and the TR2 review found it before any of it shipped.**
+
+**Why the cap does not hold.** The earning cap is proportional to each account's **own**
+snapshot bond, and a wash operator funds both accounts. So they fund them unequally and
+direct the profit to the large one:
+
+| | bond | cap | outcome |
+|---|---|---|---|
+| Winner | 1,000,000 | 40,000,000 | reward **2,500** |
+| Loser | 1,000 | 40,000 | debit **100** |
+| | | | **pair nets +2,400** |
+
+With equal bonds the pair nets exactly zero at every value tried, which is why the claim
+survived three revisions. Nothing in the design ever required the bonds to be equal, and an
+operator running both accounts would never choose them to be.
+
+**Why the rate does hold.** With §11's coupling screen in force, `r ≤ 2 × mkt.fee / 0.99`
+always. The pair's fee cost is `2fq` and the winner's reward is at most `r × 0.99q`, so:
+
+```
+reward  ≤  (2f / 0.99) × 0.99q  =  2fq  =  the pair's own fee cost
+```
+
+That bound holds **at any bonds**, because it never mentions them. The wash cannot profit.
+
+**What each mechanism is actually for, stated correctly:**
+
+- **The rate coupling is the anti-farm invariant.** It is the whole of it. §11's screen is
+  therefore not a refinement — it is load-bearing, and the program must not open without it.
+- **The bond bounds exposure.** It caps what one account earns or forfeits per epoch, makes
+  the program's cost predictable, and gives a participant skin in the game. Those are real
+  jobs. Delivering the invariant is not among them.
+
+**Two consequences for verification, both mandatory.** §8's property suite MUST draw **two
+independent bonds**, because a suite that draws one and passes it to both legs proves only
+the equal-bond case and returns green — which is exactly how the earlier revision's suite
+was written. And 08 §2.6, 14 TH-78 and 15 §4.1 all misattribute the invariant to the cap and
+MUST be corrected with the screen.
 
 The unsafe direction is upward, so the ceiling stays conservative and max-Δ stays at ×2.
 
@@ -428,7 +466,14 @@ All three questions this document opened were decided by the owner on 2026-08-10
 | Client surface | **Visible at mainnet launch**, showing status, rate, bond, score and reward status. Contract v30 → v31: §4.7 |
 | The §11 coupling | **Screened at the amendment boundary** (option 1), so the relation is an invariant rather than a documented hope |
 
-## 11. The rate coupling is screened (owner decision, 2026-08-10)
+## 11. The rate coupling is screened, and it is load-bearing (owner decision, 2026-08-10)
+
+> **This section stopped being a refinement on 2026-08-10.** §5.3 shows the earning cap does
+> not deliver the anti-farm invariant under asymmetric bonds, and that the screen below is
+> what does. The framing this section originally carried — that the bond covers the gap, so
+> the program is safe either way — was wrong. **The program must not open without the
+> screen.** Had the owner ruled option 3 on the reasoning I gave, the program would have
+> shipped exploitable at any lawfully amended `mkt.fee`.
 
 `rwd.rate ≤ 2 × mkt.fee / 0.99` becomes **doc 13 rule 7's third live coupling**, joining
 `gate.v_min ↔ dec.v_min` and `ledger.redeem_fee ≤ mkt.fee`. It takes the identical shape: the

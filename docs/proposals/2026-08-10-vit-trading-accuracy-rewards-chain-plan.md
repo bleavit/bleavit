@@ -959,21 +959,33 @@ proptest! {
     /// The invariant the whole design rests on. For any set of accounts whose
     /// positions offset, total payout minus total forfeit is never positive —
     /// evaluated at every rate the fee.vit_usdc_rate envelope admits.
+    /// **Two independent bonds, and this is not a detail.** An earlier revision drew one
+    /// `bond` and passed it to both legs, which proves only the equal-bond case and returns
+    /// green — that is exactly how the TR2 review found the invariant did not hold
+    /// (design §5.3). The pair is one operator, so the bonds are theirs to choose.
     #[test]
     fn offsetting_accounts_never_net_positive(
         net in 1u128..1_000_000_000u128,
-        bond in 100_000u128..1_000_000_000u128,
+        bond_w in 100_000u128..1_000_000_000u128,
+        bond_l in 100_000u128..1_000_000_000u128,
         rate_ppb in 1u32..6_000_000u32,
     ) {
+        // The screen of TR9 is what makes this hold, so the suite must respect it:
+        // r <= 2f/0.99 at the mkt.fee default of 3_000_000 ppb.
+        prop_assume!(99 * u128::from(rate_ppb) <= 200 * 3_000_000u128);
         let winner = EpochScore { spent: 0, received: net };
         let loser  = EpochScore { spent: net, received: 0 };
-        let reward = match epoch_outcome(&winner, bond, rate_ppb) {
+        let reward = match epoch_outcome(&winner, bond_w, rate_ppb) {
             Outcome::Reward(v) => v, _ => 0,
         };
-        let debit = match epoch_outcome(&loser, bond, rate_ppb) {
+        let debit = match epoch_outcome(&loser, bond_l, rate_ppb) {
             Outcome::Debit(v) => v, _ => 0,
         };
-        prop_assert!(debit >= reward);
+        // The kernel alone cannot bound this — see design §5.3. What the suite asserts is
+        // the economic invariant including the pair's own fee cost, which is what the
+        // coupling screen guarantees.
+        let fee_cost = 2 * net * 3_000_000 / 1_000_000_000;
+        prop_assert!(reward <= debit + fee_cost);
     }
 
     /// Selling inventory that never came through the book scores nothing,
@@ -1049,6 +1061,17 @@ Then update PLAN.md — a milestone row for this work, a Session log row, and a 
 ---
 
 ## Task 9 — TR9: The rate coupling screen (design §11, owner decision 2026-08-10)
+
+> **Priority raised 2026-08-10: this task is load-bearing, not a refinement, and the program
+> must not open without it.** The TR2 review proved the earning cap does not deliver the
+> anti-farm invariant under asymmetric bonds (design §5.3). The screen below is what does.
+> **This task therefore also owns the spec correction**, in three places that currently
+> misattribute the invariant to the cap: 08 §2.6, 14 TH-78's mitigations and residual-risk
+> columns, and 15 §4.1's normative obligation. TH-78's residual column is the sharpest — it
+> currently dismisses a lowered `mkt.fee` with "Nothing breaks there, because the bond still
+> covers it", which is false. Each must say the rate coupling delivers the invariant and the
+> cap bounds exposure. Do the correction in the same commit as the screen, so no revision
+> exists in which the claim and the mechanism disagree.
 
 **Files:**
 - Modify: `crates/constitution-core/src/lib.rs:91-145` (add the sibling screen next to `screen_redeem_fee_coupling`)
