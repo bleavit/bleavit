@@ -2216,14 +2216,17 @@ pub fn can_admit_attested_component(delta_s_max_bps: u32, params: &OracleParams)
     coverage_bps(params.rounds, params.bond_bps).is_some_and(|cov| cov >= delta_s_max_bps)
 }
 
-/// Domain separator for a committed evidence payload (07 §9).
+/// Domain separator for a committed evidence payload (07 §9 *Commitments*,
+/// which states both derivations normatively — a reporter, a prover and a
+/// watchtower all have to reproduce them).
 ///
 /// One preimage layout must never be readable as another, so every commitment
 /// this core builds opens with its own constant. The version suffix leaves room
 /// for a later layout that cannot collide with this one.
 pub const EVIDENCE_DOMAIN: &[u8] = b"bleavit/oracle/evidence/v1";
 
-/// Domain separator for a round's report identity (07 §5.1, §13).
+/// Domain separator for a round's report identity — the value `ack_observed`
+/// must supply (07 §4, §9 *Commitments*).
 pub const REPORT_DOMAIN: &[u8] = b"bleavit/oracle/report/v1";
 
 /// Domain-separated preimage of a committed evidence payload.
