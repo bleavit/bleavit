@@ -170,12 +170,104 @@ mod tests {
         assert_eq!(s.book_acquired[0], 0);
     }
 
+    // I1 (fix round 1): the test above sets proceeds == qty, so pro-rating by
+    // value (`proceeds × creditable / qty`) collapses to the quantity
+    // (`creditable`) alone — an implementation that credited *units sold*
+    // instead of *value received* would still pass it. proceeds != qty here
+    // so the two only agree if the division is actually performed:
+    // 1_500 × 600 / 1_000 = 900, not 600.
+    #[test]
+    fn a_sale_prorates_by_value_not_by_quantity() {
+        let mut s = MarketScore::default();
+        on_buy(&mut s, 0, 600, 300, 0).expect("no overflow");
+        on_sell(&mut s, 0, 1_000, 1_500).expect("no overflow");
+        assert_eq!(
+            s.received, 900,
+            "1_500 * 600 / 1_000 = 900, not the quantity 600"
+        );
+    }
+
+    // I3 (fix round 1): `CoreError::Overflow` was never produced by any test,
+    // so a checked_add/checked_mul silently replaced by a saturating or
+    // wrapping op would still pass every other test in this file.
+    #[test]
+    fn on_buy_reports_overflow_instead_of_panicking() {
+        let mut s = MarketScore::default();
+        assert_eq!(on_buy(&mut s, 0, 1, u128::MAX, 1), Err(CoreError::Overflow));
+    }
+
     #[test]
     fn settlement_credits_only_the_book_acquired_remainder() {
         let mut s = MarketScore::default();
         on_buy(&mut s, 0, 1_000, 500, 3).expect("no overflow");
         on_settle(&mut s, [1_000, 0], [1, 0]).expect("no overflow");
         assert_eq!(s.received, 1_000);
+    }
+
+    // I2 (fix round 1): the test above sets position == book_acquired, so an
+    // implementation that used `position` alone (ignoring the
+    // `min(position, book_acquired)` clamp `book_acquired` exists to
+    // enforce — design §4.4) would still pass it. Here position (1_000)
+    // exceeds book_acquired (300), so crediting by position alone would give
+    // 1_000 * 2 = 2_000 instead of the correct 300 * 2 = 600, and leaving
+    // book_acquired un-decremented would also be visible.
+    #[test]
+    fn settlement_clamps_to_book_acquired_when_position_is_larger() {
+        let mut s = MarketScore::default();
+        on_buy(&mut s, 0, 300, 150, 0).expect("no overflow");
+        on_settle(&mut s, [1_000, 0], [2, 0]).expect("no overflow");
+        assert_eq!(
+            s.received, 600,
+            "eligible = min(1_000, 300) = 300, credit = 300 * 2"
+        );
+        assert_eq!(
+            s.book_acquired[0], 0,
+            "book_acquired decrements by the eligible amount"
+        );
+    }
+
+    // I3 (fix round 1): every existing on_settle test only ever populated
+    // side 0, so the loop's side == 1 (SHORT) iteration was dead code as far
+    // as the suite could tell — an implementation that only credited side 0
+    // would still pass every other test in this file. Both sides carry
+    // different quantities and settled values here so a bug that swapped,
+    // skipped, or zeroed either side would show up in the total.
+    #[test]
+    fn on_settle_credits_both_book_sides() {
+        let mut s = MarketScore::default();
+        on_buy(&mut s, 0, 200, 100, 0).expect("no overflow");
+        on_buy(&mut s, 1, 300, 150, 0).expect("no overflow");
+        on_settle(&mut s, [200, 300], [2, 3]).expect("no overflow");
+        assert_eq!(
+            s.received,
+            200 * 2 + 300 * 3,
+            "both branches credit: 400 + 900"
+        );
+        assert_eq!(s.book_acquired, [0, 0]);
+    }
+
+    // I3 (fix round 1): `fold` had no test at all, though TR3 and TR5 both
+    // consume it directly. Folds two markets to confirm it accumulates
+    // (adds into the running epoch total) rather than replacing it.
+    #[test]
+    fn fold_accumulates_across_markets_into_one_epoch_total() {
+        let mut epoch = EpochScore::default();
+
+        let mut market_a = MarketScore::default();
+        on_buy(&mut market_a, 0, 500, 250, 2).expect("no overflow"); // spent 252
+        fold(&mut epoch, &market_a).expect("no overflow");
+        assert_eq!(epoch.spent, 252);
+        assert_eq!(epoch.received, 0);
+
+        let mut market_b = MarketScore::default();
+        on_buy(&mut market_b, 0, 100, 40, 1).expect("no overflow"); // spent 41
+        on_sell(&mut market_b, 0, 100, 60).expect("no overflow"); // received 60
+        fold(&mut epoch, &market_b).expect("no overflow");
+        assert_eq!(epoch.spent, 293, "252 (market_a) + 41 (market_b)");
+        assert_eq!(
+            epoch.received, 60,
+            "market_b's received only; market_a scored none"
+        );
     }
 
     #[test]

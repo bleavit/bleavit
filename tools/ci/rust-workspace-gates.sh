@@ -142,11 +142,12 @@ cargo test -p bleavit-runtime --features try-runtime --locked
 tools/ci/runtime-profile-gates.sh
 
 # Real no_std build gate: the frame-free math surface (futarchy-primitives,
-# futarchy-fixed) must compile without std (01 §5.2 / rule 9). A --no-default-features
-# `cargo test` executes zero tests and so silently passes; a build does not.
+# futarchy-fixed, trading-rewards-core) must compile without std (01 §5.2 /
+# rule 9). A --no-default-features `cargo test` executes zero tests and so
+# silently passes; a build does not.
 if cargo metadata --locked --no-deps --format-version=1 \
-  | python3 -c 'import json,sys; ms={m["name"] for m in json.load(sys.stdin)["packages"]}; sys.exit(0 if {"futarchy-primitives","futarchy-fixed"} <= ms else 1)'; then
-  cargo build -p futarchy-primitives -p futarchy-fixed --no-default-features --locked
+  | python3 -c 'import json,sys; ms={m["name"] for m in json.load(sys.stdin)["packages"]}; sys.exit(0 if {"futarchy-primitives","futarchy-fixed","trading-rewards-core"} <= ms else 1)'; then
+  cargo build -p futarchy-primitives -p futarchy-fixed -p trading-rewards-core --no-default-features --locked
 fi
 
 # I-24 XCM-isolation lint (15 §1, rule 7): `xcm`/`pallet-xcm` types must never be
