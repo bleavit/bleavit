@@ -134,6 +134,7 @@ const GENESIS: readonly GenesisRecord[] = [
   { key: 'mkt.obs_interval', raw: 10, min: 5, max: 50, delta: '5', cd: 1, cls: 'Param' },
   { key: 'mkt.kappa', raw: 5_000_000, min: 0.001, max: 0.02, delta: '0.002', cd: 2, cls: 'Meta' },
   { key: 'mkt.fee', raw: 3_000_000, min: 5, max: 100, delta: '10 bps', cd: 1, cls: 'Param' },
+  { key: 'rwd.rate', raw: 2_500_000, min: 0, max: 60, delta: '25 bps', cd: 1, cls: 'Param' },
   { key: 'dec.window', raw: 43_200, min: 14_400, max: 86_400, delta: '20%', cd: 2, cls: 'Meta' },
   { key: 'dec.trailing', raw: 14_400, min: 3_600, max: 28_800, delta: null, cd: 2, cls: 'Meta' },
   { key: 'dec.delta_max', raw: 50_000_000, min: 0.02, max: 0.1, delta: null, cd: 2, cls: 'Meta' },

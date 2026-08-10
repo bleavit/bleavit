@@ -121,9 +121,11 @@ Unless a call below says otherwise it requires its stated protocol origin. `fund
 
 The `sweep_insurance` call is authorized by the dedicated `InsuranceSweep` capability, not by the broader `TreasurySpend` capability (SQ-384).
 
+Two further calls carry a **PARAM** origin rather than `FutarchyTreasury`, because each spends one fixed genesis allocation pot rather than the ordinary treasury: **`create_community_schedule(beneficiary, amount)`** (`FutarchyParam` origin; the `communty` pot → a named beneficiary's vesting schedule; emits **`CommunityScheduleCreated { beneficiary, amount, start, per_block, remaining }`**; the paragraph below) and **`fund_trading_rewards(amount)`** (`FutarchyParam` origin; the `incentiv` pot → the reward pallet's sovereign account; emits **`TradingRewardsFunded { amount, remaining }`**; §2.6, added 2026-08-10). Both decrement a stored remaining allocation and both are bounded by a lifetime count of successful uses. Neither draws on `MAIN` or any `ops.*` budget line, and neither is reachable through `TreasurySpend`.
+
 ---
 
-**Phase-4 community distribution (B20 / SQ-107).** `create_community_schedule(beneficiary, amount)` is the one bounded exception to the ordinary treasury-outflow origin: it is a PARAM leaf, admitted only after the Phase-3→4 arming transition records its exact block, and dispatched with `FutarchyParam`. The source is the genesis-derived `communty` pot; the beneficiary MUST differ from that pot, `amount` MUST be at least the 13 §3.5 minimum vested transfer and no greater than the stored undistributed allocation, and the lifetime successful-schedule count MUST remain below the 13 §4 bound. The runtime calls the SDK `pallet-vesting` `vested_transfer` adapter atomically before decrementing the remaining allocation and incrementing the count. The fixed duration is 24 months in para-blocks; `per_block = floor(amount / duration)` and a zero result fails, so unlocks can never run ahead of the horizon. The arming block is an exact start (no caller-selected start), arming is idempotent, and failures leave both custody and counters unchanged. No direct `vesting.force_*`, signer impersonation, treasury stream, or unbounded schedule list may be used; the per-schedule counter is a lifetime admission bound, not a promise that old completed schedules are deleted.
+**Phase-4 community distribution (B20 / SQ-107).** `create_community_schedule(beneficiary, amount)` is one of exactly **two** bounded exceptions to the ordinary treasury-outflow origin — §2.6's `fund_trading_rewards(amount)` is the other, added 2026-08-10, and [06](06-governance-and-guardians.md) §3.2 states the three properties both MUST hold. It is a PARAM leaf, admitted only after the Phase-3→4 arming transition records its exact block, and dispatched with `FutarchyParam`. The source is the genesis-derived `communty` pot; the beneficiary MUST differ from that pot, `amount` MUST be at least the 13 §3.5 minimum vested transfer and no greater than the stored undistributed allocation, and the lifetime successful-schedule count MUST remain below the 13 §4 bound. The runtime calls the SDK `pallet-vesting` `vested_transfer` adapter atomically before decrementing the remaining allocation and incrementing the count. The fixed duration is 24 months in para-blocks; `per_block = floor(amount / duration)` and a zero result fails, so unlocks can never run ahead of the horizon. The arming block is an exact start (no caller-selected start), arming is idempotent, and failures leave both custody and counters unchanged. No direct `vesting.force_*`, signer impersonation, treasury stream, or unbounded schedule list may be used; the per-schedule counter is a lifetime admission bound, not a promise that old completed schedules are deleted.
 
 ## 2. Genesis economics (B-14, D-15)
 
@@ -265,12 +267,22 @@ dependence on the outcome. Counting only book-acquired units closes it inside th
 The direction of error is conservative: a trader who funds a position off-book is
 under-credited, never over-credited, which is the R-7 direction.
 
-**Folding is pull-based.** A permissionless `settle_market_score(who, market)` folds one settled
-market into the account's epoch total and deletes the entry. No hook iterates a collection, and
-[03](03-conditional-ledger.md) §10 keeps its rule that the ledger has no hooks.
+**Both settlement steps are pull-based, and there are exactly two.**
+`settle_market_score(who, market)` folds one settled market into the account's epoch total and
+deletes the entry. `settle_epoch(who)` then closes one participant's epoch, applying the reward
+and debit arithmetic below exactly once. Both are permissionless and both name a target account
+rather than the caller, which is safe because each acts only on already-recorded values: any
+caller reaches the same result and no caller can choose it. Neither is a hook. No hook iterates
+a collection, and [03](03-conditional-ledger.md) §10 keeps its rule that the ledger has no
+hooks. The keeper cranks both ([01](01-system-overview.md) §4.2).
 
-**Reward and debit, both computed in USDC.** At epoch close, over a participant's folded
-markets, with `r` the live `rwd.rate`:
+`settle_epoch` MUST be idempotent per participant per epoch, MUST refuse an epoch that has not
+closed, and MUST refuse while that participant still holds an unfolded score entry for the
+epoch — otherwise a partially folded account would settle on part of its own score, which is the
+one ordering in which a losing epoch pays a reward.
+
+**Reward and debit, both computed in USDC.** `settle_epoch(who)` applies the following at epoch
+close, over that participant's folded markets, with `r` the live `rwd.rate`:
 
 ```
 net     = epoch_received − epoch_spent               // USDC
