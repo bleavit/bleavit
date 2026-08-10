@@ -1773,6 +1773,16 @@ pub fn genesis_params() -> Vec<ParamRecord> {
             false
         ),
         row(
+            b"rwd.rate",
+            ParamValue::Perbill(2_500_000),
+            ParamValue::Perbill(0),
+            ParamValue::Perbill(6_000_000),
+            Some(MaxDelta::Absolute(ParamValue::Perbill(2_500_000))),
+            1,
+            ParamClass::Param,
+            false
+        ),
+        row(
             b"dec.window",
             ParamValue::U32(timing_defaults::DEC_WINDOW),
             ParamValue::U32(kernel::DECISION_WINDOW_FLOOR_BLOCKS),
@@ -3413,6 +3423,53 @@ mod tests {
         // 1,000 and two reach the superseded 2,000.
         assert_eq!(record.max_delta, Some(MaxDelta::Factor(2)));
         assert_eq!(record.class, ParamClass::Param);
+    }
+
+    /// 13 §1: the trading-accuracy reward rate, adopted at 0.25 % by the owner
+    /// on 2026-08-10. The seed and every bound on the record are pinned here
+    /// because the whole anti-farm argument of 08 §2.6 is stated in terms of
+    /// them: the ceiling keeps the rate inside the wash break-even, and the
+    /// unsafe direction is upward.
+    #[test]
+    fn rwd_rate_is_seeded_at_the_adopted_quarter_percent() {
+        let key = key16(b"rwd.rate");
+        let record = genesis_params()
+            .into_iter()
+            .find(|r| r.key == key)
+            .expect("13 §1: rwd.rate must be seeded at genesis");
+        assert_eq!(record.value, ParamValue::Perbill(2_500_000));
+        assert_eq!(record.min, ParamValue::Perbill(0));
+        assert_eq!(record.max, ParamValue::Perbill(6_000_000));
+        assert_eq!(record.cooldown_epochs, 1);
+        assert_eq!(record.class, ParamClass::Param);
+        assert!(!record.kernel_bounded);
+    }
+
+    /// 08 §2.6 / 13 §1: the seeded pair must satisfy the wash break-even the
+    /// adopted rate is derived from. This is a genesis-consistency assertion,
+    /// not the amendment-boundary screen.
+    #[test]
+    fn rwd_rate_stays_inside_the_wash_breakeven_at_the_mkt_fee_default() {
+        // 08 §2.6: r_breakeven = 2f / 0.99, evaluated in parts per billion.
+        let params = genesis_params();
+        let fee = params
+            .iter()
+            .find(|r| r.key == key16(b"mkt.fee"))
+            .expect("mkt.fee");
+        let rate = params
+            .iter()
+            .find(|r| r.key == key16(b"rwd.rate"))
+            .expect("rwd.rate");
+        let (ParamValue::Perbill(f), ParamValue::Perbill(r)) = (fee.value, rate.value) else {
+            panic!("both rows are Perbill");
+        };
+        // Cross-multiplied, so the amendment-boundary screen and this genesis
+        // assertion cannot disagree at the boundary. Equality is admissible: at
+        // exact break-even the wash nets zero rather than positive.
+        assert!(
+            99 * u128::from(r) <= 200 * u128::from(f),
+            "rwd.rate {r} ppb has reached the wash break-even against mkt.fee {f} ppb",
+        );
     }
 
     #[test]

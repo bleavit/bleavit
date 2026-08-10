@@ -1248,3 +1248,9 @@ class = "dispatch-limit"
 genesis = true
 error = "QuestionService::EpsilonOutOfRange"
 reason = "13 §1 / 16 §5.2: registration refuses epsilon one unit below the live floor."
+
+[[entry]]
+key = "rwd.rate"
+class = "param-bounds"
+genesis = true
+reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/amend_registry suite. The rate gates no dispatch — it scales an accrual, and the dispatch-bearing limit is the earning cap, which is derived per account rather than registry-held."

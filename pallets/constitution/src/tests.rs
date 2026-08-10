@@ -1287,7 +1287,12 @@ fn genesis_registry_matches_13_1_row_encodings() {
         // arms the hosted service by design rather than by accident. The last
         // two `[VERIFY]` rows were ADOPTED by the user on 2026-08-04:
         // `svc.client_bond` at 100,000 VIT (+1) and `svc.price_cap` at 4x (+1).
-        assert_eq!(Params::<Test>::count(), 113);
+        //
+        // +1 on 2026-08-10 for `rwd.rate`, the 08 §2.6 trading accuracy reward
+        // rate, adopted at 0.25 % and seeded so enrollment works from the start.
+        // It is the only row that program adds: the minimum bond reuses
+        // `ledger.pos_dep` and the per-epoch budget is a call argument.
+        assert_eq!(Params::<Test>::count(), 114);
         // Pin the adopted rate AND its unit, because 13 §1 states this row in
         // bps while the stored kind is Perbill: 1,000 bps = 10 % = 1e8 parts.
         // A 100,000× unit slip here would be silent and would misprice every

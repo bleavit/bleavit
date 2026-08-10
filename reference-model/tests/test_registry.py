@@ -530,10 +530,18 @@ class RegistryGroundingTests(unittest.TestCase):
         # than an adoption -- and the scrutiny it earned was a dispatch-limit
         # classification plus the test nobody had written, that `execute` itself
         # refuses past the retry window (V-210).
-        self.assertEqual(len(entries), 207)
-        self.assertEqual(len(json_keys), 113)
-        self.assertEqual(len(classified_genesis), 113)
-        self.assertEqual(len(model_bytes), 113)
+        #
+        # 207 -> 208 and 113 -> 114 on 2026-08-10 with `rwd.rate`, the trading
+        # accuracy reward rate of 08 Section 2.6. Both counters move together,
+        # so by this counter's own rule it is a new key rather than an adoption:
+        # the row did not exist before, and it is seeded at genesis so that
+        # enrollment works from the start. It is the ONLY row that program adds.
+        # The minimum bond reuses `ledger.pos_dep` and the per-epoch budget is a
+        # call argument, so neither earns a key of its own.
+        self.assertEqual(len(entries), 208)
+        self.assertEqual(len(json_keys), 114)
+        self.assertEqual(len(classified_genesis), 114)
+        self.assertEqual(len(model_bytes), 114)
         self.assertEqual(model_bytes, json_bytes)
         self.assertEqual(model_bytes, classified_bytes)
 
