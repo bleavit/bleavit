@@ -48,7 +48,7 @@
 
 ---
 
-## Task TR1: Spec layer, registry row and genesis seed
+## Task 1 — TR1: Spec layer, registry row and genesis seed
 
 **Files:**
 - Modify: `docs/architecture/13-parameters.md` (§1 table, §4 table)
@@ -175,7 +175,7 @@ git commit -m "feat(spec,constitution): rwd.rate at 0.25% with its bounds and se
 
 ---
 
-## Task TR2: The frame-free score kernel
+## Task 2 — TR2: The frame-free score kernel
 
 **Files:**
 - Create: `crates/trading-rewards-core/Cargo.toml`
@@ -457,7 +457,7 @@ git commit -m "feat(rewards): frame-free score kernel with book-acquired basis (
 
 ---
 
-## Task TR3: The pallet shell — storage, enrollment and bonds
+## Task 3 — TR3: The pallet shell — storage, enrollment and bonds
 
 **Files:**
 - Create: `pallets/trading-rewards/Cargo.toml`, `src/lib.rs`, `src/mock.rs`, `src/tests.rs`, `src/weights.rs`, `src/benchmarking.rs`
@@ -572,7 +572,7 @@ git commit -m "feat(rewards): enrollment, bonds and the snapshot cap (TR3)"
 
 ---
 
-## Task TR4: The market accumulator
+## Task 4 — TR4: The market accumulator
 
 **Files:**
 - Modify: `crates/market-core/src/lib.rs` (define the observer trait)
@@ -664,7 +664,7 @@ git commit -m "feat(market,rewards): observe fills for enrolled accounts (TR4)"
 
 ---
 
-## Task TR5: Folding, epoch settlement and the timeout escape
+## Task 5 — TR5: Folding, epoch settlement and the timeout escape
 
 **Files:**
 - Modify: `pallets/trading-rewards/src/lib.rs`
@@ -773,7 +773,7 @@ git commit -m "feat(rewards): folding, epoch settlement and the timeout escape (
 
 ---
 
-## Task TR6: The treasury funding call
+## Task 6 — TR6: The treasury funding call
 
 **Files:**
 - Modify: `pallets/futarchy-treasury/src/lib.rs` (new call after index 12)
@@ -841,7 +841,7 @@ git commit -m "feat(treasury): bounded PARAM-origin trading-reward funding (TR6)
 
 ---
 
-## Task TR7: Runtime wiring
+## Task 7 — TR7: Runtime wiring
 
 **Files:**
 - Modify: `runtime/bleavit-runtime/src/lib.rs:345` (`construct_runtime!`)
@@ -909,7 +909,7 @@ git commit -m "feat(runtime): wire pallet-trading-rewards at slot 68 (TR7)"
 
 ---
 
-## Task TR8: Verification — property suite, reference model and the rate guard
+## Task 8 — TR8: Verification — property suite, reference model and the rate guard
 
 **Files:**
 - Create: `reference-model/src/bleavit_reference_model/trading_rewards.py`
@@ -1021,7 +1021,7 @@ Then update PLAN.md — a milestone row for this work, a Session log row, and a 
 
 ---
 
-## Task TR9: The rate coupling screen (design §11, owner decision 2026-08-10)
+## Task 9 — TR9: The rate coupling screen (design §11, owner decision 2026-08-10)
 
 **Files:**
 - Modify: `crates/constitution-core/src/lib.rs:91-145` (add the sibling screen next to `screen_redeem_fee_coupling`)
