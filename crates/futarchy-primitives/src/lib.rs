@@ -1192,6 +1192,36 @@ pub mod bounds {
     /// roster against one bounded allocation pot for the same reason. It is
     /// derived from that constant rather than restated so the two cannot drift.
     pub const MAX_TRADING_REWARD_PARTICIPANTS: u32 = MAX_COMMUNITY_SCHEDULES;
+    /// 13 §4: the absolute lifetime of one trading-accuracy score entry
+    /// (08 §2.6). The escape that bound exists for is an **absolute
+    /// block-height timeout measured from the score entry's creation**,
+    /// independent of the market's state, and its sizing rule is that it "sits
+    /// above the longest lawful settlement horizon".
+    ///
+    /// Derived rather than picked. It reuses [`kernel::MAX_ARCHIVE_DELAY_BLOCKS`]
+    /// — the one-year ceiling this protocol already applies to the longest
+    /// retention any artifact may lawfully have. A book reaches its terminal
+    /// state inside its own cohort's measurement and settlement stages, at most
+    /// `MAX_NON_TERMINAL_COHORTS + 1` epochs, which at the epoch **ceiling**
+    /// [`kernel::PRODUCTION_MAX_EPOCH_LENGTH_BLOCKS`] is 5 × 604,800 =
+    /// 3,024,000 blocks. `trading-rewards-core` asserts that inequality, so a
+    /// later change to either constant cannot close the margin silently.
+    ///
+    /// Anchoring to `ledger.archive` instead would be circular: 03 §5.4 admits
+    /// the archive sweep only once the vault is terminal, and a market that
+    /// never settles never becomes terminal.
+    pub const SCORE_ENTRY_LIFETIME_BLOCKS: u32 = super::kernel::MAX_ARCHIVE_DELAY_BLOCKS;
+    /// The longest a book can lawfully take to reach its terminal state: its
+    /// own cohort's measurement and settlement stages, at the epoch ceiling.
+    /// Exists so [`SCORE_ENTRY_LIFETIME_BLOCKS`] can be checked against it
+    /// rather than argued against it.
+    pub const MAX_SETTLEMENT_HORIZON_BLOCKS: u32 =
+        (MAX_NON_TERMINAL_COHORTS + 1) * super::kernel::PRODUCTION_MAX_EPOCH_LENGTH_BLOCKS;
+    /// 08 §2.6: the timeout "sits above the longest lawful settlement horizon,
+    /// so no settling market can reach it". Checked at compile time, so a later
+    /// change to either constant closes the margin loudly rather than silently
+    /// turning the escape into an exit from a live debit.
+    const _: () = assert!(SCORE_ENTRY_LIFETIME_BLOCKS > MAX_SETTLEMENT_HORIZON_BLOCKS);
     /// 13 §4: `pallet-migrations` may consume at most half the block service
     /// weight while a multi-block migration is active.
     pub const MIGRATION_SERVICE_WEIGHT_PERCENT: u32 = 50;

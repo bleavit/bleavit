@@ -2,7 +2,9 @@
 //! Frame-free score kernel for the trading accuracy rewards program.
 //! Design: `docs/proposals/2026-08-09-vit-trading-accuracy-rewards-design.md` §4.4–§4.5.
 
-use futarchy_primitives::{kernel::RATE_HEADROOM, Balance};
+use futarchy_primitives::{
+    bounds::SCORE_ENTRY_LIFETIME_BLOCKS, kernel::RATE_HEADROOM, Balance, MarketId,
+};
 use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 
@@ -32,6 +34,104 @@ pub struct MarketScore {
     pub spent: Balance,
     pub received: Balance,
     pub book_acquired: [Balance; 2],
+    /// The mirror-branch branch-USDC the trade wrapper leaves with the buyer:
+    /// the book-side `cost`, **without** the fee (08 §2.6 rule 1, SQ-1051).
+    ///
+    /// `buy_branch` (`crates/market-core/src/lib.rs`) splits `cost + fee` of
+    /// plain USDC into both branches, sends `cost` of the traded branch to the
+    /// book and one fee leg **from each branch** to the fee account, so exactly
+    /// `cost` of mirror-branch branch-USDC stays with the buyer. Under 04 §6.2's
+    /// G-3 that leg redeems at par when the branch is annulled, which is why
+    /// rule 4's annulled arm scores `mirror_principal − spent` and not the whole
+    /// notional.
+    ///
+    /// Rule 1 raises `spent` by `cost + fee` and this counter by `cost` on the
+    /// same buy, so `spent >= mirror_principal` holds invariantly and their
+    /// difference is exactly the fees the market's buys paid.
+    pub mirror_principal: Balance,
+    /// Block height at which this entry was created, for 08 §2.6's **absolute**
+    /// timeout — "measured from the score entry's creation, independent of the
+    /// market's state". `u64` for the same reason `market-core` takes `u64`
+    /// block heights: the frame-free kernels never see `BlockNumberFor<T>`, and
+    /// a widening conversion from any runtime's block number cannot lose a bit.
+    pub created_at: u64,
+}
+
+impl MarketScore {
+    /// True when a fill moved nothing a score is made of.
+    ///
+    /// [`created_at`](Self::created_at) is a stamp rather than an accumulator,
+    /// so it is normalised away before the comparison. Doing it this way rather
+    /// than by listing the accounting fields keeps a field added later inside
+    /// the comparison automatically — the TR4 review's finding 7 was that a
+    /// freshly stamped entry never compares equal to `unwrap_or_default()`, so
+    /// the observer's "a fill that moved nothing writes nothing" skip would
+    /// have stopped firing silently the moment this field landed.
+    pub fn unchanged_from(&self, before: &Self) -> bool {
+        let mut probe = self.clone();
+        probe.created_at = before.created_at;
+        &probe == before
+    }
+
+    /// The invariant rule 1 establishes: every buy raises `spent` by
+    /// `cost + fee` and `mirror_principal` by `cost`, so the mirror leg can
+    /// never exceed what was spent and the annulled arm can never pay a reward.
+    pub fn mirror_within_spent(&self) -> bool {
+        self.spent >= self.mirror_principal
+    }
+}
+
+/// How the branch a score entry tracks ended (08 §2.6 rule 4).
+///
+/// A conditional market pays a buyer in two currencies and only one survives,
+/// so a single-arm `received − spent` has to be wrong in one state of the world
+/// (SQ-1051). The arm is selected from the branch's terminal disposition.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BranchDisposition {
+    /// The branch realized: `received − spent`.
+    Realized,
+    /// The branch was annulled: `mirror_principal − spent`, discarding every
+    /// `received` credit, because those are annulled-branch units worth nothing.
+    Annulled,
+    /// The proposal was VOIDed: the entry drops at zero and folds to nothing,
+    /// the same disposition as the absolute-timeout escape.
+    Void,
+}
+
+/// The terminal facts 08 §2.6 rules 3 and 4 need about one scored book.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MarketSettlement {
+    pub disposition: BranchDisposition,
+    /// The account's terminal branch position, per scalar side.
+    pub position: [Balance; 2],
+    /// The branch's terminal redemption value per unit, per scalar side.
+    pub settled_value: [Balance; 2],
+}
+
+/// Read-only source of one scored book's terminal facts.
+///
+/// The rewards pallet is the consumer, so the interface lives with it; the
+/// runtime supplies the adapter that reads the market pallet and the ledger.
+/// It is infallible by construction: `None` means "not terminal yet", which is
+/// exactly the state the absolute-timeout escape exists for, and there is no
+/// channel by which a settlement source could make folding fail.
+pub trait SettledMarkets<AccountId> {
+    fn settlement(who: &AccountId, market: MarketId) -> Option<MarketSettlement>;
+}
+
+impl<AccountId> SettledMarkets<AccountId> for () {
+    fn settlement(_who: &AccountId, _market: MarketId) -> Option<MarketSettlement> {
+        None
+    }
+}
+
+/// 08 §2.6's absolute escape: a score entry expires
+/// [`SCORE_ENTRY_LIFETIME_BLOCKS`] after its creation, whatever the market is
+/// doing. Anchoring it to `ledger.archive` instead would be circular, because
+/// the archive sweep needs a terminal vault and a market that never settles
+/// never becomes one.
+pub fn score_entry_expired(created_at: u64, now: u64) -> bool {
+    now.saturating_sub(created_at) >= u64::from(SCORE_ENTRY_LIFETIME_BLOCKS)
 }
 
 /// The folded per-account epoch total. Stored inside TR3's participant record,
@@ -69,7 +169,15 @@ pub fn on_buy(
 ) -> Result<(), CoreError> {
     let slot = s.book_acquired.get_mut(side).ok_or(CoreError::Overflow)?;
     let outlay = cost.checked_add(fee).ok_or(CoreError::Overflow)?;
+    let mirror = s
+        .mirror_principal
+        .checked_add(cost)
+        .ok_or(CoreError::Overflow)?;
     s.spent = s.spent.checked_add(outlay).ok_or(CoreError::Overflow)?;
+    // 08 §2.6 rule 1: the wrapper leaves the buyer `cost` of mirror-branch
+    // branch-USDC. Raised together with `spent` and by a strictly smaller
+    // amount, which is what makes `mirror_within_spent` invariant.
+    s.mirror_principal = mirror;
     *slot = slot.checked_add(qty).ok_or(CoreError::Overflow)?;
     Ok(())
 }
@@ -115,14 +223,33 @@ pub fn on_settle(
     Ok(())
 }
 
-pub fn fold(epoch: &mut EpochScore, market: &MarketScore) -> Result<(), CoreError> {
-    epoch.spent = epoch
-        .spent
-        .checked_add(market.spent)
-        .ok_or(CoreError::Overflow)?;
+/// Fold one settled market into the epoch total, selecting 08 §2.6 rule 4's arm
+/// from the branch's terminal disposition.
+///
+/// The arm is expressed on the two unsigned counters rather than as a signed
+/// score, so no subtraction happens here and none can underflow. The annulled
+/// arm substitutes `mirror_principal` for `received`, which reduces to
+/// `Σcost − Σ(cost + fee) = −Σfee` — 04 §6.2's G-3 promise restated, and always
+/// a debit rather than a reward, because rule 1 raises both counters on the
+/// same buy and `spent >= mirror_principal` invariantly.
+pub fn fold(
+    epoch: &mut EpochScore,
+    market: &MarketScore,
+    disposition: BranchDisposition,
+) -> Result<(), CoreError> {
+    let (spent, received) = match disposition {
+        BranchDisposition::Realized => (market.spent, market.received),
+        // Every `received` credit is discarded: those are traded-branch
+        // branch-USDC and are worth nothing once the branch is annulled.
+        BranchDisposition::Annulled => (market.spent, market.mirror_principal),
+        // VOID is a constitutional emergency rather than a resolved forecast,
+        // so nothing is folded at all.
+        BranchDisposition::Void => return Ok(()),
+    };
+    epoch.spent = epoch.spent.checked_add(spent).ok_or(CoreError::Overflow)?;
     epoch.received = epoch
         .received
-        .checked_add(market.received)
+        .checked_add(received)
         .ok_or(CoreError::Overflow)?;
     Ok(())
 }
@@ -177,6 +304,89 @@ mod tests {
         assert_eq!(s.spent, 503, "cost and fee both count against the trader");
         assert_eq!(s.book_acquired[0], 1_000);
         assert_eq!(s.received, 0);
+        // 08 §2.6 rule 1 (SQ-1051): the wrapper leaves the buyer `cost` of
+        // mirror-branch branch-USDC — the book-side cost **without** the fee,
+        // verified against `buy_branch` in `crates/market-core/src/lib.rs`,
+        // which takes one fee leg from each branch.
+        assert_eq!(s.mirror_principal, 500, "the mirror leg excludes the fee");
+        assert_ne!(
+            s.mirror_principal, s.spent,
+            "cost and cost+fee must be distinguishable in this fixture"
+        );
+    }
+
+    // The invariant the annulled arm rests on, and the reason it can never pay
+    // a reward: rule 1 raises both counters on the same buy and their
+    // difference is exactly the fees.
+    #[test]
+    fn the_mirror_leg_never_exceeds_what_was_spent_and_the_gap_is_the_fees() {
+        let mut s = MarketScore::default();
+        on_buy(&mut s, 0, 1_000, 500, 3).expect("no overflow");
+        on_buy(&mut s, 1, 400, 200, 2).expect("no overflow");
+        assert!(s.mirror_within_spent());
+        assert_eq!(s.spent - s.mirror_principal, 5, "3 + 2 fees, exactly");
+        // A sale credits `received` and must move neither leg of the identity.
+        on_sell(&mut s, 0, 1_000, 900).expect("no overflow");
+        assert!(s.mirror_within_spent());
+        assert_eq!(s.spent - s.mirror_principal, 5);
+    }
+
+    #[test]
+    fn a_zero_fee_buy_leaves_the_mirror_leg_equal_to_what_was_spent() {
+        // A governed fee of 0 bps is legal — `buy_branch` skips the zero-sized
+        // fee legs — and the annulled arm then scores exactly zero, not a
+        // reward.
+        let mut s = MarketScore::default();
+        on_buy(&mut s, 0, 1_000, 500, 0).expect("no overflow");
+        assert_eq!(s.spent, s.mirror_principal);
+        let mut epoch = EpochScore::default();
+        fold(&mut epoch, &s, BranchDisposition::Annulled).expect("no overflow");
+        assert_eq!(
+            epoch_outcome(&epoch, u128::MAX, RATE),
+            Outcome::Neutral,
+            "no fee paid, so an annulled branch costs nothing"
+        );
+    }
+
+    #[test]
+    fn an_overflowing_mirror_leg_is_reported_rather_than_wrapped() {
+        let mut s = MarketScore {
+            mirror_principal: u128::MAX,
+            ..Default::default()
+        };
+        assert_eq!(on_buy(&mut s, 0, 1, 1, 0), Err(CoreError::Overflow));
+    }
+
+    // `created_at` is a stamp rather than an accumulator. Without the
+    // normalisation a freshly stamped entry never compares equal to the
+    // default, and TR4's "a fill that moved nothing writes nothing" skip would
+    // have stopped firing the moment this field landed (TR4 review finding 7).
+    #[test]
+    fn the_unchanged_probe_ignores_the_creation_stamp_and_nothing_else() {
+        let before = MarketScore::default();
+        let stamped = MarketScore {
+            created_at: 900,
+            ..Default::default()
+        };
+        assert!(stamped.unchanged_from(&before), "the stamp is not a score");
+        let mut moved = stamped.clone();
+        moved.mirror_principal = 1;
+        assert!(
+            !moved.unchanged_from(&before),
+            "a moved accounting field is a change"
+        );
+        let mut moved = stamped.clone();
+        moved.received = 1;
+        assert!(!moved.unchanged_from(&before));
+    }
+
+    #[test]
+    fn a_score_entry_expires_on_the_absolute_lifetime_and_not_before() {
+        let lifetime = u64::from(futarchy_primitives::bounds::SCORE_ENTRY_LIFETIME_BLOCKS);
+        assert!(!score_entry_expired(100, 100));
+        assert!(!score_entry_expired(100, 100 + lifetime - 1));
+        assert!(score_entry_expired(100, 100 + lifetime));
+        assert!(score_entry_expired(100, 100 + lifetime + 1));
     }
 
     #[test]
@@ -284,19 +494,124 @@ mod tests {
 
         let mut market_a = MarketScore::default();
         on_buy(&mut market_a, 0, 500, 250, 2).expect("no overflow"); // spent 252
-        fold(&mut epoch, &market_a).expect("no overflow");
+        fold(&mut epoch, &market_a, BranchDisposition::Realized).expect("no overflow");
         assert_eq!(epoch.spent, 252);
         assert_eq!(epoch.received, 0);
 
         let mut market_b = MarketScore::default();
         on_buy(&mut market_b, 0, 100, 40, 1).expect("no overflow"); // spent 41
         on_sell(&mut market_b, 0, 100, 60).expect("no overflow"); // received 60
-        fold(&mut epoch, &market_b).expect("no overflow");
+        fold(&mut epoch, &market_b, BranchDisposition::Realized).expect("no overflow");
         assert_eq!(epoch.spent, 293, "252 (market_a) + 41 (market_b)");
         assert_eq!(
             epoch.received, 60,
             "market_b's received only; market_a scored none"
         );
+    }
+
+    // ----------------------------------------------------------------------
+    // 08 §2.6 rule 4's three arms (SQ-1051)
+    // ----------------------------------------------------------------------
+
+    /// One buy at `cost`/`fee`, then a sale of the whole book-acquired parcel.
+    /// `received` is deliberately large, so the annulled arm's discard is
+    /// visible: an implementation that kept `received` would score a reward.
+    fn bought_and_sold(cost: Balance, fee: Balance, proceeds: Balance) -> MarketScore {
+        let mut s = MarketScore::default();
+        on_buy(&mut s, 0, 1_000, cost, fee).expect("no overflow");
+        on_sell(&mut s, 0, 1_000, proceeds).expect("no overflow");
+        s
+    }
+
+    #[test]
+    fn a_realized_branch_scores_received_minus_spent() {
+        let market = bought_and_sold(500, 3, 900);
+        let mut epoch = EpochScore::default();
+        fold(&mut epoch, &market, BranchDisposition::Realized).expect("no overflow");
+        assert_eq!(epoch.spent, 503);
+        assert_eq!(epoch.received, 900, "the realized arm keeps every credit");
+    }
+
+    // The test the ruling exists for. `−(cost + fee)` is also negative, and it
+    // is the defect, so this asserts the exact value rather than the sign.
+    #[test]
+    fn an_annulled_branch_scores_exactly_the_fees_and_discards_every_credit() {
+        let market = bought_and_sold(500, 3, 900);
+        let mut epoch = EpochScore::default();
+        fold(&mut epoch, &market, BranchDisposition::Annulled).expect("no overflow");
+        assert_eq!(epoch.spent, 503);
+        assert_eq!(
+            epoch.received, 500,
+            "the mirror leg replaces `received`, which is discarded whole"
+        );
+        // `spent − received` = 3 = Σfee, which is 04 §6.2's G-3 restated. The
+        // one-arm rule would have given 503 − 900 = a reward, and on a losing
+        // sale it would have given the whole notional as a debit.
+        assert_eq!(epoch.spent - epoch.received, 3, "exactly the fees paid");
+        // The three values a wrong arm lands on are all distinct here: 3 (right),
+        // 503 (`−(cost + fee)`, the defect) and −397 (the one-arm reward).
+        assert_ne!(epoch.spent - epoch.received, 503);
+    }
+
+    #[test]
+    fn an_annulled_branch_that_lost_the_whole_notional_still_scores_only_the_fees() {
+        // The case 08 §2.6 quantifies: a buyer whose branch is annulled has a
+        // realized loss of `fee`, roughly 1/333 of the notional at the `mkt.fee`
+        // default, and the retired one-arm rule debited the whole notional.
+        let mut market = MarketScore::default();
+        on_buy(&mut market, 0, 1_000, 1_000, 3).expect("no overflow");
+        let mut epoch = EpochScore::default();
+        fold(&mut epoch, &market, BranchDisposition::Annulled).expect("no overflow");
+        assert_eq!(epoch.spent - epoch.received, 3);
+        assert_eq!(
+            epoch_outcome(&epoch, u128::MAX, RATE),
+            Outcome::Debit(1),
+            "0.25 % of 3, ceiled against the claimant"
+        );
+        // What the retired rule would have charged, for contrast.
+        let one_arm = EpochScore {
+            spent: market.spent,
+            received: market.received,
+        };
+        assert_eq!(epoch_outcome(&one_arm, u128::MAX, RATE), Outcome::Debit(3));
+    }
+
+    #[test]
+    fn a_voided_proposal_folds_to_nothing() {
+        let market = bought_and_sold(500, 3, 900);
+        let mut epoch = EpochScore {
+            spent: 70,
+            received: 40,
+        };
+        fold(&mut epoch, &market, BranchDisposition::Void).expect("no overflow");
+        assert_eq!(
+            (epoch.spent, epoch.received),
+            (70, 40),
+            "VOID adds nothing to either counter, in either direction"
+        );
+    }
+
+    #[test]
+    fn the_annulled_arm_can_never_pay_a_reward() {
+        // Exhaustive over the shapes a market can take: whatever the sale
+        // credits, the annulled arm folds `spent >= received` and
+        // `epoch_outcome` can only be a debit or neutral.
+        for (cost, fee, proceeds) in [
+            (500u128, 3u128, 0u128),
+            (500, 3, 900),
+            (500, 3, u64::MAX as u128),
+            (1, 0, 1_000_000),
+            (0, 0, 0),
+        ] {
+            let market = bought_and_sold(cost, fee, proceeds);
+            let mut epoch = EpochScore::default();
+            fold(&mut epoch, &market, BranchDisposition::Annulled).expect("no overflow");
+            assert!(epoch.spent >= epoch.received, "{cost}/{fee}/{proceeds}");
+            assert!(
+                !matches!(epoch_outcome(&epoch, u128::MAX, RATE), Outcome::Reward(_)),
+                "an annulled branch paid a reward at {cost}/{fee}/{proceeds}"
+            );
+        }
     }
 
     #[test]

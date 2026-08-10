@@ -1239,12 +1239,180 @@ fn a_topped_up_account_is_scored_even_while_its_snapshot_is_still_zero() {
             record.snapshot_bond, 0,
             "the top-up must not move the snapshot; the test is vacuous if it does",
         );
+        assert!(
+            !record.suspended,
+            "a top-up to the minimum clears the flag; the fill below is admitted \
+             by the conjunction's other half, not in spite of it",
+        );
 
         observe(&alice(), MARKET_A, SCORE_SIDE_LONG, 700, 500, 3, true);
 
         let score = Scores::<Test>::get(alice(), MARKET_A).expect("the fill was scored");
         assert_eq!(score.spent, 503);
         assert_ok!(TradingRewards::do_try_state());
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Obligation 6 (SQ-1050): the admission condition is a conjunction
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_suspended_account_holding_a_live_bond_records_nothing() {
+    // The flag half of the conjunction, and the half a balance gate misses.
+    // `top_up_bond` clears `suspended` only once the bond is back at the live
+    // minimum, so a **sub-minimum** top-up leaves a suspended participant with
+    // a nonzero bond. 08 §2.6 (SQ-1050): "Suspension suspends scoring, and the
+    // accumulator MUST test the suspension flag rather than infer it from a
+    // nonzero bond."
+    new_test_ext().execute_with(|| {
+        enrolled_alice(1_000);
+        // What a debit that took the whole bond leaves behind.
+        Participants::<Test>::mutate(alice(), |slot| {
+            if let Some(record) = slot.as_mut() {
+                record.bond = 0;
+                record.snapshot_bond = 0;
+                record.suspended = true;
+            }
+        });
+        assert_ok!(<Assets as MutateAsset<_>>::transfer(
+            UsdcAssetId::get(),
+            &TradingRewards::account_id(),
+            &alice(),
+            1_000,
+            frame_support::traits::tokens::Preservation::Expendable,
+        ));
+        // A top-up strictly below the live minimum of 100: the bond is now
+        // nonzero and the flag is still set.
+        assert_ok!(TradingRewards::top_up_bond(
+            RuntimeOrigin::signed(alice()),
+            99
+        ));
+        let record = Participants::<Test>::get(alice()).expect("record");
+        assert_eq!(record.bond, 99, "the bond gate alone would admit this fill");
+        assert!(record.suspended, "and the flag alone would refuse it");
+        assert!(!TradingRewards::scores_fills(&alice()));
+
+        observe(&alice(), MARKET_A, SCORE_SIDE_LONG, 700, 500, 3, true);
+
+        assert!(
+            Scores::<Test>::get(alice(), MARKET_A).is_none(),
+            "a suspended participant is out of the program until the minimum is back"
+        );
+        assert_eq!(ScoreCount::<Test>::get(alice()), 0);
+        // And the complement, in the same test, so a gate hardcoded to refuse
+        // cannot pass: restoring the minimum clears the flag and scoring
+        // resumes with nothing else changed.
+        assert_ok!(TradingRewards::top_up_bond(
+            RuntimeOrigin::signed(alice()),
+            1
+        ));
+        let record = Participants::<Test>::get(alice()).expect("record");
+        assert_eq!(record.bond, 100);
+        assert!(!record.suspended);
+        observe(&alice(), MARKET_A, SCORE_SIDE_LONG, 700, 500, 3, true);
+        let score = Scores::<Test>::get(alice(), MARKET_A).expect("the fill was scored");
+        assert_eq!(score.spent, 503);
+        assert_ok!(TradingRewards::do_try_state());
+    });
+}
+
+#[test]
+fn try_state_catches_a_score_row_under_a_suspension() {
+    // The suspension half of the same narrowing. A suspended account holding a
+    // live row would have its sales skipped while the buy leg stays recorded,
+    // which is the full-notional direction R-7 forbids; two gates make it
+    // unreachable and this makes that a property of the state at rest.
+    new_test_ext().execute_with(|| {
+        enrolled_alice(1_000);
+        record_test_score(&alice(), MARKET_A, 10, 0);
+        assert_ok!(TradingRewards::do_try_state());
+        Participants::<Test>::mutate(alice(), |slot| {
+            if let Some(record) = slot.as_mut() {
+                record.suspended = true;
+            }
+        });
+        assert!(TradingRewards::do_try_state().is_err());
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Obligations 1 and 7: the two new `MarketScore` fields
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_buy_records_the_mirror_principal_without_the_fee() {
+    // 08 §2.6 rule 1 (SQ-1051). The wrapper splits `cost + fee` across both
+    // branches and takes one fee leg from each, so the buyer keeps exactly
+    // `cost` of mirror-branch branch-USDC. The three figures are distinct, so
+    // an implementation that recorded `cost + fee`, the quantity, or nothing
+    // lands on three different wrong numbers.
+    new_test_ext().execute_with(|| {
+        enrolled_alice(1_000);
+        observe(&alice(), MARKET_A, SCORE_SIDE_LONG, 700, 500, 3, true);
+        let score = Scores::<Test>::get(alice(), MARKET_A).expect("the fill was scored");
+        assert_eq!(score.spent, 503);
+        assert_eq!(score.mirror_principal, 500);
+        assert_eq!(score.spent - score.mirror_principal, 3, "exactly the fee");
+        // A second buy accumulates both legs, so the gap stays the fee total.
+        observe(&alice(), MARKET_A, SCORE_SIDE_SHORT, 200, 100, 1, true);
+        let score = Scores::<Test>::get(alice(), MARKET_A).expect("entry");
+        assert_eq!(score.spent, 604);
+        assert_eq!(score.mirror_principal, 600);
+        // A sale moves neither leg of the identity.
+        observe(&alice(), MARKET_A, SCORE_SIDE_LONG, 700, 400, 2, false);
+        let score = Scores::<Test>::get(alice(), MARKET_A).expect("entry");
+        assert_eq!(score.mirror_principal, 600, "a sale adds no mirror leg");
+        assert_eq!(score.spent, 604, "and spends nothing further");
+        assert_ok!(TradingRewards::do_try_state());
+    });
+}
+
+#[test]
+fn a_new_score_entry_is_stamped_with_its_creation_block_and_never_restamped() {
+    // 08 §2.6's escape is "measured from the score entry's creation", so a
+    // later fill must not push the deadline out — otherwise an account could
+    // keep a never-settling market's entry alive forever by trading into it,
+    // which is the state the escape exists to end.
+    new_test_ext().execute_with(|| {
+        enrolled_alice(1_000);
+        run_to_block(4_242);
+        observe(&alice(), MARKET_A, SCORE_SIDE_LONG, 700, 500, 3, true);
+        let score = Scores::<Test>::get(alice(), MARKET_A).expect("entry");
+        assert_eq!(score.created_at, 4_242);
+
+        run_to_block(9_999);
+        observe(&alice(), MARKET_A, SCORE_SIDE_LONG, 100, 60, 1, true);
+        let score = Scores::<Test>::get(alice(), MARKET_A).expect("entry");
+        assert_eq!(
+            score.created_at, 4_242,
+            "the stamp is the creation, not the last fill"
+        );
+        assert_eq!(score.spent, 564, "and the fill was still accumulated");
+
+        // A different market opened later carries its own stamp.
+        observe(&alice(), MARKET_B, SCORE_SIDE_LONG, 100, 60, 1, true);
+        let other = Scores::<Test>::get(alice(), MARKET_B).expect("entry");
+        assert_eq!(other.created_at, 9_999);
+        assert_ok!(TradingRewards::do_try_state());
+    });
+}
+
+#[test]
+fn try_state_catches_a_mirror_principal_above_what_was_spent() {
+    // The invariant rule 1 establishes and the annulled arm rests on. The edit
+    // that breaks it — adding to one counter and not the other — surfaces as an
+    // annulled market paying a reward, which rule 4 makes unreachable.
+    new_test_ext().execute_with(|| {
+        enrolled_alice(1_000);
+        observe(&alice(), MARKET_A, SCORE_SIDE_LONG, 700, 500, 3, true);
+        assert_ok!(TradingRewards::do_try_state());
+        Scores::<Test>::mutate(alice(), MARKET_A, |slot| {
+            if let Some(score) = slot.as_mut() {
+                score.mirror_principal = score.spent + 1;
+            }
+        });
+        assert!(TradingRewards::do_try_state().is_err());
     });
 }
 

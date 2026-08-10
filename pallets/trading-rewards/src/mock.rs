@@ -11,6 +11,9 @@ use frame_system::{EnsureRoot, EnsureSigned};
 use futarchy_primitives::{Balance, EpochId, MarketId};
 use sp_core::crypto::AccountId32;
 use sp_runtime::{traits::IdentityLookup, BuildStorage};
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+use trading_rewards_core::MarketSettlement;
 
 type Block = frame_system::mocking::MockBlock<Test>;
 
@@ -63,6 +66,28 @@ parameter_types! {
     /// move it to prove the read is live rather than pinned.
     pub static PositionDeposit: Balance = 100;
     pub static CurrentEpoch: EpochId = 7;
+    /// 08 §1.2/§1.4's standing destination for USDC taken from an account.
+    pub const InsuranceAccount: AccountId32 = AccountId32::new([240; 32]);
+}
+
+std::thread_local! {
+    /// The terminal facts TR7's runtime adapter will read off the market
+    /// pallet and the ledger. Empty means "nothing has settled", which is the
+    /// state the absolute-timeout escape exists for.
+    static SETTLEMENTS: RefCell<BTreeMap<(AccountId32, MarketId), MarketSettlement>> =
+        const { RefCell::new(BTreeMap::new()) };
+}
+
+pub struct MockSettledMarkets;
+
+impl trading_rewards_core::SettledMarkets<AccountId32> for MockSettledMarkets {
+    fn settlement(who: &AccountId32, market: MarketId) -> Option<MarketSettlement> {
+        SETTLEMENTS.with(|map| map.borrow().get(&(who.clone(), market)).copied())
+    }
+}
+
+pub fn run_to_block(block: u64) {
+    System::set_block_number(block);
 }
 
 pub struct MockRewardRate;
@@ -91,6 +116,8 @@ impl pallet_trading_rewards::Config for Test {
     type VitUsdcRate = MockVitUsdcRate;
     type PositionDeposit = PositionDeposit;
     type CurrentEpoch = CurrentEpoch;
+    type InsuranceAccount = InsuranceAccount;
+    type SettledMarkets = MockSettledMarkets;
     type WeightInfo = ();
 
     #[cfg(feature = "runtime-benchmarks")]
@@ -192,6 +219,12 @@ pub fn record_test_score(who: &AccountId32, market: MarketId, spent: Balance, re
             spent,
             received,
             book_acquired: [0, 0],
+            // The mirror leg the wrapper leaves with a buyer is at most what
+            // they spent; the fixture takes the whole of it, which is the
+            // zero-fee shape and the one that keeps `mirror_within_spent`
+            // true for any `spent`.
+            mirror_principal: spent,
+            created_at: System::block_number(),
         },
     );
     pallet_trading_rewards::ScoreCount::<Test>::mutate(who, |count| {
@@ -226,6 +259,7 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
     VitUsdcRate::set(None);
     PositionDeposit::set(100);
     CurrentEpoch::set(7);
+    SETTLEMENTS.with(|map| map.borrow_mut().clear());
     let mut storage = frame_system::GenesisConfig::<Test>::default()
         .build_storage()
         .unwrap_or_default();
@@ -246,6 +280,15 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
         accounts: vec![
             (UsdcAssetId::get(), alice(), 1_000_000),
             (UsdcAssetId::get(), bob(), 1_000_000),
+            // INSURANCE is a genesis-endowed permanent custody account on the
+            // real chain (03 §7 R-4), so a forfeit below the asset minimum
+            // still lands. Seeded at exactly `min_balance` here so a test can
+            // read a forfeit as a delta rather than as a total.
+            (
+                UsdcAssetId::get(),
+                InsuranceAccount::get(),
+                USDC_MIN_BALANCE,
+            ),
         ],
         next_asset_id: None,
         reserves: vec![],

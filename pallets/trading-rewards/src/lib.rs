@@ -63,10 +63,10 @@ pub mod pallet {
     };
     use frame_support::{pallet_prelude::*, PalletId};
     use frame_system::pallet_prelude::*;
-    use sp_runtime::traits::AccountIdConversion;
+    use sp_runtime::traits::{AccountIdConversion, UniqueSaturatedInto};
     #[cfg(any(feature = "try-runtime", test))]
     use sp_runtime::TryRuntimeError;
-    use trading_rewards_core::{EpochScore, MarketScore};
+    use trading_rewards_core::{EpochScore, MarketScore, SettledMarkets};
 
     const STORAGE_VERSION: StorageVersion = StorageVersion::new(0);
 
@@ -151,6 +151,16 @@ pub mod pallet {
 
         /// The protocol epoch of `epoch.length`. The program adds no clock.
         type CurrentEpoch: Get<EpochId>;
+
+        /// Where forfeited USDC goes: `INSURANCE`, 08 §1.2/§1.4's standing
+        /// destination for USDC taken from an account.
+        type InsuranceAccount: Get<Self::AccountId>;
+
+        /// Terminal facts for one scored book (08 §2.6 rules 3 and 4). `()`
+        /// reports nothing settled, which folds nothing and leaves the absolute
+        /// timeout as the only escape — the fail-closed default until TR7 binds
+        /// the market pallet's adapter.
+        type SettledMarkets: SettledMarkets<Self::AccountId>;
 
         type WeightInfo: WeightInfo;
 
@@ -614,10 +624,30 @@ pub mod pallet {
         /// not the accounting. Skipping them would drop the losses too, which
         /// is the direction that costs the program money.
         ///
+        /// **The admission condition is a conjunction, and neither half implies
+        /// the other** (SQ-1050, 08 §2.6). *"Suspension suspends scoring, and
+        /// the accumulator MUST test the suspension flag rather than infer it
+        /// from a nonzero bond."* [`Pallet::top_up_bond`] clears `suspended`
+        /// only once the bond is back at the minimum `enroll` demands, so a
+        /// **sub-minimum** top-up leaves a suspended account holding a nonzero
+        /// bond and a balance gate alone would resume scoring while the flag
+        /// says otherwise. Going the other way, a voluntary `withdraw_bond`
+        /// retains the record at a zero bond and never sets the flag, so the
+        /// flag alone would score an account with nothing behind it. The
+        /// earning cap is not a backstop for either half: a zero cap makes the
+        /// reward *round* to zero, which is an arithmetic accident of the floor
+        /// rather than a refusal, and it is the argument §2.6 retired once.
+        ///
         /// Reading the record rather than probing for the key costs the same
-        /// one storage access.
+        /// one storage access, and both halves come out of that one read.
         pub fn scores_fills(who: &T::AccountId) -> bool {
-            Participants::<T>::get(who).is_some_and(|record| record.bond > 0)
+            Participants::<T>::get(who).is_some_and(|record| record.bond > 0 && !record.suspended)
+        }
+
+        /// The current block height, widened for the frame-free kernel exactly
+        /// as `pallet-market`'s `now_u64` does.
+        pub fn now_u64() -> u64 {
+            frame_system::Pallet::<T>::block_number().unique_saturated_into()
         }
 
         /// The live minimum bond: `ledger.pos_dep`, never below the USDC asset
@@ -641,11 +671,23 @@ pub mod pallet {
             let mut accrued = 0u128;
 
             let mut score_rows: BTreeMap<T::AccountId, u32> = BTreeMap::new();
-            for (who, _market, _score) in Scores::<T>::iter() {
+            for (who, _market, score) in Scores::<T>::iter() {
                 let counter = score_rows.entry(who).or_default();
                 *counter = counter.checked_add(1).ok_or(TryRuntimeError::Other(
                     "trading-rewards: score row count overflow",
                 ))?;
+                // 08 §2.6 rule 1 raises `spent` by `cost + fee` and
+                // `mirror_principal` by `cost` on the same buy, so the mirror
+                // leg can never exceed what was spent. It is checked here
+                // rather than argued in a comment because the edit that breaks
+                // it — adding to one counter and not the other — is easy to
+                // make and silent otherwise: it would surface as an **annulled
+                // market paying a reward**, which is the one direction rule 4
+                // makes unreachable.
+                ensure!(
+                    score.mirror_within_spent(),
+                    TryRuntimeError::Other("trading-rewards: mirror principal above spent")
+                );
             }
 
             for (who, record) in Participants::<T>::iter() {
@@ -712,6 +754,19 @@ pub mod pallet {
                 ensure!(
                     record.bond > 0 || score_count == 0,
                     TryRuntimeError::Other("trading-rewards: score rows under a zero bond")
+                );
+                // The suspension half of the same narrowing (SQ-1050). It is
+                // unreachable for the same shape of reason and by its own two
+                // gates: `settle_epoch` sets the flag only on a debit that took
+                // the whole bond, and it refuses while any unfolded row remains;
+                // once set, `scores_fills` admits no new row. Checking it makes
+                // the asymmetry argument a property of the state at rest rather
+                // than of two write paths (rule 8) — a suspended account holding
+                // a live row would have its sales skipped and keep the buy leg,
+                // which is the full-notional direction R-7 forbids.
+                ensure!(
+                    !record.suspended || score_count == 0,
+                    TryRuntimeError::Other("trading-rewards: score rows under a suspension")
                 );
             }
 
@@ -811,6 +866,13 @@ pub mod pallet {
             };
             let before = existing.unwrap_or_default();
             let mut score = before.clone();
+            // This is the only place that knows an entry is being created, so
+            // it is where 08 §2.6's absolute timeout is anchored — before the
+            // accumulator runs, so the stamp is a property of creation rather
+            // than of whichever branch of the arithmetic happens to run.
+            if count.is_some() {
+                score.created_at = Self::now_u64();
+            }
             // The accumulator works on a local copy, so a mid-way arithmetic
             // failure cannot leave a partly-applied score in storage: `on_buy`
             // raises `spent` before it touches the branch slot.
@@ -837,15 +899,13 @@ pub mod pallet {
             // transferred-in units could lock its own bond behind markets it
             // has no stake in. Nothing is lost, because the score is identical.
             //
-            // **TR5 must revisit this when `MarketScore` gains the creation
-            // height** that 08 §2.6's "absolute block-height timeout measured
-            // from the score entry's creation" needs. `before` is
-            // `unwrap_or_default()`, so a new entry stamped with the current
-            // height would never compare equal and the skip would silently stop
-            // firing. Either compare the accounting fields alone, or stamp the
-            // height here — this insert is the only place that knows an entry
-            // is being created.
-            if score == before {
+            // TR4's review (finding 7) predicted the trap this comparison walks
+            // into once `MarketScore` carries a creation height: `before` is
+            // `unwrap_or_default()`, so a stamped entry never compares equal to
+            // it and the skip stops firing silently. `unchanged_from` normalises
+            // the stamp away rather than listing the accounting fields, so a
+            // field added later stays inside the comparison automatically.
+            if score.unchanged_from(&before) {
                 return;
             }
             Scores::<T>::insert(who, market, score);
