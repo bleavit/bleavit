@@ -606,8 +606,14 @@ fn funding_rejects_invalid_origin_amount_and_bound_without_mutation() {
     // 13 §4 / 08 §2.6's *Bounds* paragraph: the lifetime authorization count
     // reuses `MaxCommunitySchedules` as its value, through the `Config` item
     // rather than a re-derived constant, but keeps its own counter — so
-    // consuming one does not reduce the other's headroom. The 4,097th call
-    // refuses `TooManyTradingRewardAuthorizations` before any VIT moves.
+    // consuming one does not reduce the other's headroom. The refusal past
+    // the bound happens before any VIT moves.
+    //
+    // The comment deliberately does not name the error variant. The coverage
+    // checker strips comments before matching a binding token, so naming it
+    // here would buy nothing — but it used to buy everything, and that is
+    // how three guardian tests stayed bound to a token that existed in no
+    // code at all.
     new_test_ext().execute_with(|| {
         assert_noop!(
             Treasury::fund_trading_rewards(RuntimeOrigin::root(), VIT),

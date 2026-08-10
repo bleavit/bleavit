@@ -317,6 +317,40 @@ class LimitCoverageTests(unittest.TestCase):
         self.write("tools/limit-coverage/registry.toml", manifest)
         self.assertEqual(self.failures(), [])
 
+    def test_a_binding_token_in_a_comment_does_not_satisfy_the_binding(self) -> None:
+        # The binding claims the marked test *exercises* its key's error, and a
+        # substring search cannot tell an assertion from a sentence describing
+        # one. Three guardian tests were bound to a token that appeared in no
+        # code anywhere in the repository before this was enforced.
+        self.write(
+            "pallets/epoch/src/tests.rs",
+            "#[test]\n"
+            "fn intake_overflow_is_rejected() {\n"
+            "    // limit-coverage: IntakeQueue\n"
+            "    // the queue refuses with IntakeFull once it is full\n"
+            "    assert!(true);\n"
+            "}\n",
+        )
+        self.assert_fails_with("does not contain binding token 'IntakeFull'")
+
+    def test_a_binding_token_in_a_block_comment_does_not_satisfy_it_either(self) -> None:
+        self.write(
+            "pallets/epoch/src/tests.rs",
+            "#[test]\n"
+            "fn intake_overflow_is_rejected() {\n"
+            "    // limit-coverage: IntakeQueue\n"
+            "    /* refuses with IntakeFull */\n"
+            "    assert!(true);\n"
+            "}\n",
+        )
+        self.assert_fails_with("does not contain binding token 'IntakeFull'")
+
+    def test_a_binding_token_in_a_string_literal_still_satisfies_it(self) -> None:
+        # Stripping comments and not literals is deliberate: a token inside a
+        # literal is real code and may legitimately carry the binding. The
+        # baseline fixture is exactly that case, so this pins the boundary.
+        self.assertEqual(self.failures(), [])
+
     def test_unattached_marker_fails(self) -> None:
         self.write(
             "pallets/epoch/src/tests.rs",

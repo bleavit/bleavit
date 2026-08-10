@@ -916,7 +916,7 @@ reason = "13 §2 / 07 §13: a crank facing more stale settled component values t
 [[entry]]
 key = "GuardianMaintenanceBatch"
 class = "dispatch-limit"
-behavior = "remaining_after_first_maintenance_batch"
+behavior = "GUARDIAN_MAINTENANCE_BATCH"
 reason = "13 §2 / 06 §5.4: a block facing more overdue reviews than the bound settles exactly the bound and carries the rest to the next block (the resumable ReapBatch shape, not a rejection and not a skip — dropping a due review would forfeit an accountability action). The same bound caps the failed-action reap sweep, whose cursor is what stops the bound from starving every key behind the first batch."
 
 [[entry]]

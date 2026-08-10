@@ -87,6 +87,28 @@ class TestFunction:
     ignored: bool
 
 
+_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.S)
+_LINE_COMMENT_RE = re.compile(r"//[^\n]*")
+
+
+def strip_rust_comments(body: str) -> str:
+    """Remove Rust comments so a binding token cannot be satisfied by prose.
+
+    The binding is a claim that the marked test *exercises* its key's error or
+    behavior, and a substring search over the raw function body cannot tell an
+    assertion from a comment describing one. A test whose `assert_noop!` was
+    deleted therefore stayed bound as long as a nearby comment still named the
+    error, which is the failure mode this whole checker exists to prevent —
+    reported as silence rather than as absence.
+
+    Stripping comments and not string literals is deliberate. A token inside a
+    literal is real code and may legitimately carry the binding. The one way
+    this over-strips is a `//` inside a string, and that direction is safe: it
+    can only make the gate refuse, never let it pass.
+    """
+    return _LINE_COMMENT_RE.sub("", _BLOCK_COMMENT_RE.sub("", body))
+
+
 @dataclass(frozen=True)
 class MarkerReference:
     key: str
@@ -758,7 +780,7 @@ def validate(root: Path) -> tuple[list[str], list[InventoryEntry], dict[str, dic
             binding = entry.get("error") or entry.get("behavior")
             if isinstance(binding, str):
                 token = binding.rsplit("::", 1)[-1]
-                if token not in marker.function_body:
+                if token not in strip_rust_comments(marker.function_body):
                     failures.append(
                         f"{marker.path}:{marker.line}: marked test {marker.function!r} for "
                         f"{marker.key!r} does not contain binding token {token!r}"
