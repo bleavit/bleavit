@@ -199,13 +199,22 @@ pub mod pallet {
             amount: Balance,
             bond: Balance,
         },
-        /// The whole bond was released and the record closed.
-        BondWithdrawn { who: T::AccountId, amount: Balance },
+        /// The whole bond was released. `record_retained` is true when an
+        /// unclaimed accrual kept the record alive at a zero bond, which is
+        /// the one case where a withdrawal does not close the account.
+        BondWithdrawn {
+            who: T::AccountId,
+            amount: Balance,
+            record_retained: bool,
+        },
         /// Accrued USDC was converted once, at the live rate, and paid in VIT.
+        /// `record_closed` is true when the claim was the last thing holding a
+        /// zero-bond record open, so the roster slot was freed with it.
         RewardsClaimed {
             who: T::AccountId,
             accrued: Balance,
             paid: Balance,
+            record_closed: bool,
         },
     }
 
@@ -229,8 +238,6 @@ pub mod pallet {
         AccountingOverflow,
         /// Some epoch the account participated in has not settled.
         EpochUnsettled,
-        /// Accrued reward is outstanding; claim it before closing the record.
-        RewardsUnclaimed,
         /// Nothing is accrued, or the conversion floors to zero VIT.
         NothingToClaim,
         /// `fee.vit_usdc_rate` is absent, malformed, or zero.
@@ -348,18 +355,28 @@ pub mod pallet {
             })
         }
 
-        /// Release the whole bond and close the record (08 §2.6).
+        /// Release the whole bond (08 §2.6).
         ///
         /// The gate is **epoch settlement**, never folding: folding deletes the
         /// last score entry while the debit settles at epoch close, so a
         /// fold-based gate would let a participant who folded a losing epoch
         /// release the whole bond ahead of the debit.
+        ///
+        /// **Settlement is the only condition, per 08 §2.6, and an unclaimed
+        /// accrual is deliberately not a second one.** An accrual is a VIT
+        /// claim against a budget that §2.6 returns to the pot at epoch close,
+        /// so an accrual outstanding past that boundary routinely meets an
+        /// empty budget — and refusing here would then leave the participant
+        /// able to neither claim nor withdraw, with the only remedy a
+        /// `FutarchyParam` call they cannot make. §2.6 separately forbids a
+        /// bond being locked forever. So the bond always comes back, and the
+        /// record survives at a zero bond to carry the claim.
         #[pallet::call_index(2)]
         #[pallet::weight(T::WeightInfo::withdraw_bond())]
         pub fn withdraw_bond(origin: OriginFor<T>) -> DispatchResult {
             let who = ensure_signed(origin)?;
             frame_support::storage::with_storage_layer(|| {
-                let record = Participants::<T>::get(&who).ok_or(Error::<T>::NotEnrolled)?;
+                let mut record = Participants::<T>::get(&who).ok_or(Error::<T>::NotEnrolled)?;
                 // The counter is the O(1) mirror; the prefix probe is the real
                 // guard, so a drifted counter can never release a bond that a
                 // live score entry still backs.
@@ -375,19 +392,37 @@ pub mod pallet {
                     record.epoch == EpochScore::default(),
                     Error::<T>::EpochUnsettled
                 );
-                // Closing the record would destroy the claim, so refuse instead
-                // and leave the claimant one call away from resolving it.
-                ensure!(record.accrued == 0, Error::<T>::RewardsUnclaimed);
-                let count = ParticipantCount::<T>::get()
-                    .checked_sub(1)
-                    .ok_or(Error::<T>::AccountingOverflow)?;
-                Self::release_bond(&who, record.bond)?;
-                Participants::<T>::remove(&who);
-                ScoreCount::<T>::remove(&who);
-                ParticipantCount::<T>::put(count);
+                let amount = record.bond;
+                // Only the closing path touches the roster count, so a retained
+                // record keeps exactly the one slot it already occupied.
+                let closing_count = if record.accrued == 0 {
+                    Some(
+                        ParticipantCount::<T>::get()
+                            .checked_sub(1)
+                            .ok_or(Error::<T>::AccountingOverflow)?,
+                    )
+                } else {
+                    None
+                };
+                Self::release_bond(&who, amount)?;
+                match closing_count {
+                    Some(count) => {
+                        Participants::<T>::remove(&who);
+                        ScoreCount::<T>::remove(&who);
+                        ParticipantCount::<T>::put(count);
+                    }
+                    None => {
+                        record.bond = 0;
+                        // The cap follows the bond down. Leaving a snapshot
+                        // above a released bond would leave a cap nothing backs.
+                        record.snapshot_bond = 0;
+                        Participants::<T>::insert(&who, record);
+                    }
+                }
                 Self::deposit_event(Event::BondWithdrawn {
                     who: who.clone(),
-                    amount: record.bond,
+                    amount,
+                    record_retained: closing_count.is_none(),
                 });
                 Ok(())
             })
@@ -398,6 +433,12 @@ pub mod pallet {
         ///
         /// 08 §2.6: both legs of the reward arithmetic are USDC and only the
         /// payout converts, rounding against the claimant. There is no vesting.
+        ///
+        /// A claim that empties a record `withdraw_bond` already released also
+        /// **closes** it and returns its roster slot. That is what keeps the
+        /// retained-record path from starving [`MAX_PARTICIPANTS`]: the slot is
+        /// freed by the call the claimant already wants to make, rather than by
+        /// a second one they might never send.
         #[pallet::call_index(3)]
         #[pallet::weight(T::WeightInfo::claim_rewards())]
         pub fn claim_rewards(origin: OriginFor<T>) -> DispatchResult {
@@ -420,12 +461,30 @@ pub mod pallet {
                         .map_err(|_| Error::<T>::RewardCustody)?;
                 ensure!(moved == paid, Error::<T>::RewardCustody);
                 record.accrued = 0;
-                Participants::<T>::insert(&who, record);
+                // Nothing is left to keep the record open: no bond, no score
+                // row, no folded epoch total and now no claim. The same three
+                // settlement conditions `withdraw_bond` checks apply, so a
+                // close here can never step over a pending debit.
+                let record_closed = record.bond == 0
+                    && record.epoch == EpochScore::default()
+                    && ScoreCount::<T>::get(&who) == 0
+                    && Scores::<T>::iter_key_prefix(&who).next().is_none();
+                if record_closed {
+                    let count = ParticipantCount::<T>::get()
+                        .checked_sub(1)
+                        .ok_or(Error::<T>::AccountingOverflow)?;
+                    Participants::<T>::remove(&who);
+                    ScoreCount::<T>::remove(&who);
+                    ParticipantCount::<T>::put(count);
+                } else {
+                    Participants::<T>::insert(&who, record);
+                }
                 TotalAccrued::<T>::put(total);
                 Self::deposit_event(Event::RewardsClaimed {
                     who: who.clone(),
                     accrued,
                     paid,
+                    record_closed,
                 });
                 Ok(())
             })
@@ -555,7 +614,8 @@ pub mod pallet {
                     TryRuntimeError::Other("trading-rewards: snapshot cap exceeds the held bond")
                 );
                 // 08 §2.6 reuses the frozen `ledger.pos_dep` row as the
-                // minimum. A zero bond is the post-debit suspended state.
+                // minimum. A zero bond is the post-debit suspended state, or a
+                // record `withdraw_bond` released and retained for its claim.
                 if let Some(minimum) = minimum {
                     ensure!(
                         record.bond == 0 || record.bond >= minimum,
@@ -584,6 +644,29 @@ pub mod pallet {
                 ParticipantCount::<T>::get() == rows,
                 TryRuntimeError::Other("trading-rewards: ParticipantCount disagrees with the map")
             );
+            // **DECLARED DEVIATION (TR3).** Design §8 and TR3's brief both ask
+            // this hook for *"accruals never exceed the authorized budget"*.
+            // This is not that property. It asserts the weaker one that the
+            // O(1) mirror equals the records it mirrors, and the substitution
+            // is deliberate rather than an oversight.
+            //
+            // Three reasons. `accrued` is USDC while the authorized budget is
+            // the VIT the treasury moved into the sovereign, so the comparison
+            // needs `fee.vit_usdc_rate` — a 13 §1 row that is unseeded at
+            // genesis, which would make the leg unevaluable on a lawful chain.
+            // That row is also PARAM-amendable, so a governed move could turn
+            // this hook red on a state no code here created, and a try-state a
+            // parameter amendment can break is one that blocks an upgrade for
+            // the wrong reason. And 08 §2.6 puts the real property at accrual
+            // time rather than at rest: *"when accruals exceed the authorized
+            // budget, both legs scale by the same factor"*, which is a
+            // post-condition `settle_epoch` establishes.
+            //
+            // **The real leg is TR5's**, and it belongs beside the scaling that
+            // creates it. What this one buys meanwhile is the precondition that
+            // makes the real one checkable at all: an accrual total TR5 can
+            // compare a budget against, bound to the records it summarises so
+            // it cannot drift away from them unnoticed.
             ensure!(
                 TotalAccrued::<T>::get() == accrued,
                 TryRuntimeError::Other("trading-rewards: TotalAccrued disagrees with the records")

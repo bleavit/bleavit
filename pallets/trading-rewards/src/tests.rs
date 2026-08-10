@@ -473,9 +473,14 @@ fn withdraw_releases_the_whole_bond_and_closes_the_record() {
         assert!(Participants::<Test>::get(alice()).is_none());
         assert_eq!(ParticipantCount::<Test>::get(), 0);
         assert!(!TradingRewards::is_enrolled(&alice()));
-        assert!(events()
-            .iter()
-            .any(|event| matches!(event, Event::BondWithdrawn { amount, .. } if *amount == 1_000)));
+        assert!(events().iter().any(|event| matches!(
+            event,
+            Event::BondWithdrawn {
+                amount,
+                record_retained: false,
+                ..
+            } if *amount == 1_000
+        )));
         assert_ok!(TradingRewards::do_try_state());
     });
 }
@@ -503,30 +508,232 @@ fn one_withdrawal_leaves_every_other_bond_in_custody() {
 }
 
 #[test]
-fn withdraw_refuses_while_a_reward_is_unclaimed() {
-    // Closing the record would destroy the claim. Refusing is the status-quo
-    // default, and the remedy is one call the participant already has.
+fn withdraw_releases_the_bond_and_retains_the_record_while_a_reward_is_unclaimed() {
+    // Closing the record would destroy the claim, so the record survives at a
+    // zero bond — but the USDC still comes back, because 08 §2.6 conditions
+    // withdrawal on settlement alone.
     new_test_ext().execute_with(|| {
+        let funds = usdc_balance(&alice());
         assert_ok!(TradingRewards::enroll(
             RuntimeOrigin::signed(alice()),
             1_000
         ));
         record_test_accrual(&alice(), 25);
+
+        assert_ok!(TradingRewards::withdraw_bond(
+            RuntimeOrigin::signed(alice())
+        ));
+        assert_eq!(usdc_balance(&alice()), funds, "the whole bond came back");
+        assert_eq!(sovereign_usdc(), 0);
+
+        let record = Participants::<Test>::get(alice()).expect("record retained");
+        assert_eq!(record.bond, 0);
+        assert_eq!(record.snapshot_bond, 0, "the cap follows the bond down");
+        assert_eq!(record.accrued, 25, "the claim survives");
+        assert_eq!(TotalAccrued::<Test>::get(), 25);
+        assert!(events().iter().any(|event| matches!(
+            event,
+            Event::BondWithdrawn {
+                record_retained: true,
+                ..
+            }
+        )));
+        assert_ok!(TradingRewards::do_try_state());
+    });
+}
+
+#[test]
+fn an_empty_budget_cannot_hold_the_bond_hostage() {
+    // The exact trap: 08 §2.6 returns unspent budget to the pot at epoch close,
+    // so an accrual outstanding past that boundary meets an empty budget. If
+    // withdrawal refused on an unclaimed accrual the participant could neither
+    // claim nor withdraw, and the only remedy would be a FutarchyParam call
+    // they cannot make. 08 §2.6 separately forbids a bond locked forever.
+    new_test_ext().execute_with(|| {
+        let funds = usdc_balance(&alice());
+        VitUsdcRate::set(Some(30_000_000));
+        assert_ok!(TradingRewards::enroll(
+            RuntimeOrigin::signed(alice()),
+            1_000
+        ));
+        record_test_accrual(&alice(), 3);
+
+        // The budget has swept back to the pot: the claim cannot be paid.
+        assert_noop!(
+            TradingRewards::claim_rewards(RuntimeOrigin::signed(alice())),
+            Error::<Test>::RewardCustody
+        );
+        // The bond is nonetheless returned in full.
+        assert_ok!(TradingRewards::withdraw_bond(
+            RuntimeOrigin::signed(alice())
+        ));
+        assert_eq!(usdc_balance(&alice()), funds);
+        assert_eq!(
+            Participants::<Test>::get(alice())
+                .expect("record retained")
+                .accrued,
+            3,
+            "and the unpayable claim is still owed"
+        );
+
+        // When the next budget is authorized the claim pays and the slot frees.
+        fund_reward_budget(1_000_000_000_000);
+        assert_ok!(TradingRewards::claim_rewards(
+            RuntimeOrigin::signed(alice())
+        ));
+        assert!(Participants::<Test>::get(alice()).is_none());
+        assert_eq!(ParticipantCount::<Test>::get(), 0);
+    });
+}
+
+#[test]
+fn claiming_a_retained_record_closes_it_and_frees_the_roster_slot() {
+    // A retained record holds exactly one slot, and the call the claimant
+    // already wants to make is what returns it. Nothing depends on them
+    // remembering a second call, so a retained record cannot starve the roster.
+    new_test_ext().execute_with(|| {
+        VitUsdcRate::set(Some(30_000_000));
+        fund_reward_budget(1_000_000_000_000);
+        assert_ok!(TradingRewards::enroll(
+            RuntimeOrigin::signed(alice()),
+            1_000
+        ));
+        record_test_accrual(&alice(), 3);
+        assert_ok!(TradingRewards::withdraw_bond(
+            RuntimeOrigin::signed(alice())
+        ));
+        assert_eq!(
+            ParticipantCount::<Test>::get(),
+            1,
+            "the retained record keeps the one slot it had, never a second"
+        );
+
+        assert_ok!(TradingRewards::claim_rewards(
+            RuntimeOrigin::signed(alice())
+        ));
+        assert!(Participants::<Test>::get(alice()).is_none());
+        assert_eq!(ParticipantCount::<Test>::get(), 0, "the slot came back");
+        assert!(events().iter().any(|event| matches!(
+            event,
+            Event::RewardsClaimed {
+                record_closed: true,
+                ..
+            }
+        )));
+        assert_ok!(TradingRewards::do_try_state());
+
+        // And the freed slot is genuinely reusable.
+        assert_ok!(TradingRewards::enroll(RuntimeOrigin::signed(bob()), 1_000));
+        assert_eq!(ParticipantCount::<Test>::get(), 1);
+    });
+}
+
+#[test]
+fn a_claim_by_a_bonded_participant_leaves_the_record_open() {
+    // The close is conditional on nothing being left, not on claiming.
+    new_test_ext().execute_with(|| {
+        VitUsdcRate::set(Some(30_000_000));
+        fund_reward_budget(1_000_000_000_000);
+        assert_ok!(TradingRewards::enroll(
+            RuntimeOrigin::signed(alice()),
+            1_000
+        ));
+        record_test_accrual(&alice(), 3);
+        assert_ok!(TradingRewards::claim_rewards(
+            RuntimeOrigin::signed(alice())
+        ));
+        let record = Participants::<Test>::get(alice()).expect("record still open");
+        assert_eq!(record.bond, 1_000);
+        assert_eq!(record.accrued, 0);
+        assert_eq!(ParticipantCount::<Test>::get(), 1);
+        assert!(events().iter().any(|event| matches!(
+            event,
+            Event::RewardsClaimed {
+                record_closed: false,
+                ..
+            }
+        )));
+    });
+}
+
+#[test]
+fn a_retained_record_can_be_topped_up_back_into_the_program() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(TradingRewards::enroll(
+            RuntimeOrigin::signed(alice()),
+            1_000
+        ));
+        record_test_accrual(&alice(), 3);
+        assert_ok!(TradingRewards::withdraw_bond(
+            RuntimeOrigin::signed(alice())
+        ));
+        assert_ok!(TradingRewards::top_up_bond(
+            RuntimeOrigin::signed(alice()),
+            2_000
+        ));
+        let record = Participants::<Test>::get(alice()).expect("record");
+        assert_eq!(record.bond, 2_000);
+        assert_eq!(
+            record.snapshot_bond, 0,
+            "and the cap still waits for a settlement, as every top-up does"
+        );
+        assert_eq!(sovereign_usdc(), 2_000);
+        assert_ok!(TradingRewards::do_try_state());
+    });
+}
+
+#[test]
+fn a_retained_record_cannot_be_re_enrolled_into_a_second_slot() {
+    // Double-counting against MaxParticipants is the failure mode retention
+    // could introduce. `enroll` still sees the record.
+    new_test_ext().execute_with(|| {
+        assert_ok!(TradingRewards::enroll(
+            RuntimeOrigin::signed(alice()),
+            1_000
+        ));
+        record_test_accrual(&alice(), 3);
+        assert_ok!(TradingRewards::withdraw_bond(
+            RuntimeOrigin::signed(alice())
+        ));
+        assert_noop!(
+            TradingRewards::enroll(RuntimeOrigin::signed(alice()), 1_000),
+            Error::<Test>::AlreadyEnrolled
+        );
+        assert_eq!(ParticipantCount::<Test>::get(), 1);
+    });
+}
+
+#[test]
+fn a_retained_record_is_still_gated_on_settlement() {
+    // Retention must not become a way past the settlement gate on the way back
+    // out: a score row on a zero-bond record still refuses, and a claim cannot
+    // close a record whose score is outstanding.
+    new_test_ext().execute_with(|| {
+        assert_ok!(TradingRewards::enroll(
+            RuntimeOrigin::signed(alice()),
+            1_000
+        ));
+        record_test_accrual(&alice(), 3);
+        assert_ok!(TradingRewards::withdraw_bond(
+            RuntimeOrigin::signed(alice())
+        ));
+        record_test_score(&alice(), MARKET_A, 0, 500);
         assert_noop!(
             TradingRewards::withdraw_bond(RuntimeOrigin::signed(alice())),
-            Error::<Test>::RewardsUnclaimed
+            Error::<Test>::EpochUnsettled
         );
-        assert_eq!(sovereign_usdc(), 1_000);
 
         VitUsdcRate::set(Some(30_000_000));
         fund_reward_budget(1_000_000_000_000);
         assert_ok!(TradingRewards::claim_rewards(
             RuntimeOrigin::signed(alice())
         ));
-        assert_ok!(TradingRewards::withdraw_bond(
-            RuntimeOrigin::signed(alice())
-        ));
-        assert!(Participants::<Test>::get(alice()).is_none());
+        assert!(
+            Participants::<Test>::get(alice()).is_some(),
+            "the score row keeps the record open"
+        );
+        assert_eq!(ParticipantCount::<Test>::get(), 1);
+        assert_ok!(TradingRewards::do_try_state());
     });
 }
 
