@@ -5473,6 +5473,68 @@ fn the_reported_fee_is_the_book_s_own_accrual_in_every_book_kind() {
 }
 
 #[test]
+fn an_external_book_fill_is_never_reported_and_a_primary_one_still_is() {
+    // 08 §2.6, SQ-1049: "Only primary books are scored." A fill in a
+    // `BookKind::External` book records nothing, because 16 §6.5 accepts that a
+    // client controlling a majority of its own named attestors can move the
+    // settled value and bounds the blast radius to *that question's own
+    // escrow*. Paying an accuracy reward there would extend it to the
+    // `incentiv` pot, defended by neither the bond (a client who sets the
+    // outcome never loses) nor the rate coupling (there is no offsetting loser).
+    //
+    // Both halves are in one test on purpose: an exclusion hardcoded to `false`
+    // switches scoring off entirely, and an external-only test passes against
+    // it.
+    new_test_ext().execute_with(|| {
+        create_decision();
+        seed(MARKET_ID);
+        create_external_pair();
+        seed_external_pair();
+        System::set_block_number(10);
+
+        // The external half: the trade executes and reports nothing.
+        assert_ok!(Market::buy(
+            signed(BOB),
+            EXTERNAL_ACCEPT,
+            ScalarSide::Long,
+            TRADE,
+            Balance::MAX,
+        ));
+        assert_ok!(Market::sell(
+            signed(BOB),
+            EXTERNAL_ACCEPT,
+            ScalarSide::Long,
+            TRADE,
+            0,
+        ));
+        let external = Markets::<Test>::get(EXTERNAL_ACCEPT).expect("the external book exists");
+        assert!(
+            external.fees_accrued > 0,
+            "the trades really executed; without this the silence below is vacuous",
+        );
+        assert!(
+            observed_fills().is_empty(),
+            "an external fill records no score, on either side of the book",
+        );
+
+        // The primary half, same test: scoring is on, so a `false` constant in
+        // place of the predicate cannot pass.
+        assert_ok!(Market::buy(
+            signed(ALICE),
+            MARKET_ID,
+            ScalarSide::Long,
+            TRADE,
+            600 * UNIT,
+        ));
+        let fills = observed_fills();
+        assert_eq!(fills.len(), 1, "the primary fill is still reported");
+        assert_eq!(fills[0].market, MARKET_ID);
+        assert_eq!(fills[0].who, ALICE);
+        assert_try_state();
+    });
+}
+
+#[test]
 fn a_refused_trade_reports_nothing() {
     // G-1: the report follows a completed fill. A trade that never executed
     // must leave no score behind it.

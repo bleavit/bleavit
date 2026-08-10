@@ -1922,9 +1922,13 @@ pub mod pallet {
             )
             .map_err(Error::<T>::from)?;
             Self::record_observation(market, &before, &book);
+            // 08 §2.6 (SQ-1049): only primary books are scored. Captured here,
+            // where the book is already in scope, so the exclusion costs no
+            // storage read; `book` moves into storage on the next line.
+            let scores = Self::book_is_scored(book.kind);
             Markets::<T>::insert(market, book);
             for event in events {
-                Self::deposit_trade_event(event)?;
+                Self::deposit_trade_event(event, scores)?;
             }
             Ok(())
         }
@@ -1963,9 +1967,10 @@ pub mod pallet {
             )
             .map_err(Error::<T>::from)?;
             Self::record_observation(market, &before, &book);
+            let scores = Self::book_is_scored(book.kind);
             Markets::<T>::insert(market, book);
             for event in events {
-                Self::deposit_trade_event(event)?;
+                Self::deposit_trade_event(event, scores)?;
             }
             Ok(())
         }
@@ -1995,8 +2000,14 @@ pub mod pallet {
                     .map_err(Error::<T>::from)?
             {
                 Self::record_observation(market, &before, &book);
+                // The crank emits `Observed`, which the observer arm ignores,
+                // so this predicate changes nothing today. It is computed
+                // rather than passed as a literal because a literal is a trap:
+                // a later change that routed a `Traded` through this path would
+                // score an external book silently, and the read is free here.
+                let scores = Self::book_is_scored(book.kind);
                 Markets::<T>::insert(market, book);
-                Self::deposit_trade_event(event)?;
+                Self::deposit_trade_event(event, scores)?;
                 let class = if T::InDecisionWindow::contains(&market) {
                     CrankClass::DecisionCritical
                 } else {
@@ -3951,6 +3962,19 @@ pub mod pallet {
             frame_system::Pallet::<T>::block_number().unique_saturated_into()
         }
 
+        /// Whether fills in this book reach the 08 §2.6 accuracy accumulator.
+        ///
+        /// Only primary books are scored (SQ-1049). An external book settles
+        /// through the separate service-ledger instance, and 16 §6.5 bounds the
+        /// cost of a client moving its own settled value to *that question's own
+        /// escrow* — a reward paid there would extend the blast radius to the
+        /// `incentiv` pot, which neither the bond nor the rate coupling
+        /// defends. It is also unimplementable: 08 §2.6 rule 3 needs
+        /// `settled_value`, and §2.6 names no source for it on an external book.
+        fn book_is_scored(kind: BookKind) -> bool {
+            !matches!(kind, BookKind::External { .. })
+        }
+
         /// Advance every unsealed window's 04 §7a contest-capital integral
         /// `N += noi_t · Δblocks` through `through`. `book` is the *stored*
         /// (pre-dispatch) book, so every accrued segment is priced and sized
@@ -4195,7 +4219,17 @@ pub mod pallet {
         /// An arithmetic failure skips the report (G-1). Reporting a zero fee
         /// instead would understate what the buyer paid, which is the one
         /// direction that can flatter a score.
-        fn deposit_trade_event(event: market_core::Event<T::AccountId>) -> DispatchResult {
+        /// `scores` is the caller's already-loaded answer to "is this a primary
+        /// book?" (08 §2.6, SQ-1049). It arrives as an argument rather than
+        /// being read here because this function holds only a `MarketId`, and
+        /// loading the book to classify it would add a storage read to the hot
+        /// path of every trade — contradicting §2.6's "one extra storage read".
+        /// Every caller already holds `book.kind` before it moves the book into
+        /// storage.
+        fn deposit_trade_event(
+            event: market_core::Event<T::AccountId>,
+            scores: bool,
+        ) -> DispatchResult {
             match event {
                 market_core::Event::Traded {
                     market,
@@ -4207,11 +4241,13 @@ pub mod pallet {
                 } => {
                     // Before the deposit only to keep `who` borrowable; the
                     // observer emits no events, so the order is unobservable.
-                    if let Ok(fee) = market_core::fee_up(cost, T::Fee::get()) {
-                        let (score_side, is_buy) = market_core::observer_parts(side);
-                        <T::TradeObserver as market_core::TradeObserver<T::AccountId>>::observe_fill(
-                            &who, market, score_side, amount, cost, fee, is_buy,
-                        );
+                    if scores {
+                        if let Ok(fee) = market_core::fee_up(cost, T::Fee::get()) {
+                            let (score_side, is_buy) = market_core::observer_parts(side);
+                            <T::TradeObserver as market_core::TradeObserver<T::AccountId>>::observe_fill(
+                                &who, market, score_side, amount, cost, fee, is_buy,
+                            );
+                        }
                     }
                     Self::deposit_event(Event::Traded {
                         market,
