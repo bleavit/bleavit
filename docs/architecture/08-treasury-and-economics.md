@@ -223,11 +223,31 @@ out of a treasury-derived pot without being a general treasury-outflow capabilit
 remaining allocation. The call transfers VIT to the reward pallet's own sovereign account. An
 `amount` above the remaining allocation is refused, and the lifetime successful-authorization
 count MUST stay below the bound the *Bounds* paragraph below places on it, exactly as
-§1.4's community schedule count does. Unspent budget returns to the pot at
-epoch close, so the pallet never accumulates. The per-epoch budget is a call argument rather
+§1.4's community schedule count does. Unspent budget returns to the pot, so the pallet never
+accumulates. The per-epoch budget is a call argument rather
 than a registry row, which is why the program adds exactly one key. "Program epoch" throughout
 this subsection means the protocol epoch of `epoch.length`. The program adds no second clock.
 Its resource-domain family key is [05](05-welfare-and-decision-engine.md) §1.4's `0x0D`.
+
+**The return of unspent budget carries the same authority as the authorization, and MUST NOT be
+permissionless** *(added 2026-08-10; this paragraph previously stated only the outcome, and the
+first implementation reasonably read the silence as leave to build a public crank)*. The amount
+returned is the sovereign's VIT balance **less the accruals no participant has claimed yet** —
+sweeping the balance instead would strand every unclaimed accrual behind an empty sovereign. But
+the timing matters as much as the amount. Reward accrual is clamped to the budget's unpromised
+remainder, participants settle by pull after their epoch closes, and `settle_epoch` is idempotent
+per participant per epoch — so a sweep that empties the headroom while settlements are still
+arriving closes every remaining participant's epoch at a **zero** reward, and re-funding cannot
+undo it because their epoch is already settled and their score already discarded. A permissionless
+sweep would therefore be a one-extrinsic, permanent denial of the whole program's payout for that
+epoch. The return is consequently authorized by the **same `FutarchyParam` origin that authorizes
+the funding**, and the natural shape is to fold it into `fund_trading_rewards` so that each new
+authorization retires the previous one's remainder and no independent surface exists at all. This
+does not make the return governance-discretionary in substance — the funding call is the only
+thing that can put budget there in the first place — but it does put the timing under the same
+authority as the spending, rather than under whoever transacts first. §1.2's `reconcile_insurance`
+is **not** a precedent for a public crank here: reconciling harms nobody when it runs early, while
+sweeping destroys value that is still in flight.
 
 **The bond, and the two separate jobs it does.** `enroll(bond)` holds USDC and opens a
 participant record. `top_up_bond(amount)` raises the hold. `withdraw_bond()` releases it. The
