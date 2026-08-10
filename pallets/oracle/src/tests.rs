@@ -21,11 +21,13 @@ use futarchy_primitives::{
     Balance, BlockNumber, EpochId, FixedU64, MetricId, MetricSpecVersion, H256,
 };
 use oracle_core::{
-    hash_evidence, hash_report, round_bond, OracleParams, RoundState, SettlePath, SettledComponent,
-    StoredRoundSchedule, COMPONENT_VALUE_MAX, COMPONENT_VALUE_REAP_BATCH, ORC_EXT_WINDOW_BLOCKS,
-    ORC_REPORTER_STAKE, ORC_ROUNDS, ORC_WINDOW_BLOCKS, RES_PROBE_INTERVAL, RES_PROBE_TIMEOUT,
-    WT_STAKE,
+    round_bond, OracleParams, RoundState, SettlePath, SettledComponent, StoredRoundSchedule,
+    COMPONENT_VALUE_MAX, COMPONENT_VALUE_REAP_BATCH, ORC_EXT_WINDOW_BLOCKS, ORC_REPORTER_STAKE,
+    ORC_ROUNDS, ORC_WINDOW_BLOCKS, RES_PROBE_INTERVAL, RES_PROBE_TIMEOUT, WT_STAKE,
 };
+// The suite commits under the same hash the extrinsics do, so a test can never
+// agree with a commitment the chain would reject (07 §9).
+use crate::{evidence_hash as hash_evidence, report_hash as hash_report};
 use parity_scale_codec::{Compact, Decode, Encode};
 use sp_runtime::DispatchError;
 
@@ -1186,6 +1188,112 @@ fn recompute_proof_off_grid_committed_payload_is_bad_proof() {
     });
 }
 
+/// The evidence commitment `recompute_proof` authenticates against was a
+/// 24-lane XOR fold until the 2026-08-10 security review. It offered no
+/// preimage resistance at all: bytes 24..32 of its output *were* the payload
+/// length in little-endian, and every lane was invertible, so a second payload
+/// under any committed hash was computable in O(len) from the commitment alone
+/// — by anyone, with no stake, no reporter seat and no watchtower quorum. The
+/// forged value then settled the component and recorded an offense against the
+/// honest reporter.
+///
+/// The pair below is a genuine collision under that fold, and the first
+/// assertion proves it rather than assuming it, so this test cannot pass
+/// vacuously. Under blake2-256 over a domain-separated preimage, submitting one
+/// against the other's commitment is rejected.
+#[test]
+fn recompute_proof_rejects_a_payload_the_old_xor_fold_would_have_accepted() {
+    /// The construction as it shipped, kept here only to build its own
+    /// counterexample.
+    fn old_xor_fold(payload: &[u8]) -> H256 {
+        let mut out = [0u8; 32];
+        let len = (payload.len() as u64).to_le_bytes();
+        for (i, b) in len.iter().enumerate() {
+            out[24 + i] ^= *b;
+        }
+        for (i, b) in payload.iter().enumerate() {
+            out[i % 24] ^= b.rotate_left((i / 24 % 8) as u32);
+        }
+        out
+    }
+
+    let honest_value = reported_value();
+    let forged_value = FixedU64(honest_value.0 + 1);
+
+    // 48 bytes: the fold's second row is XORed in after a one-bit rotation, so
+    // setting it to `rotate_right(lane, 1)` cancels the changed value byte for
+    // byte and lands on the same digest.
+    let mut honest = vec![0u8; 48];
+    honest[..8].copy_from_slice(&honest_value.0.to_le_bytes());
+    let mut forged = vec![0u8; 48];
+    forged[..8].copy_from_slice(&forged_value.0.to_le_bytes());
+    for lane in 0..8 {
+        forged[24 + lane] = (forged[lane] ^ honest[lane]).rotate_right(1);
+    }
+
+    // Anti-vacuity: the two payloads really did share one commitment, and they
+    // really do decode to different settled values.
+    assert_ne!(honest, forged);
+    assert_eq!(old_xor_fold(&honest), old_xor_fold(&forged));
+    assert_ne!(hash_evidence(&honest), hash_evidence(&forged));
+
+    new_test_ext().execute_with(|| {
+        assert_ok!(Oracle::note_recomputable(C, V));
+        register_reporter(1);
+        assert_ok!(do_report(1, E, honest_value, hash_evidence(&honest)));
+
+        // The forgery no longer opens the round.
+        assert_noop!(
+            Oracle::recompute_proof(
+                RuntimeOrigin::signed(acc(5)),
+                C,
+                E,
+                V,
+                proof_arg(forged.clone())
+            ),
+            Error::<Test>::EvidenceMismatch
+        );
+        assert_eq!(ComponentValues::<Test>::get((C, E, V)), None);
+        assert_eq!(
+            Reporters::<Test>::get(acc(1)).map(|info| info.offenses),
+            Some(0)
+        );
+
+        // The committed payload still resolves the round, so the refusal above
+        // is the forgery being caught and not the path being broken.
+        assert_ok!(Oracle::recompute_proof(
+            RuntimeOrigin::signed(acc(5)),
+            C,
+            E,
+            V,
+            proof_arg(honest)
+        ));
+        assert_eq!(
+            ComponentValues::<Test>::get((C, E, V)).map(|settled| settled.value),
+            Some(honest_value)
+        );
+    });
+}
+
+/// A runtime that carries no 07 §9 evaluation engine cannot settle a mechanical
+/// proof, however the recomputable set is configured.
+///
+/// `oracle_core::recompute_value` reads the settled value out of the payload's
+/// first eight bytes instead of deriving it under the frozen MetricSpec
+/// `formula_ref`, so the party that chose the commitment — the reporter — could
+/// otherwise settle at its own number the moment it committed a preimage it
+/// knows, skipping the challenge window, the watchtower quorum and the bond
+/// ladder. `()` is what the assembled runtime binds, and it refuses.
+#[test]
+fn the_unit_recompute_engine_refuses_a_payload_the_stand_in_would_accept() {
+    let proof = proof_for(reported_value());
+    assert_eq!(oracle_core::recompute_value(&proof), Ok(reported_value()));
+    assert_eq!(
+        <() as crate::RecomputeEngine>::evaluate(C, V, &proof),
+        Err(crate::CoreError::NotRecomputable)
+    );
+}
+
 #[test]
 fn recompute_proof_arg_bound_rejects_oversized_payload() {
     // 07 §9: the `BoundedVec` call argument refuses a raw SCALE payload whose
@@ -1796,6 +1904,7 @@ mod probe_dispatch_seam {
         type Params = DispatchParams;
         type Custody = ();
         type MaxRoundCloseBatch = MaxRoundCloseBatch;
+        type RecomputeEngine = crate::mock::TestRecomputeEngine;
         type ProbeDispatch = RecordingProbeDispatch;
         type ProbeTimeoutSink = RecordingProbeTimeoutSink;
         type ReserveHealthSink = ();
@@ -2173,6 +2282,7 @@ mod probe_dispatch_seam {
             type Params = DispatchParams;
             type Custody = ();
             type MaxRoundCloseBatch = MaxRoundCloseBatch;
+            type RecomputeEngine = crate::mock::TestRecomputeEngine;
             type ProbeDispatch = ();
             type ProbeTimeoutSink = ();
             type ReserveHealthSink = ();

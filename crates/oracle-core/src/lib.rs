@@ -749,7 +749,12 @@ impl Oracle {
         Ok(())
     }
 
-    pub fn report(&mut self, input: ReportInput, params: &OracleParams) -> Result<(), Error> {
+    pub fn report(
+        &mut self,
+        input: ReportInput,
+        params: &OracleParams,
+        hash: impl FnOnce(&[u8]) -> H256,
+    ) -> Result<(), Error> {
         ensure!(self.is_reporter(&input.who), Error::NotRegistered);
         ensure!(input.now <= input.report_window_end, Error::WindowClosed);
         ensure!(
@@ -795,6 +800,7 @@ impl Oracle {
             1,
             input.value,
             input.evidence_hash,
+            hash,
         );
         self.rounds.push(RoundState {
             component: input.component,
@@ -907,6 +913,10 @@ impl Oracle {
     /// The reporter's consenting escalation call (07 §5.3). A keeper may not
     /// manufacture the next reporter bond: the call itself advances the round,
     /// freezes the challenger identity, and opens the next 72-hour window.
+    // The round key is already a struct; the remaining arguments are the call's
+    // own operands plus the two host injections (`params`, `hash`), and grouping
+    // them again would hide which of them the caller controls.
+    #[allow(clippy::too_many_arguments)]
     pub fn counter_report(
         &mut self,
         who: AccountId,
@@ -915,6 +925,7 @@ impl Oracle {
         value: FixedU64,
         evidence_hash: H256,
         params: &OracleParams,
+        hash: impl FnOnce(&[u8]) -> H256,
     ) -> Result<(), Error> {
         let idx = self.find_round(key).ok_or(Error::RoundNotFound)?;
         let schedule = self.round_schedule(key)?;
@@ -933,7 +944,14 @@ impl Oracle {
         r.challenge_deadline = now.saturating_add(params.window);
         r.counter_value = None;
         r.acks = 0;
-        r.report_hash = hash_report(key.component, key.epoch, next_round, value, evidence_hash);
+        r.report_hash = hash_report(
+            key.component,
+            key.epoch,
+            next_round,
+            value,
+            evidence_hash,
+            hash,
+        );
         r.cumulative_reporter_bond = r
             .cumulative_reporter_bond
             .checked_add(next_bond)
@@ -1238,11 +1256,23 @@ impl Oracle {
     /// adjudication. (Narrowing: the proof must match the round's reporter
     /// commitment — a reporter whose own committed data contradicts the claimed
     /// value is resolved against, per the 07 §5 worked example.)
+    ///
+    /// Two things are injected rather than assumed, and both are load-bearing.
+    /// `hash` must be a cryptographic hash, because the evidence commitment is
+    /// the only authentication a submitted proof gets. `evaluate` must derive
+    /// the value from the payload under the frozen MetricSpec `formula_ref`; a
+    /// runtime that has no such engine passes one that refuses, and mechanical
+    /// resolution then fails closed. Reading the value out of the payload — what
+    /// [`recompute_value`] does for the model — would let a reporter settle at
+    /// its own number inside the challenge window, since the reporter is the
+    /// party that chose the commitment.
     pub fn recompute_proof(
         &mut self,
         prover: AccountId,
         key: RoundKey,
         proof: &[u8],
+        hash: impl FnOnce(&[u8]) -> H256,
+        evaluate: impl FnOnce(&[u8]) -> Result<FixedU64, Error>,
     ) -> Result<(), Error> {
         let (component, epoch) = (key.component, key.epoch);
         ensure!(proof.len() <= ORC_MAX_PROOF_BYTES, Error::ProofTooLarge);
@@ -1253,10 +1283,13 @@ impl Oracle {
         );
         let idx = self.find_round(key).ok_or(Error::RoundNotFound)?;
         ensure!(
-            hash_evidence(proof) == self.rounds[idx].evidence_hash,
+            hash_evidence(proof, hash) == self.rounds[idx].evidence_hash,
             Error::EvidenceMismatch
         );
-        let value = recompute_value(proof)?;
+        let value = evaluate(proof)?;
+        // The evaluator is a Config seam, so the grid bound is re-checked here
+        // rather than trusted from it (G-1, 05 §4.4 determinism rule 1).
+        ensure!(value.0 <= COMPONENT_VALUE_MAX, Error::BadProof);
         if value != self.rounds[idx].value {
             // The committed data disproves the reported value: record the 07 §3
             // offense (stake discipline); the §5.5 bond-stack forfeiture is
@@ -2183,26 +2216,68 @@ pub fn can_admit_attested_component(delta_s_max_bps: u32, params: &OracleParams)
     coverage_bps(params.rounds, params.bond_bps).is_some_and(|cov| cov >= delta_s_max_bps)
 }
 
-/// Deterministic content hash for committed evidence payloads (the model
-/// stand-in for the content-addressing of 07 §9, in the same idiom as
-/// [`hash_report`]).
-pub fn hash_evidence(payload: &[u8]) -> H256 {
-    let mut out = [0u8; 32];
-    let len = (payload.len() as u64).to_le_bytes();
-    for (i, b) in len.iter().enumerate() {
-        out[24 + i] ^= *b;
-    }
-    for (i, b) in payload.iter().enumerate() {
-        out[i % 24] ^= b.rotate_left((i / 24 % 8) as u32);
-    }
+/// Domain separator for a committed evidence payload (07 §9).
+///
+/// One preimage layout must never be readable as another, so every commitment
+/// this core builds opens with its own constant. The version suffix leaves room
+/// for a later layout that cannot collide with this one.
+pub const EVIDENCE_DOMAIN: &[u8] = b"bleavit/oracle/evidence/v1";
+
+/// Domain separator for a round's report identity (07 §5.1, §13).
+pub const REPORT_DOMAIN: &[u8] = b"bleavit/oracle/report/v1";
+
+/// Domain-separated preimage of a committed evidence payload.
+///
+/// The payload is SCALE-encoded, so it carries its own length prefix and no two
+/// distinct payloads share a preimage.
+pub fn evidence_preimage(payload: &[u8]) -> Vec<u8> {
+    let mut out = EVIDENCE_DOMAIN.to_vec();
+    payload.encode_to(&mut out);
     out
 }
 
+/// Domain-separated preimage of a round's report identity. Every field is
+/// fixed-width, so the concatenation is unambiguous.
+pub fn report_preimage(
+    component: MetricId,
+    epoch: EpochId,
+    round: u8,
+    value: FixedU64,
+    evidence_hash: H256,
+) -> Vec<u8> {
+    let mut out = REPORT_DOMAIN.to_vec();
+    component.encode_to(&mut out);
+    epoch.encode_to(&mut out);
+    round.encode_to(&mut out);
+    value.0.encode_to(&mut out);
+    evidence_hash.encode_to(&mut out);
+    out
+}
+
+/// Content hash of a committed evidence payload (07 §9).
+///
+/// The caller injects the runtime's canonical hash function, exactly as
+/// `question_service_core::verify_report_view_provenance` does, so no host or
+/// FRAME hashing dependency enters this core. **The injected function must be a
+/// cryptographic hash.** This commitment is the only thing
+/// [`Oracle::recompute_proof`] checks a submitted proof against, so a party who
+/// can find a second payload under a committed hash settles a money-bearing
+/// component at a number of its own choosing.
+pub fn hash_evidence(payload: &[u8], hash: impl FnOnce(&[u8]) -> H256) -> H256 {
+    hash(&evidence_preimage(payload))
+}
+
 /// Deterministic recomputation of a component value from its committed
-/// evidence payload — the stand-in for evaluating the frozen MetricSpec
-/// `formula_ref` (the real engine arrives with the A7 spec registry): the
-/// payload's first eight little-endian bytes are the FixedU64 value, which
-/// must lie on the [0, 1] 1e9 grid per 05 §4.4 determinism rule 1.
+/// evidence payload — the **model stand-in** for evaluating the frozen
+/// MetricSpec `formula_ref` (the real engine arrives with the A7 spec
+/// registry): the payload's first eight little-endian bytes are the FixedU64
+/// value, which must lie on the [0, 1] 1e9 grid per 05 §4.4 determinism rule 1.
+///
+/// It reads the answer out of the payload rather than deriving it, so it is not
+/// a proof of anything and no production runtime may supply it as one. That is
+/// why [`Oracle::recompute_proof`] takes its evaluator from the caller: a
+/// runtime without the A7 engine passes one that refuses, and the shipped
+/// runtime does exactly that.
 pub fn recompute_value(proof: &[u8]) -> Result<FixedU64, Error> {
     let bytes: [u8; 8] = proof
         .get(..8)
@@ -2213,28 +2288,24 @@ pub fn recompute_value(proof: &[u8]) -> Result<FixedU64, Error> {
     Ok(FixedU64(raw))
 }
 
+/// Content hash of a round's report identity, the key watchtower
+/// acknowledgments are bound to (07 §13). The caller injects the hash, under
+/// the same rule as [`hash_evidence`].
 pub fn hash_report(
     component: MetricId,
     epoch: EpochId,
     round: u8,
     value: FixedU64,
     evidence_hash: H256,
+    hash: impl FnOnce(&[u8]) -> H256,
 ) -> H256 {
-    let mut out = evidence_hash;
-    let c = component.to_le_bytes();
-    let e = epoch.to_le_bytes();
-    let v = value.0.to_le_bytes();
-    out[0] ^= c[0];
-    out[1] ^= c[1];
-    out[2] ^= e[0];
-    out[3] ^= e[1];
-    out[4] ^= e[2];
-    out[5] ^= e[3];
-    out[6] ^= round;
-    for (i, b) in v.iter().enumerate() {
-        out[8 + i] ^= *b;
-    }
-    out
+    hash(&report_preimage(
+        component,
+        epoch,
+        round,
+        value,
+        evidence_hash,
+    ))
 }
 
 #[macro_export]
@@ -2254,6 +2325,97 @@ pub mod benchmarking {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The hash the core tests inject, in the same idiom as
+    /// `question_service_core::report::tests::test_hash`.
+    ///
+    /// It is a test double, not a security claim. This core is FRAME-free and
+    /// carries no hashing dependency, so it cannot compute blake2-256 here. The
+    /// property that matters is structural and is stated where it can be
+    /// checked: [`evidence_and_report_preimages_cannot_be_confused`] shows the
+    /// core adds no arithmetic of its own and separates the two domains, and
+    /// `pallets/oracle`'s suite proves the production binding against the real
+    /// blake2-256 the runtime injects.
+    fn test_hash(bytes: &[u8]) -> H256 {
+        let mut out = [0u8; 32];
+        for (index, byte) in bytes.iter().enumerate() {
+            let slot = index % out.len();
+            out[slot] = out[slot]
+                .wrapping_add(*byte)
+                .rotate_left((index % 8) as u32);
+        }
+        out
+    }
+
+    /// The two commitments this core builds cannot be confused with each other,
+    /// and neither adds arithmetic of its own on top of the injected hash.
+    ///
+    /// Regression for the 2026-08-10 security review. `hash_evidence` was a
+    /// 24-lane XOR fold: bytes 24..32 of its output *were* the payload length in
+    /// little-endian, so the commitment published its own preimage length, and
+    /// every lane was invertible, so a second payload under any committed hash
+    /// was computable in O(len) from the commitment alone. `hash_report` folded
+    /// its fields into the evidence hash it was handed, so the two commitments
+    /// shared one output space. The pair below collided under that fold.
+    #[test]
+    fn evidence_and_report_preimages_cannot_be_confused() {
+        // 48 zero bytes against a payload whose second 24-byte row cancels its
+        // first under the fold's one-bit rotation: two distinct payloads, one
+        // old digest.
+        let zeros = alloc::vec![0u8; 48];
+        let mut collides = alloc::vec![0u8; 48];
+        collides[..24].fill(1);
+        collides[24..].fill(0x80);
+
+        assert_ne!(evidence_preimage(&zeros), evidence_preimage(&collides));
+        assert_ne!(
+            hash_evidence(&zeros, test_hash),
+            hash_evidence(&collides, test_hash)
+        );
+
+        // SCALE carries the length, so the preimage is self-delimiting: one
+        // prefix byte below the compact 63/64 boundary and two at it. Both
+        // figures fail outright if the prefix is ever dropped for a bare copy —
+        // which comparing two different-length payloads would not have noticed,
+        // since those differ as byte strings either way.
+        assert_eq!(
+            evidence_preimage(&alloc::vec![0u8; 63]).len(),
+            EVIDENCE_DOMAIN.len() + 1 + 63
+        );
+        assert_eq!(
+            evidence_preimage(&alloc::vec![0u8; 64]).len(),
+            EVIDENCE_DOMAIN.len() + 2 + 64
+        );
+
+        // Disjoint domains: an evidence preimage is never a report preimage.
+        let report = report_preimage(7, 41, 1, FixedU64(62), [9u8; 32]);
+        assert!(report.starts_with(REPORT_DOMAIN));
+        assert!(evidence_preimage(&zeros).starts_with(EVIDENCE_DOMAIN));
+        assert_ne!(EVIDENCE_DOMAIN, REPORT_DOMAIN);
+
+        // Neither helper folds anything into the digest: the whole security
+        // property belongs to the hash the caller injects.
+        assert_eq!(
+            hash_evidence(&zeros, test_hash),
+            test_hash(&evidence_preimage(&zeros))
+        );
+        assert_eq!(
+            hash_report(7, 41, 1, FixedU64(62), [9u8; 32], test_hash),
+            test_hash(&report)
+        );
+
+        // A report commitment is bound to every field it names.
+        let base = hash_report(7, 41, 1, FixedU64(62), [9u8; 32], test_hash);
+        for other in [
+            hash_report(8, 41, 1, FixedU64(62), [9u8; 32], test_hash),
+            hash_report(7, 42, 1, FixedU64(62), [9u8; 32], test_hash),
+            hash_report(7, 41, 2, FixedU64(62), [9u8; 32], test_hash),
+            hash_report(7, 41, 1, FixedU64(63), [9u8; 32], test_hash),
+            hash_report(7, 41, 1, FixedU64(62), [10u8; 32], test_hash),
+        ] {
+            assert_ne!(base, other);
+        }
+    }
 
     /// 07 §6.1 (*Units and rounding*): the base-unit product rounds **up**, so a
     /// bond is never a base unit short of the specified value. Pins the direction
@@ -2364,6 +2526,7 @@ mod tests {
                     expected_spec: $expected_spec,
                 },
                 &OracleParams::DEFAULT,
+                test_hash,
             )
         };
     }
@@ -2409,6 +2572,7 @@ mod tests {
                 FixedU64(440_000_000),
                 h(10),
                 &OracleParams::DEFAULT,
+                test_hash,
             )
             .unwrap();
         }
@@ -2648,6 +2812,7 @@ mod tests {
             FixedU64(44),
             h(11),
             &OracleParams::DEFAULT,
+            test_hash,
         )
         .unwrap();
         assert_eq!(o.rounds[0].round, 2);
@@ -2686,6 +2851,7 @@ mod tests {
                 FixedU64(500_000_000),
                 h(11),
                 &OracleParams::DEFAULT,
+                test_hash,
             ),
             Err(Error::NotRegistered)
         );
@@ -2696,6 +2862,7 @@ mod tests {
             FixedU64(500_000_000),
             h(11),
             &OracleParams::DEFAULT,
+            test_hash,
         )
         .unwrap();
         assert_eq!(o.rounds[0].challenger, Some(acct(4)));
@@ -2741,6 +2908,7 @@ mod tests {
             FixedU64(500_000_000),
             h(11),
             &OracleParams::DEFAULT,
+            test_hash,
         )
         .unwrap();
         let report_hash = o.rounds[0].report_hash;
@@ -2781,6 +2949,7 @@ mod tests {
                 FixedU64(440_000_000),
                 h(11),
                 &OracleParams::DEFAULT,
+                test_hash,
             )
             .unwrap();
         }
@@ -2812,7 +2981,7 @@ mod tests {
             41,
             3,
             FixedU64(62),
-            hash_evidence(&proof),
+            hash_evidence(&proof, test_hash),
             400_000_000_000,
             10,
             3,
@@ -2820,7 +2989,8 @@ mod tests {
         .unwrap();
         o.challenge(acct(4), 2, key(7, 41, 3), FixedU64(44), h(10))
             .unwrap();
-        o.recompute_proof(acct(5), key(7, 41, 3), &proof).unwrap();
+        o.recompute_proof(acct(5), key(7, 41, 3), &proof, test_hash, recompute_value)
+            .unwrap();
         assert_eq!(o.component_values[0].1.path, SettlePath::Recomputed);
         assert_eq!(o.component_values[0].1.value, FixedU64(44));
         assert_eq!(o.reporters[0].1.offenses, 1);
@@ -2915,7 +3085,7 @@ mod tests {
             41,
             3,
             FixedU64(62),
-            hash_evidence(&proof),
+            hash_evidence(&proof, test_hash),
             400_000_000_000,
             10,
             3,
@@ -2923,7 +3093,7 @@ mod tests {
         .unwrap();
         // Component not declared recomputable in the frozen spec: fail closed.
         assert_eq!(
-            o.recompute_proof(acct(5), key(9, 41, 3), &proof),
+            o.recompute_proof(acct(5), key(9, 41, 3), &proof, test_hash, recompute_value),
             Err(Error::NotRecomputable)
         );
         // Oversized proof.
@@ -2931,17 +3101,26 @@ mod tests {
             o.recompute_proof(
                 acct(5),
                 key(7, 41, 3),
-                &alloc::vec![0u8; ORC_MAX_PROOF_BYTES + 1]
+                &alloc::vec![0u8; ORC_MAX_PROOF_BYTES + 1],
+                test_hash,
+                recompute_value
             ),
             Err(Error::ProofTooLarge)
         );
         // Payload that does not match the committed evidence.
         assert_eq!(
-            o.recompute_proof(acct(5), key(7, 41, 3), &alloc::vec![1u8; 24]),
+            o.recompute_proof(
+                acct(5),
+                key(7, 41, 3),
+                &alloc::vec![1u8; 24],
+                test_hash,
+                recompute_value
+            ),
             Err(Error::EvidenceMismatch)
         );
         // Committed payload agreeing with the report settles without offense.
-        o.recompute_proof(acct(5), key(7, 41, 3), &proof).unwrap();
+        o.recompute_proof(acct(5), key(7, 41, 3), &proof, test_hash, recompute_value)
+            .unwrap();
         assert_eq!(o.component_values[0].1.value, FixedU64(62));
         assert_eq!(o.reporters[0].1.offenses, 0);
 
@@ -2961,18 +3140,24 @@ mod tests {
             41,
             3,
             FixedU64(62),
-            hash_evidence(&short),
+            hash_evidence(&short, test_hash),
             400_000_000_000,
             10,
             3,
         )
         .unwrap();
         assert_eq!(
-            o.recompute_proof(acct(5), key(7, 41, 3), &short),
+            o.recompute_proof(acct(5), key(7, 41, 3), &short, test_hash, recompute_value),
             Err(Error::BadProof)
         );
         assert_eq!(
-            o.recompute_proof(acct(5), key(7, 41, 3), &off_grid),
+            o.recompute_proof(
+                acct(5),
+                key(7, 41, 3),
+                &off_grid,
+                test_hash,
+                recompute_value
+            ),
             Err(Error::EvidenceMismatch)
         );
         assert_eq!(recompute_value(&off_grid), Err(Error::BadProof));
@@ -3151,7 +3336,7 @@ mod tests {
             41,
             3,
             FixedU64(44),
-            hash_evidence(&proof),
+            hash_evidence(&proof, test_hash),
             400_000_000_000,
             10,
             3,
@@ -3174,9 +3359,10 @@ mod tests {
         .unwrap();
         assert_eq!(o.rounds.len(), 2);
         // Version 3 is declared recomputable; version 4 is not.
-        o.recompute_proof(acct(5), key(7, 41, 3), &proof).unwrap();
+        o.recompute_proof(acct(5), key(7, 41, 3), &proof, test_hash, recompute_value)
+            .unwrap();
         assert_eq!(
-            o.recompute_proof(acct(5), key(7, 41, 4), &proof),
+            o.recompute_proof(acct(5), key(7, 41, 4), &proof, test_hash, recompute_value),
             Err(Error::NotRecomputable)
         );
         // The settled version-3 value does not finalize version 4's game...
@@ -3196,6 +3382,7 @@ mod tests {
                 FixedU64(50),
                 h(10),
                 &OracleParams::DEFAULT,
+                test_hash,
             )
             .unwrap();
         }
@@ -3937,7 +4124,7 @@ mod tests {
             41,
             3,
             FixedU64(620_000_000),
-            hash_evidence(&proof),
+            hash_evidence(&proof, test_hash),
             400_000_000_000,
             100,
             3,
@@ -3955,18 +4142,25 @@ mod tests {
                 41,
                 3,
                 FixedU64(620_000_000),
-                hash_evidence(&proof),
+                hash_evidence(&proof, test_hash),
                 400_000_000_000,
                 100,
                 3,
             )
             .unwrap();
-            o.recompute_proof(acct(5), key(31 + n, 41, 3), &proof)
-                .unwrap();
+            o.recompute_proof(
+                acct(5),
+                key(31 + n, 41, 3),
+                &proof,
+                test_hash,
+                recompute_value,
+            )
+            .unwrap();
         }
         assert!(!o.is_reporter(&acct(1)));
         // The pre-existing game still settles by recompute despite the ejection.
-        o.recompute_proof(acct(5), key(30, 41, 3), &proof).unwrap();
+        o.recompute_proof(acct(5), key(30, 41, 3), &proof, test_hash, recompute_value)
+            .unwrap();
         assert!(o.component_values.iter().any(|((c, _, _), _)| *c == 30));
         o.try_state().unwrap();
     }
@@ -4037,6 +4231,7 @@ mod tests {
             FixedU64(440_000_000),
             h(10),
             &OracleParams::DEFAULT,
+            test_hash,
         )
         .unwrap();
         assert_eq!(o.rounds[0].round, 2);
@@ -4127,6 +4322,7 @@ mod tests {
             FixedU64(440_000_000),
             h(10),
             &OracleParams::DEFAULT,
+            test_hash,
         )
         .unwrap();
         let d2 = round_deadline(&o, k);

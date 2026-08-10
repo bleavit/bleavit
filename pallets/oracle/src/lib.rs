@@ -89,12 +89,12 @@ mod tests;
 // The functional core is the semantic source of truth; re-export its surface
 // named (not glob — the pallet owns its own `Error`/`ReserveHealth` aliases).
 pub use oracle_core::{
-    can_admit_attested_component, coverage_bps, round_bond, stored_round_bond, BondDisposition,
-    BondSettlement, Error as CoreError, Event as CoreEvent, Oracle, OracleParams, ReportInput,
-    ReporterInfo, ReserveHealth as ReserveHealthValue, RoundKey, RoundState, SettlePath,
-    SettledComponent, StoredRoundSchedule, WatchtowerInfo, MAX_ACK_RECORDS, MAX_COMPONENT_VALUES,
-    MAX_REPORTERS, MAX_RESERVE_PROBE_QUERY_ID, MAX_ROUNDS, MAX_WATCHTOWERS, ORC_MAX_PROOF_BYTES,
-    ORC_ROUNDS, ORC_ROUND_CAP_MIN, RES_PROBE_INTERVAL, RES_PROBE_TIMEOUT,
+    can_admit_attested_component, coverage_bps, recompute_value, round_bond, stored_round_bond,
+    BondDisposition, BondSettlement, Error as CoreError, Event as CoreEvent, Oracle, OracleParams,
+    ReportInput, ReporterInfo, ReserveHealth as ReserveHealthValue, RoundKey, RoundState,
+    SettlePath, SettledComponent, StoredRoundSchedule, WatchtowerInfo, MAX_ACK_RECORDS,
+    MAX_COMPONENT_VALUES, MAX_REPORTERS, MAX_RESERVE_PROBE_QUERY_ID, MAX_ROUNDS, MAX_WATCHTOWERS,
+    ORC_MAX_PROOF_BYTES, ORC_ROUNDS, ORC_ROUND_CAP_MIN, RES_PROBE_INTERVAL, RES_PROBE_TIMEOUT,
 };
 pub use oracle_core::{COMPONENT_VALUE_REAP_BATCH, COMPONENT_VALUE_RETAINED_EPOCHS};
 
@@ -120,6 +120,35 @@ pub const MAX_ACK_RECORDS_BOUND: u32 = MAX_ACK_RECORDS as u32;
 pub const MAX_PROOF_BYTES_BOUND: u32 = ORC_MAX_PROOF_BYTES as u32;
 /// Recomputable `(component, version)` declarations from the MetricSpec registry.
 pub const MAX_RECOMPUTABLE_BOUND: u32 = 64;
+
+/// The hash this runtime commits oracle evidence under (07 §9).
+///
+/// `oracle-core` is FRAME-free and takes its hash from the caller, so this is
+/// the single place that chooses one — the extrinsics, the benchmarks and the
+/// suites all call it, and none of them can drift from what the chain commits.
+pub fn evidence_hash(payload: &[u8]) -> futarchy_primitives::H256 {
+    oracle_core::hash_evidence(payload, sp_io::hashing::blake2_256)
+}
+
+/// The hash this runtime commits a round's report identity under, which is the
+/// key watchtower acknowledgments are matched against (07 §5.1, §13). Same
+/// single-home rule as [`evidence_hash`].
+pub fn report_hash(
+    component: MetricId,
+    epoch: EpochId,
+    round: u8,
+    value: futarchy_primitives::FixedU64,
+    evidence: futarchy_primitives::H256,
+) -> futarchy_primitives::H256 {
+    oracle_core::hash_report(
+        component,
+        epoch,
+        round,
+        value,
+        evidence,
+        sp_io::hashing::blake2_256,
+    )
+}
 
 /// Live oracle and reserve-probe tunables sourced from
 /// `pallet-constitution::Params`.
@@ -288,6 +317,48 @@ impl ReserveHealthSink for () {
     }
 }
 
+/// The 07 §9 mechanical-resolution engine: evaluates a committed evidence
+/// payload under the frozen MetricSpec `formula_ref`.
+///
+/// `recompute_proof` settles a money-bearing component from whatever this
+/// returns — outside the challenge window, with no watchtower quorum and no
+/// challenger — so the value MUST be **derived** from the payload under the
+/// frozen spec, never read out of it. A runtime that carries no such engine
+/// binds `()`, and mechanical resolution then fails closed for every component
+/// (G-1 status quo).
+pub trait RecomputeEngine {
+    /// The value the frozen spec computes from this payload.
+    ///
+    /// Return [`CoreError::NotRecomputable`] when this runtime carries no engine
+    /// for `(component, version)`, and [`CoreError::BadProof`] when it has one
+    /// and the payload does not evaluate. Either way `recompute_proof` leaves
+    /// the round exactly as it found it.
+    fn evaluate(
+        component: MetricId,
+        version: MetricSpecVersion,
+        proof: &[u8],
+    ) -> Result<futarchy_primitives::FixedU64, CoreError>;
+}
+
+/// No engine, so no mechanical resolution. **Bleavit's runtime binds this.**
+///
+/// The A7 spec registry that freezes `formula_ref` does not exist yet, and the
+/// model's stand-in — `oracle_core::recompute_value` — reads the value out of
+/// the payload's first eight bytes instead of deriving it. Wiring that here
+/// would let a reporter settle at its own number the moment it committed a
+/// preimage it knows, skipping the 07 §5 challenge game entirely. Whoever lands
+/// A7 must supply a real evaluator to open this path, and the type system says
+/// so (2026-08-10 security review).
+impl RecomputeEngine for () {
+    fn evaluate(
+        _: MetricId,
+        _: MetricSpecVersion,
+        _: &[u8],
+    ) -> Result<futarchy_primitives::FixedU64, CoreError> {
+        Err(CoreError::NotRecomputable)
+    }
+}
+
 /// Constructs a runtime origin resolving to a given authority so benchmarks can
 /// drive the privileged `adjudicate` call with its exact 07 §5.4 origin.
 #[cfg(feature = "runtime-benchmarks")]
@@ -357,6 +428,11 @@ pub mod pallet {
 
         /// Weight information for extrinsics.
         type WeightInfo: WeightInfo;
+
+        /// The 07 §9 mechanical-resolution engine. `()` refuses every payload,
+        /// which closes `recompute_proof` for the whole runtime — see
+        /// [`RecomputeEngine`].
+        type RecomputeEngine: RecomputeEngine;
 
         /// Runtime XCM adapter invoked only after a fresh reserve probe commits
         /// (07 §8; B4/B1a). The pallet remains XCM-free by construction.
@@ -532,6 +608,12 @@ pub mod pallet {
     /// MetricSpec registry declares deterministically recomputable (07 §2(4)/§9).
     /// `recompute_proof` fails closed for anything absent. Seeded at genesis and
     /// via [`Pallet::note_recomputable`] (welfare `register_spec`, B1a).
+    ///
+    /// Membership here is necessary but **not sufficient**: the settled value
+    /// comes from [`Config::RecomputeEngine`], and a runtime that binds `()` —
+    /// which this one does until A7 lands — refuses every payload. Declaring a
+    /// component recomputable therefore cannot, on its own, open a settlement
+    /// path (2026-08-10 security review).
     #[pallet::storage]
     pub type Recomputable<T: Config> = StorageValue<
         _,
@@ -811,6 +893,7 @@ pub mod pallet {
                         expected_spec: spec_version,
                     },
                     &params,
+                    sp_io::hashing::blake2_256,
                 )
             })
         }
@@ -859,12 +942,24 @@ pub mod pallet {
                 spec_version,
             };
             let params = T::Params::get();
-            Self::mutate_core(|o| o.counter_report(who, now, key, value, evidence_hash, &params))
+            Self::mutate_core(|o| {
+                o.counter_report(
+                    who,
+                    now,
+                    key,
+                    value,
+                    evidence_hash,
+                    &params,
+                    sp_io::hashing::blake2_256,
+                )
+            })
         }
 
         /// `oracle.recompute_proof` — permissionless mechanical resolution from
         /// the committed evidence, bounded at `orc.max_proof_bytes` (07 §9).
-        /// Signed (keeper, rebated). Fails closed for non-recomputable components.
+        /// Signed (keeper, rebated). Fails closed for non-recomputable
+        /// components, and for every component on a runtime whose
+        /// [`Config::RecomputeEngine`] cannot evaluate the frozen `formula_ref`.
         #[pallet::call_index(4)]
         #[pallet::weight(T::WeightInfo::recompute_proof(proof.len() as u32))]
         pub fn recompute_proof(
@@ -881,7 +976,19 @@ pub mod pallet {
                 epoch,
                 spec_version,
             };
-            Self::mutate_core(|o| o.recompute_proof(prover, key, proof.as_slice()))?;
+            Self::mutate_core(|o| {
+                o.recompute_proof(
+                    prover,
+                    key,
+                    proof.as_slice(),
+                    sp_io::hashing::blake2_256,
+                    // The settled value is derived by the runtime's frozen-spec
+                    // engine, never read out of the caller's payload. `()` — what
+                    // this runtime binds — refuses, so the path fails closed
+                    // (07 §9; [`RecomputeEngine`]).
+                    |payload| T::RecomputeEngine::evaluate(component, spec_version, payload),
+                )
+            })?;
             // B5 recalibrates this weight for the post-commit rebate write/payout.
             T::KeeperRebate::rebate(&who, CrankClass::OracleLine);
             Ok(())

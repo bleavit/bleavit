@@ -15,11 +15,13 @@ scale-info = { version = "2.11.6", default-features = false, features = ["derive
 frame-support = { workspace = true }
 frame-system = { workspace = true }
 sp-runtime = { workspace = true }
+# The canonical hash the pallet injects into `oracle-core`'s commitments, in the
+# same idiom as `pallet-question-service` (07 §9).
+sp-io = { workspace = true }
 frame-benchmarking = { workspace = true, optional = true }
 
 [dev-dependencies]
 sp-core = { workspace = true, features = ["std"] }
-sp-io = { workspace = true, features = ["std"] }
 
 [features]
 default = ["std"]
@@ -32,6 +34,7 @@ std = [
   "origins-core/std",
   "parity-scale-codec/std",
   "scale-info/std",
+  "sp-io/std",
   "sp-runtime/std",
 ]
 runtime-benchmarks = [

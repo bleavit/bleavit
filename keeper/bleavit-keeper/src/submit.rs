@@ -42,11 +42,24 @@ pub struct Submitter {
     retry_base: Duration,
     cooldown_depth: u64,
     cooldowns: BTreeMap<String, u64>,
+    /// What this keeper will and will not sign.
+    policy: ShapePolicy,
+}
+
+/// The call shapes this keeper accepts, and whether it accepts none at all.
+///
+/// The two travel together everywhere the decision is made, so they are one
+/// value: a pin set carried without the operator's opt-out decision beside it is
+/// how the fail-open default survived unnoticed (2026-08-10 security review).
+#[derive(Clone, Debug, Default)]
+pub struct ShapePolicy {
     /// `Pallet.call` -> the metadata call shape this keeper will sign.
     ///
-    /// Empty means unpinned, which is the pre-existing trust posture and is
-    /// reported as such at startup.
-    call_hashes: BTreeMap<String, [u8; 32]>,
+    /// Empty means unpinned, which is refused unless [`Self::allow_unpinned`]
+    /// carries the operator's explicit opt-in.
+    pub pins: BTreeMap<String, [u8; 32]>,
+    /// The operator's `--allow-unpinned-endpoint` decision.
+    pub allow_unpinned: bool,
 }
 
 /// What this keeper pins for one call: the variant shape **and** the two bytes
@@ -88,17 +101,20 @@ pub fn dispatch_pin(metadata: &subxt::Metadata, pallet: &str, call: &str) -> Opt
 /// without a live node.
 fn shape_decision(
     observed: Option<[u8; 32]>,
-    pins: &BTreeMap<String, [u8; 32]>,
+    policy: &ShapePolicy,
     key: &str,
 ) -> Result<(), ShapeRefusal> {
     let observed = observed.ok_or(ShapeRefusal::Unknown)?;
-    match pins.get(key) {
+    match policy.pins.get(key) {
         Some(pinned) if *pinned == observed => Ok(()),
         Some(_) => Err(ShapeRefusal::Mismatch),
-        // Fail closed only once the operator has opted in: with no pins at all
-        // the keeper is in its pre-existing posture and says so loudly at
-        // startup instead of refusing every crank.
-        None if pins.is_empty() => Ok(()),
+        // With no pins at all the keeper signs whatever shape the endpoint
+        // declares, which is the posture this gate exists to close. It stays
+        // reachable only for an operator who asked for it in writing
+        // (`--allow-unpinned-endpoint`); `Config` refuses to start otherwise, and
+        // this arm keeps the refusal at the signing site too, so no other caller
+        // can reintroduce it (2026-08-10 security review).
+        None if policy.pins.is_empty() && policy.allow_unpinned => Ok(()),
         None => Err(ShapeRefusal::Unpinned),
     }
 }
@@ -132,7 +148,7 @@ impl Submitter {
         max_retries: u32,
         retry_base: Duration,
         cooldown_depth: u64,
-        call_hashes: BTreeMap<String, [u8; 32]>,
+        policy: ShapePolicy,
     ) -> Self {
         Self {
             client,
@@ -143,7 +159,7 @@ impl Submitter {
             retry_base,
             cooldown_depth,
             cooldowns: BTreeMap::new(),
-            call_hashes,
+            policy,
         }
     }
 
@@ -171,12 +187,12 @@ impl Submitter {
     /// see [`Submitter::validated_tx`], the only caller.
     pub fn validate_call_shape(
         metadata: &subxt::Metadata,
-        pins: &BTreeMap<String, [u8; 32]>,
+        policy: &ShapePolicy,
         pallet: &str,
         call: &str,
     ) -> Result<(), ShapeRefusal> {
         let key = format!("{pallet}.{call}");
-        shape_decision(dispatch_pin(metadata, pallet, call), pins, &key)
+        shape_decision(dispatch_pin(metadata, pallet, call), policy, &key)
     }
 
     /// Validate `block`'s declared call shape and hand back **that block's own**
@@ -197,19 +213,19 @@ impl Submitter {
     /// this instance already holds.
     fn validated_tx<Client>(
         block: &ClientAtBlock<PolkadotConfig, Client>,
-        pins: &BTreeMap<String, [u8; 32]>,
+        policy: &ShapePolicy,
         pallet: &str,
         call: &str,
     ) -> Result<TransactionsClient<PolkadotConfig, Client>, ShapeRefusal>
     where
         Client: OfflineClientAtBlockT<PolkadotConfig>,
     {
-        Self::validate_call_shape(block.metadata_ref(), pins, pallet, call)?;
+        Self::validate_call_shape(block.metadata_ref(), policy, pallet, call)?;
         Ok(block.tx())
     }
 
-    pub fn call_hashes(&self) -> &BTreeMap<String, [u8; 32]> {
-        &self.call_hashes
+    pub fn shape_policy(&self) -> &ShapePolicy {
+        &self.policy
     }
 
     pub fn cooldowns(&self) -> &BTreeMap<String, u64> {
@@ -321,21 +337,20 @@ impl Submitter {
             // transport failure — reconnecting to the same hostile endpoint would
             // change nothing, and the keeper must not fall back to signing an
             // unvalidated shape.
-            let mut tx =
-                match Self::validated_tx(&block, &self.call_hashes, crank.pallet, crank.call) {
-                    Ok(tx) => tx,
-                    Err(refusal) => {
-                        metrics.failed(crank.role);
-                        warn!(
-                            role = %crank.role,
-                            pallet = crank.pallet,
-                            call = crank.call,
-                            %refusal,
-                            "refusing to sign: unvalidated call shape"
-                        );
-                        return SubmissionOutcome::ExpectedFailure;
-                    }
-                };
+            let mut tx = match Self::validated_tx(&block, &self.policy, crank.pallet, crank.call) {
+                Ok(tx) => tx,
+                Err(refusal) => {
+                    metrics.failed(crank.role);
+                    warn!(
+                        role = %crank.role,
+                        pallet = crank.pallet,
+                        call = crank.call,
+                        %refusal,
+                        "refusing to sign: unvalidated call shape"
+                    );
+                    return SubmissionOutcome::ExpectedFailure;
+                }
+            };
 
             if self.nonce.is_none() {
                 match timeout(self.timeout, fetch_nonce(&tx, &self.signer)).await {
@@ -564,11 +579,14 @@ mod tests {
 mod call_shape_tests {
     use super::*;
 
-    fn pins(entries: &[(&str, [u8; 32])]) -> BTreeMap<String, [u8; 32]> {
-        entries
-            .iter()
-            .map(|(key, hash)| ((*key).to_owned(), *hash))
-            .collect()
+    fn policy(entries: &[(&str, [u8; 32])], allow_unpinned: bool) -> ShapePolicy {
+        ShapePolicy {
+            pins: entries
+                .iter()
+                .map(|(key, hash)| ((*key).to_owned(), *hash))
+                .collect(),
+            allow_unpinned,
+        }
     }
 
     /// MAX-07. With pins configured, a call the operator did not pin is
@@ -577,7 +595,7 @@ mod call_shape_tests {
     /// pin. Fails at baseline: no shape check existed at all.
     #[test]
     fn an_unpinned_call_is_refused_once_any_pin_exists() {
-        let configured = pins(&[("Epoch.tick", [7u8; 32])]);
+        let configured = policy(&[("Epoch.tick", [7u8; 32])], false);
         // The lookup itself needs metadata, so this exercises the decision
         // table directly: `Some(pinned) == observed` -> Ok, `Some(_)` ->
         // Mismatch, `None` with a non-empty map -> Unpinned.
@@ -601,20 +619,49 @@ mod call_shape_tests {
             shape_decision(None, &configured, "Epoch.tick"),
             Err(ShapeRefusal::Unknown)
         );
+        // The opt-out is not a way past a *configured* pin: it only reaches the
+        // no-pins-at-all arm.
+        let opted_out = policy(&[("Epoch.tick", [7u8; 32])], true);
+        assert_eq!(
+            shape_decision(Some([9u8; 32]), &opted_out, "Epoch.tick"),
+            Err(ShapeRefusal::Mismatch)
+        );
+        assert_eq!(
+            shape_decision(Some([9u8; 32]), &opted_out, "Balances.transfer_allow_death"),
+            Err(ShapeRefusal::Unpinned)
+        );
     }
 
-    /// With no pins at all the keeper keeps its pre-existing posture: it warns
-    /// at startup and does not refuse every crank, so an operator who has not
-    /// adopted pinning is not silently taken offline by an upgrade.
+    /// With no pins at all the keeper refuses to sign, because an unpinned shape
+    /// is the endpoint's word for what the signature authorizes.
+    ///
+    /// This used to return `Ok(())`, and that default is what the 2026-08-10
+    /// security review found: `dynamic::tx` carries `validation_hash: None`,
+    /// subxt encodes RFC-78's `CheckMetadataHash` as `Disabled`, and nothing
+    /// downstream re-checks the bytes — so a hostile endpoint could keep the
+    /// real genesis, spec and transaction versions and move a routine crank onto
+    /// `Balances.transfer_allow_death`. The keeper now starts only with pins,
+    /// under `--dry-run`, or under an explicit `--allow-unpinned-endpoint`, and
+    /// this arm holds the same line at the signing site.
     #[test]
-    fn no_pins_at_all_keeps_the_previous_posture() {
-        let empty = BTreeMap::new();
+    fn no_pins_at_all_is_refused_unless_the_operator_opted_out() {
+        let empty = policy(&[], false);
         assert_eq!(
             shape_decision(Some([1u8; 32]), &empty, "Epoch.tick"),
-            Ok(())
+            Err(ShapeRefusal::Unpinned)
         );
         assert_eq!(
             shape_decision(None, &empty, "Epoch.tick"),
+            Err(ShapeRefusal::Unknown)
+        );
+        // The explicit opt-out restores the old posture, and only that.
+        let empty_opted_out = policy(&[], true);
+        assert_eq!(
+            shape_decision(Some([1u8; 32]), &empty_opted_out, "Epoch.tick"),
+            Ok(())
+        );
+        assert_eq!(
+            shape_decision(None, &empty_opted_out, "Epoch.tick"),
             Err(ShapeRefusal::Unknown)
         );
     }
@@ -662,8 +709,11 @@ mod validated_tx_tests {
             .expect("the configured spec version and metadata resolve")
     }
 
-    fn pinned(key: &str, hash: [u8; 32]) -> BTreeMap<String, [u8; 32]> {
-        BTreeMap::from([(key.to_owned(), hash)])
+    fn pinned(key: &str, hash: [u8; 32]) -> ShapePolicy {
+        ShapePolicy {
+            pins: BTreeMap::from([(key.to_owned(), hash)]),
+            allow_unpinned: false,
+        }
     }
 
     #[test]
@@ -750,7 +800,10 @@ mod keeper_shape_pins {
         );
 
         // And the gate, not just the derivation, keeps them apart.
-        let pins = BTreeMap::from([("MilestoneRegistry.crank_close".to_owned(), incident)]);
+        let pins = ShapePolicy {
+            pins: BTreeMap::from([("MilestoneRegistry.crank_close".to_owned(), incident)]),
+            allow_unpinned: false,
+        };
         assert_eq!(
             Submitter::validate_call_shape(&metadata, &pins, "MilestoneRegistry", "crank_close"),
             Err(ShapeRefusal::Mismatch),

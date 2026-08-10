@@ -3009,6 +3009,58 @@ fn oracle_registration_refuses_an_unfunded_reporter_atomically() {
     });
 }
 
+/// 07 §9's mechanical resolution is closed on the assembled runtime, and no
+/// chain-spec entry can open it.
+///
+/// `oracle.recompute_proof` settles a money-bearing component outside the
+/// challenge window, with no watchtower quorum and no challenger, at whatever
+/// `Config::RecomputeEngine` returns. The A7 spec registry that freezes
+/// `formula_ref` does not exist yet, so this runtime binds `()`. Binding the
+/// model's stand-in instead — which reads the settled value out of the payload's
+/// first eight bytes — would let a reporter settle at its own number the moment
+/// it committed a preimage it knows. Membership in `Oracle::Recomputable` is
+/// therefore necessary but not sufficient, which is what stops one genesis entry
+/// from arming an unimplemented verifier. Regression for the 2026-08-10 security
+/// review.
+///
+/// The binding is `#[cfg]`-selected, so this test asserts what is true under
+/// **each** profile rather than what is true under the default one. A
+/// `runtime-benchmarks` runtime deliberately carries the measuring stand-in, so
+/// `recompute_proof`'s declared weight bounds the round it settles instead of the
+/// early refusal; a test that named only the shipped binding would fail there and
+/// read as the security property having regressed.
+#[test]
+fn the_assembled_runtime_binds_no_oracle_recompute_engine() {
+    use pallet_oracle::RecomputeEngine;
+
+    let mut proof = vec![0u8; 24];
+    proof[..8].copy_from_slice(&500_000_000u64.to_le_bytes());
+
+    // Anti-vacuity: the model's stand-in accepts this payload ...
+    assert_eq!(
+        pallet_oracle::recompute_value(&proof),
+        Ok(futarchy_primitives::FixedU64(500_000_000))
+    );
+    // ... and the shipped runtime's engine refuses it, for every component and
+    // version.
+    #[cfg(not(feature = "runtime-benchmarks"))]
+    assert_eq!(
+        <<Runtime as pallet_oracle::Config>::RecomputeEngine as RecomputeEngine>::evaluate(
+            1, 1, &proof
+        ),
+        Err(pallet_oracle::CoreError::NotRecomputable)
+    );
+    // The measurement runtime is the one profile that evaluates, and it is never
+    // shipped.
+    #[cfg(feature = "runtime-benchmarks")]
+    assert_eq!(
+        <<Runtime as pallet_oracle::Config>::RecomputeEngine as RecomputeEngine>::evaluate(
+            1, 1, &proof
+        ),
+        Ok(futarchy_primitives::FixedU64(500_000_000))
+    );
+}
+
 #[test]
 fn b10_param_providers_match_defaults_and_exact_genesis_keys() {
     development_ext().execute_with(|| {
