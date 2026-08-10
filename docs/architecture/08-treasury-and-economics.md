@@ -374,14 +374,31 @@ Four further rules bind the settlement, and each is a G-1 direction rather than 
   headroom of zero and takes `k = 0`. The pair nets `+r × scored` — the exact failure the scaling
   rule existed to prevent, reached through the rule itself. The two legs also draw on **different
   pots**, the reward on the authorized VIT budget and the forfeit on `INSURANCE`, so no
-  conservation identity ever linked them. The clamp keeps this bullet's second protection intact,
-  because the rate stays fixed at `r` and only the total is capped, so no pair in a thin epoch can
-  take the whole budget against a small forfeit. It gives up the first: under budget pressure a
-  losing participant pays in full while a winner is clamped. That is the R-7 direction —
-  over-punishing cannot create an unbacked claim, and under-punishing funds the farm. **The
-  residual is that a thin budget is first-come-first-served**, so a late settler may receive less
-  than `r × scored`. That is a fairness cost rather than a solvency one, it cannot make any pair
-  net positive, and governance's remedy is to authorize a budget that covers the epoch.
+  conservation identity ever linked them. The clamp keeps this bullet's second protection intact:
+  the rate stays fixed at `r`, so a reward is never more than `r × scored` and no pair can draw
+  budget out of proportion to its own score, which is what a pro-rata reward at no fixed rate
+  would have allowed. It gives up the first: under budget pressure a losing participant pays in
+  full while a winner is clamped. That is the R-7 direction — over-punishing cannot create an
+  unbacked claim, and under-punishing funds the farm.
+
+  **What this bullet does *not* do, stated because an earlier revision of it claimed otherwise.**
+  Nothing here makes a wash pair net non-positive. The clamp can only lower a reward, never raise
+  one, so it cannot open a hole — but the forfeit is sized by the *losing* account's own cap, the
+  operator chooses both bonds, and at unequal bonds the pair nets positive with no budget pressure
+  involved at all. That invariant rests on the rate coupling `rwd.rate ≤ 2 × mkt.fee / 0.99` and
+  on nothing else, as the *rate* paragraph below sets out. Between 2026-08-10 and the correction on
+  the same day this bullet said "no pair in a thin epoch can take the whole budget against a fixed
+  small forfeit", which is the retired earning-cap claim in a fifth location — added, at that, while
+  the four known instances were being corrected.
+
+  **The residual is that a thin budget is first-come-first-served**, so a late settler may receive
+  less than `r × scored`. The ordering is **choosable rather than accidental**: the participant who
+  gains most from settling first is exactly the one who already knows their own score, and a wash
+  operator holding both sides can pre-sign at the epoch boundary and take the whole budget. It
+  stays a fairness cost rather than a solvency one, and it is not free — capturing a budget `B`
+  requires at least `B × rate_headroom` in held bonds and pays the full unscaled debit plus the
+  wash fee spread, so the attacker spends more than they take. Governance's remedy is to authorize
+  a budget that covers the epoch.
 - A debit never drives the bond below zero. It takes the whole bond and suspends the participant
   until they top up. **Suspension suspends scoring, and the accumulator MUST test the suspension
   flag rather than infer it from a nonzero bond** *(added 2026-08-10, SQ-1050)*. The two are not
@@ -422,11 +439,23 @@ pays the manipulator alongside everyone else, and this one charges them twice. T
 the program attracts is real capital an attacker must overcome, so §5.2's `L̂` rises honestly.
 
 **Failure behaviour (G-1, R-7).** An unset `rwd.rate` fails `enroll` closed with a typed error,
-before any hold. An exhausted budget clamps the reward and leaves the debit whole, so nothing strands and the pot
-never overdraws. A debit above the bond takes the whole bond and suspends. An arithmetic edge is a
-no-op. A fill in a market beyond the per-account score-entry bound **records no score and never
-rejects the trade**, because refusing a lawful trade to protect a rewards bound is the wrong
-direction under G-1.
+before any hold. An exhausted budget clamps the reward and leaves the debit whole, so nothing
+strands and the pot never overdraws. A debit above the bond takes the whole bond and suspends. An
+arithmetic edge is a no-op. A fill in a market beyond the per-account score-entry bound **records
+no score and never rejects the trade**, because refusing a lawful trade to protect a rewards bound
+is the wrong direction under G-1.
+
+**An unset or zero `rwd.rate` also discharges every outstanding debit, and that is a real cost of
+the G-1 direction rather than a side effect worth leaving unsaid** *(added 2026-08-10)*. A zero
+rate gives a zero earning cap, so `settle_epoch` closes at `Neutral`: a loss already folded into
+the epoch accumulator is forgiven in full and the bond is released untouched. The alternative is
+worse — refusing would hold a participant's bond behind a governed row they cannot move, which is
+the one thing the *bond MUST NOT be locked forever* rule below forbids — so the behaviour stands.
+But note the direction. [13](13-parameters.md) §1 calls a zero rate "off, the safe direction",
+and that is true only of *new* scoring; for scores already folded it is the under-punishing
+direction this subsection names as the one that funds the farm. Reaching zero by amendment takes
+roughly 22 steps at the row's one-doubling max-Δ and one-epoch cooldown, so the reachable one-shot
+path is an unreadable row, which the provider maps to "unset".
 
 **A market that never settles MUST NOT lock a bond forever.** The escape is an **absolute
 block-height timeout measured from the score entry's creation**, independent of the market's

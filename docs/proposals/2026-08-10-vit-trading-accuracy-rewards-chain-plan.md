@@ -850,6 +850,14 @@ git commit -m "feat(rewards): folding, epoch settlement and the timeout escape (
 - Consumes: nothing from TR2–TR5.
 - Produces: `fund_trading_rewards(amount)` at the next free `call_index`, drawing from the `incentiv` pot; storage `IncentiveRemaining` and `TradingRewardBudgetCount`.
 
+**One obligation arrives from the TR5 review, and it is about the sweep rather than the call.**
+
+08 §2.6 says *"unspent budget returns to the pot at epoch close"*. **Sweep the headroom, never the balance.** TR5's `TotalAccrued` falls only when a participant calls `claim_rewards`, which is their discretion and can be arbitrarily late — so at epoch close the sovereign still holds VIT backing accruals nobody has collected. A sweep that takes `balance` rather than `balance − TotalAccrued` collapses the headroom to zero for **every** participant until those stale accruals are claimed, and an accrual that is never claimed blocks it permanently.
+
+Nothing breaks in TR5 if you get it wrong — `settle_epoch` still closes at a zero reward and still frees the bond — which is exactly why it would not be noticed. It would present as a program that silently stops paying.
+
+Add a test that sweeps an epoch with an unclaimed accrual outstanding and asserts the swept amount excludes it, then mutate the subtraction away and confirm the test goes red.
+
 - [ ] **Step 1: Write the failing tests**
 
 ```rust
@@ -963,6 +971,10 @@ Expected: FAIL.
 Add slot 68, the `Config` impl, the SafetyFilter authority row, and bind `pallet_market::Config::TradeObserver` to `TradingRewards`. Add the pallet to the benchmark list.
 
 **Three bindings arrived from TR5 and are not in the list above.** Read `.superpowers/sdd/2026-08-10-vit-trading-accuracy-rewards-chain-plan/task-5-report.md` for their exact shapes rather than guessing: `InsuranceAccount` (the 08 §1.2 destination for forfeited USDC), a `SettledMarkets` adapter the fold reads to learn a market's terminal disposition, and `BenchmarkHelper::advance_epoch`. The adapter is the one with a weight consequence — `settle_market_score` must be **re-measured** once its reads are real, for the same reason `buy`/`sell` must be: in the mock it reads nothing.
+
+**The adapter is also a new untrusted input surface, and its failure mode locks a bond.** `on_settle` computes `eligible × settled_value[side]`. That is a `checked_mul`, so an overflow is a typed error rather than a panic — but it comes back out of `settle_market_score`, and once a market is terminal the timeout arm can no longer fire. So the entry can neither fold nor expire, and **the bond behind it is locked permanently**. Everywhere else in this program a failure is a no-op; here it is not, because the escape has already closed.
+
+Bound `settled_value` per unit when you write the adapter, and prove the bound rather than assert it: `settled_value` is a branch's terminal redemption value per unit, so the ledger already caps it, and your job is to show the type the adapter hands over cannot exceed that cap. Add a test at the largest value the adapter can produce against the largest `eligible` the score bound admits, and assert the fold succeeds.
 
 - [ ] **Step 4: Re-benchmark `pallet_market::buy` and `::sell` on the worst path**
 
@@ -1158,11 +1170,12 @@ Then update PLAN.md — a milestone row for this work, a Session log row, and a 
 > **Priority raised 2026-08-10: this task is load-bearing, not a refinement, and the program
 > must not open without it.** The TR2 review proved the earning cap does not deliver the
 > anti-farm invariant under asymmetric bonds (design §5.3). The screen below is what does.
-> **This task therefore also owns the spec correction**, in **four** places that currently
+> **This task therefore also owns the spec correction**, in **five** places that currently
 > misattribute the invariant to the cap. Do not trust this list — **run
-> `grep -rn "rate-independent\|second defense\|holds at every rate" docs/architecture/` first**
-> and fix what it returns. The list has been wrong twice: I named three locations and the TR3
-> implementer found a fourth.
+> `grep -rn "rate-independent\|second defense\|holds at every rate\|the cap" docs/architecture/`
+> first** and fix what it returns. The list has now been wrong **three** times: I named three
+> locations, the TR3 implementer found a fourth, and the TR5 reviewer found that I had **added a
+> fifth on 2026-08-10 while correcting the other four**. Assume it is wrong again.
 >
 > | Location | The false claim |
 > |---|---|
@@ -1170,6 +1183,7 @@ Then update PLAN.md — a milestone row for this work, a Session log row, and a 
 > | **13 §1, the `rwd.rate` row (`:38`)** | "The bond is the second defense, it is rate-independent, and it holds at every rate" |
 > | 14 TH-78, mitigations **and** residual-risk columns | The residual is the sharpest: it dismisses a lowered `mkt.fee` with "Nothing breaks there, because the bond still covers it", which is false |
 > | 15 §4.1's normative obligation | Attributes the invariant to the cap |
+> | **08 §2.6's budget-clamp bullet** | Already corrected in place on 2026-08-10, and left here so you can confirm the correction rather than assume it. It had claimed "no pair in a thin epoch can take the whole budget against a fixed small forfeit"; the reviewer built the counterexample at unequal bonds with **no budget pressure at all** — winner bonded 1,000,000 takes 250 against a loser bonded 1,000 forfeiting 100 |
 >
 > Each must say the rate coupling delivers the invariant and the cap bounds exposure. Do the
 > correction in the **same commit** as the screen, so no revision exists in which the claim
