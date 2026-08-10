@@ -295,11 +295,46 @@ bond is consulted.
 is only half the notional, which halves the reward and doubles the apparent break-even. The
 worst case is the one a rate must clear, and it is 0.606 %.
 
+The unsafe direction is upward, so the ceiling stays conservative and max-Δ stays at ×2.
+
+**The row is seeded at genesis, so enrollment works from the start.** Payouts still need a
+second key: governance must authorize an epoch budget (§4.2) before anything accrues to a
+claim. That authorization is also the natural phase gate, since the pot is Phase 3–4 and
+governance simply does not fund it earlier.
+
+### 5.2 New bounds
+
+| Bound | Value | Derivation |
+|---|---|---|
+| `MaxParticipants` | 4,096 | The sibling allocation pot's lifetime bound for community schedules |
+| `MaxScoredMarketsPerAccount` | 196 | `MaxLiveMarkets` — the count of books that can be open at once, which is what an unfolded score row tracks |
+| Score-entry absolute timeout | derivation rule, no figure yet | §6's escape. It must exceed the longest lawful settlement horizon. No existing bound anchors it cleanly, so R-2 says ship the rule rather than invent the number |
+| Lifetime budget-authorization count | as `MaxCommunitySchedules` | §4.2 needs one and an earlier revision of this table omitted it (added 2026-08-10, found during implementation) |
+
+**Each bound lands with the call that enforces it, never in the spec-layer task**
+(established 2026-08-10 by evidence rather than preference). The I-22 limit-coverage gate
+admits no classification for a 13 §4 key whose enforcing call does not exist yet:
+`dispatch-limit` demands a marked test, `unwired` demands a PLAN.md milestone id, and `value`
+would be a false classification that never expires. All three were probed against the real
+checker and all three exit 1. Repository precedent lands a §4 bound with its pallet. The
+sizing rules are therefore fixed normatively in 08 §2.6, so nothing is left to taste.
+
+**`MaxPositionsPerAccount` was the wrong anchor and the first draft used it.** That bound
+counts simultaneous nonzero ledger entries. A score row lives from the first fill until the
+fold, so a trader who sells out of a market frees the ledger slot while the score row stays.
+Sequentially trading more than 64 markets across the settlement lag would then hit a bound
+derived from a quantity it does not measure. `MaxLiveMarkets` counts the right thing.
+
+**Overflow behavior is specified rather than left to the bound.** A fill in a market beyond
+the cap **records no score and never rejects the trade**. Refusing a lawful trade to protect
+a rewards-program bound is the wrong direction under G-1, and silence about which of the two
+happens is how a bound becomes a liveness bug.
+
 ### 5.3 There is one anti-farm defense, not two (corrected 2026-08-10)
 
-An earlier revision of this section claimed two independent defenses — the rate and the bond
-— and said the bond was rate-independent and held at any `r`. **The second claim is false,
-and the TR2 review found it before any of it shipped.**
+An earlier revision of **§5.1** claimed two independent defenses — the rate and the bond —
+and said the bond was rate-independent and held at any `r`. **The second claim is false, and
+the TR2 review found it before any of it shipped.**
 
 **Why the cap does not hold.** The earning cap is proportional to each account's **own**
 snapshot bond, and a wash operator funds both accounts. So they fund them unequally and
@@ -337,41 +372,6 @@ independent bonds**, because a suite that draws one and passes it to both legs p
 the equal-bond case and returns green — which is exactly how the earlier revision's suite
 was written. And 08 §2.6, 14 TH-78 and 15 §4.1 all misattribute the invariant to the cap and
 MUST be corrected with the screen.
-
-The unsafe direction is upward, so the ceiling stays conservative and max-Δ stays at ×2.
-
-**The row is seeded at genesis, so enrollment works from the start.** Payouts still need a
-second key: governance must authorize an epoch budget (§4.2) before anything accrues to a
-claim. That authorization is also the natural phase gate, since the pot is Phase 3–4 and
-governance simply does not fund it earlier.
-
-### 5.2 New bounds
-
-| Bound | Value | Derivation |
-|---|---|---|
-| `MaxParticipants` | 4,096 | The sibling allocation pot's lifetime bound for community schedules |
-| `MaxScoredMarketsPerAccount` | 196 | `MaxLiveMarkets` — the count of books that can be open at once, which is what an unfolded score row tracks |
-| Score-entry absolute timeout | derivation rule, no figure yet | §6's escape. It must exceed the longest lawful settlement horizon. No existing bound anchors it cleanly, so R-2 says ship the rule rather than invent the number |
-| Lifetime budget-authorization count | as `MaxCommunitySchedules` | §4.2 needs one and an earlier revision of this table omitted it (added 2026-08-10, found during implementation) |
-
-**Each bound lands with the call that enforces it, never in the spec-layer task**
-(established 2026-08-10 by evidence rather than preference). The I-22 limit-coverage gate
-admits no classification for a 13 §4 key whose enforcing call does not exist yet:
-`dispatch-limit` demands a marked test, `unwired` demands a PLAN.md milestone id, and `value`
-would be a false classification that never expires. All three were probed against the real
-checker and all three exit 1. Repository precedent lands a §4 bound with its pallet. The
-sizing rules are therefore fixed normatively in 08 §2.6, so nothing is left to taste.
-
-**`MaxPositionsPerAccount` was the wrong anchor and the first draft used it.** That bound
-counts simultaneous nonzero ledger entries. A score row lives from the first fill until the
-fold, so a trader who sells out of a market frees the ledger slot while the score row stays.
-Sequentially trading more than 64 markets across the settlement lag would then hit a bound
-derived from a quantity it does not measure. `MaxLiveMarkets` counts the right thing.
-
-**Overflow behavior is specified rather than left to the bound.** A fill in a market beyond
-the cap **records no score and never rejects the trade**. Refusing a lawful trade to protect
-a rewards-program bound is the wrong direction under G-1, and silence about which of the two
-happens is how a bound becomes a liveness bug.
 
 ## 6. Failure behavior (G-1, R-7)
 

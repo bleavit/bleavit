@@ -969,10 +969,16 @@ proptest! {
         bond_w in 100_000u128..1_000_000_000u128,
         bond_l in 100_000u128..1_000_000_000u128,
         rate_ppb in 1u32..6_000_000u32,
+        // Sweep the FEE too. An earlier draft swept only the rate and asserted the
+        // screen with `prop_assume!(99 * rate_ppb <= 200 * 3_000_000)` — vacuous,
+        // because the registry ceiling of 6_000_000 already satisfies it at every
+        // drawn value, so the assume filtered nothing and the screen was never
+        // exercised. The invariant depends on the PAIR, so the pair must be drawn.
+        fee_ppb in 500_000u32..10_000_000u32,
     ) {
-        // The screen of TR9 is what makes this hold, so the suite must respect it:
-        // r <= 2f/0.99 at the mkt.fee default of 3_000_000 ppb.
-        prop_assume!(99 * u128::from(rate_ppb) <= 200 * 3_000_000u128);
+        // TR9's screen is what makes this hold. Respect it, and let the sweep prove
+        // the pairs it admits are the safe ones.
+        prop_assume!(99 * u128::from(rate_ppb) <= 200 * u128::from(fee_ppb));
         let winner = EpochScore { spent: 0, received: net };
         let loser  = EpochScore { spent: net, received: 0 };
         let reward = match epoch_outcome(&winner, bond_w, rate_ppb) {
@@ -984,7 +990,7 @@ proptest! {
         // The kernel alone cannot bound this — see design §5.3. What the suite asserts is
         // the economic invariant including the pair's own fee cost, which is what the
         // coupling screen guarantees.
-        let fee_cost = 2 * net * 3_000_000 / 1_000_000_000;
+        let fee_cost = 2 * net * u128::from(fee_ppb) / 1_000_000_000;
         prop_assert!(reward <= debit + fee_cost);
     }
 
