@@ -24,6 +24,16 @@
 - **Adopted values, verbatim:** `rwd.rate` = **0.25 %** = `Perbill(2_500_000)`. `RATE_HEADROOM` = **10**. `MaxParticipants` = **4,096**. `MaxScoredMarketsPerAccount` = **196**. Forfeited USDC goes to **`INSURANCE`**.
 - **Out of scope for this plan:** doc 02, `INTEGRATION_CONTRACT_VERSION`, docs 10 and 11, and everything under `app/`. Those are Plan 2. Do not touch them.
 - **Commit discipline (R-9):** conventional commits carrying the task id, for example `feat(rewards): score kernel with book-acquired basis (TR2)`. Never commit with red gates.
+- **A 13 §4 bound lands with the call that enforces it** (established 2026-08-10 during TR1). Four tasks each own one, and each adds the 13 §4 row **and** its `tools/limit-coverage/registry.toml` entry in the same commit, then runs `python3 tools/limit-coverage/check-limit-coverage.py` before committing:
+
+  | Bound | Owner |
+  |---|---|
+  | `MaxParticipants` = 4,096 | TR3 |
+  | `MaxScoredMarketsPerAccount` = 196 | TR4 |
+  | Score-entry absolute timeout | TR5 |
+  | Lifetime budget-authorization count | TR6 |
+
+  TR1 fixed each one's **sizing rule** normatively in 08 §2.6, so no implementer picks a number. The I-22 coverage gate admits no classification for a key whose enforcing call does not exist, which is why they could not land in TR1.
 
 ## File Structure
 
@@ -85,7 +95,7 @@ fn rwd_rate_is_seeded_at_the_adopted_quarter_percent() {
     assert_eq!(record.value, ParamValue::Perbill(2_500_000));
     assert_eq!(record.min, ParamValue::Perbill(0));
     assert_eq!(record.max, ParamValue::Perbill(6_000_000));
-    assert_eq!(record.cooldown, 1);
+    assert_eq!(record.cooldown_epochs, 1);
     assert_eq!(record.class, ParamClass::Param);
     assert!(!record.kernel_bounded);
 }
@@ -152,8 +162,8 @@ reason = "13 §1 / rule 7; 15 §4.6: covered by the generated per-key set_param/
 
 Make every edit in the File Structure table above. The design document's §7 table says what each one is. Three are easy to get wrong:
 
-1. **13 §4** takes three rows: `MaxParticipants` 4,096, `MaxScoredMarketsPerAccount` 196, and the score-entry absolute timeout. Each cites its derivation, per §5.2 of the design.
-2. **05 §4a** takes family key `0x0D` as a **singleton**, with the `0x0C` argument restated in its own words: the call mutates one remaining-allocation pool, so a beneficiary-derived key would let two proposals pass T5 concurrently.
+1. **13 §4 takes no rows in this task.** Each bound lands with the call that enforces it — `MaxParticipants` in TR3, `MaxScoredMarketsPerAccount` in TR4, the score-entry timeout in TR5, the lifetime budget-authorization count in TR6. The I-22 coverage gate admits no classification for a key whose enforcing call does not exist, and repository precedent lands a §4 bound with its pallet. What TR1 **does** owe is the **sizing rule for each of the four, stated normatively in 08 §2.6**, so no later implementer picks a number. See design §5.2.
+2. **05 §1.4** — not §4a, which does not exist — takes family key `0x0D` as a **singleton**, with the `0x0C` argument restated in its own words: the call mutates one remaining-allocation pool, so a beneficiary-derived key would let two proposals pass T5 concurrently. The PARAM-leaf exception note lives in **06 §3.2**, not §5.
 3. **08 §2.1** gains one sentence pointing at the new §2.6, mirroring how the community row points at `create_community_schedule`.
 
 - [ ] **Step 8: Run the doc and coverage gates**

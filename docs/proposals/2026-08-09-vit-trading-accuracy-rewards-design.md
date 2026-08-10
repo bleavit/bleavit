@@ -153,7 +153,7 @@ claimant-adverse rounding straightforward.
 
 **Why `book_acquired` exists, and why the first draft was wrong.** That draft recorded
 acquisition cost only on a book buy and called off-book inventory an out-of-scope limit. It
-is not a limit, it is a hole. The ledger has five `split*` calls and a signed `transfer`
+is not a limit, it is a hole. The ledger has four `split*` calls and a signed `transfer`
 (`pallets/conditional-ledger/src/lib.rs:728`, `:834`), so an enrolled account can receive a
 complete branch set created outside the book, sell every leg, and post the whole proceeds to
 `received` against a `spent` of zero. That manufactures a positive score with no forecast in
@@ -193,10 +193,15 @@ The fix has two halves:
 
 - The score, the cap and the debit are all USDC. Conversion to VIT happens once, at
   `claim_rewards`, using the live `fee.vit_usdc_rate` with rounding against the claimant.
-- `RATE_HEADROOM` is the top of that key's `[0.1×, 10×]` envelope. Sizing the cap against the
-  **most** favourable rate the envelope admits means the snapshot bond covers the reward even
-  if VIT reprices to the ceiling before the claim lands. The cost is a conservative cap. The
-  alternative is an invariant that a governed price can open.
+- `RATE_HEADROOM` is the top of that key's `[0.1×, 10×]` envelope. **Its rationale is
+  narrower than an earlier revision claimed, and the narrower one is the real one** (corrected
+  2026-08-10, raised by the TR1 implementer). Converting at claim time already makes the
+  payout worth `accrued` USDC at that moment's *governed* rate, so a market reprice between
+  accrual and claim is not the exposure. The exposure is the governed rate **diverging from
+  the market price**, and only in one direction: a rate that understates VIT hands the
+  claimant more real value than the debit took. That divergence is bounded by the envelope's
+  width, so sizing the cap against its top is what keeps reward value ≤ debit value. The cost
+  is a conservative cap. The alternative is an invariant a stale governed price can open.
 
 - When accruals exceed the authorized budget, **both legs scale by the same factor**. A
   scaled reward against an unscaled debit would over-punish, and a pro-rata reward with no
@@ -302,13 +307,22 @@ second key: governance must authorize an epoch budget (§4.2) before anything ac
 claim. That authorization is also the natural phase gate, since the pot is Phase 3–4 and
 governance simply does not fund it earlier.
 
-### 5.2 New bounds, both derived
+### 5.2 New bounds
 
 | Bound | Value | Derivation |
 |---|---|---|
 | `MaxParticipants` | 4,096 | The sibling allocation pot's lifetime bound for community schedules |
-| Score-entry absolute timeout | above the longest lawful settlement horizon | §6's escape — it must be unreachable by any settling market |
 | `MaxScoredMarketsPerAccount` | 196 | `MaxLiveMarkets` — the count of books that can be open at once, which is what an unfolded score row tracks |
+| Score-entry absolute timeout | derivation rule, no figure yet | §6's escape. It must exceed the longest lawful settlement horizon. No existing bound anchors it cleanly, so R-2 says ship the rule rather than invent the number |
+| Lifetime budget-authorization count | as `MaxCommunitySchedules` | §4.2 needs one and an earlier revision of this table omitted it (added 2026-08-10, found during implementation) |
+
+**Each bound lands with the call that enforces it, never in the spec-layer task**
+(established 2026-08-10 by evidence rather than preference). The I-22 limit-coverage gate
+admits no classification for a 13 §4 key whose enforcing call does not exist yet:
+`dispatch-limit` demands a marked test, `unwired` demands a PLAN.md milestone id, and `value`
+would be a false classification that never expires. All three were probed against the real
+checker and all three exit 1. Repository precedent lands a §4 bound with its pallet. The
+sizing rules are therefore fixed normatively in 08 §2.6, so nothing is left to taste.
 
 **`MaxPositionsPerAccount` was the wrong anchor and the first draft used it.** That bound
 counts simultaneous nonzero ledger entries. A score row lives from the first fill until the
