@@ -482,6 +482,11 @@ git commit -m "feat(rewards): frame-free score kernel with book-acquired basis (
   - Calls `enroll(bond)`, `top_up_bond(amount)`, `withdraw_bond()`, `claim_rewards()`
   - `pub fn is_enrolled(who: &AccountId) -> bool` — the single read TR4's hot path makes
 
+**Two hand-offs from TR2, which you must action rather than rediscover:**
+
+1. **`MarketScore`, `EpochScore`, `Outcome` and `CoreError` carry no SCALE-codec derives.** TR2 deliberately left them off, because a frame-free kernel does not need them. Two of them become storage values here, so **you** add `Encode, Decode, DecodeWithMemTracking, TypeInfo, MaxEncodedLen` to the types you store, together with the `parity-scale-codec` and `scale-info` dependencies a sibling core crate already declares. Adding a derive to `trading-rewards-core` is in scope for this task; changing its arithmetic is not.
+2. **`epoch_outcome` returns `Outcome::Neutral` when the reward floors to zero**, which happens for any net below `1 / rate`. That is deliberate and load-bearing — at those nets the debit still ceils to 1, so the anti-farm invariant holds more strongly, not less. Treat `Neutral` as the value zero. Do not add a `Reward(0)` arm.
+
 - [ ] **Step 1: Scaffold with the repo's own tool**
 
 Run the `new-pallet` skill for `pallet-trading-rewards`. It produces the Cargo wiring, the `lib.rs` skeleton with `Config`/storage/events/errors, the mock runtime, per-extrinsic test stubs, benchmark stubs and the mandatory try-state hook. Do not hand-roll these — the skill encodes conventions this plan does not restate.
