@@ -43,3 +43,12 @@ runtime/bleavit-runtime/src/weights/pallet_xcm.rs execute: protocol-disabled by 
 # the `**Preserved, not re-measured` marker on that function and reports it on
 # every run, so the one function backed by no fresh measurement stays visible
 # instead of resting on a prose comment nobody re-reads.
+
+# TR6 (2026-08-10): `fund_trading_rewards`/`sweep_trading_reward_headroom` are
+# new `pallet-futarchy-treasury` calls whose runtime `TradingRewardFunding`
+# adapter refuses (fund) or reports nothing to move (sweep) until TR7 wires
+# `pallet-trading-rewards` into `construct_runtime!` — there is no real call
+# path yet for `frame-omni-bencher` to measure. Both expire the moment TR7's
+# real adapter lands and B5/TR7 regenerates this file.
+runtime/bleavit-runtime/src/weights/pallet_futarchy_treasury.rs fund_trading_rewards: TR6 — the TradingRewardFunding adapter is an unwired refusal stub until TR7 wires pallet-trading-rewards into construct_runtime!; no real call path exists yet to benchmark.
+runtime/bleavit-runtime/src/weights/pallet_futarchy_treasury.rs sweep_trading_reward_headroom: TR6 — the TradingRewardFunding adapter reports a zero balance and zero reserve until TR7 wires pallet-trading-rewards into construct_runtime!; no real call path exists yet to benchmark.

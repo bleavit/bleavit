@@ -310,6 +310,24 @@ impl<T: frame_system::Config> pallet_futarchy_treasury::WeightInfo for WeightInf
 			.saturating_add(T::DbWeight::get().reads(8))
 			.saturating_add(T::DbWeight::get().writes(6))
 	}
+	// Hand-written fallback, not `frame-omni-bencher` output (TR6): the
+	// runtime's `TradingRewardFunding` adapter refuses every call until TR7
+	// wires `pallet-trading-rewards` into `construct_runtime!`, so there is
+	// no real call path to benchmark yet. Registered in
+	// `tools/ci/generated-weight-overrides.toml`; TR7/B5 replaces this with
+	// a measured value once the adapter is real. Figures mirror the
+	// `pallet-futarchy-treasury`-local `SubstrateWeight` fallback.
+	fn fund_trading_rewards() -> Weight {
+		Weight::from_parts(40_000_000, 0)
+			.saturating_add(T::DbWeight::get().reads(2))
+			.saturating_add(T::DbWeight::get().writes(2))
+	}
+	// See `fund_trading_rewards` above: same hand-written-fallback reason.
+	fn sweep_trading_reward_headroom() -> Weight {
+		Weight::from_parts(40_000_000, 0)
+			.saturating_add(T::DbWeight::get().reads(3))
+			.saturating_add(T::DbWeight::get().writes(1))
+	}
 	/// Storage: `Epoch::EpochOf` (r:1 w:0)
 	/// Proof: `Epoch::EpochOf` (`max_values`: Some(1), `max_size`: Some(9), added: 504, mode: `MaxEncodedLen`)
 	/// Storage: `Epoch::DeadMan` (r:1 w:0)

@@ -753,7 +753,12 @@ fn project_inner(call: &RuntimeCall, budget: &mut ProjectionBudget) -> FilterCal
             | pallet_futarchy_treasury::Call::sweep_insurance { .. } => {
                 leaf(CallDomain::Treasury)
             }
-            pallet_futarchy_treasury::Call::create_community_schedule { .. } => {
+            // 08 §2.1/§2.6; 06 §3.2's authority-matrix row already names this
+            // call under `FutarchyParam` alongside `create_community_schedule`
+            // — the identical bounded-genesis-pot-leaf exception, not a
+            // treasury-outflow capability (06 §3.2).
+            pallet_futarchy_treasury::Call::create_community_schedule { .. }
+            | pallet_futarchy_treasury::Call::fund_trading_rewards { .. } => {
                 leaf(CallDomain::Param)
             }
             pallet_futarchy_treasury::Call::claim_stream { .. }
@@ -765,7 +770,17 @@ fn project_inner(call: &RuntimeCall, budget: &mut ProjectionBudget) -> FilterCal
             // place — `MAIN` — so a caller has nothing to steer; the only thing
             // a Signed origin buys is that somebody pays for the block space.
             | pallet_futarchy_treasury::Call::reconcile_insurance { .. }
-            | pallet_futarchy_treasury::Call::prune_coretime_quote { .. } => {
+            | pallet_futarchy_treasury::Call::prune_coretime_quote { .. }
+            // 08 §2.6: the trading-reward headroom sweep is the same shape as
+            // `reconcile_insurance` for the same reason — it names no
+            // beneficiary (the `incentiv` pot is fixed), chooses no amount
+            // (computed as the sovereign's balance less its accrual reserve),
+            // and can move value to exactly one place, so a Signed caller has
+            // nothing to steer. Not yet a 06 §3.2 row (owed to the controller,
+            // 08 §2.6 names no call for the sweep it requires); classified
+            // here to match the call's actual origin check
+            // (`ensure_signed`, no narrower gate).
+            | pallet_futarchy_treasury::Call::sweep_trading_reward_headroom { .. } => {
                 leaf(CallDomain::Public)
             }
             pallet_futarchy_treasury::Call::__Ignore(_, _) => denied(),

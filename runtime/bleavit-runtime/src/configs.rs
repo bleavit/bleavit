@@ -231,6 +231,45 @@ impl pallet_futarchy_treasury::CommunityVesting<AccountId, BlockNumber>
 }
 
 parameter_types! {
+    /// 08 §2.1/§2.6: the keyless genesis trading-reward `incentiv` pot.
+    pub IncentivePot: AccountId = crate::genesis::incentives_account();
+    /// 08 §2.1: 100 million VIT held in that pot at genesis.
+    pub IncentiveAllocationAmount: Balance = crate::genesis::INCENTIVE_PROGRAMS;
+}
+
+/// `pallet-trading-rewards` is not yet in `construct_runtime!` (TR7 wires
+/// it), so its sovereign account has no runtime existence here to move VIT
+/// to or from. Refuses `fund`/`sweep_to_pot` rather than reporting a value
+/// movement that never happened (G-1) — the same discipline
+/// [`TreasuryOutflowCustody`]'s unwired default already uses for the four
+/// ordinary outflow calls — and reports no balance and no reserve, which
+/// makes `sweep_trading_reward_headroom` the harmless no-op that shape
+/// implies. TR7 replaces this with a real adapter over
+/// `pallet_trading_rewards::Pallet::<Runtime>`.
+pub struct RuntimeTradingRewardFunding;
+impl pallet_futarchy_treasury::TradingRewardFunding<AccountId> for RuntimeTradingRewardFunding {
+    fn fund(_pot: &AccountId, _amount: Balance) -> DispatchResult {
+        Err(sp_runtime::DispatchError::Other(
+            "trading-rewards pallet not yet wired into construct_runtime! (TR7)",
+        ))
+    }
+
+    fn reward_sovereign_balance() -> Balance {
+        0
+    }
+
+    fn reward_accrual_reserve() -> Balance {
+        0
+    }
+
+    fn sweep_to_pot(_pot: &AccountId, _amount: Balance) -> DispatchResult {
+        Err(sp_runtime::DispatchError::Other(
+            "trading-rewards pallet not yet wired into construct_runtime! (TR7)",
+        ))
+    }
+}
+
+parameter_types! {
     pub UsdcAssetId: AssetId = usdc_location();
     pub const AssetDeposit: Balance = currency::VIT_EXISTENTIAL_DEPOSIT;
     pub const AssetAccountDeposit: Balance = currency::VIT_EXISTENTIAL_DEPOSIT;
@@ -8414,6 +8453,10 @@ impl pallet_futarchy_treasury::Config for Runtime {
     type CommunityVestingDuration = CommunityVestingDuration;
     type CommunityMinVestedTransfer = CommunityMinVestedTransfer;
     type MaxCommunitySchedules = MaxCommunitySchedules;
+    type TradingRewardOrigin = pallet_origins::EnsureFutarchyParam;
+    type TradingRewardFunding = RuntimeTradingRewardFunding;
+    type IncentivePot = IncentivePot;
+    type IncentiveAllocationAmount = IncentiveAllocationAmount;
     type MaxCollatorCompensationEntries =
         ConstU32<{ pallet_futarchy_treasury::MAX_COLLATOR_COMPENSATION_ENTRIES_BOUND }>;
     type RegisteredCollatorCount = RuntimeRegisteredCollatorCount;

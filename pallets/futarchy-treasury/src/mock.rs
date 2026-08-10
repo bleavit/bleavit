@@ -88,6 +88,8 @@ parameter_types! {
     pub static CommunityVestingDuration: u64 = 100;
     pub static CommunityMinVestedTransfer: u128 = futarchy_treasury_core::VIT;
     pub static MaxCommunitySchedules: u32 = 2;
+    pub IncentivePot: AccountId32 = AccountId32::new([78u8; 32]);
+    pub static IncentiveAllocationAmount: u128 = 100_000_000 * futarchy_treasury_core::VIT;
 }
 
 pub struct TestTreasuryPhase;
@@ -170,6 +172,12 @@ std::thread_local! {
     static FAIL_COMMUNITY_VESTING: Cell<bool> = const { Cell::new(false) };
     static INTEGRITY_FAULTS: RefCell<Vec<IntegrityFault>> = const { RefCell::new(Vec::new()) };
     static OUTFLOW_CUSTODY_WIRED: Cell<bool> = const { Cell::new(true) };
+    static TRADING_REWARD_FUNDING_CALLS: RefCell<Vec<(AccountId32, u128)>> = const { RefCell::new(Vec::new()) };
+    static FAIL_TRADING_REWARD_FUNDING: Cell<bool> = const { Cell::new(false) };
+    static TRADING_REWARD_SOVEREIGN_BALANCE: Cell<u128> = const { Cell::new(0) };
+    static TRADING_REWARD_ACCRUAL_RESERVE: Cell<u128> = const { Cell::new(0) };
+    static TRADING_REWARD_SWEEP_CALLS: RefCell<Vec<(AccountId32, u128)>> = const { RefCell::new(Vec::new()) };
+    static FAIL_TRADING_REWARD_SWEEP: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Records every 05 §4.3.2 `Π` increment this pallet asks the runtime for, so a
@@ -228,6 +236,90 @@ pub fn set_community_vesting_failure(fail: bool) {
 pub fn reset_community_vesting() {
     COMMUNITY_VESTING_CALLS.with(|calls| calls.borrow_mut().clear());
     set_community_vesting_failure(false);
+}
+
+/// Stand-in for the runtime's trading-reward funding/headroom-sweep VIT
+/// custody (08 §2.6). Models the reward pallet sovereign's VIT balance as a
+/// thread-local `Cell` that `fund`/`sweep_to_pot` move exactly as the real
+/// custody would; `set_trading_reward_accrual_reserve` drives the separate
+/// "must stay held" figure a test wants to prove the sweep never touches.
+pub struct RecordingTradingRewardFunding;
+
+impl pallet_futarchy_treasury::TradingRewardFunding<AccountId32> for RecordingTradingRewardFunding {
+    fn fund(pot: &AccountId32, amount: u128) -> frame_support::dispatch::DispatchResult {
+        if FAIL_TRADING_REWARD_FUNDING.with(Cell::get) {
+            return Err(sp_runtime::DispatchError::Other(
+                "trading reward funding failed",
+            ));
+        }
+        TRADING_REWARD_FUNDING_CALLS.with(|calls| calls.borrow_mut().push((pot.clone(), amount)));
+        // Model custody: a successful funding call raises the sovereign's
+        // modelled VIT balance by exactly `amount`, so a test can fund then
+        // sweep without hand-seeding the balance separately.
+        TRADING_REWARD_SOVEREIGN_BALANCE
+            .with(|value| value.set(value.get().saturating_add(amount)));
+        Ok(())
+    }
+
+    fn reward_sovereign_balance() -> u128 {
+        TRADING_REWARD_SOVEREIGN_BALANCE.with(Cell::get)
+    }
+
+    fn reward_accrual_reserve() -> u128 {
+        TRADING_REWARD_ACCRUAL_RESERVE.with(Cell::get)
+    }
+
+    fn sweep_to_pot(pot: &AccountId32, amount: u128) -> frame_support::dispatch::DispatchResult {
+        if FAIL_TRADING_REWARD_SWEEP.with(Cell::get) {
+            return Err(sp_runtime::DispatchError::Other(
+                "trading reward sweep failed",
+            ));
+        }
+        TRADING_REWARD_SWEEP_CALLS.with(|calls| calls.borrow_mut().push((pot.clone(), amount)));
+        TRADING_REWARD_SOVEREIGN_BALANCE
+            .with(|value| value.set(value.get().saturating_sub(amount)));
+        Ok(())
+    }
+}
+
+pub fn trading_reward_funding_calls() -> Vec<(AccountId32, u128)> {
+    TRADING_REWARD_FUNDING_CALLS.with(|calls| calls.borrow().clone())
+}
+
+pub fn set_trading_reward_funding_failure(fail: bool) {
+    FAIL_TRADING_REWARD_FUNDING.with(|value| value.set(fail));
+}
+
+pub fn trading_reward_sovereign_balance() -> u128 {
+    TRADING_REWARD_SOVEREIGN_BALANCE.with(Cell::get)
+}
+
+pub fn set_trading_reward_accrual_reserve(amount: u128) {
+    TRADING_REWARD_ACCRUAL_RESERVE.with(|value| value.set(amount));
+}
+
+pub fn trading_reward_sweep_calls() -> Vec<(AccountId32, u128)> {
+    TRADING_REWARD_SWEEP_CALLS.with(|calls| calls.borrow().clone())
+}
+
+pub fn set_trading_reward_sweep_failure(fail: bool) {
+    FAIL_TRADING_REWARD_SWEEP.with(|value| value.set(fail));
+}
+
+/// Model an unrelated direct donation landing in the reward sovereign's
+/// account — bypassing `fund_trading_rewards` entirely, exactly as an
+/// outside account could push VIT to any public address on a real chain.
+pub fn donate_to_trading_reward_sovereign(amount: u128) {
+    TRADING_REWARD_SOVEREIGN_BALANCE.with(|value| value.set(value.get().saturating_add(amount)));
+}
+
+pub fn reset_trading_reward_funding() {
+    TRADING_REWARD_FUNDING_CALLS.with(|calls| calls.borrow_mut().clear());
+    TRADING_REWARD_SWEEP_CALLS.with(|calls| calls.borrow_mut().clear());
+    set_trading_reward_funding_failure(false);
+    set_trading_reward_sweep_failure(false);
+    TRADING_REWARD_SOVEREIGN_BALANCE.with(|value| value.set(0));
+    TRADING_REWARD_ACCRUAL_RESERVE.with(|value| value.set(0));
 }
 
 /// Stand-in for the runtime's INSURANCE → `MAIN` USDC custody move (08 §1.4).
@@ -420,6 +512,10 @@ impl pallet_futarchy_treasury::Config for Test {
     type CommunityVestingDuration = CommunityVestingDuration;
     type CommunityMinVestedTransfer = CommunityMinVestedTransfer;
     type MaxCommunitySchedules = MaxCommunitySchedules;
+    type TradingRewardOrigin = TestTreasuryOrigin;
+    type TradingRewardFunding = RecordingTradingRewardFunding;
+    type IncentivePot = IncentivePot;
+    type IncentiveAllocationAmount = IncentiveAllocationAmount;
     type MaxCollatorCompensationEntries =
         ConstU32<{ pallet_futarchy_treasury::MAX_COLLATOR_COMPENSATION_ENTRIES_BOUND }>;
     type RegisteredCollatorCount = RegisteredCollatorCountValue;
@@ -500,6 +596,7 @@ pub fn new_test_ext_with(
         reset_pot_funding();
         reset_insurance_sweeps();
         reset_community_vesting();
+        reset_trading_reward_funding();
         reset_integrity_faults();
     });
     ext

@@ -267,7 +267,7 @@ fn storage_v2_initializes_bootstrap_closure_and_community_allocation() {
 
             let _ = <Treasury as Hooks<u64>>::on_runtime_upgrade();
 
-            assert_eq!(StorageVersion::get::<Treasury>(), StorageVersion::new(3));
+            assert_eq!(StorageVersion::get::<Treasury>(), StorageVersion::new(4));
             assert_eq!(
                 crate::BootstrapOpsFundingClosed::<Test>::get(),
                 treasury_armed,
@@ -314,7 +314,7 @@ fn storage_v2_try_runtime_current_version_is_an_idempotent_latch_noop() {
             let state = <Treasury as Hooks<u64>>::pre_upgrade().expect("pre-upgrade state");
             let _ = <Treasury as Hooks<u64>>::on_runtime_upgrade();
             <Treasury as Hooks<u64>>::post_upgrade(state).expect("post-upgrade checks");
-            assert_eq!(StorageVersion::get::<Treasury>(), StorageVersion::new(3));
+            assert_eq!(StorageVersion::get::<Treasury>(), StorageVersion::new(4));
             assert!(crate::BootstrapOpsFundingClosed::<Test>::get());
         }
     });
@@ -333,7 +333,7 @@ fn storage_v3_try_runtime_preserves_existing_v2_state() {
         let _ = <Treasury as Hooks<u64>>::on_runtime_upgrade();
         <Treasury as Hooks<u64>>::post_upgrade(state).expect("post-upgrade checks");
 
-        assert_eq!(crate::BootstrapOpsFundingClosed::<Test>::get(), true);
+        assert!(crate::BootstrapOpsFundingClosed::<Test>::get());
         assert_eq!(
             crate::CommunityDistributionRemaining::<Test>::get(),
             123 * VIT
@@ -358,7 +358,7 @@ fn storage_v3_try_runtime_preserves_existing_v1_bootstrap_latch() {
             crate::CommunityDistributionRemaining::<Test>::get(),
             CommunityDistributionAmount::get()
         );
-        assert_eq!(StorageVersion::get::<Treasury>(), StorageVersion::new(3));
+        assert_eq!(StorageVersion::get::<Treasury>(), StorageVersion::new(4));
     });
 }
 
@@ -464,6 +464,370 @@ fn community_distribution_adapter_failure_is_atomic_and_arming_is_idempotent() {
         assert_eq!(crate::CommunityDistributionRemaining::<Test>::get(), before);
         assert_eq!(crate::CommunityScheduleCount::<Test>::get(), 0);
         assert!(community_vesting_calls().is_empty());
+    });
+}
+
+// ---- trading-reward funding and headroom sweep (TR6, 08 §2.1/§2.6) --------
+
+/// The `FutarchyParam` origin the two bounded genesis-pot leaves share
+/// (06 §3.2). Named separately from `to()` for readability at call sites —
+/// in this mock both resolve through `TestTreasuryOrigin`, exactly as
+/// `TreasuryOrigin` and `CommunityDistributionOrigin` already do, since the
+/// mock has no way to distinguish origin *classes* that a real runtime binds
+/// to the same predicate.
+fn param_origin() -> RuntimeOrigin {
+    RuntimeOrigin::signed(treasury_acc())
+}
+
+#[test]
+fn genesis_initializes_the_incentive_allocation() {
+    new_test_ext().execute_with(|| {
+        assert_eq!(
+            crate::IncentiveRemaining::<Test>::get(),
+            IncentiveAllocationAmount::get()
+        );
+        assert_eq!(crate::TradingRewardBudgetCount::<Test>::get(), 0);
+        assert_ok!(crate::Pallet::<Test>::do_try_state());
+    });
+}
+
+#[test]
+fn storage_v4_initializes_the_incentive_allocation() {
+    new_test_ext().execute_with(|| {
+        StorageVersion::new(0).put::<Treasury>();
+        // Model a chain genesis-created before this storage item existed:
+        // no code path but the v4 migration leg can have written it.
+        crate::IncentiveRemaining::<Test>::kill();
+
+        let _ = <Treasury as Hooks<u64>>::on_runtime_upgrade();
+
+        assert_eq!(StorageVersion::get::<Treasury>(), StorageVersion::new(4));
+        assert_eq!(
+            crate::IncentiveRemaining::<Test>::get(),
+            IncentiveAllocationAmount::get()
+        );
+    });
+}
+
+#[cfg(feature = "try-runtime")]
+#[test]
+fn storage_v4_try_runtime_checks_incentive_allocation_initialization() {
+    new_test_ext().execute_with(|| {
+        StorageVersion::new(0).put::<Treasury>();
+        crate::IncentiveRemaining::<Test>::kill();
+        let state = <Treasury as Hooks<u64>>::pre_upgrade().expect("pre-upgrade state");
+        let _ = <Treasury as Hooks<u64>>::on_runtime_upgrade();
+        <Treasury as Hooks<u64>>::post_upgrade(state).expect("post-upgrade checks");
+        assert_eq!(
+            crate::IncentiveRemaining::<Test>::get(),
+            IncentiveAllocationAmount::get()
+        );
+    });
+}
+
+#[cfg(feature = "try-runtime")]
+#[test]
+fn storage_v4_try_runtime_preserves_existing_v3_state_while_initializing_incentive() {
+    new_test_ext().execute_with(|| {
+        StorageVersion::new(3).put::<Treasury>();
+        TreasuryArmedValue::set(false);
+        crate::BootstrapOpsFundingClosed::<Test>::put(true);
+        crate::CommunityDistributionRemaining::<Test>::put(123 * VIT);
+
+        let state = <Treasury as Hooks<u64>>::pre_upgrade().expect("pre-upgrade state");
+        let _ = <Treasury as Hooks<u64>>::on_runtime_upgrade();
+        <Treasury as Hooks<u64>>::post_upgrade(state).expect("post-upgrade checks");
+
+        assert!(crate::BootstrapOpsFundingClosed::<Test>::get());
+        assert_eq!(
+            crate::CommunityDistributionRemaining::<Test>::get(),
+            123 * VIT
+        );
+        assert_eq!(
+            crate::IncentiveRemaining::<Test>::get(),
+            IncentiveAllocationAmount::get()
+        );
+        assert_eq!(StorageVersion::get::<Treasury>(), StorageVersion::new(4));
+    });
+}
+
+#[cfg(feature = "try-runtime")]
+#[test]
+fn storage_v4_try_runtime_current_version_is_an_idempotent_latch_noop() {
+    new_test_ext().execute_with(|| {
+        crate::IncentiveRemaining::<Test>::put(55 * VIT);
+        for _ in 0..2 {
+            let state = <Treasury as Hooks<u64>>::pre_upgrade().expect("pre-upgrade state");
+            let _ = <Treasury as Hooks<u64>>::on_runtime_upgrade();
+            <Treasury as Hooks<u64>>::post_upgrade(state).expect("post-upgrade checks");
+            assert_eq!(StorageVersion::get::<Treasury>(), StorageVersion::new(4));
+            assert_eq!(crate::IncentiveRemaining::<Test>::get(), 55 * VIT);
+        }
+    });
+}
+
+#[test]
+fn funding_moves_vit_from_the_incentive_pot_to_the_rewards_sovereign() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Treasury::fund_trading_rewards(param_origin(), 1_000 * VIT));
+        assert_eq!(
+            trading_reward_funding_calls(),
+            vec![(IncentivePot::get(), 1_000 * VIT)]
+        );
+        assert_eq!(
+            crate::IncentiveRemaining::<Test>::get(),
+            IncentiveAllocationAmount::get() - 1_000 * VIT
+        );
+        assert_eq!(crate::TradingRewardBudgetCount::<Test>::get(), 1);
+        assert!(System::events().iter().any(|record| matches!(
+            &record.event,
+            RuntimeEvent::Treasury(Event::TradingRewardsFunded { amount, remaining })
+                if *amount == 1_000 * VIT
+                    && *remaining == IncentiveAllocationAmount::get() - 1_000 * VIT
+        )));
+    });
+}
+
+#[test]
+fn funding_refuses_a_signed_origin() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            Treasury::fund_trading_rewards(RuntimeOrigin::signed(nobody()), 1),
+            sp_runtime::DispatchError::BadOrigin
+        );
+        assert!(trading_reward_funding_calls().is_empty());
+    });
+}
+
+#[test]
+fn funding_rejects_invalid_origin_amount_and_bound_without_mutation() {
+    // Not yet `// limit-coverage:`-marked: the lifetime-authorization bound
+    // this test pins is owned by 08 §2.6's *Bounds* paragraph and reuses
+    // `MaxCommunitySchedules` directly (08 §2.6: "the authorization count
+    // reuses the community schedule's lifetime bound"), but the 13 §4 row
+    // for it is not yet written — see the task report. The checker fails a
+    // marker naming an unclassified key, so marking this test ahead of that
+    // row would break the gate rather than close it.
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            Treasury::fund_trading_rewards(RuntimeOrigin::root(), VIT),
+            sp_runtime::DispatchError::BadOrigin
+        );
+        assert_noop!(
+            Treasury::fund_trading_rewards(param_origin(), 0),
+            Error::<Test>::AmountZero
+        );
+        let remaining = crate::IncentiveRemaining::<Test>::get();
+        assert_noop!(
+            Treasury::fund_trading_rewards(param_origin(), remaining + 1),
+            Error::<Test>::IncentiveAllocationExhausted
+        );
+        assert_eq!(crate::IncentiveRemaining::<Test>::get(), remaining);
+        assert!(trading_reward_funding_calls().is_empty());
+
+        assert_ok!(Treasury::fund_trading_rewards(param_origin(), VIT));
+        assert_ok!(Treasury::fund_trading_rewards(param_origin(), VIT));
+        assert_noop!(
+            Treasury::fund_trading_rewards(param_origin(), VIT),
+            Error::<Test>::TooManyTradingRewardAuthorizations
+        );
+        assert_eq!(crate::TradingRewardBudgetCount::<Test>::get(), 2);
+    });
+}
+
+#[test]
+fn funding_adapter_failure_is_atomic() {
+    new_test_ext().execute_with(|| {
+        let remaining = crate::IncentiveRemaining::<Test>::get();
+        set_trading_reward_funding_failure(true);
+        assert!(Treasury::fund_trading_rewards(param_origin(), VIT).is_err());
+        assert_eq!(crate::IncentiveRemaining::<Test>::get(), remaining);
+        assert_eq!(crate::TradingRewardBudgetCount::<Test>::get(), 0);
+        assert!(trading_reward_funding_calls().is_empty());
+    });
+}
+
+// ---- headroom sweep: the load-bearing obligation from the TR5 review ------
+//
+// 08 §2.6: "unspent budget returns to the pot at epoch close." `TotalAccrued`
+// in the reward pallet falls only when a participant calls `claim_rewards`,
+// entirely at their own discretion and possibly long after the epoch that
+// promised it. A sweep that takes the sovereign's whole balance rather than
+// `balance − accrual reserve` would take the VIT backing that unclaimed
+// accrual too, and every participant's headroom would collapse to zero until
+// the stale accrual is claimed — permanently, if it never is. Nothing in the
+// reward pallet's own settlement path breaks when this is wrong, which is
+// exactly why it would present as a program that silently stops paying.
+
+#[test]
+fn sweep_admits_any_signed_caller_and_is_a_no_op_with_nothing_to_sweep() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Treasury::sweep_trading_reward_headroom(
+            RuntimeOrigin::signed(nobody())
+        ));
+        assert!(trading_reward_sweep_calls().is_empty());
+        assert_eq!(
+            crate::IncentiveRemaining::<Test>::get(),
+            IncentiveAllocationAmount::get()
+        );
+        assert!(!System::events().iter().any(|record| matches!(
+            &record.event,
+            RuntimeEvent::Treasury(Event::TradingRewardHeadroomSwept { .. })
+        )));
+    });
+}
+
+#[test]
+fn sweep_refuses_an_unsigned_origin() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            Treasury::sweep_trading_reward_headroom(RuntimeOrigin::root()),
+            sp_runtime::DispatchError::BadOrigin
+        );
+    });
+}
+
+#[test]
+fn sweep_moves_the_whole_sovereign_balance_when_nothing_is_reserved() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Treasury::fund_trading_rewards(param_origin(), 1_000 * VIT));
+        assert_ok!(Treasury::sweep_trading_reward_headroom(
+            RuntimeOrigin::signed(nobody())
+        ));
+        assert_eq!(
+            trading_reward_sweep_calls(),
+            vec![(IncentivePot::get(), 1_000 * VIT)]
+        );
+        assert_eq!(trading_reward_sovereign_balance(), 0);
+        assert_eq!(
+            crate::IncentiveRemaining::<Test>::get(),
+            IncentiveAllocationAmount::get()
+        );
+    });
+}
+
+/// The obligation's own test, named to match its description: sweeps an
+/// epoch with an unclaimed accrual outstanding and asserts the swept amount
+/// excludes it. Mutating the subtraction in `sweep_trading_reward_headroom`
+/// (`balance.saturating_sub(reserved)` → `balance`) makes this go red: the
+/// swept amount would be 1,000 VIT instead of 600, and the sovereign would
+/// be swept to zero instead of left holding the 400 VIT the accrual needs.
+#[test]
+fn sweeping_the_headroom_excludes_vit_backing_an_unclaimed_accrual() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Treasury::fund_trading_rewards(param_origin(), 1_000 * VIT));
+        set_trading_reward_accrual_reserve(400 * VIT);
+        let remaining_before = crate::IncentiveRemaining::<Test>::get();
+
+        assert_ok!(Treasury::sweep_trading_reward_headroom(
+            RuntimeOrigin::signed(nobody())
+        ));
+
+        assert_eq!(
+            trading_reward_sweep_calls(),
+            vec![(IncentivePot::get(), 600 * VIT)]
+        );
+        assert_eq!(trading_reward_sovereign_balance(), 400 * VIT);
+        assert_eq!(
+            crate::IncentiveRemaining::<Test>::get(),
+            remaining_before + 600 * VIT
+        );
+        assert!(System::events().iter().any(|record| matches!(
+            &record.event,
+            RuntimeEvent::Treasury(Event::TradingRewardHeadroomSwept { amount, remaining })
+                if *amount == 600 * VIT && *remaining == remaining_before + 600 * VIT
+        )));
+    });
+}
+
+#[test]
+fn sweeping_with_the_whole_balance_reserved_for_accruals_is_a_no_op() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Treasury::fund_trading_rewards(param_origin(), 1_000 * VIT));
+        set_trading_reward_accrual_reserve(1_000 * VIT);
+        let remaining_before = crate::IncentiveRemaining::<Test>::get();
+
+        assert_ok!(Treasury::sweep_trading_reward_headroom(
+            RuntimeOrigin::signed(nobody())
+        ));
+
+        assert!(trading_reward_sweep_calls().is_empty());
+        assert_eq!(trading_reward_sovereign_balance(), 1_000 * VIT);
+        assert_eq!(crate::IncentiveRemaining::<Test>::get(), remaining_before);
+    });
+}
+
+#[test]
+fn sweeping_when_the_reserve_exceeds_the_balance_saturates_to_zero_headroom() {
+    // A reserve figure momentarily above the sovereign's balance must
+    // saturate to zero headroom rather than underflow (G-1) — reachable in
+    // principle from a mid-epoch adapter read racing a debit, never from
+    // ordinary fund/sweep bookkeeping alone.
+    new_test_ext().execute_with(|| {
+        assert_ok!(Treasury::fund_trading_rewards(param_origin(), 100 * VIT));
+        set_trading_reward_accrual_reserve(500 * VIT);
+        assert_ok!(Treasury::sweep_trading_reward_headroom(
+            RuntimeOrigin::signed(nobody())
+        ));
+        assert!(trading_reward_sweep_calls().is_empty());
+        assert_eq!(trading_reward_sovereign_balance(), 100 * VIT);
+    });
+}
+
+#[test]
+fn sweep_adapter_failure_is_atomic() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(Treasury::fund_trading_rewards(param_origin(), 1_000 * VIT));
+        let remaining_before = crate::IncentiveRemaining::<Test>::get();
+        set_trading_reward_sweep_failure(true);
+        assert!(Treasury::sweep_trading_reward_headroom(RuntimeOrigin::signed(nobody())).is_err());
+        assert_eq!(crate::IncentiveRemaining::<Test>::get(), remaining_before);
+        assert_eq!(trading_reward_sovereign_balance(), 1_000 * VIT);
+    });
+}
+
+#[test]
+fn sweep_credit_never_lets_remaining_exceed_the_genesis_incentive_allocation() {
+    // Model a direct donation to the reward sovereign that was never
+    // authorized through `fund_trading_rewards`: headroom exists with
+    // nothing backing it in `IncentiveRemaining`'s ledger. The credit must
+    // clamp at the genesis allocation rather than manufacture spendable
+    // budget no governance decision ever authorized.
+    new_test_ext().execute_with(|| {
+        donate_to_trading_reward_sovereign(10 * VIT);
+        assert_eq!(
+            crate::IncentiveRemaining::<Test>::get(),
+            IncentiveAllocationAmount::get()
+        );
+
+        assert_ok!(Treasury::sweep_trading_reward_headroom(
+            RuntimeOrigin::signed(nobody())
+        ));
+
+        assert_eq!(
+            trading_reward_sweep_calls(),
+            vec![(IncentivePot::get(), 10 * VIT)]
+        );
+        assert_eq!(
+            crate::IncentiveRemaining::<Test>::get(),
+            IncentiveAllocationAmount::get()
+        );
+    });
+}
+
+#[test]
+fn try_state_catches_incentive_remaining_above_the_genesis_allocation() {
+    new_test_ext().execute_with(|| {
+        crate::IncentiveRemaining::<Test>::put(IncentiveAllocationAmount::get() + 1);
+        assert!(crate::Pallet::<Test>::do_try_state().is_err());
+    });
+}
+
+#[test]
+fn try_state_catches_trading_reward_budget_count_above_its_bound() {
+    new_test_ext().execute_with(|| {
+        crate::TradingRewardBudgetCount::<Test>::put(MaxCommunitySchedules::get() + 1);
+        assert!(crate::Pallet::<Test>::do_try_state().is_err());
     });
 }
 
@@ -1577,6 +1941,8 @@ mod renewal_dispatch_seam {
         pub const DispatchCommunityMin: u128 = VIT;
         pub const DispatchMaxCommunitySchedules: u32 = 4_096;
         pub const DispatchMaxCollatorCompensationEntries: u32 = 120;
+        pub DispatchIncentivePot: AccountId32 = AccountId32::new([78u8; 32]);
+        pub const DispatchIncentiveAllocationAmount: u128 = 100_000_000 * VIT;
     }
 
     impl pallet_futarchy_treasury::Config for DispatchTest {
@@ -1588,6 +1954,14 @@ mod renewal_dispatch_seam {
         type CommunityVestingDuration = DispatchCommunityDuration;
         type CommunityMinVestedTransfer = DispatchCommunityMin;
         type MaxCommunitySchedules = DispatchMaxCommunitySchedules;
+        // This harness exercises the coretime-renewal dispatch path only, so
+        // the trading-reward funding seam keeps the production fail-closed
+        // unit default, exactly as `CommunityVesting`/`InsuranceSweep`/
+        // `PotFunding` do above.
+        type TradingRewardOrigin = frame_system::EnsureRoot<AccountId32>;
+        type TradingRewardFunding = ();
+        type IncentivePot = DispatchIncentivePot;
+        type IncentiveAllocationAmount = DispatchIncentiveAllocationAmount;
         type MaxCollatorCompensationEntries = DispatchMaxCollatorCompensationEntries;
         type RegisteredCollatorCount = ConstU32<1>;
         type CollatorEpoch = TestCollatorEpoch;
@@ -2435,7 +2809,7 @@ fn try_state_requires_v2_and_allows_armed_open_handover() {
 
         StorageVersion::new(0).put::<Treasury>();
         assert!(Treasury::do_try_state().is_err());
-        StorageVersion::new(3).put::<Treasury>();
+        StorageVersion::new(4).put::<Treasury>();
         assert_ok!(Treasury::do_try_state());
     });
 }
