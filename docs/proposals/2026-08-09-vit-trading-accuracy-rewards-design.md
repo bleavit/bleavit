@@ -141,19 +141,39 @@ program to insiders. Traders already hold USDC, because they need it to trade at
 
 ### 4.4 The score
 
-Per enrolled account, per market, `pallet-market` accumulates two unsigned counters and the
+Per enrolled account, per market, `pallet-market` accumulates three unsigned counters and the
 net branch position. Unsigned counters keep signed arithmetic out of runtime code and make
 claimant-adverse rounding straightforward.
 
-1. On a buy, add `cost + fee` to `spent`, rounded up, and add the filled quantity to
-   `book_acquired` for that branch.
-2. On a sell, add proceeds to `received`, rounded down, **but only for the part of the sale
-   covered by `book_acquired`**, and decrement `book_acquired` by that quantity. Proceeds
-   beyond it are ignored.
+1. On a buy, add `cost + fee` to `spent`, rounded up, add the filled quantity to
+   `book_acquired` for that branch, and add `cost` to `mirror_principal`.
+2. On a sell, add proceeds **net of the withheld fee** to `received`, rounded down, **but only
+   for the part of the sale covered by `book_acquired`**, and decrement `book_acquired` by that
+   quantity. Proceeds beyond it are ignored.
 3. At settlement, add `min(position, book_acquired) × settled_value` to `received`, rounded
    down. Here `settled_value` is the branch's terminal redemption value per unit, which the
    book already resolves to when it settles.
-4. The market score is `received − spent`, and it may be negative.
+4. The market score depends on how the branch ended, and it may be negative. A **realized**
+   branch scores `received − spent`. An **annulled** branch scores `mirror_principal − spent`,
+   discarding every `received` credit. A **VOIDed** proposal drops the entry at zero.
+
+**Rule 4 has three arms because the first draft's single arm confiscated honest bonds
+(SQ-1051, ruled 2026-08-10).** A buy spends plain USDC, but the wrapper splits `cost + fee`
+across both branches and sends only `cost` of the traded branch to the book — so the buyer
+leaves holding the scalar position **and `cost` of mirror-branch branch-USDC**. A sale is paid
+in traded-branch branch-USDC. Those two are worth par in exactly opposite states of the world,
+so one rule could not be right in both.
+
+The single arm was wrong in the common state. Doc 04 §6.2 guarantees as **G-3** that a buyer in
+the losing branch *"loses only fees when its branch is annulled"*, because the mirror leg
+redeems at par. `received − spent` scores that buyer at `−(cost + fee)` — the whole notional
+against a real loss of `fee`, about 1/333 of it at the `mkt.fee` default. Roughly half of all
+decision-market trading sits in the branch that does not realize.
+
+The annulled arm is exact rather than conservative: substituting rule 1 gives `Σcost −
+Σ(cost + fee)` = `−Σfee`, which is G-3 restated. Discarding `received` is what makes it exact,
+since those credits are annulled-branch units worth nothing. VOID gets its own arm because §6.2
+gives it a different delta and no forecast was tested either way.
 
 **Why `book_acquired` exists, and why the first draft was wrong.** That draft recorded
 acquisition cost only on a book buy and called off-book inventory an out-of-scope limit. It

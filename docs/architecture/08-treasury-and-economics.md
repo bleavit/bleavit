@@ -246,12 +246,14 @@ of the debit. Second, a top-up takes effect from the **next** epoch: an immediat
 would let a wash operator wait for the outcome, enlarge only the winning account's cap, and
 leave the loser at the minimum. No caller-visible action inside an epoch can move either side.
 
-**The score.** Per enrolled account, per market, the book accumulates two unsigned counters and
+**The score.** Per enrolled account, per market, the book accumulates three unsigned counters and
 the net branch position. Unsigned counters keep signed arithmetic out of runtime code and make
 claimant-adverse rounding straightforward.
 
-1. A buy adds `cost + fee` to `spent`, rounded up, and adds the filled quantity to
-   `book_acquired` for that branch.
+1. A buy adds `cost + fee` to `spent`, rounded up, adds the filled quantity to `book_acquired`
+   for that branch, and adds `cost` to **`mirror_principal`** — the mirror-branch branch-USDC the
+   trade wrapper leaves with the buyer *(added 2026-08-10, SQ-1051; the paragraph after rule 4
+   is why)*.
 2. A sell adds proceeds **net of the fee the book withholds** — `proceeds − fee` — to `received`,
    rounded down, **but only for the part of the sale covered by `book_acquired`**, and decrements
    `book_acquired` by that quantity. Proceeds beyond it are ignored. *(Clarified 2026-08-10,
@@ -263,7 +265,47 @@ claimant-adverse rounding straightforward.
    both sides.)*
 3. Settlement adds `min(position, book_acquired) × settled_value` to `received`, rounded down.
    `settled_value` is the branch's terminal redemption value per unit.
-4. The market score is `received − spent`, and it may be negative.
+4. The market score depends on how the branch ended, and it may be negative.
+   - **Branch realized:** `received − spent`.
+   - **Branch annulled:** `mirror_principal − spent`. Every `received` credit is discarded.
+   - **Proposal VOID:** the entry drops at zero and folds to nothing, exactly as the timeout
+     escape below does.
+
+**Rule 4 has three arms because a conditional market pays a buyer in two currencies, and only one
+of them survives (added 2026-08-10, SQ-1051).** The score is denominated in plain USDC. A buy
+spends plain USDC, but everything the buyer receives is *conditional*: the trade wrapper splits
+`cost + fee` of plain USDC into both branches, sends `cost` of the traded branch to the book and
+one fee leg from each branch to the fee account, so the buyer walks away holding the scalar
+position **and `cost` of mirror-branch branch-USDC**. A sale is paid in traded-branch
+branch-USDC, not in plain USDC. So `received` and `mirror_principal` are worth par in exactly
+opposite states of the world, and a single-arm rule has to be wrong in one of them.
+
+A one-arm `received − spent` is wrong in the annulled state, and not marginally.
+[04](04-markets-and-pricing.md) §6.2 guarantees the opposite outcome as **G-3**: *"A buyer in the
+losing branch holds `cost` mirror-branch branch-USDC = winning-branch branch-USDC, redeemable at
+par at resolution. The dominant user path therefore loses only fees when its branch is
+annulled."* Under the one-arm rule that buyer scores `−(cost + fee)` — the whole notional — while
+their realized loss is `fee` alone, roughly one three-hundredth of it at the `mkt.fee` default.
+Roughly half of all decision-market trading sits in the branch that does not realize, so the
+program would have debited the bonds of accurate traders for holding positions the protocol had
+already made whole. That is the opposite of what this subsection pays for, and no defense
+elsewhere would have caught it, because every conservation identity and every per-call assertion
+holds while it happens.
+
+The annulled arm is exact rather than conservative. Substituting rule 1 gives
+`mirror_principal − spent = Σcost − Σ(cost + fee) = −Σfee` over that market's buys, which is
+G-3's promise restated. Discarding `received` is what makes it exact: those credits are
+traded-branch branch-USDC and are worth nothing once the branch is annulled, so a sale in an
+annulled branch neither earns nor costs — matching §6.2's reading that a withheld sell fee there
+is a protocol-side income haircut and never a trader-side charge. Both arms stay claimant-adverse
+under R-7, since each discards value the trader did not realize rather than crediting value they
+did not receive.
+
+**Proposal VOID drops the entry instead of scoring it**, because VOID is a constitutional
+emergency rather than a resolved forecast: [04](04-markets-and-pricing.md) §6.2 notes the buyer's
+delta there also carries the difference between the package's D-1 neutral value and `cost`, so
+neither arm above states it, and no forecast was tested in any case. Dropping at zero is the
+same disposition, and the same G-1 direction, as a market that never settles at all.
 
 **`book_acquired` closes a hole rather than accepting a limit.** [03](03-conditional-ledger.md)
 gives an account the whole `split*` family and a signed `transfer`, so an enrolled account can receive

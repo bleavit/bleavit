@@ -810,6 +810,21 @@ Re-snapshot the bond whenever an epoch closes for that participant, **including 
 
    Test both halves separately, and mutate each one away in turn. A test suite that only exercises the bond half passes with the flag check deleted, and this plan has now produced four tests that could not fail.
 
+**A seventh obligation, and it is the largest change TR5 carries. Read the ruling before you start.**
+
+7. **`MarketScore` gains `mirror_principal`, and rule 4 gains three arms** (SQ-1051, ruled 2026-08-10; normative text in 08 §2.6, verification obligation in 15 §4.1). The score as TR2 built it computes `received − spent` unconditionally. That is wrong for an **annulled** branch, and not marginally: 04 §6.2 guarantees as **G-3** that a buyer in the losing branch loses only fees, because the wrapper leaves them holding `cost` of mirror-branch branch-USDC which redeems at par — while `received − spent` scores them at `−(cost + fee)`, the whole notional. Roughly half of decision-market trading is in the branch that does not realize, so the program would have debited the bonds of accurate traders.
+
+   What to build:
+   - `mirror_principal: Balance` on `MarketScore`, in `crates/trading-rewards-core/`. `on_buy` adds `cost` to it — the book-side cost **without** the fee, because the wrapper splits `cost + fee` and then takes one fee leg from each branch, leaving exactly `cost` of mirror. Verify that against `buy_branch` in `crates/market-core/src/lib.rs:2157` rather than trusting this sentence.
+   - Fold selects the arm from the branch's terminal disposition: realized → `received − spent`; annulled → `mirror_principal − spent`, **discarding `received` entirely**; proposal VOID → the entry drops at zero, folding to nothing, the same disposition as the timeout escape.
+
+   Three tests, and the second is the one that proves the ruling:
+   - a realized branch still scores `received − spent` (the existing behaviour, unchanged);
+   - an annulled branch scores **exactly `−Σfee`**, asserted at that value and not merely as "negative" — `−(cost + fee)` is also negative, and it is the defect;
+   - a VOIDed proposal folds to zero.
+
+   You are adding a field to a struct TR3 stores and TR4 writes, and obligation 1 already has you adding a second. Do both in one pass so the storage shape moves once.
+
 - [ ] **Step 5: Run the tests and confirm they pass**
 
 Run: `cargo test -p pallet-trading-rewards`
