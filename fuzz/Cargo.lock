@@ -2407,6 +2407,7 @@ dependencies = [
  "origins-core",
  "parity-scale-codec",
  "scale-info",
+ "sp-io",
  "sp-runtime",
 ]
 
