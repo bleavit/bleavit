@@ -962,6 +962,8 @@ Expected: FAIL.
 
 Add slot 68, the `Config` impl, the SafetyFilter authority row, and bind `pallet_market::Config::TradeObserver` to `TradingRewards`. Add the pallet to the benchmark list.
 
+**Three bindings arrived from TR5 and are not in the list above.** Read `.superpowers/sdd/2026-08-10-vit-trading-accuracy-rewards-chain-plan/task-5-report.md` for their exact shapes rather than guessing: `InsuranceAccount` (the 08 §1.2 destination for forfeited USDC), a `SettledMarkets` adapter the fold reads to learn a market's terminal disposition, and `BenchmarkHelper::advance_epoch`. The adapter is the one with a weight consequence — `settle_market_score` must be **re-measured** once its reads are real, for the same reason `buy`/`sell` must be: in the mock it reads nothing.
+
 - [ ] **Step 4: Re-benchmark `pallet_market::buy` and `::sell` on the worst path**
 
 This step is yours because binding the observer is what makes the cost real. Until
