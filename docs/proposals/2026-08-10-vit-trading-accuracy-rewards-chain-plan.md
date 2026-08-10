@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Ship the on-chain half of the trading accuracy rewards program — spec text, the frame-free score kernel, `pallet-trading-rewards`, the `pallet-market` accumulator, the treasury funding call and runtime wiring — as a working, tested, headless program.
+**Goal:** Ship the on-chain half of the trading accuracy rewards program — spec text, the frame-free score kernel, `pallet-trading-rewards`, the `pallet-market` accumulator, the treasury funding call, the rate coupling screen and runtime wiring — as a working, tested, headless program.
 
 **Architecture:** A new `pallet-trading-rewards` owns enrollment, USDC bonds, per-market scores and VIT claims. `pallet-market` reports fills to it through a loosely-coupled trait at the single point both `buy` and `sell` already funnel through. `pallet-futarchy-treasury` keeps custody of the genesis incentive pot and authorizes one epoch budget at a time. The conditional ledger is never touched, so audit scope A stays closed.
 
@@ -1019,10 +1019,211 @@ Then update PLAN.md — a milestone row for this work, a Session log row, and a 
 
 ---
 
+## Task TR9: The rate coupling screen (design §11, owner decision 2026-08-10)
+
+**Files:**
+- Modify: `crates/constitution-core/src/lib.rs:91-145` (add the sibling screen next to `screen_redeem_fee_coupling`)
+- Modify: `pallets/constitution/src/lib.rs` (call it from the amendment path and from `try-state`)
+- Modify: `docs/architecture/13-parameters.md` (rule 7 gains its third coupling)
+- Test: `crates/constitution-core/src/lib.rs`, `pallets/constitution/src/tests.rs`
+
+**Interfaces:**
+- Consumes: the `rwd.rate` key from TR1. Nothing else — this task can run in parallel with TR2 onward.
+- Produces:
+  - `pub fn rwd_rate_pair(key: ParamKey) -> Option<ParamKey>`
+  - `pub const fn rwd_rate_coupled(rate_ppb: u128, fee_ppb: u128) -> bool`
+  - `pub fn screen_rwd_rate_coupling(key: ParamKey, updated: ParamValue, paired: impl FnOnce(ParamKey) -> Option<ParamValue>) -> Result<(), Error>`
+  - `Error::RewardRateAboveWashBreakeven`
+
+**Mirror `screen_redeem_fee_coupling` exactly** — it is the single-homed pattern that keeps the frame-free core and the FRAME shell from drifting on the predicate, the key set, or which side each key is on. Read `crates/constitution-core/src/lib.rs:88-145` before writing anything.
+
+**The one structural trap.** `mkt.fee` now sits in **two** couplings. `screen_redeem_fee_coupling` and `screen_rwd_rate_coupling` are independent and the amendment path must call **both**. Neither absorbs the other, and screening only one partner leaves the invariant breakable from the fee side.
+
+- [ ] **Step 1: Write the failing tests**
+
+```rust
+#[test]
+fn the_adopted_pair_passes_the_screen() {
+    // 99 × 2_500_000 = 247_500_000  ≤  200 × 3_000_000 = 600_000_000
+    assert!(rwd_rate_coupled(2_500_000, 3_000_000));
+}
+
+#[test]
+fn lowering_the_market_fee_to_its_floor_is_refused() {
+    // The amendment the screen exists to block: at 5 bps the wash
+    // break-even falls to ≈ 0.10 % and 0.25 % becomes farmable on rate alone.
+    assert!(!rwd_rate_coupled(2_500_000, 500_000));
+    let err = screen_rwd_rate_coupling(
+        key16(b"mkt.fee"),
+        ParamValue::Perbill(500_000),
+        |_| Some(ParamValue::Perbill(2_500_000)),
+    )
+    .unwrap_err();
+    assert_eq!(err, Error::RewardRateAboveWashBreakeven);
+}
+
+#[test]
+fn raising_the_reward_rate_past_the_live_fee_is_refused() {
+    // The screen must bind from both sides, exactly like redeem_fee ≤ mkt.fee.
+    let err = screen_rwd_rate_coupling(
+        key16(b"rwd.rate"),
+        ParamValue::Perbill(6_000_000),
+        |_| Some(ParamValue::Perbill(3_000_000)),
+    )
+    .unwrap_err();
+    assert_eq!(err, Error::RewardRateAboveWashBreakeven);
+}
+
+#[test]
+fn an_unrelated_key_is_not_screened() {
+    assert!(rwd_rate_pair(key16(b"epoch.length")).is_none());
+    assert!(screen_rwd_rate_coupling(
+        key16(b"epoch.length"),
+        ParamValue::U32(1),
+        |_| None
+    )
+    .is_ok());
+}
+
+#[test]
+fn a_missing_partner_row_fails_closed() {
+    let err = screen_rwd_rate_coupling(key16(b"rwd.rate"), ParamValue::Perbill(1), |_| None)
+        .unwrap_err();
+    assert_eq!(err, Error::TryStateViolation);
+}
+
+#[test]
+fn a_market_fee_amendment_passes_through_both_screens() {
+    // mkt.fee is coupled to ledger.rdm_fee AND to rwd.rate. Neither screen
+    // absorbs the other.
+    assert!(redeem_fee_pair(key16(b"mkt.fee")).is_some());
+    assert!(rwd_rate_pair(key16(b"mkt.fee")).is_some());
+    assert_ne!(
+        redeem_fee_pair(key16(b"mkt.fee")),
+        rwd_rate_pair(key16(b"mkt.fee")),
+    );
+}
+```
+
+- [ ] **Step 2: Run and confirm failure**
+
+Run: `cargo test -p constitution-core rwd_rate_coupl`
+Expected: FAIL — the functions do not exist.
+
+- [ ] **Step 3: Implement the screen**
+
+```rust
+/// 13 rule 7's **third** live coupling: `rwd.rate ≤ 2 × mkt.fee / 0.99`.
+/// Screened over the resulting pair from either side, because a lowering of
+/// `mkt.fee` breaks it exactly as a raising of `rwd.rate` does.
+pub fn rwd_rate_pair(key: ParamKey) -> Option<ParamKey> {
+    let rate = key16(b"rwd.rate");
+    let market = key16(b"mkt.fee");
+    if key == rate {
+        return Some(market);
+    }
+    if key == market {
+        return Some(rate);
+    }
+    None
+}
+
+/// The worst-case wash break-even of the design's §5.1, cross-multiplied so the
+/// predicate is exact integer arithmetic with no division and no rounding.
+pub const fn rwd_rate_coupled(rate_ppb: u128, fee_ppb: u128) -> bool {
+    99 * rate_ppb <= 200 * fee_ppb
+}
+
+pub fn screen_rwd_rate_coupling(
+    key: ParamKey,
+    updated: ParamValue,
+    paired: impl FnOnce(ParamKey) -> Option<ParamValue>,
+) -> Result<(), Error> {
+    let Some(pair) = rwd_rate_pair(key) else {
+        return Ok(());
+    };
+    let partner = paired(pair).ok_or(Error::TryStateViolation)?;
+    let (rate, fee) = if key == key16(b"rwd.rate") {
+        (updated, partner)
+    } else {
+        (partner, updated)
+    };
+    match (rate, fee) {
+        (ParamValue::Perbill(rate), ParamValue::Perbill(fee)) => {
+            ensure!(
+                rwd_rate_coupled(rate as u128, fee as u128),
+                Error::RewardRateAboveWashBreakeven
+            );
+            Ok(())
+        }
+        _ => Err(Error::WrongType),
+    }
+}
+```
+
+Add `RewardRateAboveWashBreakeven` to the core `Error` enum and map it in the pallet's `From` impl, next to `RedemptionFeeAboveMarketFee`.
+
+- [ ] **Step 4: Run the core tests and confirm they pass**
+
+Run: `cargo test -p constitution-core rwd_rate`
+Expected: PASS, all six tests.
+
+- [ ] **Step 5: Call it from the amendment path and try-state**
+
+Find every site that calls `screen_redeem_fee_coupling` in `pallets/constitution/src/lib.rs` and add a `screen_rwd_rate_coupling` call beside it. **Both must run** — see the structural trap above. Add the matching `try-state` assertion next to the existing redeem-fee one.
+
+- [ ] **Step 6: Write the pallet-level test**
+
+```rust
+#[test]
+fn set_param_refuses_a_market_fee_that_breaks_the_reward_coupling() {
+    new_test_ext().execute_with(|| {
+        assert_noop!(
+            Constitution::set_param(
+                param_origin(),
+                key16(b"mkt.fee"),
+                ParamValue::Perbill(500_000)
+            ),
+            Error::<Test>::RewardRateAboveWashBreakeven
+        );
+        // G-1: the refusal leaves the registry byte-identical.
+        assert_eq!(
+            Params::<Test>::get(key16(b"mkt.fee")).expect("row").value,
+            ParamValue::Perbill(3_000_000)
+        );
+    });
+}
+```
+
+- [ ] **Step 7: Run the tests and the changed-scope gate**
+
+```bash
+cargo test -p pallet-constitution
+tools/ci/rust-workspace-gates.sh --changed constitution-core pallet-constitution
+```
+Expected: green.
+
+- [ ] **Step 8: Amend doc 13 rule 7**
+
+Rule 7 currently names two live couplings. Add the third in the same register, stating the relation, that it binds jointly at the amendment boundary from either side, that it is asserted in `try-state`, and that `mkt.fee` therefore passes two screens. Cite the design's §5.1 derivation for the constant.
+
+- [ ] **Step 9: Run the doc and coverage gates, then commit**
+
+```bash
+python3 tools/ci/check-doc-links.py
+python3 tools/limit-coverage/check-limit-coverage.py
+git add crates/constitution-core pallets/constitution docs/architecture/13-parameters.md
+git commit -m "feat(constitution): screen rwd.rate against mkt.fee at the amendment boundary (TR9)"
+```
+
+---
+
 ## Self-Review
 
-**Spec coverage.** Every row of the design's §7 table maps to TR1 except the three that Plan 2 owns (02, 10, 11). §4.2 is TR6, §4.3 is TR3, §4.4 is TR2 and TR4, §4.5 is TR2 and TR5, §4.6 is TR4 step 7, §5.1 and §5.2 are TR1, §6 is TR5, §8 is TR8. §4.7 is Plan 2 entirely.
+**Spec coverage.** Every row of the design's §7 table maps to TR1 except the three that Plan 2 owns (02, 10, 11). §4.2 is TR6, §4.3 is TR3, §4.4 is TR2 and TR4, §4.5 is TR2 and TR5, §4.6 is TR4 step 7, §5.1 and §5.2 are TR1, §6 is TR5, §8 is TR8, §11 is TR9. §4.7 is Plan 2 entirely.
 
-**Known gap, stated rather than hidden.** The design's §11 question — whether `rwd.rate ≤ 2 × mkt.fee / 0.99` should be screened at the amendment boundary — is **not** implemented here. TR1 and TR8 assert the relation in tests, which is option 3 of §11. If the owner chooses option 1, it becomes a ninth task touching `pallet-constitution`'s amendment path, and the two tests written here stay as the backstop.
+**Dependency order.** TR1 gates everything. TR2 gates TR3, TR4 and TR5. TR6 and TR9 depend only on TR1 and can run alongside TR2. TR7 needs TR3, TR4 and TR6. TR8 needs everything.
+
+**Type consistency.** `MarketScore`, `EpochScore`, `Outcome` and `CoreError` are defined once in TR2 and used under those exact names in TR3, TR4, TR5 and TR8. `side` is `usize`, `0` = LONG and `1` = SHORT, everywhere. `rate_ppb` is `u32` in TR2's signatures and `u128` in TR9's predicate, because TR9 mirrors `redeem_fee_coupled`'s existing `u128` shape — that widening is deliberate and is the only place the two differ.
 
 **Type consistency.** `MarketScore`, `EpochScore`, `Outcome` and `CoreError` are defined once in TR2 and used under those exact names in TR3, TR4, TR5 and TR8. `side` is `usize`, `0` = LONG and `1` = SHORT, everywhere. `rate_ppb` is `u32` in every signature. `earning_cap` and `epoch_outcome` take `(snapshot_bond, rate_ppb)` in that order throughout.

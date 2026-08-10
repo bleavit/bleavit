@@ -412,25 +412,33 @@ All three questions this document opened were decided by the owner on 2026-08-10
 | `rwd.rate` | **0.25 %**, seeded at genesis. Derivation and its boundary: §5.1 |
 | Forfeited bonds | **`INSURANCE`**, not the winners. Doc 13's standing destination for USDC taken from an account, and it keeps a payout independent of the field |
 | Client surface | **Visible at mainnet launch**, showing status, rate, bond, score and reward status. Contract v30 → v31: §4.7 |
+| The §11 coupling | **Screened at the amendment boundary** (option 1), so the relation is an invariant rather than a documented hope |
 
-## 11. The one question that remains
+## 11. The rate coupling is screened (owner decision, 2026-08-10)
 
-**Should `rwd.rate ≤ 2 × mkt.fee / 0.99` be screened at the amendment boundary?**
+`rwd.rate ≤ 2 × mkt.fee / 0.99` becomes **doc 13 rule 7's third live coupling**, joining
+`gate.v_min ↔ dec.v_min` and `ledger.redeem_fee ≤ mkt.fee`. It takes the identical shape: the
+relation is the standing invariant, it is enforced **jointly over the pair at the amendment
+boundary** — so an amendment of *either* key that would carry the pair outside it is refused
+rather than left for a consumer to reconcile — and it is asserted in `try-state`.
 
-It is not a values call and it does not block the work, which is why it is separate from the
-table above. §5.1 shows the rate defense lapsing below 12.375 bps per leg while `mkt.fee`
-stays PARAM-amendable to 5 bps. The bond covers the gap, so the program is safe either way.
-What is at stake is whether a fee amendment may silently retire a defense this document
-relies on.
+**Why it binds at the boundary rather than at the consumer.** §5.1 shows the rate defense
+lapsing below 12.375 bps per leg while `mkt.fee` stays PARAM-amendable to 5 bps. The consumer
+of a bad pair is an accrual that has already happened, and there is no admissible way to fail
+closed on it without stranding a claimant — the same argument `ledger.redeem_fee` makes. So
+the only safe place to refuse is before the value is stored.
 
-Three options, in the order I would consider them:
+**Screened in exact integer arithmetic, with no division:**
 
-1. **Screen the pair jointly at the amendment boundary**, refusing an amendment of either key
-   that carries the pair out of band. This is the shape doc 13 rule 7 already uses twice, for
-   `gate.v_min ↔ dec.v_min` and `ledger.redeem_fee ≤ mkt.fee`, and it is the only option that
-   makes the relation an invariant.
-2. **Assert it in `try-state` only**, so a breach is loud but not refused.
-3. **Document it and rely on the bond**, which is the status quo of this revision.
+```
+99 × rwd.rate_ppb  ≤  200 × mkt.fee_ppb
+```
 
-The §8 rate-derivation test gives option 3 most of option 2's value for none of the cost, so
-the real choice is between 1 and 3.
+At the adopted pair that is `247,500,000 ≤ 600,000,000`, which holds with room. At
+`mkt.fee`'s 5 bps floor it is `247,500,000 ≤ 100,000,000`, which fails — and failing there is
+the entire point.
+
+**One structural consequence.** `mkt.fee` now sits in **two** couplings, so an amendment of it
+passes two independent screens. Neither absorbs the other, and a screen that handled only one
+partner would leave the invariant breakable from the fee side, which is the failure rule 7
+exists to prevent.
