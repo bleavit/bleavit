@@ -786,6 +786,12 @@ Each of the three needs its own test.
 
 Re-snapshot the bond whenever an epoch closes for that participant, **including when the epoch had nothing to settle**. TR3's report carries the exact condition; read it at `.superpowers/sdd/2026-08-10-vit-trading-accuracy-rewards-chain-plan/task-3-report.md` rather than deriving it again.
 
+**Three more obligations arrive from the TR3 review. None is optional and each has a reason TR3 could not act on:**
+
+1. **`MarketScore` needs a creation-block field, and you must add it before anything depends on the current shape.** 08 §2.6 requires the timeout to be an *absolute block height measured from the score entry's creation*, and `crates/trading-rewards-core/`'s `MarketScore` carries only `spent`, `received` and `book_acquired`. TR3 froze that struct as the `Scores` value type. Extend it here, in the core crate, and carry the field through TR4's accumulator.
+2. **The real try-state accrual leg is yours.** The brief and design §8 require *"accruals never exceed the authorized budget"*. TR3 could not implement it — `accrued` is USDC, the budget is VIT, and 08 §2.6 makes the comparison a **post-scaling** property that only `settle_epoch` establishes. TR3 substituted an exact-mirror invariant and declared the substitution. You own the real one, and it becomes checkable exactly where you apply the budget scale factor.
+3. **Do not attach a penalty to `suspended` that re-enrolment can launder.** `withdraw_bond` does not consult the flag, so a suspended zero-bond account can close and re-enroll to clear it. That costs the same as the lawful top-up which would also clear it, so TR3 is fine as it stands — but any penalty you add on top of `suspended` inherits a free reset.
+
 - [ ] **Step 5: Run the tests and confirm they pass**
 
 Run: `cargo test -p pallet-trading-rewards`
