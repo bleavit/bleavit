@@ -767,7 +767,15 @@ Permissionless. It succeeds on one of two conditions: the book has settled, in w
 
 - [ ] **Step 4: Implement `settle_epoch`**
 
-Permissionless, and refuses while any `Scores` entry for the account remains. It computes `epoch_outcome`, applies the budget scale factor to **both** legs, then either accrues a reward or debits the snapshot bond and transfers the forfeit to `INSURANCE`. It resets the epoch accumulator and re-snapshots the bond for the next epoch.
+Permissionless. It computes `epoch_outcome`, applies the budget scale factor to **both** legs, then either accrues a reward or debits the snapshot bond and transfers the forfeit to `INSURANCE`. It resets the epoch accumulator and re-snapshots the bond for the next epoch.
+
+**TR1 fixed three obligations on this call normatively in 08 §2.6, and they are not optional.** They were added when the authority matrix's `settle_epoch` grant was reconciled against its owning section, so the spec now specifies them and a later reader will hold this code to them:
+
+1. **Idempotent per participant per epoch.** A second call for a settled epoch is a no-op, not a second payout.
+2. **Refuses an epoch that has not closed.**
+3. **Refuses while any unfolded `Scores` entry for that account remains.** This one is load-bearing rather than tidy: settling an epoch with a market still unfolded pays a reward on a partial score, and the unfolded market is exactly where a loss would have come from.
+
+Each of the three needs its own test.
 
 - [ ] **Step 5: Run the tests and confirm they pass**
 
@@ -836,6 +844,10 @@ Expected: FAIL.
 - [ ] **Step 3: Implement the call**
 
 Copy the structure of `create_community_schedule` at line 1368 exactly: origin check first, then every `ensure!` before any state change, then the transfer, then the decrement, then the event. Add a lifetime authorization count bounded like `MaxCommunitySchedules`.
+
+**The event name and shape are fixed by the spec, not yours to choose.** TR1 wrote `TradingRewardsFunded { amount, remaining }` into 08 §1.4's event enumeration, following `CommunityScheduleCreated` at `pallets/futarchy-treasury/src/lib.rs:819`, which already carries `remaining`. Emit exactly that.
+
+**This task also owns the lifetime-count bound**, per the Global Constraints table: add its 13 §4 row and its `tools/limit-coverage/registry.toml` entry in this same commit, and run `python3 tools/limit-coverage/check-limit-coverage.py` before committing. Its sizing rule is fixed in 08 §2.6 — read it rather than picking a number.
 
 - [ ] **Step 4: Run the tests and confirm they pass**
 
