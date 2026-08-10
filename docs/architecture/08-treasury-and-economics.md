@@ -295,10 +295,16 @@ scored < 0  →  debit   r × |scored|  USDC from the snapshot bond
 
 `rate_headroom` is the **top of the `fee.vit_usdc_rate` envelope**, which §9 and
 [13](13-parameters.md) §1 already fix at 10× the kernel reference. It is a restatement of an
-existing bound and not a new constant. Sizing the cap against the most favourable rate the
-envelope admits means the snapshot bond still covers the reward if VIT reprices to the ceiling
-before the claim lands. The cost is a conservative cap, and the alternative is an invariant a
-governed price can open.
+existing bound and not a new constant.
+
+**What the headroom is for, stated precisely, because the obvious reading is the wrong one.**
+Converting at claim time already makes the payout worth the accrued USDC figure at that
+moment's **governed** rate, so a market reprice between accrual and claim is **not** the
+exposure. The exposure is the **governed rate diverging from the market price**, and only in one
+direction: a rate that understates VIT hands the claimant more real value than the debit took.
+The envelope's width bounds that divergence, so sizing the cap against the top of the envelope
+is what keeps reward value at or below debit value. The cost is a conservative cap, and the
+alternative is an invariant a governed price can open.
 
 **Both legs are USDC, and only the payout converts.** `claim_rewards()` converts the accrued
 USDC figure to VIT once, at the live `fee.vit_usdc_rate`, rounding against the claimant, and
