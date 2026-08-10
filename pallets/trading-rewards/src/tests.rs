@@ -1696,8 +1696,15 @@ fn buy(
     observe(who, market, SCORE_SIDE_LONG, qty, cost, fee, true);
 }
 
+/// Par: one scalar unit redeeming for one whole USDC base unit. `settled_value`
+/// is a fraction on this grid, never a plain integer — see
+/// [`trading_rewards_core::SETTLED_VALUE_SCALE`], and note that no unit can
+/// redeem above it.
+const PAR: Balance = trading_rewards_core::SETTLED_VALUE_SCALE;
+
 /// A buy, then the book reaching a realized terminal state worth `unit_value`
-/// per unit on the branch that was traded.
+/// per unit on the branch that was traded, `unit_value` being on the [`PAR`]
+/// grid.
 fn buy_and_settle(
     who: &Account,
     market: futarchy_primitives::MarketId,
@@ -1724,8 +1731,8 @@ fn record(who: &Account) -> crate::ParticipantRecord {
 fn folding_moves_a_settled_market_into_the_epoch_and_frees_the_entry() {
     new_test_ext().execute_with(|| {
         enrolled_alice(1_000);
-        // 1,000 units for 500 with no fee; the branch realizes at 1 per unit.
-        buy_and_settle(&alice(), MARKET_A, 1_000, 500, 0, 1);
+        // 1,000 units for 500 with no fee; the branch realizes at par.
+        buy_and_settle(&alice(), MARKET_A, 1_000, 500, 0, PAR);
 
         // Permissionless and named-target: BOB cranks ALICE's fold.
         assert_ok!(TradingRewards::settle_market_score(
@@ -1904,13 +1911,13 @@ fn folding_an_annulled_branch_scores_exactly_the_fees() {
 fn folding_a_voided_proposal_drops_the_entry_at_zero() {
     new_test_ext().execute_with(|| {
         enrolled_alice(1_000);
-        buy_and_settle(&alice(), MARKET_A, 1_000, 900, 3, 1);
+        buy_and_settle(&alice(), MARKET_A, 1_000, 900, 3, PAR);
         settle_book(
             &alice(),
             MARKET_A,
             BranchDisposition::Void,
             [1_000, 0],
-            [1, 0],
+            [PAR, 0],
         );
 
         assert_ok!(TradingRewards::settle_market_score(
@@ -1935,7 +1942,8 @@ fn folding_a_voided_proposal_drops_the_entry_at_zero() {
 fn settlement_credits_only_the_book_acquired_part_of_the_terminal_position() {
     // 08 §2.6 rule 3, through the pallet. The terminal position exceeds what
     // the book sold, so an implementation crediting `position` alone lands on
-    // 2,000 instead of 600.
+    // 500 instead of 150. The branch settles at half par, which also separates
+    // a per-unit fraction from an integer 1.
     new_test_ext().execute_with(|| {
         enrolled_alice(1_000);
         buy(&alice(), MARKET_A, 300, 150, 0);
@@ -1944,14 +1952,14 @@ fn settlement_credits_only_the_book_acquired_part_of_the_terminal_position() {
             MARKET_A,
             BranchDisposition::Realized,
             [1_000, 0],
-            [2, 0],
+            [PAR / 2, 0],
         );
         assert_ok!(TradingRewards::settle_market_score(
             RuntimeOrigin::signed(bob()),
             alice(),
             MARKET_A
         ));
-        assert_eq!(record(&alice()).epoch.received, 600);
+        assert_eq!(record(&alice()).epoch.received, 150);
     });
 }
 
@@ -2012,8 +2020,9 @@ fn a_winning_epoch_accrues_the_reward_in_usdc_and_re_snapshots() {
         VitUsdcRate::set(Some(VIT_RATE));
         enrolled_alice(1_000);
         authorize_budget_usdc(10_000);
-        // Spend 1,000 and take back 100,000: net +99,000, capped at 40,000.
-        buy_and_settle(&alice(), MARKET_A, 1_000, 1_000, 0, 100);
+        // Spend 1,000 on 100,000 units at 0.01 and redeem them at par: back
+        // 100,000, net +99,000, capped at 40,000.
+        buy_and_settle(&alice(), MARKET_A, 100_000, 1_000, 0, PAR);
         assert_ok!(TradingRewards::settle_market_score(
             RuntimeOrigin::signed(bob()),
             alice(),
@@ -2071,7 +2080,7 @@ fn settle_epoch_is_idempotent_per_participant_per_epoch() {
         VitUsdcRate::set(Some(VIT_RATE));
         enrolled_alice(1_000);
         authorize_budget_usdc(10_000);
-        buy_and_settle(&alice(), MARKET_A, 1_000, 1_000, 0, 100);
+        buy_and_settle(&alice(), MARKET_A, 100_000, 1_000, 0, PAR);
         assert_ok!(TradingRewards::settle_market_score(
             RuntimeOrigin::signed(bob()),
             alice(),
@@ -2103,7 +2112,7 @@ fn settle_epoch_refuses_while_an_unfolded_score_entry_remains() {
         VitUsdcRate::set(Some(VIT_RATE));
         enrolled_alice(1_000);
         authorize_budget_usdc(10_000);
-        buy_and_settle(&alice(), MARKET_A, 1_000, 1_000, 0, 100);
+        buy_and_settle(&alice(), MARKET_A, 100_000, 1_000, 0, PAR);
         // A second market, still open, carrying the loss.
         buy(&alice(), MARKET_B, 1_000, 1_000, 0);
         assert_ok!(TradingRewards::settle_market_score(

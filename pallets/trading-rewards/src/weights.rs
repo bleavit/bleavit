@@ -1,8 +1,16 @@
 //! Weights for `pallet-trading-rewards`.
 //!
 //! Pallet-local fallbacks are conservative storage-read/write counts taken from
-//! the call bodies. Production binds the generated runtime artifact when TR7
-//! wires the pallet into `construct_runtime!` (15 §4.5).
+//! the call bodies. **Production binds the generated runtime artifact**
+//! (`runtime/bleavit-runtime/src/weights/pallet_trading_rewards.rs`, TR7); what
+//! is left here is what a mock runtime charges, so the counts are kept true
+//! rather than deleted.
+//!
+//! Two of them cannot be read off this crate's own source, because the cost is
+//! on the other side of a `Config` seam: `settle_market_score` calls
+//! `T::SettledMarkets::settlement`, and the production adapter reads the book,
+//! its vault and the account's two scalar positions. The generated artifact
+//! measures those; a fallback cannot (15 §4.5).
 
 use core::marker::PhantomData;
 use frame_support::traits::Get;
@@ -22,7 +30,7 @@ pub struct SubstrateWeight<T>(PhantomData<T>);
 impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
     fn enroll() -> Weight {
         Weight::from_parts(65_000_000, 3_640)
-            .saturating_add(T::DbWeight::get().reads(12))
+            .saturating_add(T::DbWeight::get().reads(11))
             .saturating_add(T::DbWeight::get().writes(5))
     }
 
@@ -52,7 +60,7 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
 
     fn settle_epoch() -> Weight {
         Weight::from_parts(65_000_000, 3_640)
-            .saturating_add(T::DbWeight::get().reads(11))
+            .saturating_add(T::DbWeight::get().reads(8))
             .saturating_add(T::DbWeight::get().writes(4))
     }
 }
@@ -60,7 +68,7 @@ impl<T: frame_system::Config> WeightInfo for SubstrateWeight<T> {
 impl WeightInfo for () {
     fn enroll() -> Weight {
         Weight::from_parts(65_000_000, 3_640)
-            .saturating_add(RocksDbWeight::get().reads(12))
+            .saturating_add(RocksDbWeight::get().reads(11))
             .saturating_add(RocksDbWeight::get().writes(5))
     }
 
@@ -90,7 +98,7 @@ impl WeightInfo for () {
 
     fn settle_epoch() -> Weight {
         Weight::from_parts(65_000_000, 3_640)
-            .saturating_add(RocksDbWeight::get().reads(11))
+            .saturating_add(RocksDbWeight::get().reads(8))
             .saturating_add(RocksDbWeight::get().writes(4))
     }
 }

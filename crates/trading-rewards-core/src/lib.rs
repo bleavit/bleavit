@@ -3,12 +3,39 @@
 //! Design: `docs/proposals/2026-08-09-vit-trading-accuracy-rewards-design.md` §4.4–§4.5.
 
 use futarchy_primitives::{
-    bounds::SCORE_ENTRY_LIFETIME_BLOCKS, kernel::RATE_HEADROOM, Balance, MarketId,
+    bounds::SCORE_ENTRY_LIFETIME_BLOCKS,
+    kernel::{RATE_HEADROOM, SCORE_SCALE},
+    Balance, MarketId,
 };
 use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 
 const PERBILL: u128 = 1_000_000_000;
+
+/// The fixed-point scale [`MarketSettlement::settled_value`] is expressed on:
+/// `settled_value / SETTLED_VALUE_SCALE` is the branch's terminal redemption
+/// value per unit, and par is exactly [`SETTLED_VALUE_SCALE`].
+///
+/// **A per-unit value is a fraction, so a plain integer cannot carry it.** A
+/// scalar unit is denominated in the same base units as branch-USDC — the
+/// market's `buy_branch` splits `cost` of branch-USDC into `cost` LONG plus
+/// `cost` SHORT units — so one complete set redeems at par for **one** base
+/// unit and one LONG unit redeems for `s / 1e9` of it, where `s` is the
+/// settled score the ledger stores. Every value below par therefore floors to
+/// zero as an integer, which would credit rule 3 with nothing at all and score
+/// a trader who held an accurate position to settlement at `−spent`, the whole
+/// notional. That is the SQ-1051 defect class exactly, arriving through the
+/// other rule.
+///
+/// 08 §2.6 rule 3's own wording is the tell: *"Settlement adds
+/// `min(position, book_acquired) × settled_value` to `received`, **rounded
+/// down**"*. A product of two integers needs no rounding, so the value the
+/// rule multiplies by was never an integer.
+///
+/// The scale is the ledger's own [`SCORE_SCALE`], so [`on_settle`] performs the
+/// identical arithmetic `redeem_scalar` performs (`a × s / 1e9`, floored) and
+/// the credit equals the USDC the redemption really pays.
+pub const SETTLED_VALUE_SCALE: Balance = SCORE_SCALE as Balance;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum CoreError {
@@ -104,7 +131,15 @@ pub struct MarketSettlement {
     pub disposition: BranchDisposition,
     /// The account's terminal branch position, per scalar side.
     pub position: [Balance; 2],
-    /// The branch's terminal redemption value per unit, per scalar side.
+    /// The branch's terminal redemption value per unit, per scalar side, on the
+    /// [`SETTLED_VALUE_SCALE`] fixed-point grid — see that constant for why a
+    /// bare integer cannot carry a per-unit value.
+    ///
+    /// Par is `SETTLED_VALUE_SCALE`, and no unit can redeem above par: the
+    /// ledger's `ensure_score` refuses a settled score above the scale, and a
+    /// complete LONG+SHORT set is worth exactly one base unit. [`on_settle`]
+    /// clamps to par anyway, because the supplier of this value is a runtime
+    /// adapter outside this kernel.
     pub settled_value: [Balance; 2],
 }
 
@@ -207,6 +242,33 @@ pub fn on_sell(
     Ok(())
 }
 
+/// `floor(a × v / SETTLED_VALUE_SCALE)` for any `a`, with `v` already clamped
+/// to par — **and it cannot overflow**, which is the point.
+///
+/// Writing it as `a.checked_mul(v)? / SCALE` would fail for
+/// `a > u128::MAX / 1e9`, and a failure here is not a no-op like every other
+/// failure in this program: it comes back out of `settle_market_score`, and a
+/// market that has already settled can never take the timeout arm, so the score
+/// entry can neither fold nor expire and the bond behind it is locked for good.
+/// Splitting `a = q × SCALE + r` removes the failure instead of reporting it:
+/// `q × v ≤ q × SCALE ≤ a`, and `r × v < SCALE²= 1e18`, so neither product can
+/// leave `u128` and `floor(a × v / SCALE) = q × v + floor(r × v / SCALE)`
+/// exactly.
+fn scale_down(a: Balance, v: Balance) -> Option<Balance> {
+    let whole = (a / SETTLED_VALUE_SCALE).checked_mul(v)?;
+    let part = (a % SETTLED_VALUE_SCALE).checked_mul(v)? / SETTLED_VALUE_SCALE;
+    whole.checked_add(part)
+}
+
+/// 08 §2.6 rule 3: credit the book-acquired part of the terminal position at
+/// the branch's per-unit redemption value, rounded down.
+///
+/// `settled_value` is on the [`SETTLED_VALUE_SCALE`] grid and is **clamped to
+/// par here**, not refused above it. The value crosses a runtime seam
+/// ([`SettledMarkets`]), so this kernel treats it as untrusted input; refusing
+/// would be the one refusal in this program that strands a bond permanently
+/// (see [`scale_down`]), while par is the largest value any unit can lawfully
+/// redeem for, so the clamp cannot credit more than the market could pay.
 pub fn on_settle(
     s: &mut MarketScore,
     position: [Balance; 2],
@@ -214,9 +276,8 @@ pub fn on_settle(
 ) -> Result<(), CoreError> {
     for side in 0..2 {
         let eligible = core::cmp::min(position[side], s.book_acquired[side]);
-        let credit = eligible
-            .checked_mul(settled_value[side])
-            .ok_or(CoreError::Overflow)?;
+        let value = core::cmp::min(settled_value[side], SETTLED_VALUE_SCALE);
+        let credit = scale_down(eligible, value).ok_or(CoreError::Overflow)?;
         s.received = s.received.checked_add(credit).ok_or(CoreError::Overflow)?;
         s.book_acquired[side] = s.book_acquired[side].saturating_sub(eligible);
     }
@@ -439,8 +500,81 @@ mod tests {
     fn settlement_credits_only_the_book_acquired_remainder() {
         let mut s = MarketScore::default();
         on_buy(&mut s, 0, 1_000, 500, 3).expect("no overflow");
-        on_settle(&mut s, [1_000, 0], [1, 0]).expect("no overflow");
-        assert_eq!(s.received, 1_000);
+        on_settle(&mut s, [1_000, 0], [SETTLED_VALUE_SCALE, 0]).expect("no overflow");
+        assert_eq!(s.received, 1_000, "1_000 units redeeming at par");
+    }
+
+    // TR7: the defect the scale exists to prevent, stated as its own test.
+    // A branch that settles anywhere below par is the ordinary case — the
+    // settled score is a metric reading, not a coin flip — and under an
+    // integer `settled_value` every one of those readings floors to zero.
+    // The trader would then score `received = 0` against a real `spent` and
+    // fold a debit of the whole notional, which is the SQ-1051 failure
+    // arriving through rule 3 instead of rule 4. Two sub-par values, so an
+    // implementation that hardcoded one cannot pass.
+    #[test]
+    fn a_sub_par_branch_credits_its_fraction_rather_than_nothing() {
+        for (numerator, expected) in [(6_u128, 600_u128), (1, 100)] {
+            let mut s = MarketScore::default();
+            on_buy(&mut s, 0, 1_000, 500, 3).expect("no overflow");
+            let value = numerator * SETTLED_VALUE_SCALE / 10;
+            on_settle(&mut s, [1_000, 0], [value, 0]).expect("no overflow");
+            assert_eq!(
+                s.received, expected,
+                "1_000 units at 0.{numerator} of par credits {expected}, never 0"
+            );
+        }
+    }
+
+    // The value crosses a runtime seam, so the kernel does not trust it. Par
+    // is the largest any unit can lawfully redeem for, and clamping is the
+    // only response that neither over-credits nor strands the bond.
+    #[test]
+    fn a_settled_value_above_par_is_clamped_rather_than_refused() {
+        let mut s = MarketScore::default();
+        on_buy(&mut s, 0, 1_000, 500, 3).expect("no overflow");
+        on_settle(&mut s, [1_000, 0], [SETTLED_VALUE_SCALE * 7, 0]).expect("no overflow");
+        assert_eq!(s.received, 1_000, "clamped to par, not 7 000");
+    }
+
+    // The obligation the plan states in words: the largest value the adapter
+    // can produce (par) against the largest `eligible` the type admits, and
+    // the fold must succeed. `checked_mul(eligible, par)` would return `None`
+    // here, and that error reaches `settle_market_score`, where the market is
+    // already terminal — so the timeout arm can never fire and the bond is
+    // locked permanently. The credit is also exact rather than merely
+    // non-erroring.
+    #[test]
+    fn the_largest_eligible_at_par_folds_instead_of_locking_the_bond() {
+        let mut s = MarketScore {
+            book_acquired: [Balance::MAX, 0],
+            ..Default::default()
+        };
+        on_settle(&mut s, [Balance::MAX, 0], [SETTLED_VALUE_SCALE, 0]).expect("no overflow");
+        assert_eq!(s.received, Balance::MAX, "par credits one-for-one, exactly");
+        assert_eq!(s.book_acquired, [0, 0]);
+    }
+
+    // `scale_down` splits the product to stay inside u128, so it has to agree
+    // with the naive form everywhere the naive form is defined.
+    #[test]
+    fn scaling_down_agrees_with_the_naive_product_it_replaces() {
+        for a in [
+            0_u128,
+            1,
+            7,
+            SETTLED_VALUE_SCALE - 1,
+            SETTLED_VALUE_SCALE,
+            1_234_567_891,
+        ] {
+            for v in [0_u128, 1, 3, SETTLED_VALUE_SCALE / 3, SETTLED_VALUE_SCALE] {
+                assert_eq!(
+                    scale_down(a, v),
+                    Some(a * v / SETTLED_VALUE_SCALE),
+                    "scale_down({a}, {v})"
+                );
+            }
+        }
     }
 
     // I2 (fix round 1): the test above sets position == book_acquired, so an
@@ -448,16 +582,17 @@ mod tests {
     // `min(position, book_acquired)` clamp `book_acquired` exists to
     // enforce — design §4.4) would still pass it. Here position (1_000)
     // exceeds book_acquired (300), so crediting by position alone would give
-    // 1_000 * 2 = 2_000 instead of the correct 300 * 2 = 600, and leaving
-    // book_acquired un-decremented would also be visible.
+    // 1_000 * 0.5 = 500 instead of the correct 300 * 0.5 = 150, and leaving
+    // book_acquired un-decremented would also be visible. The half-par value
+    // keeps the two figures apart under the TR7 scale too.
     #[test]
     fn settlement_clamps_to_book_acquired_when_position_is_larger() {
         let mut s = MarketScore::default();
         on_buy(&mut s, 0, 300, 150, 0).expect("no overflow");
-        on_settle(&mut s, [1_000, 0], [2, 0]).expect("no overflow");
+        on_settle(&mut s, [1_000, 0], [SETTLED_VALUE_SCALE / 2, 0]).expect("no overflow");
         assert_eq!(
-            s.received, 600,
-            "eligible = min(1_000, 300) = 300, credit = 300 * 2"
+            s.received, 150,
+            "eligible = min(1_000, 300) = 300, credit = 300 * 0.5"
         );
         assert_eq!(
             s.book_acquired[0], 0,
@@ -476,11 +611,14 @@ mod tests {
         let mut s = MarketScore::default();
         on_buy(&mut s, 0, 200, 100, 0).expect("no overflow");
         on_buy(&mut s, 1, 300, 150, 0).expect("no overflow");
-        on_settle(&mut s, [200, 300], [2, 3]).expect("no overflow");
+        // The two sides of one scalar book always sum to par, which is the
+        // shape the runtime adapter produces: `[s, SCORE_SCALE - s]`.
+        let long = SETTLED_VALUE_SCALE / 4;
+        on_settle(&mut s, [200, 300], [long, SETTLED_VALUE_SCALE - long]).expect("no overflow");
         assert_eq!(
             s.received,
-            200 * 2 + 300 * 3,
-            "both branches credit: 400 + 900"
+            200 / 4 + 300 * 3 / 4,
+            "both branches credit: 50 + 225"
         );
         assert_eq!(s.book_acquired, [0, 0]);
     }

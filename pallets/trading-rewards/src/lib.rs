@@ -719,13 +719,28 @@ pub mod pallet {
                 let mut forfeited: Balance = 0;
                 match outcome {
                     Outcome::Reward(demand) => {
-                        accrued = core::cmp::min(demand, Self::budget_headroom_usdc());
+                        // **One read of each figure, used by both the clamp
+                        // and the guard.** Calling `budget_headroom_usdc()`
+                        // here and `authorized_budget_usdc()` again inside the
+                        // `ensure!` is what the code used to do, and it read
+                        // `fee.vit_usdc_rate`, the sovereign's VIT balance and
+                        // `TotalAccrued` twice each for one settlement. The
+                        // duplication was invisible in the declared weight
+                        // (which counted call sites, 11) and equally invisible
+                        // in a measured one (`frame-benchmarking` charges a
+                        // repeat access to an already-tracked key as one
+                        // read, 8), so nothing would ever have reported it.
+                        // Caching costs nothing and makes the code, the
+                        // comment and the measurement agree at 8.
+                        let budget = Self::authorized_budget_usdc().unwrap_or_default();
+                        let promised = TotalAccrued::<T>::get();
+                        accrued = core::cmp::min(demand, budget.saturating_sub(promised));
                         if accrued > 0 {
                             record.accrued = record
                                 .accrued
                                 .checked_add(accrued)
                                 .ok_or(Error::<T>::AccountingOverflow)?;
-                            let total = TotalAccrued::<T>::get()
+                            let total = promised
                                 .checked_add(accrued)
                                 .ok_or(Error::<T>::AccountingOverflow)?;
                             // 08 §2.6: an exhausted budget clamps the reward
@@ -737,10 +752,7 @@ pub mod pallet {
                             // fails the *whole* dispatch: the epoch stays
                             // unclosed and the bond stays locked until a later
                             // call succeeds.
-                            ensure!(
-                                total <= Self::authorized_budget_usdc().unwrap_or_default(),
-                                Error::<T>::BudgetExceeded
-                            );
+                            ensure!(total <= budget, Error::<T>::BudgetExceeded);
                             TotalAccrued::<T>::put(total);
                         }
                     }
