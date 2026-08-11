@@ -612,8 +612,19 @@ def scan_markers(root: Path) -> tuple[list[MarkerReference], list[str]]:
             lines = text.splitlines()
             tests = find_test_functions(lines)
             relative = path.relative_to(root)
+            # `tests_<topic>.rs` is a test file by every convention this
+            # repository uses — the runtime alone carries a dozen of them, each
+            # declared `#[cfg(test)] mod tests_…;` from `lib.rs` rather than
+            # carrying the attribute itself. Before TR7 the rule below matched
+            # only the bare name `tests.rs`, so a marker in any of them failed
+            # as "not attached to a test function" while the function it sat on
+            # was plainly a test. The consequence was quiet: a marker that
+            # cannot be placed gets left out, and the key's binding then rests
+            # on prose in `registry.toml` instead of on a test the checker can
+            # see.
             test_context = (
                 path.name == "tests.rs"
+                or path.name.startswith("tests_")
                 or "tests" in path.parts
                 or "#[cfg(test)]" in text
             )

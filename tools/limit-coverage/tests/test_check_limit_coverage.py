@@ -358,6 +358,24 @@ class LimitCoverageTests(unittest.TestCase):
         )
         self.assert_fails_with("marker is not attached to a test function")
 
+    def test_a_marker_in_a_topic_named_test_file_is_attached(self) -> None:
+        # `tests_<topic>.rs` files are declared `#[cfg(test)] mod …;` from
+        # their crate root, so the attribute is not in the file itself. Before
+        # TR7 the test-context rule matched only the bare name `tests.rs` and
+        # a marker in one of them failed as unattached — so the marker got
+        # left out and the key's binding fell back to prose (bleavit-runtime
+        # alone has a dozen such files).
+        self.write("pallets/epoch/src/tests.rs", "#[test]\nfn no_marker() {}\n")
+        self.write("pallets/epoch/src/tests_intake.rs", BASE_RUST)
+        self.assertEqual(self.failures(), [])
+
+    def test_a_marker_in_an_ordinary_source_file_is_still_unattached(self) -> None:
+        # The widening above must not admit any file whose name merely starts
+        # with something else; a marker in `lib.rs` still has to fail.
+        self.write("pallets/epoch/src/tests.rs", "#[test]\nfn no_marker() {}\n")
+        self.write("pallets/epoch/src/lib.rs", BASE_RUST)
+        self.assert_fails_with("marker is not attached to a test function")
+
     def test_param_bounds_key_missing_from_fixture_fails(self) -> None:
         self.write("tools/limit-coverage/genesis-keys.json", json.dumps([]) + "\n")
         self.assert_fails_with("param-bounds key 'epoch.length' is absent")
