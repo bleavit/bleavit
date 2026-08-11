@@ -531,14 +531,30 @@ class RegistryGroundingTests(unittest.TestCase):
         # classification plus the test nobody had written, that `execute` itself
         # refuses past the retry window (V-210).
         #
-        # 207 -> 208 and 113 -> 114 on 2026-08-10 with `rwd.rate`, the trading
-        # accuracy reward rate of 08 Section 2.6. Both counters move together,
-        # so by this counter's own rule it is a new key rather than an adoption:
+        # 207 -> 212 and 113 -> 114 on 2026-08-10 with the trading accuracy
+        # reward program of 08 Section 2.6. The two counters move by DIFFERENT
+        # amounts, which is the first time that has happened, so read them
+        # separately rather than as one number.
+        #
+        # The genesis counter moves by one, for `rwd.rate`. That is the only
+        # SEEDED key the program adds: the minimum bond reuses `ledger.pos_dep`
+        # and the per-epoch budget is a call argument, so neither earns a key.
+        # By this counter's own rule it is a new key rather than an adoption --
         # the row did not exist before, and it is seeded at genesis so that
-        # enrollment works from the start. It is the ONLY row that program adds.
-        # The minimum bond reuses `ledger.pos_dep` and the per-epoch budget is a
-        # call argument, so neither earns a key of its own.
-        self.assertEqual(len(entries), 208)
+        # enrollment works from the start.
+        #
+        # The entry counter moves by five, because four 13 Section 4 structural
+        # limits arrive with it: `Trading-reward budget authorizations`,
+        # `MaxParticipants`, `MaxScoredMarketsPerAccount` and
+        # `ScoreEntryLifetime`. Those are bounds on collections and on an
+        # entry's age. They are not ParamKeys, are not amendable, and are not
+        # seeded, so they belong to the total and to nothing else here.
+        #
+        # An earlier revision of this comment asserted 208 and said `rwd.rate`
+        # was "the ONLY row that program adds". That was true of the seeded
+        # keys and false of the registry, and it is exactly the drift this
+        # counter exists to catch -- it caught it in CI.
+        self.assertEqual(len(entries), 212)
         self.assertEqual(len(json_keys), 114)
         self.assertEqual(len(classified_genesis), 114)
         self.assertEqual(len(model_bytes), 114)

@@ -53,10 +53,10 @@ impl<T: frame_system::Config> pallet_futarchy_treasury::WeightInfo for WeightInf
 	/// Proof: `ForeignAssets::Account` (`max_values`: None, `max_size`: Some(732), added: 3207, mode: `MaxEncodedLen`)
 	fn fund_budget_line() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `13738`
+		//  Measured:  `13601`
 		//  Estimated: `32274`
-		// Minimum execution time: 107_200_000 picoseconds.
-		Weight::from_parts(112_610_000, 0)
+		// Minimum execution time: 104_810_000 picoseconds.
+		Weight::from_parts(115_550_000, 0)
 			.saturating_add(Weight::from_parts(0, 32274))
 			.saturating_add(T::DbWeight::get().reads(19))
 			.saturating_add(T::DbWeight::get().writes(5))
@@ -69,10 +69,10 @@ impl<T: frame_system::Config> pallet_futarchy_treasury::WeightInfo for WeightInf
 	/// Proof: `Constitution::Params` (`max_values`: None, `max_size`: Some(132), added: 2607, mode: `MaxEncodedLen`)
 	fn spend() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `11428`
+		//  Measured:  `11395`
 		//  Estimated: `26846`
-		// Minimum execution time: 43_250_000 picoseconds.
-		Weight::from_parts(46_170_000, 0)
+		// Minimum execution time: 40_610_000 picoseconds.
+		Weight::from_parts(44_020_000, 0)
 			.saturating_add(Weight::from_parts(0, 26846))
 			.saturating_add(T::DbWeight::get().reads(7))
 			.saturating_add(T::DbWeight::get().writes(2))
@@ -85,10 +85,10 @@ impl<T: frame_system::Config> pallet_futarchy_treasury::WeightInfo for WeightInf
 	/// Proof: `Constitution::Params` (`max_values`: None, `max_size`: Some(132), added: 2607, mode: `MaxEncodedLen`)
 	fn open_stream() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `21845`
+		//  Measured:  `21812`
 		//  Estimated: `26846`
-		// Minimum execution time: 53_110_000 picoseconds.
-		Weight::from_parts(54_930_000, 0)
+		// Minimum execution time: 48_350_000 picoseconds.
+		Weight::from_parts(51_420_000, 0)
 			.saturating_add(Weight::from_parts(0, 26846))
 			.saturating_add(T::DbWeight::get().reads(7))
 			.saturating_add(T::DbWeight::get().writes(2))
@@ -101,10 +101,10 @@ impl<T: frame_system::Config> pallet_futarchy_treasury::WeightInfo for WeightInf
 	/// Proof: `Constitution::Params` (`max_values`: None, `max_size`: Some(132), added: 2607, mode: `MaxEncodedLen`)
 	fn claim_stream() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `21927`
+		//  Measured:  `21894`
 		//  Estimated: `26846`
-		// Minimum execution time: 50_170_000 picoseconds.
-		Weight::from_parts(51_960_000, 0)
+		// Minimum execution time: 45_860_000 picoseconds.
+		Weight::from_parts(49_020_000, 0)
 			.saturating_add(Weight::from_parts(0, 26846))
 			.saturating_add(T::DbWeight::get().reads(7))
 			.saturating_add(T::DbWeight::get().writes(2))
@@ -117,10 +117,10 @@ impl<T: frame_system::Config> pallet_futarchy_treasury::WeightInfo for WeightInf
 	/// Proof: `Constitution::Params` (`max_values`: None, `max_size`: Some(132), added: 2607, mode: `MaxEncodedLen`)
 	fn cancel_stream() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `11510`
+		//  Measured:  `11477`
 		//  Estimated: `26846`
-		// Minimum execution time: 41_620_000 picoseconds.
-		Weight::from_parts(44_640_000, 0)
+		// Minimum execution time: 39_190_000 picoseconds.
+		Weight::from_parts(44_060_000, 0)
 			.saturating_add(Weight::from_parts(0, 26846))
 			.saturating_add(T::DbWeight::get().reads(7))
 			.saturating_add(T::DbWeight::get().writes(2))
@@ -133,10 +133,10 @@ impl<T: frame_system::Config> pallet_futarchy_treasury::WeightInfo for WeightInf
 	/// Proof: `Constitution::Params` (`max_values`: None, `max_size`: Some(132), added: 2607, mode: `MaxEncodedLen`)
 	fn issue_vit() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `11428`
+		//  Measured:  `11395`
 		//  Estimated: `26846`
-		// Minimum execution time: 43_980_000 picoseconds.
-		Weight::from_parts(46_920_000, 0)
+		// Minimum execution time: 41_460_000 picoseconds.
+		Weight::from_parts(45_560_000, 0)
 			.saturating_add(Weight::from_parts(0, 26846))
 			.saturating_add(T::DbWeight::get().reads(7))
 			.saturating_add(T::DbWeight::get().writes(2))
@@ -149,10 +149,10 @@ impl<T: frame_system::Config> pallet_futarchy_treasury::WeightInfo for WeightInf
 	/// Proof: `Constitution::Params` (`max_values`: None, `max_size`: Some(132), added: 2607, mode: `MaxEncodedLen`)
 	fn recover_foreign() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `11428`
+		//  Measured:  `11395`
 		//  Estimated: `26846`
-		// Minimum execution time: 40_980_000 picoseconds.
-		Weight::from_parts(43_950_000, 0)
+		// Minimum execution time: 38_960_000 picoseconds.
+		Weight::from_parts(43_260_000, 0)
 			.saturating_add(Weight::from_parts(0, 26846))
 			.saturating_add(T::DbWeight::get().reads(7))
 			.saturating_add(T::DbWeight::get().writes(2))
@@ -175,10 +175,10 @@ impl<T: frame_system::Config> pallet_futarchy_treasury::WeightInfo for WeightInf
 	/// Proof: `System::Account` (`max_values`: None, `max_size`: Some(128), added: 2603, mode: `MaxEncodedLen`)
 	fn execute_coretime_renewal() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `13079`
+		//  Measured:  `13013`
 		//  Estimated: `27060`
-		// Minimum execution time: 126_000_000 picoseconds.
-		Weight::from_parts(132_290_000, 0)
+		// Minimum execution time: 121_080_000 picoseconds.
+		Weight::from_parts(133_251_000, 0)
 			.saturating_add(Weight::from_parts(0, 27060))
 			.saturating_add(T::DbWeight::get().reads(18))
 			.saturating_add(T::DbWeight::get().writes(6))
@@ -193,10 +193,10 @@ impl<T: frame_system::Config> pallet_futarchy_treasury::WeightInfo for WeightInf
 	/// Proof: `Constitution::Params` (`max_values`: None, `max_size`: Some(132), added: 2607, mode: `MaxEncodedLen`)
 	fn note_coretime_quote() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `11643`
+		//  Measured:  `11610`
 		//  Estimated: `26846`
-		// Minimum execution time: 42_980_000 picoseconds.
-		Weight::from_parts(46_210_000, 0)
+		// Minimum execution time: 41_260_000 picoseconds.
+		Weight::from_parts(45_520_000, 0)
 			.saturating_add(Weight::from_parts(0, 26846))
 			.saturating_add(T::DbWeight::get().reads(8))
 			.saturating_add(T::DbWeight::get().writes(2))
@@ -219,10 +219,10 @@ impl<T: frame_system::Config> pallet_futarchy_treasury::WeightInfo for WeightInf
 	/// Proof: `System::Account` (`max_values`: None, `max_size`: Some(128), added: 2603, mode: `MaxEncodedLen`)
 	fn prune_coretime_quote() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `12834`
+		//  Measured:  `12768`
 		//  Estimated: `26846`
-		// Minimum execution time: 118_401_000 picoseconds.
-		Weight::from_parts(123_410_000, 0)
+		// Minimum execution time: 113_100_000 picoseconds.
+		Weight::from_parts(123_520_000, 0)
 			.saturating_add(Weight::from_parts(0, 26846))
 			.saturating_add(T::DbWeight::get().reads(16))
 			.saturating_add(T::DbWeight::get().writes(6))
@@ -235,8 +235,8 @@ impl<T: frame_system::Config> pallet_futarchy_treasury::WeightInfo for WeightInf
 		// Proof Size summary in bytes:
 		//  Measured:  `0`
 		//  Estimated: `0`
-		// Minimum execution time: 4_260_000 picoseconds.
-		Weight::from_parts(4_760_000, 0)
+		// Minimum execution time: 4_290_000 picoseconds.
+		Weight::from_parts(4_780_000, 0)
 			.saturating_add(Weight::from_parts(0, 0))
 			.saturating_add(T::DbWeight::get().writes(2))
 	}
@@ -252,10 +252,10 @@ impl<T: frame_system::Config> pallet_futarchy_treasury::WeightInfo for WeightInf
 	/// Proof: `ForeignAssets::Account` (`max_values`: None, `max_size`: Some(732), added: 3207, mode: `MaxEncodedLen`)
 	fn sweep_insurance() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `12310`
+		//  Measured:  `12244`
 		//  Estimated: `26846`
-		// Minimum execution time: 77_790_000 picoseconds.
-		Weight::from_parts(83_020_000, 0)
+		// Minimum execution time: 78_720_000 picoseconds.
+		Weight::from_parts(84_750_000, 0)
 			.saturating_add(Weight::from_parts(0, 26846))
 			.saturating_add(T::DbWeight::get().reads(10))
 			.saturating_add(T::DbWeight::get().writes(5))
@@ -278,10 +278,10 @@ impl<T: frame_system::Config> pallet_futarchy_treasury::WeightInfo for WeightInf
 	/// Proof: `System::Account` (`max_values`: None, `max_size`: Some(128), added: 2603, mode: `MaxEncodedLen`)
 	fn reconcile_insurance() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `12732`
+		//  Measured:  `12666`
 		//  Estimated: `26846`
-		// Minimum execution time: 125_880_000 picoseconds.
-		Weight::from_parts(134_880_000, 0)
+		// Minimum execution time: 126_490_000 picoseconds.
+		Weight::from_parts(135_280_000, 0)
 			.saturating_add(Weight::from_parts(0, 26846))
 			.saturating_add(T::DbWeight::get().reads(17))
 			.saturating_add(T::DbWeight::get().writes(8))
@@ -302,10 +302,10 @@ impl<T: frame_system::Config> pallet_futarchy_treasury::WeightInfo for WeightInf
 	/// Proof: `Balances::Freezes` (`max_values`: None, `max_size`: Some(49), added: 2524, mode: `MaxEncodedLen`)
 	fn create_community_schedule() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `666`
+		//  Measured:  `633`
 		//  Estimated: `6196`
-		// Minimum execution time: 73_860_000 picoseconds.
-		Weight::from_parts(76_860_000, 0)
+		// Minimum execution time: 72_430_000 picoseconds.
+		Weight::from_parts(77_180_000, 0)
 			.saturating_add(Weight::from_parts(0, 6196))
 			.saturating_add(T::DbWeight::get().reads(8))
 			.saturating_add(T::DbWeight::get().writes(6))

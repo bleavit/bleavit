@@ -158,6 +158,13 @@ parameter_types! {
     pub const CurrentEpoch: EpochId = 0;
     pub const TestMaxCollatorCompensationEntries: u32 = 120;
     pub const TestRegisteredCollatorCount: u32 = 1;
+    // 08 §2.6. `fund_trading_rewards` is never dispatched in this harness, so
+    // these two only have to satisfy the `Get` bounds. The pot is an address
+    // no test funds, and the allocation is the 08 §2.1 figure so a reader is
+    // not misled into thinking the harness models a smaller pot.
+    pub TestIncentivePot: AccountId = AccountId32::new([0xF1; 32]);
+    pub const TestIncentiveAllocationAmount: u128 =
+        100_000_000 * futarchy_treasury_core::VIT;
 }
 
 pub struct TestOracleParams;
@@ -245,6 +252,15 @@ impl pallet_futarchy_treasury::Config for Test {
     type OutflowCustody = ();
     type RebatePayout = ();
     type Integrity = ();
+    // 08 §2.6. There is no reward pallet in this harness, so no origin may
+    // reach `fund_trading_rewards` and the funding seam is the unit stub.
+    // `EnsureNever` is the fail-closed choice a signed origin would not be:
+    // the call moves VIT out of the incentive pot, and nothing here models
+    // the sovereign it would move into.
+    type TradingRewardOrigin = frame_system::EnsureNever<AccountId>;
+    type TradingRewardFunding = ();
+    type IncentivePot = TestIncentivePot;
+    type IncentiveAllocationAmount = TestIncentiveAllocationAmount;
     type WeightInfo = ();
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = TestTreasuryBenchmarkHelper;
