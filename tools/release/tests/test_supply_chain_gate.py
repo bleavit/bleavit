@@ -60,19 +60,33 @@ def audited_npm_lockfiles() -> set[str]:
 # gate audits each workspace FROM ITS OWN ROOT (15 §4.5 clause 4), so a gate that
 # quietly audited one workspace four times would still produce four rows, and only
 # distinct per-directory output can tell the two apart.
+#
+# The `unsound` rows carry a full advisory shape rather than `{}`, because leg 5
+# reads them: it keys a waiver on (id, package, version, workspace), so a bare
+# dict would key on empty strings and the fixture would exercise nothing. Root
+# and `app` report the SAME advisory on purpose — that is what proves the key
+# carries the workspace, since one waiver would otherwise cover both.
 STUB_AUDITOR = """#!/usr/bin/env python3
 import json, os, sys
 if '--version' in sys.argv:
     print('cargo-audit 0.22.2')
     raise SystemExit(0)
 if '--json' in sys.argv:
+    unsound = {
+        'kind': 'unsound',
+        'advisory': {'id': 'RUSTSEC-2026-9999', 'title': 'fixture unsoundness'},
+        'package': {'name': 'demo-unsound', 'version': '7.8.9'},
+        'versions': {'patched': ['>=9.0.0']},
+    }
     name = os.path.basename(os.getcwd())
     shapes = {
         'keeper': ([], {'unmaintained': [{}]}),
-        'app':    ([], {'unmaintained': [{}, {}], 'unsound': [{}]}),
+        'app':    ([], {'unmaintained': [{}, {}], 'unsound': [unsound]}),
         'fuzz':   ([], {'unmaintained': [{}, {}, {}, {}]}),
     }
-    ignore, warnings = shapes.get(name, (['RUSTSEC-2026-0001'], {'unmaintained': [{}, {}], 'unsound': [{}]}))
+    ignore, warnings = shapes.get(
+        name, (['RUSTSEC-2026-0001'], {'unmaintained': [{}, {}], 'unsound': [unsound]})
+    )
     print(json.dumps({'settings': {'ignore': ignore}, 'warnings': warnings}))
 raise SystemExit(0)
 """
@@ -131,6 +145,35 @@ clears_when = "never"
 triaged = "2026-08-07"
 """
 
+# Two entries for one advisory, because the stub auditor reports it in two
+# workspaces and leg 5's key carries the workspace (15 §4.5 clause 4). One entry
+# would leave the other finding unwaived and fail the gate, which is the property
+# under test rather than an inconvenience.
+STUB_UNSOUND_WAIVERS = """\
+[[waiver]]
+id = "RUSTSEC-2026-9999"
+package = "demo-unsound"
+version = "7.8.9"
+workspace = "root"
+exposure = "unreachable"
+reason = "fixture"
+blocked_by = "fixture pin"
+clears_when = "never"
+triaged = "2026-08-11"
+
+[[waiver]]
+id = "RUSTSEC-2026-9999"
+package = "demo-unsound"
+version = "7.8.9"
+workspace = "app"
+exposure = "constrained"
+call_sites = ["fixture.rs:1"]
+reason = "fixture"
+blocked_by = "fixture pin"
+clears_when = "never"
+triaged = "2026-08-11"
+"""
+
 
 class SupplyChainSummaryTests(unittest.TestCase):
     def run_gate(self, root: Path) -> dict:
@@ -144,6 +187,8 @@ class SupplyChainSummaryTests(unittest.TestCase):
         waivers.write_text(STUB_WAIVERS, encoding="utf-8")
         npm_waivers = root / "npm-advisory-waivers.toml"
         npm_waivers.write_text(STUB_NPM_WAIVERS, encoding="utf-8")
+        unsound_waivers = root / "unsound-waivers.toml"
+        unsound_waivers.write_text(STUB_UNSOUND_WAIVERS, encoding="utf-8")
         summary = root / "summary.json"
 
         environment = dict(os.environ)
@@ -151,6 +196,7 @@ class SupplyChainSummaryTests(unittest.TestCase):
         environment["BLEAVIT_OSV_SCANNER"] = str(scanner)
         environment["BLEAVIT_GHSA_WAIVERS"] = str(waivers)
         environment["BLEAVIT_NPM_WAIVERS"] = str(npm_waivers)
+        environment["BLEAVIT_UNSOUND_WAIVERS"] = str(unsound_waivers)
         completed = subprocess.run(
             [str(GATE), "--summary-out", str(summary)],
             cwd=REPO_ROOT,
@@ -174,7 +220,7 @@ class SupplyChainSummaryTests(unittest.TestCase):
         """
         with tempfile.TemporaryDirectory() as temporary:
             document = self.run_gate(Path(temporary))
-        self.assertEqual(document["schema"], "bleavit.supply-chain.v4")
+        self.assertEqual(document["schema"], "bleavit.supply-chain.v5")
         self.assertEqual(set(document["workspaces"]), audited_workspace_names())
         self.assertIn("app", document["workspaces"])
         self.assertIn("fuzz", document["workspaces"])
@@ -215,6 +261,29 @@ class SupplyChainSummaryTests(unittest.TestCase):
                     "version": "4.5.6",
                     "reaches_bundle": "no",
                 }
+            ],
+        )
+        # v5: accepted undefined behavior is disclosed on the same terms, and
+        # `exposure` travels with the entry because "the affected function is
+        # called" is a materially different disclosure from "it is not". Both
+        # rows appear because the key carries the workspace.
+        self.assertEqual(
+            document["waived_unsound"],
+            [
+                {
+                    "id": "RUSTSEC-2026-9999",
+                    "package": "demo-unsound",
+                    "version": "7.8.9",
+                    "workspace": "app",
+                    "exposure": "constrained",
+                },
+                {
+                    "id": "RUSTSEC-2026-9999",
+                    "package": "demo-unsound",
+                    "version": "7.8.9",
+                    "workspace": "root",
+                    "exposure": "unreachable",
+                },
             ],
         )
         self.assertEqual(document["workspaces"]["root"]["allowed_warning_count"], 3)

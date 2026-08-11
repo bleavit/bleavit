@@ -108,7 +108,7 @@ class AssembleReleaseTests(unittest.TestCase):
         self.supply_summary.write_text(
             json.dumps(
                 {
-                    "schema": "bleavit.supply-chain.v4",
+                    "schema": "bleavit.supply-chain.v5",
                     "ignored_advisory_ids": ["RUSTSEC-2026-0001"],
                     "waived_ghsa_only": [
                         {"id": "GHSA-vxx9-2994-q338", "package": "yamux", "version": "0.12.1"}
@@ -123,6 +123,19 @@ class AssembleReleaseTests(unittest.TestCase):
                             "package": "@opentelemetry/core",
                             "version": "1.30.1",
                             "reaches_bundle": "no",
+                        }
+                    ],
+                    # v5 discloses accepted undefined behavior as well. cargo-audit
+                    # prints an `unsound` advisory and passes; GHSA grades this
+                    # one as a medium vulnerability, and Dependabot reported it
+                    # against app/Cargo.lock while every gate was green.
+                    "waived_unsound": [
+                        {
+                            "id": "RUSTSEC-2024-0429",
+                            "package": "glib",
+                            "version": "0.18.5",
+                            "workspace": "app",
+                            "exposure": "unreachable",
                         }
                     ],
                     "npm_lockfiles": ["app/pnpm-lock.yaml"],
