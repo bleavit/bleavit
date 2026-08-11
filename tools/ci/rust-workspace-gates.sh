@@ -164,7 +164,12 @@ cargo test -p bleavit-runtime --features try-runtime --locked
 # computation, which is exactly why nothing had ever run this combination
 # unfiltered before. Fixing that is a separate, unrelated undertaking; running
 # it here would turn this gate red for a reason no trading-rewards change
-# caused. See the TR7 fix-round report for the full failing-test list.
+# caused. Tracked as SQ-1053, which owns the decision: either the
+# fabrication is a legitimate measurement artifact and this leg can only
+# ever be an opted-in module list, or it is a defect and both crates get
+# repaired. `pallet-oracle` sits in the same blind spot (`bench_report`,
+# found independently by #299 the same day). Full failing-test list is in
+# the TR7 fix-round findings.
 cargo test -p bleavit-runtime --features runtime-benchmarks --locked tests_trading_rewards
 
 # B16 deployable-image matrix. Every profile compiles and tests with Cargo
