@@ -53,9 +53,9 @@
     "Welfare",
     "XcmpQueue"
   ],
-  "metadata_sha256": "d2f9e81a9e76949aaef1230333e0d73a4599f439ce3d3f3681a1663c097277b8",
+  "metadata_sha256": "2623062b9ed7c5d5a287c76ec4519154f04d0109257a169182b31cfce0d3f3d0",
   "metadata_version": 15,
-  "on_chain_wasm_sha256": "d2d126a3547439bf655b1529bd6af009f1ec0215995fb45636c4c3c420cd0077",
+  "on_chain_wasm_sha256": "bd8ab220aaa545eff2cf8e93d1b360d6e0da444738aec8601b546965295e6116",
   "rfc78_merkleized_metadata_hash": null,
   "rfc78_status": "not enabled by the runtime build recipe",
   "runtime_profile": "bootstrap",
@@ -69,6 +69,6 @@
     "tokenSymbol": "VIT"
   },
   "transaction_version": 1,
-  "wasm_file_sha256": "d2d126a3547439bf655b1529bd6af009f1ec0215995fb45636c4c3c420cd0077",
-  "wasm_sha256": "d2d126a3547439bf655b1529bd6af009f1ec0215995fb45636c4c3c420cd0077"
+  "wasm_file_sha256": "bd8ab220aaa545eff2cf8e93d1b360d6e0da444738aec8601b546965295e6116",
+  "wasm_sha256": "bd8ab220aaa545eff2cf8e93d1b360d6e0da444738aec8601b546965295e6116"
 }

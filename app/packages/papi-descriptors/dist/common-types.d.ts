@@ -11,10 +11,10 @@ export type I4mddgoa69c0a2 = Array<DigestItem>;
 export type DigestItem = Enum<{ PreRuntime: Anonymize<I82jm9g7pufuel>; Consensus: Anonymize<I82jm9g7pufuel>; Seal: Anonymize<I82jm9g7pufuel>; Other: Uint8Array; RuntimeEnvironmentUpdated: undefined }>;
 export declare const DigestItem: GetEnum<DigestItem>;
 export type I82jm9g7pufuel = [SizedHex<4>, Uint8Array];
-export type I6rvl2tddf6nom = Array<{ phase: Phase; event: Enum<{ System: Anonymize<Ievg5tbb0c0imi>; ParachainSystem: Anonymize<Icbsekf57miplo>; Balances: Anonymize<I5fsnqj7i7t2q7>; ForeignAssets: Anonymize<Ia8v0gq53fp7hi>; TransactionPayment: TransactionPaymentEvent; AssetTxPayment: Anonymize<Ie598chmfqlqa>; Vesting: Anonymize<I7uu9ebnucfti5>; Referenda: Anonymize<Idfraa3b4eu018>; ConvictionVoting: Anonymize<I7pql8a2uf8mlq>; Preimage: PreimageEvent; Scheduler: Anonymize<I65ch62pnta2aj>; Utility: Anonymize<I6bvha4286as1k>; Proxy: Anonymize<Iv55bs0pjqvqj>; Multisig: Anonymize<Idois67t46rbhf>; Migrations: Anonymize<I94co7vj7h6bo>; Sudo: Anonymize<I9uuaid0pmci1f>; XcmpQueue: Anonymize<Idsqc7mhp6nnle>; MessageQueue: Anonymize<I2kosejppk3jon>; CumulusXcm: Anonymize<I5uv57c3fffoi9>; PolkadotXcm: Anonymize<If95hivmqmkiku>; CollatorSelection: Anonymize<I4srakrmf0fspo>; Session: Anonymize<I6ue0ck5fc3u44>; Constitution: Anonymize<I8jqccj5fq1oj>; ConditionalLedger: Anonymize<Icog4v85gspb3i>; Market: Anonymize<Icul1a5j3uhgpq>; Welfare: Anonymize<Iotv6nd407lpv>; Oracle: Anonymize<I9rq31q6e4anhq>; IncidentRegistry: Anonymize<I9o4h3u7u17bqn>; MilestoneRegistry: Anonymize<I9o4h3u7u17bqn>; FutarchyTreasury: Anonymize<I1djk4du85etnv>; Guardian: Anonymize<I2hnabup83elbp>; Attestor: Anonymize<Icfh12v8grnajk>; Epoch: Anonymize<I16r8b84a092kl>; ExecutionGuard: Anonymize<I5k67p27a3s88k>; ClientRegistry: Anonymize<Iaqnvtu78qlr78>; QuestionService: Anonymize<Iftu3nng0chq4r>; ServiceLedger: Anonymize<Icog4v85gspb3i>; TradingRewards: Anonymize<Ibnd59e3mcn2vq> }>; topics: Anonymize<Ic5m5lp1oioo8r> }>;
+export type I5ltmh69i7gt73 = Array<{ phase: Phase; event: Enum<{ System: Anonymize<If9ngv23j7tmvu>; ParachainSystem: Anonymize<Icbsekf57miplo>; Balances: Anonymize<I5fsnqj7i7t2q7>; ForeignAssets: Anonymize<Ia8v0gq53fp7hi>; TransactionPayment: TransactionPaymentEvent; AssetTxPayment: Anonymize<Ie598chmfqlqa>; Vesting: Anonymize<I7uu9ebnucfti5>; Referenda: Anonymize<Idfraa3b4eu018>; ConvictionVoting: Anonymize<I7pql8a2uf8mlq>; Preimage: PreimageEvent; Scheduler: Anonymize<I3ce3mf0v1pmt8>; Utility: Anonymize<Icji5ou7s8fhi2>; Proxy: Anonymize<I1jp84e94es27l>; Multisig: Anonymize<I19l4ocjgto2sb>; Migrations: Anonymize<I94co7vj7h6bo>; Sudo: Anonymize<Idj62lcqsikh4e>; XcmpQueue: Anonymize<Idsqc7mhp6nnle>; MessageQueue: Anonymize<I2kosejppk3jon>; CumulusXcm: Anonymize<I5uv57c3fffoi9>; PolkadotXcm: Anonymize<If95hivmqmkiku>; CollatorSelection: Anonymize<I4srakrmf0fspo>; Session: Anonymize<I6ue0ck5fc3u44>; Constitution: Anonymize<I8jqccj5fq1oj>; ConditionalLedger: Anonymize<Icog4v85gspb3i>; Market: Anonymize<Icul1a5j3uhgpq>; Welfare: Anonymize<Iotv6nd407lpv>; Oracle: Anonymize<I9rq31q6e4anhq>; IncidentRegistry: Anonymize<I9o4h3u7u17bqn>; MilestoneRegistry: Anonymize<I9o4h3u7u17bqn>; FutarchyTreasury: Anonymize<I1djk4du85etnv>; Guardian: Anonymize<I2hnabup83elbp>; Attestor: Anonymize<Icfh12v8grnajk>; Epoch: Anonymize<I16r8b84a092kl>; ExecutionGuard: Anonymize<I5k67p27a3s88k>; ClientRegistry: Anonymize<Iaqnvtu78qlr78>; QuestionService: Anonymize<Iftu3nng0chq4r>; ServiceLedger: Anonymize<Icog4v85gspb3i>; TradingRewards: Anonymize<Ibnd59e3mcn2vq> }>; topics: Anonymize<Ic5m5lp1oioo8r> }>;
 export type Phase = Enum<{ ApplyExtrinsic: number; Finalization: undefined; Initialization: undefined }>;
 export declare const Phase: GetEnum<Phase>;
-export type Ievg5tbb0c0imi = AnonymousEnum<{
+export type If9ngv23j7tmvu = AnonymousEnum<{
   /**
    * An extrinsic completed successfully.
    */
@@ -22,7 +22,7 @@ export type Ievg5tbb0c0imi = AnonymousEnum<{
   /**
    * An extrinsic failed.
    */
-  ExtrinsicFailed: Anonymize<I8bq3skkh4cj5b>;
+  ExtrinsicFailed: Anonymize<I206k5fm430ncu>;
   /**
    * `:code` was updated to the code with the given hash.
    */
@@ -46,15 +46,15 @@ export type Ievg5tbb0c0imi = AnonymousEnum<{
   /**
    * An invalid authorized upgrade was rejected while trying to apply it.
    */
-  RejectedInvalidAuthorizedUpgrade: Anonymize<Iahdi73ndhok2k>;
+  RejectedInvalidAuthorizedUpgrade: Anonymize<Ibt374blbobs7t>;
 }>;
 export type Ia82mnkmeo2rhc = { dispatch_info: Anonymize<Ic9s8f85vjtncc> };
 export type Ic9s8f85vjtncc = { weight: Anonymize<I4q39t5hn830vp>; class: DispatchClass; pays_fee: Anonymize<Iehg04bj71rkd> };
 export type DispatchClass = Enum<{ Normal: undefined; Operational: undefined; Mandatory: undefined }>;
 export declare const DispatchClass: GetEnum<DispatchClass>;
 export type Iehg04bj71rkd = AnonymousEnum<{ Yes: undefined; No: undefined }>;
-export type I8bq3skkh4cj5b = { dispatch_error: Anonymize<Iftks7pco8m7bq>; dispatch_info: Anonymize<Ic9s8f85vjtncc> };
-export type Iftks7pco8m7bq = AnonymousEnum<{ Other: undefined; CannotLookup: undefined; BadOrigin: undefined; Module: Enum<{ System: Anonymize<I5o0s7c8q1cc9b>; Timestamp: undefined; ParachainSystem: Anonymize<Icjkr35j4tmg7k>; ParachainInfo: undefined; Balances: Anonymize<Idj13i7adlomht>; ForeignAssets: Anonymize<I8ktb7n3252jn5>; TransactionPayment: undefined; AssetTxPayment: undefined; Vesting: Anonymize<Icof2acl69lq3c>; Referenda: Anonymize<I84u4ul208g742>; ConvictionVoting: Anonymize<Idfa8k8ikssbsf>; Preimage: Anonymize<I4cfhml1prt4lu>; Scheduler: Anonymize<If7oa8fprnilo5>; Utility: Anonymize<I8dt2g2hcrgh36>; Proxy: Anonymize<Iuvt54ei4cehc>; Multisig: Anonymize<Ia76qmhhg4jvb9>; Migrations: Anonymize<Iaaqq5jevtahm8>; Sudo: Anonymize<Iaug04qjhbli00>; XcmpQueue: Anonymize<Idnnbndsjjeqqs>; MessageQueue: Anonymize<I5iupade5ag2dp>; CumulusXcm: undefined; PolkadotXcm: Anonymize<I4vcvo9od6afmt>; Authorship: undefined; CollatorSelection: Anonymize<I36bcffk2387dv>; Session: Anonymize<I1e07dgbaqd1sq>; Aura: undefined; AuraExt: undefined; Origins: undefined; Constitution: Anonymize<Iagesmeksmppjt>; ConditionalLedger: Anonymize<I5hgsnolklrsfa>; Market: Anonymize<I2ks874igoa6sr>; Welfare: Anonymize<I64rovhghaoqvq>; Oracle: Anonymize<I3fq6sj2jaqn2i>; IncidentRegistry: Anonymize<I5elcsjjb7rur0>; MilestoneRegistry: Anonymize<I5elcsjjb7rur0>; FutarchyTreasury: Anonymize<I8rl7crbctfl5e>; Guardian: Anonymize<I9n6rn7ujdds5b>; Attestor: Anonymize<I7u7113h3itk4b>; Epoch: Anonymize<Idim7dv3vdtr09>; ExecutionGuard: Anonymize<I6r10mfpq2j8np>; InflowCaps: undefined; TrackOrigins: undefined; ClientRegistry: Anonymize<I8d6nputfnb2vr>; QuestionService: Anonymize<Ib5hb6i32tblm3>; ServiceLedger: Anonymize<I5hgsnolklrsfa>; TradingRewards: Anonymize<I44tfcss8sijp9> }>; ConsumerRemaining: undefined; NoProviders: undefined; TooManyConsumers: undefined; Token: TokenError; Arithmetic: ArithmeticError; Transactional: TransactionalError; Exhausted: undefined; Corruption: undefined; Unavailable: undefined; RootNotAllowed: undefined; Trie: Anonymize<Idh4cj79bvroj8> }>;
+export type I206k5fm430ncu = { dispatch_error: Anonymize<Idmmv2hj79l5es>; dispatch_info: Anonymize<Ic9s8f85vjtncc> };
+export type Idmmv2hj79l5es = AnonymousEnum<{ Other: undefined; CannotLookup: undefined; BadOrigin: undefined; Module: Enum<{ System: Anonymize<I5o0s7c8q1cc9b>; Timestamp: undefined; ParachainSystem: Anonymize<Icjkr35j4tmg7k>; ParachainInfo: undefined; Balances: Anonymize<Idj13i7adlomht>; ForeignAssets: Anonymize<I8ktb7n3252jn5>; TransactionPayment: undefined; AssetTxPayment: undefined; Vesting: Anonymize<Icof2acl69lq3c>; Referenda: Anonymize<I84u4ul208g742>; ConvictionVoting: Anonymize<Idfa8k8ikssbsf>; Preimage: Anonymize<I4cfhml1prt4lu>; Scheduler: Anonymize<If7oa8fprnilo5>; Utility: Anonymize<I8dt2g2hcrgh36>; Proxy: Anonymize<Iuvt54ei4cehc>; Multisig: Anonymize<Ia76qmhhg4jvb9>; Migrations: Anonymize<Iaaqq5jevtahm8>; Sudo: Anonymize<Iaug04qjhbli00>; XcmpQueue: Anonymize<Idnnbndsjjeqqs>; MessageQueue: Anonymize<I5iupade5ag2dp>; CumulusXcm: undefined; PolkadotXcm: Anonymize<I4vcvo9od6afmt>; Authorship: undefined; CollatorSelection: Anonymize<I36bcffk2387dv>; Session: Anonymize<I1e07dgbaqd1sq>; Aura: undefined; AuraExt: undefined; Origins: undefined; Constitution: Anonymize<I179i6pa0ggeu1>; ConditionalLedger: Anonymize<I5hgsnolklrsfa>; Market: Anonymize<I2ks874igoa6sr>; Welfare: Anonymize<I64rovhghaoqvq>; Oracle: Anonymize<I3fq6sj2jaqn2i>; IncidentRegistry: Anonymize<I5elcsjjb7rur0>; MilestoneRegistry: Anonymize<I5elcsjjb7rur0>; FutarchyTreasury: Anonymize<I8rl7crbctfl5e>; Guardian: Anonymize<I9n6rn7ujdds5b>; Attestor: Anonymize<I7u7113h3itk4b>; Epoch: Anonymize<Idim7dv3vdtr09>; ExecutionGuard: Anonymize<I6r10mfpq2j8np>; InflowCaps: undefined; TrackOrigins: undefined; ClientRegistry: Anonymize<I8d6nputfnb2vr>; QuestionService: Anonymize<Ib5hb6i32tblm3>; ServiceLedger: Anonymize<I5hgsnolklrsfa>; TradingRewards: Anonymize<I1lkr30bf8bl77> }>; ConsumerRemaining: undefined; NoProviders: undefined; TooManyConsumers: undefined; Token: TokenError; Arithmetic: ArithmeticError; Transactional: TransactionalError; Exhausted: undefined; Corruption: undefined; Unavailable: undefined; RootNotAllowed: undefined; Trie: Anonymize<Idh4cj79bvroj8> }>;
 export type I5o0s7c8q1cc9b = AnonymousEnum<{
   /**
    * The name of specification does not match between the current runtime
@@ -851,7 +851,7 @@ export type I1e07dgbaqd1sq = AnonymousEnum<{
    */
   NoAccount: undefined;
 }>;
-export type Iagesmeksmppjt = AnonymousEnum<{
+export type I179i6pa0ggeu1 = AnonymousEnum<{
   /**
    * No record exists under the given `ParamKey`.
    */
@@ -977,6 +977,25 @@ export type Iagesmeksmppjt = AnonymousEnum<{
    * are SCALE-stable.
    */
   RedemptionFeeAboveMarketFee: undefined;
+  /**
+   * 13 rule 7 / 08 §2.6 (TR9): the amendment would carry the live pair
+   * `99 × rwd.rate ≤ 200 × mkt.fee` out of band. Both rows are **PARAM**,
+   * so a single PARAM decision can move either side and both directions
+   * are refused: raising `rwd.rate` above the live wash break-even, and
+   * lowering `mkt.fee` until the live `rwd.rate` sits above it.
+   *
+   * The second direction is the one this error exists for. `mkt.fee` may
+   * be lowered toward its 5 bps floor by an ordinary vote that never
+   * mentions the reward program, and that vote would otherwise retire
+   * the program's only anti-farm defense.
+   *
+   * Deliberately not `TryStateViolation` (nothing stored is violating an
+   * invariant — the refusal is what keeps it that way) and not `AboveMax`
+   * (the `rwd.rate` record's own bounds are satisfied; the live coupling
+   * is what binds). Appended last — the preceding discriminants are
+   * SCALE-stable.
+   */
+  RewardRateAboveWashBreakeven: undefined;
 }>;
 export type I5hgsnolklrsfa = AnonymousEnum<{
   /**
@@ -1916,7 +1935,7 @@ export type Ib5hb6i32tblm3 = AnonymousEnum<{
   ArchiveNotReady: undefined;
   TryStateViolation: undefined;
 }>;
-export type I44tfcss8sijp9 = AnonymousEnum<{
+export type I1lkr30bf8bl77 = AnonymousEnum<{
   /**
    * The account already holds a participant record.
    */
@@ -1995,14 +2014,27 @@ export type I44tfcss8sijp9 = AnonymousEnum<{
   UnfoldedScore: undefined;
   /**
    * The accrual would promise more than the authorized budget.
-   * Unreachable by construction while the reward clamp
-   * (`budget_headroom_usdc`) is in place; kept as a tripwire against a
-   * future change that breaks it. If it ever fires, the failure mode is
-   * a stuck settlement, not a skipped reward: the whole dispatch
-   * aborts, so the epoch stays unclosed and the bond stays locked until
-   * a later call succeeds.
+   * Unreachable by construction while `settle_epoch`'s reward clamp
+   * (`budget.saturating_sub(promised)`) is in place; kept as a
+   * tripwire against a future change that breaks it. If it ever fires,
+   * the failure mode is a stuck settlement, not a skipped reward: the
+   * whole dispatch aborts, so the epoch stays unclosed and the bond
+   * stays locked until a later call succeeds.
    */
   BudgetExceeded: undefined;
+  /**
+   * A caller who is **not** the participant tried to settle an epoch
+   * into a headroom that would clamp the reward below the full
+   * entitlement (08 §2.6).
+   *
+   * The participant may always settle themselves at any headroom, and a
+   * third party may still crank every epoch the clamp does not touch.
+   * The refusal is status-quo (G-1): the epoch stays open, the bond
+   * stays held, and nothing is written — so re-funding the budget
+   * reopens the payout, which is exactly what finalising the epoch would
+   * have made impossible.
+   */
+  ThirdPartyWouldClampReward: undefined;
 }>;
 export type TokenError = Enum<{ FundsUnavailable: undefined; OnlyProvider: undefined; BelowMinimum: undefined; CannotCreate: undefined; UnknownAsset: undefined; Frozen: undefined; Unsupported: undefined; CannotCreateHold: undefined; NotExpendable: undefined; Blocked: undefined }>;
 export declare const TokenError: GetEnum<TokenError>;
@@ -2015,7 +2047,7 @@ export type I1jm8m1rh9e20v = { hash: SizedHex<32> };
 export type Icbccs0ug47ilf = { account: SS58String };
 export type I855j4i3kr8ko1 = { sender: SS58String; hash: SizedHex<32> };
 export type Ibgl04rn6nbfm6 = { code_hash: SizedHex<32>; check_version: boolean };
-export type Iahdi73ndhok2k = { code_hash: SizedHex<32>; error: Anonymize<Iftks7pco8m7bq> };
+export type Ibt374blbobs7t = { code_hash: SizedHex<32>; error: Anonymize<Idmmv2hj79l5es> };
 export type Icbsekf57miplo = AnonymousEnum<{
   /**
    * The validation function has been scheduled to apply.
@@ -2571,7 +2603,7 @@ export type PreimageEvent = Enum<{
   Cleared: Anonymize<I1jm8m1rh9e20v>;
 }>;
 export declare const PreimageEvent: GetEnum<PreimageEvent>;
-export type I65ch62pnta2aj = AnonymousEnum<{
+export type I3ce3mf0v1pmt8 = AnonymousEnum<{
   /**
    * Scheduled some task.
    */
@@ -2583,7 +2615,7 @@ export type I65ch62pnta2aj = AnonymousEnum<{
   /**
    * Dispatched some task.
    */
-  Dispatched: Anonymize<I67pk6j8bfvk68>;
+  Dispatched: Anonymize<I4o5f4rl7pvbsh>;
   /**
    * Set a retry configuration for some task.
    */
@@ -2615,18 +2647,18 @@ export type I65ch62pnta2aj = AnonymousEnum<{
   AgendaIncomplete: Anonymize<Ibtsa3docbr9el>;
 }>;
 export type I5n4sebgkfr760 = { when: number; index: number };
-export type I67pk6j8bfvk68 = { task: Anonymize<I9jd27rnpm8ttv>; id?: Anonymize<I4s6vifaf8k998>; result: Anonymize<I2ci0deci5eve4> };
+export type I4o5f4rl7pvbsh = { task: Anonymize<I9jd27rnpm8ttv>; id?: Anonymize<I4s6vifaf8k998>; result: Anonymize<I76nhkonagcqud> };
 export type I9jd27rnpm8ttv = FixedSizeArray<2, number>;
-export type I2ci0deci5eve4 = ResultPayload<undefined, Anonymize<Iftks7pco8m7bq>>;
+export type I76nhkonagcqud = ResultPayload<undefined, Anonymize<Idmmv2hj79l5es>>;
 export type Ia3c82eadg79bj = { task: Anonymize<I9jd27rnpm8ttv>; id?: Anonymize<I4s6vifaf8k998>; period: number; retries: number };
 export type Ienusoeb625ftq = { task: Anonymize<I9jd27rnpm8ttv>; id?: Anonymize<I4s6vifaf8k998> };
 export type Ibtsa3docbr9el = { when: number };
-export type I6bvha4286as1k = AnonymousEnum<{
+export type Icji5ou7s8fhi2 = AnonymousEnum<{
   /**
    * Batch of dispatches did not complete fully. Index of first failing dispatch given, as
    * well as the error.
    */
-  BatchInterrupted: Anonymize<Idinne5793ckgq>;
+  BatchInterrupted: Anonymize<I3r57ai53kj5og>;
   /**
    * Batch of dispatches completed fully with no error.
    */
@@ -2642,11 +2674,11 @@ export type I6bvha4286as1k = AnonymousEnum<{
   /**
    * A single item within a Batch of dispatches has completed with error.
    */
-  ItemFailed: Anonymize<I6vcusuqarerns>;
+  ItemFailed: Anonymize<If17b5mo4d2odo>;
   /**
    * A call was dispatched.
    */
-  DispatchedAs: Anonymize<I3s4aihhkpms95>;
+  DispatchedAs: Anonymize<Imnbuc3d6tdsc>;
   /**
    * Main call was dispatched.
    */
@@ -2654,17 +2686,17 @@ export type I6bvha4286as1k = AnonymousEnum<{
   /**
    * The fallback call was dispatched.
    */
-  IfElseFallbackCalled: Anonymize<Iee4b5i3vbrrj6>;
+  IfElseFallbackCalled: Anonymize<Ibt0qbob7ghhgn>;
 }>;
-export type Idinne5793ckgq = { index: number; error: Anonymize<Iftks7pco8m7bq> };
-export type I6vcusuqarerns = { error: Anonymize<Iftks7pco8m7bq> };
-export type I3s4aihhkpms95 = { result: Anonymize<I2ci0deci5eve4> };
-export type Iee4b5i3vbrrj6 = { main_error: Anonymize<Iftks7pco8m7bq> };
-export type Iv55bs0pjqvqj = AnonymousEnum<{
+export type I3r57ai53kj5og = { index: number; error: Anonymize<Idmmv2hj79l5es> };
+export type If17b5mo4d2odo = { error: Anonymize<Idmmv2hj79l5es> };
+export type Imnbuc3d6tdsc = { result: Anonymize<I76nhkonagcqud> };
+export type Ibt0qbob7ghhgn = { main_error: Anonymize<Idmmv2hj79l5es> };
+export type I1jp84e94es27l = AnonymousEnum<{
   /**
    * A proxy was executed correctly, with the given.
    */
-  ProxyExecuted: Anonymize<I3s4aihhkpms95>;
+  ProxyExecuted: Anonymize<Imnbuc3d6tdsc>;
   /**
    * A pure account has been created by new proxy with given
    * disambiguation index and proxy type.
@@ -2697,7 +2729,7 @@ export type I8a8c1n38ann55 = { pure: SS58String; spawner: SS58String; proxy_type
 export type I2ur0oeqg495j8 = { real: SS58String; proxy: SS58String; call_hash: SizedHex<32> };
 export type I7f2f3co93gefl = { delegator: SS58String; delegatee: SS58String; proxy_type: Anonymize<Icqldr8j4je7f4>; delay: number };
 export type I1bhd210c3phjj = { who: SS58String; kind: Enum<{ Proxies: undefined; Announcements: undefined }>; old_deposit: bigint; new_deposit: bigint };
-export type Idois67t46rbhf = AnonymousEnum<{
+export type I19l4ocjgto2sb = AnonymousEnum<{
   /**
    * A new multisig operation has begun.
    */
@@ -2709,7 +2741,7 @@ export type Idois67t46rbhf = AnonymousEnum<{
   /**
    * A multisig operation has been executed.
    */
-  MultisigExecuted: Anonymize<I57bnuu8jh7bik>;
+  MultisigExecuted: Anonymize<I5ank11b0br54o>;
   /**
    * A multisig operation has been cancelled.
    */
@@ -2722,7 +2754,7 @@ export type Idois67t46rbhf = AnonymousEnum<{
 export type Iep27ialq4a7o7 = { approving: SS58String; multisig: SS58String; call_hash: SizedHex<32> };
 export type Iasu5jvoqr43mv = { approving: SS58String; timepoint: Anonymize<Itvprrpb0nm3o>; multisig: SS58String; call_hash: SizedHex<32> };
 export type Itvprrpb0nm3o = { height: number; index: number };
-export type I57bnuu8jh7bik = { approving: SS58String; timepoint: Anonymize<Itvprrpb0nm3o>; multisig: SS58String; call_hash: SizedHex<32>; result: Anonymize<I2ci0deci5eve4> };
+export type I5ank11b0br54o = { approving: SS58String; timepoint: Anonymize<Itvprrpb0nm3o>; multisig: SS58String; call_hash: SizedHex<32>; result: Anonymize<I76nhkonagcqud> };
 export type I5qolde99acmd1 = { cancelling: SS58String; timepoint: Anonymize<Itvprrpb0nm3o>; multisig: SS58String; call_hash: SizedHex<32> };
 export type I8gtde5abn1g9a = { who: SS58String; call_hash: SizedHex<32>; old_deposit: bigint; new_deposit: bigint };
 export type I94co7vj7h6bo = AnonymousEnum<{
@@ -2793,11 +2825,11 @@ export type I3escdojpj0551 = {
   next_cursor?: Anonymize<Iabpgqcjikia83>;
 };
 export type Iabpgqcjikia83 = Uint8Array | undefined;
-export type I9uuaid0pmci1f = AnonymousEnum<{
+export type Idj62lcqsikh4e = AnonymousEnum<{
   /**
    * A sudo call just took place.
    */
-  Sudid: Anonymize<Ick5uthk4o2udn>;
+  Sudid: Anonymize<I7442cggth99kp>;
   /**
    * The sudo key has been updated.
    */
@@ -2809,13 +2841,13 @@ export type I9uuaid0pmci1f = AnonymousEnum<{
   /**
    * A [sudo_as](Pallet::sudo_as) call just took place.
    */
-  SudoAsDone: Anonymize<Ick5uthk4o2udn>;
+  SudoAsDone: Anonymize<I7442cggth99kp>;
 }>;
-export type Ick5uthk4o2udn = {
+export type I7442cggth99kp = {
   /**
    * The result of the call made by the sudo user.
    */
-  sudo_result: Anonymize<I2ci0deci5eve4>;
+  sudo_result: Anonymize<I76nhkonagcqud>;
 };
 export type I5rtkmhm2dng4u = {
   /**
@@ -6983,7 +7015,9 @@ export type Icmv05grq5pm7i = AnonymousEnum<{
   /**
    * `oracle.recompute_proof` — permissionless mechanical resolution from
    * the committed evidence, bounded at `orc.max_proof_bytes` (07 §9).
-   * Signed (keeper, rebated). Fails closed for non-recomputable components.
+   * Signed (keeper, rebated). Fails closed for non-recomputable
+   * components, and for every component on a runtime whose
+   * [`Config::RecomputeEngine`] cannot evaluate the frozen `formula_ref`.
    */
   recompute_proof: Anonymize<Ie00dqaka54s56>;
   /**
@@ -7650,16 +7684,20 @@ export type I981c8jco65ojh = AnonymousEnum<{
    * Fold one settled market into the account's epoch total and delete
    * the entry (08 §2.6).
    *
-   * **Permissionless, and it names a target rather than the caller.**
-   * That is safe because it acts only on already-recorded values: every
-   * caller reaches the same result and no caller can choose it. The
-   * keeper cranks it (01 §4.2).
+   * **Permissionless without qualification, and it names a target rather
+   * than the caller.** That is safe because it acts only on
+   * already-recorded values: every caller reaches the same result and no
+   * caller can choose it. [`Pallet::settle_epoch`] is deliberately
+   * *not* in that class — see its own note. The keeper cranks both
+   * (01 §4.2).
    *
    * It succeeds on one of exactly two conditions. Either the book has
-   * reached a terminal state, in which case rule 3 credits the
-   * book-acquired remainder and rule 4 selects the arm from the branch's
-   * disposition; or the **absolute timeout** has elapsed, in which case
-   * the entry drops at zero without folding. Settlement is checked
+   * reached a terminal state, in which case rule 3 credits the entry's
+   * own `book_acquired` — never a ledger position, which redemption
+   * burns at the same instant settlement opens — and rule 4 selects the
+   * arm from the branch's disposition; or the **absolute timeout** has
+   * elapsed, in which case the entry drops at zero without folding.
+   * Settlement is checked
    * first: §2.6 sizes the timeout above the longest lawful settlement
    * horizon precisely so no settling market reaches it, and dropping a
    * settled market would turn the liveness escape into an exit from a
@@ -7668,10 +7706,22 @@ export type I981c8jco65ojh = AnonymousEnum<{
   settle_market_score: Anonymize<I82lmvrrpt0s2n>;
   /**
    * Close one participant's epoch, applying the reward or the debit
-   * exactly once (08 §2.6). Permissionless and named-target for the same
-   * reason as [`Pallet::settle_market_score`].
+   * exactly once (08 §2.6). It names a target rather than the caller,
+   * **but it is not permissionless in the way
+   * [`Pallet::settle_market_score`] is, and the difference is the whole
+   * point of the fourth refusal below.**
    *
-   * Three obligations §2.6 states normatively, and each is a refusal
+   * The fold acts on already-recorded values, so any caller reaches the
+   * same result. This call does not: it clamps the reward to the
+   * budget's unpromised remainder **as read at call time** and then
+   * resets the epoch unconditionally, so two callers at two moments
+   * reach two different results and the earlier one is irreversible —
+   * re-funding cannot reopen a settled epoch. A third party could
+   * therefore finalise a victim into a zero-headroom moment for the
+   * price of a transaction fee, which is the same harm §2.6 forbids for
+   * a permissionless budget sweep, reached from the other side.
+   *
+   * Four obligations §2.6 states normatively, and each is a refusal
    * above rather than a correction below:
    *
    * 1. **Idempotent per participant per epoch.** Settling re-snapshots
@@ -7682,6 +7732,12 @@ export type I981c8jco65ojh = AnonymousEnum<{
    * 3. **Refuses while an unfolded score entry remains** — otherwise a
    * partially folded account settles on part of its own score, which
    * is the one ordering in which a losing epoch pays a reward.
+   * 4. **Refuses a caller other than the participant when the live
+   * headroom would clamp the reward below the full entitlement.** The
+   * participant may always settle themselves and accept a partial
+   * payout, which keeps §2.6's FCFS residual a choice they make
+   * rather than one made for them, and a third party may still crank
+   * every epoch the clamp does not touch.
    *
    * It also re-snapshots the bond **whenever an epoch closes, including
    * when there was nothing to settle**. Nothing else re-snapshots, so
@@ -7720,7 +7776,7 @@ export type I8fksma6odit5g = { custody_usdc: bigint; liability_usdc: bigint; ano
 export type I996aiv3qoehvi = Array<{ map: Uint8Array; entries: number; bound: number }> | undefined;
 export type I4fj3mptf3jr0q = Array<{ client_id: number; attempts: bigint; failures: bigint; consecutive_failures: number }> | undefined;
 export type Ibh9utbkad113n = { questions_live: number; max_live: number; contest_capital_external: bigint; not_decision_grade_rejections: bigint; external_weight_used_ratio_1e9: bigint } | undefined;
-export type Inohmgb3g4pbh = ResultPayload<Anonymize<I2ci0deci5eve4>, Anonymize<I5nrjkj9qumobs>>;
+export type Id5433fsuakfsh = ResultPayload<Anonymize<I76nhkonagcqud>, Anonymize<I5nrjkj9qumobs>>;
 export type I5nrjkj9qumobs = AnonymousEnum<{ Invalid: Enum<{ Call: undefined; Payment: undefined; Future: undefined; Stale: undefined; BadProof: undefined; AncientBirthBlock: undefined; ExhaustsResources: undefined; Custom: number; BadMandatory: undefined; MandatoryValidation: undefined; BadSigner: undefined; IndeterminateImplicit: undefined; UnknownOrigin: undefined }>; Unknown: TransactionValidityUnknownTransaction }>;
 export type TransactionValidityUnknownTransaction = Enum<{ CannotLookup: undefined; NoUnsignedValidator: undefined; Custom: number }>;
 export declare const TransactionValidityUnknownTransaction: GetEnum<TransactionValidityUnknownTransaction>;
