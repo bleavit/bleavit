@@ -721,7 +721,9 @@ pub mod pallet {
                     Outcome::Reward(demand) => {
                         // **One read of each figure, used by both the clamp
                         // and the guard.** Calling `budget_headroom_usdc()`
-                        // here and `authorized_budget_usdc()` again inside the
+                        // — since removed, and named here only because it is
+                        // what this arm replaced — here and
+                        // `authorized_budget_usdc()` again inside the
                         // `ensure!` is what the code used to do, and it read
                         // `fee.vit_usdc_rate`, the sovereign's VIT balance and
                         // `TotalAccrued` twice each for one settlement. The

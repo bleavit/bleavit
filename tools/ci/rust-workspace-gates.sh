@@ -151,22 +151,30 @@ cargo test -p bleavit-runtime --features try-runtime --locked
 #
 # Scoped to `tests_trading_rewards`, not the whole crate, on direct evidence:
 # the unscoped `cargo test -p bleavit-runtime --features runtime-benchmarks
-# --locked` deterministically fails 71 pre-existing tests (406 passed, 71
+# --locked` deterministically fails 71 pre-existing tests (408 passed, 71
 # failed, identical failing set across two runs) that have nothing to do with
 # this pallet — `tests_welfare_inputs::*` and unrelated `tests::*` governance/
-# treasury/coretime end-to-end flows. The cause is structural, not flaky:
-# `RuntimeMetricInputs::onchain_components` (`configs.rs`) has carried a
-# `#[cfg(feature = "runtime-benchmarks")]` branch that fabricates welfare
-# metric components (a fixed interior `FixedU64(930_000_000)`, by design —
-# see its own comment) instead of computing them, since PR #177 / #191 (A14,
-# 2026-07-27), weeks before TR7 existed. Any test that ticks a real epoch
-# under that feature inherits the fabricated components instead of the real
-# computation, which is exactly why nothing had ever run this combination
-# unfiltered before. Fixing that is a separate, unrelated undertaking; running
-# it here would turn this gate red for a reason no trading-rewards change
-# caused. Tracked as SQ-1053, which owns the decision: either the
-# fabrication is a legitimate measurement artifact and this leg can only
-# ever be an opted-in module list, or it is a defect and both crates get
+# treasury/coretime end-to-end flows. The failures are conditional on the
+# feature alone: the same crate passes all of its tests without it, and this
+# branch's whole `tests.rs` diff names none of the 71.
+#
+# **The cause is only partly identified, and this comment used to claim
+# otherwise.** `RuntimeMetricInputs::onchain_components` (`configs.rs`) has
+# carried a `#[cfg(feature = "runtime-benchmarks")]` branch that fabricates
+# welfare metric components (a fixed interior `FixedU64(930_000_000)`, by
+# design — see its own comment) instead of computing them, since PR #177 /
+# #191 (A14, 2026-07-26), weeks before TR7 existed. That explains **8** of the
+# 71, all in `tests_welfare_inputs` — measured by neutralizing the fabrication
+# under `cfg(test)` and re-running, which took the count 71 -> 63, not by
+# reading the code and inferring. **The other 63 have some other cause that no
+# one has identified.** Do not read this comment as saying that one repair
+# reopens full-crate scope; it does not.
+#
+# Fixing any of it is a separate undertaking; running the unscoped suite here
+# would turn this gate red for a reason no trading-rewards change caused.
+# Tracked as SQ-1053, which owns the decision: either the fabrication is a
+# legitimate measurement artifact and this leg can only ever be an opted-in
+# module list, or it is a defect and both crates get
 # repaired. `pallet-oracle` sits in the same blind spot (`bench_report`,
 # found independently by #299 the same day). Full failing-test list is in
 # the TR7 fix-round findings.
