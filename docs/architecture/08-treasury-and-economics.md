@@ -284,7 +284,18 @@ claimant-adverse rounding straightforward.
    a buy is charged more than the book cost and a sale is credited less, so the fee is adverse on
    both sides.)*
 3. Settlement adds `min(position, book_acquired) × settled_value` to `received`, rounded down.
-   `settled_value` is the branch's terminal redemption value per unit.
+   `settled_value` is the branch's terminal redemption value per unit, **expressed as a fraction
+   of par on [03](03-conditional-ledger.md)'s own `SCORE_SCALE` grid and clamped to par** *(made
+   explicit 2026-08-10; the earlier wording said only "value per unit", which reads as a whole
+   amount and was implemented as one)*. It has to be a fraction: a scalar leg redeems for
+   `amount × s / SCORE_SCALE`, so a unit of a branch that settled at 0.6 is worth six tenths of a
+   base unit and never a whole number of them. Read as an integer, **every sub-par settlement
+   floors to zero** — `received` collects nothing, and rule 4's realized arm folds a debit of the
+   entire notional against a trader whose forecast was correct. That is the same defect the
+   annulled arm exists to prevent, arriving through the realized arm instead, and rule 3's own
+   *"rounded down"* is the tell that no integer was ever meant: an integer product needs no
+   rounding. The clamp to par is what stops an out-of-range value from crediting more than the
+   ledger can pay.
 4. The market score depends on how the branch ended, and it may be negative.
    - **Branch realized:** `received − spent`.
    - **Branch annulled:** `mirror_principal − spent`. Every `received` credit is discarded.

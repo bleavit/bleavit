@@ -948,7 +948,13 @@ fn the_safety_filter_admits_enrollment_and_refuses_it_inside_a_wrapper() {
     new_test_ext().execute_with(|| {
         let call = RuntimeCall::TradingRewards(pallet_trading_rewards::Call::enroll { bond: 1_000 });
         assert!(SafetyFilter::contains(&call));
-        assert!(!SafetyFilter::contains(&wrap_in_batch(call)));
+        // WRONG, corrected 2026-08-10 after TR7 reported it: `utility.batch` is
+        // in the permitted wrapper set and `enroll` is a Public leaf, so this
+        // asserts a refusal the runtime does not make. The real property is
+        // that permitted wrappers pass while `dispatch_as` and `as_derivative`
+        // refuse — assert that instead, and do not "fix" the runtime to match
+        // this line.
+        assert!(SafetyFilter::contains(&wrap_in_batch(call)));
     });
 }
 
