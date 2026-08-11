@@ -419,13 +419,88 @@ fn a_fill_past_the_scored_market_bound_records_nothing_and_still_trades() {
     });
 }
 
+/// **The arm `sell`'s benchmark structurally cannot take** (TR7 review, I3).
+///
+/// The accumulator has two shapes on a sale. A sale into a market the account
+/// already has a score row for reads the row and writes it back — two keys, one
+/// write, and that is what the `sell` fixture measures. A **first** fill finds
+/// no row and reads `TradingRewards::ScoreCount` as well before deciding
+/// whether one may be created — three keys, and because a sale credits only
+/// what `book_acquired` covers, it then writes nothing at all. Neither arm
+/// dominates the other, so `sell`'s `#[pallet::weight]` composes the missing
+/// read and its measured proof bound above the fixture.
+///
+/// This test pins the premise that makes that composition necessary: the arm is
+/// reachable on an ordinary dispatch, by an enrolled account holding units the
+/// book never sold it. `external_route_weight_composition_includes_measured_pov_surcharges`
+/// pins the charge itself.
+#[test]
+fn a_first_fill_sale_takes_the_arm_that_reads_the_counter_and_writes_nothing() {
+    development_ext().execute_with(|| {
+        // The helper's own trader is only here to open and seed the book.
+        let _seeder = seeded_decision_book(Branch::Accept);
+
+        // Acquire the units *before* enrolling, so they exist and no score row
+        // does. That is the same state a `split` or an inbound position
+        // transfer leaves behind, which is precisely what the `book_acquired`
+        // rule exists for.
+        let trader = account(221);
+        assert_ok!(ForeignAssets::mint_into(
+            usdc_location(),
+            &trader,
+            currency::USDC.saturating_mul(50),
+        ));
+        assert_ok!(Market::buy(
+            RuntimeOrigin::signed(trader.clone()),
+            MARKET,
+            ScalarSide::Long,
+            kernel::MIN_TRADE_USDC,
+            Balance::MAX,
+        ));
+        assert!(
+            pallet_trading_rewards::Scores::<Runtime>::get(&trader, MARKET).is_none(),
+            "the outsider's buy must leave no row, or the sale below is not a first fill",
+        );
+
+        let bond = TradingRewards::minimum_bond().expect("ledger.pos_dep is seeded at genesis");
+        assert_ok!(TradingRewards::enroll(
+            RuntimeOrigin::signed(trader.clone()),
+            bond.saturating_mul(4),
+        ));
+        assert!(
+            pallet_trading_rewards::Pallet::<Runtime>::scores_fills(&trader),
+            "the seller must be on the scoring branch, or the accumulator stops at one read",
+        );
+
+        assert_ok!(Market::sell(
+            RuntimeOrigin::signed(trader.clone()),
+            MARKET,
+            ScalarSide::Long,
+            kernel::MIN_TRADE_USDC,
+            0,
+        ));
+
+        assert!(
+            pallet_trading_rewards::Scores::<Runtime>::get(&trader, MARKET).is_none(),
+            "a sale out of off-book inventory credits nothing and so writes no row — \
+             this is the arm that costs a key more and a write less",
+        );
+        assert_eq!(
+            pallet_trading_rewards::ScoreCount::<Runtime>::get(&trader),
+            0,
+            "and it does not take a slot against the 13 §4 per-account bound either",
+        );
+    });
+}
+
 // ---------------------------------------------------------------------------
 // The settlement adapter
 // ---------------------------------------------------------------------------
 
 /// The whole point of the TR7 adapter, and the assertion that separates a
 /// correct one from the integer reading TR5 froze: a branch settling at any
-/// score below par credits **that fraction** of the position, not zero.
+/// score below par credits **that fraction** of the book-acquired parcel, not
+/// zero.
 #[test]
 fn a_realized_decision_book_settles_at_the_ledgers_own_fraction_of_par() {
     development_ext().execute_with(|| {
@@ -459,7 +534,6 @@ fn a_realized_decision_book_settles_at_the_ledgers_own_fraction_of_par() {
         let settlement = RuntimeSettledMarkets::settlement(&trader, MARKET)
             .expect("a settled vault on the traded branch is terminal");
         assert_eq!(settlement.disposition, BranchDisposition::Realized);
-        assert_eq!(settlement.position, [held, 0]);
         assert_eq!(
             settlement.settled_value,
             [
@@ -483,10 +557,173 @@ fn a_realized_decision_book_settles_at_the_ledgers_own_fraction_of_par() {
         assert_eq!(
             record.epoch.received,
             held / 10 * 6,
-            "rule 3 credits `position x 0.6`, rounded down",
+            "rule 3 credits `book_acquired x 0.6`, rounded down",
         );
         assert!(record.epoch.received > 0);
     });
+}
+
+/// **The C1 regression, and 15 §4.1 point 3's redeem-then-fold obligation.**
+///
+/// 08 §2.6 rule 3 credits `book_acquired` and *"MUST NOT be clamped by the
+/// account's ledger position"*. The retired rule read the position at fold
+/// time, and `redeem_scalar` burns it. Settlement and redemption open at the
+/// same instant — a settled vault is the sole precondition of each — and the
+/// fold is a permissionless crank the trader does not control, so a trader who
+/// redeemed, which is the ordinary thing to do and the only way to get the
+/// money, was folded at `received = 0` against a real `spent` and rule 4's
+/// realized arm debited them for a correct forecast.
+///
+/// **The claim is an equality between two orderings, and asserting that the
+/// fold merely succeeded would prove nothing** — under the defect it succeeds,
+/// folding a lawful zero. So both orderings are run against identical books and
+/// the credited amounts are compared, and the amount is also pinned to the
+/// arithmetic so a mutation that zeroed *both* sides could not pass either.
+///
+/// The `transfer`-out case is the same shape and 08 §2.6 credits it the same
+/// way: *"the one disposal it still credits is a transfer out … the score
+/// measures the forecast the account's book activity expressed, not the custody
+/// it retained"*. Both disposals run here, because they burn the position by
+/// different routes and only one of them was in the plan.
+///
+/// Mutations killed: reinstating any `min(position, book_acquired)` clamp in
+/// `on_settle` (the two disposal legs credit 0 against the control's non-zero
+/// amount); and re-reading `ConditionalLedger::Positions` in
+/// `RuntimeSettledMarkets` for any purpose that reaches the credit.
+#[test]
+fn a_trader_who_disposes_of_the_position_before_the_fold_is_credited_the_same() {
+    /// How the trader parts with the position before the keeper folds.
+    ///
+    /// **The two disposals sit on opposite sides of settlement, and the ledger
+    /// is what puts them there.** `redeem_scalar` needs a settled vault, and
+    /// `transfer` is refused once the vault leaves the live set
+    /// (`ensure_position_live`, `WrongVaultState`). Both nonetheless reach the
+    /// state 08 §2.6 rule 3 is about — the account holds nothing when the fold
+    /// runs — which is the point: the credit must not depend on custody at all.
+    #[derive(Clone, Copy)]
+    enum Disposal {
+        /// The control: keep the position, fold, and let the trader redeem
+        /// afterwards. This is the ordering the retired clamp was right about.
+        None,
+        /// Redeem the whole leg the instant settlement opens, then be folded.
+        RedeemAfterSettlement,
+        /// Send the whole leg to another account while the vault is still live,
+        /// then be folded.
+        TransferBeforeSettlement,
+    }
+
+    const LONG_LEG: PositionId = PositionId::Proposal {
+        proposal: PID,
+        branch: Branch::Accept,
+        kind: PositionKind::Long,
+    };
+
+    /// One trader buys `MIN_TRADE_USDC` of LONG on a book that settles at
+    /// three-fifths of par, disposes of the position per `disposal`, and is
+    /// folded by a third-party keeper. Returns what the fold credited.
+    fn credited_after(disposal: Disposal) -> Balance {
+        let mut credited = 0;
+        development_ext().execute_with(|| {
+            let trader = seeded_decision_book(Branch::Accept);
+            assert_ok!(Market::buy(
+                RuntimeOrigin::signed(trader.clone()),
+                MARKET,
+                ScalarSide::Long,
+                kernel::MIN_TRADE_USDC,
+                Balance::MAX,
+            ));
+            let held = pallet_conditional_ledger::Positions::<Runtime>::get(LONG_LEG, &trader);
+            assert_eq!(held, kernel::MIN_TRADE_USDC, "the buy left a real position");
+            assert_eq!(
+                pallet_trading_rewards::Scores::<Runtime>::get(&trader, MARKET)
+                    .expect("the fill was scored")
+                    .book_acquired[0],
+                held,
+                "and the book recorded the same quantity",
+            );
+
+            if matches!(disposal, Disposal::TransferBeforeSettlement) {
+                // The recipient gains no `book_acquired`, so no second account
+                // can ever be credited for these units. It is funded because a
+                // new ledger entry takes a `ledger.pos_dep` deposit from the
+                // *destination*, not because the score program needs it.
+                let recipient = account(222);
+                assert_ok!(ForeignAssets::mint_into(
+                    usdc_location(),
+                    &recipient,
+                    currency::USDC.saturating_mul(10),
+                ));
+                assert_ok!(ConditionalLedger::transfer(
+                    RuntimeOrigin::signed(trader.clone()),
+                    LONG_LEG,
+                    recipient.clone(),
+                    held,
+                ));
+                assert!(
+                    pallet_trading_rewards::Scores::<Runtime>::get(&recipient, MARKET).is_none(),
+                    "the recipient holds no book entry, so no second credit exists",
+                );
+            }
+
+            // Three-fifths of par. Settlement and redemption open together.
+            settle_vault(Branch::Accept, FixedU64(kernel::SCORE_SCALE / 10 * 6));
+
+            if matches!(disposal, Disposal::RedeemAfterSettlement) {
+                assert_ok!(ConditionalLedger::redeem_scalar(
+                    RuntimeOrigin::signed(trader.clone()),
+                    PID,
+                    ScalarSide::Long,
+                    held,
+                ));
+            }
+
+            if matches!(disposal, Disposal::None) {
+                assert_eq!(
+                    pallet_conditional_ledger::Positions::<Runtime>::get(LONG_LEG, &trader),
+                    held,
+                    "the control still holds the position at fold time",
+                );
+            } else {
+                assert_eq!(
+                    pallet_conditional_ledger::Positions::<Runtime>::get(LONG_LEG, &trader),
+                    0,
+                    "the disposal really burned the position the clamp used to read",
+                );
+            }
+
+            // The keeper cranks the fold, as it does in production.
+            assert_ok!(TradingRewards::settle_market_score(
+                RuntimeOrigin::signed(account(221)),
+                trader.clone(),
+                MARKET,
+            ));
+            credited = pallet_trading_rewards::Participants::<Runtime>::get(&trader)
+                .expect("the record survives the fold")
+                .epoch
+                .received;
+        });
+        credited
+    }
+
+    let folded_first = credited_after(Disposal::None);
+    assert_eq!(
+        folded_first,
+        kernel::MIN_TRADE_USDC / 10 * 6,
+        "the control is the arithmetic rule 3 states, not merely 'something'",
+    );
+    assert!(folded_first > 0);
+
+    assert_eq!(
+        credited_after(Disposal::RedeemAfterSettlement),
+        folded_first,
+        "a trader who redeems before the fold is credited exactly as one who \
+         redeems after it (08 §2.6 rule 3; 15 §4.1 point 3)",
+    );
+    assert_eq!(
+        credited_after(Disposal::TransferBeforeSettlement),
+        folded_first,
+        "a transfer out is credited the same way (08 §2.6 rule 3)",
+    );
 }
 
 #[test]
@@ -506,8 +743,8 @@ fn an_annulled_branch_reports_the_annulled_arm_and_reads_no_position() {
             RuntimeSettledMarkets::settlement(&trader, MARKET).expect("terminal either way");
         assert_eq!(settlement.disposition, BranchDisposition::Annulled);
         assert_eq!(
-            (settlement.position, settlement.settled_value),
-            ([0, 0], [0, 0]),
+            settlement.settled_value,
+            [0, 0],
             "rule 4's annulled arm discards every credit, so rule 3 never runs",
         );
 
@@ -600,14 +837,18 @@ fn an_archived_vault_reports_nothing_and_leaves_the_timeout_in_charge() {
 /// A gate leg is all-or-nothing, and the outcome picks which slot is worth par.
 /// Both outcomes are exercised so a hardcoded `[par, 0]` cannot pass.
 ///
-/// **The trader holds a real, deliberately asymmetric `GateYes`/`GateNo`
-/// position, and `settlement.position` is asserted.** Without this a reviewer
-/// swap of `gate_legs`'s two `read(...)` calls (`configs.rs`, the `legs` array)
-/// passes 485/485: the fixture's trader held no gate legs at all, so
-/// `position` was `[0, 0]` under every mutation and the ordering claim in the
-/// function's own comment — 04 §6.1 maps LONG to YES, and `market_core::
-/// gate_kind` is what the fill accumulator's two slots actually follow — went
-/// unchecked. A swap credits the wrong leg on every gate market.
+/// **The score entry carries a deliberately asymmetric YES/NO parcel and the
+/// credited amount is asserted, not only the reported value.** The ordering
+/// claim — 04 §6.1 maps LONG to YES, and `market_core::gate_kind` is what the
+/// fill accumulator's two `book_acquired` slots actually follow — is exactly
+/// what a swap of `gate_values`'s two arms breaks, and it would credit the
+/// wrong leg on every gate market. Equal parcels would hide the swap, so the
+/// two differ.
+///
+/// Before 08 §2.6 rule 3 was amended this test held asymmetric *ledger
+/// positions* and asserted `settlement.position`. The adapter reads no position
+/// now, so the same claim is made one layer down, where it was always the real
+/// one: the fold.
 #[test]
 fn a_gate_book_pays_par_on_the_outcome_side_and_nothing_on_the_other() {
     for (outcome, expected) in [
@@ -615,7 +856,7 @@ fn a_gate_book_pays_par_on_the_outcome_side_and_nothing_on_the_other() {
         (false, [0, SETTLED_VALUE_SCALE]),
     ] {
         development_ext().execute_with(|| {
-            let trader = account(219);
+            let trader = enrolled_trader();
             const GATE_MARKET: MarketId = 77_002;
             assert_ok!(ConditionalLedger::create_vault(
                 RuntimeOrigin::signed(crate::configs::market_account()),
@@ -637,29 +878,21 @@ fn a_gate_book_pays_par_on_the_outcome_side_and_nothing_on_the_other() {
                 ),
             );
             // Written directly rather than traded into existence, exactly as
-            // the market row above is: this test is about the adapter's read,
-            // not about LMSR mechanics. Asymmetric on purpose — a swap of the
-            // two reads is invisible to `assert_eq!` if both legs match.
-            let yes_held: Balance = currency::USDC.saturating_mul(7);
-            let no_held: Balance = currency::USDC.saturating_mul(3);
-            pallet_conditional_ledger::Positions::<Runtime>::insert(
-                PositionId::Proposal {
-                    proposal: PID,
-                    branch: Branch::Accept,
-                    kind: PositionKind::GateYes(GateType::Survival),
-                },
+            // the market row above is: this test is about the adapter and the
+            // fold, not about LMSR mechanics. Asymmetric on purpose — a swap of
+            // the two arms is invisible if both parcels match.
+            let yes_bought: Balance = currency::USDC.saturating_mul(7);
+            let no_bought: Balance = currency::USDC.saturating_mul(3);
+            pallet_trading_rewards::Scores::<Runtime>::insert(
                 &trader,
-                yes_held,
-            );
-            pallet_conditional_ledger::Positions::<Runtime>::insert(
-                PositionId::Proposal {
-                    proposal: PID,
-                    branch: Branch::Accept,
-                    kind: PositionKind::GateNo(GateType::Survival),
+                GATE_MARKET,
+                trading_rewards_core::MarketScore {
+                    book_acquired: [yes_bought, no_bought],
+                    ..Default::default()
                 },
-                &trader,
-                no_held,
             );
+            pallet_trading_rewards::ScoreCount::<Runtime>::insert(&trader, 1);
+
             // A settled vault whose gate has no outcome yet is not terminal for
             // this book: it waits rather than folding on a missing value.
             settle_vault(Branch::Accept, FixedU64(kernel::SCORE_SCALE / 2));
@@ -673,13 +906,28 @@ fn a_gate_book_pays_par_on_the_outcome_side_and_nothing_on_the_other() {
             let settlement =
                 RuntimeSettledMarkets::settlement(&trader, GATE_MARKET).expect("terminal now");
             assert_eq!(settlement.disposition, BranchDisposition::Realized);
-            assert_eq!(
-                settlement.position,
-                [yes_held, no_held],
-                "position[0] is the YES leg and position[1] is the NO leg; a \
-                 swap of the two reads credits the wrong leg on every gate market",
-            );
             assert_eq!(settlement.settled_value, expected);
+
+            assert_ok!(TradingRewards::settle_market_score(
+                RuntimeOrigin::signed(account(221)),
+                trader.clone(),
+                GATE_MARKET,
+            ));
+            let credited = pallet_trading_rewards::Participants::<Runtime>::get(&trader)
+                .expect("the record survives the fold")
+                .epoch
+                .received;
+            assert_eq!(
+                credited,
+                if outcome { yes_bought } else { no_bought },
+                "slot 0 is the YES parcel and slot 1 is the NO parcel; a swap \
+                 of `gate_values`'s arms credits the wrong leg on every gate market",
+            );
+            assert_ne!(
+                credited,
+                if outcome { no_bought } else { yes_bought },
+                "and the two parcels differ, so the swap is visible",
+            );
         });
     }
 }
@@ -722,7 +970,6 @@ fn a_settled_baseline_book_settles_at_the_ledgers_own_fraction_of_par() {
         let settlement = RuntimeSettledMarkets::settlement(&trader, BASELINE_MARKET)
             .expect("a settled baseline vault is terminal");
         assert_eq!(settlement.disposition, BranchDisposition::Realized);
-        assert_eq!(settlement.position, [held, 0]);
         assert_eq!(
             settlement.settled_value,
             [
@@ -747,8 +994,8 @@ fn a_settled_baseline_book_settles_at_the_ledgers_own_fraction_of_par() {
         assert_eq!(
             record.epoch.received,
             held / 10 * 6,
-            "rule 3 credits `position x 0.6`, rounded down, on the Baseline \
-             book exactly as it does on a Decision book",
+            "rule 3 credits `book_acquired x 0.6`, rounded down, on the \
+             Baseline book exactly as it does on a Decision book",
         );
         assert!(record.epoch.received > 0);
     });
@@ -894,6 +1141,83 @@ fn the_return_leaves_behind_the_vit_that_backs_an_unclaimed_accrual() {
 }
 
 // ---------------------------------------------------------------------------
+// The parameter adapters this runtime binds to the pallet's Config
+// ---------------------------------------------------------------------------
+
+/// **A zero `rwd.rate` must arrive at the pallet as `None`, and only the
+/// runtime can prove it.** The Config item requires it — absent, malformed *or
+/// zero* is the fail-closed state, because a zero rate is the program switched
+/// off and must not take a hold (08 §2.6) — and the pallet's mock implements
+/// the requirement itself. So `enroll_refuses_a_zero_rate_before_any_hold` in
+/// `pallets/trading-rewards/src/tests.rs` asserts the mock's own guard and says
+/// nothing about the adapter the chain actually runs, which returned `Some(0)`
+/// until this test existed.
+///
+/// The premise is asserted rather than assumed: zero is inside the registry
+/// row's own bounds, so an ordinary amendment reaches it with no governance
+/// error at all.
+#[test]
+fn a_zero_reward_rate_reads_as_off_and_takes_no_bond() {
+    development_ext().execute_with(|| {
+        let key = pallet_constitution::key16(b"rwd.rate");
+        let seeded = pallet_constitution::Params::<Runtime>::get(key)
+            .expect("13 §1 seeds rwd.rate at genesis");
+        assert_eq!(
+            seeded.min,
+            pallet_constitution::ParamValue::Perbill(0),
+            "zero is the row's lawful floor, so this state is reachable by amendment",
+        );
+        pallet_constitution::Params::<Runtime>::insert(
+            key,
+            pallet_constitution::ParamRecord {
+                value: pallet_constitution::ParamValue::Perbill(0),
+                ..seeded
+            },
+        );
+
+        assert_eq!(
+            <crate::configs::TradingRewardRate as frame_support::traits::Get<Option<u32>>>::get(),
+            None,
+            "the switched-off program must reach the pallet as the fail-closed state",
+        );
+
+        let trader = account(219);
+        assert_ok!(ForeignAssets::mint_into(
+            usdc_location(),
+            &trader,
+            currency::USDC.saturating_mul(50),
+        ));
+        let bond = TradingRewards::minimum_bond().expect("ledger.pos_dep is seeded at genesis");
+        let funds = ForeignAssets::balance(usdc_location(), &trader);
+        let sovereign = TradingRewards::account_id();
+        let held = ForeignAssets::balance(usdc_location(), &sovereign);
+
+        assert_noop!(
+            TradingRewards::enroll(
+                RuntimeOrigin::signed(trader.clone()),
+                bond.saturating_mul(4),
+            ),
+            pallet_trading_rewards::Error::<Runtime>::RateUnset,
+        );
+        assert_eq!(
+            ForeignAssets::balance(usdc_location(), &trader),
+            funds,
+            "no hold was taken",
+        );
+        assert_eq!(
+            ForeignAssets::balance(usdc_location(), &sovereign),
+            held,
+            "and the sovereign custodies nothing it could never pay against",
+        );
+        assert!(pallet_trading_rewards::Participants::<Runtime>::get(&trader).is_none());
+        assert_eq!(
+            pallet_trading_rewards::ParticipantCount::<Runtime>::get(),
+            0
+        );
+    });
+}
+
+// ---------------------------------------------------------------------------
 // The benchmark fixtures' own preconditions
 // ---------------------------------------------------------------------------
 
@@ -936,13 +1260,15 @@ fn the_trade_and_settlement_fixtures_really_prime_the_expensive_arms() {
             BranchDisposition::Realized,
             "the fold arm is the expensive one, and the fixture must reach it",
         );
+        // Since 08 §2.6 rule 3 was amended the quantity comes from the score
+        // entry — which the benchmark seeds on both slots — so what the fixture
+        // has to supply is a value on both legs that is strictly inside the
+        // grid: then both multiplications and both floors run.
         assert!(
-            settlement.position[0] > 0 && settlement.position[1] > 0,
-            "both scalar legs must be read, or rule 3 measures half its work",
-        );
-        assert!(
-            settlement.settled_value[0] > 0 && settlement.settled_value[0] < SETTLED_VALUE_SCALE,
-            "a sub-par value, so the per-unit multiplication and its floor both run",
+            settlement.settled_value
+                .iter()
+                .all(|value| *value > 0 && *value < SETTLED_VALUE_SCALE),
+            "both legs sub-par and non-zero, or rule 3 measures half its work",
         );
     });
 }

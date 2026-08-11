@@ -28,9 +28,9 @@ const PERBILL: u128 = 1_000_000_000;
 /// other rule.
 ///
 /// 08 §2.6 rule 3's own wording is the tell: *"Settlement adds
-/// `min(position, book_acquired) × settled_value` to `received`, **rounded
-/// down**"*. A product of two integers needs no rounding, so the value the
-/// rule multiplies by was never an integer.
+/// `book_acquired × settled_value` to `received`, **rounded down**"*. A product
+/// of two integers needs no rounding, so the value the rule multiplies by was
+/// never an integer.
 ///
 /// The scale is the ledger's own [`SCORE_SCALE`], so [`on_settle`] performs the
 /// identical arithmetic `redeem_scalar` performs (`a × s / 1e9`, floored) and
@@ -126,11 +126,15 @@ pub enum BranchDisposition {
 }
 
 /// The terminal facts 08 §2.6 rules 3 and 4 need about one scored book.
+///
+/// **It carries no position, and that is the rule rather than an omission**
+/// *(08 §2.6 rule 3, amended 2026-08-11)*. The credited quantity is the
+/// accumulator's own `book_acquired`, so the supplier of these facts never
+/// reads the conditional ledger's `Positions` — see [`on_settle`] for why a
+/// position read was a defect and not merely a cost.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MarketSettlement {
     pub disposition: BranchDisposition,
-    /// The account's terminal branch position, per scalar side.
-    pub position: [Balance; 2],
     /// The branch's terminal redemption value per unit, per scalar side, on the
     /// [`SETTLED_VALUE_SCALE`] fixed-point grid — see that constant for why a
     /// bare integer cannot carry a per-unit value.
@@ -269,8 +273,28 @@ fn scale_down(a: Balance, v: Balance) -> Option<Balance> {
     whole.checked_add(part)
 }
 
-/// 08 §2.6 rule 3: credit the book-acquired part of the terminal position at
-/// the branch's per-unit redemption value, rounded down.
+/// 08 §2.6 rule 3: credit `book_acquired` at the branch's per-unit redemption
+/// value, rounded down, and decrement `book_acquired` by the credited quantity.
+///
+/// **The credited quantity is `book_acquired` alone and is never clamped by the
+/// account's ledger position** *(amended 2026-08-11; this rule read
+/// `min(position, book_acquired)`, and the clamp made an accurate forecast pay
+/// a debit)*. Settlement and redemption open at the same instant, and the fold
+/// is a permissionless crank the participant does not control, so a trader who
+/// redeems — the ordinary thing to do, and the only way to get the money — was
+/// folded against a position redemption had already burned: `received`
+/// collected nothing, `spent` still held the purchase, and rule 4's realized
+/// arm debited a correct forecaster for being prompt.
+///
+/// `book_acquired` is the right quantity on its own. It is already *bought
+/// through the book minus sold back through the book*, so it excludes exactly
+/// what the clamp was introduced to exclude — units obtained by `split` or by
+/// transfer in, which no rule here ever scores — and it is timing-independent,
+/// so no payout depends on a race between a keeper and a redemption.
+///
+/// The decrement stays, and it is what makes a second settlement of one entry a
+/// no-op: without it a repeated call credits `received` again, and an
+/// over-credited reward is the direction R-7 forbids.
 ///
 /// `settled_value` is on the [`SETTLED_VALUE_SCALE`] grid and is **clamped to
 /// par here**, not refused above it. The value crosses a runtime seam
@@ -278,18 +302,20 @@ fn scale_down(a: Balance, v: Balance) -> Option<Balance> {
 /// would be the one refusal in this program that strands a bond permanently
 /// (see [`scale_down`]), while par is the largest value any unit can lawfully
 /// redeem for, so the clamp cannot credit more than the market could pay.
-pub fn on_settle(
-    s: &mut MarketScore,
-    position: [Balance; 2],
-    settled_value: [Balance; 2],
-) -> Result<(), CoreError> {
-    for side in 0..2 {
-        let eligible = core::cmp::min(position[side], s.book_acquired[side]);
-        let value = core::cmp::min(settled_value[side], SETTLED_VALUE_SCALE);
-        let credit = scale_down(eligible, value).ok_or(CoreError::Overflow)?;
-        s.received = s.received.checked_add(credit).ok_or(CoreError::Overflow)?;
-        s.book_acquired[side] = s.book_acquired[side].saturating_sub(eligible);
+pub fn on_settle(s: &mut MarketScore, settled_value: [Balance; 2]) -> Result<(), CoreError> {
+    let mut credited: Balance = 0;
+    for (acquired, raw_value) in s.book_acquired.iter_mut().zip(settled_value) {
+        let value = core::cmp::min(raw_value, SETTLED_VALUE_SCALE);
+        let credit = scale_down(*acquired, value).ok_or(CoreError::Overflow)?;
+        credited = credited.checked_add(credit).ok_or(CoreError::Overflow)?;
+        // The decrement is by the credited quantity, and the credited quantity
+        // is the whole counter.
+        *acquired = 0;
     }
+    s.received = s
+        .received
+        .checked_add(credited)
+        .ok_or(CoreError::Overflow)?;
     Ok(())
 }
 
@@ -509,7 +535,7 @@ mod tests {
     fn settlement_credits_only_the_book_acquired_remainder() {
         let mut s = MarketScore::default();
         on_buy(&mut s, 0, 1_000, 500, 3).expect("no overflow");
-        on_settle(&mut s, [1_000, 0], [SETTLED_VALUE_SCALE, 0]).expect("no overflow");
+        on_settle(&mut s, [SETTLED_VALUE_SCALE, 0]).expect("no overflow");
         assert_eq!(s.received, 1_000, "1_000 units redeeming at par");
     }
 
@@ -527,7 +553,7 @@ mod tests {
             let mut s = MarketScore::default();
             on_buy(&mut s, 0, 1_000, 500, 3).expect("no overflow");
             let value = numerator * SETTLED_VALUE_SCALE / 10;
-            on_settle(&mut s, [1_000, 0], [value, 0]).expect("no overflow");
+            on_settle(&mut s, [value, 0]).expect("no overflow");
             assert_eq!(
                 s.received, expected,
                 "1_000 units at 0.{numerator} of par credits {expected}, never 0"
@@ -542,7 +568,7 @@ mod tests {
     fn a_settled_value_above_par_is_clamped_rather_than_refused() {
         let mut s = MarketScore::default();
         on_buy(&mut s, 0, 1_000, 500, 3).expect("no overflow");
-        on_settle(&mut s, [1_000, 0], [SETTLED_VALUE_SCALE * 7, 0]).expect("no overflow");
+        on_settle(&mut s, [SETTLED_VALUE_SCALE * 7, 0]).expect("no overflow");
         assert_eq!(s.received, 1_000, "clamped to par, not 7 000");
     }
 
@@ -559,7 +585,7 @@ mod tests {
             book_acquired: [Balance::MAX, 0],
             ..Default::default()
         };
-        on_settle(&mut s, [Balance::MAX, 0], [SETTLED_VALUE_SCALE, 0]).expect("no overflow");
+        on_settle(&mut s, [SETTLED_VALUE_SCALE, 0]).expect("no overflow");
         assert_eq!(s.received, Balance::MAX, "par credits one-for-one, exactly");
         assert_eq!(s.book_acquired, [0, 0]);
     }
@@ -586,27 +612,38 @@ mod tests {
         }
     }
 
-    // I2 (fix round 1): the test above sets position == book_acquired, so an
-    // implementation that used `position` alone (ignoring the
-    // `min(position, book_acquired)` clamp `book_acquired` exists to
-    // enforce — design §4.4) would still pass it. Here position (1_000)
-    // exceeds book_acquired (300), so crediting by position alone would give
-    // 1_000 * 0.5 = 500 instead of the correct 300 * 0.5 = 150, and leaving
-    // book_acquired un-decremented would also be visible. The half-par value
-    // keeps the two figures apart under the TR7 scale too.
+    // 08 §2.6 rule 3 as amended 2026-08-11: the credited quantity is
+    // `book_acquired` alone. The half-par value keeps the credit and the
+    // quantity apart, so an implementation crediting units rather than value
+    // lands on 300 instead of 150; and the retired clamp's own failure mode —
+    // an account folded after redeeming, which reads as `eligible = 0` — lands
+    // on 0. All three figures are distinct here.
     #[test]
-    fn settlement_clamps_to_book_acquired_when_position_is_larger() {
+    fn settlement_credits_the_whole_book_acquired_quantity() {
         let mut s = MarketScore::default();
         on_buy(&mut s, 0, 300, 150, 0).expect("no overflow");
-        on_settle(&mut s, [1_000, 0], [SETTLED_VALUE_SCALE / 2, 0]).expect("no overflow");
-        assert_eq!(
-            s.received, 150,
-            "eligible = min(1_000, 300) = 300, credit = 300 * 0.5"
-        );
+        on_settle(&mut s, [SETTLED_VALUE_SCALE / 2, 0]).expect("no overflow");
+        assert_eq!(s.received, 150, "eligible = 300, credit = 300 * 0.5");
+        assert_ne!(s.received, 0, "a redeemed position credits the book anyway");
         assert_eq!(
             s.book_acquired[0], 0,
-            "book_acquired decrements by the eligible amount"
+            "book_acquired decrements by the credited quantity"
         );
+    }
+
+    // The other half of the same rule, and the reason `book_acquired` needs no
+    // clamp: a parcel sold back through the book left the counter on the way
+    // out, so settlement cannot credit it a second time. An implementation that
+    // remembered the gross bought quantity instead of reading the live counter
+    // credits 1_000 here.
+    #[test]
+    fn a_parcel_sold_back_through_the_book_is_not_credited_again_at_settlement() {
+        let mut s = MarketScore::default();
+        on_buy(&mut s, 0, 1_000, 500, 0).expect("no overflow");
+        on_sell(&mut s, 0, 1_000, 700).expect("no overflow");
+        assert_eq!((s.received, s.book_acquired[0]), (700, 0));
+        on_settle(&mut s, [SETTLED_VALUE_SCALE, 0]).expect("no overflow");
+        assert_eq!(s.received, 700, "the sale credit, and nothing added at par");
     }
 
     // I3 (fix round 1): every existing on_settle test only ever populated
@@ -623,7 +660,7 @@ mod tests {
         // The two sides of one scalar book always sum to par, which is the
         // shape the runtime adapter produces: `[s, SCORE_SCALE - s]`.
         let long = SETTLED_VALUE_SCALE / 4;
-        on_settle(&mut s, [200, 300], [long, SETTLED_VALUE_SCALE - long]).expect("no overflow");
+        on_settle(&mut s, [long, SETTLED_VALUE_SCALE - long]).expect("no overflow");
         assert_eq!(
             s.received,
             200 / 4 + 300 * 3 / 4,

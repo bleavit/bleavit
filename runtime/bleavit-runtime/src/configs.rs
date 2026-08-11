@@ -8584,6 +8584,14 @@ parameter_types! {
 /// Live `rwd.rate` (13 §1, Perbill parts per billion). `None` when the row is
 /// unreadable, which the pallet reads as a zero cap — the program off, which
 /// 13 §1 calls the safe direction.
+///
+/// **Zero is `None` too, and the `> 0` guard is what makes it so.** The rate's
+/// registry floor is 0, so an ordinary amendment reaches it, and
+/// [`pallet_trading_rewards::Config::RewardRate`] states that a zero rate is
+/// the program switched off and MUST NOT take a hold (08 §2.6). Returning
+/// `Some(0)` here would let `enroll` move a USDC bond into the sovereign for a
+/// program that can pay nothing — the pallet's own mock honours the contract,
+/// so the pallet-level test of it passes against a chain that breaks it.
 pub struct TradingRewardRate;
 impl Get<Option<u32>> for TradingRewardRate {
     fn get() -> Option<u32> {
@@ -8592,6 +8600,7 @@ impl Get<Option<u32>> for TradingRewardRate {
             Some(pallet_constitution::ParamValue::Perbill(value)) => Some(value),
             _ => None,
         }
+        .filter(|value| *value > 0)
     }
 }
 
@@ -8621,6 +8630,15 @@ impl Get<Option<u64>> for TradingRewardVitUsdcRate {
 /// good. Every arm therefore resolves to a value or to `None`; nothing here can
 /// produce an arithmetic edge, and `settled_value` is a fraction of par by
 /// construction (see `trading_rewards_core::SETTLED_VALUE_SCALE`).
+///
+/// **It does not read `pallet_conditional_ledger::Positions`, and must not**
+/// *(08 §2.6 rule 3, amended 2026-08-11)*. Rule 3 credits the score entry's own
+/// `book_acquired`, so the only ledger facts this adapter supplies are the
+/// branch's disposition and its terminal per-unit value. A position read was
+/// not merely two storage reads spent on an unused number: settlement and
+/// redemption open at the same instant and the fold is a permissionless crank,
+/// so a trader who redeemed first was folded against a burned position and
+/// rule 4's realized arm debited them for a correct forecast.
 pub struct RuntimeSettledMarkets;
 
 /// `VaultInfo::gate_outcomes` index, mirroring the ledger core's own `gix`.
@@ -8635,74 +8653,41 @@ const fn trading_reward_gate_index(gate: futarchy_primitives::GateType) -> usize
 }
 
 impl RuntimeSettledMarkets {
-    /// The account's terminal holding of the two scalar legs of `position`,
-    /// and the per-unit value each redeems for.
+    /// The per-unit value each scalar leg redeems for.
     ///
     /// `settled_value` is `[s, SCORE_SCALE − s]`, which is exactly what
     /// `redeem_scalar` pays (`a × s / 1e9` for LONG, the complement for
     /// SHORT). `ensure_score` refuses a stored `s` above `SCORE_SCALE`, so
     /// neither leg can exceed par and the two always sum to par.
-    fn scalar_legs(
-        who: &AccountId,
-        proposal: futarchy_primitives::ProposalId,
-        winner: futarchy_primitives::Branch,
-        score: FixedU64,
-    ) -> ([Balance; 2], [Balance; 2]) {
-        use futarchy_primitives::{PositionId, PositionKind};
-        let read = |kind: PositionKind| {
-            pallet_conditional_ledger::Positions::<Runtime>::get(
-                PositionId::Proposal {
-                    proposal,
-                    branch: winner,
-                    kind,
-                },
-                who,
-            )
-        };
+    fn scalar_values(score: FixedU64) -> [Balance; 2] {
         let par = trading_rewards_core::SETTLED_VALUE_SCALE;
         let long = Balance::from(score.0).min(par);
-        (
-            [read(PositionKind::Long), read(PositionKind::Short)],
-            [long, par.saturating_sub(long)],
-        )
+        [long, par.saturating_sub(long)]
     }
 
     /// A gate leg redeems all-or-nothing: the winning side is worth par and
     /// the other nothing (`redeem_gate` burns one and pays `a` for it).
-    fn gate_legs(
-        who: &AccountId,
-        proposal: futarchy_primitives::ProposalId,
-        winner: futarchy_primitives::Branch,
-        gate: futarchy_primitives::GateType,
-        outcome: bool,
-    ) -> ([Balance; 2], [Balance; 2]) {
-        use futarchy_primitives::{PositionId, PositionKind};
-        let read = |kind: PositionKind| {
-            pallet_conditional_ledger::Positions::<Runtime>::get(
-                PositionId::Proposal {
-                    proposal,
-                    branch: winner,
-                    kind,
-                },
-                who,
-            )
-        };
+    ///
+    /// 04 §6.1's gate wrapper maps LONG to YES and SHORT to NO, which is the
+    /// order `market_core::gate_kind` uses and therefore the order the fill
+    /// accumulator's two `book_acquired` slots carry.
+    fn gate_values(outcome: bool) -> [Balance; 2] {
         let par = trading_rewards_core::SETTLED_VALUE_SCALE;
-        // 04 §6.1's gate wrapper maps LONG to YES and SHORT to NO, which is
-        // the order `market_core::gate_kind` uses and therefore the order the
-        // fill accumulator's two slots carry.
-        let legs = [
-            read(PositionKind::GateYes(gate)),
-            read(PositionKind::GateNo(gate)),
-        ];
-        let values = if outcome { [par, 0] } else { [0, par] };
-        (legs, values)
+        if outcome {
+            [par, 0]
+        } else {
+            [0, par]
+        }
     }
 }
 
 impl trading_rewards_core::SettledMarkets<AccountId> for RuntimeSettledMarkets {
+    /// The account is unused on this chain, and deliberately so: since 08 §2.6
+    /// rule 3 was amended the terminal facts are properties of the *book*, not
+    /// of the holder. The trait keeps the parameter because a settlement source
+    /// is free to be per-account, and a mock is.
     fn settlement(
-        who: &AccountId,
+        _who: &AccountId,
         market: futarchy_primitives::MarketId,
     ) -> Option<trading_rewards_core::MarketSettlement> {
         use futarchy_primitives::VaultState;
@@ -8715,21 +8700,17 @@ impl trading_rewards_core::SettledMarkets<AccountId> for RuntimeSettledMarkets {
         // swept, both report `None`: there is nothing left to value, and the
         // absolute timeout is the right disposition for an entry no settlement
         // can ever reach.
-        let (disposition, position, settled_value) = match kind {
+        let (disposition, settled_value) = match kind {
             BookKind::Decision { proposal, branch } => {
                 match pallet_conditional_ledger::Vaults::<Runtime>::get(proposal)?.state {
                     VaultState::ScalarSettled { winner, s } if winner == branch => {
-                        let (position, settled_value) = Self::scalar_legs(who, proposal, winner, s);
-                        (BranchDisposition::Realized, position, settled_value)
+                        (BranchDisposition::Realized, Self::scalar_values(s))
                     }
                     // The annulled arm discards every credit and folds
-                    // `mirror_principal − spent`, so rule 3 never runs and
-                    // reading the losing branch's positions would be two
-                    // storage reads spent on a number nothing consumes.
-                    VaultState::ScalarSettled { .. } => {
-                        (BranchDisposition::Annulled, [0, 0], [0, 0])
-                    }
-                    VaultState::Voided => (BranchDisposition::Void, [0, 0], [0, 0]),
+                    // `mirror_principal − spent`, so rule 3 never runs and any
+                    // value reported here would be consumed by nothing.
+                    VaultState::ScalarSettled { .. } => (BranchDisposition::Annulled, [0, 0]),
+                    VaultState::Voided => (BranchDisposition::Void, [0, 0]),
                     _ => return None,
                 }
             }
@@ -8745,14 +8726,10 @@ impl trading_rewards_core::SettledMarkets<AccountId> for RuntimeSettledMarkets {
                         // terminal for *this* book, so it waits rather than
                         // folding on a value that does not exist.
                         let outcome = vault.gate_outcomes[trading_reward_gate_index(gate)]?;
-                        let (position, settled_value) =
-                            Self::gate_legs(who, proposal, winner, gate, outcome);
-                        (BranchDisposition::Realized, position, settled_value)
+                        (BranchDisposition::Realized, Self::gate_values(outcome))
                     }
-                    VaultState::ScalarSettled { .. } => {
-                        (BranchDisposition::Annulled, [0, 0], [0, 0])
-                    }
-                    VaultState::Voided => (BranchDisposition::Void, [0, 0], [0, 0]),
+                    VaultState::ScalarSettled { .. } => (BranchDisposition::Annulled, [0, 0]),
+                    VaultState::Voided => (BranchDisposition::Void, [0, 0]),
                     _ => return None,
                 }
             }
@@ -8761,20 +8738,7 @@ impl trading_rewards_core::SettledMarkets<AccountId> for RuntimeSettledMarkets {
             BookKind::Baseline { epoch } => {
                 match pallet_conditional_ledger::BaselineVaults::<Runtime>::get(epoch)?.state {
                     BaselineState::Settled(s) => {
-                        use futarchy_primitives::{PositionId, ScalarSide};
-                        let read = |side: ScalarSide| {
-                            pallet_conditional_ledger::Positions::<Runtime>::get(
-                                PositionId::Baseline { epoch, side },
-                                who,
-                            )
-                        };
-                        let par = trading_rewards_core::SETTLED_VALUE_SCALE;
-                        let long = Balance::from(s.0).min(par);
-                        (
-                            BranchDisposition::Realized,
-                            [read(ScalarSide::Long), read(ScalarSide::Short)],
-                            [long, par.saturating_sub(long)],
-                        )
+                        (BranchDisposition::Realized, Self::scalar_values(s))
                     }
                     BaselineState::Open => return None,
                 }
@@ -8788,7 +8752,6 @@ impl trading_rewards_core::SettledMarkets<AccountId> for RuntimeSettledMarkets {
         };
         Some(MarketSettlement {
             disposition,
-            position,
             settled_value,
         })
     }
@@ -11850,8 +11813,14 @@ impl pallet_trading_rewards::BenchmarkHelper<AccountId> for RuntimeBenchmarkHelp
     ///
     /// The score is deliberately **sub-par and non-degenerate** (three fifths),
     /// so rule 3's per-unit multiplication and its floor are both exercised.
-    fn prime_settled_market(who: &AccountId, market: futarchy_primitives::MarketId) -> bool {
-        use futarchy_primitives::{Branch, PositionId, PositionKind, VaultState};
+    /// The account is unused: 08 §2.6 rule 3 credits the score entry's own
+    /// `book_acquired`, so the expensive arm is built entirely out of the
+    /// market row and the vault. An earlier version also wrote two
+    /// `ConditionalLedger::Positions` entries for this account, which the
+    /// adapter used to read; it reads them no longer, and priming state nothing
+    /// measures is how a fixture starts describing an arm that is not there.
+    fn prime_settled_market(_who: &AccountId, market: futarchy_primitives::MarketId) -> bool {
+        use futarchy_primitives::{Branch, VaultState};
         let proposal = market;
         pallet_market::Markets::<Runtime>::insert(
             market,
@@ -11872,17 +11841,6 @@ impl pallet_trading_rewards::BenchmarkHelper<AccountId> for RuntimeBenchmarkHelp
             s: FixedU64(kernel::SCORE_SCALE / 10 * 6),
         };
         pallet_conditional_ledger::Vaults::<Runtime>::insert(proposal, vault);
-        for kind in [PositionKind::Long, PositionKind::Short] {
-            pallet_conditional_ledger::Positions::<Runtime>::insert(
-                PositionId::Proposal {
-                    proposal,
-                    branch: Branch::Accept,
-                    kind,
-                },
-                who,
-                currency::USDC,
-            );
-        }
         true
     }
 }

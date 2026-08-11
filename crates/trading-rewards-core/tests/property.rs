@@ -299,9 +299,21 @@ fn the_fee_floor_is_the_exact_inverse_of_the_screen() {
 }
 
 proptest! {
-    /// The invariant the whole design rests on. For any set of accounts whose
-    /// positions offset, total payout minus total forfeit is never positive --
-    /// evaluated at every rate the registry admits.
+    /// The invariant the whole design rests on, stated as it actually holds:
+    /// for any pair of accounts whose positions offset, the payout never
+    /// exceeds the forfeit **plus the fees the pair itself paid** -- evaluated
+    /// at every rate and fee the registry admits.
+    ///
+    /// **The fee term is load-bearing, not slack this test happened to allow.**
+    /// The stronger claim -- payout minus forfeit is never positive, `<= 0` on
+    /// the kernel alone -- is false at unequal bonds, and this property is the
+    /// artifact that falsified it (15 §4.1; 08 §2.6). Its name and this
+    /// sentence carried the retracted version until the whole-branch review,
+    /// which left the one executable statement of the invariant asserting one
+    /// thing and claiming another -- and a reader greps the name. What holds
+    /// is the composed economic claim: a wash pair pays `2f`
+    /// per leg in fees, and the rate coupling `99 x rwd.rate <= 200 x mkt.fee`
+    /// is what keeps the reward under that cost.
     ///
     /// **Two independent bonds, and this is not a detail.** An earlier revision
     /// drew one `bond` and passed it to both legs, which proves only the
@@ -328,7 +340,7 @@ proptest! {
     /// properties after it own the per-leg contracts a single-unit mutation
     /// moves. All three are needed and none subsumes another.
     #[test]
-    fn offsetting_accounts_never_net_positive(
+    fn an_offsetting_pair_never_out_earns_its_forfeit_plus_its_own_fees(
         net in 1u128..1_000_000_000u128,
         bond_w in *MIN_BOND_USDC..1_000_000_000u128,
         bond_l in *MIN_BOND_USDC..1_000_000_000u128,
@@ -532,7 +544,6 @@ proptest! {
     fn settlement_never_credits_above_par(
         side in 0usize..2,
         acquired in 0u128..1_000_000_000u128,
-        position in 0u128..u128::from(u64::MAX),
         raw_value in prop_oneof![
             // Sub-par: where rule 3's fraction of par actually lives.
             5 => 0u128..SETTLED_VALUE_SCALE,
@@ -551,16 +562,15 @@ proptest! {
     ) {
         let mut s = MarketScore::default();
         on_buy(&mut s, side, acquired, 0, 0).expect("a zero-cost buy cannot overflow");
-        let mut positions = [0u128; 2];
-        positions[side] = position;
         let mut values = [0u128; 2];
         values[side] = raw_value;
-        on_settle(&mut s, positions, values).expect("the split product cannot overflow");
-        let eligible = core::cmp::min(position, acquired);
-        prop_assert!(s.received <= eligible);
+        on_settle(&mut s, values).expect("the split product cannot overflow");
+        // 08 §2.6 rule 3, amended 2026-08-11: the eligible quantity is
+        // `book_acquired` itself, never a position clamp.
+        prop_assert!(s.received <= acquired);
         let value = core::cmp::min(raw_value, SETTLED_VALUE_SCALE);
-        prop_assert_eq!(s.received, eligible * value / SETTLED_VALUE_SCALE);
-        prop_assert_eq!(s.book_acquired[side], acquired - eligible);
+        prop_assert_eq!(s.received, acquired * value / SETTLED_VALUE_SCALE);
+        prop_assert_eq!(s.book_acquired[side], 0);
         prop_assert_eq!(s.book_acquired[1 - side], 0, "the other branch is untouched");
     }
 
@@ -581,7 +591,7 @@ proptest! {
         let mut s = MarketScore::default();
         on_buy(&mut s, 0, long_units, 0, 0).expect("bounded magnitudes cannot overflow");
         on_buy(&mut s, 1, short_units, 0, 0).expect("bounded magnitudes cannot overflow");
-        on_settle(&mut s, [long_units, short_units], [long_value, short_value])
+        on_settle(&mut s, [long_value, short_value])
             .expect("bounded magnitudes cannot overflow");
         prop_assert_eq!(
             s.received,
@@ -604,39 +614,34 @@ proptest! {
     fn no_unit_is_credited_by_two_settlements(
         side in 0usize..2,
         acquired in 0u128..1_000_000u128,
-        position in 0u128..1_000_000u128,
+        later_parcel in 0u128..1_000_000u128,
         value in 0u128..=SETTLED_VALUE_SCALE,
     ) {
         let mut s = MarketScore::default();
         on_buy(&mut s, side, acquired, 0, 0).expect("bounded magnitudes cannot overflow");
-        let mut positions = [0u128; 2];
-        positions[side] = position;
         let mut values = [0u128; 2];
         values[side] = value;
 
-        on_settle(&mut s, positions, values).expect("bounded magnitudes cannot overflow");
-        let first_units = core::cmp::min(position, acquired);
-        prop_assert_eq!(s.received, first_units * value / SETTLED_VALUE_SCALE);
-        prop_assert_eq!(s.book_acquired[side], acquired - first_units);
+        on_settle(&mut s, values).expect("bounded magnitudes cannot overflow");
+        prop_assert_eq!(s.received, acquired * value / SETTLED_VALUE_SCALE);
+        prop_assert_eq!(s.book_acquired[side], 0, "rule 3 consumes the whole book");
         let after_first = s.received;
 
-        // The same call again. It may consume a second tranche when the first
-        // settlement was partial, but it may never re-credit a unit the first
-        // one already consumed.
-        on_settle(&mut s, positions, values).expect("bounded magnitudes cannot overflow");
-        let second_units = core::cmp::min(position, acquired - first_units);
+        // The same call again, on an entry the first call emptied: a strict
+        // no-op. Without the decrement it doubles the credit.
+        on_settle(&mut s, values).expect("bounded magnitudes cannot overflow");
+        prop_assert_eq!(s.received, after_first);
+        prop_assert_eq!(s.book_acquired[side], 0);
+
+        // And a parcel bought *after* the first settlement is a fresh tranche:
+        // the third call credits exactly that and never the first one again.
+        on_buy(&mut s, side, later_parcel, 0, 0).expect("bounded magnitudes cannot overflow");
+        on_settle(&mut s, values).expect("bounded magnitudes cannot overflow");
         prop_assert_eq!(
             s.received,
-            after_first + second_units * value / SETTLED_VALUE_SCALE,
+            after_first + later_parcel * value / SETTLED_VALUE_SCALE,
         );
-        prop_assert_eq!(s.book_acquired[side], acquired - first_units - second_units);
-        // Total units credited never exceeds what the book supplied.
-        prop_assert!(first_units + second_units <= acquired);
-        if position >= acquired {
-            // A full settlement leaves nothing, so the repeat is a strict no-op.
-            prop_assert_eq!(s.received, after_first);
-            prop_assert_eq!(s.book_acquired[side], 0);
-        }
+        prop_assert_eq!(s.book_acquired[side], 0);
     }
 
     /// The invariant the annulled arm rests on: rule 1 raises `spent` by

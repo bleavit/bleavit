@@ -38,6 +38,7 @@ CORPUS_FAMILY_CONSUMERS = {
     "ledger_sweep_scenarios": ("ledger-pallet-reference-sweep",),
     "lmsr_maker_example": ("fixed-reference-vectors",),
     "lmsr_vectors": ("fixed-reference-vectors",),
+    "trading_reward_scenarios": ("trading-rewards-core-reference-vectors",),
     "transcendental_corpus": ("fixed-reference-vectors",),
     "treasury_scenarios": ("treasury-core-reference-vectors",),
     "twap_scenarios": ("market-core-twap-vectors",),
@@ -67,6 +68,11 @@ TEST_OUTPUTS = {
     ),
     "treasury-core-reference-vectors": GATE.CommandResult(
         0, stdout="test result: ok. 1 passed; 0 failed; 0 ignored\n"
+    ),
+    # 08 §2.6 score kernel (TR8): `the_corpus_carries_the_trading_reward_family`
+    # and `the_kernel_reproduces_every_recorded_scenario`.
+    "trading-rewards-core-reference-vectors": GATE.CommandResult(
+        0, stdout="test result: ok. 2 passed; 0 failed; 0 ignored\n"
     ),
     # Baseline wrapper + twap + contest + window-staleness: the stub must clear
     # the leg's own `minimum_tests` floor, which tracks the real binary's count.
@@ -326,6 +332,7 @@ class ReportAndRunnerTests(PhaseGateTestCase):
             "welfare-core-reference-vectors": (1, 1),
             "welfare-core-normalization-vectors": (1, 1),
             "treasury-core-reference-vectors": (1, 1),
+            "trading-rewards-core-reference-vectors": (2, 1),
             "market-core-twap-vectors": (4, 4),
             "ledger-pallet-core-differential": (1, 1),
             "ledger-pallet-reference-sweep": (1, 1),
@@ -366,7 +373,10 @@ class ReportAndRunnerTests(PhaseGateTestCase):
         self.assertEqual(report["criteria"]["sim-false-pass"]["status"], "pass")
         self.assertEqual(report["criteria"]["calibration-published"]["status"], "pass")
         legs = report["criteria"]["reference-equivalence"]["legs"]
-        self.assertEqual(len(legs), 14)
+        # 15 since TR8 bound the 08 §2.6 `trading_reward_scenarios` family to its
+        # own differential leg. A bare count is deliberate: it is what fails when
+        # a leg is added and its stub output, floor and binding are not.
+        self.assertEqual(len(legs), 15)
         for leg in legs:
             required = {"id", "command", "exit_code", "status"}
             self.assertTrue(required <= set(leg))

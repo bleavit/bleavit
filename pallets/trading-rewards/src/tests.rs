@@ -1714,13 +1714,7 @@ fn buy_and_settle(
     unit_value: Balance,
 ) {
     buy(who, market, qty, cost, fee);
-    settle_book(
-        who,
-        market,
-        BranchDisposition::Realized,
-        [qty, 0],
-        [unit_value, 0],
-    );
+    settle_book(who, market, BranchDisposition::Realized, [unit_value, 0]);
 }
 
 fn record(who: &Account) -> crate::ParticipantRecord {
@@ -1880,13 +1874,7 @@ fn folding_an_annulled_branch_scores_exactly_the_fees() {
             score.received, 5_000,
             "the credit exists, and is discarded below"
         );
-        settle_book(
-            &alice(),
-            MARKET_A,
-            BranchDisposition::Annulled,
-            [0, 0],
-            [0, 0],
-        );
+        settle_book(&alice(), MARKET_A, BranchDisposition::Annulled, [0, 0]);
 
         assert_ok!(TradingRewards::settle_market_score(
             RuntimeOrigin::signed(bob()),
@@ -1912,13 +1900,7 @@ fn folding_a_voided_proposal_drops_the_entry_at_zero() {
     new_test_ext().execute_with(|| {
         enrolled_alice(1_000);
         buy_and_settle(&alice(), MARKET_A, 1_000, 900, 3, PAR);
-        settle_book(
-            &alice(),
-            MARKET_A,
-            BranchDisposition::Void,
-            [1_000, 0],
-            [PAR, 0],
-        );
+        settle_book(&alice(), MARKET_A, BranchDisposition::Void, [PAR, 0]);
 
         assert_ok!(TradingRewards::settle_market_score(
             RuntimeOrigin::signed(bob()),
@@ -1939,11 +1921,11 @@ fn folding_a_voided_proposal_drops_the_entry_at_zero() {
 }
 
 #[test]
-fn settlement_credits_only_the_book_acquired_part_of_the_terminal_position() {
-    // 08 §2.6 rule 3, through the pallet. The terminal position exceeds what
-    // the book sold, so an implementation crediting `position` alone lands on
-    // 500 instead of 150. The branch settles at half par, which also separates
-    // a per-unit fraction from an integer 1.
+fn settlement_credits_the_book_acquired_quantity_through_the_pallet() {
+    // 08 §2.6 rule 3, through the pallet. The book sold 300 units and the
+    // branch settles at half par, so the credit is 150 — which separates a
+    // per-unit fraction from an integer 1, and separates crediting *value* from
+    // crediting *units*.
     new_test_ext().execute_with(|| {
         enrolled_alice(1_000);
         buy(&alice(), MARKET_A, 300, 150, 0);
@@ -1951,7 +1933,6 @@ fn settlement_credits_only_the_book_acquired_part_of_the_terminal_position() {
             &alice(),
             MARKET_A,
             BranchDisposition::Realized,
-            [1_000, 0],
             [PAR / 2, 0],
         );
         assert_ok!(TradingRewards::settle_market_score(
@@ -1960,6 +1941,58 @@ fn settlement_credits_only_the_book_acquired_part_of_the_terminal_position() {
             MARKET_A
         ));
         assert_eq!(record(&alice()).epoch.received, 150);
+    });
+}
+
+/// **The C1 regression at the pallet's own layer** (08 §2.6 rule 3, amended
+/// 2026-08-11; 15 §4.1 point 3).
+///
+/// The retired rule clamped the credit by the account's ledger position read at
+/// fold time, and `redeem_scalar` burns that position. So the ordinary user
+/// path — redeem, then let the keeper crank — folded a lawful zero into
+/// `received` against a real `spent`, and rule 4's realized arm debited a
+/// correct forecaster.
+///
+/// The mock cannot burn a ledger position, because it holds no ledger. What it
+/// *can* do is state the claim the runtime seam has to satisfy: the credit is a
+/// function of the score entry and the branch's value, and of nothing else the
+/// caller or the clock can move. Two accounts with the same book and the same
+/// settlement are credited the same, and the settlement facts carry no field a
+/// redemption could change. `runtime/bleavit-runtime/src/tests_trading_rewards.
+/// rs` carries the version with a real redemption in it.
+///
+/// Mutation killed: restoring any position-shaped clamp in `on_settle` (whose
+/// only reachable value here would be zero, since no ledger backs the mock) and
+/// any credit that reads state outside the entry.
+#[test]
+fn the_credit_depends_on_the_book_entry_and_the_branch_value_alone() {
+    new_test_ext().execute_with(|| {
+        enrolled_alice(1_000);
+        mint_usdc(&bob(), 1_000_000);
+        assert_ok!(TradingRewards::enroll(RuntimeOrigin::signed(bob()), 1_000));
+
+        for who in [alice(), bob()] {
+            buy(&who, MARKET_A, 1_000, 900, 3);
+            settle_book(&who, MARKET_A, BranchDisposition::Realized, [PAR / 4, 0]);
+        }
+        // Cranked in opposite orders by opposite callers, which is the degree of
+        // freedom a permissionless crank really has.
+        assert_ok!(TradingRewards::settle_market_score(
+            RuntimeOrigin::signed(bob()),
+            alice(),
+            MARKET_A
+        ));
+        assert_ok!(TradingRewards::settle_market_score(
+            RuntimeOrigin::signed(alice()),
+            bob(),
+            MARKET_A
+        ));
+        assert_eq!(record(&alice()).epoch, record(&bob()).epoch);
+        assert_eq!(
+            record(&alice()).epoch.received,
+            250,
+            "1_000 book-acquired units at a quarter of par",
+        );
     });
 }
 
@@ -2133,13 +2166,7 @@ fn settle_epoch_refuses_while_an_unfolded_score_entry_remains() {
         );
 
         // Fold the loser too, and the epoch settles on the whole score.
-        settle_book(
-            &alice(),
-            MARKET_B,
-            BranchDisposition::Realized,
-            [1_000, 0],
-            [0, 0],
-        );
+        settle_book(&alice(), MARKET_B, BranchDisposition::Realized, [0, 0]);
         assert_ok!(TradingRewards::settle_market_score(
             RuntimeOrigin::signed(bob()),
             alice(),
@@ -2295,6 +2322,14 @@ fn a_settled_epoch_with_no_debit_never_sets_the_suspension_flag() {
 /// Settle an offsetting pair over one epoch and return `(reward, forfeit)`.
 /// The winner settles first, which is the order in which a budget-scaled debit
 /// would let the pair net positive.
+///
+/// **The winner settles themselves and the loser is cranked by a third party,
+/// and that split is 08 §2.6's fourth obligation rather than a stylistic
+/// choice.** A caller other than the participant is refused when the live
+/// headroom would clamp the reward, and the callers of this helper deliberately
+/// run it at a starved budget; the debit leg reads no headroom at all, so it
+/// stays permissionless and is cranked here by the other account, which is what
+/// keeps the wash-pair scenario adversarial.
 fn settle_offsetting_pair(net: Balance, bond: Balance) -> (Balance, Balance) {
     enrolled_alice(bond);
     assert_ok!(TradingRewards::enroll(RuntimeOrigin::signed(bob()), bond));
@@ -2303,7 +2338,7 @@ fn settle_offsetting_pair(net: Balance, bond: Balance) -> (Balance, Balance) {
     let insurance_before = insurance_balance();
     run_to_epoch_close();
     assert_ok!(TradingRewards::settle_epoch(
-        RuntimeOrigin::signed(bob()),
+        RuntimeOrigin::signed(alice()),
         alice()
     ));
     assert_ok!(TradingRewards::settle_epoch(
@@ -2390,8 +2425,11 @@ fn a_debit_is_never_reduced_by_budget_pressure() {
             }
         });
         record_test_epoch_score(&carol, 0, 100_000);
+        // Carol's own call: her demand of 250 meets a headroom of 50, and a
+        // third party settling her into that clamp is what §2.6's fourth
+        // obligation refuses. She may accept it, and does.
         assert_ok!(TradingRewards::settle_epoch(
-            RuntimeOrigin::signed(bob()),
+            RuntimeOrigin::signed(carol.clone()),
             carol.clone()
         ));
         assert_eq!(
@@ -2425,8 +2463,12 @@ fn an_unreadable_vit_rate_scales_the_reward_to_zero_and_still_settles() {
         assert!(VitUsdcRate::get().is_none());
         record_test_epoch_score(&alice(), 0, 100_000);
         run_to_epoch_close();
+        // Alice's own call: an unvaluable budget is a headroom of zero, so the
+        // clamp bites and §2.6's fourth obligation reserves this settlement to
+        // her. `a_third_party_may_not_settle_an_epoch_into_a_clamped_reward`
+        // pins the refusal that reserves it.
         assert_ok!(TradingRewards::settle_epoch(
-            RuntimeOrigin::signed(bob()),
+            RuntimeOrigin::signed(alice()),
             alice()
         ));
         assert_eq!(
@@ -2464,8 +2506,11 @@ fn accruals_never_exceed_the_authorized_budget_across_many_participants() {
         }
         run_to_epoch_close();
         for seed in 10u8..20 {
+            // Each settles themselves: every one of these demands 250 against a
+            // budget of 120, so every one of them is clamped and §2.6's fourth
+            // obligation refuses a third party for all ten.
             assert_ok!(TradingRewards::settle_epoch(
-                RuntimeOrigin::signed(bob()),
+                RuntimeOrigin::signed(account(seed)),
                 account(seed)
             ));
         }
@@ -2484,4 +2529,154 @@ fn accruals_never_exceed_the_authorized_budget_across_many_participants() {
         assert_eq!(record(&account(11)).accrued, 0, "and the rest get nothing");
         assert_ok!(TradingRewards::do_try_state());
     });
+}
+
+// ---------------------------------------------------------------------------
+// 08 §2.6's fourth `settle_epoch` obligation: a third party may not settle an
+// epoch into a clamped reward
+// ---------------------------------------------------------------------------
+
+/// One enrolled account carrying a `+100_000` epoch net, which demands 250 at
+/// the mock's `rwd.rate` and sits well inside the earning cap, plus an
+/// authorized budget of `budget_usdc`. Returns the demand.
+///
+/// The demand is derived from the live rate rather than pinned, so a change to
+/// the mock default moves the fixture instead of silently disagreeing with it.
+fn epoch_awaiting_settlement(budget_usdc: Balance) -> Balance {
+    VitUsdcRate::set(Some(VIT_RATE));
+    let granted = authorize_budget_usdc(budget_usdc);
+    assert_eq!(granted, budget_usdc, "the mock rate converts exactly");
+    enrolled_alice(10_000);
+    record_test_epoch_score(&alice(), 0, 100_000);
+    run_to_epoch_close();
+    let rate_ppb = u128::from(RewardRate::get().expect("mock reward rate is set"));
+    let demand = (100_000u128 * rate_ppb) / 1_000_000_000;
+    assert_eq!(demand, 250);
+    demand
+}
+
+/// **The I5 ruling.** `settle_epoch` clamps the reward to the headroom *as read
+/// at call time* and then resets the epoch unconditionally, so a third party
+/// could finalize a victim into a starved moment for a transaction fee, and
+/// re-funding could not reopen it. 08 §2.6 therefore refuses that caller.
+///
+/// The refusal is status-quo (G-1), and the second half of this test is what
+/// makes that worth having: the epoch is still open, so the budget can be
+/// topped up and the participant is paid in full afterwards. Under the defect
+/// the same sequence pays 100 and discards the rest for good.
+///
+/// Mutations killed: deleting the `caller == who ||` guard (BOB's call
+/// succeeds, ALICE accrues 100, and the top-up below finds nothing left to
+/// pay); clamping-and-continuing instead of refusing (the same); and writing
+/// anything before the refusal — `assert_noop!` compares the whole storage
+/// root, so a partial write fails here rather than at some later assertion.
+#[test]
+fn a_third_party_may_not_settle_an_epoch_into_a_clamped_reward() {
+    new_test_ext().execute_with(|| {
+        let demand = epoch_awaiting_settlement(100);
+        assert!(
+            demand > 100,
+            "the headroom must really clamp, or this proves nothing"
+        );
+
+        assert_noop!(
+            TradingRewards::settle_epoch(RuntimeOrigin::signed(bob()), alice()),
+            Error::<Test>::ThirdPartyWouldClampReward
+        );
+        let after = record(&alice());
+        assert_eq!(after.accrued, 0, "nothing was promised");
+        assert_eq!(
+            after.epoch,
+            trading_rewards_core::EpochScore {
+                spent: 0,
+                received: 100_000,
+            },
+            "the epoch stays open, with its score intact",
+        );
+        assert!(
+            after.snapshot_epoch < CurrentEpoch::get(),
+            "and it was not re-snapshotted onto the current epoch",
+        );
+        assert_eq!(after.bond, 10_000, "the bond stays held");
+        assert_eq!(TotalAccrued::<Test>::get(), 0);
+
+        // What the refusal preserved: the budget is topped up, and the same
+        // third party may now crank the same epoch for the full entitlement.
+        authorize_budget_usdc(1_000);
+        assert_ok!(TradingRewards::settle_epoch(
+            RuntimeOrigin::signed(bob()),
+            alice()
+        ));
+        assert_eq!(
+            record(&alice()).accrued,
+            demand,
+            "re-funding reopened exactly what finalizing would have destroyed",
+        );
+        assert_ok!(TradingRewards::do_try_state());
+    });
+}
+
+/// The complement, and the reason the rule is a clamp test rather than an
+/// owner-only origin check: a third party may still crank every epoch the
+/// headroom does not touch, which is most of them and is what the keeper does
+/// (01 §4.2). A debit is unaffected in the same way and at any headroom —
+/// `a_debit_is_never_reduced_by_budget_pressure` settles one through a third
+/// party at a headroom of zero.
+///
+/// The headroom here is **exactly** the demand, because that is the boundary:
+/// §2.6 refuses a clamp "below the participant's full entitlement", and an
+/// exact fit clamps nothing.
+///
+/// Mutations killed: `caller == who` alone, which would strand every epoch
+/// nobody self-cranks; and `demand < headroom`, an off-by-one that refuses the
+/// exact fit asserted here.
+#[test]
+fn a_third_party_may_settle_an_epoch_the_headroom_does_not_clamp() {
+    new_test_ext().execute_with(|| {
+        let demand = epoch_awaiting_settlement(250);
+        assert_eq!(demand, 250, "the headroom is exactly the entitlement");
+
+        assert_ok!(TradingRewards::settle_epoch(
+            RuntimeOrigin::signed(bob()),
+            alice()
+        ));
+        assert_eq!(
+            record(&alice()).accrued,
+            demand,
+            "paid in full by a stranger"
+        );
+        assert_eq!(TotalAccrued::<Test>::get(), demand);
+        assert_ok!(TradingRewards::do_try_state());
+    });
+}
+
+/// The participant may always settle themselves, at a clamping headroom and at
+/// an ample one alike. Both legs run, because the rule is *"the participant may
+/// always"* and a test of the ample leg alone passes against an owner-only
+/// refusal that strands a starved epoch.
+///
+/// Mutation killed: applying the refusal to the participant too — which locks
+/// the bond behind a budget the participant cannot move, the one direction
+/// §2.6's *bond MUST NOT be locked forever* rule forbids.
+#[test]
+fn the_participant_may_always_settle_their_own_epoch_at_any_headroom() {
+    for (budget, expected) in [(100u128, 100u128), (1_000, 250)] {
+        new_test_ext().execute_with(|| {
+            let demand = epoch_awaiting_settlement(budget);
+            assert_ok!(TradingRewards::settle_epoch(
+                RuntimeOrigin::signed(alice()),
+                alice()
+            ));
+            let after = record(&alice());
+            assert_eq!(after.accrued, expected, "budget {budget}");
+            assert_eq!(after.accrued, core::cmp::min(demand, budget));
+            assert_eq!(
+                after.epoch,
+                Default::default(),
+                "the epoch really closed at budget {budget}",
+            );
+            assert_eq!(after.snapshot_epoch, CurrentEpoch::get());
+            assert_ok!(TradingRewards::do_try_state());
+        });
+    }
 }

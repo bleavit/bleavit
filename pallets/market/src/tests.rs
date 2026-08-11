@@ -38,6 +38,12 @@ fn external_route_weight_composition_includes_measured_pov_surcharges() {
         amount: TRADE,
         max_cost: TRADE,
     };
+    let sell = crate::Call::<Test>::sell {
+        market: MARKET_ID,
+        side: ScalarSide::Long,
+        amount: TRADE,
+        min_proceeds: 0,
+    };
     let sweep = crate::Call::<Test>::sweep_revenue { market: MARKET_ID };
 
     // Mock DbWeight contributes ref-time only.  These exact deltas pin the
@@ -48,6 +54,26 @@ fn external_route_weight_composition_includes_measured_pov_surcharges() {
         buy.get_dispatch_info().call_weight.proof_size(),
         <() as WeightInfo>::buy().proof_size()
             + crate::pallet::EXTERNAL_TRADE_ROUTE_PROOF_SURCHARGE,
+        "buy's own fixture takes the observer's first-fill arm and therefore \
+         measures ScoreCount already; charging it again would double-count",
+    );
+    // `sell` carries a second surcharge, and the asymmetry is the point (TR7
+    // review, I3). Its fixture takes the observer's *writing* arm, which is the
+    // heavier of the two in ref_time and the lighter by one key: a first-fill
+    // sale reads TradingRewards::ScoreCount and appears in no sell proof line.
+    assert_eq!(
+        sell.get_dispatch_info().call_weight.proof_size(),
+        <() as WeightInfo>::sell().proof_size()
+            + crate::pallet::EXTERNAL_TRADE_ROUTE_PROOF_SURCHARGE
+            + crate::pallet::FIRST_FILL_SCORE_PROOF_SURCHARGE,
+    );
+    assert!(
+        sell.get_dispatch_info().call_weight.proof_size()
+            > buy.get_dispatch_info().call_weight.proof_size()
+                - <() as WeightInfo>::buy().proof_size()
+                + <() as WeightInfo>::sell().proof_size(),
+        "the two trade calls must not carry the same observer envelope: only \
+         sell's benchmark misses an arm",
     );
     assert_eq!(
         sweep.get_dispatch_info().call_weight.proof_size(),

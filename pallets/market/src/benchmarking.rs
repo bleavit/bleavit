@@ -240,6 +240,16 @@ mod benchmarks {
     /// ref_time — but it does touch one key more. The two arms are therefore
     /// incomparable by a single measurement, and this fixture takes the one
     /// that mutates.
+    ///
+    /// **The key the other arm touches is charged rather than described.** A
+    /// comment naming an under-declared key is not a resolution: PoV is the
+    /// scarce resource on a parachain and this is the hottest extrinsic on the
+    /// chain. `sell`'s `#[pallet::weight]` therefore composes one read and
+    /// `FIRST_FILL_SCORE_PROOF_SURCHARGE` — `TradingRewards::ScoreCount`'s
+    /// measured `MaxEncodedLen` proof bound, taken off the generated `buy`
+    /// annotation — above this fixture, so the declared envelope dominates both
+    /// arms. `external_route_weight_composition_includes_measured_pov_surcharges`
+    /// fails if that composition is removed.
     #[benchmark]
     fn sell() {
         let caller: T::AccountId = whitelisted_caller();

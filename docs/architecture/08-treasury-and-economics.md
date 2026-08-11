@@ -299,9 +299,39 @@ claimant-adverse rounding straightforward.
    which is the one rounding direction R-7 forbids, and it would break the symmetry with rule 1 —
    a buy is charged more than the book cost and a sale is credited less, so the fee is adverse on
    both sides.)*
-3. Settlement adds `min(position, book_acquired) × settled_value` to `received`, rounded down,
+3. Settlement adds `book_acquired × settled_value` to `received`, rounded down,
    **and decrements `book_acquired` by the credited quantity**, exactly as rule 2 does for a
-   sale *(stated 2026-08-11)*. The decrement was implemented from the first and this rule did
+   sale *(stated 2026-08-11)*.
+
+   **The credited quantity is the accumulator's own `book_acquired` and MUST NOT be clamped by
+   the account's ledger position** *(amended 2026-08-11; this rule said `min(position,
+   book_acquired)` and the clamp made an accurate forecast pay a debit)*. Settlement and
+   redemption open at the same instant — the vault entering its settled state is the sole
+   precondition of each — and the fold is a permissionless crank the participant does not
+   control. A trader who redeems, which is the ordinary thing to do and the only way to get the
+   money, is folded against a position that redemption has already burned: `received` collects
+   nothing, `spent` still holds the purchase, and rule 4's realized arm debits a correct
+   forecaster for being prompt while a slower one is paid. That is the third arrival of one
+   failure mode, after SQ-1051's annulled arm and this rule's own `settled_value` type — the
+   same wrong answer reached through *when* a quantity is read rather than through what it is.
+
+   `book_acquired` is the right quantity on its own, and the clamp bought nothing the program
+   needs. It is already *bought through the book minus sold back through the book*, so it
+   excludes exactly what the clamp was introduced to exclude — units obtained by `split` or by
+   transfer in, which no rule here ever scores. It is timing-independent, so no payout depends
+   on a race between a keeper and a redemption. And it cannot create an unbacked claim: every
+   credit is offset by the same account's `spent`, the accrual is bounded by `settle_epoch`'s
+   budget post-condition and by the per-account earning cap, and neither bound reads a position.
+   The one disposal it still credits is a **transfer out**, which is a trade the protocol cannot
+   see and cannot price — and crediting it is correct rather than generous, because the score
+   measures the forecast the account's *book* activity expressed, not the custody it retained.
+   No second account can be credited for the same units, since a transfer gives the receiver no
+   `book_acquired`.
+
+   A consequence worth stating, because it makes the settlement path cheaper as well as correct:
+   the runtime adapter that supplies rule 3 no longer reads the conditional ledger's `Positions`
+   at all, so the crank drops two storage reads per leg and the reward program's only remaining
+   read of the ledger is the branch disposition and `settled_value`. The decrement was implemented from the first and this rule did
    not carry it, which an independent reference model found by disagreeing with the kernel on
    that field in 59 % of 30,000 replayed vectors. It is kept rather than removed, because it is
    the only thing that makes a second settlement of one entry a no-op: without it a repeated
@@ -380,9 +410,23 @@ under-credited, never over-credited, which is the R-7 direction.
 **Both settlement steps are pull-based, and there are exactly two.**
 `settle_market_score(who, market)` folds one settled market into the account's epoch total and
 deletes the entry. `settle_epoch(who)` then closes one participant's epoch, applying the reward
-and debit arithmetic below exactly once. Both are permissionless and both name a target account
-rather than the caller, which is safe because each acts only on already-recorded values: any
-caller reaches the same result and no caller can choose it. Neither is a hook. No hook iterates
+and debit arithmetic below exactly once. Both name a target account rather than the caller, and **the justification for that differs
+between them** *(corrected 2026-08-11; one sentence previously covered both and was false of the
+second)*. `settle_market_score` acts only on already-recorded values, so any caller reaches the
+same result and no caller can choose it — it is permissionless without qualification.
+`settle_epoch` is **not** in that class. It clamps the reward to the budget's unpromised
+remainder **as read at call time** and then resets the epoch unconditionally, so two callers at
+two moments reach two different results and the earlier one is irreversible: re-funding cannot
+reopen a settled epoch. That is the same argument that forbids a permissionless budget sweep
+three paragraphs below, reaching the same harm from the other side — the sweep empties the
+headroom, and this would finalize a participant *into* an emptied one for the price of a
+transaction fee. **`settle_epoch` is therefore permissionless only while it costs the
+participant nothing:** a caller other than the participant MUST be refused when the live
+headroom would clamp the reward below the participant's full entitlement. The participant may
+always settle themselves and accept a partial payout, which keeps the FCFS residual disclosed
+below a choice they make rather than one made for them, and a third party may still crank every
+epoch the clamp does not touch. Refusal is status-quo (G-1): the epoch stays open and the bond
+stays held. Neither is a hook. No hook iterates
 a collection, and [03](03-conditional-ledger.md) §10 keeps its rule that the ledger has no
 hooks. The keeper cranks both ([01](01-system-overview.md) §4.2).
 

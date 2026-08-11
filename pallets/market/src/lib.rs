@@ -650,6 +650,26 @@ pub mod pallet {
     pub const EXTERNAL_TRADE_ROUTE_PROOF_SURCHARGE: u64 = 496 + 2_560;
     pub const EXTERNAL_SWEEP_ROUTE_PROOF_SURCHARGE: u64 = 496;
 
+    // The same shape one layer over, for the fill observer (08 §2.6, TR7).  The
+    // accumulator has two arms and one benchmark cannot take both: a fill into
+    // a market the account already has a score row for reads the row and writes
+    // it back, while a **first** fill reads the row, finds nothing, and reads
+    // the per-account counter as well before deciding whether a row may be
+    // created.  The `sell` fixture takes the arm that writes, which is the
+    // heavier of the two in ref_time and the lighter by one key: a first-fill
+    // sale credits nothing (the `book_acquired` rule) and so writes nothing,
+    // but its proof carries `TradingRewards::ScoreCount`, which appears in no
+    // `sell` proof line.
+    //
+    // - TradingRewards::ScoreCount: 52-byte value + trie proof = 2,527 bytes,
+    //   read verbatim off the generated `buy` proof annotation, whose own
+    //   fixture does take the first-fill arm and therefore measures the key.
+    //
+    // `buy` needs no surcharge for the same reason.  Sales are the only side
+    // where the two arms diverge, because only a sale can move units the book
+    // never sold the seller.
+    pub const FIRST_FILL_SCORE_PROOF_SURCHARGE: u64 = 2_527;
+
     #[pallet::config]
     pub trait Config:
         frame_system::Config<RuntimeEvent: From<Event<Self>>> + pallet_conditional_ledger::Config
@@ -1955,10 +1975,17 @@ pub mod pallet {
 
         /// Sell LONG or SHORT into an LMSR book (04 §6).
         #[pallet::call_index(1)]
+        // The generated fixture takes the observer's writing arm; the first-fill
+        // arm touches one key more and no single measurement covers both, so the
+        // read and its measured proof bound are composed here (see
+        // `FIRST_FILL_SCORE_PROOF_SURCHARGE`). The two surcharges are kept
+        // separate because they answer to different routes.
         #[pallet::weight(
             <T as Config>::WeightInfo::sell()
                 .saturating_add(<T as frame_system::Config>::DbWeight::get().reads(2))
                 .saturating_add(Weight::from_parts(0, EXTERNAL_TRADE_ROUTE_PROOF_SURCHARGE))
+                .saturating_add(<T as frame_system::Config>::DbWeight::get().reads(1))
+                .saturating_add(Weight::from_parts(0, FIRST_FILL_SCORE_PROOF_SURCHARGE))
         )]
         pub fn sell(
             origin: OriginFor<T>,

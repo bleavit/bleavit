@@ -247,16 +247,24 @@ def on_sell(score: MarketScore, side: int, proceeds: int, fee: int, quantity: in
     return credit
 
 
-def on_settle(
-    score: MarketScore,
-    position: list[int],
-    settled_value: list[int],
-) -> int:
-    """Rule 3 — credit `min(position, book_acquired) x settled_value` per branch.
+def on_settle(score: MarketScore, settled_value: list[int]) -> int:
+    """Rule 3 — credit `book_acquired x settled_value` per branch.
 
     `settled_value` is a fraction of par on 03's `SCORE_SCALE` grid and is
     clamped to par: a unit of a branch that settled at 0.6 is worth six tenths
     of a base unit.  The product is rounded down.
+
+    **The credited quantity is the accumulator's own `book_acquired` and is
+    never clamped by the account's ledger position** *(amended 2026-08-11; the
+    rule read `min(position, book_acquired)`, and the clamp made an accurate
+    forecast pay a debit)*.  Settlement and redemption open at the same instant
+    and the fold is a permissionless crank the participant does not control, so
+    a trader who redeemed — the ordinary path, and the only way to get the
+    money — was folded against a burned position: `received` collected nothing,
+    `spent` still held the purchase, and rule 4's realized arm debited them.
+    `book_acquired` is already *bought through the book minus sold back through
+    the book*, so it excludes exactly what the clamp excluded and depends on no
+    clock.
 
     The rule also **decrements `book_acquired` by the credited quantity,
     exactly as rule 2 does for a sale** *(stated in the specification
@@ -267,14 +275,14 @@ def on_settle(
 
     Returns the total credited across both branches.
     """
-    if len(position) != BRANCH_SIDES or len(settled_value) != BRANCH_SIDES:
-        raise ValueError("settlement takes one position and value per branch")
-    if any(units < 0 for units in position) or any(v < 0 for v in settled_value):
-        raise ValueError("a settlement has a non-negative position and value")
+    if len(settled_value) != BRANCH_SIDES:
+        raise ValueError("settlement takes one value per branch")
+    if any(v < 0 for v in settled_value):
+        raise ValueError("a settlement has a non-negative value")
     credited = 0
     for index in range(BRANCH_SIDES):
         value = min(settled_value[index], SCORE_SCALE)
-        units = min(position[index], score.book_acquired[index])
+        units = score.book_acquired[index]
         credit = _floor_div(units * value, SCORE_SCALE)
         score.received += credit
         score.book_acquired[index] -= units
@@ -774,10 +782,15 @@ def _sell_op(side: int, quantity: int, proceeds: int, fee: int) -> dict:
     }
 
 
-def _settle_op(position, settled_value) -> dict:
+def _settle_op(settled_value) -> dict:
+    """A settlement carries the branch's per-unit value and nothing else.
+
+    The operation used to carry a position too.  08 §2.6 rule 3 removed it on
+    2026-08-11: the credited quantity is the entry's own `book_acquired`, so a
+    position is not an input to this arithmetic at all.
+    """
     return {
         "op": "settle",
-        "position": [_amount(units) for units in position],
         "settled_value": [_amount(value) for value in settled_value],
     }
 
@@ -816,11 +829,7 @@ def replay_scenario(
                 int(operation["quantity"]),
             )
         elif kind == "settle":
-            on_settle(
-                score,
-                [int(units) for units in operation["position"]],
-                [int(value) for value in operation["settled_value"]],
-            )
+            on_settle(score, [int(value) for value in operation["settled_value"]])
         else:
             raise ValueError(f"unknown operation {kind!r}")
     epoch = EpochScore()
@@ -933,7 +942,7 @@ def _named_corners():
         ),
         (
             "settlement_at_par",
-            [_buy_op(0, 1_000, 900, 3), _settle_op([1_000, 0], [_PAR, 0])],
+            [_buy_op(0, 1_000, 900, 3), _settle_op([_PAR, 0])],
             realized,
             10**7,
             rate,
@@ -942,7 +951,7 @@ def _named_corners():
         ),
         (
             "settlement_at_six_tenths",
-            [_buy_op(0, 1_000, 900, 3), _settle_op([1_000, 0], [6 * _PAR // 10, 0])],
+            [_buy_op(0, 1_000, 900, 3), _settle_op([6 * _PAR // 10, 0])],
             realized,
             10**7,
             rate,
@@ -951,7 +960,7 @@ def _named_corners():
         ),
         (
             "settlement_at_one_part_in_a_billion",
-            [_buy_op(0, 10**9, 900, 3), _settle_op([10**9, 0], [1, 0])],
+            [_buy_op(0, 10**9, 900, 3), _settle_op([1, 0])],
             realized,
             10**7,
             rate,
@@ -960,7 +969,7 @@ def _named_corners():
         ),
         (
             "settlement_one_below_par",
-            [_buy_op(0, 1_000, 900, 3), _settle_op([1_000, 0], [_PAR - 1, 0])],
+            [_buy_op(0, 1_000, 900, 3), _settle_op([_PAR - 1, 0])],
             realized,
             10**7,
             rate,
@@ -969,7 +978,7 @@ def _named_corners():
         ),
         (
             "settlement_above_par_is_clamped",
-            [_buy_op(0, 1_000, 900, 3), _settle_op([1_000, 0], [7 * _PAR, 0])],
+            [_buy_op(0, 1_000, 900, 3), _settle_op([7 * _PAR, 0])],
             realized,
             10**7,
             rate,
@@ -977,8 +986,13 @@ def _named_corners():
             0,
         ),
         (
-            "settlement_position_above_book_acquired",
-            [_buy_op(0, 300, 150, 0), _settle_op([1_000, 0], [_PAR // 2, 0])],
+            # These two were the `min(position, book_acquired)` corners.  08
+            # §2.6 rule 3 retired the clamp on 2026-08-11 and the input with
+            # it, so they are kept for the arithmetic they still pin — a small
+            # parcel at half par, and a whole parcel at par — under names that
+            # say what they now cover.
+            "settlement_of_a_small_parcel_at_half_par",
+            [_buy_op(0, 300, 150, 0), _settle_op([_PAR // 2, 0])],
             realized,
             10**7,
             rate,
@@ -986,8 +1000,25 @@ def _named_corners():
             0,
         ),
         (
-            "settlement_position_below_book_acquired",
-            [_buy_op(0, 1_000, 500, 2), _settle_op([300, 0], [_PAR, 0])],
+            "settlement_of_the_whole_parcel_at_par",
+            [_buy_op(0, 1_000, 500, 2), _settle_op([_PAR, 0])],
+            realized,
+            10**7,
+            rate,
+            0,
+            0,
+        ),
+        (
+            # Rule 3 credits the *live* counter, so a parcel already sold back
+            # through the book is not credited again.  This is the corner that
+            # shows `book_acquired` needs no clamp: the disposals the clamp
+            # existed to exclude are the ones rule 2 has already removed.
+            "settlement_after_selling_the_whole_parcel_credits_nothing",
+            [
+                _buy_op(0, 1_000, 900, 3),
+                _sell_op(0, 1_000, 1_200, 4),
+                _settle_op([_PAR, 0]),
+            ],
             realized,
             10**7,
             rate,
@@ -999,7 +1030,7 @@ def _named_corners():
             [
                 _buy_op(0, 200, 100, 0),
                 _buy_op(1, 300, 150, 0),
-                _settle_op([200, 300], [_PAR // 4, _PAR - _PAR // 4]),
+                _settle_op([_PAR // 4, _PAR - _PAR // 4]),
             ],
             realized,
             10**7,
@@ -1009,7 +1040,7 @@ def _named_corners():
         ),
         (
             "settlement_short_leg_only",
-            [_buy_op(1, 500, 400, 2), _settle_op([0, 500], [0, 3 * _PAR // 4])],
+            [_buy_op(1, 500, 400, 2), _settle_op([0, 3 * _PAR // 4])],
             realized,
             10**7,
             rate,
@@ -1023,8 +1054,8 @@ def _named_corners():
             "settling_the_same_entry_twice_credits_once",
             [
                 _buy_op(0, 1_000, 900, 3),
-                _settle_op([1_000, 0], [_PAR, 0]),
-                _settle_op([1_000, 0], [_PAR, 0]),
+                _settle_op([_PAR, 0]),
+                _settle_op([_PAR, 0]),
             ],
             realized,
             10**7,
@@ -1036,7 +1067,7 @@ def _named_corners():
             "a_sale_after_settlement_credits_nothing",
             [
                 _buy_op(0, 1_000, 900, 3),
-                _settle_op([1_000, 0], [_PAR, 0]),
+                _settle_op([_PAR, 0]),
                 _sell_op(0, 1_000, 5_000, 15),
             ],
             realized,
@@ -1047,7 +1078,7 @@ def _named_corners():
         ),
         (
             "settlement_at_the_scale_boundary",
-            [_buy_op(0, _PAR, 900, 3), _settle_op([_PAR, 0], [_PAR - 1, 0])],
+            [_buy_op(0, _PAR, 900, 3), _settle_op([_PAR - 1, 0])],
             realized,
             10**12,
             rate,
@@ -1056,7 +1087,7 @@ def _named_corners():
         ),
         (
             "settlement_one_unit_past_the_scale_boundary",
-            [_buy_op(0, _PAR + 1, 900, 3), _settle_op([_PAR + 1, 0], [_PAR - 1, 0])],
+            [_buy_op(0, _PAR + 1, 900, 3), _settle_op([_PAR - 1, 0])],
             realized,
             10**12,
             rate,
@@ -1067,7 +1098,7 @@ def _named_corners():
             # Larger than `u128::MAX / SCORE_SCALE`, so a naive `a * v` product
             # would overflow and the split form must not.
             "settlement_at_a_magnitude_the_naive_product_could_not_hold",
-            [_buy_op(0, 10**30, 10**6, 3), _settle_op([10**30, 0], [_PAR // 3, 0])],
+            [_buy_op(0, 10**30, 10**6, 3), _settle_op([_PAR // 3, 0])],
             realized,
             10**18,
             rate,
@@ -1085,7 +1116,7 @@ def _named_corners():
         ),
         (
             "rate_at_the_registry_ceiling",
-            [_buy_op(0, 1_000, 900, 3), _settle_op([1_000, 0], [_PAR, 0])],
+            [_buy_op(0, 1_000, 900, 3), _settle_op([_PAR, 0])],
             realized,
             10**7,
             _MAX_RATE_PPB,
@@ -1094,7 +1125,7 @@ def _named_corners():
         ),
         (
             "bond_at_the_lawful_minimum",
-            [_buy_op(0, 10**6, 10**6, 3_000), _settle_op([10**6, 0], [_PAR, 0])],
+            [_buy_op(0, 10**6, 10**6, 3_000), _settle_op([_PAR, 0])],
             realized,
             MIN_BOND,
             rate,
@@ -1103,7 +1134,7 @@ def _named_corners():
         ),
         (
             "the_cap_binds_the_reward",
-            [_buy_op(0, 10**9, 1, 0), _settle_op([10**9, 0], [_PAR, 0])],
+            [_buy_op(0, 10**9, 1, 0), _settle_op([_PAR, 0])],
             realized,
             MIN_BOND,
             rate,
@@ -1123,7 +1154,7 @@ def _named_corners():
             # 25 bps of 401 is 1.0025, so the reward floors to 1 where the
             # mirrored debit ceils to 2.  R-7 in two adjacent rows.
             "a_reward_of_one_where_the_debit_would_be_two",
-            [_buy_op(0, 401, 0, 0), _settle_op([401, 0], [_PAR, 0])],
+            [_buy_op(0, 401, 0, 0), _settle_op([_PAR, 0])],
             realized,
             10**12,
             rate,
@@ -1133,7 +1164,7 @@ def _named_corners():
         ("a_debit_of_two_on_the_same_score", [_buy_op(0, 0, 401, 0)], realized, 10**12, rate, 0, 0),
         (
             "a_reward_that_rounds_away_entirely",
-            [_buy_op(0, 7, 0, 0), _settle_op([7, 0], [_PAR, 0])],
+            [_buy_op(0, 7, 0, 0), _settle_op([_PAR, 0])],
             realized,
             10**12,
             rate,
@@ -1174,7 +1205,7 @@ def _named_corners():
             [
                 _buy_op(0, 1_000, 500, 3),
                 _sell_op(0, 1_000, 9_000, 27),
-                _settle_op([0, 0], [0, 0]),
+                _settle_op([0, 0]),
             ],
             void,
             10**9,
@@ -1222,9 +1253,7 @@ def _seeded_scenario(rng, index: int):
                 values.append(SCORE_SCALE)
             else:
                 values.append(rng.randrange(SCORE_SCALE, 4 * SCORE_SCALE))
-        operations.append(
-            _settle_op([rng.randrange(0, 400_000) for _ in range(BRANCH_SIDES)], values)
-        )
+        operations.append(_settle_op(values))
     disposition = rng.choice(list(BranchDisposition))
     bond = rng.choice(
         [MIN_BOND, rng.randrange(MIN_BOND, 10**7), rng.randrange(10**7, 10**12)]

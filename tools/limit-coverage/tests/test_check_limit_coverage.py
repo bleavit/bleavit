@@ -85,15 +85,28 @@ BASE_MANIFEST = textwrap.dedent(
     """
 ).strip() + "\n"
 
+# The baseline names its error the way a real test does: as a path an
+# `assert_noop!` compares against. It used to be `assert_eq!("IntakeFull",
+# "IntakeFull")` — a token that appeared in the body only as string text — and
+# that made the whole suite's notion of "satisfied" rest on the one shape the
+# checker should refuse.
 BASE_RUST = textwrap.dedent(
     """
     #[test]
     fn intake_overflow_is_rejected() {
         // limit-coverage: IntakeQueue
-        assert_eq!("IntakeFull", "IntakeFull");
+        assert_noop!(Epoch::file(RuntimeOrigin::signed(1)), Error::<Test>::IntakeFull);
     }
     """
 ).strip() + "\n"
+
+# A `behavior` binding is frequently the runtime's own message rather than a
+# symbol, and the only way to assert one of those is to compare against the
+# text. Four real repository bindings are of this shape.
+BEHAVIOUR_MANIFEST = BASE_MANIFEST.replace(
+    'error = "Epoch::IntakeFull"',
+    'behavior = "BoundedVec exceeds its limit"',
+)
 
 
 class LimitCoverageTests(unittest.TestCase):
@@ -276,7 +289,10 @@ class LimitCoverageTests(unittest.TestCase):
     def test_error_binding_token_must_appear_in_marked_test(self) -> None:
         self.write(
             "pallets/epoch/src/tests.rs",
-            BASE_RUST.replace('assert_eq!("IntakeFull", "IntakeFull");', "assert!(true);"),
+            BASE_RUST.replace(
+                "assert_noop!(Epoch::file(RuntimeOrigin::signed(1)), Error::<Test>::IntakeFull);",
+                "assert!(true);",
+            ),
         )
         self.assert_fails_with("does not contain binding token 'IntakeFull'")
 
@@ -345,11 +361,133 @@ class LimitCoverageTests(unittest.TestCase):
         )
         self.assert_fails_with("does not contain binding token 'IntakeFull'")
 
-    def test_a_binding_token_in_a_string_literal_still_satisfies_it(self) -> None:
-        # Stripping comments and not literals is deliberate: a token inside a
-        # literal is real code and may legitimately carry the binding. The
-        # baseline fixture is exactly that case, so this pins the boundary.
+    def test_a_symbol_token_in_a_string_literal_does_not_satisfy_it(self) -> None:
+        # The hole the comment fix left open, and the test that used to bless
+        # it. That test wrote no fixture at all: it asserted the setUp baseline
+        # was clean, so its whole meaning came from `BASE_RUST` carrying the
+        # token only as string text. It therefore recorded the defect as
+        # intended behaviour and could not fail while the defect was present.
+        self.write(
+            "pallets/epoch/src/tests.rs",
+            "#[test]\n"
+            "fn intake_overflow_is_rejected() {\n"
+            "    // limit-coverage: IntakeQueue\n"
+            '    assert_eq!("IntakeFull", "IntakeFull");\n'
+            "}\n",
+        )
+        self.assert_fails_with("does not contain binding token 'IntakeFull'")
+
+    def test_the_reachable_mutation_on_a_real_row_is_refused(self) -> None:
+        # Verbatim the shape the whole-branch review found reachable on a row
+        # this branch added: delete the refusal, keep the word in the message
+        # the surviving assertion carries. `MaxParticipants` stayed bound and
+        # the gate stayed green.
+        self.write(
+            "pallets/epoch/src/tests.rs",
+            "#[test]\n"
+            "fn enroll_refuses_at_the_participant_bound_without_taking_a_hold() {\n"
+            "    // limit-coverage: IntakeQueue\n"
+            "    assert_ok!(Epoch::file(RuntimeOrigin::signed(1)));\n"
+            "    assert_eq!(\n"
+            "        balance(&bob()),\n"
+            "        funds,\n"
+            '        "no hold was taken when IntakeFull applies",\n'
+            "    );\n"
+            "}\n",
+        )
+        self.assert_fails_with("does not contain binding token 'IntakeFull'")
+
+    def test_a_symbol_token_in_a_doc_attribute_does_not_satisfy_it(self) -> None:
+        # A `#[doc = "…"]` is a comment wearing a literal's clothes, so the
+        # comment stripper never saw it.
+        self.write(
+            "pallets/epoch/src/tests.rs",
+            "#[test]\n"
+            "fn intake_overflow_is_rejected() {\n"
+            "    // limit-coverage: IntakeQueue\n"
+            '    #[doc = "refuses with IntakeFull once the queue is full"]\n'
+            "    struct Marker;\n"
+            "    assert!(true);\n"
+            "}\n",
+        )
+        self.assert_fails_with("does not contain binding token 'IntakeFull'")
+
+    def test_a_symbol_token_in_a_raw_string_does_not_satisfy_it(self) -> None:
+        # `r#"…"#` is the escape hatch a naive quote-scanner walks straight
+        # past, and it is the form a long message is usually written in.
+        self.write(
+            "pallets/epoch/src/tests.rs",
+            "#[test]\n"
+            "fn intake_overflow_is_rejected() {\n"
+            "    // limit-coverage: IntakeQueue\n"
+            '    let expected = r#"the queue refuses with "IntakeFull""#;\n'
+            "    assert!(!expected.is_empty());\n"
+            "}\n",
+        )
+        self.assert_fails_with("does not contain binding token 'IntakeFull'")
+
+    def test_a_free_text_behaviour_token_may_live_in_a_literal(self) -> None:
+        # The other half of the rule, and it must keep working: a behaviour
+        # binding that *is* the runtime's message can only ever be asserted by
+        # comparing against the text. Four real repository bindings are of this
+        # shape, and stripping literals unconditionally broke all four.
+        self.write("tools/limit-coverage/registry.toml", BEHAVIOUR_MANIFEST)
+        self.write(
+            "pallets/epoch/src/tests.rs",
+            "#[test]\n"
+            "fn intake_overflow_is_rejected() {\n"
+            "    // limit-coverage: IntakeQueue\n"
+            "    assert_eq!(\n"
+            "        Epoch::file(RuntimeOrigin::signed(1)).unwrap_err(),\n"
+            '        DispatchError::Other("BoundedVec exceeds its limit"),\n'
+            "    );\n"
+            "}\n",
+        )
         self.assertEqual(self.failures(), [])
+
+    def test_a_free_text_behaviour_token_in_a_doc_attribute_does_not(self) -> None:
+        self.write("tools/limit-coverage/registry.toml", BEHAVIOUR_MANIFEST)
+        self.write(
+            "pallets/epoch/src/tests.rs",
+            "#[test]\n"
+            "fn intake_overflow_is_rejected() {\n"
+            "    // limit-coverage: IntakeQueue\n"
+            '    #[doc = "BoundedVec exceeds its limit"]\n'
+            "    struct Marker;\n"
+            "    assert!(true);\n"
+            "}\n",
+        )
+        self.assert_fails_with("does not contain binding token 'BoundedVec exceeds its limit'")
+
+    def test_a_quote_inside_a_char_literal_does_not_swallow_the_assertion(self) -> None:
+        # Robustness of the scanner itself, in the direction that would be
+        # silent: reading `'"'` as an opening quote hides everything up to the
+        # next quote, and here that is the assertion.
+        self.write(
+            "pallets/epoch/src/tests.rs",
+            "#[test]\n"
+            "fn intake_overflow_is_rejected() {\n"
+            "    // limit-coverage: IntakeQueue\n"
+            "    assert_eq!(sep, '\"');\n"
+            "    assert_noop!(Epoch::file(o), Error::<Test>::IntakeFull);\n"
+            "}\n",
+        )
+        self.assertEqual(self.failures(), [])
+
+    def test_a_nested_block_comment_does_not_leak_its_tail(self) -> None:
+        # Rust block comments nest. A non-greedy `/\\*.*?\\*/` closes on the
+        # first inner terminator and hands the rest of the comment back as
+        # apparent code — which would satisfy the binding from prose again.
+        self.write(
+            "pallets/epoch/src/tests.rs",
+            "#[test]\n"
+            "fn intake_overflow_is_rejected() {\n"
+            "    // limit-coverage: IntakeQueue\n"
+            "    /* outer /* inner */ refuses with IntakeFull */\n"
+            "    assert!(true);\n"
+            "}\n",
+        )
+        self.assert_fails_with("does not contain binding token 'IntakeFull'")
 
     def test_unattached_marker_fails(self) -> None:
         self.write(

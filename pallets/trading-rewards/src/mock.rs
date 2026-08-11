@@ -86,12 +86,15 @@ impl trading_rewards_core::SettledMarkets<AccountId32> for MockSettledMarkets {
     }
 }
 
-/// Declare a book terminal, exactly as TR7's runtime adapter will.
+/// Declare a book terminal, exactly as TR7's runtime adapter does.
+///
+/// It carries no position: since 08 §2.6 rule 3 was amended (2026-08-11) the
+/// terminal facts are the branch's disposition and its per-unit value, and the
+/// credited quantity is the score entry's own `book_acquired`.
 pub fn settle_book(
     who: &AccountId32,
     market: MarketId,
     disposition: BranchDisposition,
-    position: [Balance; 2],
     settled_value: [Balance; 2],
 ) {
     SETTLEMENTS.with(|map| {
@@ -99,7 +102,6 @@ pub fn settle_book(
             (who.clone(), market),
             MarketSettlement {
                 disposition,
-                position,
                 settled_value,
             },
         )

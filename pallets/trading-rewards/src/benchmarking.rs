@@ -60,6 +60,20 @@ mod benches {
         assert_eq!(ParticipantCount::<T>::get(), 0);
     }
 
+    /// The **record-closing** arm, because it is the heavier of the two and
+    /// `&&` hides it.
+    ///
+    /// The close test is `record.bond == 0 && record.epoch == default &&
+    /// ScoreCount == 0 && Scores prefix empty`. A fixture that leaves a live
+    /// bond short-circuits on the first conjunct, so the counter read, the
+    /// prefix probe, the roster read and the three closing writes are never
+    /// measured — and `claim_rewards` carries no fitted component, so the drift
+    /// gate compares the cheap figure at any fidelity and agrees with it.
+    ///
+    /// The state below is not exotic. It is exactly what `withdraw_bond`'s
+    /// retained-record design exists to create: the bond comes back while an
+    /// unclaimed accrual keeps the record alive, and the claim the participant
+    /// already wants to make is what returns the roster slot.
     #[benchmark]
     fn claim_rewards() {
         let who = participant::<T>();
@@ -74,14 +88,28 @@ mod benches {
             }
         });
         TotalAccrued::<T>::put(BENCHMARK_BOND);
+        // Through the production call, so the retained record is the one the
+        // chain really produces rather than one this fixture asserts into being.
+        assert!(Pallet::<T>::withdraw_bond(RawOrigin::Signed(who.clone()).into()).is_ok());
+        assert_eq!(
+            Participants::<T>::get(&who).map(|record| record.bond),
+            Some(0),
+            "the accrual must retain the record at a zero bond, or the claim below \
+             measures the short-circuiting arm again"
+        );
 
         #[extrinsic_call]
         _(RawOrigin::Signed(who.clone()));
 
-        assert_eq!(
-            Participants::<T>::get(&who).map(|record| record.accrued),
-            Some(0)
+        // The discriminating assertion: only the closing arm removes the
+        // record. Asserting `accrued == 0` instead passes on both arms, which
+        // is how the cheap fixture stayed invisible.
+        assert!(
+            !Participants::<T>::contains_key(&who),
+            "the fixture must measure the arm that closes the record"
         );
+        assert!(!ScoreCount::<T>::contains_key(&who));
+        assert_eq!(ParticipantCount::<T>::get(), 0);
     }
 
     /// The **realized** arm wherever a runtime can build one, because it is the

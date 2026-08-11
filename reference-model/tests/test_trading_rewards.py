@@ -164,7 +164,7 @@ class ScoreRules(unittest.TestCase):
         of a base unit, never a whole one."""
         score = MarketScore()
         on_buy(score, 0, cost=600, fee=2, quantity=1_000)
-        credited = on_settle(score, position=[1_000, 0], settled_value=[6 * SCORE_SCALE // 10, 0])
+        credited = on_settle(score, [6 * SCORE_SCALE // 10, 0])
         self.assertEqual(credited, 600)
         self.assertEqual(score.received, 600)
 
@@ -173,37 +173,55 @@ class ScoreRules(unittest.TestCase):
         whole number, every sub-par settlement would credit nothing."""
         score = MarketScore()
         on_buy(score, 0, cost=990, fee=3, quantity=1_000)
-        on_settle(score, position=[1_000, 0], settled_value=[SCORE_SCALE - 1, 0])
+        on_settle(score, [SCORE_SCALE - 1, 0])
         self.assertEqual(score.received, 999)
         self.assertGreater(score.received, 0)
 
     def test_settlement_is_clamped_to_par(self):
         score = MarketScore()
         on_buy(score, 0, cost=1_000, fee=3, quantity=1_000)
-        credited = on_settle(score, position=[1_000, 0], settled_value=[5 * SCORE_SCALE, 0])
+        credited = on_settle(score, [5 * SCORE_SCALE, 0])
         self.assertEqual(credited, 1_000)
 
-    def test_settlement_credits_only_the_book_acquired_part_of_the_position(self):
+    def test_settlement_credits_the_book_acquired_quantity(self):
+        """Rule 3 as amended 2026-08-11: the credited quantity is
+        `book_acquired`, never a clamp against the account's ledger position.
+
+        The account here holds nothing in the ledger the model can see, and the
+        credit is the book's own 100 units all the same — which is exactly the
+        state a trader who redeemed before the fold is in.
+        """
         score = MarketScore()
         on_buy(score, 0, cost=100, fee=0, quantity=100)
-        credited = on_settle(score, position=[10_000, 0], settled_value=[SCORE_SCALE, 0])
+        credited = on_settle(score, [SCORE_SCALE, 0])
         self.assertEqual(credited, 100)
+
+    def test_a_parcel_sold_back_through_the_book_is_not_settled_again(self):
+        """Why `book_acquired` needs no clamp: rule 2 already removed the
+        disposals the clamp existed to exclude."""
+        score = MarketScore()
+        on_buy(score, 0, cost=900, fee=3, quantity=1_000)
+        on_sell(score, 0, proceeds=1_200, fee=4, quantity=1_000)
+        self.assertEqual(score.book_acquired, [0, 0])
+        self.assertEqual(on_settle(score, [SCORE_SCALE, 0]), 0)
 
     def test_settlement_decrements_the_credited_quantity(self):
         """Rule 3's decrement, stated 2026-08-11 after this model disagreed
         with the kernel on the field for 59 % of 30,000 replayed vectors."""
         score = MarketScore()
         on_buy(score, 0, cost=900, fee=3, quantity=1_000)
-        on_settle(score, position=[400, 0], settled_value=[SCORE_SCALE, 0])
+        on_sell(score, 0, proceeds=400, fee=0, quantity=400)
         self.assertEqual(score.book_acquired, [600, 0])
+        on_settle(score, [SCORE_SCALE, 0])
+        self.assertEqual(score.book_acquired, [0, 0])
 
     def test_settling_the_same_entry_twice_credits_it_once(self):
         """What the decrement is for: without it a repeated call credits the
         same units again, which is the over-credit direction R-7 forbids."""
         score = MarketScore()
         on_buy(score, 0, cost=900, fee=3, quantity=1_000)
-        first = on_settle(score, position=[1_000, 0], settled_value=[SCORE_SCALE, 0])
-        second = on_settle(score, position=[1_000, 0], settled_value=[SCORE_SCALE, 0])
+        first = on_settle(score, [SCORE_SCALE, 0])
+        second = on_settle(score, [SCORE_SCALE, 0])
         self.assertEqual(first, 1_000)
         self.assertEqual(second, 0)
         self.assertEqual(score.received, 1_000)
@@ -212,7 +230,7 @@ class ScoreRules(unittest.TestCase):
     def test_a_sale_after_settlement_credits_nothing(self):
         score = MarketScore()
         on_buy(score, 0, cost=900, fee=3, quantity=1_000)
-        on_settle(score, position=[1_000, 0], settled_value=[SCORE_SCALE, 0])
+        on_settle(score, [SCORE_SCALE, 0])
         self.assertEqual(on_sell(score, 0, proceeds=5_000, fee=15, quantity=1_000), 0)
 
     def test_the_two_branch_sides_carry_independent_counters(self):
@@ -223,11 +241,7 @@ class ScoreRules(unittest.TestCase):
         on_buy(score, 1, cost=150, fee=0, quantity=300)
         self.assertEqual(score.book_acquired, [200, 300])
         long_value = SCORE_SCALE // 4
-        credited = on_settle(
-            score,
-            position=[200, 300],
-            settled_value=[long_value, SCORE_SCALE - long_value],
-        )
+        credited = on_settle(score, [long_value, SCORE_SCALE - long_value])
         self.assertEqual(credited, 200 // 4 + 300 * 3 // 4)
         self.assertEqual(score.book_acquired, [0, 0])
 
@@ -268,7 +282,7 @@ class Dispositions(unittest.TestCase):
 
     def test_realized_scores_received_minus_spent(self):
         score = self._bought([(1_000, 1_000)])
-        on_settle(score, position=[1_000, 0], settled_value=[SCORE_SCALE, 0])
+        on_settle(score, [SCORE_SCALE, 0])
         self.assertEqual(market_result(score, BranchDisposition.REALIZED), 1_000 - 1_003)
 
     def test_the_annulled_arm_is_exactly_minus_the_fees(self):
@@ -298,14 +312,14 @@ class Dispositions(unittest.TestCase):
 
     def test_void_drops_the_entry_at_zero(self):
         score = self._bought([(1_000, 1_000)])
-        on_settle(score, position=[1_000, 0], settled_value=[SCORE_SCALE, 0])
+        on_settle(score, [SCORE_SCALE, 0])
         self.assertEqual(market_result(score, BranchDisposition.VOID), 0)
 
     def test_both_arms_stay_claimant_adverse(self):
         """Each arm discards value the trader did not realize rather than
         crediting value they did not receive."""
         score = self._bought([(1_000, 1_000)])
-        on_settle(score, position=[1_000, 0], settled_value=[SCORE_SCALE, 0])
+        on_settle(score, [SCORE_SCALE, 0])
         realized = market_result(score, BranchDisposition.REALIZED)
         annulled = market_result(score, BranchDisposition.ANNULLED)
         self.assertLessEqual(annulled, 0)

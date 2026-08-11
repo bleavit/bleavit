@@ -109,15 +109,21 @@ impl<T: frame_system::Config> pallet_trading_rewards::WeightInfo for WeightInfo<
 	/// Proof: `TradingRewards::TotalAccrued` (`max_values`: Some(1), `max_size`: Some(16), added: 511, mode: `MaxEncodedLen`)
 	/// Storage: `System::Account` (r:1 w:1)
 	/// Proof: `System::Account` (`max_values`: None, `max_size`: Some(128), added: 2603, mode: `MaxEncodedLen`)
+	/// Storage: `TradingRewards::ScoreCount` (r:1 w:1)
+	/// Proof: `TradingRewards::ScoreCount` (`max_values`: None, `max_size`: Some(52), added: 2527, mode: `MaxEncodedLen`)
+	/// Storage: `TradingRewards::Scores` (r:1 w:0)
+	/// Proof: `TradingRewards::Scores` (`max_values`: None, `max_size`: Some(152), added: 2627, mode: `MaxEncodedLen`)
+	/// Storage: `TradingRewards::ParticipantCount` (r:1 w:1)
+	/// Proof: `TradingRewards::ParticipantCount` (`max_values`: Some(1), `max_size`: Some(4), added: 499, mode: `MaxEncodedLen`)
 	fn claim_rewards() -> Weight {
 		// Proof Size summary in bytes:
 		//  Measured:  `1341`
-		//  Estimated: `3598`
-		// Minimum execution time: 51_710_000 picoseconds.
-		Weight::from_parts(54_510_000, 0)
-			.saturating_add(Weight::from_parts(0, 3598))
-			.saturating_add(T::DbWeight::get().reads(4))
-			.saturating_add(T::DbWeight::get().writes(3))
+		//  Estimated: `3617`
+		// Minimum execution time: 59_550_000 picoseconds.
+		Weight::from_parts(63_290_000, 0)
+			.saturating_add(Weight::from_parts(0, 3617))
+			.saturating_add(T::DbWeight::get().reads(7))
+			.saturating_add(T::DbWeight::get().writes(5))
 	}
 	/// Storage: `TradingRewards::Participants` (r:1 w:1)
 	/// Proof: `TradingRewards::Participants` (`max_values`: None, `max_size`: Some(133), added: 2608, mode: `MaxEncodedLen`)
@@ -127,18 +133,16 @@ impl<T: frame_system::Config> pallet_trading_rewards::WeightInfo for WeightInfo<
 	/// Proof: `Market::Markets` (`max_values`: None, `max_size`: Some(232), added: 2707, mode: `MaxEncodedLen`)
 	/// Storage: `ConditionalLedger::Vaults` (r:1 w:0)
 	/// Proof: `ConditionalLedger::Vaults` (`max_values`: None, `max_size`: Some(184), added: 2659, mode: `MaxEncodedLen`)
-	/// Storage: `ConditionalLedger::Positions` (r:2 w:0)
-	/// Proof: `ConditionalLedger::Positions` (`max_values`: None, `max_size`: Some(92), added: 2567, mode: `MaxEncodedLen`)
 	/// Storage: `TradingRewards::ScoreCount` (r:1 w:1)
 	/// Proof: `TradingRewards::ScoreCount` (`max_values`: None, `max_size`: Some(52), added: 2527, mode: `MaxEncodedLen`)
 	fn settle_market_score() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `1368`
-		//  Estimated: `6124`
-		// Minimum execution time: 37_170_000 picoseconds.
-		Weight::from_parts(38_970_000, 0)
-			.saturating_add(Weight::from_parts(0, 6124))
-			.saturating_add(T::DbWeight::get().reads(7))
+		//  Measured:  `1153`
+		//  Estimated: `3697`
+		// Minimum execution time: 27_940_000 picoseconds.
+		Weight::from_parts(30_010_000, 0)
+			.saturating_add(Weight::from_parts(0, 3697))
+			.saturating_add(T::DbWeight::get().reads(5))
 			.saturating_add(T::DbWeight::get().writes(3))
 	}
 	/// Storage: `TradingRewards::Participants` (r:1 w:1)

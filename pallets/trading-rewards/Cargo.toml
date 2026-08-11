@@ -43,6 +43,15 @@ runtime-benchmarks = [
   "frame-support/runtime-benchmarks",
   "frame-system/runtime-benchmarks",
   "market-core/runtime-benchmarks",
+  # Without this the crate's own test target does not COMPILE under the feature,
+  # so `impl_benchmark_test_suite!` has never run. `pallet_assets`'s
+  # `TestDefaultConfig` prelude emits a `BenchmarkHelper` associated type as soon
+  # as `frame-support/runtime-benchmarks` is on, while `pallet_assets::Config`
+  # only declares one when `pallet-assets/runtime-benchmarks` is on — so the mock
+  # fails E0437/E0576 on the `derive_impl` line itself. Repo-wide condition, not
+  # specific to this pallet (SQ-1054); fixed here because this is the pallet the
+  # branch adds.
+  "pallet-assets/runtime-benchmarks",
   "sp-runtime/runtime-benchmarks",
   "trading-rewards-core/runtime-benchmarks",
 ]

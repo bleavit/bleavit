@@ -110,10 +110,12 @@ enum Operation {
         proceeds: String,
         fee: String,
     },
-    Settle {
-        position: [String; 2],
-        settled_value: [String; 2],
-    },
+    /// No position: since 08 §2.6 rule 3 was amended (2026-08-11) the credited
+    /// quantity is the entry's own `book_acquired`, so a settlement's only
+    /// input is the branch's per-unit value. `deny_unknown_fields` is what
+    /// makes that binding rather than a convention — a corpus that still
+    /// carried a position would fail to deserialize here.
+    Settle { settled_value: [String; 2] },
 }
 
 #[derive(Deserialize)]
@@ -242,15 +244,10 @@ fn the_kernel_reproduces_every_recorded_scenario() {
                     amount(proceeds, "sale proceeds") - amount(fee, "sale fee"),
                 )
                 .unwrap_or_else(|error| panic!("{name}: sell {error:?}")),
-                Operation::Settle {
-                    position,
-                    settled_value,
-                } => on_settle(
-                    &mut score,
-                    amounts(position, "settled position"),
-                    amounts(settled_value, "settled value"),
-                )
-                .unwrap_or_else(|error| panic!("{name}: settle {error:?}")),
+                Operation::Settle { settled_value } => {
+                    on_settle(&mut score, amounts(settled_value, "settled value"))
+                        .unwrap_or_else(|error| panic!("{name}: settle {error:?}"))
+                }
             }
         }
 

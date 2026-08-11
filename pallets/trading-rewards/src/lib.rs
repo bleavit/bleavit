@@ -317,6 +317,17 @@ pub mod pallet {
         /// whole dispatch aborts, so the epoch stays unclosed and the bond
         /// stays locked until a later call succeeds.
         BudgetExceeded,
+        /// A caller who is **not** the participant tried to settle an epoch
+        /// into a headroom that would clamp the reward below the full
+        /// entitlement (08 §2.6).
+        ///
+        /// The participant may always settle themselves at any headroom, and a
+        /// third party may still crank every epoch the clamp does not touch.
+        /// The refusal is status-quo (G-1): the epoch stays open, the bond
+        /// stays held, and nothing is written — so re-funding the budget
+        /// reopens the payout, which is exactly what finalising the epoch would
+        /// have made impossible.
+        ThirdPartyWouldClampReward,
     }
 
     #[pallet::hooks]
@@ -568,16 +579,20 @@ pub mod pallet {
         /// Fold one settled market into the account's epoch total and delete
         /// the entry (08 §2.6).
         ///
-        /// **Permissionless, and it names a target rather than the caller.**
-        /// That is safe because it acts only on already-recorded values: every
-        /// caller reaches the same result and no caller can choose it. The
-        /// keeper cranks it (01 §4.2).
+        /// **Permissionless without qualification, and it names a target rather
+        /// than the caller.** That is safe because it acts only on
+        /// already-recorded values: every caller reaches the same result and no
+        /// caller can choose it. [`Pallet::settle_epoch`] is deliberately
+        /// *not* in that class — see its own note. The keeper cranks both
+        /// (01 §4.2).
         ///
         /// It succeeds on one of exactly two conditions. Either the book has
-        /// reached a terminal state, in which case rule 3 credits the
-        /// book-acquired remainder and rule 4 selects the arm from the branch's
-        /// disposition; or the **absolute timeout** has elapsed, in which case
-        /// the entry drops at zero without folding. Settlement is checked
+        /// reached a terminal state, in which case rule 3 credits the entry's
+        /// own `book_acquired` — never a ledger position, which redemption
+        /// burns at the same instant settlement opens — and rule 4 selects the
+        /// arm from the branch's disposition; or the **absolute timeout** has
+        /// elapsed, in which case the entry drops at zero without folding.
+        /// Settlement is checked
         /// first: §2.6 sizes the timeout above the longest lawful settlement
         /// horizon precisely so no settling market reaches it, and dropping a
         /// settled market would turn the liveness escape into an exit from a
@@ -602,12 +617,8 @@ pub mod pallet {
                         // reachable effect would be an overflow refusing a
                         // lawful fold.
                         if matches!(settlement.disposition, BranchDisposition::Realized) {
-                            trading_rewards_core::on_settle(
-                                &mut score,
-                                settlement.position,
-                                settlement.settled_value,
-                            )
-                            .map_err(|_| Error::<T>::AccountingOverflow)?;
+                            trading_rewards_core::on_settle(&mut score, settlement.settled_value)
+                                .map_err(|_| Error::<T>::AccountingOverflow)?;
                         }
                         let before = record.epoch.clone();
                         // `fold` stays the single owner of rule 4's arms; what
@@ -662,10 +673,22 @@ pub mod pallet {
         }
 
         /// Close one participant's epoch, applying the reward or the debit
-        /// exactly once (08 §2.6). Permissionless and named-target for the same
-        /// reason as [`Pallet::settle_market_score`].
+        /// exactly once (08 §2.6). It names a target rather than the caller,
+        /// **but it is not permissionless in the way
+        /// [`Pallet::settle_market_score`] is, and the difference is the whole
+        /// point of the fourth refusal below.**
         ///
-        /// Three obligations §2.6 states normatively, and each is a refusal
+        /// The fold acts on already-recorded values, so any caller reaches the
+        /// same result. This call does not: it clamps the reward to the
+        /// budget's unpromised remainder **as read at call time** and then
+        /// resets the epoch unconditionally, so two callers at two moments
+        /// reach two different results and the earlier one is irreversible —
+        /// re-funding cannot reopen a settled epoch. A third party could
+        /// therefore finalise a victim into a zero-headroom moment for the
+        /// price of a transaction fee, which is the same harm §2.6 forbids for
+        /// a permissionless budget sweep, reached from the other side.
+        ///
+        /// Four obligations §2.6 states normatively, and each is a refusal
         /// above rather than a correction below:
         ///
         /// 1. **Idempotent per participant per epoch.** Settling re-snapshots
@@ -676,6 +699,12 @@ pub mod pallet {
         /// 3. **Refuses while an unfolded score entry remains** — otherwise a
         ///    partially folded account settles on part of its own score, which
         ///    is the one ordering in which a losing epoch pays a reward.
+        /// 4. **Refuses a caller other than the participant when the live
+        ///    headroom would clamp the reward below the full entitlement.** The
+        ///    participant may always settle themselves and accept a partial
+        ///    payout, which keeps §2.6's FCFS residual a choice they make
+        ///    rather than one made for them, and a third party may still crank
+        ///    every epoch the clamp does not touch.
         ///
         /// It also re-snapshots the bond **whenever an epoch closes, including
         /// when there was nothing to settle**. Nothing else re-snapshots, so
@@ -685,7 +714,7 @@ pub mod pallet {
         #[pallet::call_index(5)]
         #[pallet::weight(T::WeightInfo::settle_epoch())]
         pub fn settle_epoch(origin: OriginFor<T>, who: T::AccountId) -> DispatchResult {
-            ensure_signed(origin)?;
+            let caller = ensure_signed(origin)?;
             frame_support::storage::with_storage_layer(|| {
                 let mut record = Participants::<T>::get(&who).ok_or(Error::<T>::NotEnrolled)?;
                 let epoch = T::CurrentEpoch::get();
@@ -755,7 +784,27 @@ pub mod pallet {
                         // TR6.
                         let budget = Self::authorized_budget_usdc().unwrap_or_default();
                         let promised = TotalAccrued::<T>::get();
-                        accrued = core::cmp::min(demand, budget.saturating_sub(promised));
+                        let headroom = budget.saturating_sub(promised);
+                        // 08 §2.6's fourth obligation, and the only place the
+                        // caller's identity is read. The clamp below is
+                        // irreversible — settling resets the epoch, and
+                        // re-funding cannot reopen it — so a third party must
+                        // not be able to choose the moment it bites. The
+                        // participant may; a third party may crank every epoch
+                        // the clamp does not touch. Refusing here rolls the
+                        // whole dispatch back (G-1): the epoch stays open and
+                        // the bond stays held.
+                        //
+                        // It reads no storage of its own. Both figures are
+                        // already in hand for the clamp, and the debit arm
+                        // below still reads neither — so a third party cranking
+                        // a *losing* epoch is unaffected, which is the arm the
+                        // program most needs cranked.
+                        ensure!(
+                            caller == who || demand <= headroom,
+                            Error::<T>::ThirdPartyWouldClampReward
+                        );
+                        accrued = core::cmp::min(demand, headroom);
                         if accrued > 0 {
                             record.accrued = record
                                 .accrued

@@ -70,6 +70,11 @@ CORPUS_FAMILY_BINDINGS: Mapping[str, tuple[str, ...] | None] = {
     "lmsr_maker_example": ("fixed-reference-vectors",),
     "lmsr_vectors": ("fixed-reference-vectors",),
     "transcendental_corpus": ("fixed-reference-vectors",),
+    # 08 §2.6 score kernel (TR8). The reward program is a Phase 3–4 mechanism and
+    # gates no Phase-0 exit criterion, but the family is bound to a real leg
+    # rather than marked unattested: the replay exists, it is cheap, and an
+    # unattested row states that nothing checks the family — which would be false.
+    "trading_reward_scenarios": ("trading-rewards-core-reference-vectors",),
     "treasury_scenarios": ("treasury-core-reference-vectors",),
     "twap_scenarios": ("market-core-twap-vectors",),
     "welfare_normalization_scenarios": ("welfare-core-normalization-vectors",),
@@ -546,6 +551,21 @@ def reference_legs(sweep_dir: Path) -> tuple[list[CommandLeg], CommandLeg, Comma
             minimum_tests=1,
         ),
         CommandLeg(
+            "trading-rewards-core-reference-vectors",
+            (
+                "cargo",
+                "test",
+                "-p",
+                "trading-rewards-core",
+                "--release",
+                "--locked",
+                "--test",
+                "differential_vectors",
+            ),
+            test_output="cargo",
+            minimum_tests=1,
+        ),
+        CommandLeg(
             "market-core-twap-vectors",
             (
                 "cargo",
@@ -694,6 +714,7 @@ def load_corpus_family_coverage(
         "ledger-core-reference-vectors",
         "ledger-pallet-reference-sweep",
         "market-core-twap-vectors",
+        "trading-rewards-core-reference-vectors",
         "treasury-core-reference-vectors",
         "welfare-core-normalization-vectors",
         "welfare-core-reference-vectors",
