@@ -7657,6 +7657,18 @@ impl pallet_oracle::Config for Runtime {
     type Reporting = RuntimeReporting;
     type Params = RuntimeOracleParams;
     type Custody = RuntimeOracleCustody;
+    // No 07 §9 mechanical-resolution engine: the A7 spec registry that freezes
+    // `formula_ref` does not exist, so `recompute_proof` fails closed for every
+    // component rather than settling from a stand-in that reads the value out of
+    // the caller's payload (2026-08-10 security review; `RecomputeEngine`).
+    #[cfg(not(feature = "runtime-benchmarks"))]
+    type RecomputeEngine = ();
+    // Measurement only. `recompute_proof`'s declared weight must bound the work
+    // it does when it *does* resolve a round, so the benchmark runtime carries an
+    // evaluator and the generated weight covers the settling path. A
+    // `runtime-benchmarks` runtime is never shipped.
+    #[cfg(feature = "runtime-benchmarks")]
+    type RecomputeEngine = BenchmarkRecomputeEngine;
     type ProbeDispatch = RuntimeProbeDispatch;
     type ProbeTimeoutSink = OracleProbeTimeoutToWelfare;
     type ReserveHealthSink = RuntimeReserveHealthSink;
@@ -7665,6 +7677,27 @@ impl pallet_oracle::Config for Runtime {
     type WeightInfo = crate::weights::pallet_oracle::WeightInfo<Runtime>;
     #[cfg(feature = "runtime-benchmarks")]
     type BenchmarkHelper = RuntimeBenchmarkHelper;
+}
+
+/// The evaluator the benchmark runtime binds, so `recompute_proof`'s measured
+/// weight covers the round it settles rather than the early refusal.
+///
+/// It is `oracle_core::recompute_value`, which reads the value out of the
+/// payload — safe here and only here, because a `runtime-benchmarks` runtime is
+/// a measurement artifact. The production `Runtime` binds `()`. When A7 lands a
+/// real `formula_ref` engine, this weight is re-measured against it.
+#[cfg(feature = "runtime-benchmarks")]
+pub struct BenchmarkRecomputeEngine;
+
+#[cfg(feature = "runtime-benchmarks")]
+impl pallet_oracle::RecomputeEngine for BenchmarkRecomputeEngine {
+    fn evaluate(
+        _: futarchy_primitives::MetricId,
+        _: futarchy_primitives::MetricSpecVersion,
+        proof: &[u8],
+    ) -> Result<futarchy_primitives::FixedU64, pallet_oracle::CoreError> {
+        pallet_oracle::recompute_value(proof)
+    }
 }
 
 /// USDC custody for oracle registration stakes and signed round-bond collateral.

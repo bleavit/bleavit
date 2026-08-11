@@ -83,6 +83,17 @@ pub struct Cli {
     #[arg(long)]
     pub genesis_hash: Option<String>,
 
+    /// Pin one call shape as `Pallet.call=0x…`. Repeat for each call. Run with
+    /// `--dry-run` once to have the keeper print the values this endpoint
+    /// serves.
+    #[arg(long = "call-hash")]
+    pub call_hashes: Vec<String>,
+
+    /// Sign against whatever call shapes and chain identity the endpoint
+    /// declares, with no pins. Live mode refuses to start without this.
+    #[arg(long)]
+    pub allow_unpinned_endpoint: bool,
+
     /// Development/secret URI, for example //Alice. Never use a dev URI in production.
     #[arg(long, conflicts_with = "signer_file")]
     pub signer_uri: Option<String>,
@@ -171,10 +182,23 @@ pub struct Config {
     /// chain. Pinning the shapes is what closes that; the genesis pin alone
     /// does not, because the forgery never leaves the chain.
     ///
-    /// Empty means unpinned: the keeper logs the shapes it observes so an
-    /// operator can adopt them, and warns that it is signing unvalidated call
-    /// shapes.
+    /// Empty means unpinned, which live mode refuses outright: the keeper
+    /// starts only under `--dry-run` or an explicit
+    /// [`Config::allow_unpinned_endpoint`], and then logs the shapes it observes
+    /// so an operator can adopt them.
     pub call_hashes: BTreeMap<String, [u8; 32]>,
+    /// The operator's explicit decision to sign against an endpoint it has not
+    /// pinned — neither its chain identity nor its call shapes.
+    ///
+    /// Both pins default to absent, and an absent pin used to mean "trust the
+    /// endpoint". `node_urls` names a third-party RPC operator by design
+    /// (01 §4.2), the keeper builds every call from that endpoint's own metadata
+    /// (`dynamic::tx` carries `validation_hash: None` and subxt encodes RFC-78's
+    /// `CheckMetadataHash` as `Disabled`), and nothing downstream re-checks what
+    /// was signed. So the default had to become refusal, and the old posture had
+    /// to become something an operator asks for in writing (2026-08-10 security
+    /// review).
+    pub allow_unpinned_endpoint: bool,
     pub signer: Option<SignerSource>,
     pub enabled_roles: RoleSet,
     pub obs_interval: Option<u64>,
@@ -197,6 +221,7 @@ struct FileConfig {
     node_urls: Option<Vec<String>>,
     genesis_hash: Option<String>,
     call_hashes: Option<BTreeMap<String, String>>,
+    allow_unpinned_endpoint: Option<bool>,
     signer_uri: Option<String>,
     signer_file: Option<PathBuf>,
     enabled_roles: Option<Vec<Role>>,
@@ -277,13 +302,40 @@ impl Config {
         };
         let mut call_hashes = BTreeMap::new();
         for (key, raw) in file.call_hashes.unwrap_or_default() {
-            if key.split('.').count() != 2 || key.split('.').any(str::is_empty) {
-                bail!("call_hashes key {key:?} must be \"Pallet.call\"");
+            insert_call_hash(&mut call_hashes, &key, &raw)?;
+        }
+        // `--call-hash Pallet.call=0x…` overrides the file entry for that call,
+        // so an operator can pin without authoring a TOML file at all.
+        for entry in &cli.call_hashes {
+            let (key, raw) = entry
+                .split_once('=')
+                .with_context(|| format!("--call-hash {entry:?} must be \"Pallet.call=0x…\""))?;
+            insert_call_hash(&mut call_hashes, key, raw)?;
+        }
+
+        let allow_unpinned_endpoint =
+            cli.allow_unpinned_endpoint || file.allow_unpinned_endpoint.unwrap_or(false);
+        // Every byte this keeper signs is encoded against metadata the endpoint
+        // served, and no later stage re-checks it, so an unpinned live keeper
+        // signs whatever that endpoint asks it to. Refuse rather than warn; the
+        // operator opts back in explicitly, and `--dry-run` (which signs
+        // nothing) is how they collect the values to pin.
+        if !dry_run && !allow_unpinned_endpoint {
+            if call_hashes.is_empty() {
+                bail!(
+                    "no pinned call shapes: pin them with --call-hash Pallet.call=0x… or the \
+                     config file's `call_hashes`, or pass --allow-unpinned-endpoint to sign \
+                     against the endpoint's own metadata. Run with --dry-run to print the \
+                     shapes this endpoint serves"
+                );
             }
-            call_hashes.insert(
-                key.clone(),
-                parse_h256(&raw).with_context(|| format!("invalid call_hashes.{key}"))?,
-            );
+            if genesis_hash.is_none() {
+                bail!(
+                    "no pinned genesis hash: pass --genesis-hash 0x… (or the config file's \
+                     `genesis_hash`), or --allow-unpinned-endpoint to sign for whichever chain \
+                     the endpoint claims to be"
+                );
+            }
         }
 
         let obs_interval = cli.obs_interval.or(file.obs_interval);
@@ -314,6 +366,7 @@ impl Config {
             node_urls,
             genesis_hash,
             call_hashes,
+            allow_unpinned_endpoint,
             signer,
             enabled_roles,
             obs_interval,
@@ -399,6 +452,10 @@ mod tests {
                 enabled_roles = ["cleanup"]
                 obs_interval = 20
                 cooldown_depth = 9
+                genesis_hash = "0x1111111111111111111111111111111111111111111111111111111111111111"
+
+                [call_hashes]
+                "Epoch.tick" = "0x2222222222222222222222222222222222222222222222222222222222222222"
             "#,
         )
         .expect("test TOML should parse");
@@ -436,6 +493,21 @@ mod tests {
         assert!(config.dry_run);
         assert_eq!(config.signer, None);
     }
+}
+
+/// Validate one `Pallet.call` -> shape entry and record it, from either source.
+fn insert_call_hash(
+    into: &mut BTreeMap<String, [u8; 32]>,
+    key: &str,
+    raw: &str,
+) -> anyhow::Result<()> {
+    let key = key.trim();
+    if key.split('.').count() != 2 || key.split('.').any(str::is_empty) {
+        bail!("call_hashes key {key:?} must be \"Pallet.call\"");
+    }
+    let hash = parse_h256(raw).with_context(|| format!("invalid call_hashes.{key}"))?;
+    into.insert(key.to_owned(), hash);
+    Ok(())
 }
 
 /// Parse a 0x-prefixed 32-byte hex string.
@@ -528,5 +600,124 @@ mod chain_identity_tests {
 
         assert_eq!(config.genesis_hash, Some([0x11u8; 32]));
         assert_eq!(config.call_hashes.get("Epoch.tick"), Some(&[0x22u8; 32]));
+    }
+
+    /// Both pins were optional and both defaulted to absent, so the documented
+    /// quickstart produced a keeper that signed whatever call shape the endpoint
+    /// declared, on whichever chain it claimed to be. The mitigation existed and
+    /// was correct; it was simply off. Live mode now refuses to start.
+    /// Regression for the 2026-08-10 security review.
+    #[test]
+    fn live_mode_refuses_an_endpoint_it_has_not_pinned() {
+        let signer = ["keeper", "--signer-uri", "//Alice"];
+
+        let unpinned = Config::merge(Cli::parse_from(signer), FileConfig::default())
+            .expect_err("an unpinned live keeper must not start");
+        assert!(
+            unpinned.to_string().contains("no pinned call shapes"),
+            "{unpinned}"
+        );
+
+        // Call shapes pinned, chain identity still not: also refused, because a
+        // keeper that signs for the wrong chain is the other half of the same
+        // problem.
+        let calls_only = Config::merge(
+            Cli::parse_from([
+                "keeper",
+                "--signer-uri",
+                "//Alice",
+                "--call-hash",
+                &format!("Epoch.tick=0x{}", "22".repeat(32)),
+            ]),
+            FileConfig::default(),
+        )
+        .expect_err("a live keeper without a genesis pin must not start");
+        assert!(
+            calls_only.to_string().contains("no pinned genesis hash"),
+            "{calls_only}"
+        );
+    }
+
+    /// The two ways back in, and nothing else: `--dry-run`, which signs nothing
+    /// and is how an operator collects the values to pin, and an explicit
+    /// opt-out that the operator has to write down.
+    #[test]
+    fn dry_run_and_the_explicit_opt_out_are_the_only_unpinned_paths() {
+        let dry = Config::merge(
+            Cli::parse_from(["keeper", "--dry-run"]),
+            FileConfig::default(),
+        )
+        .expect("dry run signs nothing, so it needs no pins");
+        assert!(!dry.allow_unpinned_endpoint);
+
+        let opted_out = Config::merge(
+            Cli::parse_from([
+                "keeper",
+                "--signer-uri",
+                "//Alice",
+                "--allow-unpinned-endpoint",
+            ]),
+            FileConfig::default(),
+        )
+        .expect("the operator asked for the old posture explicitly");
+        assert!(opted_out.allow_unpinned_endpoint);
+        assert!(opted_out.call_hashes.is_empty());
+
+        // The file may carry the same decision, for an operator who configures
+        // by file rather than by flag.
+        let by_file = Config::merge(
+            Cli::parse_from(["keeper", "--signer-uri", "//Alice"]),
+            FileConfig {
+                allow_unpinned_endpoint: Some(true),
+                ..Default::default()
+            },
+        )
+        .expect("the file carries the same explicit decision");
+        assert!(by_file.allow_unpinned_endpoint);
+    }
+
+    /// Pinning must not require authoring a TOML file: there was no CLI flag for
+    /// call shapes at all, which is part of why the quickstart left them empty.
+    #[test]
+    fn call_hash_flags_pin_without_a_config_file_and_win_over_it() {
+        let config = Config::merge(
+            Cli::parse_from([
+                "keeper",
+                "--signer-uri",
+                "//Alice",
+                "--genesis-hash",
+                &format!("0x{}", "11".repeat(32)),
+                "--call-hash",
+                &format!("Epoch.tick=0x{}", "22".repeat(32)),
+                "--call-hash",
+                &format!("Market.crank_close=0x{}", "33".repeat(32)),
+            ]),
+            FileConfig {
+                call_hashes: Some(BTreeMap::from([(
+                    "Epoch.tick".to_owned(),
+                    "0x".to_owned() + &"44".repeat(32),
+                )])),
+                ..Default::default()
+            },
+        )
+        .expect("flag-only pinning is a supported path");
+
+        assert_eq!(config.call_hashes.len(), 2);
+        assert_eq!(config.call_hashes.get("Epoch.tick"), Some(&[0x22u8; 32]));
+        assert_eq!(
+            config.call_hashes.get("Market.crank_close"),
+            Some(&[0x33u8; 32])
+        );
+
+        for malformed in ["Epoch.tick", &format!("Epoch=0x{}", "22".repeat(32))] {
+            assert!(
+                Config::merge(
+                    Cli::parse_from(["keeper", "--dry-run", "--call-hash", malformed]),
+                    FileConfig::default(),
+                )
+                .is_err(),
+                "{malformed:?} must be rejected"
+            );
+        }
     }
 }

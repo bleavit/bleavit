@@ -59,7 +59,13 @@ if [[ ! -x "$keeper_binary" ]]; then
   exit 69
 fi
 
+# `--allow-unpinned-endpoint` is the drill's own decision, and the check above is
+# what earns it: the endpoint must be a loopback URL, so the node this keeper
+# signs against is the one this drill just spawned. Live mode otherwise refuses to
+# start without a pinned genesis hash and pinned call shapes, and neither exists
+# for a chain spec built fresh on every run (2026-08-10 security review).
 exec "$keeper_binary" \
   --node-url "$keeper_node_url" \
   --signer-uri "$keeper_signer_uri" \
+  --allow-unpinned-endpoint \
   --metrics-bind "127.0.0.1:$prometheus_port"

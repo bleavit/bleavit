@@ -132,6 +132,9 @@ impl pallet_oracle::Config for Test {
     type Params = TestOracleParams;
     type Custody = ();
     type MaxRoundCloseBatch = MaxRoundCloseBatch;
+    // This mock exercises the 07 §8 reserve probe, never 07 §9's mechanical
+    // resolution, so it binds what the production runtime binds.
+    type RecomputeEngine = ();
     type ProbeDispatch = TestProbeDispatcher;
     type ProbeTimeoutSink = ();
     type ReserveHealthSink = ();

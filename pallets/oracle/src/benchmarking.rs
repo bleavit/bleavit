@@ -17,7 +17,10 @@ use frame_benchmarking::v2::*;
 use frame_support::pallet_prelude::*;
 use frame_system::RawOrigin;
 use futarchy_primitives::{FixedU64, H256};
-use oracle_core::{hash_evidence, hash_report, ORC_ROUNDS, ORC_WINDOW_BLOCKS, RES_PROBE_INTERVAL};
+use oracle_core::{ORC_ROUNDS, ORC_WINDOW_BLOCKS, RES_PROBE_INTERVAL};
+// Benchmark fixtures commit under the runtime's own hash, exactly as the
+// measured extrinsics do (07 §9).
+use crate::{evidence_hash as hash_evidence, report_hash as hash_report};
 
 const COMPONENT: MetricId = 1;
 const EPOCH: EpochId = 1;
