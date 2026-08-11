@@ -1283,5 +1283,26 @@ pub mod pallet {
         /// owning a clock, so only the runtime can move it. TR7 implements this
         /// against `pallet-epoch`.
         fn advance_epoch();
+
+        /// Make `market` a **realized terminal book** holding a position for
+        /// `who`, so `settle_market_score`'s fixture measures the arm that
+        /// folds rather than the arm that expires. Return `false` if this
+        /// runtime cannot (a mock whose `SettledMarkets` is a stub).
+        ///
+        /// **The two arms cost different amounts, and only one of them is the
+        /// function's job.** The timeout arm reads whatever the settlement
+        /// source needs to say "not terminal" and then drops the entry; the
+        /// realized arm reads the book, its vault and the account's two scalar
+        /// legs, then runs rules 3 and 4. TR5's fixture took the timeout arm
+        /// because `T::SettledMarkets` was `()` and no other arm existed — a
+        /// correct choice then and an under-measurement the moment TR7 bound a
+        /// real adapter, which is precisely the "fixture measures a no-op path
+        /// while claiming the paying one" shape this plan has hit before. The
+        /// return value is what stops it recurring silently: the fixture
+        /// asserts the fold really happened whenever a runtime claims it
+        /// primed one.
+        fn prime_settled_market(_who: &AccountId, _market: futarchy_primitives::MarketId) -> bool {
+            false
+        }
     }
 }

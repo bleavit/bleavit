@@ -390,6 +390,11 @@ fn all_futarchy_call_weights() -> alloc::vec::Vec<(&'static str, Weight)> {
         }),
     );
     all.extend(
+        pallet_call_weights!(pallet_trading_rewards as pallet_trading_rewards::WeightInfo {
+            enroll, top_up_bond, withdraw_bond, claim_rewards, settle_market_score, settle_epoch,
+        }),
+    );
+    all.extend(
         pallet_call_weights!(pallet_question_service as pallet_question_service::WeightInfo {
             register(futarchy_primitives::bounds::MAX_SERVICE_ATTESTORS),
             bond_attestor,
@@ -492,6 +497,7 @@ const FUTARCHY_DISPATCHING_MODULES: &[(&str, &str)] = &[
     ("Attestor", "pallet_attestor"),
     ("ClientRegistry", "pallet_client_registry"),
     ("QuestionService", "pallet_question_service"),
+    ("TradingRewards", "pallet_trading_rewards"),
     ("Epoch", "pallet_epoch"),
     ("ExecutionGuard", "pallet_execution_guard"),
 ];

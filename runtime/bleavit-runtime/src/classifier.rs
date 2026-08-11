@@ -878,6 +878,34 @@ fn project_inner(call: &RuntimeCall, budget: &mut ProjectionBudget) -> FilterCal
             pallet_execution_guard::Call::ratify { .. } => leaf(CallDomain::ConstitutionalValues),
             pallet_execution_guard::Call::__Ignore(_, _) => denied(),
         },
+        // 06 §3 authority matrix, 08 §2.6: the whole trading-accuracy program
+        // is Signed and permissionless, and no call in it is privileged.
+        //
+        // The four participant calls act on the caller's own record
+        // (`ensure_signed`, then `Participants::get(&who)`), so nobody can
+        // steer another account's bond. The two settlement cranks name a
+        // target rather than the caller and are Public for the same reason
+        // `market.reap` and `treasury.reconcile_insurance` are: they act only
+        // on values already recorded, every caller reaches the same result,
+        // and no caller can choose it. The keeper cranks them (01 §4.2).
+        //
+        // Nothing here needs a `derive_resource_inner` arm: that function
+        // screens *proposal payloads* (05 §1.4 T4), and a Signed extrinsic is
+        // never one — the same reason `market.buy` has no arm either. Nothing
+        // needs a `RuntimeCapabilities::leaf_enabled` row either, because that
+        // function's generic fallthrough admits `CallDomain::Public` and
+        // refuses every privileged domain. Both axes are asserted in
+        // `tests_trading_rewards.rs` rather than argued here, since TR6 lost a
+        // milestone to exactly this pair being checked on one axis only.
+        RuntimeCall::TradingRewards(call) => match call {
+            pallet_trading_rewards::Call::enroll { .. }
+            | pallet_trading_rewards::Call::top_up_bond { .. }
+            | pallet_trading_rewards::Call::withdraw_bond { .. }
+            | pallet_trading_rewards::Call::claim_rewards { .. }
+            | pallet_trading_rewards::Call::settle_market_score { .. }
+            | pallet_trading_rewards::Call::settle_epoch { .. } => leaf(CallDomain::Public),
+            pallet_trading_rewards::Call::__Ignore(_, _) => denied(),
+        },
     }
 }
 

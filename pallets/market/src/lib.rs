@@ -45,6 +45,26 @@ pub trait BenchmarkHelper<AccountId> {
     /// seed has a line to debit (08 §8 step 5; I-33). Setup only — the measured
     /// call still performs the real debit and its storage writes.
     fn prime_pol_custody(_: PolLine, _: futarchy_primitives::Balance) {}
+
+    /// Put `who` on the [`Config::TradeObserver`]'s scoring path, so `buy` and
+    /// `sell` measure what a fill really costs (08 §2.6, TR7).
+    ///
+    /// **Without it the trade benchmarks measure the wrong branch.** The
+    /// observer's first act is one read that answers "is this trader in the
+    /// program", and a non-participant stops there. So an unprimed fixture
+    /// charges 1 read where the real worst case is 3 reads and 2 writes, and
+    /// nothing downstream would catch the difference: `buy`/`sell` carry no
+    /// fitted component, so the drift gate compares them at any fidelity and
+    /// would simply agree with the cheap figure. The fixture must also fill
+    /// into a market with **no existing score row**, which is the arm that
+    /// pays the third read and the second write.
+    ///
+    /// The seam is a helper rather than a direct call because `pallet-market`
+    /// must not depend on the reward program: the observer trait lives in
+    /// `market-core` precisely so the consumer owns the coupling. A runtime
+    /// that runs no incentive program keeps the no-op default and measures
+    /// exactly what its `()` observer costs.
+    fn prime_trade_observer(_who: &AccountId) {}
 }
 
 #[cfg(feature = "runtime-benchmarks")]

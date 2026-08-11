@@ -84,33 +84,56 @@ mod benches {
         );
     }
 
-    /// The **timeout** arm, because `T::SettledMarkets` is `()` until TR7 binds
-    /// the market adapter and a `()` source reports nothing settled. Both arms
-    /// touch the same three reads and three writes; what TR7 adds is the
-    /// adapter's own reads, which must be re-measured with it.
+    /// The **realized** arm wherever a runtime can build one, because it is the
+    /// heavier of the two: it reads the settlement source's whole answer (the
+    /// book, its vault and the account's two scalar legs) and then runs 08
+    /// §2.6's rules 3 and 4, where the timeout arm reads only enough to learn
+    /// that nothing is terminal and drops the entry at zero.
+    ///
+    /// A mock whose `SettledMarkets` reports nothing cannot build that state,
+    /// so it keeps the timeout arm — and says so, through
+    /// [`BenchmarkHelper::prime_settled_market`]'s return value rather than by
+    /// leaving both cases behind one assertion that cannot tell them apart.
     #[benchmark]
     fn settle_market_score() {
         let who = participant::<T>();
         assert!(Pallet::<T>::enroll(RawOrigin::Signed(who.clone()).into(), BENCHMARK_BOND).is_ok());
+        let settled = T::BenchmarkHelper::prime_settled_market(&who, BENCHMARK_MARKET);
         Scores::<T>::insert(
             &who,
             BENCHMARK_MARKET,
             trading_rewards_core::MarketScore {
                 spent: BENCHMARK_BOND,
                 mirror_principal: BENCHMARK_BOND,
+                // Non-zero on both legs, so rule 3's `min(position,
+                // book_acquired)` and its multiplication are real work rather
+                // than a clamp to zero the optimizer could skip.
+                book_acquired: [BENCHMARK_BOND, BENCHMARK_BOND],
                 ..Default::default()
             },
         );
         ScoreCount::<T>::insert(&who, 1);
-        frame_system::Pallet::<T>::set_block_number(
-            futarchy_primitives::bounds::SCORE_ENTRY_LIFETIME_BLOCKS.into(),
-        );
+        if !settled {
+            frame_system::Pallet::<T>::set_block_number(
+                futarchy_primitives::bounds::SCORE_ENTRY_LIFETIME_BLOCKS.into(),
+            );
+        }
         let cranker: T::AccountId = account("cranker", 0, 0);
 
         #[extrinsic_call]
         _(RawOrigin::Signed(cranker), who.clone(), BENCHMARK_MARKET);
 
         assert!(Scores::<T>::get(&who, BENCHMARK_MARKET).is_none());
+        if settled {
+            // The discriminating assertion: only the realized arm folds the
+            // score into the epoch accumulator. Without it a runtime whose
+            // priming silently stopped working would regenerate the cheaper
+            // timeout weight and nothing would say so.
+            assert_eq!(
+                Participants::<T>::get(&who).map(|record| record.epoch.spent),
+                Some(BENCHMARK_BOND),
+            );
+        }
     }
 
     /// The **debit** arm: it is the one that moves USDC custody, so it is the

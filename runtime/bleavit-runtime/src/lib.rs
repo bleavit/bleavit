@@ -103,6 +103,7 @@ mod benches {
                 // loudly instead of silently shipping unmeasured ones.
                 [pallet_epoch, Epoch]
                 [pallet_execution_guard, ExecutionGuard]
+                [pallet_trading_rewards, TradingRewards]
             );
         };
     }
@@ -150,6 +151,8 @@ mod tests_s5_behavior;
 mod tests_storage_keys;
 #[cfg(test)]
 mod tests_telemetry;
+#[cfg(test)]
+mod tests_trading_rewards;
 #[cfg(all(test, feature = "bootstrap"))]
 mod tests_treasury_health;
 #[cfg(test)]
@@ -343,6 +346,8 @@ construct_runtime!(
         ClientRegistry: pallet_client_registry = 65,
         QuestionService: pallet_question_service = 66,
         ServiceLedger: pallet_conditional_ledger::<Instance1> = 67,
+        // 08 §2.6's trading-accuracy reward program (TR7).
+        TradingRewards: pallet_trading_rewards = 68,
     }
 );
 

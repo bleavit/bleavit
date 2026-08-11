@@ -348,6 +348,19 @@ mod benches {
         IncentiveRemaining::<T>::put(allocation.saturating_sub(returned));
         let primed = T::BenchmarkHelper::prime_trading_reward_headroom(returned);
         assert!(primed.is_ok());
+        // What the return leg will really move, asked of the adapter rather
+        // than assumed to be `returned` (TR7). A production adapter reads the
+        // sovereign's *reducible* balance, so it leaves one existential
+        // deposit behind — the sovereign also custodies every USDC bond and
+        // must never be reapable — and an assertion pinned to `returned`
+        // fails by exactly that, which is what it did the first time this ran
+        // against a real adapter.
+        let returnable = T::TradingRewardFunding::reward_sovereign_balance()
+            .saturating_sub(T::TradingRewardFunding::reward_accrual_reserve());
+        assert!(
+            returnable > 0,
+            "the fixture must give the return leg something to move",
+        );
         let amount = 1_000_000 * VIT;
 
         #[extrinsic_call]
@@ -355,14 +368,17 @@ mod benches {
 
         // The authorization leg ran.
         assert_eq!(TradingRewardBudgetCount::<T>::get(), 1);
-        // And so did the return leg: the pot lands at `allocation − amount`
-        // only because `returned` was credited back before the debit. A
-        // fixture that primed nothing, or an adapter with nothing to report,
-        // lands `returned` lower — which is the whole difference between
-        // measuring this call and measuring half of it.
+        // And so did the return leg. The figure below is reachable only if
+        // `returnable` was credited back *before* the debit; a fixture that
+        // primed nothing, or an adapter with nothing to report, lands a whole
+        // `returnable` lower — which is the difference between measuring this
+        // call and measuring half of it.
         assert_eq!(
             IncentiveRemaining::<T>::get(),
-            allocation.saturating_sub(amount)
+            allocation
+                .saturating_sub(returned)
+                .saturating_add(returnable)
+                .saturating_sub(amount),
         );
     }
 

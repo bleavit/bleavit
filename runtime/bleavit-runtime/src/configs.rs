@@ -9,7 +9,7 @@ use frame_support::traits::{Currency, Everything};
 use frame_support::{
     derive_impl,
     dispatch::{DispatchClass, DispatchResult},
-    parameter_types,
+    ensure, parameter_types,
     traits::{
         fungibles::{self, Inspect, Mutate},
         tokens::{Fortitude, Preservation},
@@ -48,7 +48,7 @@ use crate::{
     FutarchyTreasury, Hash, Market, MessageQueue, Migrations, Nonce, PalletInfo, ParachainSystem,
     PolkadotXcm, Preimage, QuestionService, Referenda, Runtime, RuntimeCall, RuntimeEvent,
     RuntimeFreezeReason, RuntimeHoldReason, RuntimeOrigin, RuntimeTask, Scheduler, Session,
-    SessionKeys, System, Vesting, XcmpQueue, VERSION,
+    SessionKeys, System, TradingRewards, Vesting, XcmpQueue, VERSION,
 };
 
 const NORMAL_DISPATCH_RATIO: Perbill = Perbill::from_percent(75);
@@ -237,36 +237,83 @@ parameter_types! {
     pub IncentiveAllocationAmount: Balance = crate::genesis::INCENTIVE_PROGRAMS;
 }
 
-/// `pallet-trading-rewards` is not yet in `construct_runtime!` (TR7 wires
-/// it), so its sovereign account has no runtime existence here to move VIT
-/// to or from. Refuses `fund`/`sweep_to_pot` rather than reporting a value
-/// movement that never happened (G-1) — the same discipline
-/// [`TreasuryOutflowCustody`]'s unwired default already uses for the four
-/// ordinary outflow calls — and reports no balance and no reserve, which
-/// makes `fund_trading_rewards`'s folded return leg a harmless no-op and
-/// leaves its zero-amount wind-down the one shape that still succeeds. TR7
-/// replaces this with a real adapter over
-/// `pallet_trading_rewards::Pallet::<Runtime>`.
+/// The 08 §2.6 custody seam between the `incentiv` pot and the reward
+/// program's own sovereign account (TR7; replaces TR6's refusal stub).
+///
+/// Both legs are plain VIT transfers with `Preservation::Preserve`, which is
+/// the same discipline the pallet's own budget read uses: the reward sovereign
+/// also custodies every USDC bond, so neither an authorization nor a return may
+/// ever reap it.
 pub struct RuntimeTradingRewardFunding;
 impl pallet_futarchy_treasury::TradingRewardFunding<AccountId> for RuntimeTradingRewardFunding {
-    fn fund(_pot: &AccountId, _amount: Balance) -> DispatchResult {
-        Err(sp_runtime::DispatchError::Other(
-            "trading-rewards pallet not yet wired into construct_runtime! (TR7)",
-        ))
+    fn fund(pot: &AccountId, amount: Balance) -> DispatchResult {
+        let moved = <Balances as frame_support::traits::fungible::Mutate<AccountId>>::transfer(
+            pot,
+            &TradingRewards::account_id(),
+            amount,
+            Preservation::Preserve,
+        )?;
+        ensure!(
+            moved == amount,
+            sp_runtime::DispatchError::Other("trading-reward funding moved a partial amount"),
+        );
+        Ok(())
     }
 
     fn reward_sovereign_balance() -> Balance {
-        0
+        // Exactly the figure `authorized_budget_usdc` values as the budget:
+        // `Preserve`/`Polite`, so the existential deposit is never counted.
+        // Reading it any other way would let the return leg believe there is
+        // more budget outstanding than the program itself will ever spend.
+        <Balances as frame_support::traits::fungible::Inspect<AccountId>>::reducible_balance(
+            &TradingRewards::account_id(),
+            Preservation::Preserve,
+            Fortitude::Polite,
+        )
     }
 
+    /// **The units trap.** `TotalAccrued` is denominated in USDC; this figure
+    /// must be VIT, because it is subtracted from a VIT balance. Returning the
+    /// USDC number raw under-reports the reserve by the whole exchange rate and
+    /// sweeps VIT that backs an accrual somebody may claim at any time — a
+    /// claim `claim_rewards` would then be unable to pay. So it converts, with
+    /// the pallet's own `usdc_to_vit`, which is the exact function the payout
+    /// uses.
+    ///
+    /// Converting the **aggregate** rather than summing per-record conversions
+    /// is the safe direction: floor is subadditive, so
+    /// `usdc_to_vit(Σ accrued) >= Σ usdc_to_vit(accrued)` and the reserve can
+    /// only ever exceed what the claims will draw.
+    ///
+    /// Two edges, both resolved toward reserving more rather than less:
+    ///
+    /// * nothing accrued reserves nothing, whatever the rate says — otherwise
+    ///   an unseeded `fee.vit_usdc_rate` would wedge the return leg on a
+    ///   program that owes nobody anything; and
+    /// * an accrual the rate cannot value reserves **everything**, so the
+    ///   return moves nothing at all. VIT that cannot be valued against an
+    ///   outstanding promise must not leave (G-1, R-7). The pot is unharmed:
+    ///   `IncentiveRemaining` still bounds every future authorization.
     fn reward_accrual_reserve() -> Balance {
-        0
+        let accrued = pallet_trading_rewards::TotalAccrued::<Runtime>::get();
+        if accrued == 0 {
+            return 0;
+        }
+        TradingRewards::usdc_to_vit(accrued).unwrap_or(Balance::MAX)
     }
 
-    fn sweep_to_pot(_pot: &AccountId, _amount: Balance) -> DispatchResult {
-        Err(sp_runtime::DispatchError::Other(
-            "trading-rewards pallet not yet wired into construct_runtime! (TR7)",
-        ))
+    fn sweep_to_pot(pot: &AccountId, amount: Balance) -> DispatchResult {
+        let moved = <Balances as frame_support::traits::fungible::Mutate<AccountId>>::transfer(
+            &TradingRewards::account_id(),
+            pot,
+            amount,
+            Preservation::Preserve,
+        )?;
+        ensure!(
+            moved == amount,
+            sp_runtime::DispatchError::Other("trading-reward return moved a partial amount"),
+        );
+        Ok(())
     }
 }
 
@@ -5227,10 +5274,12 @@ impl pallet_market::Config for Runtime {
     type MainAccount = TreasuryMainAccount;
     type MainRevenueSink = RuntimeMainRevenueSink;
     type BaselineGrade = RuntimeBaselineGrade;
-    // 08 §2.6's trading-accuracy program is not in `construct_runtime!` yet, so
-    // the book reports its fills to the no-op observer and the trade path pays
-    // nothing for it. TR7 binds `TradingRewards` here and re-benchmarks.
-    type TradeObserver = ();
+    // 08 §2.6's trading-accuracy program (TR7). Binding this is what makes the
+    // fill accumulator's storage cost real, so `buy`/`sell` are re-benchmarked
+    // with an *enrolled* trader filling into an unscored market — the 3-read,
+    // 2-write path. A fixture that traded as a non-participant would measure
+    // the single enrollment read and under-weight every trade on the chain.
+    type TradeObserver = TradingRewards;
 }
 
 pub struct RuntimePrimaryProposalIds;
@@ -8477,6 +8526,248 @@ impl pallet_futarchy_treasury::Config for Runtime {
     type BenchmarkHelper = RuntimeBenchmarkHelper;
 }
 
+// ---------------------------------------------------------------------------
+// 08 §2.6 — the trading-accuracy reward program (TR7)
+// ---------------------------------------------------------------------------
+
+parameter_types! {
+    /// The reward program's sovereign account. It custodies two assets at
+    /// once: every participant's USDC bond, and the VIT budget
+    /// `fund_trading_rewards` authorizes out of the `incentiv` pot.
+    pub const TradingRewardsPalletId: PalletId = PalletId(*b"bl/trwrd");
+}
+
+/// Live `rwd.rate` (13 §1, Perbill parts per billion). `None` when the row is
+/// unreadable, which the pallet reads as a zero cap — the program off, which
+/// 13 §1 calls the safe direction.
+pub struct TradingRewardRate;
+impl Get<Option<u32>> for TradingRewardRate {
+    fn get() -> Option<u32> {
+        let key = pallet_constitution::key16(b"rwd.rate");
+        match live_param(key).or_else(|| default_param(key)) {
+            Some(pallet_constitution::ParamValue::Perbill(value)) => Some(value),
+            _ => None,
+        }
+    }
+}
+
+/// Live `fee.vit_usdc_rate` as its stored `FixedU64` integer, read exactly as
+/// [`LiveFeeConversion`] reads it — including the `> 0` guard, so a zero rate
+/// is unreadable rather than a division by zero. The row is unseeded at
+/// genesis; until it is set, a reward accrues and simply cannot be claimed
+/// yet, which is the direction that never overpays.
+pub struct TradingRewardVitUsdcRate;
+impl Get<Option<u64>> for TradingRewardVitUsdcRate {
+    fn get() -> Option<u64> {
+        pallet_constitution::Params::<Runtime>::get(crate::FEE_VIT_USDC_RATE_KEY).and_then(
+            |record| match record.value {
+                pallet_constitution::ParamValue::Fixed(value) if value.0 > 0 => Some(value.0),
+                _ => None,
+            },
+        )
+    }
+}
+
+/// The 08 §2.6 rule 3/rule 4 terminal facts for one scored book, read off
+/// `pallet-market` and the primary conditional ledger.
+///
+/// **This is an untrusted input surface with a bond behind it.** A settled
+/// market can never take `settle_market_score`'s absolute-timeout arm, so
+/// anything this adapter reports that makes the fold fail locks that bond for
+/// good. Every arm therefore resolves to a value or to `None`; nothing here can
+/// produce an arithmetic edge, and `settled_value` is a fraction of par by
+/// construction (see `trading_rewards_core::SETTLED_VALUE_SCALE`).
+pub struct RuntimeSettledMarkets;
+
+/// `VaultInfo::gate_outcomes` index, mirroring the ledger core's own `gix`.
+/// Both `pallet-market`'s and the core's copies are private, so this is a
+/// third; `a_gate_book_folds_on_its_own_outcome` pins it against the ledger's
+/// behaviour rather than against the other two copies.
+const fn trading_reward_gate_index(gate: futarchy_primitives::GateType) -> usize {
+    match gate {
+        futarchy_primitives::GateType::Survival => 0,
+        futarchy_primitives::GateType::Security => 1,
+    }
+}
+
+impl RuntimeSettledMarkets {
+    /// The account's terminal holding of the two scalar legs of `position`,
+    /// and the per-unit value each redeems for.
+    ///
+    /// `settled_value` is `[s, SCORE_SCALE − s]`, which is exactly what
+    /// `redeem_scalar` pays (`a × s / 1e9` for LONG, the complement for
+    /// SHORT). `ensure_score` refuses a stored `s` above `SCORE_SCALE`, so
+    /// neither leg can exceed par and the two always sum to par.
+    fn scalar_legs(
+        who: &AccountId,
+        proposal: futarchy_primitives::ProposalId,
+        winner: futarchy_primitives::Branch,
+        score: FixedU64,
+    ) -> ([Balance; 2], [Balance; 2]) {
+        use futarchy_primitives::{PositionId, PositionKind};
+        let read = |kind: PositionKind| {
+            pallet_conditional_ledger::Positions::<Runtime>::get(
+                PositionId::Proposal {
+                    proposal,
+                    branch: winner,
+                    kind,
+                },
+                who,
+            )
+        };
+        let par = trading_rewards_core::SETTLED_VALUE_SCALE;
+        let long = Balance::from(score.0).min(par);
+        (
+            [read(PositionKind::Long), read(PositionKind::Short)],
+            [long, par.saturating_sub(long)],
+        )
+    }
+
+    /// A gate leg redeems all-or-nothing: the winning side is worth par and
+    /// the other nothing (`redeem_gate` burns one and pays `a` for it).
+    fn gate_legs(
+        who: &AccountId,
+        proposal: futarchy_primitives::ProposalId,
+        winner: futarchy_primitives::Branch,
+        gate: futarchy_primitives::GateType,
+        outcome: bool,
+    ) -> ([Balance; 2], [Balance; 2]) {
+        use futarchy_primitives::{PositionId, PositionKind};
+        let read = |kind: PositionKind| {
+            pallet_conditional_ledger::Positions::<Runtime>::get(
+                PositionId::Proposal {
+                    proposal,
+                    branch: winner,
+                    kind,
+                },
+                who,
+            )
+        };
+        let par = trading_rewards_core::SETTLED_VALUE_SCALE;
+        // 04 §6.1's gate wrapper maps LONG to YES and SHORT to NO, which is
+        // the order `market_core::gate_kind` uses and therefore the order the
+        // fill accumulator's two slots carry.
+        let legs = [
+            read(PositionKind::GateYes(gate)),
+            read(PositionKind::GateNo(gate)),
+        ];
+        let values = if outcome { [par, 0] } else { [0, par] };
+        (legs, values)
+    }
+}
+
+impl trading_rewards_core::SettledMarkets<AccountId> for RuntimeSettledMarkets {
+    fn settlement(
+        who: &AccountId,
+        market: futarchy_primitives::MarketId,
+    ) -> Option<trading_rewards_core::MarketSettlement> {
+        use futarchy_primitives::VaultState;
+        use pallet_conditional_ledger::core_ledger::BaselineState;
+        use pallet_market::core_market::BookKind;
+        use trading_rewards_core::{BranchDisposition, MarketSettlement};
+
+        let kind = pallet_market::Markets::<Runtime>::get(market)?.kind;
+        // A book that is not terminal, and a vault the archive crank already
+        // swept, both report `None`: there is nothing left to value, and the
+        // absolute timeout is the right disposition for an entry no settlement
+        // can ever reach.
+        let (disposition, position, settled_value) = match kind {
+            BookKind::Decision { proposal, branch } => {
+                match pallet_conditional_ledger::Vaults::<Runtime>::get(proposal)?.state {
+                    VaultState::ScalarSettled { winner, s } if winner == branch => {
+                        let (position, settled_value) = Self::scalar_legs(who, proposal, winner, s);
+                        (BranchDisposition::Realized, position, settled_value)
+                    }
+                    // The annulled arm discards every credit and folds
+                    // `mirror_principal − spent`, so rule 3 never runs and
+                    // reading the losing branch's positions would be two
+                    // storage reads spent on a number nothing consumes.
+                    VaultState::ScalarSettled { .. } => {
+                        (BranchDisposition::Annulled, [0, 0], [0, 0])
+                    }
+                    VaultState::Voided => (BranchDisposition::Void, [0, 0], [0, 0]),
+                    _ => return None,
+                }
+            }
+            BookKind::Gate {
+                proposal,
+                branch,
+                gate,
+            } => {
+                let vault = pallet_conditional_ledger::Vaults::<Runtime>::get(proposal)?;
+                match vault.state {
+                    VaultState::ScalarSettled { winner, .. } if winner == branch => {
+                        // A settled vault whose gate has no outcome yet is not
+                        // terminal for *this* book, so it waits rather than
+                        // folding on a value that does not exist.
+                        let outcome = vault.gate_outcomes[trading_reward_gate_index(gate)]?;
+                        let (position, settled_value) =
+                            Self::gate_legs(who, proposal, winner, gate, outcome);
+                        (BranchDisposition::Realized, position, settled_value)
+                    }
+                    VaultState::ScalarSettled { .. } => {
+                        (BranchDisposition::Annulled, [0, 0], [0, 0])
+                    }
+                    VaultState::Voided => (BranchDisposition::Void, [0, 0], [0, 0]),
+                    _ => return None,
+                }
+            }
+            // The Baseline book is unbranched (03 §5.2), so there is no
+            // annulled state it can reach: it either settles or it does not.
+            BookKind::Baseline { epoch } => {
+                match pallet_conditional_ledger::BaselineVaults::<Runtime>::get(epoch)?.state {
+                    BaselineState::Settled(s) => {
+                        use futarchy_primitives::{PositionId, ScalarSide};
+                        let read = |side: ScalarSide| {
+                            pallet_conditional_ledger::Positions::<Runtime>::get(
+                                PositionId::Baseline { epoch, side },
+                                who,
+                            )
+                        };
+                        let par = trading_rewards_core::SETTLED_VALUE_SCALE;
+                        let long = Balance::from(s.0).min(par);
+                        (
+                            BranchDisposition::Realized,
+                            [read(ScalarSide::Long), read(ScalarSide::Short)],
+                            [long, par.saturating_sub(long)],
+                        )
+                    }
+                    BaselineState::Open => return None,
+                }
+            }
+            // 08 §2.6 / TH-79 (SQ-1049): the program does not score external
+            // books, so no entry for one can exist. Reporting `None` keeps the
+            // exclusion true on both sides — were a legacy entry ever to
+            // exist, the timeout would clear it rather than this adapter
+            // paying on a value a client's own attestors set.
+            BookKind::External { .. } => return None,
+        };
+        Some(MarketSettlement {
+            disposition,
+            position,
+            settled_value,
+        })
+    }
+}
+
+impl pallet_trading_rewards::Config for Runtime {
+    type Collateral = ForeignAssets;
+    type UsdcAssetId = UsdcAssetId;
+    type Rewards = Balances;
+    type PalletId = TradingRewardsPalletId;
+    type RewardRate = TradingRewardRate;
+    type VitUsdcRate = TradingRewardVitUsdcRate;
+    // 08 §2.6: the minimum bond reuses `ledger.pos_dep` rather than adding a
+    // key, so it is the same live row the ledger prices a position entry with.
+    type PositionDeposit = LedgerPositionDeposit;
+    type CurrentEpoch = pallet_epoch::CurrentEpoch<Runtime>;
+    type InsuranceAccount = InsuranceAccount;
+    type SettledMarkets = RuntimeSettledMarkets;
+    type WeightInfo = crate::weights::pallet_trading_rewards::WeightInfo<Runtime>;
+    #[cfg(feature = "runtime-benchmarks")]
+    type BenchmarkHelper = RuntimeBenchmarkHelper;
+}
+
 pub struct RuntimeGuardianStatus;
 impl pallet_guardian::GuardianProposalStatus for RuntimeGuardianStatus {
     fn status(pid: u64) -> (pallet_guardian::ProposalStatus, bool) {
@@ -11049,6 +11340,29 @@ impl pallet_market::BenchmarkHelper<AccountId> for RuntimeBenchmarkHelper {
             }
         });
     }
+
+    /// Enrol the trade fixture's caller in 08 §2.6's program, through the real
+    /// `enroll` call rather than by writing `Participants` directly — so the
+    /// bond is really held, the roster counter really moves, and a fixture that
+    /// silently stopped enrolling would fail here instead of quietly measuring
+    /// the cheap branch.
+    fn prime_trade_observer(who: &AccountId) {
+        let bond = pallet_trading_rewards::Pallet::<Runtime>::minimum_bond()
+            .expect("13 §1 seeds ledger.pos_dep, so the minimum bond is readable");
+        <RuntimeBenchmarkHelper as pallet_trading_rewards::BenchmarkHelper<AccountId>>::prime_usdc(
+            who,
+            bond.saturating_mul(4),
+        );
+        pallet_trading_rewards::Pallet::<Runtime>::enroll(
+            frame_system::RawOrigin::Signed(who.clone()).into(),
+            bond,
+        )
+        .expect("benchmark enrolment succeeds");
+        assert!(
+            pallet_trading_rewards::Pallet::<Runtime>::scores_fills(who),
+            "the trade benchmark must measure the accumulator's scoring branch",
+        );
+    }
 }
 
 #[cfg(feature = "runtime-benchmarks")]
@@ -11401,6 +11715,131 @@ impl pallet_futarchy_treasury::BenchmarkHelper<RuntimeOrigin, AccountId>
             amount,
         )
         .map(|_| ())
+    }
+    /// TR6 left this as the no-op default because the funding adapter was a
+    /// refusal stub; TR7 makes it real, and the trait's own doc comment says
+    /// this must land in the same change. Without it `fund_trading_rewards`
+    /// measures the authorization leg alone and the regenerated weight lands
+    /// **below** the committed figure — a decrease the growth-only regression
+    /// gate is structurally blind to.
+    fn prime_trading_reward_headroom(amount: Balance) -> DispatchResult {
+        // **The pot has to be endowed too, and that is not over-priming.**
+        // `frame-omni-bencher` executes against a bare genesis, so the 08 §2.1
+        // `incentiv` allocation — 100 million VIT that production really holds
+        // from block zero — is simply not there, and the authorization leg's
+        // transfer fails. TR7's real adapter is what turned that from a
+        // no-op into a failure: under TR6's refusing stub the whole call
+        // errored anyway, and `regenerate-weights.py` preserved the
+        // hand-written figure instead of measuring. Reproducing genesis here
+        // is the fixture stating a precondition, not inflating a measurement:
+        // the measured call still performs its own real transfers.
+        <Balances as frame_support::traits::fungible::Mutate<AccountId>>::mint_into(
+            &IncentivePot::get(),
+            IncentiveAllocationAmount::get(),
+        )?;
+        <Balances as frame_support::traits::fungible::Mutate<AccountId>>::mint_into(
+            &TradingRewards::account_id(),
+            amount,
+        )
+        .map(|_| ())
+    }
+}
+#[cfg(feature = "runtime-benchmarks")]
+impl pallet_trading_rewards::BenchmarkHelper<AccountId> for RuntimeBenchmarkHelper {
+    fn prime_usdc(who: &AccountId, amount: Balance) {
+        let _ = <ForeignAssets as Mutate<AccountId>>::mint_into(usdc_location(), who, amount);
+    }
+
+    fn prime_reward_budget(vit: Balance) {
+        let _ = <Balances as frame_support::traits::fungible::Mutate<AccountId>>::mint_into(
+            &TradingRewards::account_id(),
+            vit,
+        );
+    }
+
+    /// `fee.vit_usdc_rate` is a 13 §1 `Fixed` row that genesis leaves unseeded,
+    /// so the claim benchmark cannot run without installing it first.
+    fn prime_vit_rate(rate: u64) {
+        pallet_constitution::Params::<Runtime>::mutate(crate::FEE_VIT_USDC_RATE_KEY, |record| {
+            match record {
+                Some(record) => {
+                    record.value =
+                        pallet_constitution::ParamValue::Fixed(futarchy_primitives::FixedU64(rate))
+                }
+                None => {
+                    *record = Some(pallet_constitution::ParamRecord {
+                        key: crate::FEE_VIT_USDC_RATE_KEY,
+                        value: pallet_constitution::ParamValue::Fixed(
+                            futarchy_primitives::FixedU64(rate),
+                        ),
+                        min: pallet_constitution::ParamValue::Fixed(futarchy_primitives::FixedU64(
+                            1,
+                        )),
+                        max: pallet_constitution::ParamValue::Fixed(futarchy_primitives::FixedU64(
+                            u64::MAX,
+                        )),
+                        max_delta: None,
+                        cooldown_epochs: 0,
+                        last_changed_epoch: 0,
+                        last_change_block: 0,
+                        class: pallet_constitution::ParamClass::Treasury,
+                        kernel_bounded: false,
+                    })
+                }
+            }
+        });
+    }
+
+    /// `settle_epoch` refuses an epoch that has not closed, and the program
+    /// reads the protocol clock rather than owning one, so only the runtime can
+    /// move it (TR5). Bumping `pallet-epoch`'s counter is the whole fixture:
+    /// nothing in 08 §2.6 reads anything else about the epoch.
+    fn advance_epoch() {
+        pallet_epoch::EpochOf::<Runtime>::mutate(|info| info.index = info.index.saturating_add(1));
+    }
+
+    /// Build the state `RuntimeSettledMarkets` reads on its heaviest path: a
+    /// decision book on the winning branch of a `ScalarSettled` vault, with the
+    /// account holding both scalar legs. Written directly rather than traded
+    /// into existence, because a benchmark fixture must build the state under
+    /// measurement, not measure the market pallet building it.
+    ///
+    /// The score is deliberately **sub-par and non-degenerate** (three fifths),
+    /// so rule 3's per-unit multiplication and its floor are both exercised.
+    fn prime_settled_market(who: &AccountId, market: futarchy_primitives::MarketId) -> bool {
+        use futarchy_primitives::{Branch, PositionId, PositionKind, VaultState};
+        let proposal = market;
+        pallet_market::Markets::<Runtime>::insert(
+            market,
+            pallet_market::core_market::MarketBook::open(
+                market,
+                pallet_market::core_market::BookKind::Decision {
+                    proposal,
+                    branch: Branch::Accept,
+                },
+                market_book_account(market),
+                market_fee_account(market),
+                balance_param(b"pol.b.param"),
+            ),
+        );
+        let mut vault = pallet_conditional_ledger::core_ledger::VaultInfo::open(0);
+        vault.state = VaultState::ScalarSettled {
+            winner: Branch::Accept,
+            s: FixedU64(kernel::SCORE_SCALE / 10 * 6),
+        };
+        pallet_conditional_ledger::Vaults::<Runtime>::insert(proposal, vault);
+        for kind in [PositionKind::Long, PositionKind::Short] {
+            pallet_conditional_ledger::Positions::<Runtime>::insert(
+                PositionId::Proposal {
+                    proposal,
+                    branch: Branch::Accept,
+                    kind,
+                },
+                who,
+                currency::USDC,
+            );
+        }
+        true
     }
 }
 #[cfg(feature = "runtime-benchmarks")]

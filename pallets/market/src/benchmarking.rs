@@ -198,10 +198,22 @@ mod benchmarks {
     /// below the fixture that sets the weight. `seeded_baseline` is retained so
     /// this stays a measurement — re-point and re-run whenever either wrapper
     /// changes shape.
+    ///
+    /// **The trader is primed into the observer's program, and that is not
+    /// cosmetic** (TR7). The 08 §2.6 fill accumulator's first act is one read
+    /// answering "is this trader enrolled", and a non-participant stops there.
+    /// So a fixture that trades as an outsider measures 1 read where a real
+    /// worst-case fill costs 3 reads and 2 writes, the figure changes, and the
+    /// drift gate goes green on it — `buy` carries no fitted component, so
+    /// nothing downstream re-checks it at a higher fidelity. This fixture takes
+    /// the expensive arm on both counts: enrolled, and filling into a market
+    /// with no score row yet, which is what pays the third read and the second
+    /// write.
     #[benchmark]
     fn buy() {
         let caller: T::AccountId = whitelisted_caller();
         fund::<T>(&caller, 10_000 * UNIT);
+        <T as Config>::BenchmarkHelper::prime_trade_observer(&caller);
         seeded_decision::<T>(1);
         #[extrinsic_call]
         _(
@@ -214,10 +226,25 @@ mod benchmarks {
         assert_eq!(Markets::<T>::get(1).expect("book exists").q_long, TRADE);
     }
 
+    /// **A sell cannot reach `buy`'s 3-read/2-write arm, and the reason is
+    /// structural rather than a fixture choice** (TR7). The accumulator credits
+    /// a sale only for the part covered by `book_acquired`, and `book_acquired`
+    /// lives in the score row itself — so a sale into a market with no row
+    /// credits nothing, compares unchanged, and writes nothing. Every sale that
+    /// writes is therefore a sale into a market that is *already* scored, which
+    /// is 2 reads and 1 write, and that is what the setup buy below arranges.
+    ///
+    /// The one arm this misses is a first-fill sale (3 reads, 0 writes: the
+    /// absent row makes the accumulator read the per-account counter as well).
+    /// It is not the maximum — it does no write at all, so it is cheaper in
+    /// ref_time — but it does touch one key more. The two arms are therefore
+    /// incomparable by a single measurement, and this fixture takes the one
+    /// that mutates.
     #[benchmark]
     fn sell() {
         let caller: T::AccountId = whitelisted_caller();
         fund::<T>(&caller, 10_000 * UNIT);
+        <T as Config>::BenchmarkHelper::prime_trade_observer(&caller);
         seeded_decision::<T>(1);
         Pallet::<T>::buy(
             RawOrigin::Signed(caller.clone()).into(),

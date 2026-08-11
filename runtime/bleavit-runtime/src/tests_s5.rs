@@ -281,6 +281,13 @@ inventory! {
         leaf guardian_hold => ["delay_once", "force_reject_process_hold"];
         leaf emergency_playbook => ["void_cohort", "set_intake_paused"];
     }
+    // 06 §3 / 08 §2.6 (TR7): the whole trading-accuracy program is Signed and
+    // permissionless. The four participant calls act on the caller's own
+    // record; the two settlement cranks name a target and act only on values
+    // already recorded, which is `market.reap`'s justification restated.
+    "TradingRewards" {
+        leaf public => ["enroll", "top_up_bond", "withdraw_bond", "claim_rewards", "settle_market_score", "settle_epoch"];
+    }
     "ExecutionGuard" {
         leaf values => ["ratify"];
         leaf code => ["commit_recovery_image"];

@@ -1352,6 +1352,7 @@ dependencies = [
  "pallet-session",
  "pallet-sudo",
  "pallet-timestamp",
+ "pallet-trading-rewards",
  "pallet-transaction-payment",
  "pallet-transaction-payment-rpc-runtime-api",
  "pallet-utility",
@@ -1384,6 +1385,7 @@ dependencies = [
  "staging-xcm-builder",
  "staging-xcm-executor",
  "substrate-wasm-builder",
+ "trading-rewards-core",
 ]
 
 [[package]]
