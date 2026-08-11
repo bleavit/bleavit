@@ -249,6 +249,17 @@ authority as the spending, rather than under whoever transacts first. §1.2's `r
 is **not** a precedent for a public crank here: reconciling harms nobody when it runs early, while
 sweeping destroys value that is still in flight.
 
+**The reserve is a VIT figure derived from a governed rate, so a rate amendment between the
+return and a claim can leave it short** *(stated 2026-08-10)*. The reserve converts the
+outstanding USDC accrual at the rate live when the return runs, and each `claim_rewards`
+converts at the rate live when it runs. The conversion is inversely proportional to
+`fee.vit_usdc_rate`, so a downward amendment in between leaves outstanding claims needing more
+VIT than was held back — bounded by the same 10× envelope the earning cap is sized against. The
+consequence is **liveness, not solvency**: the transfer fails inside its storage layer, the
+accrual survives intact and unspent, and no new accrual can be made against the shortfall,
+because the authorized budget re-reads the same balance at the same live rate. Governance
+resolves it by funding, exactly as it resolves a thin budget.
+
 **The bond, and the two separate jobs it does.** `enroll(bond)` holds USDC and opens a
 participant record. `top_up_bond(amount)` raises the hold. `withdraw_bond()` releases it. The
 bond is denominated in **USDC** rather than VIT, because the only externally signable VIT at
@@ -295,7 +306,13 @@ claimant-adverse rounding straightforward.
    annulled arm exists to prevent, arriving through the realized arm instead, and rule 3's own
    *"rounded down"* is the tell that no integer was ever meant: an integer product needs no
    rounding. The clamp to par is what stops an out-of-range value from crediting more than the
-   ledger can pay.
+   ledger can pay. **This rule credits gross of `ledger.redeem_fee`, and that is deliberate
+   rather than the asymmetry with rule 2 that it resembles** *(added 2026-08-10)*: no single
+   "net" exists to credit, because [03](03-conditional-ledger.md) §5.3a gives the paired
+   redemption path a different fee base from the single-leg path, and which path a claimant
+   takes is a later choice of theirs. A net figure would require the score to predict a
+   redemption that has not happened. The over-credit is bounded by one `ledger.redeem_fee` and is
+   absorbed by the margin the *rate* paragraph below already carries.
 4. The market score depends on how the branch ended, and it may be negative.
    - **Branch realized:** `received − spent`.
    - **Branch annulled:** `mirror_principal − spent`. Every `received` credit is discarded.
