@@ -81,3 +81,7 @@ app/src-tauri/target/
 # reproducible-build promise is a promise about a recipe.
 app/src-tauri/gen/
 app/native/**/build/
+
+# Subagent-driven-development scratch: ledgers, task briefs, review packages.
+# Session-local coordination state, never part of the repository record.
+.superpowers/

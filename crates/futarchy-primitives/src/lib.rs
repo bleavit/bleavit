@@ -1186,6 +1186,42 @@ pub mod bounds {
     pub const MAX_TWAP_WINDOWS_PER_MARKET: u32 = 8;
     /// 13 §4: maximum successful Phase-4 community vesting schedules.
     pub const MAX_COMMUNITY_SCHEDULES: u32 = 4_096;
+    /// 13 §4: enrolled trading-accuracy-reward participants (08 §2.6). The
+    /// sizing rule is fixed normatively in 08 §2.6 — it reuses the sibling
+    /// allocation pot's lifetime bound, because it caps a permissionless
+    /// roster against one bounded allocation pot for the same reason. It is
+    /// derived from that constant rather than restated so the two cannot drift.
+    pub const MAX_TRADING_REWARD_PARTICIPANTS: u32 = MAX_COMMUNITY_SCHEDULES;
+    /// 13 §4: the absolute lifetime of one trading-accuracy score entry
+    /// (08 §2.6). The escape that bound exists for is an **absolute
+    /// block-height timeout measured from the score entry's creation**,
+    /// independent of the market's state, and its sizing rule is that it "sits
+    /// above the longest lawful settlement horizon".
+    ///
+    /// Derived rather than picked. It reuses [`kernel::MAX_ARCHIVE_DELAY_BLOCKS`]
+    /// — the one-year ceiling this protocol already applies to the longest
+    /// retention any artifact may lawfully have. A book reaches its terminal
+    /// state inside its own cohort's measurement and settlement stages, at most
+    /// `MAX_NON_TERMINAL_COHORTS + 1` epochs, which at the epoch **ceiling**
+    /// [`kernel::PRODUCTION_MAX_EPOCH_LENGTH_BLOCKS`] is 5 × 604,800 =
+    /// 3,024,000 blocks. `trading-rewards-core` asserts that inequality, so a
+    /// later change to either constant cannot close the margin silently.
+    ///
+    /// Anchoring to `ledger.archive` instead would be circular: 03 §5.4 admits
+    /// the archive sweep only once the vault is terminal, and a market that
+    /// never settles never becomes terminal.
+    pub const SCORE_ENTRY_LIFETIME_BLOCKS: u32 = super::kernel::MAX_ARCHIVE_DELAY_BLOCKS;
+    /// The longest a book can lawfully take to reach its terminal state: its
+    /// own cohort's measurement and settlement stages, at the epoch ceiling.
+    /// Exists so [`SCORE_ENTRY_LIFETIME_BLOCKS`] can be checked against it
+    /// rather than argued against it.
+    pub const MAX_SETTLEMENT_HORIZON_BLOCKS: u32 =
+        (MAX_NON_TERMINAL_COHORTS + 1) * super::kernel::PRODUCTION_MAX_EPOCH_LENGTH_BLOCKS;
+    /// 08 §2.6: the timeout "sits above the longest lawful settlement horizon,
+    /// so no settling market can reach it". Checked at compile time, so a later
+    /// change to either constant closes the margin loudly rather than silently
+    /// turning the escape into an exit from a live debit.
+    const _: () = assert!(SCORE_ENTRY_LIFETIME_BLOCKS > MAX_SETTLEMENT_HORIZON_BLOCKS);
     /// 13 §4: `pallet-migrations` may consume at most half the block service
     /// weight while a multi-block migration is active.
     pub const MIGRATION_SERVICE_WEIGHT_PERCENT: u32 = 50;
@@ -1230,6 +1266,15 @@ pub mod chain_identity {
 }
 
 pub mod kernel {
+    /// Top of the `fee.vit_usdc_rate` `[0.1×, 10×]` envelope (13 §1), used to
+    /// size the trading-accuracy-rewards earning cap (08 §2.6). Both legs of
+    /// the reward arithmetic are USDC; only the payout converts to VIT at
+    /// claim time using the governed rate. The exposure sized against is not
+    /// a market reprice but the governed rate **diverging from the market
+    /// price**, and only in the direction that understates VIT — bounded by
+    /// the envelope's width, so sizing the cap against its top keeps reward
+    /// value at or below debit value.
+    pub const RATE_HEADROOM: u128 = 10;
     /// First identifier reserved for hosted-question-service questions, vaults,
     /// and books (03 §1a; 13 §3.5; 16 §7.1). Primary-domain allocators
     /// stay strictly below this boundary; service allocators start at it.

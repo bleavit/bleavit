@@ -1352,6 +1352,7 @@ dependencies = [
  "pallet-session",
  "pallet-sudo",
  "pallet-timestamp",
+ "pallet-trading-rewards",
  "pallet-transaction-payment",
  "pallet-transaction-payment-rpc-runtime-api",
  "pallet-utility",
@@ -1384,6 +1385,7 @@ dependencies = [
  "staging-xcm-builder",
  "staging-xcm-executor",
  "substrate-wasm-builder",
+ "trading-rewards-core",
 ]
 
 [[package]]
@@ -8445,6 +8447,25 @@ dependencies = [
  "sp-runtime",
  "sp-storage",
  "sp-timestamp",
+]
+
+[[package]]
+name = "pallet-trading-rewards"
+version = "0.1.0"
+dependencies = [
+ "frame-benchmarking",
+ "frame-support",
+ "frame-system",
+ "futarchy-primitives",
+ "market-core",
+ "pallet-assets",
+ "pallet-balances",
+ "parity-scale-codec",
+ "scale-info",
+ "sp-core",
+ "sp-io",
+ "sp-runtime",
+ "trading-rewards-core",
 ]
 
 [[package]]
@@ -15608,6 +15629,19 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tracing-log",
+]
+
+[[package]]
+name = "trading-rewards-core"
+version = "0.1.0"
+dependencies = [
+ "constitution-core",
+ "futarchy-primitives",
+ "parity-scale-codec",
+ "proptest",
+ "scale-info",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

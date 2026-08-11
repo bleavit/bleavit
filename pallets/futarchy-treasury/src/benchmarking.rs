@@ -327,6 +327,61 @@ mod benches {
         _(T::BenchmarkHelper::community_origin(), beneficiary, amount);
     }
 
+    /// 08 §2.6: the bounded PARAM-origin trading-reward funding call, whose
+    /// worst case runs **both** of its legs — the folded-in return of the
+    /// previous authorization's remainder and the new authorization itself.
+    /// `prime_trading_reward_headroom` is what makes the return leg real: a
+    /// fixture that only seeds `IncentiveRemaining` measures a call with
+    /// nothing to give back, so the adapter move, the extra
+    /// `IncentiveRemaining` write and the return event are charged to nobody.
+    /// The post-call assertions below fail loudly rather than let a
+    /// half-exercised fixture regenerate this weight downward in silence.
+    #[benchmark]
+    fn fund_trading_rewards() {
+        // A real retire-and-reauthorize cycle: the previous authorization has
+        // already debited the pot, and its unspent remainder is still sitting
+        // in the sovereign. Seeding the allocation at its genesis figure
+        // instead would put the credit under `credit_pot_headroom`'s cap and
+        // leave the return leg invisible in the post-state.
+        let returned = 500_000 * VIT;
+        let allocation = T::IncentiveAllocationAmount::get();
+        IncentiveRemaining::<T>::put(allocation.saturating_sub(returned));
+        let primed = T::BenchmarkHelper::prime_trading_reward_headroom(returned);
+        assert!(primed.is_ok());
+        // What the return leg will really move, asked of the adapter rather
+        // than assumed to be `returned` (TR7). A production adapter reads the
+        // sovereign's *reducible* balance, so it leaves one existential
+        // deposit behind — the sovereign also custodies every USDC bond and
+        // must never be reapable — and an assertion pinned to `returned`
+        // fails by exactly that, which is what it did the first time this ran
+        // against a real adapter.
+        let returnable = T::TradingRewardFunding::reward_sovereign_balance()
+            .saturating_sub(T::TradingRewardFunding::reward_accrual_reserve());
+        assert!(
+            returnable > 0,
+            "the fixture must give the return leg something to move",
+        );
+        let amount = 1_000_000 * VIT;
+
+        #[extrinsic_call]
+        _(T::BenchmarkHelper::trading_reward_origin(), amount);
+
+        // The authorization leg ran.
+        assert_eq!(TradingRewardBudgetCount::<T>::get(), 1);
+        // And so did the return leg. The figure below is reachable only if
+        // `returnable` was credited back *before* the debit; a fixture that
+        // primed nothing, or an adapter with nothing to report, lands a whole
+        // `returnable` lower — which is the difference between measuring this
+        // call and measuring half of it.
+        assert_eq!(
+            IncentiveRemaining::<T>::get(),
+            allocation
+                .saturating_sub(returned)
+                .saturating_add(returnable)
+                .saturating_sub(amount),
+        );
+    }
+
     #[benchmark]
     fn note_collator_block() {
         // Worst case: the accumulator holds a full prior-epoch share table,

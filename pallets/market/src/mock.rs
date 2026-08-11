@@ -17,7 +17,7 @@ use futarchy_primitives::{
 };
 use parity_scale_codec::{Decode, Encode};
 use sp_runtime::{traits::AccountIdConversion, BuildStorage};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
 pub type AccountId = u64;
 pub type AssetId = u32;
@@ -52,6 +52,7 @@ const SERVICE_MARKET_ACCOUNT_BASE: AccountId = 1 << 56;
 thread_local! {
     pub static BASELINE_GRADE_ALLOWED: Cell<bool> = const { Cell::new(true) };
     pub static NEXT_PRIMARY_PROPOSAL_ID: Cell<u64> = const { Cell::new(1) };
+    pub static OBSERVED_FILLS: RefCell<Vec<ObservedFill>> = const { RefCell::new(Vec::new()) };
 }
 
 frame_support::construct_runtime!(
@@ -485,6 +486,52 @@ impl pallet_market::Config for Test {
     type MainAccount = MainAccount;
     type MainRevenueSink = TestMainRevenueSink;
     type BaselineGrade = TestBaselineGrade;
+    type TradeObserver = TestTradeObserver;
+}
+
+/// One `observe_fill` report, recorded verbatim.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ObservedFill {
+    pub who: AccountId,
+    pub market: MarketId,
+    pub side: usize,
+    pub qty: Balance,
+    pub cost: Balance,
+    pub fee: Balance,
+    pub is_buy: bool,
+}
+
+/// The mock binds a **recording** observer rather than `()`. A no-op observer
+/// would make the whole 08 §2.6 report path invisible to this pallet's suite:
+/// every test would pass against a `deposit_trade_event` that reported nothing.
+pub struct TestTradeObserver;
+
+impl market_core::TradeObserver<AccountId> for TestTradeObserver {
+    fn observe_fill(
+        who: &AccountId,
+        market: MarketId,
+        side: usize,
+        qty: Balance,
+        cost: Balance,
+        fee: Balance,
+        is_buy: bool,
+    ) {
+        OBSERVED_FILLS.with(|fills| {
+            fills.borrow_mut().push(ObservedFill {
+                who: *who,
+                market,
+                side,
+                qty,
+                cost,
+                fee,
+                is_buy,
+            })
+        });
+    }
+}
+
+pub fn observed_fills() -> Vec<ObservedFill> {
+    OBSERVED_FILLS.with(|fills| fills.borrow().clone())
 }
 
 #[cfg(feature = "runtime-benchmarks")]
@@ -519,6 +566,7 @@ pub fn new_test_ext() -> sp_io::TestExternalities {
     PolLineBaseline::set(1_000_000 * UNIT);
     MainCreditedTotal::set(0);
     MainRevenueRefuses::set(false);
+    OBSERVED_FILLS.with(|fills| fills.borrow_mut().clear());
     let mut storage = frame_system::GenesisConfig::<Test>::default()
         .build_storage()
         .expect("mock system genesis builds");

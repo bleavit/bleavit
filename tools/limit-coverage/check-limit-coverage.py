@@ -87,6 +87,134 @@ class TestFunction:
     ignored: bool
 
 
+_IDENTIFIER_CHARACTER = re.compile(r"[A-Za-z0-9_]")
+# `r"…"`, `r#"…"#`, `br##"…"##`: the hash count is what terminates it.
+_RAW_STRING_PREFIX = re.compile(r'(?:b?r)(#*)"')
+# A char literal holds one character or one escape. A lifetime (`'a`, `'static`)
+# does not match, so it is left alone as the code it is.
+_CHARACTER_LITERAL = re.compile(r"'(?:\\.[^']*|[^'\\])'", re.S)
+
+
+_DOC_ATTRIBUTE_HEAD = re.compile(r"#!?\[\s*doc\s*=\s*$")
+_SYMBOL_TOKEN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def token_is_a_symbol(token: str) -> bool:
+    """Whether a binding token can only appear in the body as Rust code.
+
+    An `error = "Pallet::Variant"` binding reduces to a bare identifier, and an
+    identifier is a *symbol*: the only way a test can exercise that error is to
+    name it in an `assert_noop!`, a match arm or a comparison. A `behavior`
+    binding is frequently the opposite — `"BoundedVec exceeds its limit"` is the
+    decoder's own message, and the only way to assert it is to compare against
+    the text. The two therefore get searched in two different renderings of the
+    body, and the token's own shape is what selects which.
+    """
+    return bool(_SYMBOL_TOKEN.fullmatch(token))
+
+
+def strip_rust_noncode(body: str, *, keep_literals: bool = False) -> str:
+    """Render a function body with everything that is not an assertion removed.
+
+    The binding is a claim that the marked test *exercises* its key's error or
+    behavior, and a substring search over the raw function body cannot tell an
+    assertion from a sentence describing one. A test whose `assert_noop!` was
+    deleted therefore stayed bound as long as a nearby comment still named the
+    error, which is the failure mode this whole checker exists to prevent —
+    reported as silence rather than as absence.
+
+    Two renderings, because two kinds of token are legitimate:
+
+    * `keep_literals=False` — comments, string literals, raw strings and char
+      literals all go. Used for a **symbol** token, which must be named as code.
+      The earlier rule kept literals on the argument that "a token inside a
+      literal is real code and may legitimately carry the binding". It is real
+      code, but it is not an assertion, and every channel a comment offered a
+      literal offered too: `assert_ok!(call)` beside `assert!(ok, "the call is
+      refused with TooManyParticipants")` kept the key bound while deleting the
+      refusal, and `assert_eq!("Error", "Error")` is what this checker's own
+      test fixture used to be.
+    * `keep_literals=True` — comments go, and so do `#[doc = "…"]` attribute
+      strings, which are a comment wearing a literal's clothes and which the
+      comment stripper never saw. Everything else stays. Used for a free-text
+      token, where the literal *is* the assertion.
+
+    The residual, stated rather than papered over: for a free-text token an
+    assertion *message* still satisfies the binding, because separating a
+    message argument from a compared value needs a parser rather than a scanner.
+    A symbol token — which is every `error =` binding — no longer has that hole.
+
+    Any construct this scanner mis-reads can only delete more than it should,
+    which fails the gate loudly instead of passing it silently.
+    """
+    kept: list[str] = []
+    index = 0
+    length = len(body)
+    while index < length:
+        character = body[index]
+        if body.startswith("//", index):
+            end = body.find("\n", index)
+            index = length if end == -1 else end
+            continue
+        if body.startswith("/*", index):
+            # Rust block comments nest, so a depth counter is required; a
+            # non-greedy `/\*.*?\*/` closes on the first inner terminator and
+            # leaves the tail of the comment behind as apparent code.
+            depth = 1
+            index += 2
+            while index < length and depth:
+                if body.startswith("/*", index):
+                    depth += 1
+                    index += 2
+                elif body.startswith("*/", index):
+                    depth -= 1
+                    index += 2
+                else:
+                    if body[index] == "\n":
+                        kept.append("\n")
+                    index += 1
+            continue
+        raw = None
+        if character in "rb" and (
+            index == 0 or not _IDENTIFIER_CHARACTER.match(body[index - 1])
+        ):
+            raw = _RAW_STRING_PREFIX.match(body, index)
+        if raw is not None or character == '"':
+            documentation = bool(_DOC_ATTRIBUTE_HEAD.search(body, 0, index))
+            if raw is not None:
+                terminator = '"' + raw.group(1)
+                end = body.find(terminator, raw.end())
+                if end == -1:
+                    text, index = body[raw.end() :], length
+                else:
+                    text, index = body[raw.end() : end], end + len(terminator)
+            else:
+                start = index + 1
+                index = start
+                while index < length:
+                    if body[index] == "\\":
+                        index += 2
+                        continue
+                    if body[index] == '"':
+                        break
+                    index += 1
+                text = body[start:index]
+                index = min(index + 1, length)
+            if keep_literals and not documentation:
+                kept.append(text)
+            continue
+        if character == "'":
+            literal = _CHARACTER_LITERAL.match(body, index)
+            if literal:
+                # Dropped only so that a `'"'` cannot open a string that then
+                # swallows the code after it. No token fits in one character.
+                index = literal.end()
+                continue
+        kept.append(character)
+        index += 1
+    return "".join(kept)
+
+
 @dataclass(frozen=True)
 class MarkerReference:
     key: str
@@ -590,8 +718,19 @@ def scan_markers(root: Path) -> tuple[list[MarkerReference], list[str]]:
             lines = text.splitlines()
             tests = find_test_functions(lines)
             relative = path.relative_to(root)
+            # `tests_<topic>.rs` is a test file by every convention this
+            # repository uses — the runtime alone carries a dozen of them, each
+            # declared `#[cfg(test)] mod tests_…;` from `lib.rs` rather than
+            # carrying the attribute itself. Before TR7 the rule below matched
+            # only the bare name `tests.rs`, so a marker in any of them failed
+            # as "not attached to a test function" while the function it sat on
+            # was plainly a test. The consequence was quiet: a marker that
+            # cannot be placed gets left out, and the key's binding then rests
+            # on prose in `registry.toml` instead of on a test the checker can
+            # see.
             test_context = (
                 path.name == "tests.rs"
+                or path.name.startswith("tests_")
                 or "tests" in path.parts
                 or "#[cfg(test)]" in text
             )
@@ -758,10 +897,21 @@ def validate(root: Path) -> tuple[list[str], list[InventoryEntry], dict[str, dic
             binding = entry.get("error") or entry.get("behavior")
             if isinstance(binding, str):
                 token = binding.rsplit("::", 1)[-1]
-                if token not in marker.function_body:
+                symbol = token_is_a_symbol(token)
+                body = strip_rust_noncode(
+                    marker.function_body, keep_literals=not symbol
+                )
+                if token not in body:
+                    where = (
+                        "code (a symbol-shaped token must be named by an assertion, "
+                        "not by a comment or a string)"
+                        if symbol
+                        else "code or literals (comments and #[doc] strings do not count)"
+                    )
                     failures.append(
                         f"{marker.path}:{marker.line}: marked test {marker.function!r} for "
-                        f"{marker.key!r} does not contain binding token {token!r}"
+                        f"{marker.key!r} does not contain binding token {token!r} in its "
+                        f"{where}"
                     )
 
     for key, entry in sorted(manifest.items()):

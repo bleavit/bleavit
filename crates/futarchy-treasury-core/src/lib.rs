@@ -1615,6 +1615,29 @@ pub fn stream_claimable_at(stream: &Stream, now: BlockNumber) -> Result<Balance,
         .ok_or(Error::Overflow)
 }
 
+/// Credit an unspent budget remainder back into a bounded genesis-pot
+/// allocation (08 §2.6: *"The return of unspent budget carries the same
+/// authority as the authorization"*). Pairs with the ordinary decrement every
+/// bounded PARAM leaf already does inline (`create_community_schedule`,
+/// `fund_trading_rewards`) — this is the return direction neither of those
+/// calls needed before the trading-reward program, and in
+/// `fund_trading_rewards` it runs first, before that same call's own debit.
+///
+/// Infallible and saturating on both sides: crediting money back must never
+/// be the reason the funding call fails (G-1), and the result never exceeds
+/// `cap` — the pot's own genesis allocation. That ceiling is defensive
+/// rather than a path reachable in ordinary operation: every VIT a return
+/// moves is VIT this same pot sent out through a bounded authorization, so
+/// `remaining + amount` cannot exceed `cap` unless an unrelated direct
+/// donation to the paying sovereign inflated the returned amount past what
+/// any authorization ever moved. Capping rather than letting the stored
+/// allocation overstate its own genesis charter is the R-7 direction: the
+/// alternative would let a donation manufacture spendable budget no
+/// governance decision ever authorized.
+pub fn credit_pot_headroom(remaining: Balance, amount: Balance, cap: Balance) -> Balance {
+    remaining.saturating_add(amount).min(cap)
+}
+
 fn sum(v: &[Balance]) -> Balance {
     v.iter().copied().fold(0, Balance::saturating_add)
 }
@@ -2513,5 +2536,34 @@ mod tests {
             cancelled: false,
         });
         assert_eq!(t.try_state().unwrap_err(), Error::Overflow);
+    }
+
+    // ---- credit_pot_headroom (TR6, 08 §2.6) --------------------------------
+
+    #[test]
+    fn credit_pot_headroom_adds_the_swept_amount() {
+        assert_eq!(credit_pot_headroom(10, 5, 100), 15);
+    }
+
+    #[test]
+    fn credit_pot_headroom_is_a_no_op_at_zero() {
+        assert_eq!(credit_pot_headroom(42, 0, 100), 42);
+    }
+
+    #[test]
+    fn credit_pot_headroom_never_exceeds_the_genesis_cap() {
+        // A direct donation to the reward sovereign, swept back as if it were
+        // headroom, must not manufacture reauthorizable budget past what the
+        // pot was ever genesis-funded with.
+        assert_eq!(credit_pot_headroom(95, 10, 100), 100);
+        assert_eq!(credit_pot_headroom(100, 1, 100), 100);
+    }
+
+    #[test]
+    fn credit_pot_headroom_saturates_rather_than_overflowing() {
+        assert_eq!(
+            credit_pot_headroom(Balance::MAX - 1, 10, Balance::MAX),
+            Balance::MAX
+        );
     }
 }

@@ -383,11 +383,11 @@ impl<T: frame_system::Config> pallet_xcm::WeightInfo for WeightInfo<T> {
 	/// Proof: `ForeignAssets::Account` (`max_values`: None, `max_size`: Some(732), added: 3207, mode: `MaxEncodedLen`)
 	fn claim_assets() -> Weight {
 		// Proof Size summary in bytes:
-		//  Measured:  `2037`
-		//  Estimated: `5502`
-		// Minimum execution time: 59_930_000 picoseconds.
-		Weight::from_parts(66_100_000, 0)
-			.saturating_add(Weight::from_parts(0, 5502))
+		//  Measured:  `2075`
+		//  Estimated: `5540`
+		// Minimum execution time: 62_940_000 picoseconds.
+		Weight::from_parts(67_560_000, 0)
+			.saturating_add(Weight::from_parts(0, 5540))
 			.saturating_add(T::DbWeight::get().reads(6))
 			.saturating_add(T::DbWeight::get().writes(4))
 	}

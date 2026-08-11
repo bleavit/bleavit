@@ -294,6 +294,25 @@ export const PARAMS: readonly ParamRow[] = Object.freeze([
     owner: 'owner 04',
     blurb: 'LMSR trade fee, charged on the cost of every trade and always rounded up.',
   }),
+  row({
+    // The ceiling is the largest clean value strictly inside the wash
+    // break-even `2 × mkt.fee / 0.99`, which is 60.6 bps at the `mkt.fee`
+    // default. The max Δ is absolute rather than a factor because the floor is
+    // 0, and a factor rule can never raise a rate that reached its floor.
+    key: 'rwd.rate',
+    kind: 'perbill',
+    unit: 'bps',
+    value: 25,
+    raw: 2_500_000,
+    min: 0,
+    max: 60,
+    maxDelta: '25 bps',
+    cooldown: 1,
+    cls: 'Param',
+    owner: 'owner 08',
+    blurb:
+      'Share of a trader’s realized net profit paid as an accuracy reward, computed in USDC and converted to VIT once at claim.',
+  }),
 
   // --- Decision window and hurdle -----------------------------------------
   row({

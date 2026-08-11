@@ -252,7 +252,11 @@ inventory! {
     "FutarchyTreasury" {
         leaf treasury => ["fund_budget_line", "spend", "open_stream", "cancel_stream", "issue_vit", "recover_foreign", "set_coretime_authority", "sweep_insurance"];
         leaf public => ["claim_stream", "execute_coretime_renewal", "note_coretime_quote", "prune_coretime_quote", "reconcile_insurance"];
-        leaf param => ["create_community_schedule"];
+        // 06 §3.2 / 08 §2.6: the two bounded genesis-pot PARAM leaves. The
+        // trading-reward budget return is folded into `fund_trading_rewards`
+        // and is deliberately not a call of its own — a public crank would be
+        // a one-extrinsic denial of the program's payout for an epoch.
+        leaf param => ["create_community_schedule", "fund_trading_rewards"];
     }
     "Guardian" {
         leaf values => ["set_members", "ratify_action", "renew_playbook", "uphold_veto", "recall", "set_playbook_registered"];
@@ -276,6 +280,13 @@ inventory! {
         leaf values => ["set_next_epoch_length"];
         leaf guardian_hold => ["delay_once", "force_reject_process_hold"];
         leaf emergency_playbook => ["void_cohort", "set_intake_paused"];
+    }
+    // 06 §3 / 08 §2.6 (TR7): the whole trading-accuracy program is Signed and
+    // permissionless. The four participant calls act on the caller's own
+    // record; the two settlement cranks name a target and act only on values
+    // already recorded, which is `market.reap`'s justification restated.
+    "TradingRewards" {
+        leaf public => ["enroll", "top_up_bond", "withdraw_bond", "claim_rewards", "settle_market_score", "settle_epoch"];
     }
     "ExecutionGuard" {
         leaf values => ["ratify"];

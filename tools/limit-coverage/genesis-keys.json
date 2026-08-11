@@ -82,6 +82,7 @@
   "res.probe_int",
   "res.probe_to",
   "res.recover_thr",
+  "rwd.rate",
   "sec.flow_cap",
   "sec.prize.code",
   "sec.prize.meta",

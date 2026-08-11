@@ -1287,7 +1287,12 @@ fn genesis_registry_matches_13_1_row_encodings() {
         // arms the hosted service by design rather than by accident. The last
         // two `[VERIFY]` rows were ADOPTED by the user on 2026-08-04:
         // `svc.client_bond` at 100,000 VIT (+1) and `svc.price_cap` at 4x (+1).
-        assert_eq!(Params::<Test>::count(), 113);
+        //
+        // +1 on 2026-08-10 for `rwd.rate`, the 08 §2.6 trading accuracy reward
+        // rate, adopted at 0.25 % and seeded so enrollment works from the start.
+        // It is the only row that program adds: the minimum bond reuses
+        // `ledger.pos_dep` and the per-epoch budget is a call argument.
+        assert_eq!(Params::<Test>::count(), 114);
         // Pin the adopted rate AND its unit, because 13 §1 states this row in
         // bps while the stored kind is Perbill: 1,000 bps = 10 % = 1e8 parts.
         // A 100,000× unit slip here would be silent and would misprice every
@@ -2503,6 +2508,162 @@ fn raised_parts(value: ParamValue) -> u32 {
         ParamValue::Perbill(parts) => parts,
         other => panic!("expected a Perbill, got {other:?}"),
     }
+}
+
+/// TR9 — 13 §1 rows `rwd.rate` and `mkt.fee`, relation derived in 08 §2.6: the
+/// live coupling `99 × rwd.rate ≤ 200 × mkt.fee` is screened **jointly over the
+/// pair at the amendment boundary**, in both directions, and is rule 7's third
+/// such coupling.
+///
+/// It is not a refinement. The per-account earning cap does not deliver the
+/// program's anti-farm invariant — the cap scales with each account's own bond,
+/// one operator funds both legs of a wash pair, and an asymmetric pair directs
+/// the profit to the leg it chose. The rate inside the wash break-even is what
+/// makes the pair lose money on fees alone, so this screen is the defense, and
+/// an ordinary `mkt.fee` vote is what would otherwise retire it.
+///
+/// The refusal is `RewardRateAboveWashBreakeven`, not `TryStateViolation` and
+/// not `AboveMax`: the `rwd.rate` record's own bounds are satisfied at every
+/// refused value below, and the record cannot express this relation because it
+/// moves with the live `mkt.fee`.
+#[test]
+fn tr9_no_amendment_may_carry_the_reward_rate_past_the_wash_breakeven() {
+    new_test_ext().execute_with(|| {
+        let rate = key16(b"rwd.rate");
+        let market = key16(b"mkt.fee");
+        let redeem = key16(b"ledger.rdm_fee");
+        let value_of = |key| Params::<Test>::get(key).map(|record| record.value);
+        let rate_of = |key| match value_of(key) {
+            Some(ParamValue::Perbill(parts)) => parts,
+            other => panic!("13 §1: {key:?} must be a seeded Perbill row, got {other:?}"),
+        };
+
+        // (0) `mkt.fee` sits in TWO couplings and neither screen absorbs the
+        // other. At genesis `ledger.rdm_fee` equals it, so the E4 screen is what
+        // refuses a cut — proving both are wired, and forcing the legs below to
+        // clear the redemption fee before they can isolate this one.
+        set_epoch(1);
+        let seeded_rate = rate_of(rate);
+        let market_step = absolute_perbill_delta(market);
+        assert_noop!(
+            Constitution::set_param(
+                RuntimeOrigin::signed(PARAM_ACC),
+                market,
+                ParamValue::Perbill(rate_of(market).saturating_sub(market_step))
+            ),
+            Error::<Test>::RedemptionFeeAboveMarketFee
+        );
+
+        // Clear the redemption fee out of the way, one lawful max-Δ step per
+        // epoch, so every refusal below can only be this coupling.
+        let redeem_step = absolute_perbill_delta(redeem);
+        assert_ok!(Constitution::set_param(
+            RuntimeOrigin::signed(PARAM_ACC),
+            redeem,
+            ParamValue::Perbill(rate_of(redeem).saturating_sub(redeem_step))
+        ));
+        set_epoch(2);
+        assert_ok!(Constitution::set_param(
+            RuntimeOrigin::signed(PARAM_ACC),
+            redeem,
+            ParamValue::Perbill(rate_of(redeem).saturating_sub(redeem_step))
+        ));
+        set_epoch(3);
+        let lowered_fee = rate_of(market).saturating_sub(market_step);
+        assert_ok!(Constitution::set_param(
+            RuntimeOrigin::signed(PARAM_ACC),
+            market,
+            ParamValue::Perbill(lowered_fee)
+        ));
+        assert_ok!(Constitution::do_try_state());
+
+        // (1) The rate side. The largest admissible rate against the live fee is
+        // `floor(200 × fee / 99)`, restated here by the equivalent integer
+        // spelling rather than read back from the predicate under test. Both
+        // values below are inside the record's own `[0, 6_000_000]` bounds and
+        // inside its max-Δ, so only the coupling can separate them.
+        let boundary = 200u32.saturating_mul(lowered_fee) / 99;
+        set_epoch(4);
+        assert_noop!(
+            Constitution::set_param(
+                RuntimeOrigin::signed(PARAM_ACC),
+                rate,
+                ParamValue::Perbill(boundary.saturating_add(1))
+            ),
+            Error::<Test>::RewardRateAboveWashBreakeven
+        );
+        // G-1: the refusal leaves the registry byte-identical.
+        assert_eq!(value_of(rate), Some(ParamValue::Perbill(seeded_rate)));
+        assert_eq!(value_of(market), Some(ParamValue::Perbill(lowered_fee)));
+        // Equality is admissible — at exact break-even the wash nets zero.
+        assert_ok!(Constitution::set_param(
+            RuntimeOrigin::signed(PARAM_ACC),
+            rate,
+            ParamValue::Perbill(boundary)
+        ));
+
+        // (2) The fee side, which is the leg a one-sided screen would let
+        // through and the one 13 rule 7 calls out: both rows are PARAM, so a
+        // single PARAM decision can lower `mkt.fee` under the live rate. The
+        // pair now sits exactly at the boundary, so the smallest cut breaks it.
+        set_epoch(5);
+        assert_noop!(
+            Constitution::set_param(
+                RuntimeOrigin::signed(PARAM_ACC),
+                market,
+                ParamValue::Perbill(lowered_fee.saturating_sub(1))
+            ),
+            Error::<Test>::RewardRateAboveWashBreakeven
+        );
+        assert_eq!(value_of(market), Some(ParamValue::Perbill(lowered_fee)));
+        // The same refusal for a plainly lawful-for-its-own-record step — the
+        // full max-Δ, still above the row's own 5 bps hard minimum.
+        assert_noop!(
+            Constitution::set_param(
+                RuntimeOrigin::signed(PARAM_ACC),
+                market,
+                ParamValue::Perbill(lowered_fee.saturating_sub(market_step))
+            ),
+            Error::<Test>::RewardRateAboveWashBreakeven
+        );
+        assert_eq!(value_of(market), Some(ParamValue::Perbill(lowered_fee)));
+
+        // (3) Lowering `mkt.fee` is otherwise perfectly legal — the screen is
+        // over the resulting pair, not a freeze on the market fee. Lower the
+        // rate first and the identical step passes. A rate at the fee itself is
+        // trivially inside the break-even, since `99 × f ≤ 200 × f` for every f.
+        assert_ok!(Constitution::set_param(
+            RuntimeOrigin::signed(PARAM_ACC),
+            rate,
+            ParamValue::Perbill(lowered_fee)
+        ));
+        set_epoch(6);
+        assert_ok!(Constitution::set_param(
+            RuntimeOrigin::signed(PARAM_ACC),
+            market,
+            ParamValue::Perbill(lowered_fee.saturating_sub(market_step))
+        ));
+        assert_ok!(Constitution::do_try_state());
+
+        // (4) try-state is the backstop for both directions, and the only
+        // machine check an unscreened writer (a genesis seed, a migration)
+        // cannot slip past. The reward engine reads the rate and never
+        // re-derives the break-even, so nothing downstream would notice.
+        let breaking = Params::<Test>::get(rate).map(|mut record| {
+            record.value = ParamValue::Perbill(
+                200u32
+                    .saturating_mul(rate_of(market))
+                    .saturating_div(99)
+                    .saturating_add(1),
+            );
+            record
+        });
+        Params::<Test>::insert(rate, breaking.expect("seeded row"));
+        assert!(
+            Constitution::do_try_state().is_err(),
+            "13 rule 7: try-state asserts `99 × rwd.rate ≤ 200 × mkt.fee`"
+        );
+    });
 }
 
 /// A `Perbill` row's own absolute max-Δ, read from the registry rather than

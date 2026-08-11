@@ -2639,6 +2639,77 @@ pub fn fee_up(cost: Balance, fee_bps: u128) -> Result<Balance, Error> {
     let v = cost.checked_mul(fee_bps).ok_or(Error::ArithmeticOverflow)?;
     Ok(v / BPS_DENOM + u128::from(v % BPS_DENOM != 0))
 }
+
+/// LONG's index into a per-branch fill accumulator.
+pub const SCORE_SIDE_LONG: usize = 0;
+/// SHORT's index into a per-branch fill accumulator.
+pub const SCORE_SIDE_SHORT: usize = 1;
+
+/// Split one [`TradeSide`] into the `(side, is_buy)` pair a
+/// [`TradeObserver`] takes. `side` indexes a per-branch array with
+/// [`SCORE_SIDE_LONG`] first, which is the order the accumulator of
+/// [08](../../../docs/architecture/08-treasury-and-economics.md) §2.6 uses.
+///
+/// The mapping lives here, beside the trait, so exactly one place in the
+/// workspace turns a book-side into an observer side.
+pub fn observer_parts(side: TradeSide) -> (usize, bool) {
+    match side {
+        TradeSide::BuyLong => (SCORE_SIDE_LONG, true),
+        TradeSide::BuyShort => (SCORE_SIDE_SHORT, true),
+        TradeSide::SellLong => (SCORE_SIDE_LONG, false),
+        TradeSide::SellShort => (SCORE_SIDE_SHORT, false),
+    }
+}
+
+/// Loosely-coupled per-fill report from the book (08 §2.6 *Scope*: the book
+/// "reports each fill through a loosely-coupled trait, so the book never
+/// depends on the reward program").
+///
+/// **The trait belongs to the consumer.** `pallet-market` owns it, and any
+/// incentive program implements it, exactly as `OnUnbalanced` is owned by the
+/// pallet that produces the imbalance. Declaring it in the reward crate would
+/// make the book depend on an optional program.
+///
+/// **Every method is infallible on purpose.** An observer must never be able to
+/// refuse a lawful trade: 08 §2.6's failure behaviour puts an over-bound fill
+/// and an arithmetic edge at "records no score and never rejects the trade",
+/// and a `Result` here would be a route for the opposite (G-1).
+///
+/// Argument meanings, which the two sides must agree on:
+/// - `side` — [`SCORE_SIDE_LONG`] or [`SCORE_SIDE_SHORT`], the branch filled.
+/// - `qty` — the filled quantity, in position units.
+/// - `cost` — the book's own gross figure for the fill, **excluding** the fee:
+///   what the buyer pays before the fee on a buy, and the gross proceeds before
+///   the fee is withheld on a sell. It is the `Traded` event's `cost` field.
+/// - `fee` — the fee the book charged on that same fill. A buyer pays
+///   `cost + fee`; a seller receives `cost - fee`.
+/// - `is_buy` — true for `BuyLong`/`BuyShort`.
+pub trait TradeObserver<AccountId> {
+    fn observe_fill(
+        who: &AccountId,
+        market: MarketId,
+        side: usize,
+        qty: Balance,
+        cost: Balance,
+        fee: Balance,
+        is_buy: bool,
+    );
+}
+
+/// The no-op observer. A runtime that does not run an incentive program pays
+/// nothing but the call, which optimizes away.
+impl<AccountId> TradeObserver<AccountId> for () {
+    fn observe_fill(
+        _who: &AccountId,
+        _market: MarketId,
+        _side: usize,
+        _qty: Balance,
+        _cost: Balance,
+        _fee: Balance,
+        _is_buy: bool,
+    ) {
+    }
+}
 fn quantities_within_domain(q_long: Balance, q_short: Balance, b: Balance) -> bool {
     if b == 0 {
         return false;
@@ -2784,6 +2855,34 @@ mod tests {
         [n; 32]
     }
     const B: Balance = 10_000_000_000;
+
+    // The observer's side mapping is the one place a LONG fill could silently
+    // become a SHORT one. All four variants are pinned, and the two facts are
+    // asserted independently, so a mapping that got `is_buy` right and the
+    // branch wrong (or the reverse) fails here rather than in a settled score.
+    #[test]
+    fn the_observer_side_mapping_covers_all_four_trade_sides() {
+        assert_eq!(observer_parts(TradeSide::BuyLong), (SCORE_SIDE_LONG, true));
+        assert_eq!(
+            observer_parts(TradeSide::BuyShort),
+            (SCORE_SIDE_SHORT, true)
+        );
+        assert_eq!(
+            observer_parts(TradeSide::SellLong),
+            (SCORE_SIDE_LONG, false)
+        );
+        assert_eq!(
+            observer_parts(TradeSide::SellShort),
+            (SCORE_SIDE_SHORT, false)
+        );
+        // LONG and SHORT must be distinct indices into the two-slot array the
+        // score carries: a mapping that collapsed them would make every
+        // assertion above agree with itself.
+        assert_ne!(SCORE_SIDE_LONG, SCORE_SIDE_SHORT);
+        let slots = [0u8; 2];
+        assert!(slots.get(SCORE_SIDE_LONG).is_some());
+        assert!(slots.get(SCORE_SIDE_SHORT).is_some());
+    }
 
     /// Seeded decision book on `pid = 1`, Accept branch, book account `a(9)`.
     fn seeded_decision_book() -> (LedgerState<[u8; 32]>, MarketState<[u8; 32]>) {

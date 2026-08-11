@@ -1,0 +1,62 @@
+[package]
+name = "pallet-trading-rewards"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+trading-rewards-core = { path = "../../crates/trading-rewards-core", default-features = false }
+market-core = { path = "../../crates/market-core", default-features = false }
+futarchy-primitives = { path = "../../crates/futarchy-primitives", default-features = false }
+parity-scale-codec = { version = "3.7.5", default-features = false, features = ["derive", "max-encoded-len"] }
+scale-info = { version = "2.11.6", default-features = false, features = ["derive"] }
+frame-support = { workspace = true }
+frame-system = { workspace = true }
+sp-runtime = { workspace = true }
+frame-benchmarking = { workspace = true, optional = true }
+
+[dev-dependencies]
+pallet-assets = { workspace = true, features = ["std"] }
+pallet-balances = { workspace = true, features = ["std"] }
+sp-core = { workspace = true, features = ["std"] }
+sp-io = { workspace = true, features = ["std"] }
+
+[features]
+default = ["std"]
+std = [
+  "frame-benchmarking?/std",
+  "frame-support/std",
+  "frame-system/std",
+  "futarchy-primitives/std",
+  "market-core/std",
+  "pallet-assets/std",
+  "pallet-balances/std",
+  "parity-scale-codec/std",
+  "scale-info/std",
+  "sp-runtime/std",
+  "trading-rewards-core/std",
+]
+runtime-benchmarks = [
+  "dep:frame-benchmarking",
+  "frame-benchmarking/runtime-benchmarks",
+  "frame-support/runtime-benchmarks",
+  "frame-system/runtime-benchmarks",
+  "market-core/runtime-benchmarks",
+  # Without this the crate's own test target does not COMPILE under the feature,
+  # so `impl_benchmark_test_suite!` has never run. `pallet_assets`'s
+  # `TestDefaultConfig` prelude emits a `BenchmarkHelper` associated type as soon
+  # as `frame-support/runtime-benchmarks` is on, while `pallet_assets::Config`
+  # only declares one when `pallet-assets/runtime-benchmarks` is on — so the mock
+  # fails E0437/E0576 on the `derive_impl` line itself. Repo-wide condition, not
+  # specific to this pallet (SQ-1054); fixed here because this is the pallet the
+  # branch adds.
+  "pallet-assets/runtime-benchmarks",
+  "sp-runtime/runtime-benchmarks",
+  "trading-rewards-core/runtime-benchmarks",
+]
+try-runtime = [
+  "frame-support/try-runtime",
+  "frame-system/try-runtime",
+  "sp-runtime/try-runtime",
+]

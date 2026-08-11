@@ -356,12 +356,14 @@ fn all_futarchy_call_weights() -> alloc::vec::Vec<(&'static str, Weight)> {
         }),
     );
     all.extend(
-        // `create_community_schedule` was missing from this sweep until SQ-490.
+        // `create_community_schedule` was missing from this sweep until SQ-490,
+        // and `fund_trading_rewards` until the TR6 review — the derived
+        // inventory below is what reported the second one, exactly as designed.
         pallet_call_weights!(pallet_futarchy_treasury as pallet_futarchy_treasury::WeightInfo {
             spend, open_stream, claim_stream, cancel_stream, fund_budget_line, issue_vit,
             recover_foreign, execute_coretime_renewal, note_coretime_quote,
             prune_coretime_quote, set_coretime_authority, sweep_insurance,
-            reconcile_insurance, create_community_schedule,
+            reconcile_insurance, create_community_schedule, fund_trading_rewards,
         }),
     );
     all.extend(
@@ -385,6 +387,11 @@ fn all_futarchy_call_weights() -> alloc::vec::Vec<(&'static str, Weight)> {
         pallet_call_weights!(pallet_client_registry as pallet_client_registry::WeightInfo {
             admit_client, admit_local_client, remove_client,
             top_up_delivery_float, withdraw_delivery_float,
+        }),
+    );
+    all.extend(
+        pallet_call_weights!(pallet_trading_rewards as pallet_trading_rewards::WeightInfo {
+            enroll, top_up_bond, withdraw_bond, claim_rewards, settle_market_score, settle_epoch,
         }),
     );
     all.extend(
@@ -490,6 +497,7 @@ const FUTARCHY_DISPATCHING_MODULES: &[(&str, &str)] = &[
     ("Attestor", "pallet_attestor"),
     ("ClientRegistry", "pallet_client_registry"),
     ("QuestionService", "pallet_question_service"),
+    ("TradingRewards", "pallet_trading_rewards"),
     ("Epoch", "pallet_epoch"),
     ("ExecutionGuard", "pallet_execution_guard"),
 ];
@@ -787,6 +795,25 @@ fn every_futarchy_call_and_hook_fits_the_normal_class() {
 /// `claim_assets` is Public after B10's trap-recovery opening. Keep its
 /// generated proof bound in the same worst-case audit as the futarchy calls.
 ///
+/// **The pin moved 5,502 -> 5,540 on 2026-08-11, and this time the cause was
+/// NOT isolated — read the next paragraph before trusting either candidate.**
+/// `Measured` moved 2,037 -> 2,075 (+38) with reads/writes unchanged at 6/4,
+/// which is the same signature as the 2026-08-04 move below. Two changes on
+/// this branch can each produce it, because the state trie is one global trie
+/// and a leaf added anywhere can lengthen another key's path: TR1 seated
+/// `rwd.rate`, the branch's only new genesis row (`genesis-keys.json` 113 ->
+/// 114), and TR7 added `TradingRewards` at slot 68, a new top-level prefix.
+/// The tempting shortcut — attributing it to the params row because the
+/// paragraph below does — is wrong on its face: `Constitution::Params` is read
+/// here in `MaxEncodedLen` mode, so its own contribution is a declared
+/// constant. Only the two `Measured` reads (`PolkadotXcm::ShouldRecordXcm` and
+/// `AssetTraps`) can move, and both changes reach them the same way. To
+/// isolate it, rebuild the runtime twice — once with the `rwd.rate` genesis row
+/// removed, once with `TradingRewards` out of `construct_runtime!` — and
+/// re-run `regenerate-weights.py --pallet pallet_xcm`, exactly as the 2026-08-04
+/// move was isolated. One further datum for whoever does: this was the **only**
+/// stale storage dimension across all 35 pallets.
+///
 /// The pin moved 5,469 -> 5,502 on 2026-08-04 and the cause is a values
 /// adoption, not a code change: `claim_assets` reads `Constitution::Params`
 /// through the inflow-cap adapter, and seating `svc.client_bond`/`svc.price_cap`
@@ -804,7 +831,7 @@ fn xcm_claim_assets_fits_the_normal_class() {
         <crate::weights::pallet_xcm::WeightInfo<Runtime> as pallet_xcm::WeightInfo>::claim_assets();
     assert_eq!(
         claim.proof_size(),
-        5_502,
+        5_540,
         "claim_assets proof bound drifted"
     );
     assert_fits("pallet_xcm::claim_assets", claim);

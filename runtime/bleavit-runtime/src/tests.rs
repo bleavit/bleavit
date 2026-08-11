@@ -58,9 +58,9 @@ use crate::{
     Oracle, Origins, PalletInfo as RuntimePalletInfo, ParachainInfo, ParachainSystem, PolkadotXcm,
     Preimage, Proxy, QuestionService, Referenda, Runtime, RuntimeCall, RuntimeGenesisConfig,
     RuntimeOrigin, Scheduler, ServiceLedger, Session, System, Timestamp, TrackOrigins,
-    TransactionPayment, TxExtension, UncheckedExtrinsic, Utility, Vesting, Welfare, XcmpQueue,
-    FEE_VIT_USDC_RATE_KEY, MILLISECS_PER_BLOCK, SS58_PREFIX, TRANSACTION_VERSION, USDC_DECIMALS,
-    USDC_LOCATION_ENCODED, VERSION, VIT_DECIMALS,
+    TradingRewards, TransactionPayment, TxExtension, UncheckedExtrinsic, Utility, Vesting, Welfare,
+    XcmpQueue, FEE_VIT_USDC_RATE_KEY, MILLISECS_PER_BLOCK, SS58_PREFIX, TRANSACTION_VERSION,
+    USDC_DECIMALS, USDC_LOCATION_ENCODED, VERSION, VIT_DECIMALS,
 };
 
 #[cfg(feature = "bootstrap")]
@@ -1871,15 +1871,16 @@ fn composition_contains_all_wired_pallets_at_their_frozen_indices() {
     assert_pallet!(ClientRegistry, 65, "ClientRegistry");
     assert_pallet!(QuestionService, 66, "QuestionService");
     assert_pallet!(ServiceLedger, 67, "ServiceLedger");
+    assert_pallet!(TradingRewards, 68, "TradingRewards");
     #[cfg(feature = "bootstrap")]
     assert_eq!(
         <AllPalletsWithSystem as PalletsInfoAccess>::infos().len(),
-        45
+        46
     );
     #[cfg(not(feature = "bootstrap"))]
     assert_eq!(
         <AllPalletsWithSystem as PalletsInfoAccess>::infos().len(),
-        44
+        45
     );
 }
 
@@ -2630,7 +2631,7 @@ fn usdc_fee_conversion_scales_decimals_and_rounds_against_the_payer() {
 }
 
 /// Install the 13 §1 `fee.vit_usdc` rate so the USDC fee path is live.
-fn set_fee_vit_usdc_rate(rate_1e9: u64) {
+pub(crate) fn set_fee_vit_usdc_rate(rate_1e9: u64) {
     pallet_constitution::Params::<Runtime>::insert(
         FEE_VIT_USDC_RATE_KEY,
         pallet_constitution::ParamRecord {

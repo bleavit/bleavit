@@ -301,6 +301,12 @@ _row("epoch.horizon_k", ParamKind.U8, "epochs", 2, 1, 2, absolute(1), 4, Amendme
 _row("mkt.obs_interval", ParamKind.U32, "blocks", 10, 5, 50, absolute(5), 1, AmendmentClass.PARAM)
 _row("mkt.kappa", ParamKind.FIXED, "1e-9/interval", 5_000_000, 1_000_000, 20_000_000, absolute(2_000_000), 2, AmendmentClass.META)
 _row("mkt.fee", ParamKind.PERBILL, "ppb", 3_000_000, 500_000, 10_000_000, absolute(1_000_000), 1, AmendmentClass.PARAM)
+# 13 §1 / 08 §2.6.  The trading-accuracy reward rate, adopted at 0.25 % on
+# 2026-08-10.  The ceiling is the largest clean value strictly inside the wash
+# break-even `2 * mkt.fee / 0.99`, which is 60.6 bps at the `mkt.fee` default.
+# The step is absolute rather than a factor because the floor is zero, and a
+# factor rule can never raise a rate that reached its floor.
+_row("rwd.rate", ParamKind.PERBILL, "ppb", 2_500_000, 0, 6_000_000, absolute(2_500_000), 1, AmendmentClass.PARAM)
 _row("dec.window", ParamKind.U32, "blocks", 43_200, 14_400, 86_400, percent(20), 2, AmendmentClass.META)
 _row("dec.trailing", ParamKind.U32, "blocks", 14_400, 3_600, 28_800, None, 2, AmendmentClass.META)
 _row("dec.delta_max", ParamKind.FIXED, "1e-9", 50_000_000, 20_000_000, 100_000_000, None, 2, AmendmentClass.META)
@@ -550,6 +556,22 @@ COUPLINGS: tuple[Coupling, ...] = tuple(
             BindingSite.BOUNDARY_SCREENED,
             ObservedConsumerCheck.NOT_APPLICABLE,
             "13 rule 7; 08 §10.6",
+        ),
+        # Rule 7's third boundary-screened coupling (TR9, 2026-08-11).  Written
+        # cross-multiplied because the relation is `rwd.rate <= 2 * mkt.fee /
+        # 0.99` and the two integer spellings of that division do not round the
+        # same way: flooring the bound is conservative, flooring the left-hand
+        # side admits pairs the relation forbids.  Unlike the two above it does
+        # not protect a consumer from a value it cannot refuse — it carries the
+        # whole 08 §2.6 anti-farm invariant, so a pair outside it is a program
+        # whose only defense has lapsed.
+        Coupling(
+            "reward-rate-wash-breakeven",
+            ("rwd.rate", "mkt.fee"),
+            lambda s: 99 * s["rwd.rate"] <= 200 * s["mkt.fee"],
+            BindingSite.BOUNDARY_SCREENED,
+            ObservedConsumerCheck.NOT_APPLICABLE,
+            "13 rule 7; 08 §2.6",
         ),
         Coupling(
             "decision-trailing-window",

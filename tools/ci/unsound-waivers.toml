@@ -169,3 +169,112 @@ reason = "sole call site passes the mapping's own tail; set_len(file_size(..)) p
 blocked_by = "parity-db 0.4.13 -> memmap2 \"^0.5\" (the fix is 0.9.11, outside the range)"
 clears_when = "upstream parity-db adopts memmap2 >= 0.9.11 and an SDK train ships it"
 triaged = "2026-08-11"
+
+# ---------------------------------------------------------------------------
+# RUSTSEC-2026-0253 — `lru`, added 2026-08-11, one advisory across three
+# workspace/version pairs. Published AFTER the triage above and after #300
+# merged, so it turned `main` red at its own tip: this is not one branch's
+# regression, and every open PR failed on it simultaneously.
+#
+# The defect: `LruCache::pop()` is not panic-safe. If the `Drop` impl of a
+# STORED KEY panics during `pop()`, `self.detach()` never runs and the internal
+# doubly-linked list keeps dangling pointers, which a later eviction
+# dereferences. So the precondition is narrow and specific — a panicking `Drop`
+# on a key type — and it is what each entry below is argued against.
+#
+# All three are pin-forced: the fix is 0.18.2 and no requirement in any of the
+# three graphs admits it. Verified per workspace with
+# `cargo update --dry-run -p lru@<version> --precise 0.18.2`.
+#
+# NOTE the deliberate split from RUSTSEC-2026-0002 above, which is also `lru`
+# 0.12.5 in `root`. That advisory is about `iter_mut` and is `unreachable`; this
+# one is about `pop`, which the very same waiver documents as CALLED. Keying on
+# the id keeps the two arguments separate instead of letting the older, weaker
+# claim cover the newer function.
+
+[[waiver]]
+id = "RUSTSEC-2026-0253"
+package = "lru"
+version = "0.7.8"
+workspace = "root"
+exposure = "unreachable"
+# UNREACHABLE — the cache exists and is never popped. `tracing-log 0.2.0` holds
+# this graph's only `lru` 0.7.8 dependency, and its sole cache is
+# `LruCache<Key, u64, ahash::RandomState>` in `src/interest_cache.rs`. A scan of
+# every `.rs` file in the crate finds NO `.pop(` call site at all, on that cache
+# or anything else. With no call to the affected function, no key `Drop` can run
+# inside it.
+#
+# Pin-forced. Verbatim, from `cargo update --dry-run -p lru@0.7.8 --precise 0.18.2`:
+#   error: failed to select a version for the requirement `lru = "^0.7.7"`
+#   required by package `tracing-log v0.2.0`
+#   ... which satisfies dependency `tracing-log = "^0.2.0"` of package `sc-tracing v47.0.0`
+reason = "tracing-log 0.2.0 declares one LruCache and never calls pop on it — zero call sites in the crate"
+blocked_by = "tracing-log 0.2.0 -> lru \"^0.7.7\" (the fix is 0.18.2, outside the range)"
+clears_when = "upstream tracing-log adopts lru >= 0.18.2 and an SDK train ships it"
+triaged = "2026-08-11"
+
+[[waiver]]
+id = "RUSTSEC-2026-0253"
+package = "lru"
+version = "0.12.5"
+workspace = "root"
+exposure = "constrained"
+# CONSTRAINED, not unreachable — `pop` IS called, once, and the entry says so
+# rather than borrowing RUSTSEC-2026-0002's `unreachable` claim, which was about
+# `iter_mut` and explicitly recorded that `pop` is used.
+#
+# The single call site pops from the INNER cache of
+# `PeerAddresses(LruCache<PeerId, LruCache<Multiaddr, ()>>)`, so the key type
+# whose `Drop` would have to panic is **`Multiaddr`**.
+#
+# The precondition cannot be met, and this is verified rather than assumed: a
+# recursive scan for `impl Drop for` across every vendored version of
+# `multiaddr` (0.17.1, 0.18.1, 0.18.2), `libp2p-identity` (0.2.9, 0.2.12,
+# 0.2.14) and `multihash` (0.17.0, 0.19.1, 0.19.3, 0.19.5) finds **zero**. Both
+# key types are plain byte containers whose drop glue the compiler generates
+# over `Vec`/`Arc` storage, and generated glue over those types cannot panic.
+# `libp2p-identify 0.45.0` declares the dependency and holds no `LruCache` at
+# all — its `addr.pop()` at `src/behaviour.rs:356` is `Multiaddr::pop`, which
+# removes a protocol segment and is an unrelated method of the same name.
+#
+# Pin-forced. Verbatim, from `cargo update --dry-run -p lru@0.12.5 --precise 0.18.2`:
+#   error: failed to select a version for the requirement `lru = "^0.12.3"`
+#   required by package `libp2p-identify v0.45.0`
+#   ... which satisfies dependency `libp2p = "^0.54.1"` of package `sc-network v0.58.0`
+#
+# Residual risk: a libp2p that stored a key type with a user-written `Drop`
+# would move this entry to `triggerable`, which is not waivable. The version key
+# forces a fresh triage the moment libp2p-swarm moves.
+call_sites = ["libp2p-swarm 0.45.1 src/behaviour/peer_addresses.rs:81 — addrs.pop(&address), where addrs is LruCache<Multiaddr, ()>"]
+reason = "sole pop call site keys on Multiaddr, and neither multiaddr, libp2p-identity nor multihash defines any impl Drop — the panicking-key precondition is unsatisfiable"
+blocked_by = "libp2p-identify 0.45.0 -> lru \"^0.12.3\" (the fix is 0.18.2, outside the range)"
+clears_when = "upstream libp2p adopts lru >= 0.18.2, or the SDK drops the libp2p backend"
+triaged = "2026-08-11"
+
+[[waiver]]
+id = "RUSTSEC-2026-0253"
+package = "lru"
+version = "0.16.4"
+workspace = "keeper"
+exposure = "unreachable"
+# UNREACHABLE — six caches, no `LruCache::pop`. `smoldot-light 1.3.1` is this
+# workspace's only `lru` dependant and declares six `LruCache`s, five in
+# `src/json_rpc_service/background.rs` and one in
+# `src/json_rpc_service/statement.rs`, keyed on `[u8; N]` arrays and on
+# `GetKeysPagedCacheKey`. A scan of the crate finds exactly two `.pop(` lines —
+# `src/network_service.rs:3641` and `src/json_rpc_service/background.rs:2833` —
+# and BOTH are `addr.pop()` on a `Multiaddr`, the protocol-segment method, not a
+# cache. No `LruCache::pop` call site exists.
+#
+# Even if one appeared, every key here is a `[u8; N]` array or a plain struct of
+# them: arrays of `u8` have no drop glue to panic in.
+#
+# Pin-forced. Verbatim, from `cargo update --dry-run -p lru@0.16.4 --precise 0.18.2`:
+#   error: failed to select a version for the requirement `lru = "^0.16.3"`
+#   required by package `smoldot-light v1.3.1`
+#   ... which satisfies dependency `subxt = "^0.50.2"` of package `bleavit-keeper`
+reason = "smoldot-light 1.3.1's two .pop( lines are Multiaddr::pop, not LruCache::pop — no call site on any of its six caches"
+blocked_by = "smoldot-light 1.3.1 -> lru \"^0.16.3\" (the fix is 0.18.2, outside the range)"
+clears_when = "upstream smoldot-light adopts lru >= 0.18.2 and a subxt release ships it"
+triaged = "2026-08-11"
