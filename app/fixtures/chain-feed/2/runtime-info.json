@@ -46,15 +46,16 @@
     "System",
     "Timestamp",
     "TrackOrigins",
+    "TradingRewards",
     "TransactionPayment",
     "Utility",
     "Vesting",
     "Welfare",
     "XcmpQueue"
   ],
-  "metadata_sha256": "26554440fa6bce29fd00ca3036b62a0cd772e4882a10028a511746259a3e7c1b",
+  "metadata_sha256": "d2f9e81a9e76949aaef1230333e0d73a4599f439ce3d3f3681a1663c097277b8",
   "metadata_version": 15,
-  "on_chain_wasm_sha256": "a3733f2248c536de503f218887a0102c18ece48a2c89de3839486710f06b7b57",
+  "on_chain_wasm_sha256": "d2d126a3547439bf655b1529bd6af009f1ec0215995fb45636c4c3c420cd0077",
   "rfc78_merkleized_metadata_hash": null,
   "rfc78_status": "not enabled by the runtime build recipe",
   "runtime_profile": "bootstrap",
@@ -68,6 +69,6 @@
     "tokenSymbol": "VIT"
   },
   "transaction_version": 1,
-  "wasm_file_sha256": "a3733f2248c536de503f218887a0102c18ece48a2c89de3839486710f06b7b57",
-  "wasm_sha256": "a3733f2248c536de503f218887a0102c18ece48a2c89de3839486710f06b7b57"
+  "wasm_file_sha256": "d2d126a3547439bf655b1529bd6af009f1ec0215995fb45636c4c3c420cd0077",
+  "wasm_sha256": "d2d126a3547439bf655b1529bd6af009f1ec0215995fb45636c4c3c420cd0077"
 }
