@@ -180,16 +180,83 @@ python3 "$repo_root/tools/ci/check-npm-advisories.py" \
   --waivers "${BLEAVIT_NPM_WAIVERS:-$repo_root/tools/ci/npm-advisory-waivers.toml}" \
   "${npm_args[@]}"
 
+# Leg 5 — the `unsound` advisories leg 2 prints and passes.
+#
+# cargo-audit fails on a RustSec *vulnerability* and merely warns on an
+# *informational* advisory. The GitHub Advisory Database does not draw that line:
+# it grades RUSTSEC-2024-0429 (`glib`, unsound `VariantStrIter`) as a MEDIUM
+# vulnerability, and Dependabot reported it against `app/Cargo.lock` while this
+# whole script was green — and would have stayed green, because leg 2 allowed it
+# and leg 3 skips anything RustSec carries, by contract. Neither leg was
+# misconfigured. Between them sat a class of finding nothing failed on.
+#
+# This leg gates exactly that disputed class. `unmaintained` stays an allowed
+# warning, as `.cargo/audit.toml` has always said; see the checker for where the
+# line is drawn and why.
+#
+# THIS LEG RUNS UNSUPPRESSED, AND THAT IS THE WHOLE DESIGN.
+#
+# `cargo-audit` reads `.cargo/audit.toml` from its working directory, so every
+# run above inherits that workspace's `ignore` list — and an ignored advisory is
+# removed from `warnings` ENTIRELY, not merely marked. Measured, not assumed:
+# ignoring RUSTSEC-2024-0429 takes `app`'s report from 16 unmaintained + 1
+# unsound to 16 unmaintained + 0.
+#
+# So a leg 5 reading leg 2's reports would be defeated by one line in the very
+# file it exists to be independent of. The waiver file would show no entry, the
+# stale-waiver leg would see nothing to be stale about, and CI would go green
+# over an untriaged `unsound` advisory. That bypass is not hypothetical: before
+# this leg existed an unsound advisory was silent anyway, and now that one turns
+# CI red, adding its id to `.cargo/audit.toml` is the first thing a person under
+# time pressure would reach for.
+#
+# The reports below are therefore produced from a directory that holds NO
+# `.cargo/audit.toml`, with `--file` naming each lockfile. That yields the true
+# advisory set per lockfile, whatever any workspace chose to suppress. The
+# checker re-proves it by refusing any report whose `settings.ignore` is
+# non-empty, so a stray config cannot quietly re-suppress this leg.
+#
+# Clause 4 isolation is untouched: leg 2 still audits each workspace from its own
+# root, and the summary below still reports each workspace's own ignore list from
+# its own with-config run. Those runs answer "what did this workspace accept";
+# this one answers "what is actually in the lockfile", and only the second
+# question is leg 5's.
+#
+# `cargo audit` exits non-zero when a lockfile carries vulnerabilities, and
+# unsuppressed the root workspace carries the ones `.cargo/audit.toml` waives for
+# leg 2. That exit is expected here and says nothing about this leg, whose only
+# input is `warnings`. The shell therefore tolerates the status and the checker
+# fails closed on a report it cannot read — a scan that did not happen is not a
+# clean scan, and that judgement belongs in the checker rather than in `$?`.
+unsuppressed_reports=$(mktemp -d)
+trap 'rm -rf "$unsuppressed_reports"' EXIT
+unsound_args=()
+while IFS=$'\t' read -r ws_name ws_eco ws_dir ws_lockfile; do
+  (
+    cd "$unsuppressed_reports"
+    "$auditor" audit --json --no-fetch --file "$repo_root/$ws_lockfile" \
+      >"$unsuppressed_reports/$ws_name.json" || true
+  )
+  unsound_args+=(--report "$ws_name=$unsuppressed_reports/$ws_name.json")
+done <<<"$workspace_rows"
+python3 "$repo_root/tools/ci/check-unsound-advisories.py" \
+  --waivers "${BLEAVIT_UNSOUND_WAIVERS:-$repo_root/tools/ci/unsound-waivers.toml}" \
+  "${unsound_args[@]}"
+
 if [[ -n "$summary_out" ]]; then
-  summary_tmp=$(mktemp -d)
-  trap 'rm -rf "$summary_tmp"' EXIT
+  # The summary needs each workspace's OWN ignore list to re-prove clause 4
+  # isolation on every run, so it takes with-config runs from each workspace
+  # root. The unsuppressed reports above report `ignore: []` for every workspace
+  # by construction and would turn that disclosure into a uniform blank.
+  summary_reports=$(mktemp -d)
+  trap 'rm -rf "$unsuppressed_reports" "$summary_reports"' EXIT
   summary_args=()
   while IFS=$'\t' read -r ws_name ws_eco ws_dir ws_lockfile; do
     (
       cd "$repo_root/$ws_dir"
-      "$auditor" audit --json --no-fetch >"$summary_tmp/$ws_name.json"
+      "$auditor" audit --json --no-fetch >"$summary_reports/$ws_name.json"
     )
-    summary_args+=("$ws_name=$summary_tmp/$ws_name.json")
+    summary_args+=("$ws_name=$summary_reports/$ws_name.json")
   done <<<"$workspace_rows"
   npm_lockfiles=""
   while IFS=$'\t' read -r ws_name ws_eco ws_dir ws_lockfile; do
@@ -201,6 +268,8 @@ if [[ -n "$summary_out" ]]; then
     "$repo_root/tools/ci/check-ghsa-only.py" \
     "${BLEAVIT_NPM_WAIVERS:-$repo_root/tools/ci/npm-advisory-waivers.toml}" \
     "$repo_root/tools/ci/check-npm-advisories.py" \
+    "${BLEAVIT_UNSOUND_WAIVERS:-$repo_root/tools/ci/unsound-waivers.toml}" \
+    "$repo_root/tools/ci/check-unsound-advisories.py" \
     "$npm_lockfiles" \
     "${summary_args[@]}" <<'PY'
 import importlib.util
@@ -213,8 +282,10 @@ ghsa_waivers = Path(sys.argv[2])
 checker_path = Path(sys.argv[3])
 npm_waivers = Path(sys.argv[4])
 npm_checker_path = Path(sys.argv[5])
-npm_lockfiles = sorted(line for line in sys.argv[6].splitlines() if line.strip())
-reports = [argument.split("=", 1) for argument in sys.argv[7:]]
+unsound_waivers = Path(sys.argv[6])
+unsound_checker_path = Path(sys.argv[7])
+npm_lockfiles = sorted(line for line in sys.argv[8].splitlines() if line.strip())
+reports = [argument.split("=", 1) for argument in sys.argv[9:]]
 
 
 def load(path):
@@ -292,11 +363,33 @@ waived_npm = [
     for _key, row in sorted(npm_checker.load_waivers(npm_waivers).items())
 ]
 
+# v5 extends the same disclosure property to the unsound leg, for the third time
+# and for the reason v3 and v4 each recorded: extending the gate without
+# extending the summary turns a full disclosure into a partial one silently. An
+# unsound waiver is accepted undefined behavior in a shipped artifact's graph, so
+# a release that publishes the cargo and npm waivers and stays quiet about this
+# one understates precisely the risk R-7 is strictest about. `exposure` travels
+# with the entry because it is the fact a reader needs and cannot recover from
+# the id — and because "the affected function is called" (`constrained`) is a
+# materially different disclosure from "it is not" (`unreachable`).
+unsound_checker = load_checker("check_unsound_advisories", unsound_checker_path)
+waived_unsound = [
+    {
+        "id": row["id"],
+        "package": row["package"],
+        "version": row["version"],
+        "workspace": row["workspace"],
+        "exposure": row["exposure"],
+    }
+    for _key, row in sorted(unsound_checker.load_waivers(unsound_waivers).items())
+]
+
 summary = {
-    "schema": "bleavit.supply-chain.v4",
+    "schema": "bleavit.supply-chain.v5",
     "ignored_advisory_ids": sorted(union),
     "waived_ghsa_only": waived_ghsa_only,
     "waived_npm": waived_npm,
+    "waived_unsound": waived_unsound,
     "npm_lockfiles": npm_lockfiles,
     "workspaces": workspaces,
 }

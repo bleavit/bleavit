@@ -293,7 +293,7 @@ claimant-adverse rounding straightforward.
 2. A sell adds proceeds **net of the fee the book withholds** — `proceeds − fee` — to `received`,
    rounded down, **but only for the part of the sale covered by `book_acquired`**, and decrements
    `book_acquired` by that quantity. Proceeds beyond it are ignored. *(Clarified 2026-08-10,
-   SQ-1049's sibling SQ-1048: this rule said only "adds proceeds" while rule 1 spelled its arm out
+   SQ-1049's sibling SQ-1056: this rule said only "adds proceeds" while rule 1 spelled its arm out
    as `cost + fee`, and the two readings differ by the fee on every sale. Net is what the seller
    actually received. Crediting the gross figure would score a trader on value the protocol took,
    which is the one rounding direction R-7 forbids, and it would break the symmetry with rule 1 —

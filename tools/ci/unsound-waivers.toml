@@ -1,0 +1,171 @@
+# Unsound-advisory waivers — the RustSec findings cargo-audit prints and passes.
+#
+# `cargo-audit` fails on a RustSec *vulnerability* and merely prints an
+# *informational* advisory, ending with `warning: N allowed warnings found`. The
+# GitHub Advisory Database does not draw that line: it grades RUSTSEC-2024-0429
+# (`glib`, unsound `VariantStrIter`) as a MEDIUM VULNERABILITY, and Dependabot
+# reported it against `app/Cargo.lock` while every gate here was green and would
+# have stayed green. `tools/ci/check-unsound-advisories.py` gates exactly that
+# disputed class — the informational kinds GHSA may grade as vulnerabilities,
+# which is `unsound` and nothing else. `unmaintained` names no defect and stays
+# an allowed warning, as `.cargo/audit.toml` has always said.
+#
+# Every waiver states the pin that forces it and the condition that clears it. A
+# waiver that stops matching any finding FAILS the gate (stale-waiver leg): an
+# exemption can never outlive the advisory that justified it, mirroring the
+# limit-coverage registry discipline (SQ-155). That leg also closes the obvious
+# way around this file — adding an id to a workspace's `.cargo/audit.toml`
+# `ignore` list drops the warning from the report, which turns the waiver stale
+# and the gate red rather than quiet.
+#
+# THE KEY CARRIES THE WORKSPACE. Doc 15 §4.5 clause 4 audits each workspace from
+# its own root so one workspace's exception cannot excuse another's, and the same
+# holds for the triage: "unreachable" is a claim about one dependency graph.
+# `event-listener` was the worked example — it appeared in the root workspace and
+# in `keeper/`, with different graphs around it.
+#
+# `exposure` IS REQUIRED and `"triggerable"` IS REFUSED at load time, because
+# undefined behavior a shipped artifact can reach gets patched or routed around
+# under R-7, never excused. The field has three states rather than two, and the
+# `memmap2` entry below is why: its affected function IS called, and a yes/no
+# field would have forced either a false "no" or a red gate with no legitimate
+# way out. `constrained` concedes the call and carries `call_sites` so the claim
+# names the code a reviewer must re-read when the pin moves.
+#
+# Triaged 2026-08-11 against the five `unsound` findings the four committed cargo
+# lockfiles then carried. The fifth is not here: `event-listener` 5.4.1
+# (RUSTSEC-2026-0221, root and keeper) was FIXED rather than waived — 5.4.2 is a
+# patch release and `cargo update --precise` reached it in both workspaces.
+
+[[waiver]]
+id = "RUSTSEC-2024-0429"
+package = "glib"
+version = "0.18.5"
+workspace = "app"
+exposure = "unreachable"
+# The GHSA half of this advisory (GHSA-wrw7-89jp-8q8g, medium) is Dependabot
+# alert #27 and the reason this gate exists.
+#
+# `VariantStrIter::impl_get` passes `&p` — an immutable reference to a null
+# `*mut c_char` — as a variadic out-argument to `g_variant_get_child`. Recent
+# rustc versions discard the write through `&p` under optimization, so every call
+# then hands a NULL pointer to `CStr::from_ptr`. The mismatch went unnoticed
+# because the C function is variadic and the compiler checks nothing there.
+#
+# UNREACHABLE — VERIFIED, NOT ASSERTED. `VariantStrIter::new` is `pub(crate)`, so
+# `Variant::array_iter_str()` is the crate's ONLY producer of the iterator. A
+# recursive grep for `array_iter_str` and `VariantStrIter` across every crate
+# source in the cargo registry cache — which holds the resolved closure of all
+# four workspaces, not just this one — matches `glib-0.18.5` itself and nothing
+# else, and inside glib only its own `#[cfg(test)]` module and one doc comment
+# call it. No crate in the GTK3/Tauri stack (gtk, gdk, gio, atk, pango, soup3,
+# webkit2gtk, javascriptcore-rs, gdkx11, wry, tao, muda) names either symbol.
+# `bleavit-desktop` references neither `glib` nor `Variant` and sets
+# `unsafe_code = "forbid"`. The code is linked and never called.
+#
+# NOT FIXABLE AT ALL, by any bump. The 0.18 line ends at 0.18.5 and the fix is
+# 0.20.0, so there is no backport to move to. `gtk 0.18.2` requires `glib
+# "^0.18"`, and `gtk` is the ARCHIVED GTK3 binding whose last release is 0.18.2
+# (2024-12-09) — the gtk-rs project moved to gtk4 and the GTK3 crate will not
+# gain a glib 0.20 release. `tauri 2.11.5` is the current release and still
+# resolves it. Verbatim, from `cargo update --dry-run -p glib --precise 0.20.12`:
+#   error: failed to select a version for the requirement `glib = "^0.18"`
+#   required by package `gtk v0.18.2`
+#
+# Residual risk: none that this repository can reach. Were the shell to call
+# `array_iter_str` in future it would crash deterministically on a NULL
+# dereference rather than corrupt state, and `bleavit-desktop` is not packaged or
+# distributed today (F22 ships the shell and its attestation, not a pipeline).
+reason = "linked but never called — `array_iter_str` is the only producer and no crate in the closure calls it"
+blocked_by = "gtk 0.18.2 -> glib \"^0.18\" (archived GTK3 binding, last release 2024-12-09; the fix is 0.20.0, outside the range)"
+clears_when = "Tauri's Linux backend leaves GTK3 for a stack whose glib is >= 0.20 — NOT cleared by a tauri 2.x bump, since 2.11.5 is current and still resolves gtk 0.18.2"
+triaged = "2026-08-11"
+
+[[waiver]]
+id = "RUSTSEC-2026-0002"
+package = "lru"
+version = "0.12.5"
+workspace = "root"
+exposure = "unreachable"
+# `IterMut::next` and `next_back` briefly take an exclusive reference to the key
+# through the internal node pointer, invalidating the shared pointer the internal
+# `HashMap` holds. That breaks Stacked Borrows. It is a model violation Miri
+# detects rather than a miscompilation observed in the wild, and it is reachable
+# only through `LruCache::iter_mut()`.
+#
+# UNREACHABLE. Two crates in this graph depend on `lru`, and neither calls
+# `iter_mut` on an `LruCache`. `libp2p-identify 0.45.0` declares the dependency
+# in its Cargo.toml and never names `lru` or `LruCache` anywhere in `src/` — a
+# declared-but-unused dependency. `libp2p-swarm 0.45.1` holds the only real use,
+# `PeerAddresses(LruCache<PeerId, LruCache<Multiaddr, ()>>)` in
+# `src/behaviour/peer_addresses.rs`, and touches it through `get_mut`, `iter`,
+# `put` and `pop` only. The `iter_mut()` call sites elsewhere in that crate
+# (`connection.rs`, `connection/pool.rs`, `handler/multi.rs`) are on standard
+# collections, not on an `LruCache`.
+#
+# Pin-forced. Verbatim, from `cargo update --dry-run -p lru --precise 0.16.3`:
+#   error: failed to select a version for the requirement `lru = "^0.12.3"`
+#   required by package `libp2p-identify v0.45.0`
+#
+# Independently, litep2p is the collator's default network backend (sc-cli
+# `default_value_t = NetworkBackendType::Litep2p`), so the libp2p copy holding
+# this crate is not even the reachable stack on a default node — the same
+# argument the yamux GHSA waiver records. This entry does not lean on that.
+#
+# `.cargo/audit.toml` already recorded the disposition in prose ("`lru`
+# RUSTSEC-2026-0002 stays deliberately unwaived: `informational = "unsound"` is
+# an allowed warning") and Dependabot alert #4 was dismissed on the same reading.
+# What was missing was the reachability argument and an expiry, which is what
+# this entry adds.
+reason = "linked but never called — no `LruCache::iter_mut()` call site exists in the graph"
+blocked_by = "libp2p-identify 0.45.0 -> lru \"^0.12.3\" (the fix is 0.16.3, outside the range)"
+clears_when = "upstream libp2p adopts lru >= 0.16.3, or the SDK drops the libp2p backend"
+triaged = "2026-08-11"
+
+[[waiver]]
+id = "RUSTSEC-2026-0186"
+package = "memmap2"
+version = "0.5.10"
+workspace = "root"
+exposure = "constrained"
+# THE ENTRY THAT SHAPED THE `exposure` FIELD. The affected function is genuinely
+# called, so a yes/no reachability field would have answered "yes" and made this
+# unwaivable — while the honest finding is that the one call site cannot reach
+# the defect.
+#
+# The advisory names six functions that under-validate `offset` and `len`:
+# `Mmap::[unchecked_]advise_range`, `MmapMut::[unchecked_]advise_range` and
+# `MmapMut::flush[_async]_range`. An out-of-bounds range reaches
+# `pointer::offset()`/`add()`, which is UB. The pointer is not dereferenced; it
+# goes to `madvise`/`msync`.
+#
+# ONE CALL SITE, AND IT IS IN BOUNDS BY CONSTRUCTION. `parity-db 0.4.13` is the
+# only consumer, and `src/index.rs:605` is its only use of any affected function:
+#
+#     try_io!(map.flush_range(META_SIZE, map.len() - META_SIZE));
+#
+# The range is `[META_SIZE, map.len())` — derived from the mapping's own length,
+# so it is the exact tail of the mapping whenever `map.len() >= META_SIZE`. That
+# holds unconditionally: BOTH paths that produce the mapping call
+# `file.set_len(file_size(id.index_bits()))` immediately before `map_mut`
+# (`open_existing` at index.rs:220, the create branch at index.rs:537), and
+# `file_size(bits) = total_entries(bits) * 8 + META_SIZE` is >= META_SIZE for
+# every input. So a truncated or corrupt index file on disk is re-extended before
+# it is ever mapped, and the subtraction cannot underflow. parity-db's other
+# memmap2 uses are `map_mut`, `MmapOptions::map_mut` and whole-map `flush()`,
+# none of which the advisory names; `madvise_random` calls `libc::madvise`
+# directly and does not go through memmap2's `advise_range`.
+#
+# Pin-forced. Verbatim, from `cargo update --dry-run -p memmap2 --precise 0.9.11`:
+#   error: failed to select a version for the requirement `memmap2 = "^0.5"`
+#   required by package `parity-db v0.4.13`
+#
+# Residual risk: a future parity-db that passed an externally-derived range to
+# one of the six functions would move this entry to `triggerable`, which is not
+# waivable. That is exactly what `call_sites` exists to make re-checkable — the
+# version key already forces a fresh triage when parity-db moves.
+call_sites = ["parity-db 0.4.13 src/index.rs:605 — map.flush_range(META_SIZE, map.len() - META_SIZE)"]
+reason = "sole call site passes the mapping's own tail; set_len(file_size(..)) precedes every map_mut, so map.len() >= META_SIZE always"
+blocked_by = "parity-db 0.4.13 -> memmap2 \"^0.5\" (the fix is 0.9.11, outside the range)"
+clears_when = "upstream parity-db adopts memmap2 >= 0.9.11 and an SDK train ships it"
+triaged = "2026-08-11"

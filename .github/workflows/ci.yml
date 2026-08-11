@@ -75,7 +75,7 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
-      - name: Check lockfiles, RustSec advisories, GHSA-only advisories, and npm advisories
+      - name: Check lockfiles, RustSec, GHSA-only, npm, and unsound advisories
         run: tools/ci/supply-chain-gates.sh
 
   reference-model:
