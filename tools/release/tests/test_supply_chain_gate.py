@@ -66,6 +66,16 @@ def audited_npm_lockfiles() -> set[str]:
 # dict would key on empty strings and the fixture would exercise nothing. Root
 # and `app` report the SAME advisory on purpose — that is what proves the key
 # carries the workspace, since one waiver would otherwise cover both.
+#
+# The stub also answers the TWO RUN MODES differently, because the gate uses two
+# and conflating them is the defect the modes exist to prevent. A run from a
+# workspace root inherits that workspace's `.cargo/audit.toml`, so it reports the
+# root's ignore list — that is what the summary discloses to re-prove clause 4
+# isolation. A run given `--file` is leg 5's, produced where no such config
+# exists, so its ignore list is empty by construction and its workspace comes
+# from the lockfile it was pointed at. A stub that answered the with-config shape
+# to a `--file` run would hand leg 5 a suppressed report, which the checker now
+# refuses outright.
 STUB_AUDITOR = """#!/usr/bin/env python3
 import json, os, sys
 if '--version' in sys.argv:
@@ -78,16 +88,22 @@ if '--json' in sys.argv:
         'package': {'name': 'demo-unsound', 'version': '7.8.9'},
         'versions': {'patched': ['>=9.0.0']},
     }
-    name = os.path.basename(os.getcwd())
     shapes = {
-        'keeper': ([], {'unmaintained': [{}]}),
-        'app':    ([], {'unmaintained': [{}, {}], 'unsound': [unsound]}),
-        'fuzz':   ([], {'unmaintained': [{}, {}, {}, {}]}),
+        'keeper': {'unmaintained': [{}]},
+        'app':    {'unmaintained': [{}, {}], 'unsound': [unsound]},
+        'fuzz':   {'unmaintained': [{}, {}, {}, {}]},
+        'root':   {'unmaintained': [{}, {}], 'unsound': [unsound]},
     }
-    ignore, warnings = shapes.get(
-        name, (['RUSTSEC-2026-0001'], {'unmaintained': [{}, {}], 'unsound': [unsound]})
-    )
-    print(json.dumps({'settings': {'ignore': ignore}, 'warnings': warnings}))
+    if '--file' in sys.argv:
+        parent = os.path.basename(os.path.dirname(sys.argv[sys.argv.index('--file') + 1]))
+        name = parent if parent in shapes else 'root'
+        ignore = []
+    else:
+        name = os.path.basename(os.getcwd())
+        if name not in shapes:
+            name = 'root'
+        ignore = ['RUSTSEC-2026-0001'] if name == 'root' else []
+    print(json.dumps({'settings': {'ignore': ignore}, 'warnings': shapes[name]}))
 raise SystemExit(0)
 """
 
@@ -175,10 +191,19 @@ triaged = "2026-08-11"
 """
 
 
+# A stub that suppresses on EVERY run, `--file` included — that is, one modelling
+# a gate that handed leg 5 the same reports leg 2 reads. It must make the gate
+# fail; see SuppressedLegFiveTests.
+STUB_AUDITOR_SUPPRESSING = STUB_AUDITOR.replace(
+    "        ignore = []\n", "        ignore = ['RUSTSEC-2026-0001']\n"
+)
+assert STUB_AUDITOR_SUPPRESSING != STUB_AUDITOR, "the --file branch's ignore assignment moved"
+
+
 class SupplyChainSummaryTests(unittest.TestCase):
-    def run_gate(self, root: Path) -> dict:
+    def run_gate(self, root: Path, auditor_source: str = STUB_AUDITOR, expect: int = 0):
         auditor = root / "cargo-audit"
-        auditor.write_text(STUB_AUDITOR, encoding="utf-8")
+        auditor.write_text(auditor_source, encoding="utf-8")
         auditor.chmod(0o755)
         scanner = root / "osv-scanner"
         scanner.write_text(STUB_SCANNER, encoding="utf-8")
@@ -206,7 +231,9 @@ class SupplyChainSummaryTests(unittest.TestCase):
             check=False,
             timeout=600,
         )
-        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(completed.returncode, expect, completed.stderr)
+        if expect != 0:
+            return completed
         return json.loads(summary.read_text(encoding="utf-8"))
 
     def test_summary_covers_every_audited_workspace(self) -> None:
@@ -313,6 +340,39 @@ class SupplyChainSummaryTests(unittest.TestCase):
         for row in document["workspaces"].values():
             union.update(row["ignored_advisory_ids"])
         self.assertEqual(sorted(union), document["ignored_advisory_ids"])
+
+
+class SuppressedLegFiveTests(SupplyChainSummaryTests):
+    """Leg 5 must not inherit leg 2's `.cargo/audit.toml` ignore list.
+
+    `cargo-audit` drops an ignored advisory from `warnings` entirely, so a leg 5
+    reading the reports leg 2 reads could be switched off by one line in the very
+    file it exists to be independent of — with no unwaived finding and no stale
+    waiver to show for it. The gate therefore produces this leg's reports where no
+    such config is in scope, and the checker refuses any report that arrived
+    suppressed.
+
+    The suite's other tests already fail if the script regresses, because the stub
+    answers `--file` runs differently. That coverage is real but reads as
+    accidental, so this pins the property by name and from the other direction:
+    an auditor that suppresses even on `--file` MUST make the whole gate fail.
+    """
+
+    def test_a_suppressed_leg_five_report_fails_the_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            completed = self.run_gate(
+                Path(temporary), auditor_source=STUB_AUDITOR_SUPPRESSING, expect=1
+            )
+        self.assertIn("active ignore list", completed.stderr)
+        self.assertIn("RUSTSEC-2026-0001", completed.stderr)
+
+    # The inherited summary tests would run again under this subclass against the
+    # default stub, which is redundant rather than wrong. Drop them so the suite
+    # reports what it actually adds.
+    test_summary_covers_every_audited_workspace = None
+    test_summary_covers_every_audited_npm_lockfile = None
+    test_summary_discloses_ignores_and_warning_counts = None
+    test_each_workspace_reports_its_own_exception_set = None
 
 
 if __name__ == "__main__":

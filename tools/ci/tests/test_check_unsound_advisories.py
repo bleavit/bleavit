@@ -118,9 +118,11 @@ class UnsoundAdvisoryGateTests(unittest.TestCase):
     def test_stale_waiver_fails(self) -> None:
         """An exemption can never outlive the advisory that justified it (SQ-155).
 
-        This leg also closes the obvious way around the file: adding the id to a
-        workspace's `.cargo/audit.toml` `ignore` list drops the warning from the
-        report, which is exactly the empty-report case below.
+        This leg does NOT also close the `.cargo/audit.toml` bypass, and an
+        earlier draft of this file claimed it did. A stale waiver only fires when
+        something already waived here is suppressed; an advisory that was never
+        waived leaves nothing to go stale. `SuppressedReportTests` below covers
+        that case, and it is covered at the input rather than here.
         """
         completed = run({"app": report(UNMAINTAINED)}, WAIVED_GLIB)
         self.assertEqual(completed.returncode, 1, completed.stdout)
@@ -188,6 +190,72 @@ class UnsoundAdvisoryGateTests(unittest.TestCase):
         )
         self.assertEqual(completed.returncode, 1, completed.stdout)
         self.assertIn("blocked_by", completed.stderr)
+
+
+class SuppressedReportTests(unittest.TestCase):
+    """The bypass that would otherwise defeat this whole leg.
+
+    `cargo-audit` reads `.cargo/audit.toml` from its working directory and drops
+    an ignored advisory from `warnings` **entirely**. A leg reading leg 2's
+    reports could therefore be switched off by one line in the very file it
+    exists to be independent of — and since a red leg 5 is a new thing, adding
+    the id to that file is the first thing a person under pressure would try.
+    Nothing downstream can catch it: the finding is absent, so it is neither
+    unwaived nor stale, and the run reports a clean scan it never performed.
+    """
+
+    def test_report_with_active_ignore_list_is_refused(self) -> None:
+        suppressed = report(UNMAINTAINED)
+        suppressed["settings"]["ignore"] = ["RUSTSEC-2024-0429"]
+        completed = run({"app": suppressed}, WAIVED_GLIB)
+        self.assertEqual(completed.returncode, 1, completed.stdout)
+        self.assertIn("active ignore list", completed.stderr)
+        self.assertIn("RUSTSEC-2024-0429", completed.stderr)
+
+    def test_refusal_precedes_the_clean_verdict(self) -> None:
+        """A suppressed report is well-formed and short — it looks clean.
+
+        With `glib` ignored and its waiver removed there is nothing else to
+        object to, so a checker that examined only `warnings` would exit 0 here.
+        That is the exact false pass this test pins shut.
+        """
+        suppressed = report()
+        suppressed["settings"]["ignore"] = ["RUSTSEC-2024-0429"]
+        completed = run({"app": suppressed}, "")
+        self.assertEqual(completed.returncode, 1, completed.stdout)
+        self.assertIn("active ignore list", completed.stderr)
+
+    def test_report_without_settings_is_refused(self) -> None:
+        completed = run({"app": {"warnings": {}}}, "")
+        self.assertEqual(completed.returncode, 1, completed.stdout)
+        self.assertIn("no `settings.ignore` array", completed.stderr)
+
+    def test_empty_report_is_refused(self) -> None:
+        """The shape a failed unsuppressed run leaves behind.
+
+        The gate tolerates cargo-audit's exit status for this leg, since an
+        unsuppressed run exits non-zero on the vulnerabilities leg 2 waives. That
+        makes "did the run produce a report" this checker's question, and an
+        empty file must read as a failure rather than as a traceback.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            waiver_file = directory / "unsound-waivers.toml"
+            waiver_file.write_text("", encoding="utf-8")
+            empty = directory / "app.json"
+            empty.write_text("", encoding="utf-8")
+            completed = subprocess.run(
+                [
+                    sys.executable, str(SCRIPT),
+                    "--waivers", str(waiver_file),
+                    "--report", f"app={empty}",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        self.assertEqual(completed.returncode, 1, completed.stdout)
+        self.assertIn("is empty", completed.stderr)
 
 
 class CommittedWaiverFileTests(unittest.TestCase):

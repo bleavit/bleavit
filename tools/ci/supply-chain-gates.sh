@@ -194,28 +194,70 @@ python3 "$repo_root/tools/ci/check-npm-advisories.py" \
 # warning, as `.cargo/audit.toml` has always said; see the checker for where the
 # line is drawn and why.
 #
-# The JSON reports are produced ONCE here and reused by the summary block below,
-# which used to run its own second pass. Leg 2 has already fetched the advisory
-# database and already established that no workspace carries a failing
-# vulnerability, so `--no-fetch` is enough and a non-zero exit here would be a
-# real change rather than an expected one.
-audit_reports=$(mktemp -d)
-trap 'rm -rf "$audit_reports"' EXIT
+# THIS LEG RUNS UNSUPPRESSED, AND THAT IS THE WHOLE DESIGN.
+#
+# `cargo-audit` reads `.cargo/audit.toml` from its working directory, so every
+# run above inherits that workspace's `ignore` list — and an ignored advisory is
+# removed from `warnings` ENTIRELY, not merely marked. Measured, not assumed:
+# ignoring RUSTSEC-2024-0429 takes `app`'s report from 16 unmaintained + 1
+# unsound to 16 unmaintained + 0.
+#
+# So a leg 5 reading leg 2's reports would be defeated by one line in the very
+# file it exists to be independent of. The waiver file would show no entry, the
+# stale-waiver leg would see nothing to be stale about, and CI would go green
+# over an untriaged `unsound` advisory. That bypass is not hypothetical: before
+# this leg existed an unsound advisory was silent anyway, and now that one turns
+# CI red, adding its id to `.cargo/audit.toml` is the first thing a person under
+# time pressure would reach for.
+#
+# The reports below are therefore produced from a directory that holds NO
+# `.cargo/audit.toml`, with `--file` naming each lockfile. That yields the true
+# advisory set per lockfile, whatever any workspace chose to suppress. The
+# checker re-proves it by refusing any report whose `settings.ignore` is
+# non-empty, so a stray config cannot quietly re-suppress this leg.
+#
+# Clause 4 isolation is untouched: leg 2 still audits each workspace from its own
+# root, and the summary below still reports each workspace's own ignore list from
+# its own with-config run. Those runs answer "what did this workspace accept";
+# this one answers "what is actually in the lockfile", and only the second
+# question is leg 5's.
+#
+# `cargo audit` exits non-zero when a lockfile carries vulnerabilities, and
+# unsuppressed the root workspace carries the ones `.cargo/audit.toml` waives for
+# leg 2. That exit is expected here and says nothing about this leg, whose only
+# input is `warnings`. The shell therefore tolerates the status and the checker
+# fails closed on a report it cannot read — a scan that did not happen is not a
+# clean scan, and that judgement belongs in the checker rather than in `$?`.
+unsuppressed_reports=$(mktemp -d)
+trap 'rm -rf "$unsuppressed_reports"' EXIT
 unsound_args=()
-summary_args=()
 while IFS=$'\t' read -r ws_name ws_eco ws_dir ws_lockfile; do
   (
-    cd "$repo_root/$ws_dir"
-    "$auditor" audit --json --no-fetch >"$audit_reports/$ws_name.json"
+    cd "$unsuppressed_reports"
+    "$auditor" audit --json --no-fetch --file "$repo_root/$ws_lockfile" \
+      >"$unsuppressed_reports/$ws_name.json" || true
   )
-  unsound_args+=(--report "$ws_name=$audit_reports/$ws_name.json")
-  summary_args+=("$ws_name=$audit_reports/$ws_name.json")
+  unsound_args+=(--report "$ws_name=$unsuppressed_reports/$ws_name.json")
 done <<<"$workspace_rows"
 python3 "$repo_root/tools/ci/check-unsound-advisories.py" \
   --waivers "${BLEAVIT_UNSOUND_WAIVERS:-$repo_root/tools/ci/unsound-waivers.toml}" \
   "${unsound_args[@]}"
 
 if [[ -n "$summary_out" ]]; then
+  # The summary needs each workspace's OWN ignore list to re-prove clause 4
+  # isolation on every run, so it takes with-config runs from each workspace
+  # root. The unsuppressed reports above report `ignore: []` for every workspace
+  # by construction and would turn that disclosure into a uniform blank.
+  summary_reports=$(mktemp -d)
+  trap 'rm -rf "$unsuppressed_reports" "$summary_reports"' EXIT
+  summary_args=()
+  while IFS=$'\t' read -r ws_name ws_eco ws_dir ws_lockfile; do
+    (
+      cd "$repo_root/$ws_dir"
+      "$auditor" audit --json --no-fetch >"$summary_reports/$ws_name.json"
+    )
+    summary_args+=("$ws_name=$summary_reports/$ws_name.json")
+  done <<<"$workspace_rows"
   npm_lockfiles=""
   while IFS=$'\t' read -r ws_name ws_eco ws_dir ws_lockfile; do
     [[ -n "$ws_lockfile" ]] || continue

@@ -32,10 +32,29 @@ Every `unsound` warning must be fixed, or waived in
 `tools/ci/unsound-waivers.toml` with a stated blocking pin and a condition that
 clears it. A waiver matching no finding also fails (stale-waiver leg): an
 exemption can never outlive the advisory that justified it — the limit-coverage
-registry discipline (SQ-155) applied to supply chain. That leg does double duty
-here, because adding an id to a workspace's `.cargo/audit.toml` `ignore` list
-removes the warning from the report entirely: suppressing a finding this file
-waives therefore turns the gate red instead of quiet.
+registry discipline (SQ-155) applied to supply chain.
+
+THE REPORTS MUST BE UNSUPPRESSED, AND THIS CHECKER REFUSES ANY THAT ARE NOT
+
+`cargo-audit` reads `.cargo/audit.toml` from its working directory, and an
+ignored advisory is dropped from `warnings` **entirely** rather than marked.
+Measured: ignoring RUSTSEC-2024-0429 takes `app`'s report from 16 unmaintained +
+1 unsound to 16 unmaintained + 0.
+
+So a gate reading the same reports leg 2 reads would be defeated by one line in
+the very file it exists to be independent of — no finding to be unwaived, no
+waiver to go stale, and a green run over an untriaged advisory. The stale-waiver
+leg does NOT cover this: it only fires when something already waived here is
+suppressed, and the dangerous case is an advisory that was never waived at all.
+Nor is the bypass hypothetical. Before this leg an `unsound` advisory was silent
+anyway; now that one turns CI red, adding its id to `.cargo/audit.toml` is the
+first thing a person under time pressure would reach for.
+
+`tools/ci/supply-chain-gates.sh` therefore produces this leg's reports from a
+directory holding no `.cargo/audit.toml`, naming each lockfile with `--file`.
+This checker re-proves that rather than trusting it: a report whose
+`settings.ignore` is non-empty is REFUSED, so a stray config cannot quietly
+re-suppress the one leg whose job is to not be suppressible.
 
 WAIVERS ARE PER WORKSPACE
 
@@ -233,7 +252,30 @@ def load_waivers(path: Path) -> dict[tuple[str, str, str, str], dict]:
 
 
 def load_report(path: Path, workspace: str) -> dict:
-    value = json.loads(path.read_text(encoding="utf-8"))
+    """Read one report, refusing anything that is not one.
+
+    The gate tolerates cargo-audit's exit status for this leg, because an
+    unsuppressed run legitimately exits non-zero on the vulnerabilities leg 2
+    waives. That makes "the run produced a usable report" this checker's
+    question rather than the shell's, and an empty or truncated file is the shape
+    a failed run leaves behind — so it must read as a failure here, not as a
+    traceback and not as a clean scan.
+    """
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise SystemExit(f"cannot read cargo-audit report for {workspace}: {path} ({error})")
+    if not raw.strip():
+        raise SystemExit(
+            f"cargo-audit report for {workspace} is empty: {path}. The run that should have "
+            "produced it failed; a scan that did not happen is not a clean scan."
+        )
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise SystemExit(
+            f"cargo-audit report for {workspace} is not valid JSON: {path} ({error})"
+        )
     if not isinstance(value, dict):
         raise SystemExit(f"cargo-audit report is not an object: {path} ({workspace})")
     return value
@@ -248,6 +290,22 @@ def gated_findings(report: dict, workspace: str, path: Path) -> list[dict]:
     thinks it is, and guessing there would report a clean scan that never
     happened.
     """
+    # The suppression check comes first, because a suppressed report's `warnings`
+    # object is well-formed and simply short — it looks exactly like a clean one.
+    settings = report.get("settings")
+    if not isinstance(settings, dict) or not isinstance(settings.get("ignore"), list):
+        raise SystemExit(
+            f"cargo-audit report has no `settings.ignore` array: {path} ({workspace}). "
+            "This leg must prove its input was unsuppressed and cannot from this report."
+        )
+    if settings["ignore"]:
+        raise SystemExit(
+            f"cargo-audit report for {workspace} was produced with an active ignore list "
+            f"({', '.join(settings['ignore'])}): {path}. An ignored advisory is dropped from "
+            "`warnings` entirely, so this leg would report a clean scan it never performed. "
+            "Produce this leg's reports from a directory with no .cargo/audit.toml, using "
+            "`--file <lockfile>`; the per-workspace exception file governs leg 2, not this one."
+        )
     warnings = report.get("warnings")
     if not isinstance(warnings, dict):
         raise SystemExit(
