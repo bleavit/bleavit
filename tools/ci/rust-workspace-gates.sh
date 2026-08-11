@@ -136,6 +136,37 @@ cargo build -p bleavit-runtime --release --features runtime-benchmarks --locked
 cargo build -p bleavit-runtime --features try-runtime --locked
 cargo test -p bleavit-runtime --features try-runtime --locked
 
+# TR7 fix round, Important 1: a `#[cfg(feature = "runtime-benchmarks")]` test
+# module is otherwise in no gate at all. The line above only builds that
+# feature (a `cargo build`, which never runs a `#[cfg(test)]` fn), and
+# `tools/ci/runtime-profile-gates.sh` below uses it only for `clippy --lib`
+# and `cargo check`. So `tests_trading_rewards::
+# the_trade_and_settlement_fixtures_really_prime_the_expensive_arms` — written
+# specifically to catch a benchmark fixture that silently starts declining,
+# which would regenerate a *cheaper* weight the growth-only regression gate
+# cannot see — compiled and passed by hand and was never once exercised by a
+# gate. Confirmed by mutating `prime_settled_market` to return `false`: 16 of
+# 17 `tests_trading_rewards` tests still passed, and nothing before this line
+# would have noticed.
+#
+# Scoped to `tests_trading_rewards`, not the whole crate, on direct evidence:
+# the unscoped `cargo test -p bleavit-runtime --features runtime-benchmarks
+# --locked` deterministically fails 71 pre-existing tests (406 passed, 71
+# failed, identical failing set across two runs) that have nothing to do with
+# this pallet — `tests_welfare_inputs::*` and unrelated `tests::*` governance/
+# treasury/coretime end-to-end flows. The cause is structural, not flaky:
+# `RuntimeMetricInputs::onchain_components` (`configs.rs`) has carried a
+# `#[cfg(feature = "runtime-benchmarks")]` branch that fabricates welfare
+# metric components (a fixed interior `FixedU64(930_000_000)`, by design —
+# see its own comment) instead of computing them, since PR #177 / #191 (A14,
+# 2026-07-27), weeks before TR7 existed. Any test that ticks a real epoch
+# under that feature inherits the fabricated components instead of the real
+# computation, which is exactly why nothing had ever run this combination
+# unfiltered before. Fixing that is a separate, unrelated undertaking; running
+# it here would turn this gate red for a reason no trading-rewards change
+# caused. See the TR7 fix-round report for the full failing-test list.
+cargo test -p bleavit-runtime --features runtime-benchmarks --locked tests_trading_rewards
+
 # B16 deployable-image matrix. Every profile compiles and tests with Cargo
 # defaults disabled; recovery profiles additionally execute the runtime's
 # exact zero-multi-block-migrations proof under their own base feature.

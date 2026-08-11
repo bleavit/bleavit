@@ -310,12 +310,12 @@ pub mod pallet {
         /// settling would apply the arithmetic to part of its own score.
         UnfoldedScore,
         /// The accrual would promise more than the authorized budget.
-        /// Unreachable by construction while the reward clamp
-        /// (`budget_headroom_usdc`) is in place; kept as a tripwire against a
-        /// future change that breaks it. If it ever fires, the failure mode is
-        /// a stuck settlement, not a skipped reward: the whole dispatch
-        /// aborts, so the epoch stays unclosed and the bond stays locked until
-        /// a later call succeeds.
+        /// Unreachable by construction while `settle_epoch`'s reward clamp
+        /// (`budget.saturating_sub(promised)`) is in place; kept as a
+        /// tripwire against a future change that breaks it. If it ever fires,
+        /// the failure mode is a stuck settlement, not a skipped reward: the
+        /// whole dispatch aborts, so the epoch stays unclosed and the bond
+        /// stays locked until a later call succeeds.
         BudgetExceeded,
     }
 
@@ -732,6 +732,25 @@ pub mod pallet {
                         // read, 8), so nothing would ever have reported it.
                         // Caching costs nothing and makes the code, the
                         // comment and the measurement agree at 8.
+                        //
+                        // **Only this arm clamps to budget headroom; the debit
+                        // arm below deliberately does not read it at all.**
+                        // Scaling a debit by budget consumption would be
+                        // farmable by settlement timing, because both
+                        // settlement steps are pull-based and the caller
+                        // chooses when to crank: a wash operator settles the
+                        // winning account while the budget is full, waits for
+                        // other participants to exhaust it, and settles the
+                        // losing account into a headroom of zero. The pair
+                        // then nets **positive**, which is the one invariant
+                        // the whole design rests on. An unscaled debit keeps
+                        // the pair non-positive at every budget level and in
+                        // every settlement order. The cost is the one 08 §2.6
+                        // names — a loser in a starved epoch is over-punished
+                        // relative to a scaled winner — and it is the R-7
+                        // direction. See the TR5 report for the derivation
+                        // and for what closing it properly would need from
+                        // TR6.
                         let budget = Self::authorized_budget_usdc().unwrap_or_default();
                         let promised = TotalAccrued::<T>::get();
                         accrued = core::cmp::min(demand, budget.saturating_sub(promised));
@@ -872,28 +891,6 @@ pub mod pallet {
                 .checked_mul(futarchy_primitives::currency::VIT)?
                 .checked_div(futarchy_primitives::currency::USDC)?;
             vit.checked_mul(rate)?.checked_div(divisor)
-        }
-
-        /// What the authorized budget can still promise: the part of it no
-        /// outstanding accrual already claims.
-        ///
-        /// **Only the reward leg reads this, and the debit leg deliberately
-        /// does not.** Scaling a debit by budget consumption would be farmable
-        /// by settlement timing, because both settlement steps are pull-based
-        /// and the caller chooses when to crank: a wash operator settles the
-        /// winning account while the budget is full, waits for other
-        /// participants to exhaust it, and settles the losing account into a
-        /// headroom of zero. The pair then nets **positive**, which is the one
-        /// invariant the whole design rests on. An unscaled debit keeps the
-        /// pair non-positive at every budget level and in every settlement
-        /// order. The cost is the one 08 §2.6 names — a loser in a starved
-        /// epoch is over-punished relative to a scaled winner — and it is the
-        /// R-7 direction. See the TR5 report for the derivation and for what
-        /// closing it properly would need from TR6.
-        pub fn budget_headroom_usdc() -> Balance {
-            Self::authorized_budget_usdc()
-                .unwrap_or_default()
-                .saturating_sub(TotalAccrued::<T>::get())
         }
 
         /// Return `amount` USDC from the sovereign to the participant.

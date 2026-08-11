@@ -31,6 +31,8 @@ use trading_rewards_core::{BranchDisposition, SettledMarkets, SETTLED_VALUE_SCAL
 
 const PID: ProposalId = 77_001;
 const MARKET: MarketId = 77_001;
+const BASELINE_EPOCH: futarchy_primitives::EpochId = 77_001;
+const BASELINE_MARKET: MarketId = 77_003;
 
 /// Every call the pallet exposes, as a `RuntimeCall`, so a call added later
 /// cannot quietly escape the filter and origin assertions below. The list is
@@ -71,6 +73,42 @@ fn the_market_observer_is_bound_to_the_rewards_pallet() {
         core::any::type_name::<<Runtime as pallet_market::Config>::TradeObserver>(),
         core::any::type_name::<TradingRewards>(),
     );
+}
+
+/// The sovereign custodies USDC bonds and a VIT budget, never a conditional
+/// position, so a Signed `ledger.transfer` into it must be refused the same
+/// way every other protocol account is refused — or a position sent there
+/// would be stranded permanently, and the frozen `is_reserved_protocol_
+/// destination` surface would not have warned the client that sent it.
+#[test]
+fn the_reward_sovereign_refuses_a_signed_ledger_transfer_of_a_conditional_position() {
+    development_ext().execute_with(|| {
+        let trader = seeded_decision_book(Branch::Accept);
+        assert_ok!(Market::buy(
+            RuntimeOrigin::signed(trader.clone()),
+            MARKET,
+            ScalarSide::Long,
+            kernel::MIN_TRADE_USDC,
+            Balance::MAX,
+        ));
+        let position = PositionId::Proposal {
+            proposal: PID,
+            branch: Branch::Accept,
+            kind: PositionKind::Long,
+        };
+        let held = pallet_conditional_ledger::Positions::<Runtime>::get(position, &trader);
+        assert!(held > 0, "the buy really left a position to try to strand");
+
+        let sovereign = TradingRewards::account_id();
+        assert!(
+            crate::configs::ReservedProtocolAccounts::contains(&sovereign),
+            "the sovereign must be a reserved protocol destination",
+        );
+        assert_noop!(
+            ConditionalLedger::transfer(RuntimeOrigin::signed(trader), position, sovereign, held),
+            pallet_conditional_ledger::Error::<Runtime>::ProtocolDestination,
+        );
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -222,6 +260,33 @@ fn seeded_decision_book(branch: Branch) -> crate::AccountId {
     enrolled_trader()
 }
 
+/// Open and seed a Baseline book for `epoch` (04 §6.1's unbranched degenerate
+/// wrapper), and hand back a funded, enrolled trader. Mirrors
+/// `seeded_decision_book` exactly, on the Baseline POL custody line rather
+/// than the Decision one (`pol_baseline_account`, not `pol_account`).
+fn seeded_baseline_book(epoch: futarchy_primitives::EpochId) -> crate::AccountId {
+    let pol = crate::configs::pol_baseline_account();
+    let b = crate::configs::balance_param(b"pol.b.param");
+    let headroom = pallet_market::core_market::seed_headroom(b).expect("bounded live POL seed");
+    assert_ok!(ForeignAssets::mint_into(usdc_location(), &pol, headroom));
+    crate::tests::sync_pol_lines_to_custody();
+    assert_ok!(Market::create_market(
+        RuntimeOrigin::signed(crate::configs::epoch_account()),
+        BASELINE_MARKET,
+        BookKind::Baseline { epoch },
+        epoch,
+        crate::configs::market_book_account(BASELINE_MARKET),
+        crate::configs::market_fee_account(BASELINE_MARKET),
+        b,
+    ));
+    assert_ok!(Market::seed(
+        RuntimeOrigin::signed(crate::configs::epoch_account()),
+        BASELINE_MARKET,
+        pol,
+    ));
+    enrolled_trader()
+}
+
 fn usdc_location() -> crate::AssetId {
     crate::usdc_location()
 }
@@ -245,6 +310,15 @@ fn settle_vault(winner: Branch, score: FixedU64) {
     pallet_conditional_ledger::Vaults::<Runtime>::mutate(PID, |vault| {
         if let Some(vault) = vault {
             vault.state = VaultState::ScalarSettled { winner, s: score };
+        }
+    });
+}
+
+fn settle_baseline(epoch: futarchy_primitives::EpochId, score: FixedU64) {
+    use pallet_conditional_ledger::core_ledger::BaselineState;
+    pallet_conditional_ledger::BaselineVaults::<Runtime>::mutate(epoch, |vault| {
+        if let Some(vault) = vault {
+            vault.state = BaselineState::Settled(score);
         }
     });
 }
@@ -525,6 +599,15 @@ fn an_archived_vault_reports_nothing_and_leaves_the_timeout_in_charge() {
 
 /// A gate leg is all-or-nothing, and the outcome picks which slot is worth par.
 /// Both outcomes are exercised so a hardcoded `[par, 0]` cannot pass.
+///
+/// **The trader holds a real, deliberately asymmetric `GateYes`/`GateNo`
+/// position, and `settlement.position` is asserted.** Without this a reviewer
+/// swap of `gate_legs`'s two `read(...)` calls (`configs.rs`, the `legs` array)
+/// passes 485/485: the fixture's trader held no gate legs at all, so
+/// `position` was `[0, 0]` under every mutation and the ordering claim in the
+/// function's own comment — 04 §6.1 maps LONG to YES, and `market_core::
+/// gate_kind` is what the fill accumulator's two slots actually follow — went
+/// unchecked. A swap credits the wrong leg on every gate market.
 #[test]
 fn a_gate_book_pays_par_on_the_outcome_side_and_nothing_on_the_other() {
     for (outcome, expected) in [
@@ -553,6 +636,30 @@ fn a_gate_book_pays_par_on_the_outcome_side_and_nothing_on_the_other() {
                     crate::configs::balance_param(b"pol.b.param"),
                 ),
             );
+            // Written directly rather than traded into existence, exactly as
+            // the market row above is: this test is about the adapter's read,
+            // not about LMSR mechanics. Asymmetric on purpose — a swap of the
+            // two reads is invisible to `assert_eq!` if both legs match.
+            let yes_held: Balance = currency::USDC.saturating_mul(7);
+            let no_held: Balance = currency::USDC.saturating_mul(3);
+            pallet_conditional_ledger::Positions::<Runtime>::insert(
+                PositionId::Proposal {
+                    proposal: PID,
+                    branch: Branch::Accept,
+                    kind: PositionKind::GateYes(GateType::Survival),
+                },
+                &trader,
+                yes_held,
+            );
+            pallet_conditional_ledger::Positions::<Runtime>::insert(
+                PositionId::Proposal {
+                    proposal: PID,
+                    branch: Branch::Accept,
+                    kind: PositionKind::GateNo(GateType::Survival),
+                },
+                &trader,
+                no_held,
+            );
             // A settled vault whose gate has no outcome yet is not terminal for
             // this book: it waits rather than folding on a missing value.
             settle_vault(Branch::Accept, FixedU64(kernel::SCORE_SCALE / 2));
@@ -566,9 +673,85 @@ fn a_gate_book_pays_par_on_the_outcome_side_and_nothing_on_the_other() {
             let settlement =
                 RuntimeSettledMarkets::settlement(&trader, GATE_MARKET).expect("terminal now");
             assert_eq!(settlement.disposition, BranchDisposition::Realized);
+            assert_eq!(
+                settlement.position,
+                [yes_held, no_held],
+                "position[0] is the YES leg and position[1] is the NO leg; a \
+                 swap of the two reads credits the wrong leg on every gate market",
+            );
             assert_eq!(settlement.settled_value, expected);
         });
     }
+}
+
+/// The Baseline arm mirrors the Decision arm exactly (04 §6.1's degenerate
+/// wrapper: unbranched, but scored and settled the same way) — and nothing
+/// exercised it before this test. Replacing its `settled_value` with a
+/// hardcoded `[par, 0]` got 485/485 green: every Baseline holder would be
+/// credited at par whatever the epoch settled at, the exact defect rule 3 was
+/// amended to prevent, one book kind over from where TR7 first found it.
+#[test]
+fn a_settled_baseline_book_settles_at_the_ledgers_own_fraction_of_par() {
+    development_ext().execute_with(|| {
+        let trader = seeded_baseline_book(BASELINE_EPOCH);
+        assert_ok!(Market::buy(
+            RuntimeOrigin::signed(trader.clone()),
+            BASELINE_MARKET,
+            ScalarSide::Long,
+            kernel::MIN_TRADE_USDC,
+            Balance::MAX,
+        ));
+        let held = pallet_conditional_ledger::Positions::<Runtime>::get(
+            PositionId::Baseline {
+                epoch: BASELINE_EPOCH,
+                side: ScalarSide::Long,
+            },
+            &trader,
+        );
+        assert_eq!(
+            held,
+            kernel::MIN_TRADE_USDC,
+            "the buy really left a position"
+        );
+
+        // Three-fifths of par, the same fraction the Decision test uses, so a
+        // hardcoded `[par, 0]` cannot agree by coincidence.
+        let score = FixedU64(kernel::SCORE_SCALE / 10 * 6);
+        settle_baseline(BASELINE_EPOCH, score);
+
+        let settlement = RuntimeSettledMarkets::settlement(&trader, BASELINE_MARKET)
+            .expect("a settled baseline vault is terminal");
+        assert_eq!(settlement.disposition, BranchDisposition::Realized);
+        assert_eq!(settlement.position, [held, 0]);
+        assert_eq!(
+            settlement.settled_value,
+            [
+                Balance::from(score.0),
+                SETTLED_VALUE_SCALE.saturating_sub(Balance::from(score.0)),
+            ],
+            "the two legs are `[s, par - s]`, exactly what the baseline \
+             redemption pays — not `[par, 0]` regardless of `s`",
+        );
+        assert!(
+            settlement.settled_value[0] < SETTLED_VALUE_SCALE,
+            "strictly sub-par, so an always-par mutation cannot pass by accident",
+        );
+
+        assert_ok!(TradingRewards::settle_market_score(
+            RuntimeOrigin::signed(account(221)),
+            trader.clone(),
+            BASELINE_MARKET,
+        ));
+        let record = pallet_trading_rewards::Participants::<Runtime>::get(&trader)
+            .expect("the participant record survives the fold");
+        assert_eq!(
+            record.epoch.received,
+            held / 10 * 6,
+            "rule 3 credits `position x 0.6`, rounded down, on the Baseline \
+             book exactly as it does on a Decision book",
+        );
+        assert!(record.epoch.received > 0);
+    });
 }
 
 // ---------------------------------------------------------------------------

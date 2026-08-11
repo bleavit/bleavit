@@ -243,17 +243,26 @@ pub fn on_sell(
 }
 
 /// `floor(a × v / SETTLED_VALUE_SCALE)` for any `a`, with `v` already clamped
-/// to par — **and it cannot overflow**, which is the point.
+/// to par — **and the multiplication cannot overflow**, which is the point of
+/// the split below.
 ///
 /// Writing it as `a.checked_mul(v)? / SCALE` would fail for
 /// `a > u128::MAX / 1e9`, and a failure here is not a no-op like every other
 /// failure in this program: it comes back out of `settle_market_score`, and a
 /// market that has already settled can never take the timeout arm, so the score
 /// entry can neither fold nor expire and the bond behind it is locked for good.
-/// Splitting `a = q × SCALE + r` removes the failure instead of reporting it:
-/// `q × v ≤ q × SCALE ≤ a`, and `r × v < SCALE²= 1e18`, so neither product can
-/// leave `u128` and `floor(a × v / SCALE) = q × v + floor(r × v / SCALE)`
+/// Splitting `a = q × SCALE + r` removes *this* failure instead of reporting
+/// it: `q × v ≤ q × SCALE ≤ a`, and `r × v < SCALE²= 1e18`, so neither product
+/// can leave `u128` and `floor(a × v / SCALE) = q × v + floor(r × v / SCALE)`
 /// exactly.
+///
+/// **The guarantee is scoped to this one multiplication and goes no
+/// further.** [`on_settle`]'s own `s.received.checked_add(credit)` and
+/// [`fold`]'s two `checked_add`s into the epoch totals sit right next to this
+/// function and remain genuine — if practically unreachable at real
+/// magnitudes — `CoreError::Overflow` paths to the same bond-locking
+/// consequence described above. This split does not remove them; it removes
+/// only the one failure inside `scale_down` itself.
 fn scale_down(a: Balance, v: Balance) -> Option<Balance> {
     let whole = (a / SETTLED_VALUE_SCALE).checked_mul(v)?;
     let part = (a % SETTLED_VALUE_SCALE).checked_mul(v)? / SETTLED_VALUE_SCALE;

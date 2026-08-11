@@ -3851,7 +3851,18 @@ impl Contains<AccountId> for ServiceProtocolAccounts {
 pub struct ReservedProtocolAccounts;
 impl Contains<AccountId> for ReservedProtocolAccounts {
     fn contains(who: &AccountId) -> bool {
-        ProtocolAccounts::contains(who) || ServiceProtocolAccounts::contains(who)
+        ProtocolAccounts::contains(who)
+            || ServiceProtocolAccounts::contains(who)
+            // The TR7 trading-reward sovereign (08 §2.1/§2.6) custodies plain
+            // fungibles only — USDC bonds and a VIT budget — and never a
+            // conditional position, so a Signed `ledger.transfer` into it
+            // must be refused the same way every other protocol account is.
+            // It belongs here rather than in `ProtocolAccounts` because this
+            // set is destination-only: membership must not also grant the
+            // deposit/fee/inflow-cap exemptions `ProtocolAccounts` carries,
+            // and the reward pallet never splits, merges, or funds a book, so
+            // it needs none of them.
+            || *who == TradingRewardsPalletId::get().into_account_truncating()
     }
 }
 parameter_types! { pub InsuranceAccount: AccountId = insurance_account(); }
