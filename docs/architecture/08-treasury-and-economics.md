@@ -264,9 +264,11 @@ resolves it by funding, exactly as it resolves a thin budget.
 participant record. `top_up_bond(amount)` raises the hold. `withdraw_bond()` releases it. The
 bond is denominated in **USDC** rather than VIT, because the only externally signable VIT at
 genesis is the founding and ops allocation, and a VIT bond would restrict the program to
-insiders. The **earning cap** does the anti-farm work, and the **minimum bond** only prevents
-state bloat. `ledger.pos_dep` already prices an entry against bloat, so the minimum reuses that
-live row and adds no key.
+insiders. The **rate coupling** does the anti-farm work *(corrected 2026-08-11 — this sentence
+credited the earning cap, and the cap bounds exposure rather than delivering the invariant; see
+the rate paragraph below)*, the **earning cap** bounds what one account can extract in an epoch,
+and the **minimum bond** only prevents state bloat. `ledger.pos_dep` already prices an entry
+against bloat, so the minimum reuses that live row and adds no key.
 
 **Two rules make the bond a real backstop rather than a formality, and both are load-bearing.**
 An epoch's cap is fixed by the bond held when that epoch opened, and that amount stays held
@@ -294,7 +296,16 @@ claimant-adverse rounding straightforward.
    which is the one rounding direction R-7 forbids, and it would break the symmetry with rule 1 —
    a buy is charged more than the book cost and a sale is credited less, so the fee is adverse on
    both sides.)*
-3. Settlement adds `min(position, book_acquired) × settled_value` to `received`, rounded down.
+3. Settlement adds `min(position, book_acquired) × settled_value` to `received`, rounded down,
+   **and decrements `book_acquired` by the credited quantity**, exactly as rule 2 does for a
+   sale *(stated 2026-08-11)*. The decrement was implemented from the first and this rule did
+   not carry it, which an independent reference model found by disagreeing with the kernel on
+   that field in 59 % of 30,000 replayed vectors. It is kept rather than removed, because it is
+   the only thing that makes a second settlement of one entry a no-op: without it a repeated
+   call credits `received` again, and an over-credited reward is the direction R-7 forbids. It
+   is unread today — the pallet removes the score entry in the same transaction — so this is
+   defense in depth, and the rule says so rather than leaving a future caller to discover that
+   settlement is idempotent only by accident.
    `settled_value` is the branch's terminal redemption value per unit, **expressed as a fraction
    of par on [03](03-conditional-ledger.md)'s own `SCORE_SCALE` grid and clamped to par** *(made
    explicit 2026-08-10; the earlier wording said only "value per unit", which reads as a whole
@@ -472,13 +483,30 @@ approaches the whole notional `q`, the pair collects `r × 0.99q` against fees o
 break-even rate is therefore `2f / 0.99`, which is 60.6 bps at the `mkt.fee` default. The
 adopted 25 bps sits 2.4× inside it *(normative value: [13](13-parameters.md) §1)*.
 
-**Two independent defenses, and the second one has a boundary.** The bond is rate-independent
-and holds at any rate. The rate defense holds only while the fee stays at or above
-`r × 0.99 / 2`, which is 12.375 bps per leg, and `mkt.fee` is PARAM-amendable down to 5 bps. At
-that floor the break-even falls to about 10 bps and the adopted rate becomes farmable on rate
-alone. Nothing breaks, because the bond still covers it, but a fee amendment would silently
-retire a defense this subsection relies on. That is why the unsafe direction of `rwd.rate` is
-upward and its ceiling stays conservative.
+**The rate is the anti-farm defense, and the amendment screen is what keeps it one**
+*(corrected 2026-08-11)*. The rate defense holds exactly while `99 × rwd.rate ≤ 200 × mkt.fee`,
+which is `r ≤ 2f / 0.99` rearranged into integers. [13](13-parameters.md) §1 rule 7 makes that a
+**coupling screened at the amendment boundary**: neither row may be amended to a pair that
+violates it, so the fee cannot be lowered out from under the rate and the rate cannot be raised
+past the fee. Without the screen a `mkt.fee` amendment to its 5 bps floor takes the break-even to
+about 10 bps and makes the adopted 25 bps farmable on rate alone — a defense retired by a vote
+that never mentions this program.
+
+**The earning cap bounds exposure. It does not deliver the anti-farm invariant, and an earlier
+revision of this subsection said it did.** The cap is proportional to each account's **own**
+snapshot bond, and both accounts in a wash pair belong to one operator, so the operator chooses
+the two bonds independently. Bond the winning leg heavily and the losing leg at the floor, and
+the reward is capped high while the forfeit is capped low. Worked at the adopted values, both
+legs scoring a net 100,000 and `rate_headroom` 10, where the cap is `bond / (r × 10)`: the winner
+bonded 1,000,000 has a cap of 40,000,000, is therefore not capped at all, and takes
+`r × 100,000` = **250**; the loser bonded 1,000 has a cap of 40,000 and forfeits only
+`r × 40,000` = **100**. The pair is 150 ahead, with no budget pressure anywhere. It is still not
+profitable, because 30 bps on each leg of a 100,000 notional is 600 — and that is exactly the
+point: **the fees close this and the cap does not.** At **equal**
+bonds the pair nets exactly zero, which is why the claim survived three revisions of this
+document — every worked example had used one bond for both legs. What the cap does deliver is a
+ceiling on what any single account can extract per epoch, which bounds the blast radius of every
+other failure here. That is worth having and is not the invariant.
 
 **Why accuracy is nonetheless the right target.** Settlement follows the oracle's reading of the
 real outcome rather than the market price. An attacker who moves a decision price holds a

@@ -613,6 +613,58 @@ class CouplingTests(unittest.TestCase):
             with self.subTest(coupling=coupling.name):
                 self.assertTrue(coupling.holds(values))
 
+    def test_the_model_carries_every_boundary_screened_coupling_rule_7_names(self):
+        """Rule 7 numbers its boundary-screened couplings; the model must have them all.
+
+        This exists because it was caught by hand rather than by a gate.  TR9
+        added the third one and `COUPLINGS` still listed two, and nothing
+        noticed -- the model's other coupling tests all iterate whatever the
+        table happens to hold, so a missing entry is silence rather than a
+        failure.  A coupling absent from the model is a relation its adversarial
+        amendment search will never try to break, which is the one thing this
+        module exists to do.
+
+        Rule 7 names each addition in the form "is the Nth such coupling", with
+        the first (`gate.v_min`) introduced as the exception rather than
+        numbered -- so the count is the highest ordinal named.  Parsing the
+        document rather than restating a number is what keeps this from
+        becoming the same stale copy one layer over.
+        """
+        ordinals = {
+            "second": 2,
+            "third": 3,
+            "fourth": 4,
+            "fifth": 5,
+            "sixth": 6,
+            "seventh": 7,
+            "eighth": 8,
+        }
+        source = DOC_13.read_text(encoding="utf-8")
+        named = re.findall(r"is the (\w+) such coupling", source)
+        self.assertTrue(
+            named,
+            "rule 7 no longer numbers its couplings in the form this test "
+            "reads; re-derive the count rather than deleting the check",
+        )
+        unknown = [word for word in named if word not in ordinals]
+        self.assertEqual(unknown, [], f"unhandled ordinal(s) in rule 7: {unknown}")
+        documented = max(ordinals[word] for word in named)
+
+        # One family per relation: `gate.v_min` is four rows of one coupling.
+        families = {
+            coupling.name.rsplit("-", 1)[0]
+            if coupling.name.startswith("gate-v-min-")
+            else coupling.name
+            for coupling in COUPLINGS
+            if coupling.normative_binding_site is BindingSite.BOUNDARY_SCREENED
+        }
+        self.assertEqual(
+            len(families),
+            documented,
+            f"13 rule 7 names {documented} boundary-screened coupling(s) and the "
+            f"model carries {len(families)}: {sorted(families)}",
+        )
+
     def test_sq_547_required_consumer_checks_are_absent(self):
         """SQ-547. Derived: five rule-7 consumer checks are absent in Rust.
 
@@ -672,6 +724,7 @@ class CouplingTests(unittest.TestCase):
                 "gate-v-min-code",
                 "gate-v-min-meta",
                 "redemption-fee",
+                "reward-rate-wash-breakeven",
             },
         )
         for name in controls:

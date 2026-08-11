@@ -557,6 +557,22 @@ COUPLINGS: tuple[Coupling, ...] = tuple(
             ObservedConsumerCheck.NOT_APPLICABLE,
             "13 rule 7; 08 §10.6",
         ),
+        # Rule 7's third boundary-screened coupling (TR9, 2026-08-11).  Written
+        # cross-multiplied because the relation is `rwd.rate <= 2 * mkt.fee /
+        # 0.99` and the two integer spellings of that division do not round the
+        # same way: flooring the bound is conservative, flooring the left-hand
+        # side admits pairs the relation forbids.  Unlike the two above it does
+        # not protect a consumer from a value it cannot refuse — it carries the
+        # whole 08 §2.6 anti-farm invariant, so a pair outside it is a program
+        # whose only defense has lapsed.
+        Coupling(
+            "reward-rate-wash-breakeven",
+            ("rwd.rate", "mkt.fee"),
+            lambda s: 99 * s["rwd.rate"] <= 200 * s["mkt.fee"],
+            BindingSite.BOUNDARY_SCREENED,
+            ObservedConsumerCheck.NOT_APPLICABLE,
+            "13 rule 7; 08 §2.6",
+        ),
         Coupling(
             "decision-trailing-window",
             ("dec.window", "dec.trailing"),
