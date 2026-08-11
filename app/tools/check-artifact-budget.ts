@@ -111,9 +111,9 @@ const METADATA_BUDGET_GZ_BYTES = 1.5e6;
  */
 const METADATA_BLOB_COUNT_BOUND = 8;
 /** 10 §9.3's published per-blob measurement, in decimal MB gz. */
-const MEASURED_BLOB_GZ_MB = 0.15;
+const MEASURED_BLOB_GZ_MB = 0.16;
 /** 10 §9.3's published raw size of the committed `metadata.scale`, in bytes. */
-const MEASURED_BLOB_RAW_BYTES = 489_180;
+const MEASURED_BLOB_RAW_BYTES = 492_363;
 
 /** A budget refusal. Thrown rather than exiting, so the witness leg can require one. */
 export class BudgetError extends Error {
