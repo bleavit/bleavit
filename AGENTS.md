@@ -213,6 +213,26 @@ per milestone):
 > export WASM_BUILD_WORKSPACE_HINT=$PWD                    # the wasm builder cannot find
 >                                                          # Cargo.lock from an out-of-tree
 >                                                          # target dir
+> export CARGO_INCREMENTAL=0                               # what ci.yml:30 sets. Without it
+>                                                          # 23 GB of a 72 GB debug tree is
+>                                                          # incremental bookkeeping that a
+>                                                          # one-shot gate never reads
+> export CARGO_PROFILE_DEV_DEBUG=line-tables-only          # no gate here reads a backtrace's
+>                                                          # line numbers, and full debuginfo
+>                                                          # drives the serial link tail
+> ```
+>
+> **Prefer the feature-gated legs over the whole script (measured 2026-08-11).** The
+> no-argument script took **9 h 17 m** here against **61 min** for the identical file in
+> CI, and the gap is environment: CI restores a warm cargo cache and this box starts
+> cold. Do not read that as licence to skip what CI catches — a `#[cfg(feature = ...)]`
+> test runs under **no** unfeatured command, not `cargo test --workspace` and not
+> `cargo clippy --all-targets`, and this repository has been bitten at three separate
+> feature flags. Run these two directly instead, and let CI run the exhaustive file:
+>
+> ```bash
+> cargo test -p bleavit-runtime --features try-runtime --locked
+> cargo test -p bleavit-runtime --features runtime-benchmarks --locked tests_trading_rewards
 > ```
 >
 > **Put the `libclang` directory somewhere session-scoped, and re-check it before a

@@ -37,15 +37,24 @@ const PERBILL: u128 = 1_000_000_000;
 /// The reference model carries the same relation as
 /// `WASH_PROFIT_SHARE = Fraction(99, 100)` in `trading_rewards.py`. It is an
 /// 08 §2.6 constant with no 13 row, so runtime-code rule 4 is not engaged and
-/// neither copy can be derived from the registry; keeping each language's copy
-/// in one place is what stops the two drifting apart inside a language.
+/// neither copy can be derived from the registry. The **cross-language** copy
+/// is deliberate — 15 §4.4 wants the Python model independent — but the second
+/// *Rust* spelling was not: TR9 gave the predicate one home in
+/// `constitution_core::rwd_rate_coupled`, the function the amendment boundary
+/// and try-state both call, and this file now asks that function rather than
+/// re-deriving it. Only the constructive inverse below still spells the ratio,
+/// and `the_fee_floor_is_the_exact_inverse_of_the_screen` binds it back.
 const WASH_PROFIT_NUM: u128 = 99;
 const WASH_PROFIT_DEN: u128 = 100;
 const WASH_FEE_LEGS: u128 = 2;
 
 /// Whether a `(rwd.rate, mkt.fee)` pair satisfies `r <= 2f / 0.99`.
+///
+/// Delegated to the enforced screen on purpose. Line 294's assertion is a claim
+/// about the *generator*, so pointing it at the runtime's own predicate makes
+/// the property's input space exactly the space the chain admits.
 fn inside_the_coupling(rate_ppb: u32, fee_ppb: u32) -> bool {
-    WASH_PROFIT_NUM * u128::from(rate_ppb) <= WASH_FEE_LEGS * WASH_PROFIT_DEN * u128::from(fee_ppb)
+    constitution_core::rwd_rate_coupled(u128::from(rate_ppb), u128::from(fee_ppb))
 }
 
 /// The smallest `mkt.fee` the coupling admits at this rate: `ceil(99r / 200)`.
@@ -250,6 +259,43 @@ fn the_registry_bounds_admit_at_least_one_lawful_pair_at_every_rate() {
         "the coupling never binds inside the lawful rate range, so the sweep's \
          boundary draw is dead and the screen is untested by it",
     );
+}
+
+/// `coupling_fee_floor_ppb` is the only ratio still spelled twice in Rust, and
+/// this is what stops the second spelling drifting from the first.
+///
+/// It is a constructive inverse rather than a duplicate predicate: the screen
+/// answers *is this pair lawful*, and the strategies above need *the smallest
+/// fee that makes this rate lawful*. `rwd_rate_coupled` cannot supply that. So
+/// the binding is stated as the inverse property itself — the floor is admitted
+/// and one ppb below it is refused — which is false for any other function.
+///
+/// Sweeping every rate would take the whole lawful range, so the draws are the
+/// boundaries that matter plus the two the strategies actually use.
+#[test]
+fn the_fee_floor_is_the_exact_inverse_of_the_screen() {
+    let rates = [
+        1,
+        perbill_bounds(b"rwd.rate").0,
+        *COUPLING_BINDING_RATE_PPB,
+        *RWD_RATE_MAX_PPB,
+    ];
+    for rate in rates {
+        let floor = coupling_fee_floor_ppb(rate);
+        assert!(
+            inside_the_coupling(rate, floor),
+            "rate {rate} ppb: the screen refuses its own fee floor of {floor} ppb",
+        );
+        if floor > 0 {
+            assert!(
+                !inside_the_coupling(rate, floor - 1),
+                "rate {rate} ppb: the screen admits {} ppb, one below the floor {floor}, \
+                 so the floor is not the smallest lawful fee and every strategy that \
+                 starts there skips lawful pairs the chain would accept",
+                floor - 1,
+            );
+        }
+    }
 }
 
 proptest! {
