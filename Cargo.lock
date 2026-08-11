@@ -15641,6 +15641,8 @@ dependencies = [
  "parity-scale-codec",
  "proptest",
  "scale-info",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

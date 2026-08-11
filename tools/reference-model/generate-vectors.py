@@ -44,6 +44,9 @@ from bleavit_reference_model.lmsr import (
     worked_maker_example,
 )
 from bleavit_reference_model.market import baseline_market_scenarios
+from bleavit_reference_model.trading_rewards import (
+    differential_scenarios as trading_reward_scenarios,
+)
 from bleavit_reference_model.treasury import (
     attack_cost_hat,
     baseline_commitment,
@@ -3053,6 +3056,7 @@ def build():
         "welfare_normalization_scenarios": [
             _normalization_row(scenario) for scenario in NORMALIZATION_SCENARIOS
         ],
+        "trading_reward_scenarios": trading_reward_scenarios(),
         "treasury_scenarios": _treasury_scenarios(),
         "twap_scenarios": twap_scenarios,
         "window_stale_scenarios": window_stale_scenarios,

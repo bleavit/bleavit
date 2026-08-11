@@ -12,15 +12,48 @@
 //! `tools/ci/property-gates.sh rewards` runs the gate count.
 
 use constitution_core::{genesis_params, key16, ParamValue};
+// 13 §4's `ScoreEntryLifetime` is derived from a kernel constant rather than
+// stored, so `futarchy-primitives` is its one home (runtime-code rule 4).
+use futarchy_primitives::bounds::SCORE_ENTRY_LIFETIME_BLOCKS;
 use proptest::prelude::*;
 use std::sync::LazyLock;
 use trading_rewards_core::{
-    earning_cap, epoch_outcome, fold, on_buy, on_sell, on_settle, BranchDisposition, EpochScore,
-    MarketScore, Outcome, SETTLED_VALUE_SCALE,
+    earning_cap, epoch_outcome, fold, on_buy, on_sell, on_settle, score_entry_expired,
+    BranchDisposition, EpochScore, MarketScore, Outcome, SETTLED_VALUE_SCALE,
 };
 
 /// `Perbill` unity, the raw scalar unit 13 rule 8 fixes for a Perbill row.
 const PERBILL: u128 = 1_000_000_000;
+
+/// 08 §2.6's wash derivation, as the one pair of integers every use of it reads.
+///
+/// The subsection takes the worst case as "an extreme price where the winning
+/// leg's profit approaches the whole notional `q`", reads that profit as
+/// `0.99q`, and compares `r x 0.99q` against fees of `2fq`. Every appearance of
+/// `99` and `200` below is one of these two, cross-multiplied -- the coupling
+/// `WASH_PROFIT_NUM . r <= WASH_FEE_LEGS . WASH_PROFIT_DEN . f` and the fee
+/// bill `2 . f . net / 0.99`.
+///
+/// The reference model carries the same relation as
+/// `WASH_PROFIT_SHARE = Fraction(99, 100)` in `trading_rewards.py`. It is an
+/// 08 §2.6 constant with no 13 row, so runtime-code rule 4 is not engaged and
+/// neither copy can be derived from the registry; keeping each language's copy
+/// in one place is what stops the two drifting apart inside a language.
+const WASH_PROFIT_NUM: u128 = 99;
+const WASH_PROFIT_DEN: u128 = 100;
+const WASH_FEE_LEGS: u128 = 2;
+
+/// Whether a `(rwd.rate, mkt.fee)` pair satisfies `r <= 2f / 0.99`.
+fn inside_the_coupling(rate_ppb: u32, fee_ppb: u32) -> bool {
+    WASH_PROFIT_NUM * u128::from(rate_ppb) <= WASH_FEE_LEGS * WASH_PROFIT_DEN * u128::from(fee_ppb)
+}
+
+/// The smallest `mkt.fee` the coupling admits at this rate: `ceil(99r / 200)`.
+fn coupling_fee_floor_ppb(rate_ppb: u32) -> u32 {
+    let numerator = WASH_PROFIT_NUM * u128::from(rate_ppb);
+    let denominator = WASH_FEE_LEGS * WASH_PROFIT_DEN;
+    u32::try_from(numerator.div_ceil(denominator)).expect("a ppb rate fits u32")
+}
 
 /// The `[min, max]` of one 13 §1 Perbill row, read from the genesis registry.
 ///
@@ -64,21 +97,36 @@ static MKT_FEE_DEFAULT_PPB: LazyLock<u32> = LazyLock::new(|| {
     value
 });
 
-/// Proptest's default `max_global_rejects` is 1,024, and the rate/fee coupling
-/// screen below rejects about eleven per cent of the drawn pairs -- so the
-/// suite aborts on rejects at anything past ten thousand cases and never
-/// reaches the invariant at all. Measured: a 200,000-case run stopped after
-/// 8,499 successes and 1,024 rejects.
+/// 08 §2.6's minimum bond, which is `ledger.pos_dep` and not a value of its
+/// own: *"`ledger.pos_dep` already prices an entry against bloat, so the
+/// minimum reuses that live row and adds no key."*
 ///
-/// Scaling the allowance with the case count keeps the screen live, which is
-/// the point of drawing the fee at all. Widening the fee range instead, or
-/// deriving the fee from the rate, would remove the rejects by removing the
-/// hypothesis.
-fn config() -> ProptestConfig {
-    let mut cfg = ProptestConfig::default();
-    cfg.max_global_rejects = cfg.cases.saturating_mul(4).max(1_024);
-    cfg
-}
+/// It is the bond at which the loser's forfeit -- and therefore the slack in
+/// the wash bound -- is smallest, so it is the lower end of every bond the
+/// properties draw. Read from the registry per runtime-code rule 4.
+static MIN_BOND_USDC: LazyLock<u128> = LazyLock::new(|| {
+    let key = key16(b"ledger.pos_dep");
+    let record = genesis_params()
+        .into_iter()
+        .find(|r| r.key == key)
+        .expect("13 §1 seeds ledger.pos_dep at genesis");
+    let ParamValue::Balance(value) = record.value else {
+        panic!("13 §1 declares ledger.pos_dep a Balance");
+    };
+    value
+});
+
+/// The lowest `rwd.rate` whose coupling floor `ceil(99r / 200)` clears 13 §1's
+/// own `mkt.fee` minimum.
+///
+/// Below it the registry floor binds first, the coupling is slack at every
+/// admissible fee, and the anti-farm bound cannot be evaluated anywhere near
+/// its boundary. The wash property therefore draws most of its rates from
+/// above this point -- and it is derived, so a `mkt.fee` amendment moves it.
+static COUPLING_BINDING_RATE_PPB: LazyLock<u32> = LazyLock::new(|| {
+    let numerator = WASH_FEE_LEGS * WASH_PROFIT_DEN * u128::from(*MKT_FEE_MIN_PPB);
+    u32::try_from(numerator / WASH_PROFIT_NUM + 1).expect("a ppb rate fits u32")
+});
 
 /// The reward or debit an outcome carries, reading `Neutral` as zero.
 ///
@@ -127,12 +175,49 @@ fn debit_of(outcome: Outcome) -> u128 {
 /// invariant would report as a breach. The drawn ranges keep the product well
 /// inside `u128` -- `200 x 1e9 x 1e7` is `2e18`.
 fn wash_pair_fee_cost(net: u128, fee_ppb: u32) -> u128 {
-    200 * net * u128::from(fee_ppb) / (99 * PERBILL)
+    WASH_FEE_LEGS * WASH_PROFIT_DEN * net * u128::from(fee_ppb) / (WASH_PROFIT_NUM * PERBILL)
+}
+
+/// The `(rate, fee)` pairs the coupling admits, **drawn rather than filtered**.
+///
+/// This is the round-1 fix for two separate defects at once, and the reason it
+/// is a strategy rather than a `prop_assume!`.
+///
+/// 1. **A filtered boundary is never sampled.** The bound is tight only where
+///    `200f - 99r` approaches zero, and a uniform fee draw lands there with
+///    probability zero. Filtering with `prop_assume!` kept every admissible
+///    pair and reached the boundary at none of them, which is why the property
+///    below killed 0 of 32 kernel mutations. The floor is drawn explicitly,
+///    with weight, so the tight case is the common case.
+/// 2. **The filter aborted the shard.** Proptest's default `max_global_rejects`
+///    is 1,024 and the screen rejected about eleven per cent of pairs, so a
+///    200,000-case run stopped after 8,499 successes without evaluating the
+///    invariant once. Deriving the fee removes the rejects entirely rather than
+///    raising the allowance to outrun them.
+///
+/// The hypothesis stays visible: the property asserts the coupling holds for
+/// every pair this yields, so a derivation that drifted outside it fails rather
+/// than quietly widening the claim.
+fn admissible_rate_and_fee() -> impl Strategy<Value = (u32, u32)> {
+    let rate = prop_oneof![
+        // Where the coupling floor clears 13 §1's `mkt.fee` minimum, so the
+        // boundary is reachable at all.
+        4 => *COUPLING_BINDING_RATE_PPB..=*RWD_RATE_MAX_PPB,
+        1 => 1u32..=*RWD_RATE_MAX_PPB,
+    ];
+    rate.prop_flat_map(|rate_ppb| {
+        let floor = coupling_fee_floor_ppb(rate_ppb).max(*MKT_FEE_MIN_PPB);
+        let fee = prop_oneof![
+            // Exactly at the boundary, where the fee bill is the whole bound.
+            4 => Just(floor),
+            2 => floor..=floor.saturating_add(1_000).min(*MKT_FEE_MAX_PPB),
+            1 => floor..=*MKT_FEE_MAX_PPB,
+        ];
+        (Just(rate_ppb), fee)
+    })
 }
 
 proptest! {
-    #![proptest_config(config())]
-
     /// The invariant the whole design rests on. For any set of accounts whose
     /// positions offset, total payout minus total forfeit is never positive --
     /// evaluated at every rate the registry admits.
@@ -142,26 +227,38 @@ proptest! {
     /// equal-bond case and returns green -- that is exactly how the TR2 review
     /// found the invariant did not hold. The pair is one operator, so the bonds
     /// are theirs to choose, and the unequal split is the interesting one: it
-    /// caps the loser's forfeit while leaving the winner's reward uncapped, so
-    /// the forfeit contributes almost nothing and the fee bill carries the
-    /// bound alone.
+    /// caps the loser's forfeit while leaving the winner's reward uncapped.
     ///
-    /// The fee is swept for the same reason. An earlier draft swept only the
-    /// rate and asserted the screen with a `prop_assume!` the registry ceiling
-    /// already satisfied at every drawn value, so the assume filtered nothing.
-    /// The invariant depends on the PAIR, so the pair is drawn.
+    /// **What this property can and cannot detect, measured rather than
+    /// assumed.** Two terms give the bound slack, and only one of them was an
+    /// accident:
+    ///
+    /// * the fee term, which is slack everywhere except at the coupling floor.
+    ///   That was the accident, and [`admissible_rate_and_fee`] fixes it by
+    ///   drawing the floor;
+    /// * the forfeit, which at a binding loser cap is `bond_l / 10` -- real
+    ///   money the pair pays, and therefore slack the design genuinely has.
+    ///   `bond_l` is drawn from `ledger.pos_dep`, the lawful minimum bond, so
+    ///   the smallest slack the program admits is sampled; but a mutation that
+    ///   inflates the reward by less than that is invisible **here** by
+    ///   construction, and no amount of drawing changes it.
+    ///
+    /// So this property owns the composed economic claim, and the two
+    /// properties after it own the per-leg contracts a single-unit mutation
+    /// moves. All three are needed and none subsumes another.
     #[test]
     fn offsetting_accounts_never_net_positive(
         net in 1u128..1_000_000_000u128,
-        bond_w in 100_000u128..1_000_000_000u128,
-        bond_l in 100_000u128..1_000_000_000u128,
-        rate_ppb in 1u32..=*RWD_RATE_MAX_PPB,
-        fee_ppb in *MKT_FEE_MIN_PPB..=*MKT_FEE_MAX_PPB,
+        bond_w in *MIN_BOND_USDC..1_000_000_000u128,
+        bond_l in *MIN_BOND_USDC..1_000_000_000u128,
+        (rate_ppb, fee_ppb) in admissible_rate_and_fee(),
     ) {
-        // The rate coupling is what makes this hold. Respect it, and let the
-        // sweep prove the pairs it admits are the safe ones. It binds whenever
-        // `mkt.fee` is below 2.97e6 ppb, about a quarter of the drawn range.
-        prop_assume!(99 * u128::from(rate_ppb) <= 200 * u128::from(fee_ppb));
+        // Drawn rather than filtered, so this is a claim about the generator
+        // instead of a screen that silently discards work.
+        prop_assert!(
+            inside_the_coupling(rate_ppb, fee_ppb),
+            "the strategy produced rate {rate_ppb} / fee {fee_ppb} outside the coupling",
+        );
 
         let winner = EpochScore { spent: 0, received: net };
         let loser = EpochScore { spent: net, received: 0 };
@@ -200,14 +297,42 @@ proptest! {
         prop_assert!(reward <= ceiling, "reward {reward} above r x net = {ceiling}");
     }
 
+    /// The debit leg's own contract, and the mirror of the property above:
+    /// a forfeit is exactly `ceil(r x min(|net|, cap))`. R-7 puts the debit's
+    /// rounding in the opposite direction from the reward's, and stating both
+    /// as equalities is what stops a change that keeps the two legs symmetric
+    /// from passing every comparison between them.
+    #[test]
+    fn a_debit_is_the_rate_times_the_score_rounded_up(
+        net in 1u128..u128::from(u64::MAX),
+        bond in 0u128..1_000_000_000_000_000u128,
+        rate_ppb in 0u32..=*RWD_RATE_MAX_PPB,
+    ) {
+        let loser = EpochScore { spent: net, received: 0 };
+        let debit = debit_of(epoch_outcome(&loser, bond, rate_ppb));
+        let scored = core::cmp::min(net, earning_cap(bond, rate_ppb));
+        let exact = scored
+            .checked_mul(u128::from(rate_ppb))
+            .expect("the drawn magnitudes stay inside u128");
+        prop_assert_eq!(debit, exact.div_ceil(PERBILL));
+    }
+
     /// At equal bonds the caps are equal, so the kernel bounds the pair on its
     /// own and no fee argument is needed. This is the claim the retired
     /// single-bond draft actually proved, kept because it is true and because
     /// it isolates which half of the design each defense carries.
+    ///
+    /// **It is near-tautological in one direction, and that is worth naming.**
+    /// With one cap the property reduces to `ceil(x) >= floor(x)` on a single
+    /// quantity, so it cannot detect any change that keeps the two legs
+    /// symmetric -- both legs flooring passes it. What it does detect is
+    /// asymmetry: a cap applied to one side only, or a reward that overpays.
+    /// `a_debit_is_the_rate_times_the_score_rounded_up` is what pins the
+    /// symmetric case.
     #[test]
     fn at_equal_bonds_the_forfeit_alone_covers_the_reward(
         net in 1u128..u128::from(u64::MAX),
-        bond in 1u128..1_000_000_000_000u128,
+        bond in *MIN_BOND_USDC..1_000_000_000_000u128,
         rate_ppb in 1u32..=*RWD_RATE_MAX_PPB,
     ) {
         let winner = EpochScore { spent: 0, received: net };
@@ -215,6 +340,59 @@ proptest! {
         let reward = reward_of(epoch_outcome(&winner, bond, rate_ppb));
         let debit = debit_of(epoch_outcome(&loser, bond, rate_ppb));
         prop_assert!(debit >= reward, "debit {debit} < reward {reward} at net {net}");
+    }
+
+    /// Rule 1's two counters move together on every buy and differ by exactly
+    /// the fees: `spent - mirror_principal == sum(fee)`.
+    ///
+    /// This is the split the annulled arm is built on. Nothing else in the
+    /// suite pins it, and both ways of breaking it are R-7-adverse: charging
+    /// the fee to the mirror leg under-punishes an annulled branch by the whole
+    /// fee bill (the SQ-1051 direction), and dropping it from `spent` inflates
+    /// every net and therefore every reward.
+    #[test]
+    fn the_gap_between_spent_and_the_mirror_leg_is_exactly_the_fees(
+        buys in prop::collection::vec(
+            (0usize..2, 0u128..1_000_000u128, 0u128..1_000_000u128, 0u128..10_000u128),
+            0..8,
+        ),
+    ) {
+        let mut s = MarketScore::default();
+        let mut fees = 0u128;
+        let mut costs = 0u128;
+        for (side, qty, cost, fee) in buys {
+            on_buy(&mut s, side, qty, cost, fee).expect("bounded magnitudes cannot overflow");
+            fees += fee;
+            costs += cost;
+        }
+        prop_assert_eq!(s.mirror_principal, costs, "the mirror leg is the cost alone");
+        prop_assert_eq!(s.spent, costs + fees, "the charge is cost plus fee");
+        prop_assert_eq!(s.spent - s.mirror_principal, fees);
+        // The annulled arm therefore folds a debit of exactly the fees, which
+        // is 04 §6.2's G-3 promise restated.
+        let mut epoch = EpochScore::default();
+        fold(&mut epoch, &s, BranchDisposition::Annulled).expect("bounded magnitudes");
+        prop_assert_eq!(epoch.spent - epoch.received, fees);
+    }
+
+    /// The absolute timeout is `>=`, not `>`: an entry at exactly the lifetime
+    /// has expired. The boundary is the whole content of the rule -- an
+    /// off-by-one here is a bond released a block late or a block early on the
+    /// only escape a never-settling market has.
+    #[test]
+    fn an_entry_expires_at_the_lifetime_and_not_a_block_later(
+        created_at in 0u64..1_000_000_000u64,
+        elapsed in 0u64..u64::from(SCORE_ENTRY_LIFETIME_BLOCKS) * 2,
+    ) {
+        let lifetime = u64::from(SCORE_ENTRY_LIFETIME_BLOCKS);
+        prop_assert_eq!(
+            score_entry_expired(created_at, created_at.saturating_add(elapsed)),
+            elapsed >= lifetime,
+        );
+        // Stated again at the boundary itself, which a uniform draw over a
+        // ten-million-block window reaches once in ten million cases.
+        prop_assert!(!score_entry_expired(created_at, created_at + lifetime - 1));
+        prop_assert!(score_entry_expired(created_at, created_at + lifetime));
     }
 
     /// Selling inventory that never came through the book scores nothing,
@@ -254,25 +432,130 @@ proptest! {
         prop_assert_eq!(s.book_acquired[side], acquired - covered);
     }
 
-    /// Rule 3 credits a fraction of par and never more than par. A unit cannot
-    /// redeem above par, so the clamp bounds the credit by the book-acquired
-    /// quantity whatever the settlement adapter supplies -- including a value
-    /// far above the grid, which crosses a runtime seam and is untrusted.
+    /// Rule 3 credits a fraction of par and never more than par, on the branch
+    /// the units were acquired on.
+    ///
+    /// **The value is drawn on the grid the rule lives on.** An earlier draft
+    /// drew it from `0..u64::MAX`, which reaches a sub-par value with
+    /// probability `1e9 / 1.8e19` -- about `5e-11`, so `0.00005` expected
+    /// sub-par cases across the whole million-case gate. The clamp then made
+    /// `value` par at every drawn point, the equality below degenerated to
+    /// `received == eligible`, and rule 3's fractional arithmetic was never
+    /// executed. Four mutations survived, including 08 §2.6's own
+    /// `"read as an integer, every sub-par settlement floors to zero"` defect
+    /// verbatim -- the one the rule spends three paragraphs on. The
+    /// above-par arm is kept with real weight, because the untrusted-seam clamp
+    /// is a separate claim and dropping it would trade one blind spot for
+    /// another.
     #[test]
     fn settlement_never_credits_above_par(
+        side in 0usize..2,
         acquired in 0u128..1_000_000_000u128,
         position in 0u128..u128::from(u64::MAX),
-        raw_value in 0u128..u128::from(u64::MAX),
+        raw_value in prop_oneof![
+            // Sub-par: where rule 3's fraction of par actually lives.
+            5 => 0u128..SETTLED_VALUE_SCALE,
+            // The three exact points the fraction degenerates at.
+            2 => prop::sample::select(vec![
+                0u128,
+                1,
+                SETTLED_VALUE_SCALE - 1,
+                SETTLED_VALUE_SCALE,
+            ]),
+            // Above par, from just over the grid to the far end of the type:
+            // the adapter is outside this kernel and its value is untrusted.
+            2 => SETTLED_VALUE_SCALE..(4 * SETTLED_VALUE_SCALE),
+            1 => SETTLED_VALUE_SCALE..u128::from(u64::MAX),
+        ],
     ) {
         let mut s = MarketScore::default();
-        on_buy(&mut s, 0, acquired, 0, 0).expect("a zero-cost buy cannot overflow");
-        on_settle(&mut s, [position, 0], [raw_value, 0])
-            .expect("the split product cannot overflow");
+        on_buy(&mut s, side, acquired, 0, 0).expect("a zero-cost buy cannot overflow");
+        let mut positions = [0u128; 2];
+        positions[side] = position;
+        let mut values = [0u128; 2];
+        values[side] = raw_value;
+        on_settle(&mut s, positions, values).expect("the split product cannot overflow");
         let eligible = core::cmp::min(position, acquired);
         prop_assert!(s.received <= eligible);
         let value = core::cmp::min(raw_value, SETTLED_VALUE_SCALE);
         prop_assert_eq!(s.received, eligible * value / SETTLED_VALUE_SCALE);
-        prop_assert_eq!(s.book_acquired[0], acquired - eligible);
+        prop_assert_eq!(s.book_acquired[side], acquired - eligible);
+        prop_assert_eq!(s.book_acquired[1 - side], 0, "the other branch is untouched");
+    }
+
+    /// Both branches are credited, each at its own settled value. Every other
+    /// settlement property populates one side, and the kernel's loop over the
+    /// pair is the kind of thing that reads as covered while a `0..1` bound
+    /// would pass every one of them.
+    ///
+    /// The pair `[s, SCORE_SCALE - s]` is the shape the runtime adapter
+    /// produces, because 03 §2.3 pays a LONG unit `s` and a SHORT unit `1 - s`.
+    #[test]
+    fn settlement_credits_each_branch_at_its_own_value(
+        long_units in 0u128..1_000_000u128,
+        short_units in 0u128..1_000_000u128,
+        long_value in 0u128..=SETTLED_VALUE_SCALE,
+    ) {
+        let short_value = SETTLED_VALUE_SCALE - long_value;
+        let mut s = MarketScore::default();
+        on_buy(&mut s, 0, long_units, 0, 0).expect("bounded magnitudes cannot overflow");
+        on_buy(&mut s, 1, short_units, 0, 0).expect("bounded magnitudes cannot overflow");
+        on_settle(&mut s, [long_units, short_units], [long_value, short_value])
+            .expect("bounded magnitudes cannot overflow");
+        prop_assert_eq!(
+            s.received,
+            long_units * long_value / SETTLED_VALUE_SCALE
+                + short_units * short_value / SETTLED_VALUE_SCALE,
+        );
+        prop_assert_eq!(s.book_acquired, [0, 0]);
+    }
+
+    /// Rule 3 decrements `book_acquired` by the credited quantity, so no unit
+    /// is ever credited twice however many times an entry is settled.
+    ///
+    /// 08 §2.6 stated the decrement on 2026-08-11, after the reference model
+    /// disagreed with the kernel over the field. Without it a repeated
+    /// settlement credits the same units again, which is the over-credit
+    /// direction R-7 forbids -- and the exact-value assertions below are what
+    /// makes that visible, since the two calls have identical arguments and a
+    /// missing decrement simply doubles the credit.
+    #[test]
+    fn no_unit_is_credited_by_two_settlements(
+        side in 0usize..2,
+        acquired in 0u128..1_000_000u128,
+        position in 0u128..1_000_000u128,
+        value in 0u128..=SETTLED_VALUE_SCALE,
+    ) {
+        let mut s = MarketScore::default();
+        on_buy(&mut s, side, acquired, 0, 0).expect("bounded magnitudes cannot overflow");
+        let mut positions = [0u128; 2];
+        positions[side] = position;
+        let mut values = [0u128; 2];
+        values[side] = value;
+
+        on_settle(&mut s, positions, values).expect("bounded magnitudes cannot overflow");
+        let first_units = core::cmp::min(position, acquired);
+        prop_assert_eq!(s.received, first_units * value / SETTLED_VALUE_SCALE);
+        prop_assert_eq!(s.book_acquired[side], acquired - first_units);
+        let after_first = s.received;
+
+        // The same call again. It may consume a second tranche when the first
+        // settlement was partial, but it may never re-credit a unit the first
+        // one already consumed.
+        on_settle(&mut s, positions, values).expect("bounded magnitudes cannot overflow");
+        let second_units = core::cmp::min(position, acquired - first_units);
+        prop_assert_eq!(
+            s.received,
+            after_first + second_units * value / SETTLED_VALUE_SCALE,
+        );
+        prop_assert_eq!(s.book_acquired[side], acquired - first_units - second_units);
+        // Total units credited never exceeds what the book supplied.
+        prop_assert!(first_units + second_units <= acquired);
+        if position >= acquired {
+            // A full settlement leaves nothing, so the repeat is a strict no-op.
+            prop_assert_eq!(s.received, after_first);
+            prop_assert_eq!(s.book_acquired[side], 0);
+        }
     }
 
     /// The invariant the annulled arm rests on: rule 1 raises `spent` by

@@ -13,10 +13,11 @@ from bleavit_reference_model.trading_rewards import (
     MAX_BUDGET_AUTHORIZATIONS,
     MAX_PARTICIPANTS,
     MAX_SCORED_MARKETS_PER_ACCOUNT,
+    MIN_BOND,
     PERBILL_ONE,
     RATE_HEADROOM,
     SCORE_ENTRY_LIFETIME_BLOCKS,
-    SETTLED_VALUE_SCALE,
+    SCORE_SCALE,
     VIT_USDC_RATE_MAX_FIXED,
     VIT_USDC_RATE_MIN_FIXED,
     VIT_USDC_RATE_REF_FIXED,
@@ -33,6 +34,7 @@ from bleavit_reference_model.trading_rewards import (
     check_wash_bound_needs_the_notional_factor,
     claim_vit,
     clamp_reward_to_budget,
+    differential_scenarios,
     earning_cap,
     epoch_outcome,
     fold,
@@ -41,6 +43,7 @@ from bleavit_reference_model.trading_rewards import (
     on_buy,
     on_sell,
     on_settle,
+    replay_scenario,
     reserve_vit,
     score_entry_expired,
     wash_breakeven_rate_ppb,
@@ -114,10 +117,10 @@ class ScoreRules(unittest.TestCase):
 
     def test_a_buy_charges_cost_plus_fee_and_credits_the_mirror_principal(self):
         score = MarketScore()
-        on_buy(score, cost=1_000, fee=book_fee(1_000, 30 * BPS), quantity=400)
+        on_buy(score, 0, cost=1_000, fee=book_fee(1_000, 30 * BPS), quantity=400)
         self.assertEqual(score.spent, 1_003)
         self.assertEqual(score.mirror_principal, 1_000)
-        self.assertEqual(score.book_acquired, 400)
+        self.assertEqual(score.book_acquired, [400, 0])
         self.assertEqual(score.received, 0)
 
     def test_the_book_fee_rounds_up_on_both_sides(self):
@@ -128,40 +131,40 @@ class ScoreRules(unittest.TestCase):
 
     def test_a_sale_credits_proceeds_net_of_the_withheld_fee(self):
         score = MarketScore()
-        on_buy(score, cost=1_000, fee=3, quantity=400)
-        credited = on_sell(score, proceeds=1_200, fee=book_fee(1_200, 30 * BPS), quantity=400)
+        on_buy(score, 0, cost=1_000, fee=3, quantity=400)
+        credited = on_sell(score, 0, proceeds=1_200, fee=book_fee(1_200, 30 * BPS), quantity=400)
         self.assertEqual(credited, 1_196)
         self.assertEqual(score.received, 1_196)
-        self.assertEqual(score.book_acquired, 0)
+        self.assertEqual(score.book_acquired, [0, 0])
 
     def test_off_book_inventory_never_scores(self):
         """The `book_acquired` rule: a complete set created through `split*`
         and sold into the book posts nothing against a `spent` of zero."""
         score = MarketScore()
-        credited = on_sell(score, proceeds=1_000_000, fee=0, quantity=1_000)
+        credited = on_sell(score, 0, proceeds=1_000_000, fee=0, quantity=1_000)
         self.assertEqual(credited, 0)
         self.assertEqual(score.received, 0)
-        self.assertEqual(score.book_acquired, 0)
+        self.assertEqual(score.book_acquired, [0, 0])
 
     def test_only_the_covered_part_of_a_mixed_sale_scores(self):
         score = MarketScore()
-        on_buy(score, cost=1_000, fee=3, quantity=100)
-        credited = on_sell(score, proceeds=800, fee=0, quantity=400)
+        on_buy(score, 0, cost=1_000, fee=3, quantity=100)
+        credited = on_sell(score, 0, proceeds=800, fee=0, quantity=400)
         self.assertEqual(credited, 200)
-        self.assertEqual(score.book_acquired, 0)
+        self.assertEqual(score.book_acquired, [0, 0])
 
     def test_the_covered_share_rounds_down(self):
         score = MarketScore()
-        on_buy(score, cost=10, fee=0, quantity=1)
-        credited = on_sell(score, proceeds=10, fee=1, quantity=3)
+        on_buy(score, 0, cost=10, fee=0, quantity=1)
+        credited = on_sell(score, 0, proceeds=10, fee=1, quantity=3)
         self.assertEqual(credited, 3)
 
     def test_settlement_credits_a_fraction_of_par(self):
         """Rule 3: a unit of a branch that settled at 0.6 is worth six tenths
         of a base unit, never a whole one."""
         score = MarketScore()
-        on_buy(score, cost=600, fee=2, quantity=1_000)
-        credited = on_settle(score, position=1_000, settled_value=6 * SETTLED_VALUE_SCALE // 10)
+        on_buy(score, 0, cost=600, fee=2, quantity=1_000)
+        credited = on_settle(score, position=[1_000, 0], settled_value=[6 * SCORE_SCALE // 10, 0])
         self.assertEqual(credited, 600)
         self.assertEqual(score.received, 600)
 
@@ -169,33 +172,88 @@ class ScoreRules(unittest.TestCase):
         """The defect the fraction-of-par wording exists to prevent: read as a
         whole number, every sub-par settlement would credit nothing."""
         score = MarketScore()
-        on_buy(score, cost=990, fee=3, quantity=1_000)
-        on_settle(score, position=1_000, settled_value=SETTLED_VALUE_SCALE - 1)
+        on_buy(score, 0, cost=990, fee=3, quantity=1_000)
+        on_settle(score, position=[1_000, 0], settled_value=[SCORE_SCALE - 1, 0])
         self.assertEqual(score.received, 999)
         self.assertGreater(score.received, 0)
 
     def test_settlement_is_clamped_to_par(self):
         score = MarketScore()
-        on_buy(score, cost=1_000, fee=3, quantity=1_000)
-        credited = on_settle(score, position=1_000, settled_value=5 * SETTLED_VALUE_SCALE)
+        on_buy(score, 0, cost=1_000, fee=3, quantity=1_000)
+        credited = on_settle(score, position=[1_000, 0], settled_value=[5 * SCORE_SCALE, 0])
         self.assertEqual(credited, 1_000)
 
     def test_settlement_credits_only_the_book_acquired_part_of_the_position(self):
         score = MarketScore()
-        on_buy(score, cost=100, fee=0, quantity=100)
-        credited = on_settle(score, position=10_000, settled_value=SETTLED_VALUE_SCALE)
+        on_buy(score, 0, cost=100, fee=0, quantity=100)
+        credited = on_settle(score, position=[10_000, 0], settled_value=[SCORE_SCALE, 0])
         self.assertEqual(credited, 100)
+
+    def test_settlement_decrements_the_credited_quantity(self):
+        """Rule 3's decrement, stated 2026-08-11 after this model disagreed
+        with the kernel on the field for 59 % of 30,000 replayed vectors."""
+        score = MarketScore()
+        on_buy(score, 0, cost=900, fee=3, quantity=1_000)
+        on_settle(score, position=[400, 0], settled_value=[SCORE_SCALE, 0])
+        self.assertEqual(score.book_acquired, [600, 0])
+
+    def test_settling_the_same_entry_twice_credits_it_once(self):
+        """What the decrement is for: without it a repeated call credits the
+        same units again, which is the over-credit direction R-7 forbids."""
+        score = MarketScore()
+        on_buy(score, 0, cost=900, fee=3, quantity=1_000)
+        first = on_settle(score, position=[1_000, 0], settled_value=[SCORE_SCALE, 0])
+        second = on_settle(score, position=[1_000, 0], settled_value=[SCORE_SCALE, 0])
+        self.assertEqual(first, 1_000)
+        self.assertEqual(second, 0)
+        self.assertEqual(score.received, 1_000)
+        self.assertEqual(score.book_acquired, [0, 0])
+
+    def test_a_sale_after_settlement_credits_nothing(self):
+        score = MarketScore()
+        on_buy(score, 0, cost=900, fee=3, quantity=1_000)
+        on_settle(score, position=[1_000, 0], settled_value=[SCORE_SCALE, 0])
+        self.assertEqual(on_sell(score, 0, proceeds=5_000, fee=15, quantity=1_000), 0)
+
+    def test_the_two_branch_sides_carry_independent_counters(self):
+        """Rule 1 records the filled quantity "for that branch", and 03 §2.3
+        settles a LONG unit at `s` and a SHORT unit at `1 - s`."""
+        score = MarketScore()
+        on_buy(score, 0, cost=100, fee=0, quantity=200)
+        on_buy(score, 1, cost=150, fee=0, quantity=300)
+        self.assertEqual(score.book_acquired, [200, 300])
+        long_value = SCORE_SCALE // 4
+        credited = on_settle(
+            score,
+            position=[200, 300],
+            settled_value=[long_value, SCORE_SCALE - long_value],
+        )
+        self.assertEqual(credited, 200 // 4 + 300 * 3 // 4)
+        self.assertEqual(score.book_acquired, [0, 0])
+
+    def test_a_sale_on_one_side_leaves_the_other_untouched(self):
+        score = MarketScore()
+        on_buy(score, 0, cost=100, fee=0, quantity=200)
+        on_buy(score, 1, cost=150, fee=0, quantity=300)
+        on_sell(score, 1, proceeds=600, fee=0, quantity=300)
+        self.assertEqual(score.book_acquired, [200, 0])
+        self.assertEqual(score.received, 600)
+
+    def test_a_side_outside_the_pair_is_refused(self):
+        score = MarketScore()
+        with self.assertRaises(ValueError):
+            on_buy(score, 2, cost=1, fee=0, quantity=1)
 
     def test_a_sale_may_not_be_credited_gross_of_the_fee(self):
         """Rule 2's own reason: crediting the gross figure would score a trader
         on value the protocol took."""
         gross = MarketScore()
         net = MarketScore()
-        on_buy(gross, cost=1_000, fee=3, quantity=1_000)
-        on_buy(net, cost=1_000, fee=3, quantity=1_000)
+        on_buy(gross, 0, cost=1_000, fee=3, quantity=1_000)
+        on_buy(net, 0, cost=1_000, fee=3, quantity=1_000)
         fee = book_fee(1_200, 30 * BPS)
-        on_sell(gross, proceeds=1_200, fee=0, quantity=1_000)
-        on_sell(net, proceeds=1_200, fee=fee, quantity=1_000)
+        on_sell(gross, 0, proceeds=1_200, fee=0, quantity=1_000)
+        on_sell(net, 0, proceeds=1_200, fee=fee, quantity=1_000)
         self.assertEqual(gross.received - net.received, fee)
 
 
@@ -205,12 +263,12 @@ class Dispositions(unittest.TestCase):
     def _bought(self, buys):
         score = MarketScore()
         for cost, quantity in buys:
-            on_buy(score, cost=cost, fee=book_fee(cost, 30 * BPS), quantity=quantity)
+            on_buy(score, 0, cost=cost, fee=book_fee(cost, 30 * BPS), quantity=quantity)
         return score
 
     def test_realized_scores_received_minus_spent(self):
         score = self._bought([(1_000, 1_000)])
-        on_settle(score, position=1_000, settled_value=SETTLED_VALUE_SCALE)
+        on_settle(score, position=[1_000, 0], settled_value=[SCORE_SCALE, 0])
         self.assertEqual(market_result(score, BranchDisposition.REALIZED), 1_000 - 1_003)
 
     def test_the_annulled_arm_is_exactly_minus_the_fees(self):
@@ -224,7 +282,7 @@ class Dispositions(unittest.TestCase):
     def test_the_annulled_arm_discards_every_received_credit(self):
         score = self._bought([(1_000, 1_000)])
         without_sale = market_result(score, BranchDisposition.ANNULLED)
-        on_sell(score, proceeds=900, fee=book_fee(900, 30 * BPS), quantity=1_000)
+        on_sell(score, 0, proceeds=900, fee=book_fee(900, 30 * BPS), quantity=1_000)
         self.assertEqual(market_result(score, BranchDisposition.ANNULLED), without_sale)
 
     def test_a_one_arm_rule_would_debit_the_whole_notional_of_an_annulled_buyer(self):
@@ -240,14 +298,14 @@ class Dispositions(unittest.TestCase):
 
     def test_void_drops_the_entry_at_zero(self):
         score = self._bought([(1_000, 1_000)])
-        on_settle(score, position=1_000, settled_value=SETTLED_VALUE_SCALE)
+        on_settle(score, position=[1_000, 0], settled_value=[SCORE_SCALE, 0])
         self.assertEqual(market_result(score, BranchDisposition.VOID), 0)
 
     def test_both_arms_stay_claimant_adverse(self):
         """Each arm discards value the trader did not realize rather than
         crediting value they did not receive."""
         score = self._bought([(1_000, 1_000)])
-        on_settle(score, position=1_000, settled_value=SETTLED_VALUE_SCALE)
+        on_settle(score, position=[1_000, 0], settled_value=[SCORE_SCALE, 0])
         realized = market_result(score, BranchDisposition.REALIZED)
         annulled = market_result(score, BranchDisposition.ANNULLED)
         self.assertLessEqual(annulled, 0)
@@ -259,20 +317,20 @@ class Folding(unittest.TestCase):
 
     def test_a_realized_fold_moves_both_counters(self):
         epoch = EpochScore()
-        score = MarketScore(spent=1_003, received=1_200, mirror_principal=1_000, book_acquired=0)
+        score = MarketScore(spent=1_003, received=1_200, mirror_principal=1_000)
         self.assertEqual(fold(epoch, score, BranchDisposition.REALIZED), 197)
         self.assertEqual((epoch.spent, epoch.received), (1_003, 1_200))
         self.assertEqual(epoch.net(), 197)
 
     def test_an_annulled_fold_folds_the_mirror_principal(self):
         epoch = EpochScore()
-        score = MarketScore(spent=1_003, received=1_200, mirror_principal=1_000, book_acquired=0)
+        score = MarketScore(spent=1_003, received=1_200, mirror_principal=1_000)
         self.assertEqual(fold(epoch, score, BranchDisposition.ANNULLED), -3)
         self.assertEqual((epoch.spent, epoch.received), (1_003, 1_000))
 
     def test_a_void_fold_moves_neither_counter(self):
         epoch = EpochScore()
-        score = MarketScore(spent=1_003, received=1_200, mirror_principal=1_000, book_acquired=0)
+        score = MarketScore(spent=1_003, received=1_200, mirror_principal=1_000)
         self.assertEqual(fold(epoch, score, BranchDisposition.VOID), 0)
         self.assertEqual((epoch.spent, epoch.received), (0, 0))
 
@@ -390,7 +448,7 @@ class VitConversion(unittest.TestCase):
         self.assertEqual(claim_vit(one_usdc, self._rate_fixed()), 20 * 10**12)
 
     def test_the_claim_conversion_rounds_against_the_claimant(self):
-        rate_fixed = SETTLED_VALUE_SCALE * 3
+        rate_fixed = SCORE_SCALE * 3
         self.assertEqual(claim_vit(1, rate_fixed), 10**15 // (3 * 10**9))
         self.assertLessEqual(
             claim_vit(1, rate_fixed) * rate_fixed,
@@ -398,7 +456,7 @@ class VitConversion(unittest.TestCase):
         )
 
     def test_the_reserve_rounds_the_other_way(self):
-        rate_fixed = SETTLED_VALUE_SCALE * 3
+        rate_fixed = SCORE_SCALE * 3
         self.assertGreaterEqual(reserve_vit(1, rate_fixed), claim_vit(1, rate_fixed))
         self.assertGreaterEqual(reserve_vit(1, rate_fixed) * rate_fixed, 1 * 10**15)
 
@@ -511,6 +569,110 @@ class UnstatedRoundings(unittest.TestCase):
                 "the credited share of a partly covered sale is unstated",
             },
         )
+
+
+class DifferentialCorpus(unittest.TestCase):
+    """The family `generate-vectors.py` writes and the Rust replay consumes."""
+
+    def test_the_family_is_deterministic(self):
+        """Rule 3 of the reference-model rules: byte-identical output for
+        identical inputs, or the corpus cannot be a freshness gate."""
+        self.assertEqual(differential_scenarios(), differential_scenarios())
+
+    def test_every_row_carries_the_inputs_needed_to_replay_it(self):
+        """04 §5's standalone-replay rule."""
+        for row in differential_scenarios():
+            with self.subTest(row["name"]):
+                inputs = row["inputs"]
+                self.assertEqual(
+                    set(inputs),
+                    {
+                        "operations",
+                        "disposition",
+                        "snapshot_bond",
+                        "rate_ppb",
+                        "created_at",
+                        "now",
+                    },
+                )
+                for operation in inputs["operations"]:
+                    self.assertIn(operation["op"], {"buy", "sell", "settle"})
+                # Every balance is a decimal string: the family reaches above
+                # `u64::MAX`, which a JSON number cannot carry to a `u128`.
+                for key in ("snapshot_bond",):
+                    self.assertIsInstance(inputs[key], str)
+                for key in ("spent", "received", "mirror_principal"):
+                    self.assertIsInstance(row["score"][key], str)
+                self.assertIsInstance(row["market_result"], str)
+                self.assertIsInstance(row["earning_cap"], str)
+                self.assertIsInstance(row["outcome"]["amount"], str)
+
+    def test_row_names_are_unique(self):
+        names = [row["name"] for row in differential_scenarios()]
+        self.assertEqual(len(names), len(set(names)))
+
+    def test_every_recorded_output_is_reproduced_by_the_model(self):
+        """The corpus is generated, never hand-maintained (rule 2)."""
+        for row in differential_scenarios():
+            with self.subTest(row["name"]):
+                inputs = row["inputs"]
+                replayed = replay_scenario(
+                    inputs["operations"],
+                    BranchDisposition(inputs["disposition"]),
+                    int(inputs["snapshot_bond"]),
+                    inputs["rate_ppb"],
+                    inputs["created_at"],
+                    inputs["now"],
+                )
+                replayed["name"] = row["name"]
+                self.assertEqual(replayed, row)
+
+    def test_the_family_reaches_the_corners_it_claims_to(self):
+        """A corpus is only a differential over the ground it covers, so the
+        coverage is asserted rather than asserted-by-construction."""
+        rows = differential_scenarios()
+        sub_par = 0
+        above_par = 0
+        short_leg = 0
+        expired = 0
+        zero_rate = 0
+        capped = 0
+        dispositions = set()
+        for row in rows:
+            dispositions.add(row["inputs"]["disposition"])
+            if row["expired"]:
+                expired += 1
+            if row["inputs"]["rate_ppb"] == 0:
+                zero_rate += 1
+            net = int(row["epoch"]["received"]) - int(row["epoch"]["spent"])
+            if int(row["earning_cap"]) < abs(net):
+                capped += 1
+            for operation in row["inputs"]["operations"]:
+                if operation["op"] == "buy" and operation["side"] == 1:
+                    short_leg += 1
+                if operation["op"] == "settle":
+                    for text in operation["settled_value"]:
+                        value = int(text)
+                        if 0 < value < SCORE_SCALE:
+                            sub_par += 1
+                        elif value > SCORE_SCALE:
+                            above_par += 1
+        self.assertEqual(dispositions, {"realized", "annulled", "void"})
+        self.assertGreater(sub_par, 100, "rule 3's fractional arithmetic")
+        self.assertGreater(above_par, 20, "the untrusted-seam clamp")
+        self.assertGreater(short_leg, 40, "the SHORT leg")
+        self.assertGreater(expired, 20, "the timeout escape")
+        self.assertGreater(zero_rate, 20, "the zero-rate forgiveness")
+        self.assertGreater(capped, 20, "the earning cap binding")
+
+    def test_the_minimum_bond_is_the_position_deposit(self):
+        """08 §2.6 reuses `ledger.pos_dep` as the minimum bond, and 13 §1
+        freezes that row at 0.1 USDC."""
+        record = REGISTRY["ledger.pos_dep"]
+        self.assertEqual(record.unit, "µUSDC")
+        self.assertEqual(record.value, MIN_BOND)
+        # 13 §1 freezes the row, so the floor cannot move under the program.
+        self.assertEqual((record.minimum, record.maximum), (MIN_BOND, MIN_BOND))
 
 
 if __name__ == "__main__":

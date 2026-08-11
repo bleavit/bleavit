@@ -34,6 +34,7 @@ adverse direction; :func:`earning_cap` floors it and
 
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass, field
 from enum import Enum
 from fractions import Fraction
@@ -54,11 +55,11 @@ from .spec_values import (
 #: `Perbill` unity — 13 rule 8's raw scalar unit for a Perbill row.
 PERBILL_ONE: Final = 1_000_000_000
 
-#: 03 §5.2's settlement score grid.  `settle_scalar(pid, s)` takes
-#: `s ∈ [0,1]` as a `FixedU64` at 1e9, and §6.3 multiplies at that scale, so a
-#: branch that settled at 0.6 carries `s = 600_000_000`.  08 §2.6 rule 3 names
-#: this grid as `SCORE_SCALE` and requires `settled_value` to be read on it.
-SETTLED_VALUE_SCALE: Final = 1_000_000_000
+#: 03 §5.2's settlement score grid, under the name 08 §2.6 rule 3 gives it.
+#: `settle_scalar(pid, s)` takes `s ∈ [0,1]` as a `FixedU64` at 1e9, and §6.3
+#: multiplies at that scale, so a branch that settled at 0.6 carries
+#: `s = 600_000_000`.  Rule 3 requires `settled_value` to be read on this grid.
+SCORE_SCALE: Final = 1_000_000_000
 
 #: 02 §1 — USDC has 6 decimals, so one base unit is one µUSDC.
 USDC_BASE_UNITS: Final = 1_000_000
@@ -73,7 +74,7 @@ RATE_HEADROOM: Final = 10
 
 def _to_fixed(value) -> int:
     """Place an exact decimal rate on the 1e9 `FixedU64` grid, or refuse."""
-    exact = Fraction(value) * SETTLED_VALUE_SCALE
+    exact = Fraction(value) * SCORE_SCALE
     if exact.denominator != 1:
         raise ValueError(f"{value} is not representable on the 1e9 grid")
     return exact.numerator
@@ -153,6 +154,13 @@ class BranchDisposition(str, Enum):
     VOID = "void"
 
 
+#: A scalar book has two branch sides, LONG and SHORT, and rule 1 records the
+#: filled quantity "for that branch".  03 §2.3's `ScalarSettled { winner, s }`
+#: pays a LONG unit `s` and a SHORT unit `1 - s`, so the two sides settle at
+#: different values and cannot share one counter.
+BRANCH_SIDES: Final = 2
+
+
 @dataclass
 class MarketScore:
     """One account's score entry for one market.
@@ -160,7 +168,8 @@ class MarketScore:
     08 §2.6 *The score*: "the book accumulates three unsigned counters and the
     net branch position".  The counters are `spent`, `received` and
     `mirror_principal`; `book_acquired` is the net branch position, held
-    separately per rule 2 so that off-book inventory can be excluded.
+    per branch because rule 1 records the filled quantity "for that branch"
+    and rule 3 settles each branch at its own value.
     """
 
     #: Rule 1 — `cost + fee` of every book buy, rounded up.
@@ -170,71 +179,107 @@ class MarketScore:
     #: Rule 1 — the mirror-branch branch-USDC the trade wrapper leaves with the
     #: buyer, which is `cost` and never `cost + fee` (04 §2: the buy fee is
     #: collected as a complete branch-USDC pair, so no fee leg stays with the
-    #: buyer).
+    #: buyer).  One counter for the entry, because the mirror leg is plain
+    #: branch-USDC rather than a scalar side.
     mirror_principal: int = 0
-    #: Rule 2 — units acquired through this book and not yet sold out of it.
-    book_acquired: int = 0
+    #: Rule 2 — units acquired through this book, per branch, and not yet sold
+    #: or settled out of it.
+    book_acquired: list[int] = field(default_factory=lambda: [0] * BRANCH_SIDES)
     #: The block the entry was created at, for the *absolute block-height
     #: timeout* escape.
     created_at: int = 0
 
     def __post_init__(self) -> None:
-        for name in ("spent", "received", "mirror_principal", "book_acquired"):
+        for name in ("spent", "received", "mirror_principal"):
             if getattr(self, name) < 0:
                 raise ValueError(f"{name} is an unsigned counter")
+        if len(self.book_acquired) != BRANCH_SIDES:
+            raise ValueError("book_acquired carries one counter per branch")
+        if any(units < 0 for units in self.book_acquired):
+            raise ValueError("book_acquired is an unsigned counter")
 
 
-def on_buy(score: MarketScore, cost: int, fee: int, quantity: int) -> None:
+def _side(side: int) -> int:
+    if side not in range(BRANCH_SIDES):
+        raise ValueError(f"a scalar book has {BRANCH_SIDES} branch sides")
+    return side
+
+
+def on_buy(score: MarketScore, side: int, cost: int, fee: int, quantity: int) -> None:
     """Rule 1 — a buy charges `cost + fee` and credits the mirror principal.
 
     `cost` and `fee` arrive already rounded up by 04 §2's book
     (`cost = ceil(C(q + d) - C(q))`, `fee = ceil(mkt.fee . cost)`), so the
     rule's own "rounded up" is satisfied by the sum of two ceilings.
+
+    The two counters move together on every buy and by amounts that differ by
+    exactly `fee`, which is what makes `spent >= mirror_principal` invariant
+    and the annulled arm a debit of exactly the fees.
     """
     if cost < 0 or fee < 0 or quantity < 0:
         raise ValueError("a buy has non-negative cost, fee and quantity")
     score.spent += cost + fee
-    score.book_acquired += quantity
+    score.book_acquired[_side(side)] += quantity
     score.mirror_principal += cost
 
 
-def on_sell(score: MarketScore, proceeds: int, fee: int, quantity: int) -> int:
+def on_sell(score: MarketScore, side: int, proceeds: int, fee: int, quantity: int) -> int:
     """Rule 2 — credit `proceeds - fee`, but only over the book-acquired part.
 
     Returns the credited amount.  The covered quantity is
-    `min(quantity, book_acquired)`; the credit is the net proceeds scaled by
-    that share and rounded down, and `book_acquired` falls by the covered
-    quantity.  Proceeds beyond it are ignored, which is what closes the
-    off-book hole: a complete branch set created through `split*` and sold
-    into the book scores nothing at all.
+    `min(quantity, book_acquired[side])`; the credit is the net proceeds
+    scaled by that share and rounded down, and `book_acquired[side]` falls by
+    the covered quantity.  Proceeds beyond it are ignored, which is what
+    closes the off-book hole: a complete branch set created through `split*`
+    and sold into the book scores nothing at all.
     """
     if proceeds < 0 or fee < 0 or quantity < 0:
         raise ValueError("a sale has non-negative proceeds, fee and quantity")
     if fee > proceeds:
         raise ValueError("the book withholds the fee from the proceeds")
-    covered = min(quantity, score.book_acquired)
+    index = _side(side)
+    covered = min(quantity, score.book_acquired[index])
     if covered == 0 or quantity == 0:
         return 0
     credit = _floor_div((proceeds - fee) * covered, quantity)
     score.received += credit
-    score.book_acquired -= covered
+    score.book_acquired[index] -= covered
     return credit
 
 
-def on_settle(score: MarketScore, position: int, settled_value: int) -> int:
-    """Rule 3 — credit `min(position, book_acquired) x settled_value`.
+def on_settle(
+    score: MarketScore,
+    position: list[int],
+    settled_value: list[int],
+) -> int:
+    """Rule 3 — credit `min(position, book_acquired) x settled_value` per branch.
 
-    `settled_value` is a fraction of par on the 1e9 grid and is clamped to
-    par: a unit of a branch that settled at 0.6 is worth six tenths of a base
-    unit.  The product is rounded down.  Returns the credited amount.
+    `settled_value` is a fraction of par on 03's `SCORE_SCALE` grid and is
+    clamped to par: a unit of a branch that settled at 0.6 is worth six tenths
+    of a base unit.  The product is rounded down.
+
+    The rule also **decrements `book_acquired` by the credited quantity,
+    exactly as rule 2 does for a sale** *(stated in the specification
+    2026-08-11, after this model disagreed with the kernel on that field)*.
+    The decrement is what makes a second settlement of one entry a no-op:
+    without it a repeated call credits `received` again, and an over-credited
+    reward is the direction R-7 forbids.
+
+    Returns the total credited across both branches.
     """
-    if position < 0 or settled_value < 0:
+    if len(position) != BRANCH_SIDES or len(settled_value) != BRANCH_SIDES:
+        raise ValueError("settlement takes one position and value per branch")
+    if any(units < 0 for units in position) or any(v < 0 for v in settled_value):
         raise ValueError("a settlement has a non-negative position and value")
-    value = min(settled_value, SETTLED_VALUE_SCALE)
-    units = min(position, score.book_acquired)
-    credit = _floor_div(units * value, SETTLED_VALUE_SCALE)
-    score.received += credit
-    return credit
+    credited = 0
+    for index in range(BRANCH_SIDES):
+        value = min(settled_value[index], SCORE_SCALE)
+        units = min(position[index], score.book_acquired[index])
+        credit = _floor_div(units * value, SCORE_SCALE)
+        score.received += credit
+        score.book_acquired[index] -= units
+        credited += credit
+    return credited
 
 
 def market_result(score: MarketScore, disposition: BranchDisposition) -> int:
@@ -443,7 +488,7 @@ def claim_vit(accrued_usdc: int, vit_usdc_rate_fixed: int) -> int:
         raise ValueError("an accrual is non-negative")
     if vit_usdc_rate_fixed <= 0:
         raise ValueError("the conversion rate must be positive")
-    scale = (VIT_BASE_UNITS // USDC_BASE_UNITS) * SETTLED_VALUE_SCALE
+    scale = (VIT_BASE_UNITS // USDC_BASE_UNITS) * SCORE_SCALE
     return _floor_div(accrued_usdc * scale, vit_usdc_rate_fixed)
 
 
@@ -461,7 +506,7 @@ def reserve_vit(outstanding_usdc: int, vit_usdc_rate_fixed: int) -> int:
         raise ValueError("an accrual is non-negative")
     if vit_usdc_rate_fixed <= 0:
         raise ValueError("the conversion rate must be positive")
-    scale = (VIT_BASE_UNITS // USDC_BASE_UNITS) * SETTLED_VALUE_SCALE
+    scale = (VIT_BASE_UNITS // USDC_BASE_UNITS) * SCORE_SCALE
     return _ceil_div(outstanding_usdc * scale, vit_usdc_rate_fixed)
 
 
@@ -651,3 +696,586 @@ def check_wash_bound_needs_the_notional_factor() -> tuple[Finding, ...]:
             f"{wash_pair_fee_cost(net, fee_ppb)} and the bound holds",
         ),
     )
+
+
+# --------------------------------------------------------------------------
+# The committed differential corpus (04 §5; 15 §4.4)
+# --------------------------------------------------------------------------
+#
+# 15 §4.4 makes a differential against an independent implementation the way a
+# kernel is certified, and rule 1 of `.claude/rules/reference-model.md` says a
+# disagreement is evidence about the specification.  A harness that is run once
+# and deleted delivers neither: the round-1 review found the model and the
+# kernel disagreeing over `book_acquired` after settlement -- which 08 §2.6
+# rule 3 then had to state -- and nothing left in the tree could have found it
+# a second time.
+#
+# So the scenarios are generated here, written into the shared corpus by
+# `tools/reference-model/generate-vectors.py`, and replayed by
+# `crates/trading-rewards-core/tests/differential_vectors.rs`.  Two gates that
+# already exist carry it, with no new machinery: the reference-model CI job
+# runs `generate-vectors.py --check`, so the corpus cannot go stale against
+# this module, and the Rust job's `cargo test --workspace` runs the replay.
+#
+# Every row carries the inputs needed to replay it standalone (04 §5's rule),
+# and the operations are a sequence rather than a fixed buy/sell/settle triple
+# so that a second settlement of one entry -- the case the rule 3 decrement
+# exists for -- is expressible at all.
+
+
+#: The scenario seed.  Fixed, because rule 3 of the reference-model rules makes
+#: byte-identical output for identical inputs a requirement of this corpus.
+DIFFERENTIAL_SEED: Final = 0x7264_7738
+
+#: How many seeded scenarios follow the named corners.  Sized so the family is
+#: a few hundred kilobytes of a two-megabyte corpus rather than a rewrite of it.
+DIFFERENTIAL_SEEDED_ROWS: Final = 320
+
+#: The lawful minimum bond.  08 §2.6 floors the bond at `ledger.pos_dep` --
+#: "`ledger.pos_dep` already prices an entry against bloat, so the minimum
+#: reuses that live row" -- and 13 §1 freezes that row at 0.1 USDC, which is
+#: 100,000 base units.  It is also the bond at which the loser's forfeit is
+#: smallest, so it is the corner the anti-farm bound is tightest at.
+MIN_BOND: Final = 100_000
+
+_ADOPTED_RATE_PPB: Final = 2_500_000
+_MAX_RATE_PPB: Final = 6_000_000
+_PAR: Final = SCORE_SCALE
+
+
+def _amount(value: int) -> str:
+    """Every balance in the corpus is a decimal string, never a JSON number.
+
+    The family deliberately reaches magnitudes above `u64::MAX` — the split in
+    the kernel's settlement product exists for exactly those — and a JSON
+    number cannot carry one to a `u128` consumer.  Strings are also the
+    convention the LMSR and welfare families already use for exact values.
+    """
+    return str(value)
+
+
+def _buy_op(side: int, quantity: int, cost: int, fee: int) -> dict:
+    return {
+        "op": "buy",
+        "side": side,
+        "quantity": _amount(quantity),
+        "cost": _amount(cost),
+        "fee": _amount(fee),
+    }
+
+
+def _sell_op(side: int, quantity: int, proceeds: int, fee: int) -> dict:
+    return {
+        "op": "sell",
+        "side": side,
+        "quantity": _amount(quantity),
+        "proceeds": _amount(proceeds),
+        "fee": _amount(fee),
+    }
+
+
+def _settle_op(position, settled_value) -> dict:
+    return {
+        "op": "settle",
+        "position": [_amount(units) for units in position],
+        "settled_value": [_amount(value) for value in settled_value],
+    }
+
+
+def replay_scenario(
+    operations,
+    disposition: BranchDisposition,
+    snapshot_bond: int,
+    rate_ppb: int,
+    created_at: int,
+    now: int,
+) -> dict:
+    """Run one scenario through the model and record every observable it has.
+
+    The recorded set is deliberately wider than the payout: `book_acquired`
+    after settlement is unread by the pallet today, and recording it anyway is
+    what turned a silent divergence into a specification amendment.
+    """
+    score = MarketScore(created_at=created_at)
+    for operation in operations:
+        kind = operation["op"]
+        if kind == "buy":
+            on_buy(
+                score,
+                operation["side"],
+                int(operation["cost"]),
+                int(operation["fee"]),
+                int(operation["quantity"]),
+            )
+        elif kind == "sell":
+            on_sell(
+                score,
+                operation["side"],
+                int(operation["proceeds"]),
+                int(operation["fee"]),
+                int(operation["quantity"]),
+            )
+        elif kind == "settle":
+            on_settle(
+                score,
+                [int(units) for units in operation["position"]],
+                [int(value) for value in operation["settled_value"]],
+            )
+        else:
+            raise ValueError(f"unknown operation {kind!r}")
+    epoch = EpochScore()
+    result = fold(epoch, score, disposition)
+    outcome = epoch_outcome(epoch, snapshot_bond, rate_ppb)
+    return {
+        "inputs": {
+            "operations": [dict(operation) for operation in operations],
+            "disposition": disposition.value,
+            "snapshot_bond": _amount(snapshot_bond),
+            "rate_ppb": rate_ppb,
+            "created_at": created_at,
+            "now": now,
+        },
+        "score": {
+            "spent": _amount(score.spent),
+            "received": _amount(score.received),
+            "mirror_principal": _amount(score.mirror_principal),
+            "book_acquired": [_amount(units) for units in score.book_acquired],
+        },
+        "epoch": {"spent": _amount(epoch.spent), "received": _amount(epoch.received)},
+        "market_result": _amount(result),
+        "earning_cap": _amount(earning_cap(snapshot_bond, rate_ppb)),
+        "outcome": {"kind": outcome.kind.value, "amount": _amount(outcome.amount)},
+        "expired": score_entry_expired(created_at, now),
+    }
+
+
+def _named_corners():
+    """The cases a uniform draw reaches rarely or never, named and pinned."""
+    realized = BranchDisposition.REALIZED
+    annulled = BranchDisposition.ANNULLED
+    void = BranchDisposition.VOID
+    rate = _ADOPTED_RATE_PPB
+    lifetime = SCORE_ENTRY_LIFETIME_BLOCKS
+    return [
+        ("empty_entry", [], realized, MIN_BOND, rate, 0, 0),
+        ("buy_only_realized", [_buy_op(0, 1_000, 500, 2)], realized, 10**7, rate, 0, 0),
+        (
+            "buy_only_annulled_scores_the_fees",
+            [_buy_op(0, 1_000, 500, 2)],
+            annulled,
+            10**7,
+            rate,
+            0,
+            0,
+        ),
+        (
+            "buy_only_void_folds_nothing",
+            [_buy_op(0, 1_000, 500, 2)],
+            void,
+            10**7,
+            rate,
+            0,
+            0,
+        ),
+        (
+            "zero_fee_buy_annulled_scores_zero",
+            [_buy_op(0, 1_000, 500, 0)],
+            annulled,
+            10**7,
+            rate,
+            0,
+            0,
+        ),
+        (
+            "off_book_sale_scores_nothing",
+            [_sell_op(0, 1_000, 900_000, 2_700)],
+            realized,
+            10**7,
+            rate,
+            0,
+            0,
+        ),
+        (
+            "sale_partly_covered",
+            [_buy_op(0, 400, 300, 1), _sell_op(0, 1_000, 900, 3)],
+            realized,
+            10**7,
+            rate,
+            0,
+            0,
+        ),
+        (
+            "sale_exactly_covered",
+            [_buy_op(0, 1_000, 800, 3), _sell_op(0, 1_000, 900, 3)],
+            realized,
+            10**7,
+            rate,
+            0,
+            0,
+        ),
+        (
+            "sale_over_covered",
+            [_buy_op(0, 600, 500, 2), _sell_op(0, 1_000, 1_500, 5)],
+            realized,
+            10**7,
+            rate,
+            0,
+            0,
+        ),
+        (
+            "sale_credit_floors",
+            [_buy_op(0, 1, 10, 0), _sell_op(0, 3, 10, 1)],
+            realized,
+            10**7,
+            rate,
+            0,
+            0,
+        ),
+        (
+            "settlement_at_par",
+            [_buy_op(0, 1_000, 900, 3), _settle_op([1_000, 0], [_PAR, 0])],
+            realized,
+            10**7,
+            rate,
+            0,
+            0,
+        ),
+        (
+            "settlement_at_six_tenths",
+            [_buy_op(0, 1_000, 900, 3), _settle_op([1_000, 0], [6 * _PAR // 10, 0])],
+            realized,
+            10**7,
+            rate,
+            0,
+            0,
+        ),
+        (
+            "settlement_at_one_part_in_a_billion",
+            [_buy_op(0, 10**9, 900, 3), _settle_op([10**9, 0], [1, 0])],
+            realized,
+            10**7,
+            rate,
+            0,
+            0,
+        ),
+        (
+            "settlement_one_below_par",
+            [_buy_op(0, 1_000, 900, 3), _settle_op([1_000, 0], [_PAR - 1, 0])],
+            realized,
+            10**7,
+            rate,
+            0,
+            0,
+        ),
+        (
+            "settlement_above_par_is_clamped",
+            [_buy_op(0, 1_000, 900, 3), _settle_op([1_000, 0], [7 * _PAR, 0])],
+            realized,
+            10**7,
+            rate,
+            0,
+            0,
+        ),
+        (
+            "settlement_position_above_book_acquired",
+            [_buy_op(0, 300, 150, 0), _settle_op([1_000, 0], [_PAR // 2, 0])],
+            realized,
+            10**7,
+            rate,
+            0,
+            0,
+        ),
+        (
+            "settlement_position_below_book_acquired",
+            [_buy_op(0, 1_000, 500, 2), _settle_op([300, 0], [_PAR, 0])],
+            realized,
+            10**7,
+            rate,
+            0,
+            0,
+        ),
+        (
+            "settlement_credits_both_sides",
+            [
+                _buy_op(0, 200, 100, 0),
+                _buy_op(1, 300, 150, 0),
+                _settle_op([200, 300], [_PAR // 4, _PAR - _PAR // 4]),
+            ],
+            realized,
+            10**7,
+            rate,
+            0,
+            0,
+        ),
+        (
+            "settlement_short_leg_only",
+            [_buy_op(1, 500, 400, 2), _settle_op([0, 500], [0, 3 * _PAR // 4])],
+            realized,
+            10**7,
+            rate,
+            0,
+            0,
+        ),
+        (
+            # Rule 3's decrement is the whole reason this row exists: the second
+            # settlement must credit nothing, and without the decrement it
+            # credits the same units a second time.
+            "settling_the_same_entry_twice_credits_once",
+            [
+                _buy_op(0, 1_000, 900, 3),
+                _settle_op([1_000, 0], [_PAR, 0]),
+                _settle_op([1_000, 0], [_PAR, 0]),
+            ],
+            realized,
+            10**7,
+            rate,
+            0,
+            0,
+        ),
+        (
+            "a_sale_after_settlement_credits_nothing",
+            [
+                _buy_op(0, 1_000, 900, 3),
+                _settle_op([1_000, 0], [_PAR, 0]),
+                _sell_op(0, 1_000, 5_000, 15),
+            ],
+            realized,
+            10**7,
+            rate,
+            0,
+            0,
+        ),
+        (
+            "settlement_at_the_scale_boundary",
+            [_buy_op(0, _PAR, 900, 3), _settle_op([_PAR, 0], [_PAR - 1, 0])],
+            realized,
+            10**12,
+            rate,
+            0,
+            0,
+        ),
+        (
+            "settlement_one_unit_past_the_scale_boundary",
+            [_buy_op(0, _PAR + 1, 900, 3), _settle_op([_PAR + 1, 0], [_PAR - 1, 0])],
+            realized,
+            10**12,
+            rate,
+            0,
+            0,
+        ),
+        (
+            # Larger than `u128::MAX / SCORE_SCALE`, so a naive `a * v` product
+            # would overflow and the split form must not.
+            "settlement_at_a_magnitude_the_naive_product_could_not_hold",
+            [_buy_op(0, 10**30, 10**6, 3), _settle_op([10**30, 0], [_PAR // 3, 0])],
+            realized,
+            10**18,
+            rate,
+            0,
+            0,
+        ),
+        (
+            "zero_rate_forgives_a_loss",
+            [_buy_op(0, 1_000, 10**6, 3_000)],
+            realized,
+            10**9,
+            0,
+            0,
+            0,
+        ),
+        (
+            "rate_at_the_registry_ceiling",
+            [_buy_op(0, 1_000, 900, 3), _settle_op([1_000, 0], [_PAR, 0])],
+            realized,
+            10**7,
+            _MAX_RATE_PPB,
+            0,
+            0,
+        ),
+        (
+            "bond_at_the_lawful_minimum",
+            [_buy_op(0, 10**6, 10**6, 3_000), _settle_op([10**6, 0], [_PAR, 0])],
+            realized,
+            MIN_BOND,
+            rate,
+            0,
+            0,
+        ),
+        (
+            "the_cap_binds_the_reward",
+            [_buy_op(0, 10**9, 1, 0), _settle_op([10**9, 0], [_PAR, 0])],
+            realized,
+            MIN_BOND,
+            rate,
+            0,
+            0,
+        ),
+        (
+            "the_cap_binds_the_debit",
+            [_buy_op(0, 0, 10**9, 0)],
+            realized,
+            MIN_BOND,
+            rate,
+            0,
+            0,
+        ),
+        (
+            # 25 bps of 401 is 1.0025, so the reward floors to 1 where the
+            # mirrored debit ceils to 2.  R-7 in two adjacent rows.
+            "a_reward_of_one_where_the_debit_would_be_two",
+            [_buy_op(0, 401, 0, 0), _settle_op([401, 0], [_PAR, 0])],
+            realized,
+            10**12,
+            rate,
+            0,
+            0,
+        ),
+        ("a_debit_of_two_on_the_same_score", [_buy_op(0, 0, 401, 0)], realized, 10**12, rate, 0, 0),
+        (
+            "a_reward_that_rounds_away_entirely",
+            [_buy_op(0, 7, 0, 0), _settle_op([7, 0], [_PAR, 0])],
+            realized,
+            10**12,
+            rate,
+            0,
+            0,
+        ),
+        ("a_debit_of_one_unit", [_buy_op(0, 0, 1, 0)], realized, 10**12, rate, 0, 0),
+        (
+            "entry_one_block_before_expiry",
+            [],
+            realized,
+            MIN_BOND,
+            rate,
+            100,
+            100 + lifetime - 1,
+        ),
+        ("entry_at_the_expiry_boundary", [], realized, MIN_BOND, rate, 100, 100 + lifetime),
+        (
+            "entry_one_block_past_expiry",
+            [],
+            realized,
+            MIN_BOND,
+            rate,
+            100,
+            100 + lifetime + 1,
+        ),
+        (
+            "annulled_after_a_profitable_sale_still_scores_the_fees",
+            [_buy_op(0, 1_000, 500, 3), _sell_op(0, 1_000, 9_000, 27)],
+            annulled,
+            10**9,
+            rate,
+            0,
+            0,
+        ),
+        (
+            "void_after_a_full_round_trip_folds_nothing",
+            [
+                _buy_op(0, 1_000, 500, 3),
+                _sell_op(0, 1_000, 9_000, 27),
+                _settle_op([0, 0], [0, 0]),
+            ],
+            void,
+            10**9,
+            rate,
+            0,
+            0,
+        ),
+    ]
+
+
+def _seeded_scenario(rng, index: int):
+    """One drawn scenario, biased toward the corners a uniform draw misses."""
+    operations = []
+    for _ in range(rng.randrange(0, 4)):
+        operations.append(
+            _buy_op(
+                rng.randrange(0, BRANCH_SIDES),
+                rng.randrange(0, 200_000),
+                rng.randrange(0, 2_000_000),
+                rng.randrange(0, 6_000),
+            )
+        )
+    for _ in range(rng.randrange(0, 3)):
+        proceeds = rng.randrange(0, 3_000_000)
+        operations.append(
+            _sell_op(
+                rng.randrange(0, BRANCH_SIDES),
+                rng.randrange(0, 300_000),
+                proceeds,
+                rng.randrange(0, proceeds + 1) if proceeds else 0,
+            )
+        )
+    for _ in range(rng.randrange(0, 3)):
+        # Three draws in four are at or below par, which is where rule 3's
+        # fractional arithmetic lives and where a uniform draw over the whole
+        # `u64` range never lands.
+        values = []
+        for _ in range(BRANCH_SIDES):
+            pick = rng.randrange(0, 4)
+            if pick == 0:
+                values.append(rng.randrange(0, SCORE_SCALE))
+            elif pick == 1:
+                values.append(rng.choice([0, 1, SCORE_SCALE - 1, SCORE_SCALE]))
+            elif pick == 2:
+                values.append(SCORE_SCALE)
+            else:
+                values.append(rng.randrange(SCORE_SCALE, 4 * SCORE_SCALE))
+        operations.append(
+            _settle_op([rng.randrange(0, 400_000) for _ in range(BRANCH_SIDES)], values)
+        )
+    disposition = rng.choice(list(BranchDisposition))
+    bond = rng.choice(
+        [MIN_BOND, rng.randrange(MIN_BOND, 10**7), rng.randrange(10**7, 10**12)]
+    )
+    rate_ppb = rng.choice(
+        [0, 1, _ADOPTED_RATE_PPB, _MAX_RATE_PPB, rng.randrange(1, _MAX_RATE_PPB + 1)]
+    )
+    created_at = rng.randrange(0, 10**7)
+    now = created_at + rng.choice(
+        [
+            0,
+            rng.randrange(0, SCORE_ENTRY_LIFETIME_BLOCKS),
+            SCORE_ENTRY_LIFETIME_BLOCKS - 1,
+            SCORE_ENTRY_LIFETIME_BLOCKS,
+        ]
+    )
+    return (
+        f"seeded_{index:04d}",
+        operations,
+        disposition,
+        bond,
+        rate_ppb,
+        created_at,
+        now,
+    )
+
+
+def differential_scenarios():
+    """The 08 §2.6 differential family, for `vectors.json`.
+
+    Deterministic: the same seed gives the same rows, byte for byte.  The named
+    corners come first, so a reader can see what the family claims to cover
+    without decoding the seeded body.
+    """
+    rows = []
+    for name, operations, disposition, bond, rate, created_at, now in _named_corners():
+        row = replay_scenario(operations, disposition, bond, rate, created_at, now)
+        row["name"] = name
+        rows.append(row)
+    rng = random.Random(DIFFERENTIAL_SEED)
+    for index in range(DIFFERENTIAL_SEEDED_ROWS):
+        (
+            name,
+            operations,
+            disposition,
+            bond,
+            rate,
+            created_at,
+            now,
+        ) = _seeded_scenario(rng, index)
+        row = replay_scenario(operations, disposition, bond, rate, created_at, now)
+        row["name"] = name
+        rows.append(row)
+    return rows
