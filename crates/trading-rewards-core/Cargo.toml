@@ -18,3 +18,15 @@ runtime-benchmarks = []
 futarchy-primitives = { path = "../../crates/futarchy-primitives", default-features = false }
 parity-scale-codec = { version = "3.7.5", default-features = false, features = ["derive", "max-encoded-len"] }
 scale-info = { version = "2.11.6", default-features = false, features = ["derive"] }
+
+# A dev-dependency never enters the `no_std` build, so the crate stays
+# FRAME-free and `no_std` while carrying the TR8 property suite.
+#
+# `constitution-core` supplies the genesis registry the suite sweeps over.
+# Runtime-code rule 4 forbids a numeric literal that duplicates a 13-owned
+# value "in code and in tests alike", and the `rwd.rate` / `mkt.fee` bounds the
+# anti-farm property sweeps are exactly that — so the ranges are read from
+# `genesis_params()` rather than restated, and a 13 amendment moves the sweep.
+[dev-dependencies]
+constitution-core = { path = "../constitution-core" }
+proptest = "1.11.0"

@@ -15636,8 +15636,10 @@ dependencies = [
 name = "trading-rewards-core"
 version = "0.1.0"
 dependencies = [
+ "constitution-core",
  "futarchy-primitives",
  "parity-scale-codec",
+ "proptest",
  "scale-info",
 ]
 
