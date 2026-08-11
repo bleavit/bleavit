@@ -217,6 +217,41 @@ fn admissible_rate_and_fee() -> impl Strategy<Value = (u32, u32)> {
     })
 }
 
+/// The registry bounds must admit the coupling at all, and this says so by name.
+///
+/// `admissible_rate_and_fee` builds `floor..=mkt.fee max`, which **inverts and
+/// panics inside the strategy** once the coupling floor for the highest lawful
+/// rate passes `mkt.fee`'s ceiling — at a `rwd.rate` maximum above 20,202,020
+/// ppb, about 3.4x the current headroom. That is reachable: a 13 §1 row's
+/// `max` is ordinary META-amendable metadata.
+///
+/// A panic from inside a proptest strategy is a stack trace about `Range`, not
+/// about the registry, so the amendment that caused it would be the last place
+/// anybody looked. Asserting it here turns the same condition into a named
+/// failure that says what is wrong. It is also a real statement about the two
+/// rows and not only test hygiene: if no lawful `mkt.fee` satisfies the
+/// coupling at the highest lawful `rwd.rate`, then the screen TR9 installs can
+/// refuse every amendment of one row, and the values layer is self-sealing.
+#[test]
+fn the_registry_bounds_admit_at_least_one_lawful_pair_at_every_rate() {
+    let floor_at_max = coupling_fee_floor_ppb(*RWD_RATE_MAX_PPB);
+    assert!(
+        floor_at_max <= *MKT_FEE_MAX_PPB,
+        "13 §1 now admits a rwd.rate of {} ppb, whose coupling floor is {} ppb, \
+         above mkt.fee's ceiling of {} ppb. No lawful fee satisfies the coupling \
+         at that rate, so the pair is unscreenable and the sweep below cannot \
+         build its range.",
+        *RWD_RATE_MAX_PPB,
+        floor_at_max,
+        *MKT_FEE_MAX_PPB,
+    );
+    assert!(
+        *COUPLING_BINDING_RATE_PPB <= *RWD_RATE_MAX_PPB,
+        "the coupling never binds inside the lawful rate range, so the sweep's \
+         boundary draw is dead and the screen is untested by it",
+    );
+}
+
 proptest! {
     /// The invariant the whole design rests on. For any set of accounts whose
     /// positions offset, total payout minus total forfeit is never positive --

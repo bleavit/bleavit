@@ -29,6 +29,12 @@ use trading_rewards_core::{
     MarketScore, Outcome,
 };
 
+/// The one family this replay owns, out of the twenty the shared corpus holds.
+///
+/// Deliberately **not** `deny_unknown_fields`: the other nineteen families are
+/// its siblings in one artifact (04 §5's single-generator rule), and refusing
+/// them here would make this test fail whenever any unrelated family is added.
+/// The rows below carry the strictness instead, which is where it belongs.
 #[derive(Deserialize)]
 struct Fixture {
     trading_reward_scenarios: Vec<Scenario>,
@@ -37,6 +43,7 @@ struct Fixture {
 /// One standalone scenario: 04 §5 requires every row to carry the inputs
 /// needed to replay it without consulting 13 or any other family.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Scenario {
     name: String,
     inputs: Inputs,
@@ -49,6 +56,7 @@ struct Scenario {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Inputs {
     operations: Vec<Operation>,
     disposition: String,
@@ -82,6 +90,7 @@ fn amounts(texts: &[String; 2], context: &str) -> [u128; 2] {
 /// that a second settlement of one entry — the case rule 3's decrement exists
 /// for — is expressible at all.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 #[serde(tag = "op", rename_all = "lowercase")]
 enum Operation {
     Buy {
@@ -108,6 +117,7 @@ enum Operation {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Score {
     spent: String,
     received: String,
@@ -116,12 +126,14 @@ struct Score {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Epoch {
     spent: String,
     received: String,
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RecordedOutcome {
     kind: String,
     amount: String,
