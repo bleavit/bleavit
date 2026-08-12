@@ -144,6 +144,108 @@ pub fn screen_redeem_fee_coupling(
     }
 }
 
+/// 13 rule 7's **third** live coupling: `rwd.rate ≤ 2 × mkt.fee / 0.99`
+/// (08 §2.6). Returns the partner key of either side.
+///
+/// It takes the same shape as the two couplings above and differs from them in
+/// what it protects. Those each keep a consuming engine away from a value it
+/// cannot fail closed on. This one carries the **whole anti-farm invariant** of
+/// the trading-accuracy reward program, so a lapse here does not degrade a
+/// payout path — it opens the program to a wash trader.
+///
+/// The per-account earning cap does not deliver that invariant, which is why
+/// the rate has to. The cap is proportional to each account's *own* bond, one
+/// operator funds both legs of a wash pair, and an asymmetric pair therefore
+/// directs the profit to whichever leg the operator chose to bond larger. At
+/// equal bonds the pair nets exactly zero, which is what made the wrong claim
+/// look true. A rate inside the wash break-even is the defense that holds
+/// whatever the bonds are, because the pair then loses money on fees alone.
+///
+/// **Both directions are in scope**, and here that is the load-bearing half.
+/// Both rows are **PARAM**, so an ordinary PARAM decision can move either side:
+/// `mkt.fee` may be lowered toward its 5 bps floor by a vote that never
+/// mentions the reward program, which takes the wash break-even to about 10 bps
+/// and makes an unmoved 25 bps `rwd.rate` farmable on rate alone. Screening
+/// only `rwd.rate` would leave exactly that door open (13 rule 7).
+///
+/// `mkt.fee` therefore sits in **two** couplings. This screen and
+/// [`screen_redeem_fee_coupling`] are independent, neither absorbs the other,
+/// and every amendment path must call both.
+pub fn rwd_rate_pair(key: ParamKey) -> Option<ParamKey> {
+    let rate = key16(b"rwd.rate");
+    let market = key16(b"mkt.fee");
+    if key == rate {
+        return Some(market);
+    }
+    if key == market {
+        return Some(rate);
+    }
+    None
+}
+
+/// The 08 §2.6 wash break-even itself, over the two raw `Perbill` scalars.
+///
+/// **Cross-multiplied on purpose.** The relation is `rwd.rate ≤ 2 × mkt.fee /
+/// 0.99`, and in integers the two ways to write that division do not round the
+/// same way (13 rule 7). `99 × rate / 100 ≤ 2 × fee` floors the left-hand side
+/// and **admits pairs the relation forbids** — at `mkt.fee` = 2,000,000 ppb it
+/// admits a rate of 4,040,405 ppb, which the relation refuses. The
+/// cross-multiplied form is exact, so no caller has to make that choice twice.
+///
+/// Equality is admissible: at exact break-even the wash pair nets zero rather
+/// than positive. The unsafe direction is a rate above the bound, so a lowering
+/// of `mkt.fee` breaks the pair exactly as a raising of `rwd.rate` does.
+///
+/// Both products are evaluated with `checked_mul` and an unrepresentable
+/// product refuses (G-1). Over the whole `Perbill` domain — the only domain the
+/// screen and `try_state` can present, since both operands come from a
+/// `ParamValue::Perbill` and are therefore below 2³² — neither product can
+/// overflow, so this is bit-identical to the plain expression there.
+///
+/// `u128` mirrors [`redeem_fee_coupled`]'s shape rather than the trading-reward
+/// kernel's `u32` rate. That widening is deliberate and is the only place the
+/// two disagree.
+pub const fn rwd_rate_coupled(rate_ppb: u128, fee_ppb: u128) -> bool {
+    match (rate_ppb.checked_mul(99), fee_ppb.checked_mul(200)) {
+        (Some(scaled_rate), Some(scaled_fee)) => scaled_rate <= scaled_fee,
+        _ => false,
+    }
+}
+
+/// Screen the 13 rule 7 / 08 §2.6 live coupling over the **resulting pair**,
+/// given the amended key's post-image value and a reader for the partner's live
+/// value.
+///
+/// Single-homed so the frame-free core and the FRAME shell cannot drift on the
+/// predicate, the key set, or which side of the relation each key is.
+pub fn screen_rwd_rate_coupling(
+    key: ParamKey,
+    updated: ParamValue,
+    paired: impl FnOnce(ParamKey) -> Option<ParamValue>,
+) -> Result<(), Error> {
+    let Some(pair) = rwd_rate_pair(key) else {
+        return Ok(());
+    };
+    // A missing partner row cannot be reconciled, and 13 §1 seeds both. Fail
+    // closed rather than admitting an unscreened amendment (G-1).
+    let partner = paired(pair).ok_or(Error::TryStateViolation)?;
+    let (rate, fee) = if key == key16(b"rwd.rate") {
+        (updated, partner)
+    } else {
+        (partner, updated)
+    };
+    match (rate, fee) {
+        (ParamValue::Perbill(rate), ParamValue::Perbill(fee)) => {
+            ensure!(
+                rwd_rate_coupled(rate as u128, fee as u128),
+                Error::RewardRateAboveWashBreakeven
+            );
+            Ok(())
+        }
+        _ => Err(Error::WrongType),
+    }
+}
+
 #[derive(
     Clone,
     Copy,
@@ -837,6 +939,18 @@ impl ConstitutionState {
                 .find(|record| record.key == pair)
                 .map(|record| record.value)
         })?;
+        // 13 rule 7's third live coupling (TR9): `99 × rwd.rate ≤ 200 ×
+        // mkt.fee`, screened jointly over the pair in both directions. It is
+        // independent of the screen above and neither absorbs the other —
+        // `mkt.fee` is a partner in both pairs, so an amendment of it must pass
+        // both or the reward program's anti-farm invariant is breakable from
+        // the fee side.
+        screen_rwd_rate_coupling(key, updated.value, |pair| {
+            self.params
+                .iter()
+                .find(|record| record.key == pair)
+                .map(|record| record.value)
+        })?;
         Ok((index, updated))
     }
 
@@ -1202,6 +1316,34 @@ impl ConstitutionState {
             }
             _ => return Err(Error::WrongType),
         }
+        // 13 rule 7 / 08 §2.6 (TR9): the `99 × rwd.rate ≤ 200 × mkt.fee`
+        // coupling is asserted here as well as screened at the amendment
+        // boundary. The backstop matters more for this pair than for the one
+        // above: the reward engine reads the rate and never re-derives the
+        // break-even, so a genesis seed, a migration or an unscreened writer
+        // that carried the pair out of band would keep paying a farmable rate
+        // with nothing downstream noticing.
+        let rate_key = key16(b"rwd.rate");
+        let rate_record = self
+            .params
+            .iter()
+            .find(|record| record.key == rate_key)
+            .ok_or(Error::TryStateViolation)?;
+        let rate_fee_key = rwd_rate_pair(rate_key).ok_or(Error::TryStateViolation)?;
+        let rate_fee_record = self
+            .params
+            .iter()
+            .find(|record| record.key == rate_fee_key)
+            .ok_or(Error::TryStateViolation)?;
+        match (rate_record.value, rate_fee_record.value) {
+            (ParamValue::Perbill(rate), ParamValue::Perbill(fee)) => {
+                ensure!(
+                    rwd_rate_coupled(rate as u128, fee as u128),
+                    Error::TryStateViolation
+                );
+            }
+            _ => return Err(Error::WrongType),
+        }
         for meter in &self.meters {
             ensure!(meter.spent <= meter.limit, Error::MeterExhausted);
         }
@@ -1263,6 +1405,23 @@ pub enum Error {
     /// satisfied and the origin is authorized; it is the *resulting pair* that
     /// is not. Appended last — the preceding discriminants are SCALE-stable.
     RedemptionFeeAboveMarketFee,
+    /// 13 rule 7 / 08 §2.6 (TR9): the amendment would carry the pair
+    /// `99 × rwd.rate ≤ 200 × mkt.fee` out of band — either by raising the
+    /// reward rate above the live wash break-even, or by lowering the market
+    /// fee until the live reward rate sits above it. Both rows are PARAM, so
+    /// both directions are refusable and both are refused.
+    ///
+    /// This refusal is what keeps the reward program's anti-farm invariant
+    /// alive, not a refinement of it: above the break-even a wash pair profits
+    /// on rate alone, whatever the two legs bond.
+    ///
+    /// Deliberately **not** `TryStateViolation`, for the reason given on
+    /// `RedemptionFeeAboveMarketFee` — nothing stored is violating an invariant,
+    /// and the refusal is what keeps it that way. Also not `AboveMax`: the
+    /// `rwd.rate` record's own `[0, 6_000_000]` ppb bounds are satisfied, and
+    /// they cannot express this relation because it moves with the live
+    /// `mkt.fee`. Appended last — the preceding discriminants are SCALE-stable.
+    RewardRateAboveWashBreakeven,
 }
 
 /// 09 §5.2 (SQ-197): `phase3.tvl_cap` and `phase3.dep_cap` are "raised only by
@@ -1768,6 +1927,16 @@ pub fn genesis_params() -> Vec<ParamRecord> {
             ParamValue::Perbill(500_000),
             ParamValue::Perbill(10_000_000),
             Some(MaxDelta::Absolute(ParamValue::Perbill(1_000_000))),
+            1,
+            ParamClass::Param,
+            false
+        ),
+        row(
+            b"rwd.rate",
+            ParamValue::Perbill(2_500_000),
+            ParamValue::Perbill(0),
+            ParamValue::Perbill(6_000_000),
+            Some(MaxDelta::Absolute(ParamValue::Perbill(2_500_000))),
             1,
             ParamClass::Param,
             false
@@ -3053,6 +3222,8 @@ mod tests {
         // E4 appends the 13 rule 7 coupling refusal last, after
         // `PhaseCapRaiseRefused` (20) and `CoverageBreaksAdmission` (21).
         assert_eq!(Error::RedemptionFeeAboveMarketFee.encode(), vec![22]);
+        // TR9 appends rule 7's third coupling refusal after that one.
+        assert_eq!(Error::RewardRateAboveWashBreakeven.encode(), vec![23]);
     }
 
     /// 13 rule 7 (E1/E4): `ledger.redeem_fee ≤ mkt.fee` is screened jointly
@@ -3113,6 +3284,285 @@ mod tests {
         for record in &mut state.params {
             if record.key == redeem {
                 record.value = ParamValue::Perbill(seeded + 2);
+            }
+        }
+        assert_eq!(state.try_state(), Err(Error::TryStateViolation));
+    }
+
+    // ---- 13 rule 7's third live coupling: `rwd.rate` ↔ `mkt.fee` (TR9) ----
+
+    #[test]
+    fn the_adopted_pair_passes_the_screen() {
+        // 99 × 2_500_000 = 247_500_000  ≤  200 × 3_000_000 = 600_000_000
+        assert!(rwd_rate_coupled(2_500_000, 3_000_000));
+    }
+
+    #[test]
+    fn lowering_the_market_fee_to_its_floor_is_refused() {
+        // The amendment the screen exists to block: at 5 bps the wash
+        // break-even falls to ≈ 0.10 % and 0.25 % becomes farmable on rate alone.
+        assert!(!rwd_rate_coupled(2_500_000, 500_000));
+        let err = screen_rwd_rate_coupling(key16(b"mkt.fee"), ParamValue::Perbill(500_000), |_| {
+            Some(ParamValue::Perbill(2_500_000))
+        })
+        .unwrap_err();
+        assert_eq!(err, Error::RewardRateAboveWashBreakeven);
+    }
+
+    /// The screen must bind from both sides, exactly like redeem_fee ≤ mkt.fee.
+    ///
+    /// **Corrected against the task brief (TR9, 2026-08-11).** The brief named
+    /// `Perbill(6_000_000)` against `Perbill(3_000_000)` as the refused case and
+    /// the relation admits it: `99 × 6_000_000 = 594_000_000` is below
+    /// `200 × 3_000_000 = 600_000_000`. That is a property of the registry
+    /// rather than a hole in the screen, and it is the reason the rate side is
+    /// unreachable at launch — see
+    /// [`the_rate_records_own_maximum_is_inside_the_seeded_breakeven`]. The
+    /// smallest rate the relation refuses against the seeded fee is one part
+    /// above `floor(200 × fee / 99)`.
+    #[test]
+    fn raising_the_reward_rate_past_the_live_fee_is_refused() {
+        let fee = seeded_perbill(b"mkt.fee");
+        // Restated by the equivalent integer spelling, so the boundary is
+        // derived here rather than read back from the predicate under test.
+        let breakeven = 200u32.saturating_mul(fee) / 99;
+        assert!(rwd_rate_coupled(breakeven as u128, fee as u128));
+        let err = screen_rwd_rate_coupling(
+            key16(b"rwd.rate"),
+            ParamValue::Perbill(breakeven + 1),
+            |_| Some(ParamValue::Perbill(fee)),
+        )
+        .unwrap_err();
+        assert_eq!(err, Error::RewardRateAboveWashBreakeven);
+    }
+
+    /// Why the rate side of the screen cannot fire at launch, stated so that a
+    /// registry edit has to confront it. At the seeded `mkt.fee` the `rwd.rate`
+    /// record's own hard maximum is already inside the wash break-even, so the
+    /// record's bounds and the coupling agree while the fee is unmoved. The
+    /// coupling is what keeps them agreeing **after** the fee moves, which the
+    /// record alone cannot do because its bounds do not track `mkt.fee`.
+    #[test]
+    fn the_rate_records_own_maximum_is_inside_the_seeded_breakeven() {
+        let fee = seeded_perbill(b"mkt.fee");
+        let max = match genesis_params()
+            .into_iter()
+            .find(|record| record.key == key16(b"rwd.rate"))
+            .map(|record| record.max)
+        {
+            Some(ParamValue::Perbill(parts)) => parts,
+            other => panic!("13 §1: `rwd.rate` must carry a Perbill max, got {other:?}"),
+        };
+        assert!(
+            rwd_rate_coupled(max as u128, fee as u128),
+            "13 §1: the `rwd.rate` ceiling {max} ppb has escaped the wash \
+             break-even at the seeded `mkt.fee` {fee} ppb",
+        );
+    }
+
+    /// One seeded 13 §1 `Perbill` value, read rather than restated.
+    fn seeded_perbill(name: &[u8]) -> u32 {
+        match genesis_params()
+            .into_iter()
+            .find(|record| record.key == key16(name))
+            .map(|record| record.value)
+        {
+            Some(ParamValue::Perbill(parts)) => parts,
+            other => panic!("13 §1 must seed a Perbill row for this key, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_unrelated_key_is_not_screened() {
+        assert!(rwd_rate_pair(key16(b"epoch.length")).is_none());
+        assert!(
+            screen_rwd_rate_coupling(key16(b"epoch.length"), ParamValue::U32(1), |_| None).is_ok()
+        );
+    }
+
+    #[test]
+    fn a_missing_partner_row_fails_closed() {
+        let err = screen_rwd_rate_coupling(key16(b"rwd.rate"), ParamValue::Perbill(1), |_| None)
+            .unwrap_err();
+        assert_eq!(err, Error::TryStateViolation);
+    }
+
+    #[test]
+    fn a_market_fee_amendment_passes_through_both_screens() {
+        // mkt.fee is coupled to ledger.rdm_fee AND to rwd.rate. Neither screen
+        // absorbs the other.
+        assert!(redeem_fee_pair(key16(b"mkt.fee")).is_some());
+        assert!(rwd_rate_pair(key16(b"mkt.fee")).is_some());
+        assert_ne!(
+            redeem_fee_pair(key16(b"mkt.fee")),
+            rwd_rate_pair(key16(b"mkt.fee")),
+        );
+    }
+
+    /// 13 rule 7 states that the cross-multiplied form is exact and that
+    /// `99 × rate / 100 ≤ 2 × fee` is the unsafe spelling. This is the witness
+    /// that separates them, so a future rewrite into the floored-left-hand-side
+    /// form cannot pass: at `mkt.fee` = 2,000,000 ppb that spelling admits
+    /// 4,040,405 ppb, because `floor(99 × 4_040_405 / 100) = 4_000_000` is not
+    /// greater than `2 × 2_000_000`.
+    #[test]
+    fn the_cross_multiplied_predicate_is_exact_at_its_boundary() {
+        let fee: u128 = 2_000_000;
+        // Restated by the *other* correct spelling (`rate ≤ 200 × fee / 99`,
+        // which is equivalent over the integers) so the boundary is derived
+        // here rather than copied from the predicate under test.
+        let boundary = 200 * fee / 99;
+        assert_eq!(boundary, 4_040_404);
+        assert!(rwd_rate_coupled(boundary, fee));
+        assert!(!rwd_rate_coupled(boundary + 1, fee));
+        // The unsafe spelling would have admitted `boundary + 1`.
+        assert!(99 * (boundary + 1) / 100 <= 2 * fee);
+    }
+
+    /// G-1: the predicate is `pub`, so it must answer rather than overflow on
+    /// an argument no `ParamValue::Perbill` can hold. An unrepresentable
+    /// product refuses, which is the status-quo direction.
+    #[test]
+    fn the_predicate_refuses_an_unrepresentable_product() {
+        assert!(!rwd_rate_coupled(u128::MAX, u128::MAX));
+        assert!(!rwd_rate_coupled(u128::MAX / 98, 0));
+        // Over the whole Perbill domain it is the plain cross-multiplication.
+        for rate in [0u128, 1, 2_500_000, 6_000_000, u128::from(u32::MAX)] {
+            for fee in [0u128, 1, 500_000, 3_000_000, u128::from(u32::MAX)] {
+                assert_eq!(rwd_rate_coupled(rate, fee), 99 * rate <= 200 * fee);
+            }
+        }
+    }
+
+    /// Controller resolution 6 (2026-08-11): genesis must satisfy the coupling,
+    /// proved through the shipped screen rather than assumed. A future genesis
+    /// edit that broke the pair would leave the chain refusing its own launch
+    /// values, and `try_state` would fail on block one.
+    #[test]
+    fn genesis_satisfies_the_coupling_through_the_screen() {
+        let params = genesis_params();
+        let value_of = |key| {
+            params
+                .iter()
+                .find(|record| record.key == key)
+                .map(|record| record.value)
+                .expect("13 §1 seeds the row")
+        };
+        let rate = key16(b"rwd.rate");
+        let market = key16(b"mkt.fee");
+        // Screened from both sides, because either seeded row could be the one
+        // a future edit moves.
+        assert_eq!(
+            screen_rwd_rate_coupling(rate, value_of(rate), |pair| Some(value_of(pair))),
+            Ok(())
+        );
+        assert_eq!(
+            screen_rwd_rate_coupling(market, value_of(market), |pair| Some(value_of(pair))),
+            Ok(())
+        );
+        assert!(ConstitutionState::genesis().try_state().is_ok());
+    }
+
+    /// 13 rule 7 (TR9): `99 × rwd.rate ≤ 200 × mkt.fee` is screened jointly over
+    /// the pair at the amendment boundary — **in both directions**, because both
+    /// rows are PARAM and a single PARAM decision can move either side — and
+    /// asserted in try-state.
+    #[test]
+    fn rwd_rate_coupling_is_screened_over_the_pair_in_both_directions() {
+        let rate = key16(b"rwd.rate");
+        let market = key16(b"mkt.fee");
+        assert_eq!(rwd_rate_pair(rate), Some(market));
+        assert_eq!(rwd_rate_pair(market), Some(rate));
+        assert_eq!(rwd_rate_pair(key16(b"epoch.length")), None);
+
+        let mut state = ConstitutionState::genesis();
+        let value_of = |state: &ConstitutionState, key| {
+            state
+                .params
+                .iter()
+                .find(|record| record.key == key)
+                .map(|record| record.value)
+                .expect("13 §1 seeds the row")
+        };
+        let perbill_of = |state: &ConstitutionState, key| match value_of(state, key) {
+            ParamValue::Perbill(parts) => parts,
+            other => panic!("13 §1: {key:?} must be a Perbill row, got {other:?}"),
+        };
+        // Every step below is one record's own max-Δ, read from the registry
+        // rather than restated: 13 owns those values (runtime-code rule 4).
+        let step_of = |state: &ConstitutionState, key| match state
+            .params
+            .iter()
+            .find(|record| record.key == key)
+            .and_then(|record| record.max_delta)
+        {
+            Some(MaxDelta::Absolute(ParamValue::Perbill(parts))) => parts,
+            other => panic!("13 §1: {key:?} must carry an absolute Perbill max-Δ, got {other:?}"),
+        };
+        let redeem = key16(b"ledger.rdm_fee");
+        let redeem_step = step_of(&state, redeem);
+        let market_step = step_of(&state, market);
+        // `mkt.fee` is also the partner of `ledger.rdm_fee`, which genesis seeds
+        // at the same rate, so lowering it is refused by *that* screen until the
+        // redemption fee moves out of the way. Clear it first, so the legs below
+        // isolate this coupling and cannot pass for the wrong reason.
+        for epoch in [1u32, 2] {
+            let next = perbill_of(&state, redeem).saturating_sub(redeem_step);
+            assert!(state
+                .set_param(redeem, ParamValue::Perbill(next), epoch, epoch)
+                .is_ok());
+        }
+        let lowered_fee = perbill_of(&state, market).saturating_sub(market_step);
+        assert!(state
+            .set_param(market, ParamValue::Perbill(lowered_fee), 3, 3)
+            .is_ok());
+        assert!(state.try_state().is_ok());
+
+        // (1) The rate side. The largest admissible rate against the live fee is
+        // `floor(200 × fee / 99)`, restated by the equivalent integer spelling so
+        // the boundary is not copied from the predicate under test.
+        let boundary = 200u32.saturating_mul(lowered_fee) / 99;
+        let before = state.clone();
+        assert_eq!(
+            state.set_param(rate, ParamValue::Perbill(boundary + 1), 4, 4),
+            Err(Error::RewardRateAboveWashBreakeven)
+        );
+        assert_eq!(before, state, "a refused amendment is a strict no-op");
+        // Equality is admissible, and the record's own bounds admit both values,
+        // so only the coupling can be refusing the one above.
+        assert!(state
+            .set_param(rate, ParamValue::Perbill(boundary), 4, 4)
+            .is_ok());
+
+        // (2) The fee side, which a one-sided screen would let through. The pair
+        // now sits at the boundary, so the smallest cut breaks it.
+        let before = state.clone();
+        assert_eq!(
+            state.set_param(market, ParamValue::Perbill(lowered_fee - 1), 5, 5),
+            Err(Error::RewardRateAboveWashBreakeven),
+            "13 rule 7: screening only `rwd.rate` leaves the invariant breakable \
+             from `mkt.fee`"
+        );
+        assert_eq!(before, state);
+
+        // (3) Lowering `mkt.fee` is otherwise lawful — the screen is over the
+        // resulting pair, not a freeze on the market fee. Drop the rate first
+        // and a far larger cut passes.
+        assert!(state
+            .set_param(rate, ParamValue::Perbill(lowered_fee), 5, 5)
+            .is_ok());
+        let cut_fee = lowered_fee.saturating_sub(market_step);
+        assert!(state
+            .set_param(market, ParamValue::Perbill(cut_fee), 6, 6)
+            .is_ok());
+        assert_eq!(value_of(&state, market), ParamValue::Perbill(cut_fee));
+        assert!(state.try_state().is_ok());
+
+        // (4) try-state is the backstop an unscreened writer cannot slip past.
+        let breaking = 200u32.saturating_mul(cut_fee) / 99 + 1;
+        for record in &mut state.params {
+            if record.key == rate {
+                record.value = ParamValue::Perbill(breaking);
             }
         }
         assert_eq!(state.try_state(), Err(Error::TryStateViolation));
@@ -3413,6 +3863,53 @@ mod tests {
         // 1,000 and two reach the superseded 2,000.
         assert_eq!(record.max_delta, Some(MaxDelta::Factor(2)));
         assert_eq!(record.class, ParamClass::Param);
+    }
+
+    /// 13 §1: the trading-accuracy reward rate, adopted at 0.25 % by the owner
+    /// on 2026-08-10. The seed and every bound on the record are pinned here
+    /// because the whole anti-farm argument of 08 §2.6 is stated in terms of
+    /// them: the ceiling keeps the rate inside the wash break-even, and the
+    /// unsafe direction is upward.
+    #[test]
+    fn rwd_rate_is_seeded_at_the_adopted_quarter_percent() {
+        let key = key16(b"rwd.rate");
+        let record = genesis_params()
+            .into_iter()
+            .find(|r| r.key == key)
+            .expect("13 §1: rwd.rate must be seeded at genesis");
+        assert_eq!(record.value, ParamValue::Perbill(2_500_000));
+        assert_eq!(record.min, ParamValue::Perbill(0));
+        assert_eq!(record.max, ParamValue::Perbill(6_000_000));
+        assert_eq!(record.cooldown_epochs, 1);
+        assert_eq!(record.class, ParamClass::Param);
+        assert!(!record.kernel_bounded);
+    }
+
+    /// 08 §2.6 / 13 §1: the seeded pair must satisfy the wash break-even the
+    /// adopted rate is derived from. This is a genesis-consistency assertion,
+    /// not the amendment-boundary screen.
+    #[test]
+    fn rwd_rate_stays_inside_the_wash_breakeven_at_the_mkt_fee_default() {
+        // 08 §2.6: r_breakeven = 2f / 0.99, evaluated in parts per billion.
+        let params = genesis_params();
+        let fee = params
+            .iter()
+            .find(|r| r.key == key16(b"mkt.fee"))
+            .expect("mkt.fee");
+        let rate = params
+            .iter()
+            .find(|r| r.key == key16(b"rwd.rate"))
+            .expect("rwd.rate");
+        let (ParamValue::Perbill(f), ParamValue::Perbill(r)) = (fee.value, rate.value) else {
+            panic!("both rows are Perbill");
+        };
+        // Cross-multiplied, so the amendment-boundary screen and this genesis
+        // assertion cannot disagree at the boundary. Equality is admissible: at
+        // exact break-even the wash nets zero rather than positive.
+        assert!(
+            99 * u128::from(r) <= 200 * u128::from(f),
+            "rwd.rate {r} ppb has reached the wash break-even against mkt.fee {f} ppb",
+        );
     }
 
     #[test]

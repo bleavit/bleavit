@@ -68,9 +68,9 @@ mod tests;
 // The functional core is the semantic source of truth; re-export its surface
 // (named, not glob — the pallet defines its own `Event`/`Error`).
 pub use futarchy_treasury_core::{
-    bps, reserve_probe_runway_debit, stream_claimable_at, vested_amount, AssetKind, BudgetLine,
-    CoretimeQuote, Error as CoreError, Event as CoreEvent, KeeperMeter, KeeperMeterClass,
-    NavComponents, RollingMeter, Stream, StreamInput, Treasury, TreasuryAccount,
+    bps, credit_pot_headroom, reserve_probe_runway_debit, stream_claimable_at, vested_amount,
+    AssetKind, BudgetLine, CoretimeQuote, Error as CoreError, Event as CoreEvent, KeeperMeter,
+    KeeperMeterClass, NavComponents, RollingMeter, Stream, StreamInput, Treasury, TreasuryAccount,
     DEFAULT_VIT_SUPPLY, ISS_INFLATION_CAP_BPS, MAX_BUDGET_LINES, MAX_FUNDED_CORETIME_PERIODS,
     MAX_PENDING_OUTFLOWS, MAX_POL_COMMITMENTS, MAX_STREAMS, TRS_CAP_180D_BPS, TRS_CAP_30D_BPS,
     TRS_CAP_PROPOSAL_BPS, TRS_STREAM_THRESHOLD_BPS, USDC, VIT,
@@ -133,6 +133,75 @@ impl<AccountId, BlockNumber> CommunityVesting<AccountId, BlockNumber> for () {
         _: futarchy_primitives::Balance,
         _: futarchy_primitives::Balance,
         _: BlockNumber,
+    ) -> frame_support::dispatch::DispatchResult {
+        Ok(())
+    }
+}
+
+/// Runtime custody adapter for the Phase 3-4 trading-reward funding path and
+/// its folded-in budget return (08 §2.6). The treasury pallet deliberately
+/// does not depend on `pallet-trading-rewards` or on the runtime's native
+/// currency implementation — see the module doc's custody/accounting
+/// boundary. The runtime binds this seam to a real VIT transfer plus a read
+/// of the reward pallet's own accrual accounting; pallet tests use a
+/// recording adapter.
+///
+/// The four methods are deliberately not one round trip: `fund` only ever
+/// moves VIT forward (pot → sovereign), and the return direction is split
+/// into two *reads* (the sovereign's balance and what it must keep held)
+/// plus a *move*, so the pallet — not the adapter — performs the subtraction
+/// that keeps the return from ever touching VIT backing an unclaimed accrual.
+/// Computing that subtraction inside the adapter would put the one property
+/// this seam exists to protect behind an implementation this pallet cannot
+/// see or test.
+pub trait TradingRewardFunding<AccountId> {
+    /// Move `amount` VIT from `pot` into the reward pallet's sovereign
+    /// account. An error must leave both accounts and the stored allocation
+    /// unchanged.
+    fn fund(
+        pot: &AccountId,
+        amount: futarchy_primitives::Balance,
+    ) -> frame_support::dispatch::DispatchResult;
+
+    /// The reward pallet sovereign's current, reducible VIT balance — the
+    /// authorized budget the treasury has moved there and not yet returned.
+    fn reward_sovereign_balance() -> futarchy_primitives::Balance;
+
+    /// The VIT the sovereign must keep held, because it backs `TotalAccrued`
+    /// — rewards promised to participants at epoch settlement and not yet
+    /// collected. `claim_rewards` is entirely the claimant's own discretion
+    /// and can be arbitrarily late (08 §2.6), so this can be positive long
+    /// after the epoch that promised it has closed, and a return MUST NOT
+    /// take VIT this figure reserves.
+    fn reward_accrual_reserve() -> futarchy_primitives::Balance;
+
+    /// Move `amount` VIT from the reward pallet's sovereign account into
+    /// `pot`. An error must leave both accounts unchanged.
+    fn sweep_to_pot(
+        pot: &AccountId,
+        amount: futarchy_primitives::Balance,
+    ) -> frame_support::dispatch::DispatchResult;
+}
+
+impl<AccountId> TradingRewardFunding<AccountId> for () {
+    fn fund(
+        _: &AccountId,
+        _: futarchy_primitives::Balance,
+    ) -> frame_support::dispatch::DispatchResult {
+        Ok(())
+    }
+
+    fn reward_sovereign_balance() -> futarchy_primitives::Balance {
+        0
+    }
+
+    fn reward_accrual_reserve() -> futarchy_primitives::Balance {
+        0
+    }
+
+    fn sweep_to_pot(
+        _: &AccountId,
+        _: futarchy_primitives::Balance,
     ) -> frame_support::dispatch::DispatchResult {
         Ok(())
     }
@@ -385,6 +454,27 @@ pub trait BenchmarkHelper<RuntimeOrigin, AccountId> {
     fn treasury_origin() -> RuntimeOrigin;
     /// A runtime origin that [`Config::CommunityDistributionOrigin`] admits.
     fn community_origin() -> RuntimeOrigin;
+    /// A runtime origin that [`Config::TradingRewardOrigin`] admits.
+    /// Defaults to [`Self::community_origin`]: 06 §3.2 states both bounded
+    /// PARAM leaves carry the identical `FutarchyParam` origin, so a runtime
+    /// binding them to the same predicate needs no second fixture. Override
+    /// only if a runtime ever binds the two origins differently.
+    fn trading_reward_origin() -> RuntimeOrigin {
+        Self::community_origin()
+    }
+    /// Put `amount` unspent VIT into the reward pallet's sovereign account so
+    /// `fund_trading_rewards`'s **return** leg has something to move. Without
+    /// it the fixture measures only the authorization half, and the return
+    /// half — an adapter move, an `IncentiveRemaining` write and an event —
+    /// is charged to nobody. A runtime whose
+    /// [`Config::TradingRewardFunding`] is still an unwired stub keeps the
+    /// no-op default; it MUST implement this the moment that adapter becomes
+    /// real, or `--write` commits a half-measured weight downward.
+    fn prime_trading_reward_headroom(
+        _: futarchy_primitives::Balance,
+    ) -> frame_support::dispatch::DispatchResult {
+        Ok(())
+    }
     /// A funded keeper/recipient account for Signed calls.
     fn account(seed: u8) -> AccountId;
     /// Seed the real-USDC `MAIN` custody balance used by the dedicated payout
@@ -426,8 +516,11 @@ pub mod pallet {
     };
 
     /// v3 adds the bounded authored-share accumulator used for Housekeeping
-    /// collator compensation. The new storage defaults empty on upgrade.
-    const STORAGE_VERSION: StorageVersion = StorageVersion::new(3);
+    /// collator compensation. The new storage defaults empty on upgrade. v4
+    /// adds the trading-reward `incentiv` pot's remaining allocation
+    /// (08 §2.1/§2.6), which must default to the genesis amount rather than
+    /// zero — the same reason v2 added community allocation initialization.
+    const STORAGE_VERSION: StorageVersion = StorageVersion::new(4);
 
     #[pallet::pallet]
     #[pallet::storage_version(STORAGE_VERSION)]
@@ -469,6 +562,27 @@ pub mod pallet {
 
         /// 13 §4 bound on the number of community schedules.
         type MaxCommunitySchedules: Get<u32>;
+
+        /// Admits the passed PARAM decision that authorizes one bounded
+        /// trading-reward epoch budget from the `incentiv` pot (08 §2.6).
+        /// Kept as its own Config item rather than reusing
+        /// [`Config::CommunityDistributionOrigin`] for naming clarity only:
+        /// 06 §3.2 states both bounded PARAM leaves carry the identical
+        /// `FutarchyParam` origin, and the runtime binds both to the same
+        /// `EnsureFutarchyParam` predicate.
+        type TradingRewardOrigin: EnsureOrigin<Self::RuntimeOrigin>;
+
+        /// Runtime custody adapter for the trading-reward funding/headroom-
+        /// sweep pair. See [`TradingRewardFunding`].
+        type TradingRewardFunding: TradingRewardFunding<Self::AccountId>;
+
+        /// Derived keyless source account holding the genesis trading-reward
+        /// `incentiv` pot (08 §2.1's Phase 3-4 incentive allocation; §2.6).
+        type IncentivePot: Get<Self::AccountId>;
+
+        /// 08 §2.1's fixed trading-reward incentive allocation (10% of total
+        /// VIT supply).
+        type IncentiveAllocationAmount: Get<Balance>;
 
         /// 13 §4 bound on distinct collators retained in one pending authored
         /// share accumulator.
@@ -670,6 +784,22 @@ pub mod pallet {
     #[pallet::storage]
     pub type CommunityScheduleCount<T: Config> = StorageValue<_, u32, ValueQuery>;
 
+    /// Undistributed amount remaining in the derived trading-reward
+    /// `incentiv` pot (08 §2.1/§2.6). `fund_trading_rewards` moves it in both
+    /// directions in one call: the previous authorization's unspent remainder
+    /// is credited back first (never above
+    /// [`Config::IncentiveAllocationAmount`]), then the new authorization is
+    /// debited from the replenished figure.
+    #[pallet::storage]
+    pub type IncentiveRemaining<T: Config> = StorageValue<_, Balance, ValueQuery>;
+
+    /// Number of successful lifetime trading-reward budget authorizations
+    /// (08 §2.6, *Bounds*). Completed authorizations do not replenish it —
+    /// returning a remainder credits [`IncentiveRemaining`] alone, never this
+    /// counter.
+    #[pallet::storage]
+    pub type TradingRewardBudgetCount<T: Config> = StorageValue<_, u32, ValueQuery>;
+
     /// Ops-operated account funded on the Coretime chain (09 §4).
     #[pallet::storage]
     pub type CoretimeRenewalAccount<T: Config> = StorageValue<_, [u8; 32], OptionQuery>;
@@ -823,6 +953,23 @@ pub mod pallet {
             per_block: Balance,
             remaining: Balance,
         },
+        /// A bounded Phase 3-4 trading-reward epoch budget was authorized
+        /// from the `incentiv` pot into the reward pallet's own sovereign
+        /// account (08 §1.4/§2.6). `remaining` is the pot's undistributed
+        /// allocation after the debit. This is the frozen event 08 §1.4
+        /// names for `fund_trading_rewards`.
+        TradingRewardsFunded { amount: Balance, remaining: Balance },
+        /// The previous authorization's unspent VIT was returned from the
+        /// reward pallet's sovereign account to the `incentiv` pot, inside
+        /// `fund_trading_rewards` and before the new authorization
+        /// (08 §2.6: *"The return of unspent budget carries the same
+        /// authority as the authorization"*). `amount` excludes every VIT
+        /// backing an accrual no participant has claimed yet; `remaining` is
+        /// the pot's undistributed allocation after the credit and before the
+        /// new debit. Treasury-owned operational history, not a frozen
+        /// integration-contract event — 08 §1.4 names no event for the
+        /// return leg.
+        TradingRewardBudgetReturned { amount: Balance, remaining: Balance },
     }
 
     /// 1:1 with [`CoreError`]; `CoreError::BadOrigin` maps to
@@ -917,6 +1064,12 @@ pub mod pallet {
         /// off-chain consumers decode, so a new variant goes at the end (02 §13
         /// append-only rule) rather than shifting every variant after it.
         OutflowCustodyUnwired,
+        /// `fund_trading_rewards`'s amount exceeds the undistributed
+        /// `incentiv` pot (08 §2.6).
+        IncentiveAllocationExhausted,
+        /// The bounded lifetime trading-reward authorization count (08 §2.6,
+        /// *Bounds*) is full.
+        TooManyTradingRewardAuthorizations,
     }
 
     #[pallet::hooks]
@@ -933,9 +1086,12 @@ pub mod pallet {
             if on_chain < StorageVersion::new(2) && !CommunityDistributionRemaining::<T>::exists() {
                 CommunityDistributionRemaining::<T>::put(T::CommunityDistributionAmount::get());
             }
+            if on_chain < StorageVersion::new(4) && !IncentiveRemaining::<T>::exists() {
+                IncentiveRemaining::<T>::put(T::IncentiveAllocationAmount::get());
+            }
             STORAGE_VERSION.put::<Pallet<T>>();
             // StorageVersion + live PhaseFlags; closure latch, allocation and version.
-            T::DbWeight::get().reads_writes(2, 3)
+            T::DbWeight::get().reads_writes(3, 4)
         }
 
         // 15 §1 try-state coverage: the core validator (bounded collections,
@@ -957,6 +1113,8 @@ pub mod pallet {
                 BootstrapOpsFundingClosed::<T>::get(),
                 on_chain < StorageVersion::new(2) && !CommunityDistributionRemaining::<T>::exists(),
                 CommunityDistributionRemaining::<T>::get(),
+                on_chain < StorageVersion::new(4) && !IncentiveRemaining::<T>::exists(),
+                IncentiveRemaining::<T>::get(),
             )
                 .encode())
         }
@@ -970,46 +1128,63 @@ pub mod pallet {
                 bootstrap_before,
                 initialize_community,
                 community_before,
-            ): (bool, bool, bool, bool, bool, Balance) =
+                initialize_incentive,
+                incentive_before,
+            ): (bool, bool, bool, bool, bool, Balance, bool, Balance) =
                 Decode::decode(&mut &state[..]).map_err(|_| {
-                    TryRuntimeError::Other("treasury v3 migration: invalid pre-upgrade state")
+                    TryRuntimeError::Other("treasury v4 migration: invalid pre-upgrade state")
                 })?;
             if migrated {
                 frame_support::ensure!(
                     StorageVersion::get::<Pallet<T>>() == STORAGE_VERSION,
-                    "treasury v3 migration: storage version was not advanced"
+                    "treasury v4 migration: storage version was not advanced"
                 );
                 if initialize_bootstrap {
                     frame_support::ensure!(
                         BootstrapOpsFundingClosed::<T>::get() == treasury_was_armed,
-                        "treasury v3 migration: bootstrap closure was not initialized"
+                        "treasury v4 migration: bootstrap closure was not initialized"
                     );
                 } else {
                     frame_support::ensure!(
                         BootstrapOpsFundingClosed::<T>::get() == bootstrap_before,
-                        "treasury v3 migration: existing bootstrap closure changed"
+                        "treasury v4 migration: existing bootstrap closure changed"
                     );
                 }
                 if initialize_community {
                     frame_support::ensure!(
                         CommunityDistributionRemaining::<T>::get()
                             == T::CommunityDistributionAmount::get(),
-                        "treasury v3 migration: community allocation was not initialized"
+                        "treasury v4 migration: community allocation was not initialized"
                     );
                 } else {
                     frame_support::ensure!(
                         CommunityDistributionRemaining::<T>::get() == community_before,
-                        "treasury v3 migration: existing community allocation changed"
+                        "treasury v4 migration: existing community allocation changed"
+                    );
+                }
+                if initialize_incentive {
+                    frame_support::ensure!(
+                        IncentiveRemaining::<T>::get() == T::IncentiveAllocationAmount::get(),
+                        "treasury v4 migration: incentive allocation was not initialized"
+                    );
+                } else {
+                    frame_support::ensure!(
+                        IncentiveRemaining::<T>::get() == incentive_before,
+                        "treasury v4 migration: existing incentive allocation changed"
                     );
                 }
             } else {
                 frame_support::ensure!(
                     BootstrapOpsFundingClosed::<T>::get() == bootstrap_before,
-                    "treasury v3 migration: current-version latch changed"
+                    "treasury v4 migration: current-version latch changed"
                 );
                 frame_support::ensure!(
                     CommunityDistributionRemaining::<T>::get() == community_before,
-                    "treasury v3 migration: current-version allocation changed"
+                    "treasury v4 migration: current-version allocation changed"
+                );
+                frame_support::ensure!(
+                    IncentiveRemaining::<T>::get() == incentive_before,
+                    "treasury v4 migration: current-version incentive allocation changed"
                 );
             }
             Ok(())
@@ -1413,6 +1588,121 @@ pub mod pallet {
             });
             Ok(())
         }
+
+        /// `treasury.fund_trading_rewards(amount)` — the bounded Phase 3-4
+        /// trading-reward funding mechanism (08 §2.1/§2.6, 06 §3.2). A passed
+        /// PARAM decision retires the previous authorization's unspent
+        /// remainder and then moves `amount` VIT out of the `incentiv` pot
+        /// into the reward pallet's own sovereign account. Mirrors
+        /// `create_community_schedule`'s shape, as 06 §3.2 requires of any
+        /// future member of this pair: a fixed genesis source with a stored
+        /// remaining balance, a payment shape the call fixes rather than the
+        /// caller (the destination is [`Config::TradingRewardFunding`]'s own,
+        /// never a call argument), and a lifetime successful-authorization
+        /// count.
+        ///
+        /// The lifetime count reuses [`Config::MaxCommunitySchedules`]
+        /// directly rather than a duplicated same-valued constant (08 §2.6,
+        /// *Bounds*: "the authorization count reuses the community
+        /// schedule's lifetime bound") — the two calls share this Config
+        /// item, so an amendment of one bound moves both and neither can
+        /// drift from the other.
+        ///
+        /// # The return leg is folded in, and it is not a separate call
+        ///
+        /// 08 §2.6: *"The return of unspent budget carries the same authority
+        /// as the authorization, and MUST NOT be permissionless … the natural
+        /// shape is to fold it into `fund_trading_rewards` so that each new
+        /// authorization retires the previous one's remainder and no
+        /// independent surface exists at all."* A public crank would be a
+        /// one-extrinsic, permanent denial of the whole program's payout for
+        /// an epoch: reward accrual is clamped to the budget's unpromised
+        /// remainder, participants settle by pull, and `settle_epoch` is
+        /// idempotent per participant per epoch — so emptying the headroom
+        /// mid-settlement closes every remaining participant at a **zero**
+        /// reward with their score already discarded, and re-funding cannot
+        /// reopen a settled epoch.
+        ///
+        /// **Order is load-bearing: return first, authorize second.** The
+        /// other order would hand back the amount this very call just
+        /// authorized, leaving the sovereign empty and the pot untouched.
+        ///
+        /// **Returns the headroom, never the balance.** `TotalAccrued` in the
+        /// reward pallet falls only when a participant calls `claim_rewards`,
+        /// entirely at their own discretion and possibly long after the epoch
+        /// that promised it — so the sovereign routinely still holds VIT
+        /// backing an accrual nobody has collected. Taking the whole balance
+        /// would take that VIT too and leave `claim_rewards` unable to pay
+        /// it: nothing in the reward pallet's own settlement path breaks when
+        /// this is wrong, which is exactly why it would present as a program
+        /// that silently stops paying rather than as a visible failure.
+        /// [`Config::TradingRewardFunding`] reports the sovereign's balance
+        /// and its accrual reserve as two separate reads for exactly this
+        /// reason: the subtraction below is this pallet's own, not the
+        /// adapter's, so it is covered by this pallet's own tests rather than
+        /// hidden behind an implementation this pallet cannot see.
+        ///
+        /// **`amount == 0` is the wind-down, not an error.** With the return
+        /// folded in, a zero authorization is the only pure retire action —
+        /// the one call governance needs to end the program — so refusing it
+        /// would leave no way to return the budget without authorizing at
+        /// least one more planck. It is also the only path that stays open
+        /// once the lifetime count is full: the bound counts authorizations,
+        /// a zero call authorizes nothing, and gating the return on the
+        /// authorization bound would strand the final remainder in the
+        /// sovereign forever (G-1).
+        #[pallet::call_index(14)]
+        #[pallet::weight(T::WeightInfo::fund_trading_rewards())]
+        pub fn fund_trading_rewards(origin: OriginFor<T>, amount: Balance) -> DispatchResult {
+            T::TradingRewardOrigin::ensure_origin(origin)?;
+            let count = TradingRewardBudgetCount::<T>::get();
+            // Checked before any value moves, so a refused authorization is a
+            // complete no-op and never returns a remainder as a side effect.
+            if amount > 0 {
+                ensure!(
+                    count < T::MaxCommunitySchedules::get(),
+                    Error::<T>::TooManyTradingRewardAuthorizations
+                );
+            }
+
+            let pot = T::IncentivePot::get();
+
+            // 1. Retire the previous authorization's unspent remainder.
+            let mut remaining = IncentiveRemaining::<T>::get();
+            let balance = T::TradingRewardFunding::reward_sovereign_balance();
+            let reserved = T::TradingRewardFunding::reward_accrual_reserve();
+            let returned = balance.saturating_sub(reserved);
+            if returned > 0 {
+                T::TradingRewardFunding::sweep_to_pot(&pot, returned)?;
+                remaining =
+                    credit_pot_headroom(remaining, returned, T::IncentiveAllocationAmount::get());
+                IncentiveRemaining::<T>::put(remaining);
+                Self::deposit_event(Event::TradingRewardBudgetReturned {
+                    amount: returned,
+                    remaining,
+                });
+            }
+
+            // 2. Authorize the new budget out of the replenished allocation.
+            if amount == 0 {
+                return Ok(());
+            }
+            ensure!(
+                amount <= remaining,
+                Error::<T>::IncentiveAllocationExhausted
+            );
+            T::TradingRewardFunding::fund(&pot, amount)?;
+            let next_remaining = remaining
+                .checked_sub(amount)
+                .ok_or(Error::<T>::IncentiveAllocationExhausted)?;
+            IncentiveRemaining::<T>::put(next_remaining);
+            TradingRewardBudgetCount::<T>::put(count.saturating_add(1));
+            Self::deposit_event(Event::TradingRewardsFunded {
+                amount,
+                remaining: next_remaining,
+            });
+            Ok(())
+        }
     }
 
     #[pallet::extra_constants]
@@ -1494,6 +1784,7 @@ pub mod pallet {
             // truncating conversion drops nothing.
             State::<T>::put(TreasuryState::truncating_from_core(&t));
             CommunityDistributionRemaining::<T>::put(T::CommunityDistributionAmount::get());
+            IncentiveRemaining::<T>::put(T::IncentiveAllocationAmount::get());
             STORAGE_VERSION.put::<Pallet<T>>();
             if let Some(authority) = self.coretime_quote_authority.clone() {
                 CoretimeQuoteAuthority::<T>::put(authority);
@@ -2388,7 +2679,7 @@ pub mod pallet {
         pub fn do_try_state() -> Result<(), TryRuntimeError> {
             if StorageVersion::get::<Pallet<T>>() != STORAGE_VERSION {
                 return Err(TryRuntimeError::Other(
-                    "treasury: on-chain storage version is not v3",
+                    "treasury: on-chain storage version is not v4",
                 ));
             }
             let authored = CollatorAuthoredBlocks::<T>::get();
@@ -2452,6 +2743,25 @@ pub mod pallet {
             if CommunityScheduleCount::<T>::get() > T::MaxCommunitySchedules::get() {
                 return Err(TryRuntimeError::Other(
                     "treasury: community schedule count exceeds its bound",
+                ));
+            }
+            // 08 §2.6: `credit_pot_headroom` never lets a returned remainder
+            // raise `IncentiveRemaining` above the genesis allocation, and
+            // `fund_trading_rewards` never lets it fall below zero (a
+            // `ValueQuery` `Balance` cannot anyway) — this asserts both
+            // write paths kept the invariant rather than trusting them.
+            if IncentiveRemaining::<T>::get() > T::IncentiveAllocationAmount::get() {
+                return Err(TryRuntimeError::Other(
+                    "treasury: remaining incentive allocation exceeds genesis allocation",
+                ));
+            }
+            // 08 §2.6, *Bounds*: the lifetime trading-reward authorization
+            // count reuses `MaxCommunitySchedules` (the same Config item
+            // `fund_trading_rewards` checks), so the two counters share one
+            // bound while remaining independent counters.
+            if TradingRewardBudgetCount::<T>::get() > T::MaxCommunitySchedules::get() {
+                return Err(TryRuntimeError::Other(
+                    "treasury: trading-reward budget authorization count exceeds its bound",
                 ));
             }
             // 08 §1.2 INSURANCE target relation. The bounded-reserve claim is a

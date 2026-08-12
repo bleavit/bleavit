@@ -399,6 +399,23 @@ pub mod pallet {
         /// resulting pair is not). Appended last — the preceding discriminants
         /// are SCALE-stable.
         RedemptionFeeAboveMarketFee,
+        /// 13 rule 7 / 08 §2.6 (TR9): the amendment would carry the live pair
+        /// `99 × rwd.rate ≤ 200 × mkt.fee` out of band. Both rows are **PARAM**,
+        /// so a single PARAM decision can move either side and both directions
+        /// are refused: raising `rwd.rate` above the live wash break-even, and
+        /// lowering `mkt.fee` until the live `rwd.rate` sits above it.
+        ///
+        /// The second direction is the one this error exists for. `mkt.fee` may
+        /// be lowered toward its 5 bps floor by an ordinary vote that never
+        /// mentions the reward program, and that vote would otherwise retire
+        /// the program's only anti-farm defense.
+        ///
+        /// Deliberately not `TryStateViolation` (nothing stored is violating an
+        /// invariant — the refusal is what keeps it that way) and not `AboveMax`
+        /// (the `rwd.rate` record's own bounds are satisfied; the live coupling
+        /// is what binds). Appended last — the preceding discriminants are
+        /// SCALE-stable.
+        RewardRateAboveWashBreakeven,
     }
 
     #[pallet::hooks]
@@ -465,6 +482,18 @@ pub mod pallet {
             // invariant breakable from the other. The predicate and the key set
             // are single-homed in the core so shell and core cannot drift.
             constitution_core::screen_redeem_fee_coupling(key, updated.value, |pair| {
+                Params::<T>::get(pair).map(|record| record.value)
+            })
+            .map_err(Self::map_core_error)?;
+            // 13 rule 7's third live coupling (TR9): `99 × rwd.rate ≤ 200 ×
+            // mkt.fee`, the wash break-even of 08 §2.6. Screened jointly over
+            // the pair and in **both** directions, for the same PARAM reason as
+            // above and with more at stake: this relation is the whole
+            // anti-farm invariant of the reward program, so a `mkt.fee`
+            // lowering that closed the margin would retire it silently.
+            // `mkt.fee` is a partner in both pairs — the two screens are
+            // independent, neither absorbs the other, and both must run.
+            constitution_core::screen_rwd_rate_coupling(key, updated.value, |pair| {
                 Params::<T>::get(pair).map(|record| record.value)
             })
             .map_err(Self::map_core_error)?;
@@ -1018,6 +1047,9 @@ pub mod pallet {
                 CoreError::TryStateViolation => Error::<T>::TryStateViolation.into(),
                 CoreError::RedemptionFeeAboveMarketFee => {
                     Error::<T>::RedemptionFeeAboveMarketFee.into()
+                }
+                CoreError::RewardRateAboveWashBreakeven => {
+                    Error::<T>::RewardRateAboveWashBreakeven.into()
                 }
             }
         }

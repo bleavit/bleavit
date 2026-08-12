@@ -563,8 +563,8 @@ def validate_supply_chain_summary(
     expected_npm_lockfiles: set[str],
 ) -> list[str]:
     errors: list[str] = []
-    if summary.get("schema") != "bleavit.supply-chain.v4":
-        errors.append("supply-chain summary schema must be bleavit.supply-chain.v4")
+    if summary.get("schema") != "bleavit.supply-chain.v5":
+        errors.append("supply-chain summary schema must be bleavit.supply-chain.v5")
     ignored = summary.get("ignored_advisory_ids")
     if not isinstance(ignored, list) or any(
         not isinstance(item, str) or not item.startswith("RUSTSEC-") for item in ignored
@@ -604,6 +604,28 @@ def validate_supply_chain_summary(
         # one means the summary was not produced by that checker. Blocking here
         # keeps the release from trusting a hand-edited disclosure.
         errors.append("waived_npm declares a waiver reaching the bundle, which cannot be waived")
+    # v5: the third extension of the same disclosure property, to the `unsound`
+    # leg. cargo-audit prints these and passes; the GitHub Advisory Database
+    # grades them as vulnerabilities (RUSTSEC-2024-0429 / GHSA-wrw7-89jp-8q8g,
+    # `glib`, is the worked example and reached Dependabot while every gate here
+    # was green). A release that disclosed the RustSec ignores, the GHSA-only
+    # waivers and the npm waivers, and stayed silent about accepted undefined
+    # behavior in a shipped artifact's graph, would understate exactly what R-7
+    # is strictest about. `exposure` travels with each entry: "the affected
+    # function is called" is a materially different disclosure from "it is not",
+    # and no reader can recover which from an advisory id.
+    waived_unsound = summary.get("waived_unsound")
+    if not isinstance(waived_unsound, list) or any(
+        not isinstance(row, dict)
+        or set(row) != {"id", "package", "version", "workspace", "exposure"}
+        or not all(isinstance(value, str) and value for value in row.values())
+        or row["exposure"] not in ("unreachable", "constrained")
+        for row in waived_unsound
+    ):
+        errors.append(
+            "waived_unsound must be an array of {id, package, version, workspace, exposure} "
+            "objects with exposure in (unreachable, constrained)"
+        )
     # v4: the npm lockfiles a release scanned must be all of them, for the same
     # reason the workspace set must be complete — a partial scan reports as a
     # clean one.

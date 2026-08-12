@@ -1,5 +1,5 @@
 import { StorageDescriptor, PlainDescriptor, TxDescriptor, RuntimeDescriptor, Enum, ApisFromDef, QueryFromPalletsDef, TxFromPalletsDef, EventsFromPalletsDef, ErrorsFromPalletsDef, ConstFromPalletsDef, ViewFnsFromPalletsDef, SS58String, SizedHex, FixedSizeArray } from "polkadot-api";
-import type { I5sesotjlssv2d, Iffmde3ekjedi9, I4mddgoa69c0a2, I7oo41fpphderq, I95g6i7ilua7lq, Ieniouoqkq4icf, Phase, Ibgl04rn6nbfm6, I4q39t5hn830vp, I8re9183nrhr3n, I1v7jbnil3tjns, I8jgj1nhcr2dg8, Ifn6q3equiq9qi, Ia3sb0vgvovhtg, Iav8k1edbj86k7, Itom7fk49o0c9, I4i91h98n3cv1b, I4iumukclgj8ej, Iqnbvitf7a7l3, I48i407regf59r, I6r5cbv8ttrb09, Inofn0qqbjtb9, I1q8tnt1cluu5j, I8ds64oj6581v0, Ia7pdug7cdsg8g, Ifnu5trqcrgt5b, I9bin2jc70qt6q, I3qklfjubrljqh, If9iqq7i64mur8, Iag3f1hum3p4c8, I4v5g6i7bmt06o, I4s6jkha20aoh0, I84bhscllvv07n, I78s05f59eoi8b, I35l6p7kq19mr0, TransactionPaymentReleases, Ifble4juuml5ig, Version, Ida3u2t8t1l1js, If9jidduiuq7vv, ConvictionVotingVoteVoting, I6ouflveob4eli, PreimageOldRequestStatus, PreimageRequestStatus, I4pact7n2e9a0i, Ifh9leie5rtseb, I56u24ncejr5kt, I9jd27rnpm8ttv, I775lbh1002e7f, I9p9lq3rej5bhc, Iag146hmjgqfgj, I8uo3fpd3bcc6f, Iepbsvlk3qceij, Icgljjb6j82uhn, I5mpbmq1ooiq9i, I5g2vv0ckl2m8b, Ifup3lg9ro8a0f, Idh2ug6ou4a8og, Iejeo53sea6n4q, I53esa2ms463bk, Ib4jhb8tt3uung, I5qfubnuvrnqn6, I8t3u2dv73ahbd, I7vlvrrl2pnbgk, Ie0rpl5bahldfk, XcmPalletVersionMigrationStage, I7e5oaj2qi4kl1, Ie849h3gncgvok, Iat62vud7hlod2, Ict03eedr8de9s, Ici7ejds60vj52, XcmVersionedLocation, Ia2lhg7l2hilo3, Ifi4da1gej1fri, Ifvgo9568rpmqc, I82jm9g7pufuel, Ic5m5lp1oioo8r, I6cs1itejju2vv, I19osbbvcedbnc, Iapa0pspj5na3t, I5ebvuao287pjg, I71v2rrt182hod, Ia03hjl5um8umc, I1bd4sfsts9lp2, I5m1k92kcp4o6d, Ifkob0fdn3eods, I1ai0vm56bl7eu, I7aij5ls86nd9l, Iafqnechp3omqg, I3hg4c9ge064lf, Iej87d0l2agljs, Ifr88cshss4mco, I3qulnvnc3hn00, Iept8gvj9an6pj, I3ge8l11mhestc, I4qqej82rtmcsa, I8el4qiut1afl1, I2o134i87sa348, I9v1nr5t25p3gu, Ij23g2682mtlh, Ib65ekpdoa117u, Ic9m8l8pkrt2k5, Idjevvptm6gjaq, Id9gm4bteop71s, Ibk7vl3nqtkvjq, I25if6a41d56ra, Icj2nb69liuu24, Icm9f9h6nua3dd, I8hs8cgiei54sv, I43pkljl3a50rq, Ic7ihfq9tebase, Ia78sqv46skudk, I8kuj5ij9r87hi, Ieupfkt3mtrjlc, I5eoome1iv99mc, Ifs8l7uhm2p84a, I205qrookusi3d, Itdvhihql560g, I3fphkj3rkb8d1, Ie358p6da7iusl, I3i3q11ol0f2a8, Iihcv2ffgfdth, I5ss06mick4shb, I3a0nip7t7d0i7, I67b4evvsj5s3g, Ifolljjjlhmesh, I342jcra5dcalu, I6lfe132so20ih, It5jnbkpi46a7, I7emrdrb8oc4do, I4dcivh5duqno8, Iflkot84bd90qk, Ibphrfq348d9fn, I1qevohso20t15, I3dp098duidkfr, I6o17cn2677nom, Ias91rflo6ebo5, Idggr61fqjm503, I8fhaue1ob9s7m, I9mj1qagqpte76, I44n5hoqkdsljm, I7rilbfprtfgq9, Ifip05kcrl65am, I7dp3d6kokg6qm, I806t22dpi77ls, Ib9hqqd0dq5sja, Icqilkshp1mtl, I2rc77s0mqdebl, I2uoo9t5ta92pd, I2og4uv7220vja, I8dfqph7nh6ls, I60nr0tc614tgj, I4p5t2krb1gmvp, I5lf8t4evk0fq7, Ic23t0smeuk6mq, Iacpni5fp46chb, Ie1r5megrresvn, Icrbds76ujpbkg, Ifcik8ed7tl04e, I8jh0enk7f0r9l, Icu5tfrap3ledf, I7jbmorihvfg1b, I7tusvhvaa2qim, Iar9rrgd5eqf9n, I96rqo4i9p11oo, Iilpsjpsgmkpu, In7a38730s6qs, Ibtil0ss5munbk, I9s0ave7t0vnrk, I4fo08joqmcqnm, Ibafpkl9hhno69, Iasb8k6ash5mjn, XcmV5Junctions, I7r7b6bp2g5acg, I7rm113kjbo5gc, I4totqt881mlti, I5pbtpcshc7f67, I35p85j063s0il, I8ofcg5rbj0g2c, I4adgbll7gku4i, I6pjjpfvhvcfru, I9pj91mj79qekl, I39uah9nss64h9, Ik64dknsq7k08, Ib51vk42m1po4n, Idcr6u6361oad9, Ial23jn8hp0aen, Ifpj261e8s63m3, I4ktuaksf5i1gk, I9bqtpv2ii35mp, I9j7pagd6d4bda, I2h9pmio37r7fb, Ibmr18suc9ikh9, I9iq22t0burs89, I5u8olqbbvfnvf, I5utcetro501ir, I7t2thek61ghou, I61tdrsafr1vf3, Ibsk5g3rhm45pu, Icfoe9q8d4vs8f, Ibrfmvjrg4trnb, Iedih7t34maii9, I4e902qbfel1f1, Ie4met0joi8sv0, I1t8vq6a06ohhu, Icvt3pdunbinm7, I9ui3n41balr2q, I89sl7btgl24g2, I3u6g26k9kn96u, If1invp94rsjms, Ie5nc19gtiv5sv, Iald3dgvt1hjkb, Iurrhahet4gno, I5tamv2nk8bj8o, I8apq8e7c7qcpp, Id1e31ij0c35fv, Ibm7u0qulpnrs9, Id9uqtigc0il3v, Iaa2o6cgjdpdn5, Iam6hrl7ptd85l, Ict9ivhr2c5hv0, I8t4vv03357lk9, Ifc6beta7g87k, I666bl2fqjkejo, Icbio0e1f0034b, I8c0vkqjjipnuj, Idnsr2pndm36h0, Ia1pvdcbhuqf8m, I8steo882k7qns, I4pa4q37gj6fua, I5f178ab6b89t3, I4nakhtbsk3c5s, I82nfqfkd48n10, I1jm8m1rh9e20v, I3o5j3bli1pd8e, I4hoqldg80onj4, I5n4sebgkfr760, I7tpmr8tipe9i6, Ifs1i5fk9cqvr6, Ifpr9t4r1bh02u, Idhgkffmrcrpph, Ieg3fd8p4pkt10, I8kg5ll427kfqq, I467333262q1l9, Ibhs62r2hk467a, Ifeg4pudqnboeu, I1d5onj5bp3620, I6jje7fctkmdam, I6he8b4b4q6p14, I57mgih1qrbf70, I3lj33btcqlb1i, I707m7edh0jft8, I2j5sqe1l974kn, I2eb501t8s6hsq, Ianmuoljk2sk1u, I1ok6cg6f6qjvq, I7knpbpi70kjd6, I2ubgugv6pr3bd, Ideaemvoneh309, I3d9o9d7epp66v, I6lqh1vgb4mcja, Ibou4u1engb441, Id6nbvqoqdj4o2, I95iqep3b8snn9, I6fa9aeuk7i4ib, I8k3rnvpeeh4hv, I1jllala72loei, I3vh014cqgmrfd, I40pqum1mu8qg3, I1r4c2ghbtvjuc, Ia5cotcvi888ln, I21jsa919m88fd, Iegif7m3upfe1k, I9kt8c221c83ln, Ic76kfh5ebqkpl, Icscpmubum33bq, I21d2olof7eb60, Ibgm4rnf22lal1, Ie68np0vpihith, I9bnv6lu0crf1q, Iauhjqifrdklq7, Ie1uso9m8rt5cf, Ifccifqltb5obi, Iadtsfv699cq8b, Ialpmgmhr3gk5r, I4cbvqmqadhrea, I3sdol54kg5jaq, I8fougodaj6di6, I81vt5eq60l4b6, Irupv22iu38vu, I7grtu814479f3, I93s1mcesjtqu3, I1p86ntl6dn03c, I3ri98utbddtsd, I6bpho1qciu1vq, I23de7n843u7sn, I5fe6dsj65bbns, Ideepm5vhbl12g, Idasi83b2hi6kd, I3l1prg489cgso, Ibihfmtr4nutgv, I8b0duu38170aj, I7445bslhc0ic2, Id6e8lk3pfjocj, I449ug3537vfu2, I7r9r972bl7s6h, I45orgf9ulklgj, I7gp5f34oc7pki, I36p2bgnnl36ta, I6qcvfaiubjt05, I7tjbm7l304tu9, I7kcd6p94nv55v, I483r8098di3t5, Ico0ou8pmf1cq5, Ie38ogc3bkfpu, Iasovm2m56clga, I3s764kupqvvc3, Ide781hv7v8ek3, I4n0jfeme2dupj, Iejr8qrqkqh148, Ie00dqaka54s56, I97fq4k68v5pmh, Ifh9jjrch89bli, I17o91bl727r0j, Idbt6597auf3g2, I3nkq26pmovr9u, I1mjueefcqgdaj, Ict5mnga93gs4g, If97gtgn6okleo, I5c87v6pd2sdaf, I5l0jsir5si80s, I86uhg8ivvk3a8, I4ov6e94l79mbg, I3dg8tbt6tcck6, Ibnicuotj4pjfm, I4gj9mv93je4sv, I3f8ncpioik5na, I3qt1hgg4djhgb, Idscf6boak49q1, I3ajpo6bheav6q, Iaoh4afnk8h0fj, Ie239vtc2egj50, I4m6dhgb2ar055, I8m9idjg76ip7q, I3c63j6sh3evqn, Idpghfv397i03j, I1iqmhg9l6j4g5, Ifdhckj0h8qpv2, I4uk5nmqsi401j, I7eloeoebplnvf, Icu0h2un8nbhct, Ifoljaehihf3a6, If5i6c2m5d9b65, I9ihjoku7164ou, I7661jqlhbtghb, I5h8g89cqhubt3, I3gvjatq4m8h18, I8vsdam138s0ak, I68s7org31qt4d, Ielk7f0jb1jt1u, I7n5sdbabu8l7g, I1qpch3k96pn83, Ia82mnkmeo2rhc, I91sqkhtuteciq, Icbccs0ug47ilf, I855j4i3kr8ko1, Iff5ab2dmnvclk, Idd7hd99u0ho0n, Iafscmv8tjf0ou, I100l07kaehdlp, I6gnbnvip5vvdi, Icv68aq8841478, Ic262ibdoec56a, Iflcfm9b6nlmdd, Ijrsf4mnp3eka, Id5fm4p8lj5qgi, I8tjvj9uq4b7hi, I4fooe9dun9o0t, I4ici6vhci5d5f, I9ia5eeknmnh40, I9nrdlsbtsjaoc, Iph9c4rn81ub2, Icqe266pmnr25o, I5hoiph0lqphp, I5k7oropl9ofc7, I48vagp1omigob, Ib5tst4ppem1g6, Ibn64edsrg3737, I83r9d02dh47j9, I22bm4d7re21j9, I3jnhifvaeuama, I8n1gia0lo42ok, I6gb0o7lqjfdjq, Idh36v6iegkmpq, I27hnueutmchbe, Iectm2em66uhao, I7q57goff3j72h, Ibe49veu9i9nro, I1rnkmiu7usb82, Ig6jnoe1clkm7, Ibtugueatkkr9s, Ier2cke86dqbr2, Iaeqj2ebnvkjqe, Ih04jp733tqqa, Ievr89968437gm, I229ijht536qdu, I62nte77gksm0f, I9cg2delv92pvq, Ilhp45uime5tp, I4f1hv034jf1dt, I7svrbkiu01iec, I8cbok7qd7ru4t, I7kij8p9kchdjo, I3dlplal9hg0ou, Ia3c82eadg79bj, Ienusoeb625ftq, Ibtsa3docbr9el, I72dv4a82dus88, I17qjng9vev10h, I53fpkd6hlkoe2, Ib49ck93mjok7d, Icovh3ggbhth1s, I8a8c1n38ann55, I2ur0oeqg495j8, I7f2f3co93gefl, I1bhd210c3phjj, Iep27ialq4a7o7, Iasu5jvoqr43mv, I25quf02h3f45f, I5qolde99acmd1, I8gtde5abn1g9a, If1co0pilmi7oq, Iae74gjak1qibn, I3escdojpj0551, I38473632flscn, I5rtkmhm2dng4u, I137t1cld92pod, I1rvj4ubaplho0, Ia3uu7lqcc1q1i, I7crucfnonitkn, I7tmrp94r9sq4n, Ibslgga81p36aa, I61d51nv4cou88, If8u5kl4h8070m, Ibmuil6p3vl83l, I7lul91g50ae87, Icl7nl1rfeog3i, Iasr6pj6shs0fl, I2uqmls7kcdnii, Idg69klialbkb8, I7r6b7145022pp, I30pg328m00nr3, Icmrn7bogp28cs, I7m9b5plj4h5ot, I9onhk772nfs4f, I3l6bnksrmt56r, Idh09k0l2pmdcg, I7uoiphbm0tj4r, I512p1n7qt24l8, I6s1nbislhk619, I3gghqnh2mj0is, I6iv852roh6t3h, I9oc2o6itbiopq, I39t01nnod9109, I6v8sm60vvkmk7, I1qmtmbe5so8r3, Ih99m6ehpcar7, Idgorhsbgdq2ap, I9ubb2kqevnu6t, I2hq50pu2kdjpo, I9acqruh7322g2, I8i1bk7kj5k5ed, Ie5qta40r3ho5l, Ibfd56bn4a7kfk, Ifcslavva7skj1, Icolandhn4qpus, I333ps8sjf4lhr, Iah5vhnso7uqce, I2lct6m7k5r2et, I9cf6so4vur6mg, Isntabb3i2t9f, I40af445fa06rh, Iapmmsuq8j9rcn, I80dirtbv2ognl, I6qrovovkeah6g, I5v7n6l8j8vd1f, I2kpgolvhr6ftt, I20e9ph536u7ti, Id2312c48f17dd, I7a6s4h48lmk1t, I2fkgb649u353b, I3a053sft19jid, Idj8pac8q2ngco, I2sg7pchi235m2, Ibg0qukn7q6t5u, I93sj8arfs7e7f, I3qf57dn94jogo, I7jnda8be156fb, I27lb9t574io60, Ic7t67gl6oo8ed, Ifaori90nvndr0, Ie2rqjbtm23ftk, I7oiv62sj2f3r3, I4oohlti0ugomv, Icj2jtt996rgo7, I55162di4jv6rk, Ib8h08jrok1svd, I4m6m36nu8gsqu, Ie1dicjiiaa5q8, I239j3gnc1jsps, I15atr7h39m6es, I5052qcfs60vjm, If8en01tuc3bij, I5euu4q9kmp9c3, Ictvl5d049lms3, I94jeskiehjtf1, I36oknt2f8tl4g, I288nkd84a7m9u, Ifc75td2ivg90e, I7i7gk545r3sv3, I97i24r5tc4i6u, I5tek56pm6maiv, I60fhenaqhrkjj, I6o7guvg1i99i2, I5l6c62egasn2e, I3qv7v9gggggd4, I7dq91mkderm2o, Ie2mt3ul73mn1d, I50qqth3sk471t, I5em265vo8vck5, Ibp2vba0704net, Idts26aojvm4gr, I141piq296rc2n, Iasl7n2tkle090, I178uj1s35amp3, Iai5mccr300imn, I1uen92pl1lhqu, Id6ktlm8uq63g6, I4f2hva90hak3m, I823eg09r939h3, Ibcj87mgvuqbc8, I5d87nqeditd0c, Ib4lvahglmvoj4, Ib5tkqghj5b2lj, I6d3ckosptflrl, I3if4k84v5n0f6, I5k37qbr3s9v15, I5eol3g6qqti18, I1qrnckffb9nrm, I1e0oh3bn9igat, I70l5rhpgblmim, Id94b4a7r8bjeq, Ic4vbg4dnnpegu, I7nl4maqn6m365, I6bq7cmd37a5ik, I9i68vrjhvjnp1, Icu71ht824icnq, I3fr1hdlq8g81s, I1c5ncj72v7k27, Idhhlivifn563e, I3o9sh4pms1jcb, Iij42ed7fk1sg, I8vg1ab5ssn90l, Ifai7amejetiv, I5el2hvlofnvv5, Ibqi69m3s38lo0, I6ctvd5gvtboll, Ierkp6g0vn9ojj, I1srp17os6n92p, I1hd2l2dfhk11i, Idrd3fp3ciqt4f, I15300qnq5mpkt, I689heiuu575e6, I6v9f8qobgk41i, Ie4auh3nmut3h7, I5r8t4iaend96p, Iaqet9jc3ihboe, Ic952bubvq4k7d, I2v50gu3s1aqk6, Iabpgqcjikia83, I4gil44d08grh, I7u915mvkdsb08, I7g3jnj59cuc3k, I3nir9l71btsd5, Ib4c4hbfg3ril4, I6bep0s8nf1jn4, Idbhri2uj6av22, Ietccudq8ucajb, I3fvgo362krtrr, Ifi0c8r8eomqru, I6tacm14gh0jtv, Ibe056naqv5jeg, Idq3lmpdqfuf91, I8s95j32t1rrnr, If9jrft6hbnnq, I4ujid8kn88isk, Idu551939jhadj, I9fgo4t9o7trj7, I607t5e3e5mnk5, Ie8c3gf89pirvk, Idt3pdmk8m17j6, I8fksma6odit5g, I996aiv3qoehvi, I4fj3mptf3jr0q, Ibh9utbkad113n, I2b90ci0g6gdiu, If7uv525tdvv7a, I2an1fs2eiebjp, TransactionValidityTransactionSource, I9ask1o4tfvcvs, I4ph3d1eepnmr1, Icerf8h8pdu8ss, I15h4jnb8b841p, I6spmpef2c7svf, Iei2mvq0mjvt81, Icscgdrls4bngd, Ic1d4u2opv3fst, Ie9sr1iqcg3cgm, I1mqgk2tmnn9i2, I6lr8sctk0bi4e, I5cj8vo7lksljp } from "./common-types";
+import type { I5sesotjlssv2d, Iffmde3ekjedi9, I4mddgoa69c0a2, I5ltmh69i7gt73, I95g6i7ilua7lq, Ieniouoqkq4icf, Phase, Ibgl04rn6nbfm6, I4q39t5hn830vp, I8re9183nrhr3n, I1v7jbnil3tjns, I8jgj1nhcr2dg8, Ifn6q3equiq9qi, Ia3sb0vgvovhtg, Iav8k1edbj86k7, Itom7fk49o0c9, I4i91h98n3cv1b, I4iumukclgj8ej, Iqnbvitf7a7l3, I48i407regf59r, I6r5cbv8ttrb09, Inofn0qqbjtb9, I1q8tnt1cluu5j, I8ds64oj6581v0, Ia7pdug7cdsg8g, Ifnu5trqcrgt5b, I9bin2jc70qt6q, I3qklfjubrljqh, If9iqq7i64mur8, Iag3f1hum3p4c8, I4v5g6i7bmt06o, I4s6jkha20aoh0, I84bhscllvv07n, I78s05f59eoi8b, I35l6p7kq19mr0, TransactionPaymentReleases, Ifble4juuml5ig, Version, Ida3u2t8t1l1js, If9jidduiuq7vv, ConvictionVotingVoteVoting, I6ouflveob4eli, PreimageOldRequestStatus, PreimageRequestStatus, I4pact7n2e9a0i, Ifh9leie5rtseb, I56u24ncejr5kt, I9jd27rnpm8ttv, I775lbh1002e7f, I9p9lq3rej5bhc, Iag146hmjgqfgj, I8uo3fpd3bcc6f, Iepbsvlk3qceij, Icgljjb6j82uhn, I5mpbmq1ooiq9i, I5g2vv0ckl2m8b, Ifup3lg9ro8a0f, Idh2ug6ou4a8og, Iejeo53sea6n4q, I53esa2ms463bk, Ib4jhb8tt3uung, I5qfubnuvrnqn6, I8t3u2dv73ahbd, I7vlvrrl2pnbgk, Ie0rpl5bahldfk, XcmPalletVersionMigrationStage, I7e5oaj2qi4kl1, Ie849h3gncgvok, Iat62vud7hlod2, Ict03eedr8de9s, Ici7ejds60vj52, XcmVersionedLocation, Ia2lhg7l2hilo3, Ifi4da1gej1fri, Ifvgo9568rpmqc, I82jm9g7pufuel, Ic5m5lp1oioo8r, I6cs1itejju2vv, I19osbbvcedbnc, Iapa0pspj5na3t, I5ebvuao287pjg, I71v2rrt182hod, Ia03hjl5um8umc, I1bd4sfsts9lp2, I5m1k92kcp4o6d, Ifkob0fdn3eods, I1ai0vm56bl7eu, I7aij5ls86nd9l, Iafqnechp3omqg, I3hg4c9ge064lf, Iej87d0l2agljs, Ifr88cshss4mco, I3qulnvnc3hn00, Iept8gvj9an6pj, I3ge8l11mhestc, I4qqej82rtmcsa, I8el4qiut1afl1, I2o134i87sa348, I9v1nr5t25p3gu, Ij23g2682mtlh, Ib65ekpdoa117u, Ic9m8l8pkrt2k5, Idjevvptm6gjaq, Id9gm4bteop71s, Ibk7vl3nqtkvjq, I25if6a41d56ra, Icj2nb69liuu24, Icm9f9h6nua3dd, I8hs8cgiei54sv, I43pkljl3a50rq, Ic7ihfq9tebase, Ia78sqv46skudk, I8kuj5ij9r87hi, Ieupfkt3mtrjlc, I5eoome1iv99mc, Ifs8l7uhm2p84a, I205qrookusi3d, Itdvhihql560g, I3fphkj3rkb8d1, Ie358p6da7iusl, I3i3q11ol0f2a8, Iihcv2ffgfdth, I5ss06mick4shb, I3a0nip7t7d0i7, I67b4evvsj5s3g, Ifolljjjlhmesh, I342jcra5dcalu, I6lfe132so20ih, It5jnbkpi46a7, I7emrdrb8oc4do, I4dcivh5duqno8, Iflkot84bd90qk, Ibphrfq348d9fn, I1qevohso20t15, I3dp098duidkfr, I6o17cn2677nom, Ias91rflo6ebo5, Idggr61fqjm503, I8fhaue1ob9s7m, I9mj1qagqpte76, I44n5hoqkdsljm, I7rilbfprtfgq9, Ifip05kcrl65am, I7dp3d6kokg6qm, I806t22dpi77ls, Ib9hqqd0dq5sja, Icqilkshp1mtl, I2rc77s0mqdebl, I2uoo9t5ta92pd, I2og4uv7220vja, I8dfqph7nh6ls, I60nr0tc614tgj, I4p5t2krb1gmvp, I5lf8t4evk0fq7, Ic23t0smeuk6mq, Iacpni5fp46chb, Ie1r5megrresvn, Icrbds76ujpbkg, Ifcik8ed7tl04e, I8jh0enk7f0r9l, Icu5tfrap3ledf, I7jbmorihvfg1b, I7tusvhvaa2qim, Iar9rrgd5eqf9n, I96rqo4i9p11oo, Iilpsjpsgmkpu, Iccj220c6e0rai, I8nofrgats4bb6, I95l2k9b1re95f, In7a38730s6qs, Ibtil0ss5munbk, I9s0ave7t0vnrk, I4fo08joqmcqnm, Ibafpkl9hhno69, Iasb8k6ash5mjn, XcmV5Junctions, I7r7b6bp2g5acg, I7rm113kjbo5gc, I4totqt881mlti, I5pbtpcshc7f67, I35p85j063s0il, I8ofcg5rbj0g2c, I4adgbll7gku4i, I6pjjpfvhvcfru, I9pj91mj79qekl, I39uah9nss64h9, Ik64dknsq7k08, Ib51vk42m1po4n, Idcr6u6361oad9, Ial23jn8hp0aen, Ifpj261e8s63m3, I4ktuaksf5i1gk, I9bqtpv2ii35mp, I9j7pagd6d4bda, I2h9pmio37r7fb, Ibmr18suc9ikh9, I9iq22t0burs89, I5u8olqbbvfnvf, I5utcetro501ir, I7t2thek61ghou, I61tdrsafr1vf3, Ibsk5g3rhm45pu, Icfoe9q8d4vs8f, Ibrfmvjrg4trnb, Iedih7t34maii9, I4e902qbfel1f1, Ie4met0joi8sv0, I1t8vq6a06ohhu, Icvt3pdunbinm7, I9ui3n41balr2q, I89sl7btgl24g2, I3u6g26k9kn96u, If1invp94rsjms, Ie5nc19gtiv5sv, Iald3dgvt1hjkb, Iurrhahet4gno, I5tamv2nk8bj8o, I8apq8e7c7qcpp, Id1e31ij0c35fv, Ibm7u0qulpnrs9, Id9uqtigc0il3v, Iaa2o6cgjdpdn5, Iam6hrl7ptd85l, Ict9ivhr2c5hv0, I8t4vv03357lk9, Ifc6beta7g87k, I666bl2fqjkejo, Icbio0e1f0034b, I8c0vkqjjipnuj, Idnsr2pndm36h0, Ia1pvdcbhuqf8m, I8steo882k7qns, I4pa4q37gj6fua, I5f178ab6b89t3, I4nakhtbsk3c5s, I82nfqfkd48n10, I1jm8m1rh9e20v, I3o5j3bli1pd8e, Iet0dtt3q9k4bk, I5n4sebgkfr760, I2jhl9koipl72b, Ifs1i5fk9cqvr6, I6tndkavufkmbv, Icph8qjashf315, Ieg3fd8p4pkt10, I8kg5ll427kfqq, I467333262q1l9, I7v6q4eo5bpqja, I6ftm1lq7baqj4, I5ua4t7rcge9ca, I1q7iisvnsn9jn, I2cr2dkgo2tr4e, I7vo2kfsore692, I3lj33btcqlb1i, I707m7edh0jft8, I2j5sqe1l974kn, I2eb501t8s6hsq, Ianmuoljk2sk1u, I6232pg7njm7nt, Ib4dcamu44h2f8, Iajkocjedluuc3, Ideaemvoneh309, I3d9o9d7epp66v, I6lqh1vgb4mcja, Ibou4u1engb441, Id6nbvqoqdj4o2, I95iqep3b8snn9, I77l5dsi0gnac7, I8k3rnvpeeh4hv, I5a1mcnnhp9s1k, I3vh014cqgmrfd, I40pqum1mu8qg3, I1r4c2ghbtvjuc, Ia5cotcvi888ln, I21jsa919m88fd, Iegif7m3upfe1k, I9kt8c221c83ln, Ic76kfh5ebqkpl, Icscpmubum33bq, I21d2olof7eb60, Ibgm4rnf22lal1, Ie68np0vpihith, I9bnv6lu0crf1q, Iauhjqifrdklq7, Ie1uso9m8rt5cf, Ifccifqltb5obi, Iadtsfv699cq8b, Ialpmgmhr3gk5r, I4cbvqmqadhrea, I3sdol54kg5jaq, I8fougodaj6di6, I81vt5eq60l4b6, Irupv22iu38vu, I7grtu814479f3, I93s1mcesjtqu3, I1p86ntl6dn03c, I3ri98utbddtsd, I6bpho1qciu1vq, I23de7n843u7sn, I5fe6dsj65bbns, Ideepm5vhbl12g, Idasi83b2hi6kd, I3l1prg489cgso, Ibihfmtr4nutgv, I8b0duu38170aj, I7445bslhc0ic2, Id6e8lk3pfjocj, I449ug3537vfu2, I7r9r972bl7s6h, I45orgf9ulklgj, I7gp5f34oc7pki, I36p2bgnnl36ta, I6qcvfaiubjt05, I7tjbm7l304tu9, I7kcd6p94nv55v, I483r8098di3t5, Ico0ou8pmf1cq5, Ie38ogc3bkfpu, Iasovm2m56clga, I3s764kupqvvc3, Ide781hv7v8ek3, I4n0jfeme2dupj, Iejr8qrqkqh148, Ie00dqaka54s56, I97fq4k68v5pmh, Ifh9jjrch89bli, I17o91bl727r0j, Idbt6597auf3g2, I3nkq26pmovr9u, I1mjueefcqgdaj, Ict5mnga93gs4g, If97gtgn6okleo, I5c87v6pd2sdaf, I5l0jsir5si80s, I86uhg8ivvk3a8, I4ov6e94l79mbg, I3dg8tbt6tcck6, Ibnicuotj4pjfm, I4gj9mv93je4sv, I3f8ncpioik5na, I3qt1hgg4djhgb, Idscf6boak49q1, I3ajpo6bheav6q, Iaoh4afnk8h0fj, Ie239vtc2egj50, I4m6dhgb2ar055, I8m9idjg76ip7q, I3c63j6sh3evqn, Idpghfv397i03j, I1iqmhg9l6j4g5, Ifdhckj0h8qpv2, I4uk5nmqsi401j, I7eloeoebplnvf, Icu0h2un8nbhct, Ifoljaehihf3a6, If5i6c2m5d9b65, I9ihjoku7164ou, I7661jqlhbtghb, I5h8g89cqhubt3, I3gvjatq4m8h18, I8vsdam138s0ak, I68s7org31qt4d, Ielk7f0jb1jt1u, I7n5sdbabu8l7g, I1qpch3k96pn83, I82lmvrrpt0s2n, Ia82mnkmeo2rhc, I206k5fm430ncu, Icbccs0ug47ilf, I855j4i3kr8ko1, Ibt374blbobs7t, Idd7hd99u0ho0n, Iafscmv8tjf0ou, I100l07kaehdlp, I6gnbnvip5vvdi, Icv68aq8841478, Ic262ibdoec56a, Iflcfm9b6nlmdd, Ijrsf4mnp3eka, Id5fm4p8lj5qgi, I8tjvj9uq4b7hi, I4fooe9dun9o0t, I4ici6vhci5d5f, I9ia5eeknmnh40, I9nrdlsbtsjaoc, Iph9c4rn81ub2, Icqe266pmnr25o, I5hoiph0lqphp, I5k7oropl9ofc7, I48vagp1omigob, Ib5tst4ppem1g6, Ibn64edsrg3737, I83r9d02dh47j9, I22bm4d7re21j9, I3jnhifvaeuama, I8n1gia0lo42ok, I6gb0o7lqjfdjq, Idh36v6iegkmpq, I27hnueutmchbe, Iectm2em66uhao, I7q57goff3j72h, Ibe49veu9i9nro, I1rnkmiu7usb82, Ig6jnoe1clkm7, Ibtugueatkkr9s, Ier2cke86dqbr2, Iaeqj2ebnvkjqe, Ih04jp733tqqa, Ievr89968437gm, I229ijht536qdu, I62nte77gksm0f, I9cg2delv92pvq, Ilhp45uime5tp, I4f1hv034jf1dt, I7svrbkiu01iec, I8cbok7qd7ru4t, I7kij8p9kchdjo, I4o5f4rl7pvbsh, Ia3c82eadg79bj, Ienusoeb625ftq, Ibtsa3docbr9el, I3r57ai53kj5og, If17b5mo4d2odo, Imnbuc3d6tdsc, Ibt0qbob7ghhgn, Icovh3ggbhth1s, I8a8c1n38ann55, I2ur0oeqg495j8, I7f2f3co93gefl, I1bhd210c3phjj, Iep27ialq4a7o7, Iasu5jvoqr43mv, I5ank11b0br54o, I5qolde99acmd1, I8gtde5abn1g9a, If1co0pilmi7oq, Iae74gjak1qibn, I3escdojpj0551, I7442cggth99kp, I5rtkmhm2dng4u, I137t1cld92pod, I1rvj4ubaplho0, Ia3uu7lqcc1q1i, I7crucfnonitkn, I7tmrp94r9sq4n, Ibslgga81p36aa, I61d51nv4cou88, If8u5kl4h8070m, Ibmuil6p3vl83l, I7lul91g50ae87, Icl7nl1rfeog3i, Iasr6pj6shs0fl, I2uqmls7kcdnii, Idg69klialbkb8, I7r6b7145022pp, I30pg328m00nr3, Icmrn7bogp28cs, I7m9b5plj4h5ot, I9onhk772nfs4f, I3l6bnksrmt56r, Idh09k0l2pmdcg, I7uoiphbm0tj4r, I512p1n7qt24l8, I6s1nbislhk619, I3gghqnh2mj0is, I6iv852roh6t3h, I9oc2o6itbiopq, I39t01nnod9109, I6v8sm60vvkmk7, I1qmtmbe5so8r3, Ih99m6ehpcar7, Idgorhsbgdq2ap, I9ubb2kqevnu6t, I2hq50pu2kdjpo, I9acqruh7322g2, I8i1bk7kj5k5ed, Ie5qta40r3ho5l, Ibfd56bn4a7kfk, Ifcslavva7skj1, Icolandhn4qpus, I333ps8sjf4lhr, Iah5vhnso7uqce, I2lct6m7k5r2et, I9cf6so4vur6mg, Isntabb3i2t9f, I40af445fa06rh, Iapmmsuq8j9rcn, I80dirtbv2ognl, I6qrovovkeah6g, I5v7n6l8j8vd1f, I2kpgolvhr6ftt, I20e9ph536u7ti, Id2312c48f17dd, I7a6s4h48lmk1t, I2fkgb649u353b, I3a053sft19jid, Idj8pac8q2ngco, I2sg7pchi235m2, Ibg0qukn7q6t5u, I93sj8arfs7e7f, I3qf57dn94jogo, I7jnda8be156fb, I27lb9t574io60, Ic7t67gl6oo8ed, Ifaori90nvndr0, Ie2rqjbtm23ftk, I7oiv62sj2f3r3, I4oohlti0ugomv, Icj2jtt996rgo7, I55162di4jv6rk, Ib8h08jrok1svd, I4m6m36nu8gsqu, Ie1dicjiiaa5q8, I239j3gnc1jsps, I15atr7h39m6es, I5052qcfs60vjm, If8en01tuc3bij, I5euu4q9kmp9c3, Ictvl5d049lms3, I94jeskiehjtf1, I36oknt2f8tl4g, I288nkd84a7m9u, Ifc75td2ivg90e, I7i7gk545r3sv3, I97i24r5tc4i6u, I5tek56pm6maiv, I60fhenaqhrkjj, I6o7guvg1i99i2, I5l6c62egasn2e, I3qv7v9gggggd4, I7dq91mkderm2o, Ie2mt3ul73mn1d, I50qqth3sk471t, I5em265vo8vck5, Ibp2vba0704net, Idts26aojvm4gr, I141piq296rc2n, I3a4qht3l7q9rt, Iasl7n2tkle090, I178uj1s35amp3, Iai5mccr300imn, I1uen92pl1lhqu, Id6ktlm8uq63g6, I4f2hva90hak3m, I823eg09r939h3, Ibcj87mgvuqbc8, I5d87nqeditd0c, Ib4lvahglmvoj4, Ib5tkqghj5b2lj, I6d3ckosptflrl, I3if4k84v5n0f6, I5k37qbr3s9v15, I5eol3g6qqti18, I1qrnckffb9nrm, I1e0oh3bn9igat, I70l5rhpgblmim, Id94b4a7r8bjeq, Ic4vbg4dnnpegu, I7nl4maqn6m365, I6bq7cmd37a5ik, I9i68vrjhvjnp1, Icu71ht824icnq, I3fr1hdlq8g81s, I1c5ncj72v7k27, Idhhlivifn563e, I3o9sh4pms1jcb, Iij42ed7fk1sg, I8vg1ab5ssn90l, Ifai7amejetiv, I5el2hvlofnvv5, Ibqi69m3s38lo0, I6ctvd5gvtboll, Ierkp6g0vn9ojj, I1srp17os6n92p, I1hd2l2dfhk11i, Idrd3fp3ciqt4f, I15300qnq5mpkt, I689heiuu575e6, I6v9f8qobgk41i, Ie4auh3nmut3h7, I93vothlkfb80t, I34ssr4fhp2kik, Icctupj3ftl0ch, I86dulb0e6aqlq, Iffhjj19aangi6, Ib6pl1520ec2jq, I75eb7jq67cg5l, I5r8t4iaend96p, Iaqet9jc3ihboe, Ic952bubvq4k7d, I2v50gu3s1aqk6, Iabpgqcjikia83, I4gil44d08grh, I7u915mvkdsb08, I7g3jnj59cuc3k, I3nir9l71btsd5, Ib4c4hbfg3ril4, I6bep0s8nf1jn4, Idbhri2uj6av22, Ietccudq8ucajb, I3fvgo362krtrr, Ifi0c8r8eomqru, I6tacm14gh0jtv, Ibe056naqv5jeg, Idq3lmpdqfuf91, I8s95j32t1rrnr, If9jrft6hbnnq, I4ujid8kn88isk, Idu551939jhadj, I9fgo4t9o7trj7, I607t5e3e5mnk5, Ie8c3gf89pirvk, Idt3pdmk8m17j6, I8fksma6odit5g, I996aiv3qoehvi, I4fj3mptf3jr0q, Ibh9utbkad113n, Id5433fsuakfsh, If7uv525tdvv7a, I2an1fs2eiebjp, TransactionValidityTransactionSource, I9ask1o4tfvcvs, I4ph3d1eepnmr1, Icerf8h8pdu8ss, I15h4jnb8b841p, I6spmpef2c7svf, Iei2mvq0mjvt81, I3hev30cis3ndu, Ic1d4u2opv3fst, Ie9sr1iqcg3cgm, I1mqgk2tmnn9i2, I6lr8sctk0bi4e, Idmmv2hj79l5es } from "./common-types";
 type AnonymousEnum<T extends {}> = T & { __anonymous: true };
 type MyTuple<T> = [T, ...T[]];
 type SeparateUndefined<T> = undefined extends T ? undefined | Exclude<T, undefined> : T;
@@ -57,7 +57,7 @@ type IStorage = {
      * Events have a large in-memory size. Box the events to not go out-of-memory
      * just in case someone still reads them from within the runtime.
      */
-    Events: StorageDescriptor<[], Anonymize<I7oo41fpphderq>, false, never>;
+    Events: StorageDescriptor<[], Anonymize<I5ltmh69i7gt73>, false, never>;
     /**
      * The number of events in the `Events<T>` list.
      */
@@ -1420,6 +1420,12 @@ type IStorage = {
      * MetricSpec registry declares deterministically recomputable (07 §2(4)/§9).
      * `recompute_proof` fails closed for anything absent. Seeded at genesis and
      * via [`Pallet::note_recomputable`] (welfare `register_spec`, B1a).
+     *
+     * Membership here is necessary but **not sufficient**: the settled value
+     * comes from [`Config::RecomputeEngine`], and a runtime that binds `()` —
+     * which this one does until A7 lands — refuses every payload. Declaring a
+     * component recomputable therefore cannot, on its own, open a settlement
+     * path (2026-08-10 security review).
      */
     Recomputable: StorageDescriptor<[], Anonymize<I95g6i7ilua7lq>, false, never>;
   };
@@ -1575,6 +1581,22 @@ type IStorage = {
      * Number of successful bounded community schedules created.
      */
     CommunityScheduleCount: StorageDescriptor<[], number, false, never>;
+    /**
+     * Undistributed amount remaining in the derived trading-reward
+     * `incentiv` pot (08 §2.1/§2.6). `fund_trading_rewards` moves it in both
+     * directions in one call: the previous authorization's unspent remainder
+     * is credited back first (never above
+     * [`Config::IncentiveAllocationAmount`]), then the new authorization is
+     * debited from the replenished figure.
+     */
+    IncentiveRemaining: StorageDescriptor<[], bigint, false, never>;
+    /**
+     * Number of successful lifetime trading-reward budget authorizations
+     * (08 §2.6, *Bounds*). Completed authorizations do not replenish it —
+     * returning a remainder credits [`IncentiveRemaining`] alone, never this
+     * counter.
+     */
+    TradingRewardBudgetCount: StorageDescriptor<[], number, false, never>;
     /**
      * Ops-operated account funded on the Coretime chain (09 §4).
      */
@@ -2340,6 +2362,32 @@ type IStorage = {
      * Independent one-renewal latch (06 §6.3).
      */
     FreezeRenewed: StorageDescriptor<[], boolean, false, never>;
+  };
+  TradingRewards: {
+    /**
+     * The enrolled roster (08 §2.6). Bounded by [`MAX_PARTICIPANTS`] through
+     * [`ParticipantCount`], which `enroll` checks before taking any hold.
+     */
+    Participants: StorageDescriptor<[Key: SS58String], Anonymize<Iccj220c6e0rai>, true, never>;
+    /**
+     * Per-account, per-market accumulators. TR4 writes them on each fill and
+     * TR5 folds and deletes them.
+     */
+    Scores: StorageDescriptor<Anonymize<I95l2k9b1re95f>, Anonymize<I8nofrgats4bb6>, true, never>;
+    /**
+     * O(1) mirror of each account's [`Scores`] prefix length. TR4 bounds it.
+     */
+    ScoreCount: StorageDescriptor<[Key: SS58String], number, false, never>;
+    /**
+     * O(1) mirror of the [`Participants`] map length, so the roster bound is
+     * enforced without iterating a map.
+     */
+    ParticipantCount: StorageDescriptor<[], number, false, never>;
+    /**
+     * O(1) mirror of the summed unclaimed `accrued` USDC across the roster.
+     * TR5's budget scaling reads it; `try-state` binds it to the records.
+     */
+    TotalAccrued: StorageDescriptor<[], bigint, false, never>;
   };
 };
 type ICalls = {
@@ -3452,7 +3500,7 @@ type ICalls = {
     /**
      * Anonymously schedule a task.
      */
-    schedule: TxDescriptor<Anonymize<I4hoqldg80onj4>>;
+    schedule: TxDescriptor<Anonymize<Iet0dtt3q9k4bk>>;
     /**
      * Cancel a scheduled task (named or anonymous), by providing the block it is scheduled for
      * execution in, as well as the index of the task in that block's agenda.
@@ -3463,7 +3511,7 @@ type ICalls = {
     /**
      * Schedule a named task.
      */
-    schedule_named: TxDescriptor<Anonymize<I7tpmr8tipe9i6>>;
+    schedule_named: TxDescriptor<Anonymize<I2jhl9koipl72b>>;
     /**
      * Cancel a named scheduled task.
      */
@@ -3471,11 +3519,11 @@ type ICalls = {
     /**
      * Anonymously schedule a task after a delay.
      */
-    schedule_after: TxDescriptor<Anonymize<Ifpr9t4r1bh02u>>;
+    schedule_after: TxDescriptor<Anonymize<I6tndkavufkmbv>>;
     /**
      * Schedule a named task after a delay.
      */
-    schedule_named_after: TxDescriptor<Anonymize<Idhgkffmrcrpph>>;
+    schedule_named_after: TxDescriptor<Anonymize<Icph8qjashf315>>;
     /**
      * Set a retry configuration for a task so that, in case its scheduled run fails, it will
      * be retried after `period` blocks, for a total amount of `retries` retries or until it
@@ -3540,7 +3588,7 @@ type ICalls = {
      * and the error of the failed call. If all were successful, then the `BatchCompleted`
      * event is deposited.
      */
-    batch: TxDescriptor<Anonymize<Ibhs62r2hk467a>>;
+    batch: TxDescriptor<Anonymize<I7v6q4eo5bpqja>>;
     /**
      * Send a call through an indexed pseudonym of the sender.
      *
@@ -3556,7 +3604,7 @@ type ICalls = {
      *
      * The dispatch origin for this call must be _Signed_.
      */
-    as_derivative: TxDescriptor<Anonymize<Ifeg4pudqnboeu>>;
+    as_derivative: TxDescriptor<Anonymize<I6ftm1lq7baqj4>>;
     /**
      * Send a batch of dispatch calls and atomically execute them.
      * The whole transaction will rollback and fail if any of the calls failed.
@@ -3572,7 +3620,7 @@ type ICalls = {
      * ## Complexity
      * - O(C) where C is the number of calls to be batched.
      */
-    batch_all: TxDescriptor<Anonymize<Ibhs62r2hk467a>>;
+    batch_all: TxDescriptor<Anonymize<I7v6q4eo5bpqja>>;
     /**
      * Dispatches a function call with a provided origin.
      *
@@ -3581,7 +3629,7 @@ type ICalls = {
      * ## Complexity
      * - O(1).
      */
-    dispatch_as: TxDescriptor<Anonymize<I1d5onj5bp3620>>;
+    dispatch_as: TxDescriptor<Anonymize<I5ua4t7rcge9ca>>;
     /**
      * Send a batch of dispatch calls.
      * Unlike `batch`, it allows errors and won't interrupt.
@@ -3597,7 +3645,7 @@ type ICalls = {
      * ## Complexity
      * - O(C) where C is the number of calls to be batched.
      */
-    force_batch: TxDescriptor<Anonymize<Ibhs62r2hk467a>>;
+    force_batch: TxDescriptor<Anonymize<I7v6q4eo5bpqja>>;
     /**
      * Dispatch a function call with a specified weight.
      *
@@ -3606,7 +3654,7 @@ type ICalls = {
      *
      * The dispatch origin for this call must be _Root_.
      */
-    with_weight: TxDescriptor<Anonymize<I6jje7fctkmdam>>;
+    with_weight: TxDescriptor<Anonymize<I1q7iisvnsn9jn>>;
     /**
      * Dispatch a fallback call in the event the main call fails to execute.
      * May be called from any origin except `None`.
@@ -3632,7 +3680,7 @@ type ICalls = {
      * - Some use cases might involve submitting a `batch` type call in either main, fallback
      * or both.
      */
-    if_else: TxDescriptor<Anonymize<I6he8b4b4q6p14>>;
+    if_else: TxDescriptor<Anonymize<I2cr2dkgo2tr4e>>;
     /**
      * Dispatches a function call with a provided origin.
      *
@@ -3640,7 +3688,7 @@ type ICalls = {
      *
      * The dispatch origin for this call must be _Root_.
      */
-    dispatch_as_fallible: TxDescriptor<Anonymize<I1d5onj5bp3620>>;
+    dispatch_as_fallible: TxDescriptor<Anonymize<I5ua4t7rcge9ca>>;
   };
   Proxy: {
     /**
@@ -3654,7 +3702,7 @@ type ICalls = {
      * - `force_proxy_type`: Specify the exact proxy type to be used and checked for this call.
      * - `call`: The call to be made by the `real` account.
      */
-    proxy: TxDescriptor<Anonymize<I57mgih1qrbf70>>;
+    proxy: TxDescriptor<Anonymize<I7vo2kfsore692>>;
     /**
      * Register a proxy account for the sender that is able to make calls on its behalf.
      *
@@ -3783,7 +3831,7 @@ type ICalls = {
      * - `force_proxy_type`: Specify the exact proxy type to be used and checked for this call.
      * - `call`: The call to be made by the `real` account.
      */
-    proxy_announced: TxDescriptor<Anonymize<I1ok6cg6f6qjvq>>;
+    proxy_announced: TxDescriptor<Anonymize<I6232pg7njm7nt>>;
     /**
      * Poke / Adjust deposits made for proxies and announcements based on current values.
      * This can be used by accounts to possibly lower their locked amount.
@@ -3811,7 +3859,7 @@ type ICalls = {
      * ## Complexity
      * O(Z + C) where Z is the length of the call and C its execution weight.
      */
-    as_multi_threshold_1: TxDescriptor<Anonymize<I7knpbpi70kjd6>>;
+    as_multi_threshold_1: TxDescriptor<Anonymize<Ib4dcamu44h2f8>>;
     /**
      * Register approval for a dispatch to be made from a deterministic composite account if
      * approved by a total of `threshold - 1` of `other_signatories`.
@@ -3856,7 +3904,7 @@ type ICalls = {
      * - Storage: inserts one item, value size bounded by `MaxSignatories`, with a deposit
      * taken for its lifetime of `DepositBase + threshold * DepositFactor`.
      */
-    as_multi: TxDescriptor<Anonymize<I2ubgugv6pr3bd>>;
+    as_multi: TxDescriptor<Anonymize<Iajkocjedluuc3>>;
     /**
      * Register approval for a dispatch to be made from a deterministic composite account if
      * approved by a total of `threshold - 1` of `other_signatories`.
@@ -3977,7 +4025,7 @@ type ICalls = {
     /**
      * Authenticates the sudo key and dispatches a function call with `Root` origin.
      */
-    sudo: TxDescriptor<Anonymize<I6fa9aeuk7i4ib>>;
+    sudo: TxDescriptor<Anonymize<I77l5dsi0gnac7>>;
     /**
      * Authenticates the sudo key and dispatches a function call with `Root` origin.
      * This function does not check the weight of the call, and instead allows the
@@ -3985,7 +4033,7 @@ type ICalls = {
      *
      * The dispatch origin for this call must be _Signed_.
      */
-    sudo_unchecked_weight: TxDescriptor<Anonymize<I6jje7fctkmdam>>;
+    sudo_unchecked_weight: TxDescriptor<Anonymize<I1q7iisvnsn9jn>>;
     /**
      * Authenticates the current sudo key and sets the given AccountId (`new`) as the new sudo
      * key.
@@ -3997,7 +4045,7 @@ type ICalls = {
      *
      * The dispatch origin for this call must be _Signed_.
      */
-    sudo_as: TxDescriptor<Anonymize<I1jllala72loei>>;
+    sudo_as: TxDescriptor<Anonymize<I5a1mcnnhp9s1k>>;
     /**
      * Permanently removes the sudo key.
      *
@@ -4828,7 +4876,9 @@ type ICalls = {
     /**
      * `oracle.recompute_proof` — permissionless mechanical resolution from
      * the committed evidence, bounded at `orc.max_proof_bytes` (07 §9).
-     * Signed (keeper, rebated). Fails closed for non-recomputable components.
+     * Signed (keeper, rebated). Fails closed for non-recomputable
+     * components, and for every component on a runtime whose
+     * [`Config::RecomputeEngine`] cannot evaluate the frozen `formula_ref`.
      */
     recompute_proof: TxDescriptor<Anonymize<Ie00dqaka54s56>>;
     /**
@@ -5096,6 +5146,71 @@ type ICalls = {
      * and installs the lock before the remaining pot is reduced.
      */
     create_community_schedule: TxDescriptor<Anonymize<Idscf6boak49q1>>;
+    /**
+     * `treasury.fund_trading_rewards(amount)` — the bounded Phase 3-4
+     * trading-reward funding mechanism (08 §2.1/§2.6, 06 §3.2). A passed
+     * PARAM decision retires the previous authorization's unspent
+     * remainder and then moves `amount` VIT out of the `incentiv` pot
+     * into the reward pallet's own sovereign account. Mirrors
+     * `create_community_schedule`'s shape, as 06 §3.2 requires of any
+     * future member of this pair: a fixed genesis source with a stored
+     * remaining balance, a payment shape the call fixes rather than the
+     * caller (the destination is [`Config::TradingRewardFunding`]'s own,
+     * never a call argument), and a lifetime successful-authorization
+     * count.
+     *
+     * The lifetime count reuses [`Config::MaxCommunitySchedules`]
+     * directly rather than a duplicated same-valued constant (08 §2.6,
+     * *Bounds*: "the authorization count reuses the community
+     * schedule's lifetime bound") — the two calls share this Config
+     * item, so an amendment of one bound moves both and neither can
+     * drift from the other.
+     *
+     * # The return leg is folded in, and it is not a separate call
+     *
+     * 08 §2.6: *"The return of unspent budget carries the same authority
+     * as the authorization, and MUST NOT be permissionless … the natural
+     * shape is to fold it into `fund_trading_rewards` so that each new
+     * authorization retires the previous one's remainder and no
+     * independent surface exists at all."* A public crank would be a
+     * one-extrinsic, permanent denial of the whole program's payout for
+     * an epoch: reward accrual is clamped to the budget's unpromised
+     * remainder, participants settle by pull, and `settle_epoch` is
+     * idempotent per participant per epoch — so emptying the headroom
+     * mid-settlement closes every remaining participant at a **zero**
+     * reward with their score already discarded, and re-funding cannot
+     * reopen a settled epoch.
+     *
+     * **Order is load-bearing: return first, authorize second.** The
+     * other order would hand back the amount this very call just
+     * authorized, leaving the sovereign empty and the pot untouched.
+     *
+     * **Returns the headroom, never the balance.** `TotalAccrued` in the
+     * reward pallet falls only when a participant calls `claim_rewards`,
+     * entirely at their own discretion and possibly long after the epoch
+     * that promised it — so the sovereign routinely still holds VIT
+     * backing an accrual nobody has collected. Taking the whole balance
+     * would take that VIT too and leave `claim_rewards` unable to pay
+     * it: nothing in the reward pallet's own settlement path breaks when
+     * this is wrong, which is exactly why it would present as a program
+     * that silently stops paying rather than as a visible failure.
+     * [`Config::TradingRewardFunding`] reports the sovereign's balance
+     * and its accrual reserve as two separate reads for exactly this
+     * reason: the subtraction below is this pallet's own, not the
+     * adapter's, so it is covered by this pallet's own tests rather than
+     * hidden behind an implementation this pallet cannot see.
+     *
+     * **`amount == 0` is the wind-down, not an error.** With the return
+     * folded in, a zero authorization is the only pure retire action —
+     * the one call governance needs to end the program — so refusing it
+     * would leave no way to return the budget without authorizing at
+     * least one more planck. It is also the only path that stays open
+     * once the lifetime count is full: the bound counts authorizations,
+     * a zero call authorizes nothing, and gating the return on the
+     * authorization bound would strand the final remainder in the
+     * sovereign forever (G-1).
+     */
+    fund_trading_rewards: TxDescriptor<Anonymize<I3qt1hgg4djhgb>>;
   };
   Guardian: {
     /**
@@ -5573,6 +5688,124 @@ type ICalls = {
      */
     sweep_redemption_fees: TxDescriptor<undefined>;
   };
+  TradingRewards: {
+    /**
+     * Hold a USDC bond and open a participant record (08 §2.6).
+     *
+     * Every refusal precedes every state change, and the `rwd.rate` read
+     * is first of all: 08 §2.6's failure behaviour requires an unset rate
+     * to fail closed **before any hold**.
+     */
+    enroll: TxDescriptor<Anonymize<Ialpmgmhr3gk5r>>;
+    /**
+     * Raise the hold. The earning cap moves only at the next settlement.
+     *
+     * 08 §2.6: an immediate cap raise would let a wash operator wait for
+     * the outcome, enlarge only the winning account's cap, and leave the
+     * loser at the minimum. `snapshot_bond` and `snapshot_epoch` are
+     * therefore untouched here, unconditionally.
+     */
+    top_up_bond: TxDescriptor<Anonymize<I3qt1hgg4djhgb>>;
+    /**
+     * Release the whole bond (08 §2.6).
+     *
+     * The gate is **epoch settlement**, never folding: folding deletes the
+     * last score entry while the debit settles at epoch close, so a
+     * fold-based gate would let a participant who folded a losing epoch
+     * release the whole bond ahead of the debit.
+     *
+     * **Settlement is the only condition, per 08 §2.6, and an unclaimed
+     * accrual is deliberately not a second one.** An accrual is a VIT
+     * claim against a budget that §2.6 returns to the pot at epoch close,
+     * so an accrual outstanding past that boundary routinely meets an
+     * empty budget — and refusing here would then leave the participant
+     * able to neither claim nor withdraw, with the only remedy a
+     * `FutarchyParam` call they cannot make. §2.6 separately forbids a
+     * bond being locked forever. So the bond always comes back, and the
+     * record survives at a zero bond to carry the claim.
+     */
+    withdraw_bond: TxDescriptor<undefined>;
+    /**
+     * Convert the accrued USDC figure to VIT once, at the live
+     * `fee.vit_usdc_rate`, and pay it from the authorized budget.
+     *
+     * 08 §2.6: both legs of the reward arithmetic are USDC and only the
+     * payout converts, rounding against the claimant. There is no vesting.
+     *
+     * A claim that empties a record `withdraw_bond` already released also
+     * **closes** it and returns its roster slot. That is what keeps the
+     * retained-record path from starving [`MAX_PARTICIPANTS`]: the slot is
+     * freed by the call the claimant already wants to make, rather than by
+     * a second one they might never send.
+     */
+    claim_rewards: TxDescriptor<undefined>;
+    /**
+     * Fold one settled market into the account's epoch total and delete
+     * the entry (08 §2.6).
+     *
+     * **Permissionless without qualification, and it names a target rather
+     * than the caller.** That is safe because it acts only on
+     * already-recorded values: every caller reaches the same result and no
+     * caller can choose it. [`Pallet::settle_epoch`] is deliberately
+     * *not* in that class — see its own note. The keeper cranks both
+     * (01 §4.2).
+     *
+     * It succeeds on one of exactly two conditions. Either the book has
+     * reached a terminal state, in which case rule 3 credits the entry's
+     * own `book_acquired` — never a ledger position, which redemption
+     * burns at the same instant settlement opens — and rule 4 selects the
+     * arm from the branch's disposition; or the **absolute timeout** has
+     * elapsed, in which case the entry drops at zero without folding.
+     * Settlement is checked
+     * first: §2.6 sizes the timeout above the longest lawful settlement
+     * horizon precisely so no settling market reaches it, and dropping a
+     * settled market would turn the liveness escape into an exit from a
+     * live debit.
+     */
+    settle_market_score: TxDescriptor<Anonymize<I82lmvrrpt0s2n>>;
+    /**
+     * Close one participant's epoch, applying the reward or the debit
+     * exactly once (08 §2.6). It names a target rather than the caller,
+     * **but it is not permissionless in the way
+     * [`Pallet::settle_market_score`] is, and the difference is the whole
+     * point of the fourth refusal below.**
+     *
+     * The fold acts on already-recorded values, so any caller reaches the
+     * same result. This call does not: it clamps the reward to the
+     * budget's unpromised remainder **as read at call time** and then
+     * resets the epoch unconditionally, so two callers at two moments
+     * reach two different results and the earlier one is irreversible —
+     * re-funding cannot reopen a settled epoch. A third party could
+     * therefore finalise a victim into a zero-headroom moment for the
+     * price of a transaction fee, which is the same harm §2.6 forbids for
+     * a permissionless budget sweep, reached from the other side.
+     *
+     * Four obligations §2.6 states normatively, and each is a refusal
+     * above rather than a correction below:
+     *
+     * 1. **Idempotent per participant per epoch.** Settling re-snapshots
+     * the record onto the current epoch, so a second call meets the
+     * closed-epoch refusal. There is no separate settled marker to keep
+     * in step with the snapshot.
+     * 2. **Refuses an epoch that has not closed.**
+     * 3. **Refuses while an unfolded score entry remains** — otherwise a
+     * partially folded account settles on part of its own score, which
+     * is the one ordering in which a losing epoch pays a reward.
+     * 4. **Refuses a caller other than the participant when the live
+     * headroom would clamp the reward below the full entitlement.** The
+     * participant may always settle themselves and accept a partial
+     * payout, which keeps §2.6's FCFS residual a choice they make
+     * rather than one made for them, and a third party may still crank
+     * every epoch the clamp does not touch.
+     *
+     * It also re-snapshots the bond **whenever an epoch closes, including
+     * when there was nothing to settle**. Nothing else re-snapshots, so
+     * without that an account that tops up in a quiet epoch would keep the
+     * smaller cap indefinitely and §2.6's "a top-up takes effect from the
+     * next epoch" would not be what the code does (TR3 §6.2).
+     */
+    settle_epoch: TxDescriptor<Anonymize<I4cbvqmqadhrea>>;
+  };
 };
 type IEvent = {
   System: {
@@ -5583,7 +5816,7 @@ type IEvent = {
     /**
      * An extrinsic failed.
      */
-    ExtrinsicFailed: PlainDescriptor<Anonymize<I91sqkhtuteciq>>;
+    ExtrinsicFailed: PlainDescriptor<Anonymize<I206k5fm430ncu>>;
     /**
      * `:code` was updated to the code with the given hash.
      */
@@ -5607,7 +5840,7 @@ type IEvent = {
     /**
      * An invalid authorized upgrade was rejected while trying to apply it.
      */
-    RejectedInvalidAuthorizedUpgrade: PlainDescriptor<Anonymize<Iff5ab2dmnvclk>>;
+    RejectedInvalidAuthorizedUpgrade: PlainDescriptor<Anonymize<Ibt374blbobs7t>>;
   };
   ParachainSystem: {
     /**
@@ -6033,7 +6266,7 @@ type IEvent = {
     /**
      * Dispatched some task.
      */
-    Dispatched: PlainDescriptor<Anonymize<I3dlplal9hg0ou>>;
+    Dispatched: PlainDescriptor<Anonymize<I4o5f4rl7pvbsh>>;
     /**
      * Set a retry configuration for some task.
      */
@@ -6069,7 +6302,7 @@ type IEvent = {
      * Batch of dispatches did not complete fully. Index of first failing dispatch given, as
      * well as the error.
      */
-    BatchInterrupted: PlainDescriptor<Anonymize<I72dv4a82dus88>>;
+    BatchInterrupted: PlainDescriptor<Anonymize<I3r57ai53kj5og>>;
     /**
      * Batch of dispatches completed fully with no error.
      */
@@ -6085,11 +6318,11 @@ type IEvent = {
     /**
      * A single item within a Batch of dispatches has completed with error.
      */
-    ItemFailed: PlainDescriptor<Anonymize<I17qjng9vev10h>>;
+    ItemFailed: PlainDescriptor<Anonymize<If17b5mo4d2odo>>;
     /**
      * A call was dispatched.
      */
-    DispatchedAs: PlainDescriptor<Anonymize<I53fpkd6hlkoe2>>;
+    DispatchedAs: PlainDescriptor<Anonymize<Imnbuc3d6tdsc>>;
     /**
      * Main call was dispatched.
      */
@@ -6097,13 +6330,13 @@ type IEvent = {
     /**
      * The fallback call was dispatched.
      */
-    IfElseFallbackCalled: PlainDescriptor<Anonymize<Ib49ck93mjok7d>>;
+    IfElseFallbackCalled: PlainDescriptor<Anonymize<Ibt0qbob7ghhgn>>;
   };
   Proxy: {
     /**
      * A proxy was executed correctly, with the given.
      */
-    ProxyExecuted: PlainDescriptor<Anonymize<I53fpkd6hlkoe2>>;
+    ProxyExecuted: PlainDescriptor<Anonymize<Imnbuc3d6tdsc>>;
     /**
      * A pure account has been created by new proxy with given
      * disambiguation index and proxy type.
@@ -6142,7 +6375,7 @@ type IEvent = {
     /**
      * A multisig operation has been executed.
      */
-    MultisigExecuted: PlainDescriptor<Anonymize<I25quf02h3f45f>>;
+    MultisigExecuted: PlainDescriptor<Anonymize<I5ank11b0br54o>>;
     /**
      * A multisig operation has been cancelled.
      */
@@ -6198,7 +6431,7 @@ type IEvent = {
     /**
      * A sudo call just took place.
      */
-    Sudid: PlainDescriptor<Anonymize<I38473632flscn>>;
+    Sudid: PlainDescriptor<Anonymize<I7442cggth99kp>>;
     /**
      * The sudo key has been updated.
      */
@@ -6210,7 +6443,7 @@ type IEvent = {
     /**
      * A [sudo_as](Pallet::sudo_as) call just took place.
      */
-    SudoAsDone: PlainDescriptor<Anonymize<I38473632flscn>>;
+    SudoAsDone: PlainDescriptor<Anonymize<I7442cggth99kp>>;
   };
   XcmpQueue: {
     /**
@@ -7030,6 +7263,27 @@ type IEvent = {
      * frozen integration-contract event.
      */
     CommunityScheduleCreated: PlainDescriptor<Anonymize<I141piq296rc2n>>;
+    /**
+     * A bounded Phase 3-4 trading-reward epoch budget was authorized
+     * from the `incentiv` pot into the reward pallet's own sovereign
+     * account (08 §1.4/§2.6). `remaining` is the pot's undistributed
+     * allocation after the debit. This is the frozen event 08 §1.4
+     * names for `fund_trading_rewards`.
+     */
+    TradingRewardsFunded: PlainDescriptor<Anonymize<I3a4qht3l7q9rt>>;
+    /**
+     * The previous authorization's unspent VIT was returned from the
+     * reward pallet's sovereign account to the `incentiv` pot, inside
+     * `fund_trading_rewards` and before the new authorization
+     * (08 §2.6: *"The return of unspent budget carries the same
+     * authority as the authorization"*). `amount` excludes every VIT
+     * backing an accrual no participant has claimed yet; `remaining` is
+     * the pot's undistributed allocation after the credit and before the
+     * new debit. Treasury-owned operational history, not a frozen
+     * integration-contract event — 08 §1.4 names no event for the
+     * return leg.
+     */
+    TradingRewardBudgetReturned: PlainDescriptor<Anonymize<I3a4qht3l7q9rt>>;
   };
   Guardian: {
     /**
@@ -7498,6 +7752,49 @@ type IEvent = {
      * Operational edge event outside the frozen 02 ingest schema.
      */
     LedgerDriftCleared: PlainDescriptor<Anonymize<Id2312c48f17dd>>;
+  };
+  TradingRewards: {
+    /**
+     * A bond was held and a participant record opened.
+     */
+    Enrolled: PlainDescriptor<Anonymize<I93vothlkfb80t>>;
+    /**
+     * The hold grew. The earning cap did not.
+     */
+    BondToppedUp: PlainDescriptor<Anonymize<I34ssr4fhp2kik>>;
+    /**
+     * The whole bond was released. `record_retained` is true when an
+     * unclaimed accrual kept the record alive at a zero bond, which is
+     * the one case where a withdrawal does not close the account.
+     */
+    BondWithdrawn: PlainDescriptor<Anonymize<Icctupj3ftl0ch>>;
+    /**
+     * Accrued USDC was converted once, at the live rate, and paid in VIT.
+     * `record_closed` is true when the claim was the last thing holding a
+     * zero-bond record open, so the roster slot was freed with it.
+     */
+    RewardsClaimed: PlainDescriptor<Anonymize<I86dulb0e6aqlq>>;
+    /**
+     * A settled market was folded into the epoch total and its entry
+     * deleted. `spent` and `received` are what the fold contributed, which
+     * is not the entry's own pair when 08 §2.6 rule 4's annulled arm
+     * substitutes the mirror leg for the sale credits.
+     */
+    MarketScoreFolded: PlainDescriptor<Anonymize<Iffhjj19aangi6>>;
+    /**
+     * A score entry was deleted without folding anything: the proposal was
+     * VOIDed, or the absolute timeout elapsed on a market that never
+     * settled. `timed_out` separates the two, because one is a resolved
+     * constitutional emergency and the other is a liveness escape.
+     */
+    MarketScoreDropped: PlainDescriptor<Anonymize<Ib6pl1520ec2jq>>;
+    /**
+     * One participant's epoch closed. `accrued` is the reward, clamped to
+     * the authorized budget's unpromised remainder; `forfeited` is the
+     * debit, which budget pressure never reduces. `snapshot_bond` is the
+     * cap the next epoch carries.
+     */
+    EpochSettled: PlainDescriptor<Anonymize<I75eb7jq67cg5l>>;
   };
 };
 type IError = {
@@ -8422,6 +8719,25 @@ type IError = {
      * are SCALE-stable.
      */
     RedemptionFeeAboveMarketFee: PlainDescriptor<undefined>;
+    /**
+     * 13 rule 7 / 08 §2.6 (TR9): the amendment would carry the live pair
+     * `99 × rwd.rate ≤ 200 × mkt.fee` out of band. Both rows are **PARAM**,
+     * so a single PARAM decision can move either side and both directions
+     * are refused: raising `rwd.rate` above the live wash break-even, and
+     * lowering `mkt.fee` until the live `rwd.rate` sits above it.
+     *
+     * The second direction is the one this error exists for. `mkt.fee` may
+     * be lowered toward its 5 bps floor by an ordinary vote that never
+     * mentions the reward program, and that vote would otherwise retire
+     * the program's only anti-farm defense.
+     *
+     * Deliberately not `TryStateViolation` (nothing stored is violating an
+     * invariant — the refusal is what keeps it that way) and not `AboveMax`
+     * (the `rwd.rate` record's own bounds are satisfied; the live coupling
+     * is what binds). Appended last — the preceding discriminants are
+     * SCALE-stable.
+     */
+    RewardRateAboveWashBreakeven: PlainDescriptor<undefined>;
   };
   ConditionalLedger: {
     /**
@@ -9297,6 +9613,16 @@ type IError = {
      * append-only rule) rather than shifting every variant after it.
      */
     OutflowCustodyUnwired: PlainDescriptor<undefined>;
+    /**
+     * `fund_trading_rewards`'s amount exceeds the undistributed
+     * `incentiv` pot (08 §2.6).
+     */
+    IncentiveAllocationExhausted: PlainDescriptor<undefined>;
+    /**
+     * The bounded lifetime trading-reward authorization count (08 §2.6,
+     * *Bounds*) is full.
+     */
+    TooManyTradingRewardAuthorizations: PlainDescriptor<undefined>;
   };
   Guardian: {
     /**
@@ -10074,6 +10400,107 @@ type IError = {
      * custody; only the MarketAuthority wrapper may do so (03 §4/§5.1).
      */
     ProtocolDestination: PlainDescriptor<undefined>;
+  };
+  TradingRewards: {
+    /**
+     * The account already holds a participant record.
+     */
+    AlreadyEnrolled: PlainDescriptor<undefined>;
+    /**
+     * No participant record exists for the account.
+     */
+    NotEnrolled: PlainDescriptor<undefined>;
+    /**
+     * `rwd.rate` is absent, malformed, or zero. Fails before any hold.
+     */
+    RateUnset: PlainDescriptor<undefined>;
+    /**
+     * `ledger.pos_dep` is unreadable, so no minimum can be enforced.
+     */
+    MinimumBondUnset: PlainDescriptor<undefined>;
+    /**
+     * The offered bond is below the live minimum.
+     */
+    BondBelowMinimum: PlainDescriptor<undefined>;
+    /**
+     * The roster is at its 13 §4 bound.
+     */
+    TooManyParticipants: PlainDescriptor<undefined>;
+    /**
+     * A zero-amount bond mutation.
+     */
+    AmountZero: PlainDescriptor<undefined>;
+    /**
+     * The bond, the roster count or the accrual total would overflow.
+     */
+    AccountingOverflow: PlainDescriptor<undefined>;
+    /**
+     * Some epoch the account participated in has not settled.
+     */
+    EpochUnsettled: PlainDescriptor<undefined>;
+    /**
+     * Nothing is accrued, or the conversion floors to zero VIT.
+     */
+    NothingToClaim: PlainDescriptor<undefined>;
+    /**
+     * `fee.vit_usdc_rate` is absent, malformed, or zero.
+     */
+    VitRateUnset: PlainDescriptor<undefined>;
+    /**
+     * USDC custody refused the move, or moved the wrong amount.
+     */
+    BondCustody: PlainDescriptor<undefined>;
+    /**
+     * VIT custody refused the payout, or paid the wrong amount.
+     */
+    RewardCustody: PlainDescriptor<undefined>;
+    /**
+     * Transferring the bond would leave the funder below the asset minimum.
+     */
+    BondFundingWouldDust: PlainDescriptor<undefined>;
+    /**
+     * No score entry exists for that account and market.
+     */
+    NoScoreEntry: PlainDescriptor<undefined>;
+    /**
+     * The book has not reached a terminal state and the absolute timeout
+     * has not elapsed, so there is nothing to fold and nothing to escape.
+     */
+    MarketNotSettled: PlainDescriptor<undefined>;
+    /**
+     * The account's epoch in flight has not closed. This is also the
+     * refusal a second `settle_epoch` for a settled epoch meets, because
+     * settling re-snapshots the record onto the current epoch.
+     */
+    EpochNotClosed: PlainDescriptor<undefined>;
+    /**
+     * The account still holds an unfolded score entry for the epoch, so
+     * settling would apply the arithmetic to part of its own score.
+     */
+    UnfoldedScore: PlainDescriptor<undefined>;
+    /**
+     * The accrual would promise more than the authorized budget.
+     * Unreachable by construction while `settle_epoch`'s reward clamp
+     * (`budget.saturating_sub(promised)`) is in place; kept as a
+     * tripwire against a future change that breaks it. If it ever fires,
+     * the failure mode is a stuck settlement, not a skipped reward: the
+     * whole dispatch aborts, so the epoch stays unclosed and the bond
+     * stays locked until a later call succeeds.
+     */
+    BudgetExceeded: PlainDescriptor<undefined>;
+    /**
+     * A caller who is **not** the participant tried to settle an epoch
+     * into a headroom that would clamp the reward below the full
+     * entitlement (08 §2.6).
+     *
+     * The participant may always settle themselves at any headroom, and a
+     * third party may still crank every epoch the clamp does not touch.
+     * The refusal is status-quo (G-1): the epoch stays open, the bond
+     * stays held, and nothing is written — so re-funding the budget
+     * reopens the payout, which is exactly what finalising the epoch would
+     * have made impossible.
+     */
+    ThirdPartyWouldClampReward: PlainDescriptor<undefined>;
   };
 };
 type IConstants = {
@@ -11018,6 +11445,25 @@ type IConstants = {
      */
     ServiceIdBase: PlainDescriptor<bigint>;
   };
+  TradingRewards: {
+    /**
+        
+         */
+    UsdcAssetId: PlainDescriptor<Anonymize<If9iqq7i64mur8>>;
+    /**
+     * Root of the pallet's own sovereign account, which custodies both the
+     * USDC bonds and the authorized VIT budget.
+     */
+    PalletId: PlainDescriptor<SizedHex<8>>;
+    /**
+     * 13 §4's bound on the enrolled roster.
+     */
+    MaxParticipants: PlainDescriptor<number>;
+    /**
+     * 13 §4's bound on one account's unfolded score entries.
+     */
+    MaxScoredMarketsPerAccount: PlainDescriptor<number>;
+  };
 };
 type IViewFns = {};
 type IRuntimeCalls = {
@@ -11246,7 +11692,7 @@ type IRuntimeCalls = {
      * Returns an inclusion outcome which specifies if this extrinsic is included in
      * this block or not.
      */
-    apply_extrinsic: RuntimeDescriptor<[extrinsic: Uint8Array], Anonymize<I2b90ci0g6gdiu>>;
+    apply_extrinsic: RuntimeDescriptor<[extrinsic: Uint8Array], Anonymize<Id5433fsuakfsh>>;
     /**
      * Finish the current block.
      */
@@ -11474,11 +11920,11 @@ type IRuntimeCalls = {
     /**
      * Query information of a dispatch class, weight, and fee of a given encoded `Call`.
      */
-    query_call_info: RuntimeDescriptor<[call: Anonymize<Icscgdrls4bngd>, len: number], Anonymize<I6spmpef2c7svf>>;
+    query_call_info: RuntimeDescriptor<[call: Anonymize<I3hev30cis3ndu>, len: number], Anonymize<I6spmpef2c7svf>>;
     /**
      * Query fee details of a given encoded `Call`.
      */
-    query_call_fee_details: RuntimeDescriptor<[call: Anonymize<Icscgdrls4bngd>, len: number], Anonymize<Iei2mvq0mjvt81>>;
+    query_call_fee_details: RuntimeDescriptor<[call: Anonymize<I3hev30cis3ndu>, len: number], Anonymize<Iei2mvq0mjvt81>>;
     /**
      * Query the output of the current `WeightToFee` given some input.
      */
@@ -11547,7 +11993,7 @@ type IRuntimeCalls = {
     preset_names: RuntimeDescriptor<[], Anonymize<I6lr8sctk0bi4e>>;
   };
 };
-export type Bleavit_recoveryDispatchError = Anonymize<I5cj8vo7lksljp>;
+export type Bleavit_recoveryDispatchError = Anonymize<Idmmv2hj79l5es>;
 type IAsset = PlainDescriptor<Anonymize<If9iqq7i64mur8>>;
 export type Bleavit_recoveryExtensions = {};
 type PalletsTypedef = { __storage: IStorage; __tx: ICalls; __event: IEvent; __error: IError; __const: IConstants; __view: IViewFns };
@@ -11561,8 +12007,8 @@ export type Bleavit_recoveryEvents = EventsFromPalletsDef<PalletsTypedef>;
 export type Bleavit_recoveryErrors = ErrorsFromPalletsDef<PalletsTypedef>;
 export type Bleavit_recoveryConstants = ConstFromPalletsDef<PalletsTypedef>;
 export type Bleavit_recoveryViewFns = ViewFnsFromPalletsDef<PalletsTypedef>;
-export type Bleavit_recoveryCallData = Anonymize<Icscgdrls4bngd> & { value: { type: string } };
-type AllInteractions = { storage: { System: ["Account", "ExtrinsicCount", "InherentsApplied", "BlockWeight", "BlockSize", "BlockHash", "ExtrinsicData", "Number", "ParentHash", "Digest", "Events", "EventCount", "EventTopics", "LastRuntimeUpgrade", "BlocksTillUpgrade", "UpgradedToU32RefCount", "UpgradedToTripleRefCount", "ExecutionPhase", "AuthorizedUpgrade", "ExtrinsicWeightReclaimed"]; Timestamp: ["Now", "DidUpdate"]; ParachainSystem: ["BlockWeightMode", "PreviousCoreCount", "UnincludedSegment", "AggregatedUnincludedSegment", "PendingValidationCode", "NewValidationCode", "ValidationData", "DidSetValidationCode", "LastRelayChainBlockNumber", "UpgradeRestrictionSignal", "UpgradeGoAhead", "RelayStateProof", "RelevantMessagingState", "HostConfiguration", "LastDmqMqcHead", "LastHrmpMqcHeads", "ProcessedDownwardMessages", "LastProcessedDownwardMessage", "HrmpWatermark", "LastProcessedHrmpMessage", "HrmpOutboundMessages", "UpwardMessages", "PendingUpwardMessages", "PendingUpwardSignals", "PendingApprovedPeer", "UpwardDeliveryFeeFactor", "AnnouncedHrmpMessagesPerCandidate", "ReservedXcmpWeightOverride", "ReservedDmpWeightOverride", "CustomValidationHeadData", "PoVMessagesTracker"]; ParachainInfo: ["ParachainId"]; Balances: ["TotalIssuance", "InactiveIssuance", "Account", "Locks", "Reserves", "Holds", "Freezes"]; ForeignAssets: ["Asset", "Account", "Approvals", "Metadata", "Reserves", "NextAssetId"]; TransactionPayment: ["NextFeeMultiplier", "StorageVersion", "TxPaymentCredit"]; Vesting: ["Vesting", "StorageVersion"]; Referenda: ["ReferendumCount", "ReferendumInfoFor", "TrackQueue", "DecidingCount", "MetadataOf"]; ConvictionVoting: ["VotingFor", "ClassLocksFor"]; Preimage: ["StatusFor", "RequestStatusFor", "PreimageFor"]; Scheduler: ["IncompleteSince", "Agenda", "Retries", "Lookup"]; Proxy: ["Proxies", "Announcements"]; Multisig: ["Multisigs"]; Migrations: ["Cursor", "Historic"]; Sudo: ["Key"]; XcmpQueue: ["InboundXcmpSuspended", "OutboundXcmpStatus", "OutboundXcmpMessages", "SignalMessages", "QueueConfig", "QueueSuspended", "DeliveryFeeFactor"]; MessageQueue: ["BookStateFor", "ServiceHead", "Pages"]; PolkadotXcm: ["QueryCounter", "Queries", "AssetTraps", "SafeXcmVersion", "SupportedVersion", "VersionNotifiers", "VersionNotifyTargets", "VersionDiscoveryQueue", "CurrentMigration", "RemoteLockedFungibles", "LockedFungibles", "XcmExecutionSuspended", "ShouldRecordXcm", "RecordedXcm", "AuthorizedAliases"]; Authorship: ["Author"]; CollatorSelection: ["Invulnerables", "CandidateList", "LastAuthoredBlock", "DesiredCandidates", "CandidacyBond"]; Session: ["Validators", "CurrentIndex", "QueuedChanged", "QueuedKeys", "DisabledValidators", "NextKeys", "KeyOwner", "ExternallySetKeys"]; Aura: ["Authorities", "CurrentSlot"]; AuraExt: ["Authorities", "RelaySlotInfo"]; Constitution: ["Params", "CounterForParams", "PhaseFlags", "ReleaseChannel", "Meters", "Capabilities"]; ConditionalLedger: ["Vaults", "BaselineVaults", "Positions", "PositionCount", "PositionTotals", "DepositsHeld", "TotalEscrowed", "RedemptionFeesAccrued", "LedgerDrifted", "LastReconciliation", "VaultTerminalAt", "BaselineTerminalAt", "SplitPausedUntil", "FrozenUntil", "FreezeRenewed"]; Market: ["Markets", "CounterForMarkets", "ActiveMarketCount", "ActiveExternalMarketCount", "StoredExternalMarketCount", "ExternalBookPairs", "CounterForExternalBookPairs", "MarketProtocolAccounts", "CounterForMarketProtocolAccounts", "ProposalMarketIds", "BaselineMarketOf", "SealedBaselineTwap", "ClosedAt", "SeededMarkets", "SweptMarkets", "NextMarketId", "TwapCheckpoints", "DecisionWindows", "DecisionWindowOwners", "RerunSeededMarkets", "SettlementObservedAt", "LivePolCommitments", "CreationFrozenUntil", "FrozenUntil", "FreezeRenewed"]; Welfare: ["MetricSpecs", "Snapshots", "SnapshotContexts", "SnapshotDeadline", "GateBreachFlags", "SampledGateDays", "XcmTraffic", "XcmTrafficEpochs", "ReserveProbeDaily", "CollatorAuthorship", "CollatorAuthorshipEpoch", "BlockProduction", "BlockProductionEpoch", "BlockWeightSamples", "PrimaryBlockWeightSamples", "BlockResourceUsage", "IntegrityFailures"]; Oracle: ["Reporters", "CounterForReporters", "Watchtowers", "CounterForWatchtowers", "Rounds", "RoundSchedules", "ComponentValues", "ReserveHealth", "ReserveProbeArmed", "ReserveProbeArmedAt", "AckRecords", "WatchtowerActive", "MoneySettled", "ReporterRecords", "RoundActivity", "Recomputable"]; IncidentRegistry: ["Filings", "FilingCount", "Aggregates", "AckRecords", "ClosedAt"]; MilestoneRegistry: ["Filings", "FilingCount", "Aggregates", "AckRecords", "ClosedAt"]; FutarchyTreasury: ["State", "PendingMainCredit", "SweptResidueUnreclaimed", "CoretimeQuoteAuthority", "BootstrapOpsFundingClosed", "CommunityDistributionArmedAt", "CommunityDistributionRemaining", "CommunityScheduleCount", "CoretimeRenewalAccount", "CollatorAuthoredBlocks", "CollatorAuthoredEpoch", "CollatorAuthoredRegisteredCount", "CollatorPendingBlocks", "CollatorPendingEpoch", "CollatorPendingRegisteredCount", "CollatorAuthoredOverflowed", "CollatorPendingOverflowed", "CollatorDroppedEpoch", "CollatorCompensationPaidEpoch"]; Guardian: ["Members", "MemberBonds", "PendingActions", "Approvals", "ReviewDeadlines", "ActivePlaybooks", "PlaybookRegistered", "RerunUsed", "Allowances", "NextActionId", "LastSeenEpoch", "ReviewReferenda", "VetoReviewReferenda", "CounterForVetoReviewReferenda", "VetoReviewActions", "CounterForVetoReviewActions", "ReviewFrontingOf", "CounterForReviewFrontingOf", "PendingBondReleases", "FailedActions", "CounterForFailedActions", "MaintenanceSweepCursor", "FailedActionReapCursor"]; Attestor: ["Members", "Attestations", "Liabilities", "Revocations", "NextAttestationId"]; Epoch: ["Proposals", "CounterForProposals", "EpochOf", "IntakeQueue", "RecentCohortSummaries", "Cohorts", "CounterForCohorts", "IntakeProposals", "CounterForIntakeProposals", "Schedule", "EpochTimings", "GuardianReviewDeadlines", "CounterForGuardianReviewDeadlines", "GuardianReviewWindows", "CounterForGuardianReviewWindows", "QualificationPreimageRequests", "CounterForQualificationPreimageRequests", "QualificationAuxiliaryPreimageRequests", "CounterForQualificationAuxiliaryPreimageRequests", "ProposalSecurityTermsOf", "CounterForProposalSecurityTermsOf", "ProposalBonds", "CounterForProposalBonds", "ResourceLocks", "ProposalSchedules", "CohortSchedules", "NextProposalId", "RolloverCounts", "FundedPolSlots", "DeadMan", "LastRelayParent", "DeadManDetector", "StaleEpochCutoff", "BaselineCarry", "IntakePausedUntil", "GuardianIntakePausedUntil", "PendingOracleVoids", "CounterForPendingOracleVoids", "LastWatchtowerSweep", "OracleDeadlineCursor"]; ExecutionGuard: ["Queue", "CounterForQueue", "Ratifications", "CounterForRatifications", "PendingRatifications", "CounterForPendingRatifications", "ExecutionRecords", "PendingUpgrade", "CurrentSpecName", "HeldResources", "HardGateBreach", "DeadManFreeze", "MigrationHalt", "GateSuspension", "Expedited", "LastUpgradeAuthorized", "UpgradeSpacingHistory", "PendingAnchorCapture", "PreMigrationAnchor", "ScheduledUpgrade", "AttestationBindings", "RecoveryImage", "QueuedRecoveryImages", "QualifiedRecoveryImages", "CounterForQualifiedRecoveryImages", "RerunRecoveryPins", "CounterForRerunRecoveryPins", "ExecutingUpgrade", "PhaseFourBridge", "RerunPins", "CounterForRerunPins"]; InflowCaps: ["CumulativeDeposits"]; ClientRegistry: ["Clients", "ClientIdOf", "ClientIdOfSigner", "ClientPolicies", "BondOwners", "RemovedClients", "IngressMeters", "ClientCount", "NextClientId"]; QuestionService: ["Questions", "CounterForQuestions", "Reports", "Terms", "AttestorBonds", "Attestations", "PauseAffected", "PausedUntil", "NextServiceId", "LiveQuestionCount", "LiveExternalDepth", "ScarcityMultiplier"]; ServiceLedger: ["Vaults", "BaselineVaults", "Positions", "PositionCount", "PositionTotals", "DepositsHeld", "TotalEscrowed", "RedemptionFeesAccrued", "LedgerDrifted", "LastReconciliation", "VaultTerminalAt", "BaselineTerminalAt", "SplitPausedUntil", "FrozenUntil", "FreezeRenewed"] }; tx: { System: ["remark", "set_heap_pages", "set_code", "set_code_without_checks", "set_storage", "kill_storage", "kill_prefix", "remark_with_event", "authorize_upgrade", "authorize_upgrade_without_checks", "apply_authorized_upgrade"]; Timestamp: ["set"]; ParachainSystem: ["set_validation_data", "sudo_send_upward_message"]; Balances: ["transfer_allow_death", "force_transfer", "transfer_keep_alive", "transfer_all", "force_unreserve", "upgrade_accounts", "force_set_balance", "force_adjust_total_issuance", "burn"]; ForeignAssets: ["create", "force_create", "start_destroy", "destroy_accounts", "destroy_approvals", "finish_destroy", "mint", "burn", "transfer", "transfer_keep_alive", "force_transfer", "freeze", "thaw", "freeze_asset", "thaw_asset", "transfer_ownership", "set_team", "set_metadata", "clear_metadata", "force_set_metadata", "force_clear_metadata", "force_asset_status", "approve_transfer", "cancel_approval", "force_cancel_approval", "transfer_approved", "touch", "refund", "set_min_balance", "touch_other", "refund_other", "block", "transfer_all", "set_reserves"]; Vesting: ["vest", "vest_other", "vested_transfer", "force_vested_transfer", "merge_schedules", "force_remove_vesting_schedule"]; Referenda: ["submit", "place_decision_deposit", "refund_decision_deposit", "cancel", "kill", "nudge_referendum", "one_fewer_deciding", "refund_submission_deposit", "set_metadata"]; ConvictionVoting: ["vote", "delegate", "undelegate", "unlock", "remove_vote", "remove_other_vote"]; Preimage: ["note_preimage", "unnote_preimage", "request_preimage", "unrequest_preimage", "ensure_updated"]; Scheduler: ["schedule", "cancel", "schedule_named", "cancel_named", "schedule_after", "schedule_named_after", "set_retry", "set_retry_named", "cancel_retry", "cancel_retry_named"]; Utility: ["batch", "as_derivative", "batch_all", "dispatch_as", "force_batch", "with_weight", "if_else", "dispatch_as_fallible"]; Proxy: ["proxy", "add_proxy", "remove_proxy", "remove_proxies", "create_pure", "kill_pure", "announce", "remove_announcement", "reject_announcement", "proxy_announced", "poke_deposit"]; Multisig: ["as_multi_threshold_1", "as_multi", "approve_as_multi", "cancel_as_multi", "poke_deposit"]; Migrations: ["force_set_cursor", "force_set_active_cursor", "force_onboard_mbms", "clear_historic"]; Sudo: ["sudo", "sudo_unchecked_weight", "set_key", "sudo_as", "remove_key"]; XcmpQueue: ["suspend_xcm_execution", "resume_xcm_execution", "update_suspend_threshold", "update_drop_threshold", "update_resume_threshold"]; MessageQueue: ["reap_page", "execute_overweight"]; PolkadotXcm: ["send", "teleport_assets", "reserve_transfer_assets", "execute", "force_xcm_version", "force_default_xcm_version", "force_subscribe_version_notify", "force_unsubscribe_version_notify", "limited_reserve_transfer_assets", "limited_teleport_assets", "force_suspension", "transfer_assets", "claim_assets", "transfer_assets_using_type_and_then", "add_authorized_alias", "remove_authorized_alias", "remove_all_authorized_aliases"]; CollatorSelection: ["set_invulnerables", "set_desired_candidates", "set_candidacy_bond", "register_as_candidate", "leave_intent", "add_invulnerable", "remove_invulnerable", "update_bond", "take_candidate_slot"]; Session: ["set_keys", "purge_keys"]; Constitution: ["set_param", "set_capability", "set_phase_flag", "set_release_channel", "amend_registry"]; ConditionalLedger: ["split", "merge", "split_scalar", "merge_scalar", "split_gate", "merge_gate", "transfer", "split_baseline", "merge_baseline", "resolve", "void", "settle_scalar", "settle_gate", "settle_baseline", "redeem", "redeem_scalar", "redeem_scalar_pair", "redeem_gate", "redeem_void", "redeem_baseline", "redeem_baseline_pair", "sweep_dust", "sweep_dust_baseline", "set_split_paused", "set_frozen", "reconcile", "sweep_redemption_fees"]; Market: ["buy", "sell", "crank_observe", "sweep_revenue", "reap", "freeze_creation", "set_frozen"]; Welfare: ["register_spec", "record_snapshot", "record_daily_gate"]; Oracle: ["register_reporter", "deregister_reporter", "report", "challenge", "counter_report", "recompute_proof", "register_watchtower", "ack_observed", "crank_round_close", "crank_reserve_probe", "adjudicate"]; IncidentRegistry: ["file", "challenge_filing", "ack_observed", "crank_close", "resolve_challenge", "close_epoch", "reap_epoch"]; MilestoneRegistry: ["file", "challenge_filing", "ack_observed", "crank_close", "resolve_challenge", "close_epoch", "reap_epoch"]; FutarchyTreasury: ["fund_budget_line", "spend", "open_stream", "claim_stream", "cancel_stream", "issue_vit", "recover_foreign", "execute_coretime_renewal", "note_coretime_quote", "prune_coretime_quote", "set_coretime_authority", "sweep_insurance", "reconcile_insurance", "create_community_schedule"]; Guardian: ["set_members", "propose_action", "approve_action", "ratify_action", "renew_playbook", "uphold_veto", "recall", "set_playbook_registered"]; Attestor: ["set_members", "attest", "challenge_attestation", "resolve_challenge", "remove_for_cause", "reap_attestation"]; Epoch: ["submit", "withdraw", "tick", "decide", "settle_cohort", "set_next_epoch_length", "delay_once", "mark_executed", "mark_failed_executed", "retry_exhausted_to_measurement", "expire_or_stale_queue", "force_reject_process_hold", "void_cohort", "set_intake_paused", "finalize_epoch_baseline", "drive_oracle_boundaries", "bind_ratification"]; ExecutionGuard: ["execute", "apply_authorized_upgrade", "expire_failed_execution", "ratify", "reject_stale", "commit_recovery_image", "authorize_phase_four", "qualify_recovery_image"]; ClientRegistry: ["admit_client", "admit_local_client", "remove_client", "top_up_delivery_float", "withdraw_delivery_float"]; QuestionService: ["register", "bond_attestor", "open", "seal", "submit_attestation", "settle", "void", "set_paused", "archive"]; ServiceLedger: ["split", "merge", "split_scalar", "merge_scalar", "split_gate", "merge_gate", "transfer", "split_baseline", "merge_baseline", "resolve", "void", "settle_scalar", "settle_gate", "settle_baseline", "redeem", "redeem_scalar", "redeem_scalar_pair", "redeem_gate", "redeem_void", "redeem_baseline", "redeem_baseline_pair", "sweep_dust", "sweep_dust_baseline", "set_split_paused", "set_frozen", "reconcile", "sweep_redemption_fees"] }; events: { System: ["ExtrinsicSuccess", "ExtrinsicFailed", "CodeUpdated", "NewAccount", "KilledAccount", "Remarked", "UpgradeAuthorized", "RejectedInvalidAuthorizedUpgrade"]; ParachainSystem: ["ValidationFunctionStored", "ValidationFunctionApplied", "ValidationFunctionDiscarded", "DownwardMessagesReceived", "DownwardMessagesProcessed", "UpwardMessageSent"]; Balances: ["Endowed", "DustLost", "Transfer", "BalanceSet", "Reserved", "Unreserved", "ReserveRepatriated", "Deposit", "Withdraw", "Slashed", "Minted", "MintedCredit", "Burned", "BurnedDebt", "Suspended", "Restored", "Upgraded", "Issued", "Rescinded", "Locked", "Unlocked", "Frozen", "Thawed", "TotalIssuanceForced", "Held", "BurnedHeld", "TransferOnHold", "TransferAndHold", "Released", "Unexpected"]; ForeignAssets: ["Created", "Issued", "Transferred", "Burned", "TeamChanged", "OwnerChanged", "Frozen", "Thawed", "AssetFrozen", "AssetThawed", "AccountsDestroyed", "ApprovalsDestroyed", "DestructionStarted", "Destroyed", "ForceCreated", "MetadataSet", "MetadataCleared", "ApprovedTransfer", "ApprovalCancelled", "TransferredApproved", "AssetStatusChanged", "AssetMinBalanceChanged", "Touched", "Blocked", "Deposited", "Withdrawn", "ReservesUpdated", "ReservesRemoved", "IssuedCredit", "BurnedCredit", "IssuedDebt", "BurnedDebt"]; TransactionPayment: ["TransactionFeePaid"]; AssetTxPayment: ["AssetTxFeePaid"]; Vesting: ["VestingCreated", "VestingUpdated", "VestingCompleted"]; Referenda: ["Submitted", "DecisionDepositPlaced", "DecisionDepositRefunded", "DepositSlashed", "DecisionStarted", "ConfirmStarted", "ConfirmAborted", "Confirmed", "Approved", "Rejected", "TimedOut", "Cancelled", "Killed", "SubmissionDepositRefunded", "MetadataSet", "MetadataCleared"]; ConvictionVoting: ["Delegated", "Undelegated", "Voted", "VoteRemoved", "VoteUnlocked"]; Preimage: ["Noted", "Requested", "Cleared"]; Scheduler: ["Scheduled", "Canceled", "Dispatched", "RetrySet", "RetryCancelled", "CallUnavailable", "PeriodicFailed", "RetryFailed", "PermanentlyOverweight", "AgendaIncomplete"]; Utility: ["BatchInterrupted", "BatchCompleted", "BatchCompletedWithErrors", "ItemCompleted", "ItemFailed", "DispatchedAs", "IfElseMainSuccess", "IfElseFallbackCalled"]; Proxy: ["ProxyExecuted", "PureCreated", "PureKilled", "Announced", "ProxyAdded", "ProxyRemoved", "DepositPoked"]; Multisig: ["NewMultisig", "MultisigApproval", "MultisigExecuted", "MultisigCancelled", "DepositPoked"]; Migrations: ["UpgradeStarted", "UpgradeCompleted", "UpgradeFailed", "MigrationSkipped", "MigrationAdvanced", "MigrationCompleted", "MigrationFailed", "HistoricCleared"]; Sudo: ["Sudid", "KeyChanged", "KeyRemoved", "SudoAsDone"]; XcmpQueue: ["XcmpMessageSent"]; MessageQueue: ["ProcessingFailed", "Processed", "OverweightEnqueued", "PageReaped"]; CumulusXcm: ["InvalidFormat", "UnsupportedVersion", "ExecutedDownward"]; PolkadotXcm: ["Attempted", "Sent", "SendFailed", "ProcessXcmError", "UnexpectedResponse", "ResponseReady", "Notified", "NotifyOverweight", "NotifyDispatchError", "NotifyDecodeFailed", "InvalidResponder", "InvalidResponderVersion", "ResponseTaken", "AssetsTrapped", "VersionChangeNotified", "SupportedVersionChanged", "NotifyTargetSendFail", "NotifyTargetMigrationFail", "InvalidQuerierVersion", "InvalidQuerier", "VersionNotifyStarted", "VersionNotifyRequested", "VersionNotifyUnrequested", "FeesPaid", "AssetsClaimed", "VersionMigrationFinished", "AliasAuthorized", "AliasAuthorizationRemoved", "AliasesAuthorizationsRemoved"]; CollatorSelection: ["NewInvulnerables", "InvulnerableAdded", "InvulnerableRemoved", "NewDesiredCandidates", "NewCandidacyBond", "CandidateAdded", "CandidateBondUpdated", "CandidateRemoved", "CandidateReplaced", "InvalidInvulnerableSkipped"]; Session: ["NewSession", "NewQueued", "ValidatorDisabled", "ValidatorReenabled"]; Constitution: ["ParamUpdated", "CapabilitySet", "PhaseFlagSet", "ReleaseChannelSet", "RegistryAmended", "MeterCharged"]; ConditionalLedger: ["Split", "Merged", "ScalarSplit", "ScalarMerged", "GateSplit", "GateMerged", "PositionTransferred", "BaselineSplit", "BaselineMerged", "VaultResolved", "VaultVoided", "ScalarSettlementSet", "GateSettled", "BaselineSettled", "Redeemed", "ScalarRedeemed", "ScalarPairRedeemed", "GateRedeemed", "VoidRedeemed", "BaselineRedeemed", "RedemptionFeesSwept", "VaultReaped", "BaselineVaultReaped", "SplitPauseSet", "SplitPauseCleared", "FreezeSet", "FreezeCleared", "FreezeExtended", "LedgerDriftDetected", "LedgerDriftCleared"]; Market: ["Traded", "Observed", "MarketCreated", "MarketClosed", "MarketReaped", "Seeded", "CreationFreezeSet", "CreationFreezeCleared", "FreezeSet", "FreezeCleared", "FreezeExtended", "RevenueSwept", "ExternalRevenueSwept"]; Welfare: ["MetricSpecRegistered", "SnapshotRecorded", "GateBreachRecorded", "SettlementComputed", "SettlementRenormalized", "IntegrityFailureRecorded"]; Oracle: ["ReporterRegistered", "Reported", "Challenged", "RoundEscalated", "RecomputeProven", "AdjudicationRequested", "Adjudicated", "ComponentSettled", "NeutralSettlement", "WindowAcknowledged", "WindowExtended", "QuorumFailed", "ReporterSlashed", "ReporterEjected", "WatchtowerRegistered", "WatchtowerInactive", "WatchtowerSlashed", "ReserveProbeSent", "ReserveProbeResult", "ReserveUnhealthy", "ReserveRecovered", "RetentionExpired", "ReporterRecordsFull"]; IncidentRegistry: ["IncidentFiled", "MilestoneFiled", "IncidentChallenged", "MilestoneChallenged", "IncidentUpheld", "IncidentRejected", "MilestoneAccepted", "MilestoneRejected", "FilingBondSlashed", "RegistryEpochClosed", "WindowAcknowledged", "WindowExtended"]; MilestoneRegistry: ["IncidentFiled", "MilestoneFiled", "IncidentChallenged", "MilestoneChallenged", "IncidentUpheld", "IncidentRejected", "MilestoneAccepted", "MilestoneRejected", "FilingBondSlashed", "RegistryEpochClosed", "WindowAcknowledged", "WindowExtended"]; FutarchyTreasury: ["Spent", "StreamOpened", "StreamClaimed", "StreamCancelled", "BudgetLineFunded", "VitIssued", "NavHaircutFlagged", "ForeignRecovered", "CoretimeRenewalCalled", "ReserveProbeFeeCharged", "NavFloorUnmet", "KeeperBudgetLow", "KeeperBudgetExhausted", "CoretimeQuoteNoted", "CoretimeQuotePruned", "CoretimeAuthoritySet", "InsuranceSwept", "InsuranceOverflowed", "PolCustodyMoved", "CommunityScheduleCreated"]; Guardian: ["GuardianAction", "ForceRerun", "PlaybookActivated", "PlaybookRenewed", "PlaybookExpired", "ReviewScheduled", "MembersSet", "ActionProposed", "ActionApproved", "ActionRatified", "ReviewFailed", "RecallScheduled", "RecallEnacted", "PlaybookRegistrationSet"]; Attestor: ["MembersSet", "AttestationSubmitted", "AttestationChallenged", "ChallengeResolved", "AttestorEjected", "AttestorRemovedForCause", "AttestationRevoked"]; Epoch: ["ProposalSubmitted", "ProposalWithdrawn", "ScreeningStarted", "ProposalCancelled", "ProposalQualified", "ProposalDeferred", "SlotsShrunk", "MarketsOpened", "DecisionExtended", "ProposalQueued", "ProposalRejected", "ProposalDelayed", "RerunScheduled", "RerunOpened", "MandateExpired", "MeasurementStarted", "CohortSettled", "CohortVoided", "BaselineCarried", "ProposalForceRejected", "IntakeSlashed", "IntakePauseSet", "IntakePauseCleared", "OracleDeadlockLatched", "OracleDeadlockCleared"]; ExecutionGuard: ["Executed", "ExecutionFailed", "Ratified", "UpgradeAuthorized", "Enqueued", "Rejected", "UpgradeApplied", "PreimageUnpinned", "UpgradeAborted", "PendingOutflowSyncFailed", "MigrationHalted", "RecoveryImageCommitted", "RecoveryImageApplied", "PhaseFourUpgradeAuthorized", "RecoveryImageQualified"]; ClientRegistry: ["ClientAdmitted", "LocalClientAdmitted", "ClientRemovalStarted", "ClientRemoved", "EgressPrepaid", "DeliveryFloatToppedUp", "DeliveryFloatWithdrawn"]; QuestionService: ["QuestionRegistered", "QuestionSealed", "QuestionSettled", "QuestionVoided", "AttestorBonded", "AttestationSubmitted", "ServicePauseSet", "ServicePauseCleared", "QuestionArchived"]; ServiceLedger: ["Split", "Merged", "ScalarSplit", "ScalarMerged", "GateSplit", "GateMerged", "PositionTransferred", "BaselineSplit", "BaselineMerged", "VaultResolved", "VaultVoided", "ScalarSettlementSet", "GateSettled", "BaselineSettled", "Redeemed", "ScalarRedeemed", "ScalarPairRedeemed", "GateRedeemed", "VoidRedeemed", "BaselineRedeemed", "RedemptionFeesSwept", "VaultReaped", "BaselineVaultReaped", "SplitPauseSet", "SplitPauseCleared", "FreezeSet", "FreezeCleared", "FreezeExtended", "LedgerDriftDetected", "LedgerDriftCleared"] }; errors: { System: ["InvalidSpecName", "SpecVersionNeedsToIncrease", "FailedToExtractRuntimeVersion", "NonDefaultComposite", "NonZeroRefCount", "CallFiltered", "MultiBlockMigrationsOngoing", "NothingAuthorized", "Unauthorized"]; ParachainSystem: ["OverlappingUpgrades", "ProhibitedByPolkadot", "TooBig", "ValidationDataNotAvailable", "HostConfigurationNotAvailable", "NotScheduled"]; Balances: ["VestingBalance", "LiquidityRestrictions", "InsufficientBalance", "ExistentialDeposit", "Expendability", "ExistingVestingSchedule", "DeadAccount", "TooManyReserves", "TooManyHolds", "TooManyFreezes", "IssuanceDeactivated", "DeltaZero"]; ForeignAssets: ["BalanceLow", "NoAccount", "NoPermission", "Unknown", "Frozen", "InUse", "BadWitness", "MinBalanceZero", "UnavailableConsumer", "BadMetadata", "Unapproved", "WouldDie", "AlreadyExists", "NoDeposit", "WouldBurn", "LiveAsset", "AssetNotLive", "IncorrectStatus", "NotFrozen", "CallbackFailed", "BadAssetId", "ContainsFreezes", "ContainsHolds", "TooManyReserves"]; Vesting: ["NotVesting", "AtMaxVestingSchedules", "AmountLow", "ScheduleIndexOutOfBounds", "InvalidScheduleParams"]; Referenda: ["NotOngoing", "HasDeposit", "BadTrack", "Full", "QueueEmpty", "BadReferendum", "NothingToDo", "NoTrack", "Unfinished", "NoPermission", "NoDeposit", "BadStatus", "PreimageNotExist", "PreimageStoredWithDifferentLength"]; ConvictionVoting: ["NotOngoing", "NotVoter", "NoPermission", "NoPermissionYet", "AlreadyDelegating", "AlreadyVoting", "InsufficientFunds", "NotDelegating", "Nonsense", "MaxVotesReached", "ClassNeeded", "BadClass"]; Preimage: ["TooBig", "AlreadyNoted", "NotAuthorized", "NotNoted", "Requested", "NotRequested", "TooMany", "TooFew"]; Scheduler: ["FailedToSchedule", "NotFound", "TargetBlockNumberInPast", "RescheduleNoChange", "Named"]; Utility: ["TooManyCalls"]; Proxy: ["TooMany", "NotFound", "NotProxy", "Unproxyable", "Duplicate", "NoPermission", "Unannounced", "NoSelfProxy"]; Multisig: ["MinimumThreshold", "AlreadyApproved", "NoApprovalsNeeded", "TooFewSignatories", "TooManySignatories", "SignatoriesOutOfOrder", "SenderInSignatories", "NotFound", "NotOwner", "NoTimepoint", "WrongTimepoint", "UnexpectedTimepoint", "MaxWeightTooLow", "AlreadyStored"]; Migrations: ["Ongoing"]; Sudo: ["RequireSudo"]; XcmpQueue: ["BadQueueConfig", "AlreadySuspended", "AlreadyResumed", "TooManyActiveOutboundChannels", "TooBig"]; MessageQueue: ["NotReapable", "NoPage", "NoMessage", "AlreadyProcessed", "Queued", "InsufficientWeight", "TemporarilyUnprocessable", "QueuePaused", "RecursiveDisallowed"]; PolkadotXcm: ["Unreachable", "SendFailure", "Filtered", "UnweighableMessage", "DestinationNotInvertible", "Empty", "CannotReanchor", "TooManyAssets", "InvalidOrigin", "BadVersion", "BadLocation", "NoSubscription", "AlreadySubscribed", "CannotCheckOutTeleport", "LowBalance", "TooManyLocks", "AccountNotSovereign", "FeesNotMet", "LockNotFound", "InUse", "InvalidAssetUnknownReserve", "InvalidAssetUnsupportedReserve", "TooManyReserves", "LocalExecutionIncomplete", "TooManyAuthorizedAliases", "ExpiresInPast", "AliasNotFound", "LocalExecutionIncompleteWithError"]; CollatorSelection: ["TooManyCandidates", "TooFewEligibleCollators", "AlreadyCandidate", "NotCandidate", "TooManyInvulnerables", "AlreadyInvulnerable", "NotInvulnerable", "NoAssociatedValidatorId", "ValidatorNotRegistered", "InsertToCandidateListFailed", "RemoveFromCandidateListFailed", "DepositTooLow", "UpdateCandidateListFailed", "InsufficientBond", "TargetIsNotCandidate", "IdenticalDeposit", "InvalidUnreserve"]; Session: ["InvalidProof", "NoAssociatedValidatorId", "DuplicatedKey", "NoKeys", "NoAccount"]; Constitution: ["UnknownParam", "UnknownMeter", "WrongType", "BelowMin", "AboveMax", "DeltaTooLarge", "CooldownActive", "MeterOverflow", "MeterExhausted", "ReservedPhaseFlag", "FlagNotArmable", "BadReleaseSchema", "TooManyParams", "TooManyMeters", "TooManyCapabilities", "KernelBoundImmutable", "MetaBoundViolation", "TryStateViolation", "NavFloorUnmet", "BudgetDerivationRequired", "PhaseCapRaiseRefused", "CoverageBreaksAdmission", "RedemptionFeeAboveMarketFee"]; ConditionalLedger: ["BadOrigin", "UnknownVault", "UnknownBaselineVault", "WrongVaultState", "BelowMinimum", "ArithmeticOverflow", "InsufficientPosition", "TooManyPositions", "InvalidScore", "GateAlreadySettled", "GateNotSettled", "TryStateViolation", "ReapNotDue", "DepositFailed", "SplitPaused", "Frozen", "FreezeOutOfBounds", "FreezeRenewalExhausted", "InflowCapExceeded", "ProtocolDestination"]; Market: ["UnknownMarket", "DuplicateMarket", "DuplicateBaselineMarket", "NotTrading", "AmountTooSmall", "AmountTooLarge", "SlippageExceeded", "PriceBoundExceeded", "ArithmeticOverflow", "Ledger", "TryStateViolation", "BadOrigin", "NotReapable", "TooManyMarkets", "TooManyStoredMarkets", "AlreadySeeded", "CreationFrozen", "Frozen", "FreezeOutOfBounds", "FreezeRenewalExhausted", "UnreservedProtocolAccount", "EpochMismatch", "NotSweepable", "TooManyExternalMarkets", "WrongFundingDomain", "FunderMismatch", "DuplicateExternalQuestion", "InvalidIdBand"]; Welfare: ["TooManyMetricSpecs", "TooManySnapshots", "TooManyComponents", "TooManyGateFlags", "DuplicateSpecVersion", "SpecNotFound", "BadActivationEpoch", "SpecNotActive", "MissingMetricDiscipline", "BadEpsilonFloor", "BadSourceClass", "BadWeightSum", "ValueOutOfRange", "MissingComponent", "DuplicateComponent", "DuplicateSnapshot", "ArithmeticOverflow", "TryStateViolation", "BadParams", "EpochNotFinalized", "GateWindowUnsampled", "MilestoneTargetUnset", "BadDeltaSMax", "InsufficientOracleSeats", "BondCoverageUnmet", "IncidentAggregateUnavailable", "BadFlaggedComponent", "MissingSnapshotContext", "EmptyNormalizationSample", "DegenerateNormalizationRange", "DayOutsideEpoch", "SpecVersionNotAdmissible"]; Oracle: ["AlreadyRegistered", "NotRegistered", "TooManyReporters", "TooManyWatchtowers", "WindowClosed", "WindowOpen", "BondBelowMinimum", "SpecVersionMismatch", "AlreadyFinal", "AlreadyChallenged", "QuorumPending", "RoundNotFound", "RoundLimit", "DuplicateAck", "ReserveUnhealthy", "ProbeTooEarly", "ProbeUnavailable", "UnknownQuery", "Overflow", "NotRecomputable", "ProofTooLarge", "EvidenceMismatch", "BadProof", "ValueOutOfBounds", "SelfChallenge", "ReporterEjected", "TryStateViolation", "ReporterRecordsSaturated"]; IncidentRegistry: ["EpochFull", "TooManyLiveEpochs", "TooManyAggregates", "WindowClosed", "WindowOpen", "AlreadyChallenged", "AlreadyFinal", "SpecVersionMismatch", "BondBelowMinimum", "FilingNotFound", "DuplicateAck", "BatchTooLarge", "InvalidClass", "Overflow", "NotRegistered", "TryStateViolation", "BadAccount", "AlreadyQuorum", "ReapNotDue", "NothingToClose", "MilestoneTargetUnset", "ExposureUnavailable", "EvidenceMismatch"]; MilestoneRegistry: ["EpochFull", "TooManyLiveEpochs", "TooManyAggregates", "WindowClosed", "WindowOpen", "AlreadyChallenged", "AlreadyFinal", "SpecVersionMismatch", "BondBelowMinimum", "FilingNotFound", "DuplicateAck", "BatchTooLarge", "InvalidClass", "Overflow", "NotRegistered", "TryStateViolation", "BadAccount", "AlreadyQuorum", "ReapNotDue", "NothingToClose", "MilestoneTargetUnset", "ExposureUnavailable", "EvidenceMismatch"]; FutarchyTreasury: ["UnknownBudgetLine", "InsufficientFunds", "ReserveImpaired", "ProposalCapExceeded", "StreamRequired", "MeterExhausted", "StreamNotFound", "StreamNotClaimable", "NotRecipient", "AlreadyCancelled", "BadDuration", "RenewalWindowClosed", "PeriodAlreadyFunded", "TooManyStreams", "TooManyBudgetLines", "TooManyObligations", "IssuanceLineNotAllowed", "IssuanceCapExceeded", "UnknownForeignAsset", "NavFloorUnmet", "ZeroQuote", "Overflow", "NotQuoteAuthority", "BootstrapOpsLineOnly", "BootstrapOpsFundingClosed", "BootstrapOpsFundingLimit", "RenewalAccountUnset", "QuoteExpired", "QuoteNotExpired", "RateUnset", "FeeBudgetUnset", "QuoteTtlUnset", "QuoteTimestampInFuture", "CommunityDistributionNotArmed", "CommunityDistributionAmountTooSmall", "CommunityDistributionExhausted", "TooManyCommunitySchedules", "CommunityVestingDurationInvalid", "CommunityBeneficiaryIsPot", "OutflowCustodyUnwired"]; Guardian: ["NotInitialized", "NotMember", "DuplicateMember", "DuplicateApproval", "ActionNotFound", "ActionExpired", "AlreadyDispatched", "TooManyPending", "TooManyApprovals", "TooManyReviews", "TooManyActivePlaybooks", "TooManyReruns", "ThresholdNotMet", "AllowanceExhausted", "DurationTooLong", "TriggerInactive", "BadPlaybookTrigger", "BadPlaybookTarget", "AlreadyRerun", "NotRerunnable", "ReviewNotFound", "AlreadyRatified", "RenewalNotAllowed", "PlaybookAlreadyActive", "Overflow", "TryStateViolation", "FailedActionNotFound", "NotDelayAction", "TooManyBondReleases", "BondAccounting", "PlaybookNotRegistered"]; Attestor: ["NotMember", "DuplicateMember", "TooFewMembers", "AttestationNotFound", "DuplicateAttestation", "ChallengeWindowClosed", "ChallengeAlreadyOpen", "ChallengeBondTooSmall", "ChallengeStillOpen", "QuorumMissing", "NoOpenChallenge", "EjectedMemberActive", "Overflow", "NotInitialized", "TooManyAttestors", "TooManyAttestations", "TooManyLiabilities", "TooManyRevocations", "LiabilityExists", "AttestorNotFound", "LiabilityNotFound", "ProposalNotTerminal", "ChallengeOpen", "ReapNotAllowed", "BondAccounting", "UnknownProposal", "AttestorQuotaExceeded"]; Epoch: ["BadPhase", "IntakeFull", "TooManyLiveProposals", "TooManyResources", "UnknownProposal", "BadState", "DuplicateProposal", "LockConflict", "TooManyCohorts", "TooManyCohortProposals", "BadEpochLength", "BadParams", "BadDecisionInput", "BatchTooLarge", "ArithmeticOverflow", "Ledger", "ExecutionGuard", "Welfare", "TryStateViolation", "BadProposalShape", "IntakePaused", "IntakePauseOutOfBounds"]; ExecutionGuard: ["QueueFull", "NotFound", "Cancelled", "NotMature", "GraceExpired", "BadPreimage", "StaleQueue", "NotRatified", "AttestationMissing", "CapabilityDenied", "MetersBlocked", "ResourceLockMissing", "GuardianHold", "GateSuspended", "FreezeActive", "PayloadTooLarge", "TooManyCalls", "TooManyDomains", "TooManyLocks", "BadDomainDeclaration", "SafetyFilter", "DispatchFailed", "BadUpgradePayload", "PendingUpgradeExists", "NoPendingUpgrade", "DescriptorLeadTime", "UpgradeHashMismatch", "UpgradeVersionMismatch", "RecoveryImageMissing", "RecoveryImageInvalid", "ShadowMode", "PhaseFourBridgeUsed", "JustificationMissing", "RetryWindowOpen", "Overflow"]; ClientRegistry: ["ClientBondUnset", "DuplicateLocation", "ClientsFull", "ClientIdExhausted", "NotRegistered", "ClientRemoved", "QuestionCounterOverflow", "NoLiveQuestions", "BondInsufficient", "BondAccounting", "DeliveryFloatAmountZero", "DeliveryFloatInsufficient", "DeliveryFloatWouldDrain", "DeliveryFloatBelowMinimum", "DeliveryFundingWouldDust", "DeliveryFloatOverflow", "DeliveryFloatAccounting"]; QuestionService: ["NotRegistered", "ClientRemoved", "ServicePaused", "ServiceRateUnset", "CertificationUnavailable", "StakeBelowFloor", "ArmingBoundExceeded", "SubsidyBelowMinimum", "EpsilonOutOfRange", "WindowTooLong", "WindowTooShort", "WindowCollidesWithDecision", "SlotsExhausted", "TvlCapWouldBind", "AttestorSetTooSmall", "AttestorBondInsufficient", "ClientIsProtocolAccount", "EscrowInsufficient", "NotSealed", "AlreadySealed", "AlreadyTerminal", "QuorumNotReached", "MedianOutOfRange", "DeadlineNotReached", "UnknownQuestion", "DeadlinePassed", "CreationFrozen", "DuplicateAttestor", "UnknownAttestor", "AlreadyBonded", "InvalidSubId", "ArithmeticOverflow", "ArchiveNotReady", "TryStateViolation"]; ServiceLedger: ["BadOrigin", "UnknownVault", "UnknownBaselineVault", "WrongVaultState", "BelowMinimum", "ArithmeticOverflow", "InsufficientPosition", "TooManyPositions", "InvalidScore", "GateAlreadySettled", "GateNotSettled", "TryStateViolation", "ReapNotDue", "DepositFailed", "SplitPaused", "Frozen", "FreezeOutOfBounds", "FreezeRenewalExhausted", "InflowCapExceeded", "ProtocolDestination"] }; constants: { System: ["BlockWeights", "BlockLength", "BlockHashCount", "DbWeight", "Version", "SS58Prefix"]; Timestamp: ["MinimumPeriod"]; ParachainSystem: ["SelfParaId"]; Balances: ["ExistentialDeposit", "MaxLocks", "MaxReserves", "MaxFreezes"]; ForeignAssets: ["RemoveItemsLimit", "AssetDeposit", "AssetAccountDeposit", "MetadataDepositBase", "MetadataDepositPerByte", "ApprovalDeposit", "StringLimit"]; TransactionPayment: ["OperationalFeeMultiplier"]; Vesting: ["MinVestedTransfer", "MaxVestingSchedules"]; Referenda: ["SubmissionDeposit", "MaxQueued", "UndecidingTimeout", "AlarmInterval", "Tracks"]; ConvictionVoting: ["MaxVotes", "VoteLockingPeriod"]; Scheduler: ["MaximumWeight", "MaxScheduledPerBlock"]; Utility: ["batched_calls_limit"]; Proxy: ["ProxyDepositBase", "ProxyDepositFactor", "MaxProxies", "MaxPending", "AnnouncementDepositBase", "AnnouncementDepositFactor"]; Multisig: ["DepositBase", "DepositFactor", "MaxSignatories"]; Migrations: ["CursorMaxLen", "IdentifierMaxLen"]; XcmpQueue: ["MaxInboundSuspended", "MaxActiveOutboundChannels", "MaxPageSize"]; MessageQueue: ["HeapSize", "MaxStale", "ServiceWeight", "IdleMaxServiceWeight"]; PolkadotXcm: ["UniversalLocation", "AdvertisedXcmVersion", "MaxLockers", "MaxRemoteLockConsumers"]; CollatorSelection: ["PotId", "MaxCandidates", "MinEligibleCollators", "MaxInvulnerables", "KickThreshold", "pot_account"]; Session: ["KeyDeposit"]; Aura: ["SlotDuration"]; Constitution: ["INTEGRATION_CONTRACT_VERSION", "MaxParams", "MaxCapabilities", "MaxMeters"]; ConditionalLedger: ["MinSplit", "PositionDeposit", "MaxPositionsPerAccount", "ArchiveDelay", "ReapBatch", "PalletId", "MinTransfer", "RedemptionFee", "ServiceIdBase"]; Market: ["Fee", "ObsInterval", "Kappa1e9", "ArchiveDelay", "PalletId", "MinTrade", "MaxTradeRatio", "MaxLiveMarkets", "MaxStoredMarkets", "MaxLiveExternalMarkets", "MaxStoredExternalMarkets", "MaxAllStoredMarkets", "GatePMaxCeiling", "GateEpsFloor"]; Welfare: ["INTEGRATION_CONTRACT_VERSION", "MaxMetricSpecs", "MaxSnapshots", "MaxGateFlags", "MaxDailyGateSamples"]; Oracle: ["MaxRoundCloseBatch"]; IncidentRegistry: ["Kind", "PalletId", "ArchiveDelay", "MaxFilingsPerEpoch", "MaxEvidenceLen"]; MilestoneRegistry: ["Kind", "PalletId", "ArchiveDelay", "MaxFilingsPerEpoch", "MaxEvidenceLen"]; FutarchyTreasury: ["INTEGRATION_CONTRACT_VERSION", "MaxStreams", "MaxBudgetLines", "MaxPolCommitments", "MaxCollatorCompensationEntries"]; Guardian: ["GuardianSeats", "GuardianThreshold", "GuardianBond", "PlaybookFreezeWindowBlocks", "DelayOnceAllowancePerEpoch", "ForceRerunAllowancePerEpoch", "PauseIntakeAllowanceWindowEpochs", "PauseIntakeAllowance"]; Attestor: ["AttMinMembers", "AttQuorum", "ChallengeWindowBlocks"]; Epoch: ["INTEGRATION_CONTRACT_VERSION", "TreasuryBondAskBps", "MaxLiveProposals", "MaxIntakeQueue", "MaxNonTerminalCohorts", "RecentCohortSummariesBound", "TickBatch", "PhaseOffsets", "MaxBooksPerProposal", "MinEpochLength", "DecisionWindowFloor", "DecisionExtension", "DecisionDeltaFloors", "DecisionSigmaFloors"]; ExecutionGuard: ["MaxRuntimeCodeBytes", "INTEGRATION_CONTRACT_VERSION", "MaxLiveProposals", "MaxExecutionRecords", "MaxCalls", "MaxPayloadBytes", "DescriptorLeadTime", "MaxRuntimeCodeBytes", "ExecutionTimelockFloor", "ExecutionGraceFloor"]; ClientRegistry: ["DeliveryAssetId", "DeliveryFloatPalletId", "MaxClients", "ClientBond"]; QuestionService: ["PalletId", "FeeFloor", "MaxLive", "MaxWindow", "EpsilonMin", "AttestorsMin"]; ServiceLedger: ["MinSplit", "PositionDeposit", "MaxPositionsPerAccount", "ArchiveDelay", "ReapBatch", "PalletId", "MinTransfer", "RedemptionFee", "ServiceIdBase"] }; viewFns: {}; apis: { Core: ["version", "execute_block", "initialize_block"]; Metadata: ["metadata", "metadata_at_version", "metadata_versions"]; RuntimeViewFunction: ["execute_view_function"]; FutarchyApi: ["epoch_status", "proposal_summaries", "quote", "decision_stats", "account_positions", "execution_queue", "welfare_current", "params", "nav", "recent_cohorts", "open_oracle_rounds", "hosted_report", "service_positions", "is_reserved_protocol_destination", "bond_quote", "treasury_streams"]; TelemetryApi: ["market_books", "mid_window_coverage", "pol", "collateral", "service_collateral", "reserve_probe_line_balance", "migration_cursor_stalled", "storage_utilization", "service_egress", "service_partition"]; BlockBuilder: ["apply_extrinsic", "finalize_block", "inherent_extrinsics", "check_inherents"]; TaggedTransactionQueue: ["validate_transaction"]; OffchainWorkerApi: ["offchain_worker"]; SessionKeys: ["generate_session_keys", "decode_session_keys"]; AuraApi: ["slot_duration", "authorities"]; AuraUnincludedSegmentApi: ["can_build_upon"]; RelayParentOffsetApi: ["relay_parent_offset", "max_claim_queue_offset"]; GetParachainInfo: ["parachain_id"]; KeyToIncludeInRelayProof: ["keys_to_prove"]; AccountNonceApi: ["account_nonce"]; TransactionPaymentApi: ["query_info", "query_fee_details", "query_weight_to_fee", "query_length_to_fee"]; TransactionPaymentCallApi: ["query_call_info", "query_call_fee_details", "query_weight_to_fee", "query_length_to_fee"]; CollectCollationInfo: ["collect_collation_info"]; GenesisBuilder: ["build_state", "get_preset", "preset_names"] } };
+export type Bleavit_recoveryCallData = Anonymize<I3hev30cis3ndu> & { value: { type: string } };
+type AllInteractions = { storage: { System: ["Account", "ExtrinsicCount", "InherentsApplied", "BlockWeight", "BlockSize", "BlockHash", "ExtrinsicData", "Number", "ParentHash", "Digest", "Events", "EventCount", "EventTopics", "LastRuntimeUpgrade", "BlocksTillUpgrade", "UpgradedToU32RefCount", "UpgradedToTripleRefCount", "ExecutionPhase", "AuthorizedUpgrade", "ExtrinsicWeightReclaimed"]; Timestamp: ["Now", "DidUpdate"]; ParachainSystem: ["BlockWeightMode", "PreviousCoreCount", "UnincludedSegment", "AggregatedUnincludedSegment", "PendingValidationCode", "NewValidationCode", "ValidationData", "DidSetValidationCode", "LastRelayChainBlockNumber", "UpgradeRestrictionSignal", "UpgradeGoAhead", "RelayStateProof", "RelevantMessagingState", "HostConfiguration", "LastDmqMqcHead", "LastHrmpMqcHeads", "ProcessedDownwardMessages", "LastProcessedDownwardMessage", "HrmpWatermark", "LastProcessedHrmpMessage", "HrmpOutboundMessages", "UpwardMessages", "PendingUpwardMessages", "PendingUpwardSignals", "PendingApprovedPeer", "UpwardDeliveryFeeFactor", "AnnouncedHrmpMessagesPerCandidate", "ReservedXcmpWeightOverride", "ReservedDmpWeightOverride", "CustomValidationHeadData", "PoVMessagesTracker"]; ParachainInfo: ["ParachainId"]; Balances: ["TotalIssuance", "InactiveIssuance", "Account", "Locks", "Reserves", "Holds", "Freezes"]; ForeignAssets: ["Asset", "Account", "Approvals", "Metadata", "Reserves", "NextAssetId"]; TransactionPayment: ["NextFeeMultiplier", "StorageVersion", "TxPaymentCredit"]; Vesting: ["Vesting", "StorageVersion"]; Referenda: ["ReferendumCount", "ReferendumInfoFor", "TrackQueue", "DecidingCount", "MetadataOf"]; ConvictionVoting: ["VotingFor", "ClassLocksFor"]; Preimage: ["StatusFor", "RequestStatusFor", "PreimageFor"]; Scheduler: ["IncompleteSince", "Agenda", "Retries", "Lookup"]; Proxy: ["Proxies", "Announcements"]; Multisig: ["Multisigs"]; Migrations: ["Cursor", "Historic"]; Sudo: ["Key"]; XcmpQueue: ["InboundXcmpSuspended", "OutboundXcmpStatus", "OutboundXcmpMessages", "SignalMessages", "QueueConfig", "QueueSuspended", "DeliveryFeeFactor"]; MessageQueue: ["BookStateFor", "ServiceHead", "Pages"]; PolkadotXcm: ["QueryCounter", "Queries", "AssetTraps", "SafeXcmVersion", "SupportedVersion", "VersionNotifiers", "VersionNotifyTargets", "VersionDiscoveryQueue", "CurrentMigration", "RemoteLockedFungibles", "LockedFungibles", "XcmExecutionSuspended", "ShouldRecordXcm", "RecordedXcm", "AuthorizedAliases"]; Authorship: ["Author"]; CollatorSelection: ["Invulnerables", "CandidateList", "LastAuthoredBlock", "DesiredCandidates", "CandidacyBond"]; Session: ["Validators", "CurrentIndex", "QueuedChanged", "QueuedKeys", "DisabledValidators", "NextKeys", "KeyOwner", "ExternallySetKeys"]; Aura: ["Authorities", "CurrentSlot"]; AuraExt: ["Authorities", "RelaySlotInfo"]; Constitution: ["Params", "CounterForParams", "PhaseFlags", "ReleaseChannel", "Meters", "Capabilities"]; ConditionalLedger: ["Vaults", "BaselineVaults", "Positions", "PositionCount", "PositionTotals", "DepositsHeld", "TotalEscrowed", "RedemptionFeesAccrued", "LedgerDrifted", "LastReconciliation", "VaultTerminalAt", "BaselineTerminalAt", "SplitPausedUntil", "FrozenUntil", "FreezeRenewed"]; Market: ["Markets", "CounterForMarkets", "ActiveMarketCount", "ActiveExternalMarketCount", "StoredExternalMarketCount", "ExternalBookPairs", "CounterForExternalBookPairs", "MarketProtocolAccounts", "CounterForMarketProtocolAccounts", "ProposalMarketIds", "BaselineMarketOf", "SealedBaselineTwap", "ClosedAt", "SeededMarkets", "SweptMarkets", "NextMarketId", "TwapCheckpoints", "DecisionWindows", "DecisionWindowOwners", "RerunSeededMarkets", "SettlementObservedAt", "LivePolCommitments", "CreationFrozenUntil", "FrozenUntil", "FreezeRenewed"]; Welfare: ["MetricSpecs", "Snapshots", "SnapshotContexts", "SnapshotDeadline", "GateBreachFlags", "SampledGateDays", "XcmTraffic", "XcmTrafficEpochs", "ReserveProbeDaily", "CollatorAuthorship", "CollatorAuthorshipEpoch", "BlockProduction", "BlockProductionEpoch", "BlockWeightSamples", "PrimaryBlockWeightSamples", "BlockResourceUsage", "IntegrityFailures"]; Oracle: ["Reporters", "CounterForReporters", "Watchtowers", "CounterForWatchtowers", "Rounds", "RoundSchedules", "ComponentValues", "ReserveHealth", "ReserveProbeArmed", "ReserveProbeArmedAt", "AckRecords", "WatchtowerActive", "MoneySettled", "ReporterRecords", "RoundActivity", "Recomputable"]; IncidentRegistry: ["Filings", "FilingCount", "Aggregates", "AckRecords", "ClosedAt"]; MilestoneRegistry: ["Filings", "FilingCount", "Aggregates", "AckRecords", "ClosedAt"]; FutarchyTreasury: ["State", "PendingMainCredit", "SweptResidueUnreclaimed", "CoretimeQuoteAuthority", "BootstrapOpsFundingClosed", "CommunityDistributionArmedAt", "CommunityDistributionRemaining", "CommunityScheduleCount", "IncentiveRemaining", "TradingRewardBudgetCount", "CoretimeRenewalAccount", "CollatorAuthoredBlocks", "CollatorAuthoredEpoch", "CollatorAuthoredRegisteredCount", "CollatorPendingBlocks", "CollatorPendingEpoch", "CollatorPendingRegisteredCount", "CollatorAuthoredOverflowed", "CollatorPendingOverflowed", "CollatorDroppedEpoch", "CollatorCompensationPaidEpoch"]; Guardian: ["Members", "MemberBonds", "PendingActions", "Approvals", "ReviewDeadlines", "ActivePlaybooks", "PlaybookRegistered", "RerunUsed", "Allowances", "NextActionId", "LastSeenEpoch", "ReviewReferenda", "VetoReviewReferenda", "CounterForVetoReviewReferenda", "VetoReviewActions", "CounterForVetoReviewActions", "ReviewFrontingOf", "CounterForReviewFrontingOf", "PendingBondReleases", "FailedActions", "CounterForFailedActions", "MaintenanceSweepCursor", "FailedActionReapCursor"]; Attestor: ["Members", "Attestations", "Liabilities", "Revocations", "NextAttestationId"]; Epoch: ["Proposals", "CounterForProposals", "EpochOf", "IntakeQueue", "RecentCohortSummaries", "Cohorts", "CounterForCohorts", "IntakeProposals", "CounterForIntakeProposals", "Schedule", "EpochTimings", "GuardianReviewDeadlines", "CounterForGuardianReviewDeadlines", "GuardianReviewWindows", "CounterForGuardianReviewWindows", "QualificationPreimageRequests", "CounterForQualificationPreimageRequests", "QualificationAuxiliaryPreimageRequests", "CounterForQualificationAuxiliaryPreimageRequests", "ProposalSecurityTermsOf", "CounterForProposalSecurityTermsOf", "ProposalBonds", "CounterForProposalBonds", "ResourceLocks", "ProposalSchedules", "CohortSchedules", "NextProposalId", "RolloverCounts", "FundedPolSlots", "DeadMan", "LastRelayParent", "DeadManDetector", "StaleEpochCutoff", "BaselineCarry", "IntakePausedUntil", "GuardianIntakePausedUntil", "PendingOracleVoids", "CounterForPendingOracleVoids", "LastWatchtowerSweep", "OracleDeadlineCursor"]; ExecutionGuard: ["Queue", "CounterForQueue", "Ratifications", "CounterForRatifications", "PendingRatifications", "CounterForPendingRatifications", "ExecutionRecords", "PendingUpgrade", "CurrentSpecName", "HeldResources", "HardGateBreach", "DeadManFreeze", "MigrationHalt", "GateSuspension", "Expedited", "LastUpgradeAuthorized", "UpgradeSpacingHistory", "PendingAnchorCapture", "PreMigrationAnchor", "ScheduledUpgrade", "AttestationBindings", "RecoveryImage", "QueuedRecoveryImages", "QualifiedRecoveryImages", "CounterForQualifiedRecoveryImages", "RerunRecoveryPins", "CounterForRerunRecoveryPins", "ExecutingUpgrade", "PhaseFourBridge", "RerunPins", "CounterForRerunPins"]; InflowCaps: ["CumulativeDeposits"]; ClientRegistry: ["Clients", "ClientIdOf", "ClientIdOfSigner", "ClientPolicies", "BondOwners", "RemovedClients", "IngressMeters", "ClientCount", "NextClientId"]; QuestionService: ["Questions", "CounterForQuestions", "Reports", "Terms", "AttestorBonds", "Attestations", "PauseAffected", "PausedUntil", "NextServiceId", "LiveQuestionCount", "LiveExternalDepth", "ScarcityMultiplier"]; ServiceLedger: ["Vaults", "BaselineVaults", "Positions", "PositionCount", "PositionTotals", "DepositsHeld", "TotalEscrowed", "RedemptionFeesAccrued", "LedgerDrifted", "LastReconciliation", "VaultTerminalAt", "BaselineTerminalAt", "SplitPausedUntil", "FrozenUntil", "FreezeRenewed"]; TradingRewards: ["Participants", "Scores", "ScoreCount", "ParticipantCount", "TotalAccrued"] }; tx: { System: ["remark", "set_heap_pages", "set_code", "set_code_without_checks", "set_storage", "kill_storage", "kill_prefix", "remark_with_event", "authorize_upgrade", "authorize_upgrade_without_checks", "apply_authorized_upgrade"]; Timestamp: ["set"]; ParachainSystem: ["set_validation_data", "sudo_send_upward_message"]; Balances: ["transfer_allow_death", "force_transfer", "transfer_keep_alive", "transfer_all", "force_unreserve", "upgrade_accounts", "force_set_balance", "force_adjust_total_issuance", "burn"]; ForeignAssets: ["create", "force_create", "start_destroy", "destroy_accounts", "destroy_approvals", "finish_destroy", "mint", "burn", "transfer", "transfer_keep_alive", "force_transfer", "freeze", "thaw", "freeze_asset", "thaw_asset", "transfer_ownership", "set_team", "set_metadata", "clear_metadata", "force_set_metadata", "force_clear_metadata", "force_asset_status", "approve_transfer", "cancel_approval", "force_cancel_approval", "transfer_approved", "touch", "refund", "set_min_balance", "touch_other", "refund_other", "block", "transfer_all", "set_reserves"]; Vesting: ["vest", "vest_other", "vested_transfer", "force_vested_transfer", "merge_schedules", "force_remove_vesting_schedule"]; Referenda: ["submit", "place_decision_deposit", "refund_decision_deposit", "cancel", "kill", "nudge_referendum", "one_fewer_deciding", "refund_submission_deposit", "set_metadata"]; ConvictionVoting: ["vote", "delegate", "undelegate", "unlock", "remove_vote", "remove_other_vote"]; Preimage: ["note_preimage", "unnote_preimage", "request_preimage", "unrequest_preimage", "ensure_updated"]; Scheduler: ["schedule", "cancel", "schedule_named", "cancel_named", "schedule_after", "schedule_named_after", "set_retry", "set_retry_named", "cancel_retry", "cancel_retry_named"]; Utility: ["batch", "as_derivative", "batch_all", "dispatch_as", "force_batch", "with_weight", "if_else", "dispatch_as_fallible"]; Proxy: ["proxy", "add_proxy", "remove_proxy", "remove_proxies", "create_pure", "kill_pure", "announce", "remove_announcement", "reject_announcement", "proxy_announced", "poke_deposit"]; Multisig: ["as_multi_threshold_1", "as_multi", "approve_as_multi", "cancel_as_multi", "poke_deposit"]; Migrations: ["force_set_cursor", "force_set_active_cursor", "force_onboard_mbms", "clear_historic"]; Sudo: ["sudo", "sudo_unchecked_weight", "set_key", "sudo_as", "remove_key"]; XcmpQueue: ["suspend_xcm_execution", "resume_xcm_execution", "update_suspend_threshold", "update_drop_threshold", "update_resume_threshold"]; MessageQueue: ["reap_page", "execute_overweight"]; PolkadotXcm: ["send", "teleport_assets", "reserve_transfer_assets", "execute", "force_xcm_version", "force_default_xcm_version", "force_subscribe_version_notify", "force_unsubscribe_version_notify", "limited_reserve_transfer_assets", "limited_teleport_assets", "force_suspension", "transfer_assets", "claim_assets", "transfer_assets_using_type_and_then", "add_authorized_alias", "remove_authorized_alias", "remove_all_authorized_aliases"]; CollatorSelection: ["set_invulnerables", "set_desired_candidates", "set_candidacy_bond", "register_as_candidate", "leave_intent", "add_invulnerable", "remove_invulnerable", "update_bond", "take_candidate_slot"]; Session: ["set_keys", "purge_keys"]; Constitution: ["set_param", "set_capability", "set_phase_flag", "set_release_channel", "amend_registry"]; ConditionalLedger: ["split", "merge", "split_scalar", "merge_scalar", "split_gate", "merge_gate", "transfer", "split_baseline", "merge_baseline", "resolve", "void", "settle_scalar", "settle_gate", "settle_baseline", "redeem", "redeem_scalar", "redeem_scalar_pair", "redeem_gate", "redeem_void", "redeem_baseline", "redeem_baseline_pair", "sweep_dust", "sweep_dust_baseline", "set_split_paused", "set_frozen", "reconcile", "sweep_redemption_fees"]; Market: ["buy", "sell", "crank_observe", "sweep_revenue", "reap", "freeze_creation", "set_frozen"]; Welfare: ["register_spec", "record_snapshot", "record_daily_gate"]; Oracle: ["register_reporter", "deregister_reporter", "report", "challenge", "counter_report", "recompute_proof", "register_watchtower", "ack_observed", "crank_round_close", "crank_reserve_probe", "adjudicate"]; IncidentRegistry: ["file", "challenge_filing", "ack_observed", "crank_close", "resolve_challenge", "close_epoch", "reap_epoch"]; MilestoneRegistry: ["file", "challenge_filing", "ack_observed", "crank_close", "resolve_challenge", "close_epoch", "reap_epoch"]; FutarchyTreasury: ["fund_budget_line", "spend", "open_stream", "claim_stream", "cancel_stream", "issue_vit", "recover_foreign", "execute_coretime_renewal", "note_coretime_quote", "prune_coretime_quote", "set_coretime_authority", "sweep_insurance", "reconcile_insurance", "create_community_schedule", "fund_trading_rewards"]; Guardian: ["set_members", "propose_action", "approve_action", "ratify_action", "renew_playbook", "uphold_veto", "recall", "set_playbook_registered"]; Attestor: ["set_members", "attest", "challenge_attestation", "resolve_challenge", "remove_for_cause", "reap_attestation"]; Epoch: ["submit", "withdraw", "tick", "decide", "settle_cohort", "set_next_epoch_length", "delay_once", "mark_executed", "mark_failed_executed", "retry_exhausted_to_measurement", "expire_or_stale_queue", "force_reject_process_hold", "void_cohort", "set_intake_paused", "finalize_epoch_baseline", "drive_oracle_boundaries", "bind_ratification"]; ExecutionGuard: ["execute", "apply_authorized_upgrade", "expire_failed_execution", "ratify", "reject_stale", "commit_recovery_image", "authorize_phase_four", "qualify_recovery_image"]; ClientRegistry: ["admit_client", "admit_local_client", "remove_client", "top_up_delivery_float", "withdraw_delivery_float"]; QuestionService: ["register", "bond_attestor", "open", "seal", "submit_attestation", "settle", "void", "set_paused", "archive"]; ServiceLedger: ["split", "merge", "split_scalar", "merge_scalar", "split_gate", "merge_gate", "transfer", "split_baseline", "merge_baseline", "resolve", "void", "settle_scalar", "settle_gate", "settle_baseline", "redeem", "redeem_scalar", "redeem_scalar_pair", "redeem_gate", "redeem_void", "redeem_baseline", "redeem_baseline_pair", "sweep_dust", "sweep_dust_baseline", "set_split_paused", "set_frozen", "reconcile", "sweep_redemption_fees"]; TradingRewards: ["enroll", "top_up_bond", "withdraw_bond", "claim_rewards", "settle_market_score", "settle_epoch"] }; events: { System: ["ExtrinsicSuccess", "ExtrinsicFailed", "CodeUpdated", "NewAccount", "KilledAccount", "Remarked", "UpgradeAuthorized", "RejectedInvalidAuthorizedUpgrade"]; ParachainSystem: ["ValidationFunctionStored", "ValidationFunctionApplied", "ValidationFunctionDiscarded", "DownwardMessagesReceived", "DownwardMessagesProcessed", "UpwardMessageSent"]; Balances: ["Endowed", "DustLost", "Transfer", "BalanceSet", "Reserved", "Unreserved", "ReserveRepatriated", "Deposit", "Withdraw", "Slashed", "Minted", "MintedCredit", "Burned", "BurnedDebt", "Suspended", "Restored", "Upgraded", "Issued", "Rescinded", "Locked", "Unlocked", "Frozen", "Thawed", "TotalIssuanceForced", "Held", "BurnedHeld", "TransferOnHold", "TransferAndHold", "Released", "Unexpected"]; ForeignAssets: ["Created", "Issued", "Transferred", "Burned", "TeamChanged", "OwnerChanged", "Frozen", "Thawed", "AssetFrozen", "AssetThawed", "AccountsDestroyed", "ApprovalsDestroyed", "DestructionStarted", "Destroyed", "ForceCreated", "MetadataSet", "MetadataCleared", "ApprovedTransfer", "ApprovalCancelled", "TransferredApproved", "AssetStatusChanged", "AssetMinBalanceChanged", "Touched", "Blocked", "Deposited", "Withdrawn", "ReservesUpdated", "ReservesRemoved", "IssuedCredit", "BurnedCredit", "IssuedDebt", "BurnedDebt"]; TransactionPayment: ["TransactionFeePaid"]; AssetTxPayment: ["AssetTxFeePaid"]; Vesting: ["VestingCreated", "VestingUpdated", "VestingCompleted"]; Referenda: ["Submitted", "DecisionDepositPlaced", "DecisionDepositRefunded", "DepositSlashed", "DecisionStarted", "ConfirmStarted", "ConfirmAborted", "Confirmed", "Approved", "Rejected", "TimedOut", "Cancelled", "Killed", "SubmissionDepositRefunded", "MetadataSet", "MetadataCleared"]; ConvictionVoting: ["Delegated", "Undelegated", "Voted", "VoteRemoved", "VoteUnlocked"]; Preimage: ["Noted", "Requested", "Cleared"]; Scheduler: ["Scheduled", "Canceled", "Dispatched", "RetrySet", "RetryCancelled", "CallUnavailable", "PeriodicFailed", "RetryFailed", "PermanentlyOverweight", "AgendaIncomplete"]; Utility: ["BatchInterrupted", "BatchCompleted", "BatchCompletedWithErrors", "ItemCompleted", "ItemFailed", "DispatchedAs", "IfElseMainSuccess", "IfElseFallbackCalled"]; Proxy: ["ProxyExecuted", "PureCreated", "PureKilled", "Announced", "ProxyAdded", "ProxyRemoved", "DepositPoked"]; Multisig: ["NewMultisig", "MultisigApproval", "MultisigExecuted", "MultisigCancelled", "DepositPoked"]; Migrations: ["UpgradeStarted", "UpgradeCompleted", "UpgradeFailed", "MigrationSkipped", "MigrationAdvanced", "MigrationCompleted", "MigrationFailed", "HistoricCleared"]; Sudo: ["Sudid", "KeyChanged", "KeyRemoved", "SudoAsDone"]; XcmpQueue: ["XcmpMessageSent"]; MessageQueue: ["ProcessingFailed", "Processed", "OverweightEnqueued", "PageReaped"]; CumulusXcm: ["InvalidFormat", "UnsupportedVersion", "ExecutedDownward"]; PolkadotXcm: ["Attempted", "Sent", "SendFailed", "ProcessXcmError", "UnexpectedResponse", "ResponseReady", "Notified", "NotifyOverweight", "NotifyDispatchError", "NotifyDecodeFailed", "InvalidResponder", "InvalidResponderVersion", "ResponseTaken", "AssetsTrapped", "VersionChangeNotified", "SupportedVersionChanged", "NotifyTargetSendFail", "NotifyTargetMigrationFail", "InvalidQuerierVersion", "InvalidQuerier", "VersionNotifyStarted", "VersionNotifyRequested", "VersionNotifyUnrequested", "FeesPaid", "AssetsClaimed", "VersionMigrationFinished", "AliasAuthorized", "AliasAuthorizationRemoved", "AliasesAuthorizationsRemoved"]; CollatorSelection: ["NewInvulnerables", "InvulnerableAdded", "InvulnerableRemoved", "NewDesiredCandidates", "NewCandidacyBond", "CandidateAdded", "CandidateBondUpdated", "CandidateRemoved", "CandidateReplaced", "InvalidInvulnerableSkipped"]; Session: ["NewSession", "NewQueued", "ValidatorDisabled", "ValidatorReenabled"]; Constitution: ["ParamUpdated", "CapabilitySet", "PhaseFlagSet", "ReleaseChannelSet", "RegistryAmended", "MeterCharged"]; ConditionalLedger: ["Split", "Merged", "ScalarSplit", "ScalarMerged", "GateSplit", "GateMerged", "PositionTransferred", "BaselineSplit", "BaselineMerged", "VaultResolved", "VaultVoided", "ScalarSettlementSet", "GateSettled", "BaselineSettled", "Redeemed", "ScalarRedeemed", "ScalarPairRedeemed", "GateRedeemed", "VoidRedeemed", "BaselineRedeemed", "RedemptionFeesSwept", "VaultReaped", "BaselineVaultReaped", "SplitPauseSet", "SplitPauseCleared", "FreezeSet", "FreezeCleared", "FreezeExtended", "LedgerDriftDetected", "LedgerDriftCleared"]; Market: ["Traded", "Observed", "MarketCreated", "MarketClosed", "MarketReaped", "Seeded", "CreationFreezeSet", "CreationFreezeCleared", "FreezeSet", "FreezeCleared", "FreezeExtended", "RevenueSwept", "ExternalRevenueSwept"]; Welfare: ["MetricSpecRegistered", "SnapshotRecorded", "GateBreachRecorded", "SettlementComputed", "SettlementRenormalized", "IntegrityFailureRecorded"]; Oracle: ["ReporterRegistered", "Reported", "Challenged", "RoundEscalated", "RecomputeProven", "AdjudicationRequested", "Adjudicated", "ComponentSettled", "NeutralSettlement", "WindowAcknowledged", "WindowExtended", "QuorumFailed", "ReporterSlashed", "ReporterEjected", "WatchtowerRegistered", "WatchtowerInactive", "WatchtowerSlashed", "ReserveProbeSent", "ReserveProbeResult", "ReserveUnhealthy", "ReserveRecovered", "RetentionExpired", "ReporterRecordsFull"]; IncidentRegistry: ["IncidentFiled", "MilestoneFiled", "IncidentChallenged", "MilestoneChallenged", "IncidentUpheld", "IncidentRejected", "MilestoneAccepted", "MilestoneRejected", "FilingBondSlashed", "RegistryEpochClosed", "WindowAcknowledged", "WindowExtended"]; MilestoneRegistry: ["IncidentFiled", "MilestoneFiled", "IncidentChallenged", "MilestoneChallenged", "IncidentUpheld", "IncidentRejected", "MilestoneAccepted", "MilestoneRejected", "FilingBondSlashed", "RegistryEpochClosed", "WindowAcknowledged", "WindowExtended"]; FutarchyTreasury: ["Spent", "StreamOpened", "StreamClaimed", "StreamCancelled", "BudgetLineFunded", "VitIssued", "NavHaircutFlagged", "ForeignRecovered", "CoretimeRenewalCalled", "ReserveProbeFeeCharged", "NavFloorUnmet", "KeeperBudgetLow", "KeeperBudgetExhausted", "CoretimeQuoteNoted", "CoretimeQuotePruned", "CoretimeAuthoritySet", "InsuranceSwept", "InsuranceOverflowed", "PolCustodyMoved", "CommunityScheduleCreated", "TradingRewardsFunded", "TradingRewardBudgetReturned"]; Guardian: ["GuardianAction", "ForceRerun", "PlaybookActivated", "PlaybookRenewed", "PlaybookExpired", "ReviewScheduled", "MembersSet", "ActionProposed", "ActionApproved", "ActionRatified", "ReviewFailed", "RecallScheduled", "RecallEnacted", "PlaybookRegistrationSet"]; Attestor: ["MembersSet", "AttestationSubmitted", "AttestationChallenged", "ChallengeResolved", "AttestorEjected", "AttestorRemovedForCause", "AttestationRevoked"]; Epoch: ["ProposalSubmitted", "ProposalWithdrawn", "ScreeningStarted", "ProposalCancelled", "ProposalQualified", "ProposalDeferred", "SlotsShrunk", "MarketsOpened", "DecisionExtended", "ProposalQueued", "ProposalRejected", "ProposalDelayed", "RerunScheduled", "RerunOpened", "MandateExpired", "MeasurementStarted", "CohortSettled", "CohortVoided", "BaselineCarried", "ProposalForceRejected", "IntakeSlashed", "IntakePauseSet", "IntakePauseCleared", "OracleDeadlockLatched", "OracleDeadlockCleared"]; ExecutionGuard: ["Executed", "ExecutionFailed", "Ratified", "UpgradeAuthorized", "Enqueued", "Rejected", "UpgradeApplied", "PreimageUnpinned", "UpgradeAborted", "PendingOutflowSyncFailed", "MigrationHalted", "RecoveryImageCommitted", "RecoveryImageApplied", "PhaseFourUpgradeAuthorized", "RecoveryImageQualified"]; ClientRegistry: ["ClientAdmitted", "LocalClientAdmitted", "ClientRemovalStarted", "ClientRemoved", "EgressPrepaid", "DeliveryFloatToppedUp", "DeliveryFloatWithdrawn"]; QuestionService: ["QuestionRegistered", "QuestionSealed", "QuestionSettled", "QuestionVoided", "AttestorBonded", "AttestationSubmitted", "ServicePauseSet", "ServicePauseCleared", "QuestionArchived"]; ServiceLedger: ["Split", "Merged", "ScalarSplit", "ScalarMerged", "GateSplit", "GateMerged", "PositionTransferred", "BaselineSplit", "BaselineMerged", "VaultResolved", "VaultVoided", "ScalarSettlementSet", "GateSettled", "BaselineSettled", "Redeemed", "ScalarRedeemed", "ScalarPairRedeemed", "GateRedeemed", "VoidRedeemed", "BaselineRedeemed", "RedemptionFeesSwept", "VaultReaped", "BaselineVaultReaped", "SplitPauseSet", "SplitPauseCleared", "FreezeSet", "FreezeCleared", "FreezeExtended", "LedgerDriftDetected", "LedgerDriftCleared"]; TradingRewards: ["Enrolled", "BondToppedUp", "BondWithdrawn", "RewardsClaimed", "MarketScoreFolded", "MarketScoreDropped", "EpochSettled"] }; errors: { System: ["InvalidSpecName", "SpecVersionNeedsToIncrease", "FailedToExtractRuntimeVersion", "NonDefaultComposite", "NonZeroRefCount", "CallFiltered", "MultiBlockMigrationsOngoing", "NothingAuthorized", "Unauthorized"]; ParachainSystem: ["OverlappingUpgrades", "ProhibitedByPolkadot", "TooBig", "ValidationDataNotAvailable", "HostConfigurationNotAvailable", "NotScheduled"]; Balances: ["VestingBalance", "LiquidityRestrictions", "InsufficientBalance", "ExistentialDeposit", "Expendability", "ExistingVestingSchedule", "DeadAccount", "TooManyReserves", "TooManyHolds", "TooManyFreezes", "IssuanceDeactivated", "DeltaZero"]; ForeignAssets: ["BalanceLow", "NoAccount", "NoPermission", "Unknown", "Frozen", "InUse", "BadWitness", "MinBalanceZero", "UnavailableConsumer", "BadMetadata", "Unapproved", "WouldDie", "AlreadyExists", "NoDeposit", "WouldBurn", "LiveAsset", "AssetNotLive", "IncorrectStatus", "NotFrozen", "CallbackFailed", "BadAssetId", "ContainsFreezes", "ContainsHolds", "TooManyReserves"]; Vesting: ["NotVesting", "AtMaxVestingSchedules", "AmountLow", "ScheduleIndexOutOfBounds", "InvalidScheduleParams"]; Referenda: ["NotOngoing", "HasDeposit", "BadTrack", "Full", "QueueEmpty", "BadReferendum", "NothingToDo", "NoTrack", "Unfinished", "NoPermission", "NoDeposit", "BadStatus", "PreimageNotExist", "PreimageStoredWithDifferentLength"]; ConvictionVoting: ["NotOngoing", "NotVoter", "NoPermission", "NoPermissionYet", "AlreadyDelegating", "AlreadyVoting", "InsufficientFunds", "NotDelegating", "Nonsense", "MaxVotesReached", "ClassNeeded", "BadClass"]; Preimage: ["TooBig", "AlreadyNoted", "NotAuthorized", "NotNoted", "Requested", "NotRequested", "TooMany", "TooFew"]; Scheduler: ["FailedToSchedule", "NotFound", "TargetBlockNumberInPast", "RescheduleNoChange", "Named"]; Utility: ["TooManyCalls"]; Proxy: ["TooMany", "NotFound", "NotProxy", "Unproxyable", "Duplicate", "NoPermission", "Unannounced", "NoSelfProxy"]; Multisig: ["MinimumThreshold", "AlreadyApproved", "NoApprovalsNeeded", "TooFewSignatories", "TooManySignatories", "SignatoriesOutOfOrder", "SenderInSignatories", "NotFound", "NotOwner", "NoTimepoint", "WrongTimepoint", "UnexpectedTimepoint", "MaxWeightTooLow", "AlreadyStored"]; Migrations: ["Ongoing"]; Sudo: ["RequireSudo"]; XcmpQueue: ["BadQueueConfig", "AlreadySuspended", "AlreadyResumed", "TooManyActiveOutboundChannels", "TooBig"]; MessageQueue: ["NotReapable", "NoPage", "NoMessage", "AlreadyProcessed", "Queued", "InsufficientWeight", "TemporarilyUnprocessable", "QueuePaused", "RecursiveDisallowed"]; PolkadotXcm: ["Unreachable", "SendFailure", "Filtered", "UnweighableMessage", "DestinationNotInvertible", "Empty", "CannotReanchor", "TooManyAssets", "InvalidOrigin", "BadVersion", "BadLocation", "NoSubscription", "AlreadySubscribed", "CannotCheckOutTeleport", "LowBalance", "TooManyLocks", "AccountNotSovereign", "FeesNotMet", "LockNotFound", "InUse", "InvalidAssetUnknownReserve", "InvalidAssetUnsupportedReserve", "TooManyReserves", "LocalExecutionIncomplete", "TooManyAuthorizedAliases", "ExpiresInPast", "AliasNotFound", "LocalExecutionIncompleteWithError"]; CollatorSelection: ["TooManyCandidates", "TooFewEligibleCollators", "AlreadyCandidate", "NotCandidate", "TooManyInvulnerables", "AlreadyInvulnerable", "NotInvulnerable", "NoAssociatedValidatorId", "ValidatorNotRegistered", "InsertToCandidateListFailed", "RemoveFromCandidateListFailed", "DepositTooLow", "UpdateCandidateListFailed", "InsufficientBond", "TargetIsNotCandidate", "IdenticalDeposit", "InvalidUnreserve"]; Session: ["InvalidProof", "NoAssociatedValidatorId", "DuplicatedKey", "NoKeys", "NoAccount"]; Constitution: ["UnknownParam", "UnknownMeter", "WrongType", "BelowMin", "AboveMax", "DeltaTooLarge", "CooldownActive", "MeterOverflow", "MeterExhausted", "ReservedPhaseFlag", "FlagNotArmable", "BadReleaseSchema", "TooManyParams", "TooManyMeters", "TooManyCapabilities", "KernelBoundImmutable", "MetaBoundViolation", "TryStateViolation", "NavFloorUnmet", "BudgetDerivationRequired", "PhaseCapRaiseRefused", "CoverageBreaksAdmission", "RedemptionFeeAboveMarketFee", "RewardRateAboveWashBreakeven"]; ConditionalLedger: ["BadOrigin", "UnknownVault", "UnknownBaselineVault", "WrongVaultState", "BelowMinimum", "ArithmeticOverflow", "InsufficientPosition", "TooManyPositions", "InvalidScore", "GateAlreadySettled", "GateNotSettled", "TryStateViolation", "ReapNotDue", "DepositFailed", "SplitPaused", "Frozen", "FreezeOutOfBounds", "FreezeRenewalExhausted", "InflowCapExceeded", "ProtocolDestination"]; Market: ["UnknownMarket", "DuplicateMarket", "DuplicateBaselineMarket", "NotTrading", "AmountTooSmall", "AmountTooLarge", "SlippageExceeded", "PriceBoundExceeded", "ArithmeticOverflow", "Ledger", "TryStateViolation", "BadOrigin", "NotReapable", "TooManyMarkets", "TooManyStoredMarkets", "AlreadySeeded", "CreationFrozen", "Frozen", "FreezeOutOfBounds", "FreezeRenewalExhausted", "UnreservedProtocolAccount", "EpochMismatch", "NotSweepable", "TooManyExternalMarkets", "WrongFundingDomain", "FunderMismatch", "DuplicateExternalQuestion", "InvalidIdBand"]; Welfare: ["TooManyMetricSpecs", "TooManySnapshots", "TooManyComponents", "TooManyGateFlags", "DuplicateSpecVersion", "SpecNotFound", "BadActivationEpoch", "SpecNotActive", "MissingMetricDiscipline", "BadEpsilonFloor", "BadSourceClass", "BadWeightSum", "ValueOutOfRange", "MissingComponent", "DuplicateComponent", "DuplicateSnapshot", "ArithmeticOverflow", "TryStateViolation", "BadParams", "EpochNotFinalized", "GateWindowUnsampled", "MilestoneTargetUnset", "BadDeltaSMax", "InsufficientOracleSeats", "BondCoverageUnmet", "IncidentAggregateUnavailable", "BadFlaggedComponent", "MissingSnapshotContext", "EmptyNormalizationSample", "DegenerateNormalizationRange", "DayOutsideEpoch", "SpecVersionNotAdmissible"]; Oracle: ["AlreadyRegistered", "NotRegistered", "TooManyReporters", "TooManyWatchtowers", "WindowClosed", "WindowOpen", "BondBelowMinimum", "SpecVersionMismatch", "AlreadyFinal", "AlreadyChallenged", "QuorumPending", "RoundNotFound", "RoundLimit", "DuplicateAck", "ReserveUnhealthy", "ProbeTooEarly", "ProbeUnavailable", "UnknownQuery", "Overflow", "NotRecomputable", "ProofTooLarge", "EvidenceMismatch", "BadProof", "ValueOutOfBounds", "SelfChallenge", "ReporterEjected", "TryStateViolation", "ReporterRecordsSaturated"]; IncidentRegistry: ["EpochFull", "TooManyLiveEpochs", "TooManyAggregates", "WindowClosed", "WindowOpen", "AlreadyChallenged", "AlreadyFinal", "SpecVersionMismatch", "BondBelowMinimum", "FilingNotFound", "DuplicateAck", "BatchTooLarge", "InvalidClass", "Overflow", "NotRegistered", "TryStateViolation", "BadAccount", "AlreadyQuorum", "ReapNotDue", "NothingToClose", "MilestoneTargetUnset", "ExposureUnavailable", "EvidenceMismatch"]; MilestoneRegistry: ["EpochFull", "TooManyLiveEpochs", "TooManyAggregates", "WindowClosed", "WindowOpen", "AlreadyChallenged", "AlreadyFinal", "SpecVersionMismatch", "BondBelowMinimum", "FilingNotFound", "DuplicateAck", "BatchTooLarge", "InvalidClass", "Overflow", "NotRegistered", "TryStateViolation", "BadAccount", "AlreadyQuorum", "ReapNotDue", "NothingToClose", "MilestoneTargetUnset", "ExposureUnavailable", "EvidenceMismatch"]; FutarchyTreasury: ["UnknownBudgetLine", "InsufficientFunds", "ReserveImpaired", "ProposalCapExceeded", "StreamRequired", "MeterExhausted", "StreamNotFound", "StreamNotClaimable", "NotRecipient", "AlreadyCancelled", "BadDuration", "RenewalWindowClosed", "PeriodAlreadyFunded", "TooManyStreams", "TooManyBudgetLines", "TooManyObligations", "IssuanceLineNotAllowed", "IssuanceCapExceeded", "UnknownForeignAsset", "NavFloorUnmet", "ZeroQuote", "Overflow", "NotQuoteAuthority", "BootstrapOpsLineOnly", "BootstrapOpsFundingClosed", "BootstrapOpsFundingLimit", "RenewalAccountUnset", "QuoteExpired", "QuoteNotExpired", "RateUnset", "FeeBudgetUnset", "QuoteTtlUnset", "QuoteTimestampInFuture", "CommunityDistributionNotArmed", "CommunityDistributionAmountTooSmall", "CommunityDistributionExhausted", "TooManyCommunitySchedules", "CommunityVestingDurationInvalid", "CommunityBeneficiaryIsPot", "OutflowCustodyUnwired", "IncentiveAllocationExhausted", "TooManyTradingRewardAuthorizations"]; Guardian: ["NotInitialized", "NotMember", "DuplicateMember", "DuplicateApproval", "ActionNotFound", "ActionExpired", "AlreadyDispatched", "TooManyPending", "TooManyApprovals", "TooManyReviews", "TooManyActivePlaybooks", "TooManyReruns", "ThresholdNotMet", "AllowanceExhausted", "DurationTooLong", "TriggerInactive", "BadPlaybookTrigger", "BadPlaybookTarget", "AlreadyRerun", "NotRerunnable", "ReviewNotFound", "AlreadyRatified", "RenewalNotAllowed", "PlaybookAlreadyActive", "Overflow", "TryStateViolation", "FailedActionNotFound", "NotDelayAction", "TooManyBondReleases", "BondAccounting", "PlaybookNotRegistered"]; Attestor: ["NotMember", "DuplicateMember", "TooFewMembers", "AttestationNotFound", "DuplicateAttestation", "ChallengeWindowClosed", "ChallengeAlreadyOpen", "ChallengeBondTooSmall", "ChallengeStillOpen", "QuorumMissing", "NoOpenChallenge", "EjectedMemberActive", "Overflow", "NotInitialized", "TooManyAttestors", "TooManyAttestations", "TooManyLiabilities", "TooManyRevocations", "LiabilityExists", "AttestorNotFound", "LiabilityNotFound", "ProposalNotTerminal", "ChallengeOpen", "ReapNotAllowed", "BondAccounting", "UnknownProposal", "AttestorQuotaExceeded"]; Epoch: ["BadPhase", "IntakeFull", "TooManyLiveProposals", "TooManyResources", "UnknownProposal", "BadState", "DuplicateProposal", "LockConflict", "TooManyCohorts", "TooManyCohortProposals", "BadEpochLength", "BadParams", "BadDecisionInput", "BatchTooLarge", "ArithmeticOverflow", "Ledger", "ExecutionGuard", "Welfare", "TryStateViolation", "BadProposalShape", "IntakePaused", "IntakePauseOutOfBounds"]; ExecutionGuard: ["QueueFull", "NotFound", "Cancelled", "NotMature", "GraceExpired", "BadPreimage", "StaleQueue", "NotRatified", "AttestationMissing", "CapabilityDenied", "MetersBlocked", "ResourceLockMissing", "GuardianHold", "GateSuspended", "FreezeActive", "PayloadTooLarge", "TooManyCalls", "TooManyDomains", "TooManyLocks", "BadDomainDeclaration", "SafetyFilter", "DispatchFailed", "BadUpgradePayload", "PendingUpgradeExists", "NoPendingUpgrade", "DescriptorLeadTime", "UpgradeHashMismatch", "UpgradeVersionMismatch", "RecoveryImageMissing", "RecoveryImageInvalid", "ShadowMode", "PhaseFourBridgeUsed", "JustificationMissing", "RetryWindowOpen", "Overflow"]; ClientRegistry: ["ClientBondUnset", "DuplicateLocation", "ClientsFull", "ClientIdExhausted", "NotRegistered", "ClientRemoved", "QuestionCounterOverflow", "NoLiveQuestions", "BondInsufficient", "BondAccounting", "DeliveryFloatAmountZero", "DeliveryFloatInsufficient", "DeliveryFloatWouldDrain", "DeliveryFloatBelowMinimum", "DeliveryFundingWouldDust", "DeliveryFloatOverflow", "DeliveryFloatAccounting"]; QuestionService: ["NotRegistered", "ClientRemoved", "ServicePaused", "ServiceRateUnset", "CertificationUnavailable", "StakeBelowFloor", "ArmingBoundExceeded", "SubsidyBelowMinimum", "EpsilonOutOfRange", "WindowTooLong", "WindowTooShort", "WindowCollidesWithDecision", "SlotsExhausted", "TvlCapWouldBind", "AttestorSetTooSmall", "AttestorBondInsufficient", "ClientIsProtocolAccount", "EscrowInsufficient", "NotSealed", "AlreadySealed", "AlreadyTerminal", "QuorumNotReached", "MedianOutOfRange", "DeadlineNotReached", "UnknownQuestion", "DeadlinePassed", "CreationFrozen", "DuplicateAttestor", "UnknownAttestor", "AlreadyBonded", "InvalidSubId", "ArithmeticOverflow", "ArchiveNotReady", "TryStateViolation"]; ServiceLedger: ["BadOrigin", "UnknownVault", "UnknownBaselineVault", "WrongVaultState", "BelowMinimum", "ArithmeticOverflow", "InsufficientPosition", "TooManyPositions", "InvalidScore", "GateAlreadySettled", "GateNotSettled", "TryStateViolation", "ReapNotDue", "DepositFailed", "SplitPaused", "Frozen", "FreezeOutOfBounds", "FreezeRenewalExhausted", "InflowCapExceeded", "ProtocolDestination"]; TradingRewards: ["AlreadyEnrolled", "NotEnrolled", "RateUnset", "MinimumBondUnset", "BondBelowMinimum", "TooManyParticipants", "AmountZero", "AccountingOverflow", "EpochUnsettled", "NothingToClaim", "VitRateUnset", "BondCustody", "RewardCustody", "BondFundingWouldDust", "NoScoreEntry", "MarketNotSettled", "EpochNotClosed", "UnfoldedScore", "BudgetExceeded", "ThirdPartyWouldClampReward"] }; constants: { System: ["BlockWeights", "BlockLength", "BlockHashCount", "DbWeight", "Version", "SS58Prefix"]; Timestamp: ["MinimumPeriod"]; ParachainSystem: ["SelfParaId"]; Balances: ["ExistentialDeposit", "MaxLocks", "MaxReserves", "MaxFreezes"]; ForeignAssets: ["RemoveItemsLimit", "AssetDeposit", "AssetAccountDeposit", "MetadataDepositBase", "MetadataDepositPerByte", "ApprovalDeposit", "StringLimit"]; TransactionPayment: ["OperationalFeeMultiplier"]; Vesting: ["MinVestedTransfer", "MaxVestingSchedules"]; Referenda: ["SubmissionDeposit", "MaxQueued", "UndecidingTimeout", "AlarmInterval", "Tracks"]; ConvictionVoting: ["MaxVotes", "VoteLockingPeriod"]; Scheduler: ["MaximumWeight", "MaxScheduledPerBlock"]; Utility: ["batched_calls_limit"]; Proxy: ["ProxyDepositBase", "ProxyDepositFactor", "MaxProxies", "MaxPending", "AnnouncementDepositBase", "AnnouncementDepositFactor"]; Multisig: ["DepositBase", "DepositFactor", "MaxSignatories"]; Migrations: ["CursorMaxLen", "IdentifierMaxLen"]; XcmpQueue: ["MaxInboundSuspended", "MaxActiveOutboundChannels", "MaxPageSize"]; MessageQueue: ["HeapSize", "MaxStale", "ServiceWeight", "IdleMaxServiceWeight"]; PolkadotXcm: ["UniversalLocation", "AdvertisedXcmVersion", "MaxLockers", "MaxRemoteLockConsumers"]; CollatorSelection: ["PotId", "MaxCandidates", "MinEligibleCollators", "MaxInvulnerables", "KickThreshold", "pot_account"]; Session: ["KeyDeposit"]; Aura: ["SlotDuration"]; Constitution: ["INTEGRATION_CONTRACT_VERSION", "MaxParams", "MaxCapabilities", "MaxMeters"]; ConditionalLedger: ["MinSplit", "PositionDeposit", "MaxPositionsPerAccount", "ArchiveDelay", "ReapBatch", "PalletId", "MinTransfer", "RedemptionFee", "ServiceIdBase"]; Market: ["Fee", "ObsInterval", "Kappa1e9", "ArchiveDelay", "PalletId", "MinTrade", "MaxTradeRatio", "MaxLiveMarkets", "MaxStoredMarkets", "MaxLiveExternalMarkets", "MaxStoredExternalMarkets", "MaxAllStoredMarkets", "GatePMaxCeiling", "GateEpsFloor"]; Welfare: ["INTEGRATION_CONTRACT_VERSION", "MaxMetricSpecs", "MaxSnapshots", "MaxGateFlags", "MaxDailyGateSamples"]; Oracle: ["MaxRoundCloseBatch"]; IncidentRegistry: ["Kind", "PalletId", "ArchiveDelay", "MaxFilingsPerEpoch", "MaxEvidenceLen"]; MilestoneRegistry: ["Kind", "PalletId", "ArchiveDelay", "MaxFilingsPerEpoch", "MaxEvidenceLen"]; FutarchyTreasury: ["INTEGRATION_CONTRACT_VERSION", "MaxStreams", "MaxBudgetLines", "MaxPolCommitments", "MaxCollatorCompensationEntries"]; Guardian: ["GuardianSeats", "GuardianThreshold", "GuardianBond", "PlaybookFreezeWindowBlocks", "DelayOnceAllowancePerEpoch", "ForceRerunAllowancePerEpoch", "PauseIntakeAllowanceWindowEpochs", "PauseIntakeAllowance"]; Attestor: ["AttMinMembers", "AttQuorum", "ChallengeWindowBlocks"]; Epoch: ["INTEGRATION_CONTRACT_VERSION", "TreasuryBondAskBps", "MaxLiveProposals", "MaxIntakeQueue", "MaxNonTerminalCohorts", "RecentCohortSummariesBound", "TickBatch", "PhaseOffsets", "MaxBooksPerProposal", "MinEpochLength", "DecisionWindowFloor", "DecisionExtension", "DecisionDeltaFloors", "DecisionSigmaFloors"]; ExecutionGuard: ["MaxRuntimeCodeBytes", "INTEGRATION_CONTRACT_VERSION", "MaxLiveProposals", "MaxExecutionRecords", "MaxCalls", "MaxPayloadBytes", "DescriptorLeadTime", "MaxRuntimeCodeBytes", "ExecutionTimelockFloor", "ExecutionGraceFloor"]; ClientRegistry: ["DeliveryAssetId", "DeliveryFloatPalletId", "MaxClients", "ClientBond"]; QuestionService: ["PalletId", "FeeFloor", "MaxLive", "MaxWindow", "EpsilonMin", "AttestorsMin"]; ServiceLedger: ["MinSplit", "PositionDeposit", "MaxPositionsPerAccount", "ArchiveDelay", "ReapBatch", "PalletId", "MinTransfer", "RedemptionFee", "ServiceIdBase"]; TradingRewards: ["UsdcAssetId", "PalletId", "MaxParticipants", "MaxScoredMarketsPerAccount"] }; viewFns: {}; apis: { Core: ["version", "execute_block", "initialize_block"]; Metadata: ["metadata", "metadata_at_version", "metadata_versions"]; RuntimeViewFunction: ["execute_view_function"]; FutarchyApi: ["epoch_status", "proposal_summaries", "quote", "decision_stats", "account_positions", "execution_queue", "welfare_current", "params", "nav", "recent_cohorts", "open_oracle_rounds", "hosted_report", "service_positions", "is_reserved_protocol_destination", "bond_quote", "treasury_streams"]; TelemetryApi: ["market_books", "mid_window_coverage", "pol", "collateral", "service_collateral", "reserve_probe_line_balance", "migration_cursor_stalled", "storage_utilization", "service_egress", "service_partition"]; BlockBuilder: ["apply_extrinsic", "finalize_block", "inherent_extrinsics", "check_inherents"]; TaggedTransactionQueue: ["validate_transaction"]; OffchainWorkerApi: ["offchain_worker"]; SessionKeys: ["generate_session_keys", "decode_session_keys"]; AuraApi: ["slot_duration", "authorities"]; AuraUnincludedSegmentApi: ["can_build_upon"]; RelayParentOffsetApi: ["relay_parent_offset", "max_claim_queue_offset"]; GetParachainInfo: ["parachain_id"]; KeyToIncludeInRelayProof: ["keys_to_prove"]; AccountNonceApi: ["account_nonce"]; TransactionPaymentApi: ["query_info", "query_fee_details", "query_weight_to_fee", "query_length_to_fee"]; TransactionPaymentCallApi: ["query_call_info", "query_call_fee_details", "query_weight_to_fee", "query_length_to_fee"]; CollectCollationInfo: ["collect_collation_info"]; GenesisBuilder: ["build_state", "get_preset", "preset_names"] } };
 export type Bleavit_recoveryWhitelistEntry = PalletKey | `query.${NestedKey<AllInteractions["storage"]>}` | `tx.${NestedKey<AllInteractions["tx"]>}` | `event.${NestedKey<AllInteractions["events"]>}` | `error.${NestedKey<AllInteractions["errors"]>}` | `const.${NestedKey<AllInteractions["constants"]>}` | `view.${NestedKey<AllInteractions["viewFns"]>}` | `api.${NestedKey<AllInteractions["apis"]>}`;
 type PalletKey = `*.${{ [K in keyof AllInteractions]: K extends "apis" ? never : keyof AllInteractions[K] }[keyof AllInteractions]}`;
 type NestedKey<D extends Record<string, string[]>> = "*" | { [P in keyof D & string]: `${P}.*` | `${P}.${D[P][number]}` }[keyof D & string];

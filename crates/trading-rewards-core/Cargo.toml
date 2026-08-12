@@ -1,0 +1,38 @@
+[package]
+name = "trading-rewards-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["std"]
+std = [
+  "futarchy-primitives/std",
+  "parity-scale-codec/std",
+  "scale-info/std",
+]
+runtime-benchmarks = []
+
+[dependencies]
+futarchy-primitives = { path = "../../crates/futarchy-primitives", default-features = false }
+parity-scale-codec = { version = "3.7.5", default-features = false, features = ["derive", "max-encoded-len"] }
+scale-info = { version = "2.11.6", default-features = false, features = ["derive"] }
+
+# A dev-dependency never enters the `no_std` build, so the crate stays
+# FRAME-free and `no_std` while carrying the TR8 property suite.
+#
+# `constitution-core` supplies the genesis registry the suite sweeps over.
+# Runtime-code rule 4 forbids a numeric literal that duplicates a 13-owned
+# value "in code and in tests alike", and the `rwd.rate` / `mkt.fee` bounds the
+# anti-farm property sweeps are exactly that — so the ranges are read from
+# `genesis_params()` rather than restated, and a 13 amendment moves the sweep.
+#
+# `serde`/`serde_json` read the shared reference-model corpus for the committed
+# differential (15 §4.4), the same way `conditional-ledger-core` reads its own
+# families out of the one artifact.
+[dev-dependencies]
+constitution-core = { path = "../constitution-core" }
+proptest = "1.11.0"
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1.0.140"

@@ -45,6 +45,26 @@ pub trait BenchmarkHelper<AccountId> {
     /// seed has a line to debit (08 §8 step 5; I-33). Setup only — the measured
     /// call still performs the real debit and its storage writes.
     fn prime_pol_custody(_: PolLine, _: futarchy_primitives::Balance) {}
+
+    /// Put `who` on the [`Config::TradeObserver`]'s scoring path, so `buy` and
+    /// `sell` measure what a fill really costs (08 §2.6, TR7).
+    ///
+    /// **Without it the trade benchmarks measure the wrong branch.** The
+    /// observer's first act is one read that answers "is this trader in the
+    /// program", and a non-participant stops there. So an unprimed fixture
+    /// charges 1 read where the real worst case is 3 reads and 2 writes, and
+    /// nothing downstream would catch the difference: `buy`/`sell` carry no
+    /// fitted component, so the drift gate compares them at any fidelity and
+    /// would simply agree with the cheap figure. The fixture must also fill
+    /// into a market with **no existing score row**, which is the arm that
+    /// pays the third read and the second write.
+    ///
+    /// The seam is a helper rather than a direct call because `pallet-market`
+    /// must not depend on the reward program: the observer trait lives in
+    /// `market-core` precisely so the consumer owns the coupling. A runtime
+    /// that runs no incentive program keeps the no-op default and measures
+    /// exactly what its `()` observer costs.
+    fn prime_trade_observer(_who: &AccountId) {}
 }
 
 #[cfg(feature = "runtime-benchmarks")]
@@ -630,6 +650,26 @@ pub mod pallet {
     pub const EXTERNAL_TRADE_ROUTE_PROOF_SURCHARGE: u64 = 496 + 2_560;
     pub const EXTERNAL_SWEEP_ROUTE_PROOF_SURCHARGE: u64 = 496;
 
+    // The same shape one layer over, for the fill observer (08 §2.6, TR7).  The
+    // accumulator has two arms and one benchmark cannot take both: a fill into
+    // a market the account already has a score row for reads the row and writes
+    // it back, while a **first** fill reads the row, finds nothing, and reads
+    // the per-account counter as well before deciding whether a row may be
+    // created.  The `sell` fixture takes the arm that writes, which is the
+    // heavier of the two in ref_time and the lighter by one key: a first-fill
+    // sale credits nothing (the `book_acquired` rule) and so writes nothing,
+    // but its proof carries `TradingRewards::ScoreCount`, which appears in no
+    // `sell` proof line.
+    //
+    // - TradingRewards::ScoreCount: 52-byte value + trie proof = 2,527 bytes,
+    //   read verbatim off the generated `buy` proof annotation, whose own
+    //   fixture does take the first-fill arm and therefore measures the key.
+    //
+    // `buy` needs no surcharge for the same reason.  Sales are the only side
+    // where the two arms diverge, because only a sale can move units the book
+    // never sold the seller.
+    pub const FIRST_FILL_SCORE_PROOF_SURCHARGE: u64 = 2_527;
+
     #[pallet::config]
     pub trait Config:
         frame_system::Config<RuntimeEvent: From<Event<Self>>> + pallet_conditional_ledger::Config
@@ -715,6 +755,13 @@ pub mod pallet {
         /// The predicate is read-only and must fail closed when governed grade
         /// inputs are unavailable.
         type BaselineGrade: crate::BaselineGrade;
+
+        /// Per-fill observer for an incentive program (08 §2.6 *Scope*). The
+        /// book reports each fill and never learns who listens; `()` is the
+        /// no-op, and a runtime that runs no such program binds it.
+        ///
+        /// The trait is infallible, so no observer can refuse a lawful trade.
+        type TradeObserver: market_core::TradeObserver<Self::AccountId>;
 
         /// Cross-pallet keeper-rebate fixture used only by runtime benchmarks.
         #[cfg(feature = "runtime-benchmarks")]
@@ -1915,19 +1962,30 @@ pub mod pallet {
             )
             .map_err(Error::<T>::from)?;
             Self::record_observation(market, &before, &book);
+            // 08 §2.6 (SQ-1049): only primary books are scored. Captured here,
+            // where the book is already in scope, so the exclusion costs no
+            // storage read; `book` moves into storage on the next line.
+            let scores = Self::book_is_scored(book.kind);
             Markets::<T>::insert(market, book);
             for event in events {
-                Self::deposit_trade_event(event)?;
+                Self::deposit_trade_event(event, scores)?;
             }
             Ok(())
         }
 
         /// Sell LONG or SHORT into an LMSR book (04 §6).
         #[pallet::call_index(1)]
+        // The generated fixture takes the observer's writing arm; the first-fill
+        // arm touches one key more and no single measurement covers both, so the
+        // read and its measured proof bound are composed here (see
+        // `FIRST_FILL_SCORE_PROOF_SURCHARGE`). The two surcharges are kept
+        // separate because they answer to different routes.
         #[pallet::weight(
             <T as Config>::WeightInfo::sell()
                 .saturating_add(<T as frame_system::Config>::DbWeight::get().reads(2))
                 .saturating_add(Weight::from_parts(0, EXTERNAL_TRADE_ROUTE_PROOF_SURCHARGE))
+                .saturating_add(<T as frame_system::Config>::DbWeight::get().reads(1))
+                .saturating_add(Weight::from_parts(0, FIRST_FILL_SCORE_PROOF_SURCHARGE))
         )]
         pub fn sell(
             origin: OriginFor<T>,
@@ -1956,9 +2014,10 @@ pub mod pallet {
             )
             .map_err(Error::<T>::from)?;
             Self::record_observation(market, &before, &book);
+            let scores = Self::book_is_scored(book.kind);
             Markets::<T>::insert(market, book);
             for event in events {
-                Self::deposit_trade_event(event)?;
+                Self::deposit_trade_event(event, scores)?;
             }
             Ok(())
         }
@@ -1988,8 +2047,14 @@ pub mod pallet {
                     .map_err(Error::<T>::from)?
             {
                 Self::record_observation(market, &before, &book);
+                // The crank emits `Observed`, which the observer arm ignores,
+                // so this predicate changes nothing today. It is computed
+                // rather than passed as a literal because a literal is a trap:
+                // a later change that routed a `Traded` through this path would
+                // score an external book silently, and the read is free here.
+                let scores = Self::book_is_scored(book.kind);
                 Markets::<T>::insert(market, book);
-                Self::deposit_trade_event(event)?;
+                Self::deposit_trade_event(event, scores)?;
                 let class = if T::InDecisionWindow::contains(&market) {
                     CrankClass::DecisionCritical
                 } else {
@@ -3944,6 +4009,19 @@ pub mod pallet {
             frame_system::Pallet::<T>::block_number().unique_saturated_into()
         }
 
+        /// Whether fills in this book reach the 08 §2.6 accuracy accumulator.
+        ///
+        /// Only primary books are scored (SQ-1049). An external book settles
+        /// through the separate service-ledger instance, and 16 §6.5 bounds the
+        /// cost of a client moving its own settled value to *that question's own
+        /// escrow* — a reward paid there would extend the blast radius to the
+        /// `incentiv` pot, which neither the bond nor the rate coupling
+        /// defends. It is also unimplementable: 08 §2.6 rule 3 needs
+        /// `settled_value`, and §2.6 names no source for it on an external book.
+        fn book_is_scored(kind: BookKind) -> bool {
+            !matches!(kind, BookKind::External { .. })
+        }
+
         /// Advance every unsealed window's 04 §7a contest-capital integral
         /// `N += noi_t · Δblocks` through `through`. `book` is the *stored*
         /// (pre-dispatch) book, so every accrued segment is priced and sized
@@ -4169,7 +4247,36 @@ pub mod pallet {
             Ok(described)
         }
 
-        fn deposit_trade_event(event: market_core::Event<T::AccountId>) -> DispatchResult {
+        /// Deposit one core event, and report a fill to the 08 §2.6 observer.
+        ///
+        /// This is the **single** place a completed fill becomes visible:
+        /// `buy` and `sell` both funnel their core events through it, so one
+        /// hook covers both and there is no second path.
+        ///
+        /// **The fee is recomputed rather than threaded.** `Traded.cost` is
+        /// frozen by 02 §5 and excludes the fee, and `market_core` charges
+        /// exactly `fee_up(cost, fee_bps)` on a buy and withholds exactly
+        /// `fee_up(proceeds, fee_bps)` on a sell — in both cases the argument
+        /// is the very figure the event carries. So the same pure function
+        /// reproduces it here, in the same dispatch, from the same `T::Fee`
+        /// the trade itself priced with. That costs no extra storage access:
+        /// `buy`/`sell` already read `mkt.fee` through `Self::params()` before
+        /// the core call, so this read is served from the overlay.
+        ///
+        /// An arithmetic failure skips the report (G-1). Reporting a zero fee
+        /// instead would understate what the buyer paid, which is the one
+        /// direction that can flatter a score.
+        /// `scores` is the caller's already-loaded answer to "is this a primary
+        /// book?" (08 §2.6, SQ-1049). It arrives as an argument rather than
+        /// being read here because this function holds only a `MarketId`, and
+        /// loading the book to classify it would add a storage read to the hot
+        /// path of every trade — contradicting §2.6's "one extra storage read".
+        /// Every caller already holds `book.kind` before it moves the book into
+        /// storage.
+        fn deposit_trade_event(
+            event: market_core::Event<T::AccountId>,
+            scores: bool,
+        ) -> DispatchResult {
             match event {
                 market_core::Event::Traded {
                     market,
@@ -4178,14 +4285,26 @@ pub mod pallet {
                     amount,
                     cost,
                     p_after,
-                } => Self::deposit_event(Event::Traded {
-                    market,
-                    who,
-                    side,
-                    amount,
-                    cost,
-                    p_after,
-                }),
+                } => {
+                    // Before the deposit only to keep `who` borrowable; the
+                    // observer emits no events, so the order is unobservable.
+                    if scores {
+                        if let Ok(fee) = market_core::fee_up(cost, T::Fee::get()) {
+                            let (score_side, is_buy) = market_core::observer_parts(side);
+                            <T::TradeObserver as market_core::TradeObserver<T::AccountId>>::observe_fill(
+                                &who, market, score_side, amount, cost, fee, is_buy,
+                            );
+                        }
+                    }
+                    Self::deposit_event(Event::Traded {
+                        market,
+                        who,
+                        side,
+                        amount,
+                        cost,
+                        p_after,
+                    })
+                }
                 market_core::Event::Observed { market, o_t } => {
                     Self::deposit_event(Event::Observed { market, o_t });
                 }

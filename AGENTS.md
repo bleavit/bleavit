@@ -216,6 +216,26 @@ per milestone):
 > export WASM_BUILD_WORKSPACE_HINT=$PWD                    # the wasm builder cannot find
 >                                                          # Cargo.lock from an out-of-tree
 >                                                          # target dir
+> export CARGO_INCREMENTAL=0                               # what ci.yml:30 sets. Without it
+>                                                          # 23 GB of a 72 GB debug tree is
+>                                                          # incremental bookkeeping that a
+>                                                          # one-shot gate never reads
+> export CARGO_PROFILE_DEV_DEBUG=line-tables-only          # no gate here reads a backtrace's
+>                                                          # line numbers, and full debuginfo
+>                                                          # drives the serial link tail
+> ```
+>
+> **Prefer the feature-gated legs over the whole script (measured 2026-08-11).** The
+> no-argument script took **9 h 17 m** here against **61 min** for the identical file in
+> CI, and the gap is environment: CI restores a warm cargo cache and this box starts
+> cold. Do not read that as licence to skip what CI catches — a `#[cfg(feature = ...)]`
+> test runs under **no** unfeatured command, not `cargo test --workspace` and not
+> `cargo clippy --all-targets`, and this repository has been bitten at three separate
+> feature flags. Run these two directly instead, and let CI run the exhaustive file:
+>
+> ```bash
+> cargo test -p bleavit-runtime --features try-runtime --locked
+> cargo test -p bleavit-runtime --features runtime-benchmarks --locked tests_trading_rewards
 > ```
 >
 > **Put the `libclang` directory somewhere session-scoped, and re-check it before a
@@ -235,15 +255,15 @@ and `ls -lL` rather than `ls -l` (which happily shows a dangling one).
 
 | Area | Gate (current) |
 |---|---|
-| Rust | `tools/ci/rust-workspace-gates.sh` — fmt · clippy `-D warnings` · `cargo test --workspace` · runtime release/`runtime-benchmarks`/`try-runtime` builds · `runtime-profile-gates.sh` (B15/B16 matrix) · `no_std` · `check-weight-storage-bounds.py` · `check-generated-weights.py` (15 §4.5 purity) · the S3 limit-coverage leg (15 §4.6 / I-22). `--changed [PACKAGE...]` is the locked, changed-scope loop; no argument is exhaustive |
+| Rust | `tools/ci/rust-workspace-gates.sh` — fmt · clippy `-D warnings` · `cargo test --workspace` · runtime release/`runtime-benchmarks`/`try-runtime` builds · the feature-enabled try-runtime and scoped runtime-benchmarks test legs · `runtime-profile-gates.sh` (B15/B16 matrix) · `no_std` · `check-weight-storage-bounds.py` · `check-generated-weights.py` (15 §4.5 purity) · the S3 limit-coverage leg (15 §4.6 / I-22). `--changed [PACKAGE...]` is the locked, changed-scope loop; no argument is exhaustive |
 | Runtime crates | `try-state` green in test envs; benchmarks compile; no new `unwrap`/`expect`/`panic!`/`unsafe` in runtime code |
 | Weight drift (15 §4.5) | `python3 tools/ci/regenerate-weights.py --check --steps 2 --repeat 1` — CI job `benchmark-smoke` (a drift gate, not a smoke test; the id is kept for branch protection). `--write` regenerates, `--changed` selects moved pallets. Component slopes are re-verified at committed fidelity by the release-blocking `release.yml` job **`Component weights at committed fidelity`** |
 | Fuzzing (15 §4.5) | `tools/ci/fuzz-gates.sh` (CI job `fuzz`, nightly-pinned separate `fuzz/` workspace). Long campaigns, distillation and sanitizer matrices are B8 |
 | Reference model | `PYTHONPATH=reference-model/src python3 -m unittest discover -s reference-model/tests`; vector freshness via `python3 tools/reference-model/generate-vectors.py --check`; normative LMSR documentation-table agreement via `python3 tools/reference-model/check-doc-table.py` (04 §5; 15 §4.4) |
-| Economic simulation (S4) | `PYTHONPATH=reference-model/src:simulation/src python3 -m unittest discover -s simulation/tests` (CI, in the reference-model job). `python3 tools/simulation/run-calibration.py` is evidence tooling, not a CI gate — `--check` is **red by design** pending SQ-231 |
+| Economic simulation (S4) | `PYTHONPATH=reference-model/src:simulation/src python3 -m unittest discover -s simulation/tests` (CI, in the reference-model job). `python3 tools/simulation/run-calibration.py --check` re-verifies the committed calibration artifact but remains **red by design** pending SQ-231; `--full` regenerates the ≥10⁴-proposal evidence |
 | Formal models (S1) | `tools/verify/run-model-checks.sh` — pinned TLC over `models/tla/*`; main configs green above their distinct-state floor AND witness configs MUST violate. CI job `model-checking` (15 §4.1) |
-| Property suites (S1) | `tools/ci/property-gates.sh` — the 03 §11 / 15 §4.2–4.3 suites at ≥10⁶ proptest cases in release with `--locked`. Optional `ledger`/`market`/`constitution`/`welfare` shard; no argument runs all. CI job `property-suites` |
-| Supply chain (15 §4.5; 14 §3.6 TH-44) | `tools/ci/supply-chain-gates.sh` — four legs over **every committed lockfile, in every ecosystem** (three cargo, one npm), each cargo workspace audited from its own root. The audited set is derived from `tools/ci/audited-workspaces.toml` and cross-checked against `git ls-files`. Per-commit CI job and release-blocking `release.yml` leg |
+| Property suites (S1) | `tools/ci/property-gates.sh` — the 03 §11 / 15 §4.2–4.3 suites at ≥10⁶ proptest cases in release with `--locked`. Optional `ledger`/`market`/`constitution`/`welfare`/`rewards` shard; no argument runs all. CI job `property-suites` |
+| Supply chain (15 §4.5; 14 §3.6 TH-44) | `tools/ci/supply-chain-gates.sh` — five legs over **every committed lockfile, in every ecosystem**: committed-lockfile, RustSec, GHSA-only, unsound-advisory and npm checks. Unsound reports are deliberately unsuppressed; waivers are exposure-classified and mechanically checked. The audited set is derived from `tools/ci/audited-workspaces.toml` and cross-checked against `git ls-files`. Per-commit CI job and release-blocking `release.yml` leg |
 | Tooling suites | `python3 -m unittest discover -s <dir>` over `tools/deploy/tests`, `tools/reference-model/tests`, `tools/release/tests`, `tools/phase-gates/tests`, `tools/env/tests`, `tools/ci/tests`, `tools/monitoring/tests`; plus `python3 tools/env/validate-environments.py`. Pins: the env suite needs `pyyaml==6.0.2` + `websockets==15.0.1`, the monitoring suite `pyyaml==6.0.2` |
 | CI parity (pre-push helper, not a CI job) | `python3 tools/ci/check-ci-parity.py` — runs each environment-sensitive gate in the working tree and in a CI-shaped shallow clone. **Parity only: a green run does not mean CI will pass.** Run it before pushing a change to anything under `tools/ci/` |
 | Monitoring (O5) | `python3 tools/monitoring/check_alert_coverage.py` — the 12 §6.3 alert-table coverage gate |
@@ -270,6 +290,8 @@ status lives in `PLAN.md` plus `plan/` and nowhere else (R-4).
 | `docs/integration/` | living | **Human-facing client documentation** (N11): nine plain-language files for people integrating the hosted question service. Non-normative — `docs/architecture/` wins on conflict, and [16](docs/architecture/16-hosted-question-service.md) is the owning doc. The quickstart's code is the integration drill's code, so CI notices when it rots |
 | `docs/design/` | derived | Non-normative design-context pack (`claude-design-kit/`: spec distillations + Claude Design prompt); spec wins on conflict; regenerate after any spec change |
 | `docs/superpowers/specs/` | design | Approved designs for repository-shape changes, one dated file each, written before implementation. Non-normative — `docs/architecture/` wins on conflict, and PLAN.md still owns status |
+| `docs/proposals/` | living | Pre-implementation designs and plans, named `YYYY-MM-DD-<topic>-{design,plan}.md`. Non-normative and historical once implementation lands; `docs/architecture/` wins and `PLAN.md` + `plan/` own status |
+| `docs/reviews/` | archive | Dated external review reports, kept verbatim. Findings are acted on through the plan tree and specification, never by editing the report |
 | `PLAN.md` | living | Short implementation focus, Track-E arithmetic and generated plan index |
 | `plan/` | living | Per-id milestones/questions/verifications, dated logs/decisions/audits/changes, and generated human indexes |
 | `tools/plan/` | tooling | Strict plan frontmatter model, one-shot migration/losslessness tools, and generated-index renderer |

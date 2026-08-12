@@ -49,6 +49,11 @@ run_welfare() {
   cargo test --locked -p welfare-core --release --test property
 }
 
+run_rewards() {
+  echo "property-suites: trading-rewards-core 08 §2.6 anti-farm invariant"
+  cargo test --locked -p trading-rewards-core --release --test property
+}
+
 # PT-10 is a runtime REPLAY property, not a proptest over a frame-free core, so
 # it does not read PROPTEST_CASES: each case is two full 22-block runtime
 # replays and a millionth of that is not reachable. `BLEAVIT_PT10_CASES` is its
@@ -70,16 +75,18 @@ case "${suite}" in
   market) run_market ;;
   constitution) run_constitution ;;
   welfare) run_welfare ;;
+  rewards) run_rewards ;;
   containment) run_containment ;;
   all)
     run_ledger
     run_market
     run_constitution
     run_welfare
+    run_rewards
     run_containment
     ;;
   *)
-    echo "property-suites: unknown shard '${suite}' (expected ledger|market|constitution|welfare|containment, or no argument for all)" >&2
+    echo "property-suites: unknown shard '${suite}' (expected ledger|market|constitution|welfare|rewards|containment, or no argument for all)" >&2
     exit 2
     ;;
 esac

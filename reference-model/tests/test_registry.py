@@ -530,10 +530,34 @@ class RegistryGroundingTests(unittest.TestCase):
         # than an adoption -- and the scrutiny it earned was a dispatch-limit
         # classification plus the test nobody had written, that `execute` itself
         # refuses past the retry window (V-210).
-        self.assertEqual(len(entries), 207)
-        self.assertEqual(len(json_keys), 113)
-        self.assertEqual(len(classified_genesis), 113)
-        self.assertEqual(len(model_bytes), 113)
+        #
+        # 207 -> 212 and 113 -> 114 on 2026-08-10 with the trading accuracy
+        # reward program of 08 Section 2.6. The two counters move by DIFFERENT
+        # amounts, which is the first time that has happened, so read them
+        # separately rather than as one number.
+        #
+        # The genesis counter moves by one, for `rwd.rate`. That is the only
+        # SEEDED key the program adds: the minimum bond reuses `ledger.pos_dep`
+        # and the per-epoch budget is a call argument, so neither earns a key.
+        # By this counter's own rule it is a new key rather than an adoption --
+        # the row did not exist before, and it is seeded at genesis so that
+        # enrollment works from the start.
+        #
+        # The entry counter moves by five, because four 13 Section 4 structural
+        # limits arrive with it: `Trading-reward budget authorizations`,
+        # `MaxParticipants`, `MaxScoredMarketsPerAccount` and
+        # `ScoreEntryLifetime`. Those are bounds on collections and on an
+        # entry's age. They are not ParamKeys, are not amendable, and are not
+        # seeded, so they belong to the total and to nothing else here.
+        #
+        # An earlier revision of this comment asserted 208 and said `rwd.rate`
+        # was "the ONLY row that program adds". That was true of the seeded
+        # keys and false of the registry, and it is exactly the drift this
+        # counter exists to catch -- it caught it in CI.
+        self.assertEqual(len(entries), 212)
+        self.assertEqual(len(json_keys), 114)
+        self.assertEqual(len(classified_genesis), 114)
+        self.assertEqual(len(model_bytes), 114)
         self.assertEqual(model_bytes, json_bytes)
         self.assertEqual(model_bytes, classified_bytes)
 
@@ -588,6 +612,58 @@ class CouplingTests(unittest.TestCase):
         for coupling in COUPLINGS:
             with self.subTest(coupling=coupling.name):
                 self.assertTrue(coupling.holds(values))
+
+    def test_the_model_carries_every_boundary_screened_coupling_rule_7_names(self):
+        """Rule 7 numbers its boundary-screened couplings; the model must have them all.
+
+        This exists because it was caught by hand rather than by a gate.  TR9
+        added the third one and `COUPLINGS` still listed two, and nothing
+        noticed -- the model's other coupling tests all iterate whatever the
+        table happens to hold, so a missing entry is silence rather than a
+        failure.  A coupling absent from the model is a relation its adversarial
+        amendment search will never try to break, which is the one thing this
+        module exists to do.
+
+        Rule 7 names each addition in the form "is the Nth such coupling", with
+        the first (`gate.v_min`) introduced as the exception rather than
+        numbered -- so the count is the highest ordinal named.  Parsing the
+        document rather than restating a number is what keeps this from
+        becoming the same stale copy one layer over.
+        """
+        ordinals = {
+            "second": 2,
+            "third": 3,
+            "fourth": 4,
+            "fifth": 5,
+            "sixth": 6,
+            "seventh": 7,
+            "eighth": 8,
+        }
+        source = DOC_13.read_text(encoding="utf-8")
+        named = re.findall(r"is the (\w+) such coupling", source)
+        self.assertTrue(
+            named,
+            "rule 7 no longer numbers its couplings in the form this test "
+            "reads; re-derive the count rather than deleting the check",
+        )
+        unknown = [word for word in named if word not in ordinals]
+        self.assertEqual(unknown, [], f"unhandled ordinal(s) in rule 7: {unknown}")
+        documented = max(ordinals[word] for word in named)
+
+        # One family per relation: `gate.v_min` is four rows of one coupling.
+        families = {
+            coupling.name.rsplit("-", 1)[0]
+            if coupling.name.startswith("gate-v-min-")
+            else coupling.name
+            for coupling in COUPLINGS
+            if coupling.normative_binding_site is BindingSite.BOUNDARY_SCREENED
+        }
+        self.assertEqual(
+            len(families),
+            documented,
+            f"13 rule 7 names {documented} boundary-screened coupling(s) and the "
+            f"model carries {len(families)}: {sorted(families)}",
+        )
 
     def test_sq_547_required_consumer_checks_are_absent(self):
         """SQ-547. Derived: five rule-7 consumer checks are absent in Rust.
@@ -648,6 +724,7 @@ class CouplingTests(unittest.TestCase):
                 "gate-v-min-code",
                 "gate-v-min-meta",
                 "redemption-fee",
+                "reward-rate-wash-breakeven",
             },
         )
         for name in controls:

@@ -619,6 +619,13 @@ class Max11ForgeryTests(unittest.TestCase):
             any(drift.quantity == "committed_fidelity" for drift in result.hard),
             result.hard,
         )
+        # And it must be *reportable*. `describe()` formatted both operands as
+        # integers, so the one drift built from strings raised `TypeError` and
+        # the whole tool aborted with a traceback rather than printing its own
+        # hard failure — the finding never reached a reader. Found by TR7,
+        # against a committed file carrying no fidelity header at all.
+        for drift in result.hard:
+            self.assertIn("committed_fidelity", drift.describe())
 
     def test_canonical_committed_fidelity_passes(self):
         result = self.compare(BASE, BASE)

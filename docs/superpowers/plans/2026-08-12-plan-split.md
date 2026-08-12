@@ -1,8 +1,9 @@
 # PLAN.md Split Implementation Plan
 
 > **Status (2026-08-12):** implementation and local verification complete on
-> `plan/split-tree`; published as draft [PR #301](https://github.com/bleavit/bleavit/pull/301).
-> Readiness remains pending on the PR's CI.
+> `plan/split-tree`; reconciled through `main` at `d55f3673` and published as
+> ready-for-review [PR #301](https://github.com/bleavit/bleavit/pull/301).
+> GitHub CI owns the remaining merge gate.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 

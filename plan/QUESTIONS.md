@@ -172,6 +172,9 @@
 | SQ-1045 | [**11 §11.12's E21 row still reads *"R: disappears on verifi…](questions/SQ-1045.md) | [11] (../../docs/architecture/11-frontend-wor… | 2026-08-09 | B7 |
 | SQ-1046 | [**11 §11.8.1 states a disclosure obligation for unreadable…](questions/SQ-1046.md) | [11] (../../docs/architecture/11-frontend-wor… | 2026-08-09 | B7 |
 | SQ-1047 | [**10 §3.1 gives `CompatUnavailable` the renderable surface…](questions/SQ-1047.md) | [10] (../../docs/architecture/10-frontend-arc… | 2026-08-09 | B7 |
+| SQ-1053 | [**CI compiles the `runtime-benchmarks` feature everywhere a…](questions/SQ-1053.md) | [15] (../../docs/architecture/15-invariants-a… | 2026-08-11 | B7 |
+| SQ-1054 | [**Six pallet mocks do not COMPILE under `runtime-benchmarks…](questions/SQ-1054.md) | [15] (../../docs/architecture/15-invariants-a… | 2026-08-11 | B7 |
+| SQ-1055 | [**`check-chain-feed.py` compares which pallets exist and wh…](questions/SQ-1055.md) | [15] (../../docs/architecture/15-invariants-a… | 2026-08-11 | B7 |
 
 ## Resolved
 
@@ -594,4 +597,10 @@
 | SQ-1032 | [**12 §5.2 point 2 and §1.4 gate 2 count attestations differ…](questions/SQ-1032.md) | [12] (../../docs/architecture/12-release-and-… | 2026-08-08 | none |
 | SQ-1033 | [**`chainLabel` is a pin-matching key wearing a display labe…](questions/SQ-1033.md) | 02 §7.7 · 10 §5.2 | 2026-08-08 | none |
 | SQ-1034 | [**§11.9.1's D-13 row is structurally unpassable: nothing in…](questions/SQ-1034.md) | 11 §11.9.1 · 02 §7.4, §9 · 13 §1 (`phase3.*`) | 2026-08-08 | none |
+| SQ-1048 | [**15 §4.5 required the supply-chain gate to preserve cargo-…](questions/SQ-1048.md) | [15] (../../docs/architecture/15-invariants-a… | 2026-08-11 | none |
+| SQ-1049 | [**`MaxScoredMarketsPerAccount` is anchored to `MaxLiveMarke…](questions/SQ-1049.md) | [08] (../../docs/architecture/08-treasury-and… | 2026-08-10 | none |
+| SQ-1050 | [**08 §2.6 says a debit "suspends the participant until they…](questions/SQ-1050.md) | [08] (../../docs/architecture/08-treasury-and… | 2026-08-10 | none |
+| SQ-1051 | [**The score mixes plain USDC with branch-conditional USDC a…](questions/SQ-1051.md) | [08] (../../docs/architecture/08-treasury-and… | 2026-08-10 | none |
+| SQ-1052 | [**The trading reward program may authorize the *whole* Phas…](questions/SQ-1052.md) | [08] (../../docs/architecture/08-treasury-and… | 2026-08-10 | none |
+| SQ-1056 | [*(Raised as SQ-1048 on 2026-08-10 and renumbered on 2026-08…](questions/SQ-1056.md) | [08] (../../docs/architecture/08-treasury-and… | 2026-08-10 | none |
 

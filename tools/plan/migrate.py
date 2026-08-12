@@ -102,6 +102,12 @@ def rewrite_repo_links(text: str, root: Path, emit_dir: Path) -> str:
         if not candidate.exists():
             return match.group(0)  # resolves from neither base; not this function's call
         relative = Path(os.path.relpath(candidate, emit_dir)).as_posix()
+        # Preserve the source target's directory marker. Path normalization
+        # drops a terminal slash, but the losslessness proof compares the
+        # Markdown target itself and must not silently rewrite
+        # `docs/proposals/` as `docs/proposals`.
+        if path_part.endswith("/"):
+            relative += "/"
         return f"[{label}]({relative}{fragment})"
 
     return _MD_LINK_RE.sub(replace, text)

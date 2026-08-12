@@ -19,7 +19,15 @@ The script runs `cargo fmt --all -- --check`, `cargo clippy --workspace
 --all-targets -- -D warnings`, `cargo test --workspace`, the runtime
 release/`runtime-benchmarks`/`try-runtime` builds and the try-runtime-enabled
 runtime suite (B6 — the 15 §4.7 snapshot `try-runtime-cli` leg lands with
-B7/B8), `tools/ci/runtime-profile-gates.sh` for the bootstrap/Phase-4
+B7/B8), and the **`runtime-benchmarks`-enabled**
+`tests_trading_rewards` suite. TR7 found that CI built that feature but tested
+no `#[cfg(feature = "runtime-benchmarks")]` test module: profile gates use
+`clippy --lib` and `cargo check`, neither of which compiles `#[cfg(test)]`.
+That leg is deliberately scoped to the trading-rewards module because the
+unscoped runtime currently exposes 71 pre-existing feature-only test failures;
+SQ-1053 owns widening the scope and repairing the affected crates.
+
+The script also runs `tools/ci/runtime-profile-gates.sh` for the bootstrap/Phase-4
 primary+recovery matrix, exact-one bounded primary ledger MBM, exhaustive paired
 repair, and recovery zero-SDK-MBM proof (B15/B16), the `no_std` build, and the
 generated-weight storage-bound check (`python3
@@ -112,22 +120,41 @@ The 03 §11 / 15 §4.2–4.3 suites at ≥10⁶ proptest cases in release with
 `--locked`. The script hard-rejects a lower `PROPTEST_CASES`. Reduced-count runs
 happen implicitly in `cargo test --workspace`. CI job `property-suites` fans out
 per-crate across parallel runners: the script takes an optional
-`ledger`/`market`/`constitution`/`welfare` shard, and no argument runs all.
+`ledger`/`market`/`constitution`/`welfare`/`rewards` shard, and no argument runs all.
 `welfare` covers the 05 §4.6 normalization kernel's percentile, winsorization and
 min–max properties (SQ-502).
 
 ## Supply chain (15 §4.5; 14 §3.6 TH-44) — `tools/ci/supply-chain-gates.sh`
 
-Four legs over **every committed lockfile, in every ecosystem**.
+Five legs over **every committed lockfile, in every ecosystem**.
 
-Cargo gets three: the committed-lockfile assertion (`cargo metadata --locked`),
+Cargo gets four: the committed-lockfile assertion (`cargo metadata --locked`),
 pinned `cargo-audit 0.22.2`, and the **GHSA-only leg** (`check-ghsa-only.py` over
 pinned `osv-scanner`, with annotated `tools/ci/ghsa-waivers.toml`). RustSec is a
 strict subset of the GitHub Advisory DB for crates.io, so cargo-audit is
 structurally blind to GHSA-only advisories. This leg gates exactly that
 complement, and nothing cargo-audit already sees (SQ-219).
 
-npm gets the fourth: `check-npm-advisories.py` over the same pinned
+The fourth cargo leg is the **unsound-advisory leg**
+(`check-unsound-advisories.py`, annotated
+`tools/ci/unsound-waivers.toml`, SQ-1048). It closes the class between the
+other scanners: cargo-audit reports `unsound` as an allowed warning while the
+GHSA-only leg skips every RustSec-carried advisory by contract. Dependabot #27
+proved the gap with RUSTSEC-2024-0429 (`glib`): the repository gate stayed
+green on a medium vulnerability both scanners had intentionally declined.
+`unmaintained` remains informational because it names no defect or trigger.
+
+Unsound waivers are keyed by `(id, package, version, workspace)` and declare
+`unreachable` or `constrained` exposure with evidence. `triggerable` is refused:
+reachable undefined behavior is patched, not excused (R-7). The leg evaluates
+an **unsuppressed** advisory set from a directory containing no
+`.cargo/audit.toml`, using `--file`, and refuses any report whose
+`settings.ignore` is non-empty. This is load-bearing: the first implementation
+reused the configured cargo-audit reports, so adding an id to
+`.cargo/audit.toml` removed the finding from `warnings` entirely and silently
+disabled the new leg. The connector review on #300 found that bypass.
+
+npm gets the fifth leg: `check-npm-advisories.py` over the same pinned
 `osv-scanner`, which picks its ecosystem from the lockfile's own name. That leg
 **skips nothing**, because no second scanner stands behind it. Feeding
 `app/pnpm-lock.yaml` to the GHSA-only checker instead would have looked correct
@@ -156,10 +183,11 @@ had named `npm audit`/OSV CI as a mitigation since the threat model was written.
 Each cargo workspace is audited **from its own root** per 15 §4.5 clause 4,
 because cargo-audit reads `.cargo/audit.toml` from its working directory and one
 workspace's pin-forced exception must never mask another's vulnerability. The
-`bleavit.supply-chain.v4` summary reports each workspace's own ignore list so that
+`bleavit.supply-chain.v5` summary reports each workspace's own ignore list so that
 isolation is re-proven on every run, plus `waived_npm` and `npm_lockfiles` so a
 release cannot disclose the cargo half and stay silent about the half a browser
-executes.
+executes, plus `waived_unsound` with its exposure classification so accepted
+undefined behavior cannot disappear from release evidence.
 
 Per-commit CI job and release-blocking `release.yml` leg.
 

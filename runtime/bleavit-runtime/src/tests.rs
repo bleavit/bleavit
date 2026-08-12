@@ -58,9 +58,9 @@ use crate::{
     Oracle, Origins, PalletInfo as RuntimePalletInfo, ParachainInfo, ParachainSystem, PolkadotXcm,
     Preimage, Proxy, QuestionService, Referenda, Runtime, RuntimeCall, RuntimeGenesisConfig,
     RuntimeOrigin, Scheduler, ServiceLedger, Session, System, Timestamp, TrackOrigins,
-    TransactionPayment, TxExtension, UncheckedExtrinsic, Utility, Vesting, Welfare, XcmpQueue,
-    FEE_VIT_USDC_RATE_KEY, MILLISECS_PER_BLOCK, SS58_PREFIX, TRANSACTION_VERSION, USDC_DECIMALS,
-    USDC_LOCATION_ENCODED, VERSION, VIT_DECIMALS,
+    TradingRewards, TransactionPayment, TxExtension, UncheckedExtrinsic, Utility, Vesting, Welfare,
+    XcmpQueue, FEE_VIT_USDC_RATE_KEY, MILLISECS_PER_BLOCK, SS58_PREFIX, TRANSACTION_VERSION,
+    USDC_DECIMALS, USDC_LOCATION_ENCODED, VERSION, VIT_DECIMALS,
 };
 
 #[cfg(feature = "bootstrap")]
@@ -1871,15 +1871,16 @@ fn composition_contains_all_wired_pallets_at_their_frozen_indices() {
     assert_pallet!(ClientRegistry, 65, "ClientRegistry");
     assert_pallet!(QuestionService, 66, "QuestionService");
     assert_pallet!(ServiceLedger, 67, "ServiceLedger");
+    assert_pallet!(TradingRewards, 68, "TradingRewards");
     #[cfg(feature = "bootstrap")]
     assert_eq!(
         <AllPalletsWithSystem as PalletsInfoAccess>::infos().len(),
-        45
+        46
     );
     #[cfg(not(feature = "bootstrap"))]
     assert_eq!(
         <AllPalletsWithSystem as PalletsInfoAccess>::infos().len(),
-        44
+        45
     );
 }
 
@@ -2630,7 +2631,7 @@ fn usdc_fee_conversion_scales_decimals_and_rounds_against_the_payer() {
 }
 
 /// Install the 13 §1 `fee.vit_usdc` rate so the USDC fee path is live.
-fn set_fee_vit_usdc_rate(rate_1e9: u64) {
+pub(crate) fn set_fee_vit_usdc_rate(rate_1e9: u64) {
     pallet_constitution::Params::<Runtime>::insert(
         FEE_VIT_USDC_RATE_KEY,
         pallet_constitution::ParamRecord {
@@ -3007,6 +3008,58 @@ fn oracle_registration_refuses_an_unfunded_reporter_atomically() {
             0,
         );
     });
+}
+
+/// 07 §9's mechanical resolution is closed on the assembled runtime, and no
+/// chain-spec entry can open it.
+///
+/// `oracle.recompute_proof` settles a money-bearing component outside the
+/// challenge window, with no watchtower quorum and no challenger, at whatever
+/// `Config::RecomputeEngine` returns. The A7 spec registry that freezes
+/// `formula_ref` does not exist yet, so this runtime binds `()`. Binding the
+/// model's stand-in instead — which reads the settled value out of the payload's
+/// first eight bytes — would let a reporter settle at its own number the moment
+/// it committed a preimage it knows. Membership in `Oracle::Recomputable` is
+/// therefore necessary but not sufficient, which is what stops one genesis entry
+/// from arming an unimplemented verifier. Regression for the 2026-08-10 security
+/// review.
+///
+/// The binding is `#[cfg]`-selected, so this test asserts what is true under
+/// **each** profile rather than what is true under the default one. A
+/// `runtime-benchmarks` runtime deliberately carries the measuring stand-in, so
+/// `recompute_proof`'s declared weight bounds the round it settles instead of the
+/// early refusal; a test that named only the shipped binding would fail there and
+/// read as the security property having regressed.
+#[test]
+fn the_assembled_runtime_binds_no_oracle_recompute_engine() {
+    use pallet_oracle::RecomputeEngine;
+
+    let mut proof = vec![0u8; 24];
+    proof[..8].copy_from_slice(&500_000_000u64.to_le_bytes());
+
+    // Anti-vacuity: the model's stand-in accepts this payload ...
+    assert_eq!(
+        pallet_oracle::recompute_value(&proof),
+        Ok(futarchy_primitives::FixedU64(500_000_000))
+    );
+    // ... and the shipped runtime's engine refuses it, for every component and
+    // version.
+    #[cfg(not(feature = "runtime-benchmarks"))]
+    assert_eq!(
+        <<Runtime as pallet_oracle::Config>::RecomputeEngine as RecomputeEngine>::evaluate(
+            1, 1, &proof
+        ),
+        Err(pallet_oracle::CoreError::NotRecomputable)
+    );
+    // The measurement runtime is the one profile that evaluates, and it is never
+    // shipped.
+    #[cfg(feature = "runtime-benchmarks")]
+    assert_eq!(
+        <<Runtime as pallet_oracle::Config>::RecomputeEngine as RecomputeEngine>::evaluate(
+            1, 1, &proof
+        ),
+        Ok(futarchy_primitives::FixedU64(500_000_000))
+    );
 }
 
 #[test]

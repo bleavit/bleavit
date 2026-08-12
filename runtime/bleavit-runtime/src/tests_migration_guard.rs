@@ -2081,9 +2081,23 @@ fn composed_runtime_upgrade_migrates_all_reserve_probe_v0_state_and_passes_try_s
             0,
         );
         assert!(pallet_futarchy_treasury::State::<Runtime>::get().reserve_impaired);
+        // 3 -> 4 with TR6 (08 §2.6): the treasury gained the trading-reward
+        // budget authorization path, whose migration seeds `IncentiveRemaining`
+        // for a chain that predates it. The composed upgrade runs that migration
+        // too, so this is the version the whole set lands on.
         assert_eq!(
             StorageVersion::get::<crate::FutarchyTreasury>(),
-            StorageVersion::new(3),
+            StorageVersion::new(4),
+        );
+        // The version alone would pass on a migration that bumped and did
+        // nothing. Assert the state it exists to establish: the full 08 §2.1
+        // allocation is available, because nothing has been authorized yet on a
+        // chain that is only now learning the program exists. Reading the
+        // constant rather than restating it keeps 13 the single home for the
+        // value (runtime-code rule 4).
+        assert_eq!(
+            pallet_futarchy_treasury::IncentiveRemaining::<Runtime>::get(),
+            crate::configs::IncentiveAllocationAmount::get(),
         );
         assert!(!pallet_futarchy_treasury::BootstrapOpsFundingClosed::<
             Runtime,

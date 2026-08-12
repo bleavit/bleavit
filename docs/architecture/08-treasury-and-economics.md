@@ -121,9 +121,11 @@ Unless a call below says otherwise it requires its stated protocol origin. `fund
 
 The `sweep_insurance` call is authorized by the dedicated `InsuranceSweep` capability, not by the broader `TreasurySpend` capability (SQ-384).
 
+Two further calls carry a **PARAM** origin rather than `FutarchyTreasury`, because each spends one fixed genesis allocation pot rather than the ordinary treasury: **`create_community_schedule(beneficiary, amount)`** (`FutarchyParam` origin; the `communty` pot → a named beneficiary's vesting schedule; emits **`CommunityScheduleCreated { beneficiary, amount, start, per_block, remaining }`**; the paragraph below) and **`fund_trading_rewards(amount)`** (`FutarchyParam` origin; the `incentiv` pot → the reward pallet's sovereign account; emits **`TradingRewardsFunded { amount, remaining }`**; §2.6, added 2026-08-10). Both decrement a stored remaining allocation and both are bounded by a lifetime count of successful uses. Neither draws on `MAIN` or any `ops.*` budget line, and neither is reachable through `TreasurySpend`.
+
 ---
 
-**Phase-4 community distribution (B20 / SQ-107).** `create_community_schedule(beneficiary, amount)` is the one bounded exception to the ordinary treasury-outflow origin: it is a PARAM leaf, admitted only after the Phase-3→4 arming transition records its exact block, and dispatched with `FutarchyParam`. The source is the genesis-derived `communty` pot; the beneficiary MUST differ from that pot, `amount` MUST be at least the 13 §3.5 minimum vested transfer and no greater than the stored undistributed allocation, and the lifetime successful-schedule count MUST remain below the 13 §4 bound. The runtime calls the SDK `pallet-vesting` `vested_transfer` adapter atomically before decrementing the remaining allocation and incrementing the count. The fixed duration is 24 months in para-blocks; `per_block = floor(amount / duration)` and a zero result fails, so unlocks can never run ahead of the horizon. The arming block is an exact start (no caller-selected start), arming is idempotent, and failures leave both custody and counters unchanged. No direct `vesting.force_*`, signer impersonation, treasury stream, or unbounded schedule list may be used; the per-schedule counter is a lifetime admission bound, not a promise that old completed schedules are deleted.
+**Phase-4 community distribution (B20 / SQ-107).** `create_community_schedule(beneficiary, amount)` is one of exactly **two** bounded exceptions to the ordinary treasury-outflow origin — §2.6's `fund_trading_rewards(amount)` is the other, added 2026-08-10, and [06](06-governance-and-guardians.md) §3.2 states the three properties both MUST hold. It is a PARAM leaf, admitted only after the Phase-3→4 arming transition records its exact block, and dispatched with `FutarchyParam`. The source is the genesis-derived `communty` pot; the beneficiary MUST differ from that pot, `amount` MUST be at least the 13 §3.5 minimum vested transfer and no greater than the stored undistributed allocation, and the lifetime successful-schedule count MUST remain below the 13 §4 bound. The runtime calls the SDK `pallet-vesting` `vested_transfer` adapter atomically before decrementing the remaining allocation and incrementing the count. The fixed duration is 24 months in para-blocks; `per_block = floor(amount / duration)` and a zero result fails, so unlocks can never run ahead of the horizon. The arming block is an exact start (no caller-selected start), arming is idempotent, and failures leave both custody and counters unchanged. No direct `vesting.force_*`, signer impersonation, treasury stream, or unbounded schedule list may be used; the per-schedule counter is a lifetime admission bound, not a promise that old completed schedules are deleted.
 
 ## 2. Genesis economics (B-14, D-15)
 
@@ -137,11 +139,11 @@ Total supply **1,000,000,000 VIT, 12 decimals**, fixed at genesis; existential d
 | Community distribution | 25% | 250,000,000 | Linear vest over 24 months from Phase-4 arming *(schedule simulation-gated)* |
 | Founding team | 20% | 200,000,000 | **4-year linear vest, 1-year cliff**, from TGE |
 | Ecosystem / ops fund | 15% | 150,000,000 | Feeds the `ops.*` lines; per-epoch budgets. Ordinary lines are pre-provisioned by genesis/onboarding until governed funding is live; the ops multisig's only direct allocation power is the runway-capped `OpsReserveProbe` top-up. The first successful positive TREASURY-class funding of that line closes the bootstrap exception; all later funding is TREASURY-class |
-| Phase 3–4 incentive programs | 10% | 100,000,000 | Trading/keeper/reporter bootstrap incentives; backstops the reporter loans of §2.5 |
+| Phase 3–4 incentive programs | 10% | 100,000,000 | Trading/keeper/reporter bootstrap incentives; subordinately backstops the reporter loans of §2.5. **One undivided allocation: no sub-allocation splits it three ways, and §2.6 MAY authorize the whole of it** *(owner ruling 2026-08-11, SQ-1052 — the earlier wording said "the trading share", which implied a split that no table here ever stated)*. §2.6 is the trading delivery mechanism, exactly as §1.4's `create_community_schedule` delivers the community allocation |
 
 Vesting is enforced on-chain from genesis via SDK **`pallet-vesting`** (stable2606, `=49.0.0`) linear lock schedules on VIT — genesis-configured balances locks, **one schedule per beneficiary with `begin = cliff end`**: nothing is spendable before the cliff — locked VIT cannot even pay transaction fees (beneficiaries pay fees in USDC per §9 until vested) — then the full locked amount unlocks linearly to the end of the vesting horizon. For the founding team that is zero until TGE + 1 year, then linear to TGE + 4 years (the integer per-block unlock floors, so a sub-VIT remainder MAY clear one block after the 4-year mark — rounding is always against the claimant, never ahead of schedule) — everywhere ≤ the idealized `t/4` catch-up-at-cliff curve, i.e. this reading can only unlock *slower* than the alternative, never faster (the conservative direction; a two-schedule catch-up composition is rejected because `pallet-vesting`'s genesis lock is replace-not-accumulate, which would leave the cliff tranche spendable at genesis). Schedules are denominated in para-blocks at the nominal 6 s block time; slower-than-nominal block production delays unlocks and can never accelerate them. *(Resolved at B3: SDK `pallet-vesting` adopted over an in-pallet schedule store — battle-tested lock accounting, genesis-native schedules, permissionless `vest()`; `pallet-futarchy-treasury` keeps only its §1.3 USDC grant streams.)* The community-distribution and incentive allocations, whose schedules cannot start at genesis (Phase-4 arming is not a genesis-known block), are held at genesis in protocol-derived treasury sub-accounts; the community 24-month schedule is created at Phase-4 arming.
 
-**Genesis protocol-account derivations (normative; mirrored in [13 §3.5](13-parameters.md)).** Account identity is derived with Substrate's `PalletId` conversion exactly as follows; a seed is the exact byte string shown, with no padding, normalization or replacement. The VIT allocation pots use `TreasuryPalletId = PalletId(*b"bl/trsry")`: `MAIN` is `TreasuryPalletId::get().into_account_truncating()`, the community pot is `TreasuryPalletId::get().into_sub_account_truncating(b"communty")`, and the Phase-3–4 incentive pot is `TreasuryPalletId::get().into_sub_account_truncating(b"incentiv")`.
+**Genesis protocol-account derivations (normative; mirrored in [13 §3.5](13-parameters.md)).** Account identity is derived with Substrate's `PalletId` conversion exactly as follows; a seed is the exact byte string shown, with no padding, normalization or replacement. The VIT allocation pots use `TreasuryPalletId = PalletId(*b"bl/trsry")`: `MAIN` is `TreasuryPalletId::get().into_account_truncating()`, the community pot is `TreasuryPalletId::get().into_sub_account_truncating(b"communty")`, and the Phase-3–4 incentive pot is `TreasuryPalletId::get().into_sub_account_truncating(b"incentiv")`. The trading-reward sovereign of §2.6 is `PalletId(*b"bl/trwrd").into_account_truncating()` *(frozen 2026-08-10)*, and it holds two assets at once: the participants' USDC bonds and the authorized VIT budget. It is deliberately **not** in the R-4 endowment set below — R-4 does not name it, and it needs no endowment because the account is created by the first `enroll`, whose bond §2.6 floors at `ledger.pos_dep`, far above the USDC `min_balance`.
 
 Under [03 §7](03-conditional-ledger.md) R-4, `usdc_genesis_endowments()` endows exactly the following thirteen statically derived protocol accounts with exactly the live USDC `min_balance`; the endowment rule is owned there, while this section freezes the account derivations consumed by genesis and deployment tooling:
 
@@ -198,7 +200,448 @@ The reserve exists for values-layer continuity (guardian bonds, conviction depth
 
 **Reporter-stake bootstrap (B-15-adjacent sequencing, D-15).** Phase-3 arming requires ≥ 3 registered reporters with full `orc.reporter_stake` = 100,000 USDC stakes. The treasury MAY extend **recallable USDC loans** (per-reporter ≤ 75,000 USDC, line backstopped by the 10% incentive allocation) held directly as reporter stake, never withdrawable by the reporter. The reporter MUST post ≥ 25% (≥ 25,000 USDC) of own capital, and **slashing consumes the reporter's own tranche first** — a loan with no reporter skin would deter nothing. Loans are recallable by TREASURY decision or automatically on reporter exit/ejection. Bootstrap line sizing: 3–5 reporters × 75,000 = 225,000–375,000 USDC.
 
+**The backstop is subordinate to §2.6, and this sequencing is now explicit** *(owner ruling 2026-08-11, SQ-1052)*. §2.1's incentive allocation is undivided, so what stands behind this loan line is the part of it that §2.6 has **not** authorized, and nothing reserves a floor for the line. Two consequences follow, and both belong here rather than in §2.6. A budget authorization that empties the pot removes the backstop, and Phase-3 arming depends on three reporters this line exists to bootstrap. And the exposure is recoverable but not automatically: §2.6 returns unspent budget to the pot, so what an over-authorization actually costs is the VIT already paid out. Sequencing the reporter line **before** a large trading-reward authorization is therefore an operational requirement of Phase-3 arming, not a preference. The two are denominated in different assets — a USDC line against a VIT pot — so no formula converts one into the other, and D-18 keeps the governed rate out of any that tried.
+
 Welfare cold start (`PriorBounds`, epochs 1–12 winsorization) is specified in [05](05-welfare-and-decision-engine.md) (D-15).
+
+### 2.6 Trading accuracy rewards — the incentive pot's delivery mechanism (normative; added 2026-08-10)
+
+The §2.1 allocation names *"Trading/keeper/reporter bootstrap incentives"* and had no delivery
+mechanism for the trading use. This subsection is that mechanism, and §2.1's allocation is
+undivided, so this subsection MAY draw the whole pot (SQ-1052). It pays VIT for **realized
+forecast accuracy**, and every value it uses is either an existing key or `rwd.rate`
+*(normative values: [13](13-parameters.md))*.
+
+**The funding source is the pot, never new issuance.** The program spends the genesis
+`incentiv` pot of §2.1 and mints nothing. Three reasons make issuance the wrong instrument
+here. The pot already holds the money. `issue_vit` cannot pay a trader at all, because §2.3
+credits only `REWARDS` and the `ops.*` lines, which are budget lines rather than accounts. And
+`iss.inflation_cap` is amendable **down only**, so spending it on a bootstrap program burns a
+one-way resource reserved for cases with no funded alternative.
+
+**Funding one epoch budget at a time.** `fund_trading_rewards(amount)` is a bounded PARAM leaf
+that mirrors §1.4's `create_community_schedule`, and it carries the same exception: it moves VIT
+out of a treasury-derived pot without being a general treasury-outflow capability
+([06](06-governance-and-guardians.md) §3.2). The source is the `incentiv` pot and its stored
+remaining allocation. The call transfers VIT to the reward pallet's own sovereign account. An
+`amount` above the remaining allocation is refused, and the lifetime successful-authorization
+count MUST stay below the bound the *Bounds* paragraph below places on it, exactly as
+§1.4's community schedule count does. Unspent budget returns to the pot, so the pallet never
+accumulates. The per-epoch budget is a call argument rather
+than a registry row, which is why the program adds exactly one key. "Program epoch" throughout
+this subsection means the protocol epoch of `epoch.length`. The program adds no second clock.
+Its resource-domain family key is [05](05-welfare-and-decision-engine.md) §1.4's `0x0D`.
+
+**The return of unspent budget carries the same authority as the authorization, and MUST NOT be
+permissionless** *(added 2026-08-10; this paragraph previously stated only the outcome, and the
+first implementation reasonably read the silence as leave to build a public crank)*. The amount
+returned is the sovereign's VIT balance **less the accruals no participant has claimed yet** —
+sweeping the balance instead would strand every unclaimed accrual behind an empty sovereign. But
+the timing matters as much as the amount. Reward accrual is clamped to the budget's unpromised
+remainder, participants settle by pull after their epoch closes, and `settle_epoch` is idempotent
+per participant per epoch — so a sweep that empties the headroom while settlements are still
+arriving closes every remaining participant's epoch at a **zero** reward, and re-funding cannot
+undo it because their epoch is already settled and their score already discarded. A permissionless
+sweep would therefore be a one-extrinsic, permanent denial of the whole program's payout for that
+epoch. The return is consequently authorized by the **same `FutarchyParam` origin that authorizes
+the funding**, and the natural shape is to fold it into `fund_trading_rewards` so that each new
+authorization retires the previous one's remainder and no independent surface exists at all. This
+does not make the return governance-discretionary in substance — the funding call is the only
+thing that can put budget there in the first place — but it does put the timing under the same
+authority as the spending, rather than under whoever transacts first. §1.2's `reconcile_insurance`
+is **not** a precedent for a public crank here: reconciling harms nobody when it runs early, while
+sweeping destroys value that is still in flight.
+
+**The reserve is a VIT figure derived from a governed rate, so a rate amendment between the
+return and a claim can leave it short** *(stated 2026-08-10)*. The reserve converts the
+outstanding USDC accrual at the rate live when the return runs, and each `claim_rewards`
+converts at the rate live when it runs. The conversion is inversely proportional to
+`fee.vit_usdc_rate`, so a downward amendment in between leaves outstanding claims needing more
+VIT than was held back — bounded by the same 10× envelope the earning cap is sized against. The
+consequence is **liveness, not solvency**: the transfer fails inside its storage layer, the
+accrual survives intact and unspent, and no new accrual can be made against the shortfall,
+because the authorized budget re-reads the same balance at the same live rate. Governance
+resolves it by funding, exactly as it resolves a thin budget.
+
+**The bond, and the two separate jobs it does.** `enroll(bond)` holds USDC and opens a
+participant record. `top_up_bond(amount)` raises the hold. `withdraw_bond()` releases it. The
+bond is denominated in **USDC** rather than VIT, because the only externally signable VIT at
+genesis is the founding and ops allocation, and a VIT bond would restrict the program to
+insiders. The **rate coupling** does the anti-farm work *(corrected 2026-08-11 — this sentence
+credited the earning cap, and the cap bounds exposure rather than delivering the invariant; see
+the rate paragraph below)*, the **earning cap** bounds what one account can extract in an epoch,
+and the **minimum bond** only prevents state bloat. `ledger.pos_dep` already prices an entry
+against bloat, so the minimum reuses that live row and adds no key.
+
+**Two rules make the bond a real backstop rather than a formality, and both are load-bearing.**
+An epoch's cap is fixed by the bond held when that epoch opened, and that amount stays held
+until the epoch settles. First, `withdraw_bond` is gated on **epoch settlement**, never on
+folding: folding deletes the last score entry while the debit settles at epoch close, so a
+fold-based gate would let a participant who folded a losing epoch release the whole bond ahead
+of the debit. Second, a top-up takes effect from the **next** epoch: an immediate cap raise
+would let a wash operator wait for the outcome, enlarge only the winning account's cap, and
+leave the loser at the minimum. No caller-visible action inside an epoch can move either side.
+
+**The score.** Per enrolled account, per market, the book accumulates three unsigned counters and
+the net branch position. Unsigned counters keep signed arithmetic out of runtime code and make
+claimant-adverse rounding straightforward.
+
+1. A buy adds `cost + fee` to `spent`, rounded up, adds the filled quantity to `book_acquired`
+   for that branch, and adds `cost` to **`mirror_principal`** — the mirror-branch branch-USDC the
+   trade wrapper leaves with the buyer *(added 2026-08-10, SQ-1051; the paragraph after rule 4
+   is why)*.
+2. A sell adds proceeds **net of the fee the book withholds** — `proceeds − fee` — to `received`,
+   rounded down, **but only for the part of the sale covered by `book_acquired`**, and decrements
+   `book_acquired` by that quantity. Proceeds beyond it are ignored. *(Clarified 2026-08-10,
+   SQ-1049's sibling SQ-1056: this rule said only "adds proceeds" while rule 1 spelled its arm out
+   as `cost + fee`, and the two readings differ by the fee on every sale. Net is what the seller
+   actually received. Crediting the gross figure would score a trader on value the protocol took,
+   which is the one rounding direction R-7 forbids, and it would break the symmetry with rule 1 —
+   a buy is charged more than the book cost and a sale is credited less, so the fee is adverse on
+   both sides.)*
+3. Settlement adds `book_acquired × settled_value` to `received`, rounded down,
+   **and decrements `book_acquired` by the credited quantity**, exactly as rule 2 does for a
+   sale *(stated 2026-08-11)*.
+
+   **The credited quantity is the accumulator's own `book_acquired` and MUST NOT be clamped by
+   the account's ledger position** *(amended 2026-08-11; this rule said `min(position,
+   book_acquired)` and the clamp made an accurate forecast pay a debit)*. Settlement and
+   redemption open at the same instant — the vault entering its settled state is the sole
+   precondition of each — and the fold is a permissionless crank the participant does not
+   control. A trader who redeems, which is the ordinary thing to do and the only way to get the
+   money, is folded against a position that redemption has already burned: `received` collects
+   nothing, `spent` still holds the purchase, and rule 4's realized arm debits a correct
+   forecaster for being prompt while a slower one is paid. That is the third arrival of one
+   failure mode, after SQ-1051's annulled arm and this rule's own `settled_value` type — the
+   same wrong answer reached through *when* a quantity is read rather than through what it is.
+
+   `book_acquired` is the right quantity on its own, and the clamp bought nothing the program
+   needs. It is already *bought through the book minus sold back through the book*, so it
+   excludes exactly what the clamp was introduced to exclude — units obtained by `split` or by
+   transfer in, which no rule here ever scores. It is timing-independent, so no payout depends
+   on a race between a keeper and a redemption. And it cannot create an unbacked claim: every
+   credit is offset by the same account's `spent`, the accrual is bounded by `settle_epoch`'s
+   budget post-condition and by the per-account earning cap, and neither bound reads a position.
+   The one disposal it still credits is a **transfer out**, which is a trade the protocol cannot
+   see and cannot price — and crediting it is correct rather than generous, because the score
+   measures the forecast the account's *book* activity expressed, not the custody it retained.
+   No second account can be credited for the same units, since a transfer gives the receiver no
+   `book_acquired`.
+
+   A consequence worth stating, because it makes the settlement path cheaper as well as correct:
+   the runtime adapter that supplies rule 3 no longer reads the conditional ledger's `Positions`
+   at all, so the crank drops two storage reads per leg and the reward program's only remaining
+   read of the ledger is the branch disposition and `settled_value`. The decrement was implemented from the first and this rule did
+   not carry it, which an independent reference model found by disagreeing with the kernel on
+   that field in 59 % of 30,000 replayed vectors. It is kept rather than removed, because it is
+   the only thing that makes a second settlement of one entry a no-op: without it a repeated
+   call credits `received` again, and an over-credited reward is the direction R-7 forbids. It
+   is unread today — the pallet removes the score entry in the same transaction — so this is
+   defense in depth, and the rule says so rather than leaving a future caller to discover that
+   settlement is idempotent only by accident.
+   `settled_value` is the branch's terminal redemption value per unit, **expressed as a fraction
+   of par on [03](03-conditional-ledger.md)'s own `SCORE_SCALE` grid and clamped to par** *(made
+   explicit 2026-08-10; the earlier wording said only "value per unit", which reads as a whole
+   amount and was implemented as one)*. It has to be a fraction: a scalar leg redeems for
+   `amount × s / SCORE_SCALE`, so a unit of a branch that settled at 0.6 is worth six tenths of a
+   base unit and never a whole number of them. Read as an integer, **every sub-par settlement
+   floors to zero** — `received` collects nothing, and rule 4's realized arm folds a debit of the
+   entire notional against a trader whose forecast was correct. That is the same defect the
+   annulled arm exists to prevent, arriving through the realized arm instead, and rule 3's own
+   *"rounded down"* is the tell that no integer was ever meant: an integer product needs no
+   rounding. The clamp to par is what stops an out-of-range value from crediting more than the
+   ledger can pay. **This rule credits gross of `ledger.redeem_fee`, and that is deliberate
+   rather than the asymmetry with rule 2 that it resembles** *(added 2026-08-10)*: no single
+   "net" exists to credit, because [03](03-conditional-ledger.md) §5.3a gives the paired
+   redemption path a different fee base from the single-leg path, and which path a claimant
+   takes is a later choice of theirs. A net figure would require the score to predict a
+   redemption that has not happened. The over-credit is bounded by one `ledger.redeem_fee` and is
+   absorbed by the margin the *rate* paragraph below already carries.
+4. The market score depends on how the branch ended, and it may be negative.
+   - **Branch realized:** `received − spent`.
+   - **Branch annulled:** `mirror_principal − spent`. Every `received` credit is discarded.
+   - **Proposal VOID:** the entry drops at zero and folds to nothing, exactly as the timeout
+     escape below does.
+
+**Rule 4 has three arms because a conditional market pays a buyer in two currencies, and only one
+of them survives (added 2026-08-10, SQ-1051).** The score is denominated in plain USDC. A buy
+spends plain USDC, but everything the buyer receives is *conditional*: the trade wrapper splits
+`cost + fee` of plain USDC into both branches, sends `cost` of the traded branch to the book and
+one fee leg from each branch to the fee account, so the buyer walks away holding the scalar
+position **and `cost` of mirror-branch branch-USDC**. A sale is paid in traded-branch
+branch-USDC, not in plain USDC. So `received` and `mirror_principal` are worth par in exactly
+opposite states of the world, and a single-arm rule has to be wrong in one of them.
+
+A one-arm `received − spent` is wrong in the annulled state, and not marginally.
+[04](04-markets-and-pricing.md) §6.2 guarantees the opposite outcome as **G-3**: *"A buyer in the
+losing branch holds `cost` mirror-branch branch-USDC = winning-branch branch-USDC, redeemable at
+par at resolution. The dominant user path therefore loses only fees when its branch is
+annulled."* Under the one-arm rule that buyer scores `−(cost + fee)` — the whole notional — while
+their realized loss is `fee` alone, roughly one three-hundredth of it at the `mkt.fee` default.
+Roughly half of all decision-market trading sits in the branch that does not realize, so the
+program would have debited the bonds of accurate traders for holding positions the protocol had
+already made whole. That is the opposite of what this subsection pays for, and no defense
+elsewhere would have caught it, because every conservation identity and every per-call assertion
+holds while it happens.
+
+The annulled arm is exact rather than conservative. Substituting rule 1 gives
+`mirror_principal − spent = Σcost − Σ(cost + fee) = −Σfee` over that market's buys, which is
+G-3's promise restated. Discarding `received` is what makes it exact: those credits are
+traded-branch branch-USDC and are worth nothing once the branch is annulled, so a sale in an
+annulled branch neither earns nor costs — matching §6.2's reading that a withheld sell fee there
+is a protocol-side income haircut and never a trader-side charge. Both arms stay claimant-adverse
+under R-7, since each discards value the trader did not realize rather than crediting value they
+did not receive.
+
+**Proposal VOID drops the entry instead of scoring it**, because VOID is a constitutional
+emergency rather than a resolved forecast: [04](04-markets-and-pricing.md) §6.2 notes the buyer's
+delta there also carries the difference between the package's D-1 neutral value and `cost`, so
+neither arm above states it, and no forecast was tested in any case. Dropping at zero is the
+same disposition, and the same G-1 direction, as a market that never settles at all.
+
+**`book_acquired` closes a hole rather than accepting a limit.** [03](03-conditional-ledger.md)
+gives an account the whole `split*` family and a signed `transfer`, so an enrolled account can receive
+a complete branch set created outside the book, sell every leg, and post the whole proceeds
+against a `spent` of zero. That manufactures a positive score with no forecast in it and no
+dependence on the outcome. Counting only book-acquired units closes it inside the market pallet.
+The direction of error is conservative: a trader who funds a position off-book is
+under-credited, never over-credited, which is the R-7 direction.
+
+**Both settlement steps are pull-based, and there are exactly two.**
+`settle_market_score(who, market)` folds one settled market into the account's epoch total and
+deletes the entry. `settle_epoch(who)` then closes one participant's epoch, applying the reward
+and debit arithmetic below exactly once. Both name a target account rather than the caller, and **the justification for that differs
+between them** *(corrected 2026-08-11; one sentence previously covered both and was false of the
+second)*. `settle_market_score` acts only on already-recorded values, so any caller reaches the
+same result and no caller can choose it — it is permissionless without qualification.
+`settle_epoch` is **not** in that class. It clamps the reward to the budget's unpromised
+remainder **as read at call time** and then resets the epoch unconditionally, so two callers at
+two moments reach two different results and the earlier one is irreversible: re-funding cannot
+reopen a settled epoch. That is the same argument that forbids a permissionless budget sweep
+three paragraphs below, reaching the same harm from the other side — the sweep empties the
+headroom, and this would finalize a participant *into* an emptied one for the price of a
+transaction fee. **`settle_epoch` is therefore permissionless only while it costs the
+participant nothing:** a caller other than the participant MUST be refused when the live
+headroom would clamp the reward below the participant's full entitlement. The participant may
+always settle themselves and accept a partial payout, which keeps the FCFS residual disclosed
+below a choice they make rather than one made for them, and a third party may still crank every
+epoch the clamp does not touch. Refusal is status-quo (G-1): the epoch stays open and the bond
+stays held. Neither is a hook. No hook iterates
+a collection, and [03](03-conditional-ledger.md) §10 keeps its rule that the ledger has no
+hooks. The keeper cranks both ([01](01-system-overview.md) §4.2).
+
+`settle_epoch` MUST be idempotent per participant per epoch, MUST refuse an epoch that has not
+closed, and MUST refuse while that participant still holds an unfolded score entry for the
+epoch — otherwise a partially folded account would settle on part of its own score, which is the
+one ordering in which a losing epoch pays a reward.
+
+**Reward and debit, both computed in USDC.** `settle_epoch(who)` applies the following at epoch
+close, over that participant's folded markets, with `r` the live `rwd.rate`:
+
+```
+net     = epoch_received − epoch_spent               // USDC
+cap     = snapshot_bond / (r × rate_headroom)        // USDC
+scored  = clamp(net, −cap, +cap)                     // USDC
+
+scored > 0  →  accrue  r × scored  USDC-denominated, paid in VIT at claim
+scored < 0  →  debit   r × |scored|  USDC from the snapshot bond
+```
+
+`rate_headroom` is the **top of the `fee.vit_usdc_rate` envelope**, which §9 and
+[13](13-parameters.md) §1 already fix at 10× the kernel reference. It is a restatement of an
+existing bound and not a new constant.
+
+**What the headroom is for, stated precisely, because the obvious reading is the wrong one.**
+Converting at claim time already makes the payout worth the accrued USDC figure at that
+moment's **governed** rate, so a market reprice between accrual and claim is **not** the
+exposure. The exposure is the **governed rate diverging from the market price**, and only in one
+direction: a rate that understates VIT hands the claimant more real value than the debit took.
+The envelope's width bounds that divergence, so sizing the cap against the top of the envelope
+is what keeps reward value at or below debit value. The cost is a conservative cap, and the
+alternative is an invariant a governed price can open.
+
+**Both legs are USDC, and only the payout converts.** `claim_rewards()` converts the accrued
+USDC figure to VIT once, at the live `fee.vit_usdc_rate`, rounding against the claimant, and
+transfers with no vesting. Computing the reward in VIT while debiting in USDC would compare two
+different units and would make the anti-farm invariant depend on the VIT price, which is exactly
+the reflexivity §2.2 and D-18 keep out of every sizing formula.
+
+Four further rules bind the settlement, and each is a G-1 direction rather than a preference.
+
+- When accruals exceed the authorized budget, **the reward is clamped to the budget's unpromised
+  remainder at the rate `r`, and the debit is never reduced by budget pressure** *(amended
+  2026-08-10; this bullet required both legs to scale by one factor, and that rule is neither
+  implementable here nor safe in any approximation of it)*. Two things defeat the original. **The
+  factor does not exist at settlement time:** settlement is pull-based and per-participant, so an
+  epoch's total accrual is unknown until the last participant settles, and there is no moment at
+  which one `k` could be applied to both legs. **Every per-call approximation of `k` is
+  orderable:** a wash operator settles the winning account while the budget is full and takes
+  `k = 1`, waits for other participants to exhaust it, then settles the losing account into a
+  headroom of zero and takes `k = 0`. The pair nets `+r × scored` — the exact failure the scaling
+  rule existed to prevent, reached through the rule itself. The two legs also draw on **different
+  pots**, the reward on the authorized VIT budget and the forfeit on `INSURANCE`, so no
+  conservation identity ever linked them. The clamp keeps this bullet's second protection intact:
+  the rate stays fixed at `r`, so a reward is never more than `r × scored` and no pair can draw
+  budget out of proportion to its own score, which is what a pro-rata reward at no fixed rate
+  would have allowed. It gives up the first: under budget pressure a losing participant pays in
+  full while a winner is clamped. That is the R-7 direction — over-punishing cannot create an
+  unbacked claim, and under-punishing funds the farm.
+
+  **What this bullet does *not* do, stated because an earlier revision of it claimed otherwise.**
+  Nothing here makes a wash pair net non-positive. The clamp can only lower a reward, never raise
+  one, so it cannot open a hole — but the forfeit is sized by the *losing* account's own cap, the
+  operator chooses both bonds, and at unequal bonds the pair nets positive with no budget pressure
+  involved at all. That invariant rests on the rate coupling `rwd.rate ≤ 2 × mkt.fee / 0.99` and
+  on nothing else, as the *rate* paragraph below sets out. Between 2026-08-10 and the correction on
+  the same day this bullet said "no pair in a thin epoch can take the whole budget against a fixed
+  small forfeit", which is the retired earning-cap claim in a fifth location — added, at that, while
+  the four known instances were being corrected.
+
+  **The residual is that a thin budget is first-come-first-served**, so a late settler may receive
+  less than `r × scored`. The ordering is **choosable rather than accidental**: the participant who
+  gains most from settling first is exactly the one who already knows their own score, and a wash
+  operator holding both sides can pre-sign at the epoch boundary and take the whole budget. It
+  stays a fairness cost rather than a solvency one, and it is not free — capturing a budget `B`
+  requires at least `B × rate_headroom` in held bonds and pays the full unscaled debit plus the
+  wash fee spread, so the attacker spends more than they take. Governance's remedy is to authorize
+  a budget that covers the epoch.
+- A debit never drives the bond below zero. It takes the whole bond and suspends the participant
+  until they top up. **Suspension suspends scoring, and the accumulator MUST test the suspension
+  flag rather than infer it from a nonzero bond** *(added 2026-08-10, SQ-1050)*. The two are not
+  the same condition. A top-up clears the flag only at the minimum bond `enroll` already demands,
+  so a **sub-minimum** top-up leaves a suspended participant holding a nonzero bond, and a gate
+  reading the balance alone would resume scoring while the flag says otherwise. The bond must be
+  tested as well, because a voluntary `withdraw_bond` leaves a retained record at zero bond and
+  never sets the flag. The admission condition is therefore **both**: a nonzero bond and no
+  suspension. Stating it as a conjunction rather than deriving one side matters, because the
+  earning cap is *not* a backstop here — a zero cap makes a reward round to zero, which is an
+  arithmetic accident of the floor rather than a refusal, and it is the argument this subsection
+  already retired once.
+- Forfeited USDC goes to `INSURANCE`, the standing destination for USDC taken from an account
+  (§1.2, §1.4).
+- Accrued reward is paid from the authorized budget alone. The program never draws on `MAIN`.
+
+**The rate is `rwd.rate`, and it is derived from the wash arithmetic.** A reward paid only to
+correct traders is farmable, because the market payoff is symmetric and a bonus on the winning
+side alone removes the loss half. Two accounts under one operator supply both sides, and
+`phase3.dep_cap` makes splitting across accounts ordinary Phase-3 behaviour. Writing `f` for the
+per-leg fee rate and taking the worst case, an extreme price where the winning leg's profit
+approaches the whole notional `q`, the pair collects `r × 0.99q` against fees of `2fq`. The
+break-even rate is therefore `2f / 0.99`, which is 60.6 bps at the `mkt.fee` default. The
+adopted 25 bps sits 2.4× inside it *(normative value: [13](13-parameters.md) §1)*.
+
+**The rate is the anti-farm defense, and the amendment screen is what keeps it one**
+*(corrected 2026-08-11)*. The rate defense holds exactly while `99 × rwd.rate ≤ 200 × mkt.fee`,
+which is `r ≤ 2f / 0.99` rearranged into integers. [13](13-parameters.md) §1 rule 7 makes that a
+**coupling screened at the amendment boundary**: neither row may be amended to a pair that
+violates it, so the fee cannot be lowered out from under the rate and the rate cannot be raised
+past the fee. Without the screen a `mkt.fee` amendment to its 5 bps floor takes the break-even to
+about 10 bps and makes the adopted 25 bps farmable on rate alone — a defense retired by a vote
+that never mentions this program.
+
+**The earning cap bounds exposure. It does not deliver the anti-farm invariant, and an earlier
+revision of this subsection said it did.** The cap is proportional to each account's **own**
+snapshot bond, and both accounts in a wash pair belong to one operator, so the operator chooses
+the two bonds independently. Bond the winning leg heavily and the losing leg at the floor, and
+the reward is capped high while the forfeit is capped low. Worked at the adopted values, both
+legs scoring a net 100,000 and `rate_headroom` 10, where the cap is `bond / (r × 10)`: the winner
+bonded 1,000,000 has a cap of 40,000,000, is therefore not capped at all, and takes
+`r × 100,000` = **250**; the loser bonded 1,000 has a cap of 40,000 and forfeits only
+`r × 40,000` = **100**. The pair is 150 ahead, with no budget pressure anywhere. It is still not
+profitable, because 30 bps on each leg of a 100,000 notional is 600 — and that is exactly the
+point: **the fees close this and the cap does not.** At **equal**
+bonds the pair nets exactly zero, which is why the claim survived three revisions of this
+document — every worked example had used one bond for both legs. What the cap does deliver is a
+ceiling on what any single account can extract per epoch, which bounds the blast radius of every
+other failure here. That is worth having and is not the invariant.
+
+**Why accuracy is nonetheless the right target.** Settlement follows the oracle's reading of the
+real outcome rather than the market price. An attacker who moves a decision price holds a
+position that loses at settlement, forfeits bond, and collects nothing. Every other reward shape
+pays the manipulator alongside everyone else, and this one charges them twice. The open interest
+the program attracts is real capital an attacker must overcome, so §5.2's `L̂` rises honestly.
+
+**Failure behaviour (G-1, R-7).** An unset `rwd.rate` fails `enroll` closed with a typed error,
+before any hold. An exhausted budget clamps the reward and leaves the debit whole, so nothing
+strands and the pot never overdraws. A debit above the bond takes the whole bond and suspends. An
+arithmetic edge is a no-op. A fill in a market beyond the per-account score-entry bound **records
+no score and never rejects the trade**, because refusing a lawful trade to protect a rewards bound
+is the wrong direction under G-1.
+
+**An unset or zero `rwd.rate` also discharges every outstanding debit, and that is a real cost of
+the G-1 direction rather than a side effect worth leaving unsaid** *(added 2026-08-10)*. A zero
+rate gives a zero earning cap, so `settle_epoch` closes at `Neutral`: a loss already folded into
+the epoch accumulator is forgiven in full and the bond is released untouched. The alternative is
+worse — refusing would hold a participant's bond behind a governed row they cannot move, which is
+the one thing the *bond MUST NOT be locked forever* rule below forbids — so the behaviour stands.
+But note the direction. [13](13-parameters.md) §1 calls a zero rate "off, the safe direction",
+and that is true only of *new* scoring; for scores already folded it is the under-punishing
+direction this subsection names as the one that funds the farm. Reaching zero by amendment takes
+roughly 22 steps at the row's one-doubling max-Δ and one-epoch cooldown, so the reachable one-shot
+path is an unreadable row, which the provider maps to "unset".
+
+**A market that never settles MUST NOT lock a bond forever.** The escape is an **absolute
+block-height timeout measured from the score entry's creation**, independent of the market's
+state. On expiry the entry drops at zero and stops blocking withdrawal. Anchoring the escape to
+`ledger.archive` instead would be circular: [03](03-conditional-ledger.md) §5.4 admits the
+archive sweep only once the vault is terminal, and a market that never settles never becomes
+terminal, so the escape could never fire in the one case it exists for. Dropping at zero is safe
+for two reasons. The timeout is sized above the longest lawful settlement horizon, so no
+settling market can reach it. And settlement is oracle-driven, so no participant can push a
+market past it.
+
+**Bounds.** Four bounds constrain the program, and [13](13-parameters.md) §4 is the home of
+each value: the lifetime count of budget authorizations, the participant set, the per-account
+set of unfolded score entries, and the absolute lifetime of one score entry. Each value is
+written into §4 with the call that enforces it, so the [15](15-invariants-and-testing.md) §4.6
+coverage registry can bind it to a real dispatch-past-limit test rather than to an exemption.
+The sizing rules are fixed here, and they are what a §4 row MUST follow.
+
+- The **authorization count** reuses the community schedule's lifetime bound. Completed
+  authorizations do not replenish it.
+- The **participant set** reuses the same sibling bound, for the same reason: it caps a
+  permissionless roster against one bounded allocation pot.
+- The **per-account score-entry bound is `MaxLiveMarkets`**, because a score row tracks an open
+  book. `MaxPositionsPerAccount` is the wrong anchor and MUST NOT be used. It counts
+  simultaneous nonzero ledger entries, while a score row lives from the first fill until the
+  fold, so a trader who sells out of a market frees the ledger slot and keeps the score row.
+  Sequential trading across the settlement lag would then hit a bound derived from a quantity it
+  does not measure. `MaxLiveExternalMarkets` is **not** added to the anchor, and the reason is the
+  exclusion above rather than an omission: an external fill records no score, so no score row can
+  exist for one. The anchor is therefore exact, not merely conservative.
+- The **score-entry timeout** sits above the longest lawful settlement horizon, per the escape
+  above.
+
+**Only primary books are scored, and the hosted service is excluded on purpose (added 2026-08-10,
+SQ-1049).** A fill in a `BookKind::External` book records nothing. The exclusion is decided where
+the book is already loaded, so it costs no storage read, and it is not a sizing choice.
+[16](16-hosted-question-service.md) §6.5 states that a client controlling a majority of its own
+named attestors can move the settled value, declines to repair it, and bounds what that costs:
+*"the blast radius is that question's own escrow, minus forfeited bonds, with Bleavit's ledger
+instance and every Bleavit market untouched."* Paying an accuracy reward on such a book would
+break that bound, because the same client could convert an accepted, self-funded residual into a
+claim on the `incentiv` pot — risk-free, since neither defense reaches it. The bond does not,
+because a client who sets the outcome never loses. The rate coupling does not, because there is no
+offsetting loser to pay the other half. Two further reasons agree on their own. The pot buys
+Bleavit's **own** decision liquidity, which is the `L̂` argument below, and an external book raises
+no `L̂` while its client already pays `svc.fee_bps` for the venue. And rule 3 has no source for
+`settled_value` on an external book, which settles through the separate service-ledger instance
+this subsection never reads. Should the hosted service ever want a trading incentive, it is the
+client's fee that must fund it, not this pot. [14](14-threat-model.md) carries this as **TH-79**,
+separately from TH-78's wash farm, because the two share no defense.
+
+**Scope.** Audit scope A is not opened. The conditional ledger is not touched, and no hook is
+added where [03](03-conditional-ledger.md) §10 says there is none.
+[04](04-markets-and-pricing.md)'s book reports each fill through a loosely-coupled trait, so the
+book never depends on the reward program. `pallet-futarchy-treasury` keeps custody authority
+over the incentive pot, as it does for the community pot.
+
+**Three accepted costs, stated rather than discovered later.** Every trade pays one extra
+storage read, including trades by accounts that never enroll, because the book must check
+enrollment before it can skip the accumulator, and that read enters the trade weight. Off-book
+inventory earns nothing, per the `book_acquired` rule above. And the earning cap is conservative
+by the width of the rate envelope, so a participant at the reference rate earns on less score
+than their bond would otherwise support.
 
 ---
 

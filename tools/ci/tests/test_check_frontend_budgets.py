@@ -338,24 +338,35 @@ class FrontendBudgets(unittest.TestCase):
 
     def test_a_drifted_measured_blob_size_fails(self) -> None:
         """§9.3's blob figure is *measured*, and §9.4's metadata row is derived from it."""
+        # 0.15 -> 0.16 on 2026-08-11, when the chain feed was re-recorded for the two new
+        # pallet error variants: the blob gzips to 155,548 B, which is 0.16 at the two
+        # decimals §9.3 publishes to. This is the FIRST time the rounded figure has moved —
+        # the four prior raw-size steps below all stayed at 0.15 — so §9.3's own claim that
+        # it had never moved was corrected in the same commit.
         self.assert_mutation_caught(
             ARTIFACT_GATE,
+            "const MEASURED_BLOB_GZ_MB = 0.16;",
             "const MEASURED_BLOB_GZ_MB = 0.15;",
-            "const MEASURED_BLOB_GZ_MB = 0.14;",
-            "publishes measured blob size as 0.15",
+            "publishes measured blob size as 0.16",
         )
 
     def test_a_drifted_raw_blob_size_fails(self) -> None:
         # 470_546 -> 472_998 at contract v29: `bond_quote` and `treasury_streams` and their
         # view types enter the metadata, so the committed blob is larger. 472_998 -> 473_749
-        # at v30, which adds four guardian allowance metadata constants and their docs. The
-        # anchor moves with the measurement by design — this test proves the gate notices a
-        # drift, and a stale anchor would make it silently unable to apply its own mutation.
+        # at v30, which adds four guardian allowance metadata constants and their docs.
+        # 473_749 -> 489_180 on 2026-08-11, when the 08 §2.6 trading accuracy reward pallet
+        # took slot 68 — a whole pallet, so this is the largest step the anchor has taken.
+        # 489_180 -> 492_363 the same day, re-recording the feed for that pallet's two new
+        # error variants, which is the step that finally moved the *rounded* gz figure.
+        # The anchor moves with the measurement by design — this test proves the gate notices
+        # a drift, and a stale anchor would make it silently unable to apply its own mutation.
+        # It is also the thing that caught the incomplete edit: updating the gate constant and
+        # doc 10 §9.3 without this line left `tooling-suites` red, which is the pair working.
         self.assert_mutation_caught(
             ARTIFACT_GATE,
-            "const MEASURED_BLOB_RAW_BYTES = 473_749;",
+            "const MEASURED_BLOB_RAW_BYTES = 492_363;",
             "const MEASURED_BLOB_RAW_BYTES = 500_000;",
-            "publishes measured blob raw size as 473749",
+            "publishes measured blob raw size as 492363",
         )
 
     def test_moving_the_published_metadata_cell_without_the_gate_fails(self) -> None:

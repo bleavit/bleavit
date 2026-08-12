@@ -45,7 +45,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Install native build dependencies
         run: sudo apt-get update && sudo apt-get install -y libclang-dev protobuf-compiler
-      - name: Rust workspace, runtime wasm, and try-runtime gates
+      - name: Rust workspace, runtime wasm, try-runtime, and runtime-benchmarks-test gates
         run: tools/ci/rust-workspace-gates.sh
 
   fuzz:
@@ -75,7 +75,7 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: '3.12'
-      - name: Check lockfiles, RustSec advisories, GHSA-only advisories, and npm advisories
+      - name: Check lockfiles, RustSec, GHSA-only, npm, and unsound advisories
         run: tools/ci/supply-chain-gates.sh
 
   reference-model:
@@ -253,7 +253,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [ledger, market, constitution, welfare, containment]
+        suite: [ledger, market, constitution, welfare, rewards, containment]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.89.0

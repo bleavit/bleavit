@@ -654,6 +654,12 @@ class RewriteRepoLinksTests(unittest.TestCase):
             "[02](../../docs/architecture/02-integration-contract.md#section)", rewritten
         )
 
+    def test_a_rebased_directory_link_keeps_its_trailing_slash(self):
+        text = "see [designs](docs/architecture/) for them"
+        rewritten = rewrite_repo_links(text, self.root, self.emit_dir)
+        self.assertIn("[designs](../../docs/architecture/)", rewritten)
+        self.assertEqual(normalize_prose(text), normalize_prose(rewritten))
+
     def test_a_target_resolving_from_neither_base_is_left_untouched(self):
         text = "see [x](docs/architecture/does-not-exist.md) for it"
         self.assertEqual(rewrite_repo_links(text, self.root, self.emit_dir), text)

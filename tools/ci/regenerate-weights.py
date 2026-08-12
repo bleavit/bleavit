@@ -141,10 +141,20 @@ class Drift:
 
     function: str
     quantity: str
-    committed: int
-    fresh: int
+    #: Numeric for every per-function dimension, and a **string** for the one
+    #: `<header> committed_fidelity` drift the comparator raises (`"50x20"`).
+    committed: int | str
+    fresh: int | str
 
     def describe(self) -> str:
+        # The header drift is the whole reason for the type union, and it used
+        # to make this method raise `TypeError` on string operands — so the
+        # tool crashed with a traceback on the exact hard failure it exists to
+        # report (a committed artifact whose declared fidelity is not the
+        # canonical one). A gate that aborts instead of reporting is a gate
+        # whose finding never reaches anybody. Found by TR7.
+        if not isinstance(self.committed, int) or not isinstance(self.fresh, int):
+            return f"{self.function}: {self.quantity} {self.committed} -> {self.fresh}"
         delta = ""
         if self.committed:
             delta = f" ({(self.fresh - self.committed) / self.committed * 100:+.1f}%)"

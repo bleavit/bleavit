@@ -322,12 +322,16 @@ only after that release-blocking job is green. Its summary discloses the exact
 annotated RustSec ignores and counts allowed informational warnings for **every**
 committed cargo workspace — the set declared in `tools/ci/audited-workspaces.toml`,
 which is checked against the repository so a new lockfile cannot go unaudited. The
-`bleavit.supply-chain.v4` shape adds the npm leg's disclosure: `waived_npm` lists
-each accepted npm advisory with its `reaches_bundle` verdict, and `npm_lockfiles`
-names every npm lockfile the run scanned. The assembler embeds the summary under
+`bleavit.supply-chain.v5` shape adds two more disclosures. `waived_npm` lists each
+accepted npm advisory with its `reaches_bundle` verdict, and `npm_lockfiles` names
+every npm lockfile the run scanned. `waived_unsound` lists each accepted `unsound`
+RustSec advisory with the workspace it was found in and its `exposure` — the
+advisories cargo-audit prints and passes, which the GitHub Advisory Database grades
+as vulnerabilities (15 §4.5). The assembler embeds the summary under
 `supply_chain.summary` and rejects one whose workspace set or npm lockfile set does
 not match that manifest, whose top-level ignore list omits an ignore some workspace
-applied, or which claims a waiver for a package that reaches the bundle.
+applied, which claims a waiver for a package that reaches the bundle, or which
+claims a `triggerable` unsound exposure — none of the three is waivable.
 
 Offline tooling checks are:
 

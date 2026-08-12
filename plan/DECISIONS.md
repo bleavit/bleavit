@@ -266,4 +266,19 @@
 | 2026-08-09 | [12 §1.4 gate 4 publishes the release-signature…](decisions/2026/08/2026-08-09.md#12-14-gate-4-publishes-the-release-signature) | R-1 (the user owns both sides… |
 | 2026-08-09 | [12 §1.3 publishes a command that runs, and §2.1 states…](decisions/2026/08/2026-08-09.md#12-13-publishes-a-command-that-runs-and-21-states) | R-1 (the user owns both sides… |
 | 2026-08-09 | [12 §1.5 says which address `diff-scope` takes, and §1.3…](decisions/2026/08/2026-08-09.md#12-15-says-which-address-diff-scope-takes-and-13) | R-1 (the user owns both sides… |
+| 2026-08-10 | [The trading-reward sovereign's derivation is frozen,…](decisions/2026/08/2026-08-10.md#the-trading-reward-sovereigns-derivation-is-frozen) | Session, under R-1 (spec ruli… |
+| 2026-08-10 | [`settled_value` is a fraction of par, not a whole…](decisions/2026/08/2026-08-10.md#settled_value-is-a-fraction-of-par-not-a-whole) | Session, under R-1 (spec ruli… |
+| 2026-08-10 | [The return of unspent reward budget is not…](decisions/2026/08/2026-08-10.md#the-return-of-unspent-reward-budget-is-not) | Session, under R-1 (spec ruli… |
+| 2026-08-10 | [08 §2.6's "both legs scale by the same factor" is…](decisions/2026/08/2026-08-10.md#08-26s-both-legs-scale-by-the-same-factor-is) | Session, under R-1 (spec ruli… |
+| 2026-08-10 | [The trading accuracy score would have confiscated the…](decisions/2026/08/2026-08-10.md#the-trading-accuracy-score-would-have-confiscated-the) | Session, under R-1 (spec ruli… |
+| 2026-08-10 | [The trading accuracy program excludes the hosted…](decisions/2026/08/2026-08-10.md#the-trading-accuracy-program-excludes-the-hosted) | Session, under R-1 (values an… |
+| 2026-08-10 | [The trading accuracy reward program enters the…](decisions/2026/08/2026-08-10.md#the-trading-accuracy-reward-program-enters-the) | Owner decisions of 2026-08-10… |
+| 2026-08-10 | [07 §9 gains a normative *Commitments* block, because…](decisions/2026/08/2026-08-10.md#07-9-gains-a-normative-commitments-block-because) | This session under R-1 (the u… |
+| 2026-08-10 | [Three implementation rulings from the whole-repository…](decisions/2026/08/2026-08-10.md#three-implementation-rulings-from-the-whole-repository) | This session under R-1 (imple… |
+| 2026-08-11 | [10 §9.3's measured blob figure moves for the first…](decisions/2026/08/2026-08-11.md#10-93s-measured-blob-figure-moves-for-the-first) | Session, under R-1 (spec ruli… |
+| 2026-08-11 | [The Phase 3–4 incentive allocation is one undivided…](decisions/2026/08/2026-08-11.md#the-phase-34-incentive-allocation-is-one-undivided) | **The owner, 2026-08-11**, an… |
+| 2026-08-11 | [The exhaustive Rust gate is a CI artifact, not a local…](decisions/2026/08/2026-08-11.md#the-exhaustive-rust-gate-is-a-ci-artifact-not-a-local) | Session, under R-3. No spec t… |
+| 2026-08-11 | [The 2026-08-02 weight-noise rule now has a per-function…](decisions/2026/08/2026-08-11.md#the-2026-08-02-weight-noise-rule-now-has-a-per-function) | Session, applying the 2026-08… |
+| 2026-08-11 | [10 §9.3's metadata measurement is re-taken for the…](decisions/2026/08/2026-08-11.md#10-93s-metadata-measurement-is-re-taken-for-the) | Session, under R-1 (spec ruli… |
+| 2026-08-11 | [15 §4.5 gates `unsound` RustSec advisories instead of…](decisions/2026/08/2026-08-11.md#15-45-gates-unsound-rustsec-advisories-instead-of) | R-1 (spec rulings delegated 2… |
 

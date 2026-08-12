@@ -147,6 +147,18 @@ fn derive_resource_inner(
             // and make the second one fail after adoption.
             singleton_resource(0x0C)
         }
+        // 05 §1.4 family `0x0D`: singleton, for the reason `0x0C` is one.
+        // `fund_trading_rewards` mutates the single remaining-allocation and
+        // lifetime-count pool of the genesis `incentiv` allocation, whatever
+        // amount it names, so a key derived from the amount would let two
+        // PARAM proposals pass T5 concurrently and make the second fail only
+        // after adoption. Without this arm the leaf is `Unclassifiable` and
+        // T4 screening refunds or slashes every lawful funding proposal —
+        // the second half of the same unreachability the capability arm in
+        // `configs.rs` carried (found in TR6 review).
+        RuntimeCall::FutarchyTreasury(pallet_futarchy_treasury::Call::fund_trading_rewards {
+            ..
+        }) => singleton_resource(0x0D),
         RuntimeCall::FutarchyTreasury(pallet_futarchy_treasury::Call::cancel_stream { id }) => {
             keyed_resource(0x08, &id.encode())
         }
@@ -753,7 +765,12 @@ fn project_inner(call: &RuntimeCall, budget: &mut ProjectionBudget) -> FilterCal
             | pallet_futarchy_treasury::Call::sweep_insurance { .. } => {
                 leaf(CallDomain::Treasury)
             }
-            pallet_futarchy_treasury::Call::create_community_schedule { .. } => {
+            // 08 §2.1/§2.6; 06 §3.2's authority-matrix row already names this
+            // call under `FutarchyParam` alongside `create_community_schedule`
+            // — the identical bounded-genesis-pot-leaf exception, not a
+            // treasury-outflow capability (06 §3.2).
+            pallet_futarchy_treasury::Call::create_community_schedule { .. }
+            | pallet_futarchy_treasury::Call::fund_trading_rewards { .. } => {
                 leaf(CallDomain::Param)
             }
             pallet_futarchy_treasury::Call::claim_stream { .. }
@@ -860,6 +877,34 @@ fn project_inner(call: &RuntimeCall, budget: &mut ProjectionBudget) -> FilterCal
             pallet_execution_guard::Call::commit_recovery_image { .. } => leaf(CallDomain::Code),
             pallet_execution_guard::Call::ratify { .. } => leaf(CallDomain::ConstitutionalValues),
             pallet_execution_guard::Call::__Ignore(_, _) => denied(),
+        },
+        // 06 §3 authority matrix, 08 §2.6: the whole trading-accuracy program
+        // is Signed and permissionless, and no call in it is privileged.
+        //
+        // The four participant calls act on the caller's own record
+        // (`ensure_signed`, then `Participants::get(&who)`), so nobody can
+        // steer another account's bond. The two settlement cranks name a
+        // target rather than the caller and are Public for the same reason
+        // `market.reap` and `treasury.reconcile_insurance` are: they act only
+        // on values already recorded, every caller reaches the same result,
+        // and no caller can choose it. The keeper cranks them (01 §4.2).
+        //
+        // Nothing here needs a `derive_resource_inner` arm: that function
+        // screens *proposal payloads* (05 §1.4 T4), and a Signed extrinsic is
+        // never one — the same reason `market.buy` has no arm either. Nothing
+        // needs a `RuntimeCapabilities::leaf_enabled` row either, because that
+        // function's generic fallthrough admits `CallDomain::Public` and
+        // refuses every privileged domain. Both axes are asserted in
+        // `tests_trading_rewards.rs` rather than argued here, since TR6 lost a
+        // milestone to exactly this pair being checked on one axis only.
+        RuntimeCall::TradingRewards(call) => match call {
+            pallet_trading_rewards::Call::enroll { .. }
+            | pallet_trading_rewards::Call::top_up_bond { .. }
+            | pallet_trading_rewards::Call::withdraw_bond { .. }
+            | pallet_trading_rewards::Call::claim_rewards { .. }
+            | pallet_trading_rewards::Call::settle_market_score { .. }
+            | pallet_trading_rewards::Call::settle_epoch { .. } => leaf(CallDomain::Public),
+            pallet_trading_rewards::Call::__Ignore(_, _) => denied(),
         },
     }
 }
