@@ -9,7 +9,7 @@ One directory per runtime `spec_version`, holding what
 |---|---|
 | `metadata.scale` | Raw SCALE runtime metadata, **v15** (see below) |
 | `runtime-info.json` | `bleavit.runtime-info.v1` — spec name/version, contract version, pallet list, metadata hash, and the `:code` ↔ wasm binding |
-| `build-info.json` | The immutable reproducible-build record for the runtime this metadata came from. Existing v2 records remain historical facts; newly generated feeds use `bleavit.runtime-build.v3` and bind the reviewed OCI manifest, image configuration and platform |
+| `build-info.json` | The immutable reproducible-build record for the runtime this metadata came from. Historical v2 records in Git history remain facts; current generated feeds use `bleavit.runtime-build.v3` and bind the reviewed OCI manifest, image configuration and platform |
 
 ## Two directories, because two runtimes are live-capable at once
 
@@ -61,15 +61,19 @@ implement v16 yet. Recorded in PLAN.md · V-75, not blocking — v15 carries eve
 The same scripts a tag release runs, so this feed and a published one cannot diverge:
 
 ```sh
-tools/deploy/generate-chain-specs.sh                  # RUNTIME_PROFILE=bootstrap
-cargo build -p bleavit-node --release --locked
-
 # Build the primary and paired recovery together inside the reviewed,
 # digest-pinned OCI environment. The inner build-runtime.sh worker refuses
 # direct host execution.
 tools/release/build-runtime-oci.sh release-work/runtime bootstrap
 
-# Primary metadata.
+# Carry the exact OCI primary into the canonical specs; release mode does not
+# rebuild or substitute a host runtime.
+tools/deploy/generate-chain-specs.sh \
+  --runtime-wasm release-work/runtime/runtime.wasm
+cargo build -p bleavit-node --release --locked
+
+# Primary metadata boots the canonical spec and proves its `:code` equals the
+# supplied OCI Wasm.
 python3 tools/release/extract-metadata.py \
   --node "${CARGO_TARGET_DIR:-target}/release/bleavit-node" \
   --wasm release-work/runtime/runtime.wasm \
@@ -89,10 +93,10 @@ then copy `metadata.scale`, `runtime-info.json` and `build-info.json` into the
 `pnpm -C app run descriptors:generate`. `tools/release/extract-metadata.py` needs
 `websockets==15.0.1`.
 
-The committed spec-version 2/3 `build-info.json` files predate the OCI and RFC-78
-controls and therefore correctly remain schema v2. Relabelling those bytes as v3
-would fabricate provenance; the next genuine regeneration replaces them with the
-v3 records emitted by the wrapper.
+The committed spec-version 2/3 `build-info.json` files are genuine schema-v3
+records emitted by the OCI wrapper. They bind the exact source commit, build
+image digest/config/platform, normalized environment, runtime profile, Wasm and
+RFC-78 inputs; never hand-edit or relabel those provenance records.
 
 The chainHead transcripts in `../chainhead/` are recorded from the same pair — see that
 directory's README.

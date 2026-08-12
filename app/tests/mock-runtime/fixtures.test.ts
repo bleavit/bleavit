@@ -187,12 +187,12 @@ test('FE-R1 bounds are exactly 02 §9\'s frozen values', () => {
     'constant.epoch.max_intake_queue': 64n,            // IntakeQueue
     'constant.ledger.max_positions_per_account': 64n,  // MaxPositionsPerAccount
     'constant.identity.ss58_prefix': 7777n,
-    'constant.identity.contract_version': 30n,         // INTEGRATION_CONTRACT_VERSION (v30: the guardian allowance limits and the two playbook reads)
+    'constant.identity.contract_version': 31n,         // INTEGRATION_CONTRACT_VERSION (v31: bounded-capacity additions)
     'constant.market.max_live_markets': 196n,
     'constant.market.max_stored_markets': 2240n,
     'constant.market.max_live_external_markets': 128n,
-    'constant.market.max_stored_external_markets': 128n,
-    'constant.market.max_all_stored_markets': 2368n,
+    'constant.market.max_stored_external_markets': 15_744n,
+    'constant.market.max_all_stored_markets': 17_984n,
     'constant.epoch.books_per_proposal': 6n,
     'constant.ledger.service_id_base': 1n << 63n,      // the primary/service boundary
   };

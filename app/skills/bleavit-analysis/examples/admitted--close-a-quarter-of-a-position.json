@@ -3,7 +3,7 @@
   "binding": {
     "genesisHash": "0x91b171bb158e2d3848fa23a9f1c25182fb8e20313b2c1eb49219da7a70ce90c3",
     "specVersion": 2,
-    "contractVersion": 30
+    "contractVersion": 31
   },
   "action": {
     "kind": "close_position",
@@ -13,5 +13,5 @@
   "limits": {
     "minProceeds": "1000000"
   },
-  "digest": "db8292a3b7c5b14f0f7a921b6bbde0939648d79900d852814bb1957df3281084"
+  "digest": "6ba87ccd932fa693203c8baa3280db687e550888df3cc1240abcbfc4e2e11757"
 }

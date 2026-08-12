@@ -15,7 +15,7 @@ Legend: ⬜ pending · 🔨 active · ✅ done · ⛔ blocked
 
 > **ACTIVE: 2026-08-13 — remediate the whole-repository security review in
 > draft PR #304.** The immutable review checkpoint is published at commit
-> `3b70e09e`; all 15 findings have implementation patches in the working tree.
+> `3b70e09e`; all 15 findings have implementation fixes in the local commit series.
 > A final independent pass also closed two late source blockers: the signing gate
 > now has no caller-controlled evidence port and stays fail-closed until its closed
 > evaluator exists, while the monitor consumes the real app release schema and
@@ -24,9 +24,11 @@ Legend: ⬜ pending · 🔨 active · ✅ done · ⛔ blocked
 > Wasm into canonical and drill specs; both generators now carry the exact OCI
 > primary end to end. Its closure review also made the N10 client-para spec an
 > explicit release prerequisite while keeping that separate runtime out of the
-> primary-Wasm binding. Remaining work is the focused source gates, a new clean
-> source commit, genuine same-SHA OCI runtime/feed regeneration, artifact gates,
-> and the remediation push.
+> primary-Wasm binding. The source closure is committed at `a4983e85`; the
+> digest-pinned primary/recovery pair, v31 chain feed, chainHead fixtures,
+> descriptors and downstream generated consumers have been regenerated from that
+> exact commit, with zero assembly corruption and their focused gates green.
+> Remaining work is the generated-artifact/status commit, push, and PR CI handoff.
 
 > **PARKED: 2026-08-09 — Track F's code is complete; four milestones wait on
 > external inputs.** F1 needs the user's SQ-940 ruling plus a device lab/live

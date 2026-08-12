@@ -3,7 +3,7 @@
   "binding": {
     "genesisHash": "0x91b171bb158e2d3848fa23a9f1c25182fb8e20313b2c1eb49219da7a70ce90c3",
     "specVersion": 2,
-    "contractVersion": 30
+    "contractVersion": 31
   },
   "action": {
     "kind": "prepare_pass_position",
@@ -13,5 +13,5 @@
   "limits": {
     "maxCost": "26000000"
   },
-  "digest": "3515a03b54f00e42e60c291fa1af894fdbdd9a183e7801059fd02d6b9b2a6209"
+  "digest": "a011ef0a6ceb33f7c1bc4ad391bdf90d5f27b6bc0312f3ad8dea7f4d73e401f5"
 }

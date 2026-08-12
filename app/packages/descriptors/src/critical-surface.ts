@@ -1,5 +1,5 @@
 /**
- * GENERATED — do not edit. Source: `tools/release/surface-manifest.json` (contract v30).
+ * GENERATED — do not edit. Source: `tools/release/surface-manifest.json` (contract v31).
  * Regenerate: `pnpm -C app run surface:generate`; verified by `pnpm -C app run surface:check`.
  *
  * 10 §5.2's `CRITICAL_SURFACE`: every runtime API, storage item, constant and event the
@@ -29,7 +29,7 @@ export interface CriticalSurfaceEntry {
   readonly citation: string;
 }
 
-export const INTEGRATION_CONTRACT_VERSION = 30;
+export const INTEGRATION_CONTRACT_VERSION = 31;
 
 /** Manifest entries with no metadata surface to probe (raw fixed-layout key, chain properties). */
 export const UNPROBED_MANIFEST_ENTRIES = 2;
