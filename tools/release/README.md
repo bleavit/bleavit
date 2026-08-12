@@ -119,8 +119,9 @@ audited upstream tag: bullseye-1.88.0-2025-06-27-v202511141243
 
 The tag is an audit label only; no build resolves it. `build-runtime-oci.sh`
 pulls the manifest digest, verifies Docker's local image config ID, mounts the
-source read-only, drops every capability, enables no-new-privileges, and builds
-the primary and paired recovery profile in that one container. The worker
+source read-only, drops every capability, enables no-new-privileges, disables
+rustup self-update (the image's rustup binary is immutable), and builds the
+primary and paired recovery profile in that one container. The worker
 `build-runtime.sh` refuses direct host execution or an OCI identity that differs
 from the reviewed manifest.
 

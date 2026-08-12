@@ -78,7 +78,11 @@ docker run --rm --pull=never --platform "$platform" --read-only \
   --env BLEAVIT_RECOVERY_PROFILE="$recovery_profile" \
   --env BLEAVIT_RUST_TOOLCHAIN="$toolchain" \
   "$image" bash -ceu '
-    rustup toolchain install "$BLEAVIT_RUST_TOOLCHAIN" --profile minimal \
+    # The image is deliberately read-only.  Without --no-self-update rustup
+    # installs the requested toolchain and then probes beside its own binary at
+    # /usr/local/cargo/bin/updtest*, failing after a successful install because
+    # that image path is immutable.
+    rustup toolchain install "$BLEAVIT_RUST_TOOLCHAIN" --profile minimal --no-self-update \
       --component rustfmt --component clippy --component rust-analyzer \
       --target wasm32-unknown-unknown --target wasm32v1-none
     /src/tools/release/build-runtime.sh /out "$BLEAVIT_PRIMARY_PROFILE"

@@ -51,6 +51,7 @@ class RuntimeBuildOciTests(unittest.TestCase):
             'dst=/src,readonly',
             'BLEAVIT_RUNTIME_BUILD_IMAGE="$image"',
             '--env SOURCE_DATE_EPOCH="$source_date_epoch"',
+            "--no-self-update",
             '/src/tools/release/build-runtime.sh /out/recovery',
         ):
             self.assertIn(required, source)
