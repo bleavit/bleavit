@@ -948,6 +948,25 @@ def _day_and_span(cell: str) -> tuple[str, str | None]:
     return day, (text if text != day else None)
 
 
+def _independent_day(cell: str) -> str:
+    """The day a record files under, computed WITHOUT calling `_day_and_span`.
+
+    `_verify_day_placement_and_order` (fix round 1, finding 3) exists to
+    catch a defect in `_day_and_span` itself — e.g. a mutation that misfiles
+    every 2026-07-18 row under 2026-07-17. A derivation check built by
+    calling `_day_and_span` again would share the same defect and pass
+    silently, exactly as `migrate_day_records`'s own round-trip self-check
+    already does (it compares against `grouped`, which `_day_and_span` built
+    in the first place — self-consistent, not correct). This duplicates
+    only the minimal regex match, deliberately, so the two paths cannot fail
+    together.
+    """
+    match = _DAY_RE.match(cell.strip("*_` "))
+    if match is None:
+        raise ValueError(f"record date cell does not begin with a date: {cell[:40]!r}")
+    return match.group(1)
+
+
 # The cell's leading **bold** run becomes the record heading; everything
 # after it (with one separating space, if any) becomes the body. A cell
 # with no leading bold run — genuinely common: 5 of 262 Decision log rows, 2
@@ -1147,6 +1166,64 @@ def _iter_change_bullets(section: str):
         yield date_cell, full_text.rstrip("\n")
 
 
+def _source_day_and_heading_rows(section: str, kind: str, columns: list[str]) -> list[tuple[str, str]]:
+    """(date_cell, heading) for every record, in source order — the same
+    shape `migrate_day_records` folds into `grouped`, but read fresh from
+    `section` every time it is called rather than reused from any prior
+    call's state."""
+    if kind == "changes":
+        return [(date_cell, _split_lead(full_text)[0]) for date_cell, full_text in _iter_change_bullets(section)]
+    if kind == "log":
+        return [(date_cell, milestone) for date_cell, milestone, _done, _next in _iter_table_day_rows(section, columns)]
+    if kind in ("decisions", "audits"):
+        return [
+            (date_cell, _split_lead(lead_cell)[0])
+            for date_cell, lead_cell, _field1, _field2 in _iter_table_day_rows(section, columns)
+        ]
+    raise ValueError(f"unknown day-record kind {kind!r}")
+
+
+def _verify_day_placement_and_order(section: str, kind: str, out: Path, columns: list[str]) -> None:
+    """Prove, against the SOURCE rows rather than against `grouped`, that
+
+    1. every record was written into the day file its own date cell
+       designates (via `_independent_day`, never `_day_and_span` — see that
+       function's docstring for why the two must not share a bug), and
+    2. the records within each file appear in the same order the source
+       rows for that day appeared in `section`.
+
+    `migrate_day_records`'s round-trip self-check compares what was written
+    against `rewritten`/`grouped` — the very structure that chose the file
+    and the order — so it is self-consistent by construction and cannot
+    catch either kind of misfiling (fix round 1, finding 3, demonstrated by
+    mutation: patching `_day_and_span` to misfile every 2026-07-18 log row
+    under 2026-07-17, and reversing the row-iteration order before
+    grouping, both produced `0 cells missing`, 0 parse errors, silently).
+    This function re-derives the expected shape from `section` independently
+    of anything `migrate_day_records` computed, and raises loudly on the
+    first disagreement — never silently.
+    """
+    expected_by_day: dict[str, list[str]] = {}
+    for date_cell, heading in _source_day_and_heading_rows(section, kind, columns):
+        day = _independent_day(date_cell)
+        heading_rw = rewrite_repo_links(heading, out, _day_path(out, kind, day).parent)
+        expected_by_day.setdefault(day, []).append(heading_rw)
+
+    for day, expected_headings in expected_by_day.items():
+        path = _day_path(out, kind, day)
+        if not path.exists():
+            raise ValueError(
+                f"derivation check: source rows designate day {day} ({expected_headings!r}) "
+                f"but {path} was never written"
+            )
+        actual_headings = [record.heading for record in _parse_day_file(path, kind)]
+        if actual_headings != expected_headings:
+            raise ValueError(
+                f"derivation check failed for {path}: source rows designate heading order "
+                f"{expected_headings!r}, but the file holds {actual_headings!r}"
+            )
+
+
 def migrate_day_records(section: str, kind: str, out: Path, columns: list[str]) -> list[Path]:
     """Write plan/<kind>/YYYY/MM/YYYY-MM-DD.md for every record in `section`.
 
@@ -1223,6 +1300,8 @@ def migrate_day_records(section: str, kind: str, out: Path, columns: list[str]) 
 
         written.append(path)
         print(f"wrote {path.relative_to(out)}", file=sys.stderr)
+
+    _verify_day_placement_and_order(section, kind, out, columns)
 
     return written
 

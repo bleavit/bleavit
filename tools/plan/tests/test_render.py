@@ -170,7 +170,9 @@ class RenderDecisionsTests(unittest.TestCase):
         self.assertIn("decisions/2026/08/2026-08-09.md#", text)
         self.assertIn("user", text)
 
-    def test_row_stays_under_200_characters_for_a_long_no_bold_amendment(self):
+    def test_the_link_label_stays_truncated_for_a_long_no_bold_amendment(self):
+        """The label (visible text) is still bounded; only the anchor is
+        full-length now (fix round 1, finding 1)."""
         migrate_day_records(
             DECISION_SECTION_LONG,
             "decisions",
@@ -180,12 +182,49 @@ class RenderDecisionsTests(unittest.TestCase):
         text, errors = render_decisions(self.root)
         self.assertEqual(errors, [])
         row = next(line for line in text.split("\n") if line.startswith("| 2026-08-10 "))
-        self.assertLess(len(row), 200)
+        label = row.split("[", 1)[1].split("]", 1)[0]
+        self.assertLess(len(label), 70)
 
-    def test_anchor_is_a_bounded_lowercase_hyphenated_slug(self):
+    def test_anchor_matches_a_real_heading_in_the_target_file(self):
+        """The core of finding 1: a full-heading anchor must resolve, even
+        for a long no-bold-lead Amendment cell that a truncated-prefix
+        anchor (the pre-fix behaviour) could never match."""
+        migrate_day_records(
+            DECISION_SECTION_LONG,
+            "decisions",
+            self.root,
+            ["Date", "Amendment", "Authorized by", "Docs touched"],
+        )
+        text, errors = render_decisions(self.root)
+        self.assertEqual(errors, [])
+        row = next(line for line in text.split("\n") if line.startswith("| 2026-08-10 "))
+        target = row.split("(", 1)[1].split(")", 1)[0]
+        path_part, _, fragment = target.partition("#")
+        day_file = (self.root / "plan" / path_part).read_text(encoding="utf-8")
+        headings = [line[len("## ") :] for line in day_file.split("\n") if line.startswith("## ")]
+        self.assertIn(fragment, [_anchor(h) for h in headings])
+
+    def test_anchor_is_the_full_slug_of_the_heading_not_a_truncated_prefix(self):
         self.assertEqual(_anchor("Track F compat verdict"), "track-f-compat-verdict")
-        # Truncated at ANCHOR_SOURCE_WIDTH, never the whole (possibly huge) heading.
-        self.assertLessEqual(len(_anchor("x" * 500)), 40)
+        long_heading = "x " * 200
+        self.assertGreater(len(_anchor(long_heading)), 40)
+
+    def test_repeated_headings_in_one_file_are_disambiguated_like_github(self):
+        section = """## Decision log
+
+| Date | Amendment | Authorized by | Docs touched |
+|---|---|---|---|
+| 2026-08-06 | **Same title.** First occurrence. | a | x |
+| 2026-08-06 | **Same title.** Second occurrence. | b | y |
+| 2026-08-06 | **Same title.** Third occurrence. | c | z |
+"""
+        migrate_day_records(
+            section, "decisions", self.root, ["Date", "Amendment", "Authorized by", "Docs touched"]
+        )
+        text, errors = render_decisions(self.root)
+        self.assertEqual(errors, [])
+        anchors = [line.split("#", 1)[1].split(")", 1)[0] for line in text.split("\n") if "#same-title" in line]
+        self.assertEqual(anchors, ["same-title", "same-title-1", "same-title-2"])
 
     def test_missing_decisions_directory_is_reported_as_an_error_not_a_crash(self):
         # No plan/decisions directory at all under this empty root.

@@ -590,9 +590,9 @@ Append-only; newest last. Format: `| Date | Milestone(s) | Done | Next |`
 
 | Date | Milestone(s) | Done | Next |
 |---|---|---|---|
-| 2026-07-12 | M0 | Did the thing. | Do the next thing. |
+| 2026-07-12 | M9 | Did the thing. | Do the next thing. |
 | 2026-07-15–16 | M1 | Range row done. | Range next. |
-| 2026-07-12 | M2 | Second row, same day as M0. | Second next. |
+| 2026-07-12 | M2 | Second row, same day as M9, sorts before it. | Second next. |
 
 ## Decision log
 
@@ -675,12 +675,17 @@ class MigrateDayRecordsTests(unittest.TestCase):
         )
 
     def test_two_records_on_the_same_date_land_in_one_file_in_source_order(self):
+        """The fixture's two same-day rows are named so that source order
+        ("M9", "M2") and sorted order ("M2", "M9") disagree (fix round 1,
+        finding 2) — the original fixture ("M0", "M2") happened to already
+        be alphabetical, so it passed against a converter that silently
+        sorted instead of preserving source order."""
         written = self._migrate("log")
         same_day = next(p for p in written if p.name == "2026-07-12.md")
         records, errors = read_day_records(self.root, "log")
         self.assertEqual(errors, [])
         headings = [r.heading for r in records if r.path == same_day]
-        self.assertEqual(headings, ["M0", "M2"])  # source order, not sorted
+        self.assertEqual(headings, ["M9", "M2"])  # source order; sorted() would give ["M2", "M9"]
 
     def test_a_range_row_files_under_its_first_date_and_carries_a_span_field(self):
         written = self._migrate("log")

@@ -109,33 +109,58 @@ def render_questions(items) -> str:
     return "\n".join(lines) + "\n"
 
 
-# A day-file heading is never truncated (the file carries the full text),
-# but the index row must stay narrow, so the anchor is built from a bounded
-# prefix of the heading rather than the whole thing — measured necessary:
-# building it from the full heading put one real row (a no-bold-lead
-# Amendment cell, itself the whole 1,300+-character source cell) at 1,417
-# characters, seven times the 200-character ceiling every other index row
-# in this file already holds to.
-ANCHOR_SOURCE_WIDTH = 30
-
-
 def _anchor(heading: str) -> str:
     """Approximate GitHub's own heading-anchor slug: lowercase, drop
     punctuation (keeping word characters, whitespace and hyphens), collapse
     whitespace to a single hyphen.
 
-    `tools/ci/check-doc-links.py` never verifies the fragment half of a link
-    — it parses the URL, keeps only the path, and explicitly skips a
-    fragment-only target — so an inexact anchor cannot fail that gate; this
-    is only for a human reader actually landing on the right heading, which
-    is also why truncating the anchor's source text (unlike truncating the
-    milestone/question ID a link target names elsewhere in this file) does
-    not create a broken link — worst case a long heading's anchor is a
-    prefix of the real one and a reader lands at the top of the file instead
-    of the exact record.
+    Built from the **whole** heading, never a truncated prefix (fix round 1,
+    finding 1): a slug built from `heading[:30]` matched no real heading for
+    259 of 262 decisions, because GitHub's own slug is a function of the
+    entire heading and a 30-character prefix of a long one collides with
+    nothing — "the anchor was the only unbounded term, and it is the one
+    that must stay whole." The visible link *label* keeps truncating
+    (`DECISION_TITLE_WIDTH`); only the invisible fragment needs the full
+    text. `tools/ci/check-doc-links.py` never verifies the fragment half of
+    a link — it parses the URL, keeps only the path, and explicitly skips a
+    fragment-only target — so this is for a human reader actually landing
+    on the right heading, not a gate.
     """
-    slug = _ANCHOR_STRIP_RE.sub("", heading[:ANCHOR_SOURCE_WIDTH].lower()).strip()
+    slug = _ANCHOR_STRIP_RE.sub("", heading.lower()).strip()
     return _ANCHOR_SPACE_RE.sub("-", slug)
+
+
+def _disambiguate_anchor(base: str, counts: dict[str, int]) -> str:
+    """GitHub's own repeat-heading rule: the first occurrence of a slug in a
+    file keeps it bare; the second gets `-1`, the third `-2`, and so on, in
+    document order. `counts` is mutated in place, keyed by file (the caller
+    passes one dict per target file) and by base slug within it — three
+    headings repeat within the real `2026-08-06` decisions day file, so this
+    is exercised by the live corpus, not only by a fixture.
+    """
+    seen = counts.get(base, 0)
+    counts[base] = seen + 1
+    return base if seen == 0 else f"{base}-{seen}"
+
+
+def _decision_label(heading: str) -> str:
+    """`escape_cell` plus one more neutralization this renderer alone needs.
+
+    `[VERIFY]`-style bracket notation (13 §1's own convention) is common in
+    decision prose, and a bare `[`/`]` *inside* a link label breaks
+    `check-doc-links.py`'s `\\[[^\\]]*\\]\\(...\\)` regex — the inner `]`
+    ends the character class early, so the whole label+target stops
+    matching as a link at all. Measured against the real corpus (fix round
+    1, finding 1's own verification pass): 3 of 262 rows hit exactly this,
+    dropping the anchor-match count from 262/262 to 259/262 even though
+    every anchor computed correctly. `escape_cell` already applies this
+    same kind of workaround for `|` and `](`; brackets get one too, but
+    only here — `render_milestones`/`render_questions` share `escape_cell`
+    and regenerate `plan/MILESTONES.md`/`plan/QUESTIONS.md`, which this
+    task must not touch (Task 4/6 own those indexes), so the fix is local
+    to the decisions label rather than added to the shared function.
+    """
+    return heading.replace("[", "").replace("]", "")
 
 
 def render_decisions(root: Path) -> tuple[str, list[str]]:
@@ -152,15 +177,21 @@ def render_decisions(root: Path) -> tuple[str, list[str]]:
         return "", errors
     lines = [BANNER, "", "# Decisions", ""]
     lines += ["| Date | Amendment | Authorized by |", "|---|---|---|"]
+    # Keyed by the day-file path, so a repeated slug is disambiguated within
+    # its own file — the same scope `_parse_day_file` reads headings in and
+    # the same scope GitHub itself disambiguates within.
+    anchor_counts: dict[Path, dict[str, int]] = {}
     for record in records:  # read_day_records is already chronological, then source order
         year, month, _ = record.date.split("-")
         target = f"decisions/{year}/{month}/{record.date}.md"
-        anchor = _anchor(record.heading)
+        base_anchor = _anchor(record.heading)
+        anchor = _disambiguate_anchor(base_anchor, anchor_counts.setdefault(record.path, {}))
         # Kept apart for the same reason render_milestones/render_questions
         # keep their link literals apart: check-doc-links.py resolves link
         # syntax anywhere in the file, and an f-string link would be
         # resolved as source.
-        link = f"[{escape_cell(_truncate(record.heading, DECISION_TITLE_WIDTH))}]" f"({target}#{anchor})"
+        label = escape_cell(_decision_label(_truncate(record.heading, DECISION_TITLE_WIDTH)))
+        link = f"[{label}]" f"({target}#{anchor})"
         authorized_by = escape_cell(_truncate(record.fields.get("authorized_by", ""), AUTHORIZED_BY_WIDTH)) or "—"
         lines.append(f"| {record.date} | {link} | {authorized_by} |")
     lines.append("")
