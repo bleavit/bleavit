@@ -6,20 +6,32 @@ mechanically". Before this script existed that claim was aspirational — the
 index was maintained by hand across concurrent branches, which is exactly the
 shape that drifts.
 
-Most of what this checker used to enforce is now structurally impossible, since
+Part of what this checker used to enforce is now structurally impossible, since
 `tools.plan.model.load_questions` (backing the `plan/questions/<ID>.md` item
 tree) makes each of the following true by construction rather than by review:
 
   * an id cannot collide, because the id IS the filename;
   * a question cannot be named by two batches, because `batch:` is one scalar
-    on one file;
-  * an open question cannot be missing a batch and a resolved one cannot be
-    misnamed by a live batch, because `tools/plan/migrate.py`'s round-trip
-    proof already ties `batch:` to the source row it was extracted from.
+    on one file.
 
-One thing survives: a question's `batch:` value might name a batch PLAN.md's
-index does not declare (a typo, or a label the index later renamed or
-retired). That is the one invariant left to check.
+**The rest is not impossible, and an earlier version of this file wrongly
+claimed it was** (fix round 1, 2026-08-12). `tools/plan/migrate.py`'s
+round-trip proof ties `batch:` to the source row only at the moment of the
+one-time Task 6 conversion — it says nothing about drift afterward, once
+`batch:` (per-item frontmatter) and PLAN.md's batch-index table (hand-
+maintained prose) are two independent artifacts that can disagree. That is
+exactly the incident this script was written for: "batch B1 was left
+declaring rows that a later PR had already resolved." Four invariants are
+checked over the item tree:
+
+  1. A question's `batch:` value must name a batch PLAN.md's index declares
+     (or the `"none"` sentinel).
+  2. An OPEN question must not carry `batch: none` — it must name a live
+     batch.
+  3. A RESOLVED question must carry `batch: none` — it must not still sit in
+     a live batch (the B1 incident, restated per-item).
+  4. Where the index declares a batch's row count, that count must equal the
+     number of `plan/questions/` items whose own `batch:` names it.
 """
 
 from __future__ import annotations
@@ -119,13 +131,65 @@ def declared_batches(root: Path) -> set[str]:
     return declared
 
 
+def batch_row_counts(root: Path) -> dict[str, int]:
+    """label -> the index's declared `Rows` count, for every batch row whose
+    count parses as an integer. A row whose count is not a number is skipped
+    here (silently) rather than raised: `check()` does not own PLAN.md table
+    well-formedness, `check-plan-tables.py` does, and this checker still owes
+    the invariant for every label it CAN read.
+    """
+    text = (root / "PLAN.md").read_text(encoding="utf-8")
+    rows: dict[str, int] = {}
+    for _lineno, cells in iter_rows(text, BATCH_HEADER):
+        match = BATCH_LABEL_RE.match(cells[0])
+        if not match:
+            continue
+        try:
+            rows[match.group(1)] = int(cells[1])
+        except ValueError:
+            continue
+    return rows
+
+
 def check(root: Path) -> list[str]:
-    """Every question's batch label must be one the index declares."""
+    """Four invariants over the item tree, checked against PLAN.md's index."""
     items, errors = load_questions(root)
     declared = declared_batches(root)
+    rows = batch_row_counts(root)
+
+    actual_counts: dict[str, int] = {}
     for item in items:
+        # Invariant 1: the batch label itself must be declared (or "none").
         if item.batch not in declared:
             errors.append(f"plan/questions/{item.id}.md: batch {item.batch!r} is not a declared batch")
+            continue
+
+        # Invariant 2: an OPEN question must name a live batch.
+        if item.status == "open" and item.batch == UNBATCHED:
+            errors.append(f"plan/questions/{item.id}.md: {item.id} is OPEN but assigned to no batch")
+
+        # Invariant 3: a RESOLVED question must not still sit in a live batch —
+        # the exact drift this script exists to catch (batch B1 kept declaring
+        # rows a later PR had already resolved).
+        if item.status == "resolved" and item.batch != UNBATCHED:
+            errors.append(
+                f"plan/questions/{item.id}.md: {item.id} is RESOLVED but still named by batch"
+                f" {item.batch!r} — drop it from the index (a closed batch may mention it in"
+                " prose instead)"
+            )
+
+        if item.batch != UNBATCHED:
+            actual_counts[item.batch] = actual_counts.get(item.batch, 0) + 1
+
+    # Invariant 4: a declared row count must match the item tree's actual count.
+    for label, declared_count in sorted(rows.items()):
+        actual = actual_counts.get(label, 0)
+        if declared_count != actual:
+            errors.append(
+                f"batch {label} declares {declared_count} rows but"
+                f" {actual} plan/questions/ item(s) name it"
+            )
+
     return errors
 
 
@@ -139,7 +203,11 @@ def main(argv: list[str]) -> int:
         for err in errors:
             print(f"  - {err}")
         return 1
-    print("Spec-question batches OK — every question's batch label is declared by the index.")
+    print(
+        "Spec-question batches OK — every question's batch label is declared,"
+        " open questions are batched, resolved questions are not, and every"
+        " declared row count matches the item tree."
+    )
     return 0
 
 
