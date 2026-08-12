@@ -28,10 +28,35 @@ if [ -f PLAN.md ]; then
   awk '/^## Current focus/{f=1;next} /^## /{f=0} f' PLAN.md | sed '/^[[:space:]]*$/d' | head -25
   echo
   echo "--- Next pending / in-progress milestones ---"
-  grep -E '^\|.*(⬜|🔨|⛔)' PLAN.md | head -8 || echo "(none found — check PLAN.md)"
+  python3 - <<'PY' || echo "(none found — check plan/milestones/)"
+import sys
+from pathlib import Path
+sys.path.insert(0, ".")
+from tools.plan.model import STATUS_GLYPHS, load_milestones
+
+items, errors = load_milestones(Path("."))
+for error in errors[:3]:
+    print(f"WARNING: {error}")
+order = {"active": 0, "blocked": 1, "pending": 2}
+rows = sorted((i for i in items if i.status != "done"), key=lambda i: (order[i.status], i.id))
+for item in rows[:8]:
+    print(f"{STATUS_GLYPHS[item.status]} {item.id}  {item.title[:150]}")
+PY
   echo
   echo "--- Last session log entries ---"
-  awk '/^## Session log/{f=1;next} /^## /{f=0} f' PLAN.md | grep -E '^\| 20[0-9]{2}-' | tail -3 || echo "(no session log entries yet)"
+  python3 - <<'PY' || echo "(no session log entries yet — check plan/log/)"
+from pathlib import Path
+import sys
+sys.path.insert(0, ".")
+from tools.plan.migrate import read_day_records
+
+records, errors = read_day_records(Path("."), "log")
+for error in errors[:3]:
+    print(f"WARNING: {error}")
+for record in records[-3:]:
+    summary = " ".join(record.body.split())[:240]
+    print(f"{record.date}  {record.heading}  {summary}")
+PY
 else
   echo
   echo "WARNING: PLAN.md is missing. Recreate it per AGENTS.md · rule R-3 before any other work."
@@ -39,5 +64,5 @@ fi
 
 echo
 echo "Protocol reminder (AGENTS.md): implement from the spec · keep going past a closed milestone (R-5)"
-echo "in docs/architecture/ · verify per doc 15 · update PLAN.md before stopping."
+echo "in docs/architecture/ · verify per doc 15 · update the plan tree before stopping."
 exit 0

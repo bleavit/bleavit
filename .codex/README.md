@@ -35,7 +35,7 @@ changes one updates the other (`/sync-docs` checks this). Codex has no equivalen
 the Claude hooks, so the playbooks restate the hook-enforced rules explicitly: change
 `docs/architecture/` only deliberately per rule R-1 (AGENTS.md · *Changing the
 specification*), never end a session that changed the repo without updating
-`PLAN.md`, never alter README.md's pinned opening (thank-you to Prof. Robin Hanson)
-or closing (Bon appétit) line (rule R-11, AGENTS.md), and never leave a PLAN.md
+`PLAN.md` and `plan/`, never alter README.md's pinned opening (thank-you to Prof. Robin Hanson)
+or closing (Bon appétit) line (rule R-11, AGENTS.md), and never leave the plan tree
 Markdown table structurally broken — run `python3 tools/ci/check-plan-tables.py`
 after editing PLAN.md (standing user instruction 2026-07-17; also a `docs` CI step).

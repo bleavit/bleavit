@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# Stop hook — enforces the standing user instruction (2026-07-17) that PLAN.md's
-# Markdown table formatting must never drift/break (the B10/B11 incident: a blank
-# line inside the Track B milestones table stranded rows from their header).
+# Stop hook — enforces the standing user instruction (2026-07-17) that hand-written
+# living/spec Markdown table formatting must never drift/break (the B10/B11 incident).
 # Since 2026-07-29 the checker's default scope also covers the living documents
 # and docs/architecture/ — R-1 makes the spec the source of truth, so a table
 # that renders wrong there matters more than one in a status file.

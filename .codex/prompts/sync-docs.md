@@ -1,5 +1,5 @@
 Bring this repository's living documents back in line with reality (AGENTS.md is
-binding). Scope: README.md, PLAN.md, AGENTS.md, CLAUDE.md, .claude/ assets, .codex/
+binding). Scope: README.md, PLAN.md, plan/, AGENTS.md, CLAUDE.md, .claude/ assets, .codex/
 playbooks. docs/architecture/ is the spec and is out of scope here — leave it alone;
 syncing the living documents is never the place to change the spec.
 
@@ -9,10 +9,10 @@ syncing the living documents is never the place to change the spec.
    points that exist right now.
 
 2. PER-FILE CONTRACT.
-   - PLAN.md: statuses match reality (red gates ⇒ not ✅); Current focus names the
-     true next step; Session log has a row for today's work; Spec questions /
-     Verification log / Decision log / Audit log reflect what actually happened.
-     PLAN.md stays reference-only — milestone rows cite docs/architecture/ sections,
+   - PLAN.md + plan/: statuses match reality (red gates ⇒ not done); Current focus names
+     the true next step; today's `plan/log/` file records the work; question,
+     verification, decision and audit items reflect what actually happened.
+     The plan tree stays reference-only — milestone frontmatter cites docs/architecture/ sections,
      never restate spec content.
    - README.md: status, repository map, and commands are currently true; links resolve.
      The opening paragraph (thank-you to Prof. Robin Hanson) and the closing line

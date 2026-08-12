@@ -82,6 +82,8 @@ app/src-tauri/target/
 app/src-tauri/gen/
 app/native/**/build/
 
-# Subagent-driven-development scratch: ledgers, task briefs, review packages.
-# Session-local coordination state, never part of the repository record.
+# Subagent-driven-development scratch: per-plan ledgers, task briefs, implementer
+# reports and review packages. Git-ignored on purpose — the git history is the
+# record of what the plan produced, and these are the coordination artifacts that
+# got it there. Deleting this tree loses nothing that `git log` does not carry.
 .superpowers/

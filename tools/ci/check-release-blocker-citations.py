@@ -18,8 +18,8 @@ question closed, and PLAN.md cannot know who cites it.
 So the expiry is mechanical, exactly as it is for the client's unreadable
 obligations and the limit-coverage registry. One rule:
 
-    every `SQ-nnn` appearing anywhere under `app/tools/release/` is a row of
-    PLAN.md's spec-question table whose status cell begins with "open".
+    every `SQ-nnn` appearing anywhere under `app/tools/release/` is a
+    plan/questions/ item whose `status:` frontmatter field is "open".
 
 **Anywhere, including comments, and that breadth is the design.** The stale
 citation lived in a doc comment *and* in the emitted string, and the strings are
@@ -32,12 +32,9 @@ The cost is that this directory may not carry a closed question as history. That
 is the right trade: the pipeline's job is to state what is *unresolved*, and
 PLAN.md's decision log and session log are where a ruling is recorded.
 
-"Open" is read exactly as `check-spec-question-batches.py` and
-`check-unreadable-obligations.py` read it — the status cell's leading word, not a
-keyword search, because open rows legitimately contain the word "resolved" in
-their prose. The table parser is duplicated from those checkers rather than
-shared, as they duplicate it from each other: each gate stays a standalone script
-that a cold checkout can run with no import path.
+The status is read from `plan/questions/SQ-n.md`'s `status:` enum via
+`tools.plan.model.load_questions`, shared with `check-unreadable-obligations.py`
+rather than re-derived.
 """
 
 from __future__ import annotations
@@ -48,77 +45,26 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 RELEASE_DIR = ROOT / "app/tools/release"
-PLAN = ROOT / "PLAN.md"
+
+sys.path.insert(0, str(ROOT))
+from tools.plan.model import load_questions  # noqa: E402
 
 # The pipeline's own sources, and nothing else: these are the files whose text
 # can reach a readiness blocker.
 SCANNED_SUFFIXES = (".ts", ".json")
 
-QUESTION_HEADER = ("ID", "Question", "Spec ref", "Raised", "Status")
-QUESTION_ID_RE = re.compile(r"^SQ-\d+$")
-SEPARATOR_CELL_RE = re.compile(r"^:?-+:?$")
 CITATION_RE = re.compile(r"\bSQ-\d+\b")
 
 
-def split_cells(line: str) -> list[str]:
-    """Split a GFM table row: every unescaped `|` delimits. Mirrors
-    `check-plan-tables.py` — backticks do not protect a pipe in a table row."""
-    cells: list[str] = []
-    current: list[str] = []
-    escaped = False
-    for ch in line:
-        if escaped:
-            current.append(ch)
-            escaped = False
-        elif ch == "\\":
-            current.append(ch)
-            escaped = True
-        elif ch == "|":
-            cells.append("".join(current).strip())
-            current = []
-        else:
-            current.append(ch)
-    cells.append("".join(current).strip())
-    if cells and cells[0] == "":
-        cells = cells[1:]
-    if cells and cells[-1] == "":
-        cells = cells[:-1]
-    return cells
+def load_question_statuses(root: Path) -> tuple[dict[str, str], list[str]]:
+    """`SQ-n` -> "open" | "resolved", from the plan/ item tree.
 
-
-def is_separator_row(line: str) -> bool:
-    cells = split_cells(line)
-    return bool(cells) and all(SEPARATOR_CELL_RE.match(c) for c in cells)
-
-
-def question_status(text: str) -> dict[str, str]:
-    """`SQ-n` → "open" | "resolved", from PLAN.md's question table."""
-    status: dict[str, str] = {}
-    lines = text.splitlines()
-    in_fence = False
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        if line.lstrip().startswith("```"):
-            in_fence = not in_fence
-            i += 1
-            continue
-        if in_fence or not line.startswith("|"):
-            i += 1
-            continue
-        if tuple(split_cells(line)) == QUESTION_HEADER and i + 1 < len(lines) and is_separator_row(lines[i + 1]):
-            j = i + 2
-            while j < len(lines) and lines[j].startswith("|"):
-                if not is_separator_row(lines[j]):
-                    cells = split_cells(lines[j])
-                    if cells and QUESTION_ID_RE.match(cells[0]):
-                        leading = cells[-1].lstrip("*_ ").lower()
-                        status[cells[0]] = "open" if leading.startswith("open") else "resolved"
-                j += 1
-            i = j
-            continue
-        i += 1
-    return status
+    Replaces a reading that asked whether a status *cell* began with the word
+    "open" — necessary while the cell was prose, because an open row's prose
+    legitimately contains the word "resolved". `status` is now an enum.
+    """
+    items, errors = load_questions(root)
+    return {item.id: item.status for item in items}, errors
 
 
 def citations(directory: Path) -> list[tuple[str, int, str]]:
@@ -139,12 +85,18 @@ def main() -> int:
         print(f"{RELEASE_DIR.relative_to(ROOT)} does not exist; the pipeline moved", file=sys.stderr)
         return 1
 
-    status = question_status(PLAN.read_text(encoding="utf-8"))
+    status, load_errors = load_question_statuses(ROOT)
+    if load_errors:
+        # Fail closed: a parse error is not "nothing to check". Treating it as
+        # such would let a broken plan/questions/ tree pass every citation.
+        for error in load_errors:
+            print(error, file=sys.stderr)
+        return 1
     if not status:
         # Fail closed. A parser that found no questions would report every
         # citation as unknown, or — with the check written the other way round —
         # pass every one of them.
-        print("PLAN.md: no spec-question table found (header changed?)", file=sys.stderr)
+        print("plan/questions/: no spec questions found", file=sys.stderr)
         return 1
 
     found = citations(RELEASE_DIR)
@@ -163,10 +115,10 @@ def main() -> int:
         where = f"{relative}:{lineno}"
         state = status.get(sq)
         if state is None:
-            errors.append(f"{where}: cites {sq}, which is not a row of PLAN.md's spec-question table")
+            errors.append(f"{where}: cites {sq}, which is not a plan/questions/ item")
         elif state != "open":
             errors.append(
-                f"{where}: cites {sq}, which PLAN.md records as RESOLVED. A readiness blocker "
+                f"{where}: cites {sq}, which is recorded RESOLVED. A readiness blocker "
                 "naming a closed question sends a release operator to a decision that has "
                 "already been made — and the work it was waiting on may well be done, as F4's "
                 "Asset Hub descriptor set was for three days behind SQ-587."

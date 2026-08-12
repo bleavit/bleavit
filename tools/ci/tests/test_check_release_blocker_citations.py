@@ -30,14 +30,45 @@ SPEC.loader.exec_module(checker)
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
-PLAN = """## Spec questions
 
-| ID | Question | Spec ref | Raised | Status |
-|---|---|---|---|---|
-| SQ-720 | First | 10 §9.4 | 2026-01-01 | open — X (release format + consumers) |
-| SQ-587 | Second | 02 §7.7 | 2026-01-01 | resolved 2026-08-04 — the rollout phases it |
-| SQ-999 | Third | 12 §1.1 | 2026-01-01 | open — this row is not resolved yet |
-"""
+def write_question(
+    root: Path,
+    identifier: str,
+    *,
+    status: str,
+    spec_ref: str = "02 §7",
+    raised: str = "2026-01-01",
+    resolved: str | None = None,
+    batch: str = "X",
+) -> None:
+    """Write a minimal `plan/questions/<identifier>.md` frontmatter fixture."""
+    directory = root / "plan" / "questions"
+    directory.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "---",
+        f"id: {identifier}",
+        f"title: {identifier} title",
+        f"spec_ref: {spec_ref}",
+        f"raised: {raised}",
+        f"status: {status}",
+    ]
+    if resolved:
+        lines.append(f"resolved: {resolved}")
+    lines += [
+        f"batch: {batch if status == 'open' else 'none'}",
+        "---",
+        "",
+        "## Question",
+        "",
+        f"{identifier} question body.",
+        "",
+        "## Status",
+        "",
+        status,
+        "",
+    ]
+    (directory / f"{identifier}.md").write_text("\n".join(lines), encoding="utf-8")
+
 
 # The two shapes the stale citation actually had: a doc comment, and a string
 # built by multi-line concatenation. A scanner that reads only one of them would
@@ -85,37 +116,58 @@ class TestScanner(unittest.TestCase):
 
 
 class TestStatus(unittest.TestCase):
-    def test_reads_the_status_cell_and_not_a_keyword(self) -> None:
-        # "this row is not resolved yet" contains the word "resolved"; what
-        # decides is the cell's leading word, as the sibling checkers read it.
-        status = checker.question_status(PLAN)
-        self.assertEqual(status["SQ-720"], "open")
-        self.assertEqual(status["SQ-999"], "open")
-        self.assertEqual(status["SQ-587"], "resolved")
+    def test_reads_frontmatter_status_and_not_a_keyword(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            write_question(root, "SQ-720", status="open")
+            write_question(root, "SQ-999", status="open")
+            write_question(root, "SQ-587", status="resolved", resolved="2026-08-04")
+            status, errors = checker.load_question_statuses(root)
+            self.assertEqual(errors, [])
+            self.assertEqual(status["SQ-720"], "open")
+            self.assertEqual(status["SQ-999"], "open")
+            self.assertEqual(status["SQ-587"], "resolved")
 
 
 class TestRule(unittest.TestCase):
+    def _status(self, root: Path) -> dict[str, str]:
+        status, errors = checker.load_question_statuses(root)
+        self.assertEqual(errors, [])
+        return status
+
     def test_a_resolved_citation_is_rejected(self) -> None:
-        status = checker.question_status(PLAN)
-        stale = SOURCE_TS.replace("SQ-720", "SQ-587")
-        offenders = [
-            match.group(0)
-            for match in checker.CITATION_RE.finditer(stale)
-            if status.get(match.group(0)) != "open"
-        ]
-        self.assertEqual(offenders, ["SQ-587"], "a resolved citation passed — the check is vacuous")
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            write_question(root, "SQ-587", status="resolved", resolved="2026-08-04")
+            write_question(root, "SQ-999", status="open")
+            status = self._status(root)
+            stale = SOURCE_TS.replace("SQ-720", "SQ-587")
+            offenders = [
+                match.group(0)
+                for match in checker.CITATION_RE.finditer(stale)
+                if status.get(match.group(0)) != "open"
+            ]
+            self.assertEqual(offenders, ["SQ-587"], "a resolved citation passed — the check is vacuous")
 
     def test_an_unknown_citation_is_rejected(self) -> None:
-        status = checker.question_status(PLAN)
-        offenders = [
-            match.group(0)
-            for match in checker.CITATION_RE.finditer("// SQ-4242 does not exist")
-            if status.get(match.group(0)) != "open"
-        ]
-        self.assertEqual(offenders, ["SQ-4242"])
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            write_question(root, "SQ-1", status="open")
+            status = self._status(root)
+            offenders = [
+                match.group(0)
+                for match in checker.CITATION_RE.finditer("// SQ-4242 does not exist")
+                if status.get(match.group(0)) != "open"
+            ]
+            self.assertEqual(offenders, ["SQ-4242"])
 
-    def test_an_unparsable_plan_fails_closed(self) -> None:
-        self.assertEqual(checker.question_status("no table here at all"), {})
+    def test_an_unparsable_tree_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            # No plan/questions/ directory at all.
+            status, errors = checker.load_question_statuses(root)
+            self.assertEqual(status, {})
+            self.assertTrue(errors, "a missing plan/questions/ tree must report an error, not silence")
 
 
 class TestRepository(unittest.TestCase):

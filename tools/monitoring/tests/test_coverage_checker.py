@@ -39,24 +39,31 @@ def fixture_root(directory: str) -> Path:
     return root
 
 
-def milestone_plan(
-    *, b13: str = "⬜", o3: str = "⬜", n7: str = "🔨", n9: str = "⬜"
-) -> str:
-    return f"""# PLAN fixture
+def write_milestone(root: Path, identifier: str, track: str, status: str) -> None:
+    directory = root / "plan" / "milestones"
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / f"{identifier}.md").write_text(
+        f"---\nid: {identifier}\ntrack: {track}\ntitle: t\n"
+        f"spec: [a]\ndepends: []\nstatus: {status}\n---\n\nbody\n",
+        encoding="utf-8",
+    )
 
-## Milestones
 
-### Owners
+DEFAULT_SEAM_OWNER_STATUSES = {
+    "B13": ("B", "pending"),
+    "O3": ("O", "pending"),
+    "N7": ("N", "active"),
+    "N9": ("N", "pending"),
+}
 
-| ID | Milestone | Spec | Depends | Status | Notes |
-|---|---|---|---|---|---|
-| B13 | Runtime telemetry | 12 §6.3 | — | {b13} | |
-| O3 | Bootnode probes | 12 §6.2 | — | {o3} | |
-| N7 | Hosted-service chain primitives | 16 §5 | — | {n7} | |
-| N9 | Hosted-service egress and telemetry | 16 §9 | — | {n9} | |
 
-## Next section
-"""
+def write_seam_owner_milestones(root: Path, **overrides: str) -> None:
+    statuses = dict(DEFAULT_SEAM_OWNER_STATUSES)
+    for identifier, status in overrides.items():
+        track, _ = statuses[identifier]
+        statuses[identifier] = (track, status)
+    for identifier, (track, status) in statuses.items():
+        write_milestone(root, identifier, track, status)
 
 
 class CoverageCheckerTests(unittest.TestCase):
@@ -161,18 +168,16 @@ class CoverageCheckerTests(unittest.TestCase):
     def test_pending_seam_owners_are_allowed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = fixture_root(directory)
-            (root / "PLAN.md").write_text(milestone_plan(), encoding="utf-8")
+            write_seam_owner_milestones(root)
             failures, _, _ = checker.validate(root, exported=EXPORTED)
             self.assertEqual(failures, [])
 
     def test_seam_expires_when_owner_is_complete(self) -> None:
-        samples = (("O3", {"o3": "✅"}, "bleavit_bootnode_browser_dial_success"),)
-        for owner, statuses, series in samples:
+        samples = (("O3", "done", "bleavit_bootnode_browser_dial_success"),)
+        for owner, status, series in samples:
             with self.subTest(owner=owner), tempfile.TemporaryDirectory() as directory:
                 root = fixture_root(directory)
-                (root / "PLAN.md").write_text(
-                    milestone_plan(**statuses), encoding="utf-8"
-                )
+                write_seam_owner_milestones(root, **{owner: status})
                 failures, _, _ = checker.validate(root, exported=EXPORTED)
                 self.assertTrue(
                     any(series in failure and owner in failure for failure in failures),
@@ -182,10 +187,10 @@ class CoverageCheckerTests(unittest.TestCase):
     def test_missing_seam_owner_row_fails_loudly(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = fixture_root(directory)
-            plan = milestone_plan().replace(
-                "| O3 | Bootnode probes | 12 §6.2 | — | ⬜ | |\n", ""
-            )
-            (root / "PLAN.md").write_text(plan, encoding="utf-8")
+            for identifier, (track, status) in DEFAULT_SEAM_OWNER_STATUSES.items():
+                if identifier == "O3":
+                    continue
+                write_milestone(root, identifier, track, status)
             failures, _, _ = checker.validate(root, exported=EXPORTED)
             self.assertTrue(
                 any(

@@ -78,8 +78,8 @@ specification section. Every parameter value lives in exactly two documents —
 
 **The specification is complete. The chain is not deployed.**
 
-[`PLAN.md`](PLAN.md) is the single source of implementation status, and it wins
-over the summary below.
+[`PLAN.md`](PLAN.md) and the [`plan/`](plan/) tree are the single source of
+implementation status, and they win over the summary below.
 
 | Track | What it covers | Status |
 |---|---|---|
@@ -160,7 +160,7 @@ pnpm -C app dev
 | Understand the protocol | [`docs/architecture/`](docs/architecture/README.md) — 16 component documents plus the decision record |
 | Watch the protocol move | [`explainer/`](explainer/README.md) — an interactive teaching site, not the canonical client |
 | Integrate a client | [`docs/integration/`](docs/integration/README.md) — plain language, non-normative, nine guides |
-| Know what is built | [`PLAN.md`](PLAN.md) — milestones, verification log, decision log, session log |
+| Know what is built | [`PLAN.md`](PLAN.md) for current focus and [`plan/`](plan/) for per-item status, generated indexes and dated history |
 | Contribute code | [`AGENTS.md`](AGENTS.md) — the rules, the quality gates, the session loop |
 | Operate a node | [`deploy/runbooks/`](deploy/runbooks/) and [`deploy/monitoring/`](deploy/monitoring/README.md) |
 | Design a frontend | [`docs/design/`](docs/design/claude-design-kit/00-START-HERE.md) — a derived, non-normative design kit |
@@ -172,7 +172,7 @@ pnpm -C app dev
 |---|---|
 | [`docs/architecture/`](docs/architecture/README.md) | The specification, and the source of truth for every behavior |
 | [`docs/integration/`](docs/integration/README.md) | Human-facing guides for people who integrate a client |
-| [`PLAN.md`](PLAN.md), [`AGENTS.md`](AGENTS.md), [`CLAUDE.md`](CLAUDE.md) | Status, the operating manual, and the Claude Code wiring |
+| [`PLAN.md`](PLAN.md), [`plan/`](plan/), [`AGENTS.md`](AGENTS.md), [`CLAUDE.md`](CLAUDE.md) | Current focus, detailed status, the operating manual, and the Claude Code wiring |
 | `crates/` | Shared primitives, the fixed-point kernel, and frame-free `no_std` functional cores |
 | `pallets/` | Production FRAME pallets, mostly thin shells over those functional cores |
 | `runtime/`, `runtime-api/`, `node/` | The Cumulus runtime, the frozen `FutarchyApi`, and the collator binary |
@@ -186,7 +186,7 @@ pnpm -C app dev
 | [`SIGNERS.md`](SIGNERS.md) | The signer registry, whose populations print as unseated until the key ceremony |
 
 [AGENTS.md · Repository layout](AGENTS.md#repository-layout) carries the long-form version of this
-table, one row per path with its milestone status.
+table, one row per path.
 
 ## Development
 
@@ -223,22 +223,22 @@ section that mandates it.
 
 ### How this gets built
 
-Coding agents build the project one [`PLAN.md`](PLAN.md) milestone at a time,
-under three standing constraints:
+Coding agents build the project one [`plan/`](plan/) milestone at a time, under
+three standing constraints:
 
 1. Every observable behavior traces to a specification section (rule R-1).
 2. Parameter values come only from document 13, or from the contract surface in
    document 02.
 3. The living documents stay true in the same session as any change (rule R-3).
 
-Humans and agents alike: read [AGENTS.md](AGENTS.md), then [PLAN.md](PLAN.md),
-then work.
+Humans and agents alike: read [AGENTS.md](AGENTS.md), then [PLAN.md](PLAN.md) and
+its linked plan items, then work.
 
 ## Contributing
 
 This repository has no separate contributing guide, because
 [AGENTS.md](AGENTS.md) is that guide for humans and agents alike. Read it first.
-Then read [PLAN.md](PLAN.md) for the current focus.
+Then read [PLAN.md](PLAN.md) and its linked plan items for the current focus.
 
 Three things matter more here than in most repositories:
 

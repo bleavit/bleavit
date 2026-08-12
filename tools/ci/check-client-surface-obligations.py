@@ -50,8 +50,8 @@ produced 27 references, 15 of them frozen and 12 genuine findings, with no false
 positives to triage.
 
 **Waivers expire mechanically.** A gap that is real but not yet fixed is waived
-by open spec-question id, never by a bare marker. When that SQ closes in PLAN.md
-the waiver becomes an error, so the fix cannot be forgotten and the waiver file
+by open spec-question id, never by a bare marker. When that SQ closes in
+plan/questions/ the waiver becomes an error, so the fix cannot be forgotten and the waiver file
 cannot quietly become the permanent home of the problem. This mirrors the
 limit-coverage registry's unwired-key expiry and
 `tools/ci/generated-weight-overrides.toml`.
@@ -76,8 +76,10 @@ except ModuleNotFoundError:  # Python 3.10 compatibility for the local quality g
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 MANIFEST = ROOT / "tools/release/surface-manifest.json"
 WAIVERS = ROOT / "tools/ci/client-surface-waivers.toml"
-PLAN = ROOT / "PLAN.md"
 CLIENT_DOCS = ("10-frontend-architecture.md", "11-frontend-workflows.md")
+
+sys.path.insert(0, str(ROOT))
+from tools.plan.model import load_questions  # noqa: E402
 
 # `Pallet.Item` or `Pallet::Item`, both halves CamelCase. The item half must be
 # capitalised: storage items, constants and events are, while dispatchable calls
@@ -165,24 +167,24 @@ def client_references() -> dict[tuple[str, str], list[str]]:
 
 
 def open_question_ids() -> set[int]:
-    """Spec-question ids whose PLAN.md row is still open.
+    """Spec-question ids whose plan/questions/ item is still open.
 
-    Reuses `check-spec-question-batches.py` rather than re-deriving "open", whose
-    definition is subtler than it looks: a row is open iff its status cell
-    *starts* with "open", because open rows legitimately contain the word
-    "resolved" in prose ("`gate.v_min` resolved; two rows remain").
+    Reuses `tools.plan.model.load_questions` rather than re-deriving "open":
+    `status` is now an enum on the item's frontmatter, not a prose cell whose
+    leading word had to be read carefully.
     """
-    batches = load_module(ROOT / "tools/ci/check-spec-question-batches.py", "check_spec_question_batches")
-    text = PLAN.read_text()
-    open_ids: set[int] = set()
-    for _lineno, cells in batches.iter_rows(text, batches.QUESTION_HEADER):
-        match = batches.QUESTION_ID_RE.match(cells[0])
-        if not match:
-            continue
-        if cells[-1].lstrip("*_ ").lower().startswith("open"):
-            open_ids.add(int(match.group(1)))
+    items, errors = load_questions(ROOT)
+    if errors:
+        # Fail closed: a broken plan/questions/ tree is not "no open questions",
+        # it is "cannot tell" — and the waiver-expiry anti-vacuity guard below
+        # exists precisely so that distinction is never silently collapsed.
+        raise SystemExit(
+            "plan/questions/: could not be parsed — the waiver expiry is broken:\n"
+            + "\n".join(errors)
+        )
+    open_ids = {int(item.id.removeprefix("SQ-")) for item in items if item.status == "open"}
     if not open_ids:
-        raise SystemExit("no open spec questions parsed from PLAN.md — the waiver expiry is broken")
+        raise SystemExit("no open spec questions parsed from plan/questions/ — the waiver expiry is broken")
     return open_ids
 
 
@@ -233,10 +235,10 @@ def check() -> list[str]:
     frozen = frozen_surface()
     waivers = load_waivers()
     # Only consulted when something is actually waived. `open_question_ids()` fails closed
-    # on an unparseable PLAN.md, which is right when a waiver's expiry depends on it — but
-    # a tree with no waivers at all would otherwise be failed by a condition it does not
-    # rely on, and "the gate broke because PLAN.md has no open questions" is a confusing
-    # way to learn that every obligation is satisfied.
+    # on an unparseable plan/questions/ tree, which is right when a waiver's expiry depends
+    # on it — but a tree with no waivers at all would otherwise be failed by a condition it
+    # does not rely on, and "the gate broke because there are no open questions" is a
+    # confusing way to learn that every obligation is satisfied.
     open_ids = open_question_ids() if waivers else set()
 
     matched = {key for key in references if key in frozen}
@@ -284,7 +286,7 @@ def check() -> list[str]:
             continue
         if int(sq.removeprefix("SQ-")) not in open_ids:
             errors.append(
-                f"{name}: waiver cites {sq}, which is no longer open in PLAN.md — the"
+                f"{name}: waiver cites {sq}, which is no longer open — the"
                 " waiver has expired; freeze the surface or re-open the question"
             )
 

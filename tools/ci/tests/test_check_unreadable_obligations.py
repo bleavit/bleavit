@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -28,6 +29,46 @@ sys.modules[SPEC.name] = checker
 SPEC.loader.exec_module(checker)
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
+def write_question(
+    root: Path,
+    identifier: str,
+    *,
+    status: str,
+    spec_ref: str = "02 §7",
+    raised: str = "2026-01-01",
+    resolved: str | None = None,
+    batch: str = "X",
+) -> None:
+    """Write a minimal `plan/questions/<identifier>.md` frontmatter fixture."""
+    directory = root / "plan" / "questions"
+    directory.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "---",
+        f"id: {identifier}",
+        f"title: {identifier} title",
+        f"spec_ref: {spec_ref}",
+        f"raised: {raised}",
+        f"status: {status}",
+    ]
+    if resolved:
+        lines.append(f"resolved: {resolved}")
+    lines += [
+        f"batch: {batch if status == 'open' else 'none'}",
+        "---",
+        "",
+        "## Question",
+        "",
+        f"{identifier} question body.",
+        "",
+        "## Status",
+        "",
+        status,
+        "",
+    ]
+    (directory / f"{identifier}.md").write_text("\n".join(lines), encoding="utf-8")
+
 
 SOURCE = """const UNREADABLE = {
   'P-13': [
@@ -51,45 +92,61 @@ SOURCE = """const UNREADABLE = {
 };
 """
 
-PLAN = """## Spec questions
-
-| ID | Question | Spec ref | Raised | Status |
-|---|---|---|---|---|
-| SQ-564 | First | 11 §11.8.1 | 2026-01-01 | open — the surface half is a contract addition |
-| SQ-598 | Second | 07 §6.1 | 2026-01-01 | open — the client half is closed fail-closed |
-| SQ-615 | Third | 11 §11.8.4 | 2026-01-01 | Resolved |
-"""
-
 
 class TestParser(unittest.TestCase):
     def test_finds_every_declaration_with_its_disposition(self) -> None:
         found = [(sq, disposition) for _, sq, disposition in checker.declarations(SOURCE)]
         self.assertEqual(found, [("SQ-598", "blocking"), ("SQ-564", "stated")])
 
-    def test_reads_the_status_cell_and_not_a_keyword(self) -> None:
-        # "the client half is closed fail-closed" contains neither "open" as a word
-        # boundary trap nor "resolved"; what decides is the cell's leading word.
-        status = checker.question_status(PLAN)
-        self.assertEqual(status["SQ-598"], "open")
-        self.assertEqual(status["SQ-615"], "resolved")
+    def test_reads_frontmatter_status_and_not_a_keyword(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            write_question(root, "SQ-598", status="open")
+            write_question(root, "SQ-615", status="resolved", resolved="2026-08-06")
+            status, errors = checker.load_question_statuses(root)
+            self.assertEqual(errors, [])
+            self.assertEqual(status["SQ-598"], "open")
+            self.assertEqual(status["SQ-615"], "resolved")
 
 
 class TestRule(unittest.TestCase):
+    def _status(self, root: Path) -> dict[str, str]:
+        status, errors = checker.load_question_statuses(root)
+        self.assertEqual(errors, [])
+        return status
+
     def test_a_resolved_citation_is_rejected(self) -> None:
-        status = checker.question_status(PLAN)
-        stale = SOURCE.replace("'SQ-598',", "'SQ-615',")
-        offenders = [
-            sq for _, sq, _ in checker.declarations(stale) if status.get(sq) != "open"
-        ]
-        self.assertEqual(offenders, ["SQ-615"], "a resolved citation passed — the check is vacuous")
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            write_question(root, "SQ-564", status="open")
+            write_question(root, "SQ-615", status="resolved", resolved="2026-08-06")
+            status = self._status(root)
+            stale = SOURCE.replace("'SQ-598',", "'SQ-615',")
+            offenders = [
+                sq for _, sq, _ in checker.declarations(stale) if status.get(sq) != "open"
+            ]
+            self.assertEqual(offenders, ["SQ-615"], "a resolved citation passed — the check is vacuous")
 
     def test_an_unknown_citation_is_rejected(self) -> None:
-        status = checker.question_status(PLAN)
-        unknown = SOURCE.replace("'SQ-564',", "'SQ-9999',")
-        offenders = [
-            sq for _, sq, _ in checker.declarations(unknown) if status.get(sq) != "open"
-        ]
-        self.assertEqual(offenders, ["SQ-9999"])
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            write_question(root, "SQ-598", status="open")
+            status = self._status(root)
+            unknown = SOURCE.replace("'SQ-564',", "'SQ-9999',")
+            offenders = [
+                sq for _, sq, _ in checker.declarations(unknown) if status.get(sq) != "open"
+            ]
+            self.assertEqual(offenders, ["SQ-9999"])
+
+
+class TestAntiVacuity(unittest.TestCase):
+    def test_an_unparsable_tree_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            # No plan/questions/ directory at all.
+            status, errors = checker.load_question_statuses(root)
+            self.assertEqual(status, {})
+            self.assertTrue(errors, "a missing plan/questions/ tree must report an error, not silence")
 
 
 class TestRepository(unittest.TestCase):
