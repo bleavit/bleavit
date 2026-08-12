@@ -1,6 +1,6 @@
 ---
 name: spec-audit
-description: Audit implemented code against the architecture spec in docs/architecture/. Use before commits or releases, after refactors, when the user asks whether something is spec-compliant, or as a periodic sweep. Delegates per-component review to spec-reviewer subagents and records the result in PLAN.md's Audit log.
+description: Audit implemented code against the architecture spec in docs/architecture/. Use before commits or releases, after refactors, when the user asks whether something is spec-compliant, or as a periodic sweep. Delegates per-component review to spec-reviewer subagents and records the result in plan/audits/.
 argument-hint: "[component | path | milestone-id | all]"
 ---
 
@@ -13,7 +13,7 @@ user explicitly asks afterwards.
 
 - `$ARGUMENTS` may name a component (`ledger`, `market`, …), a path, a milestone ID,
   or `all`. Default when empty: every component with changes since the last audit
-  recorded in PLAN.md · Audit log (fall back to: everything implemented so far).
+  recorded in `plan/audits/` (fall back to: everything implemented so far).
 - Map scope to owning docs (spec-reviewer knows the mapping; pass it explicitly anyway):
   constitution→06/13 · ledger→03 · market→04 · epoch/welfare→05 · governance/guardian/
   attestor/origins→06 · oracle/registry→07 · treasury→08 · execution-guard→09 ·
@@ -27,10 +27,8 @@ user explicitly asks afterwards.
 ## 3. Aggregate and record
 
 - Merge results, deduplicate, and order: blockers → majors → minors → spec questions.
-- Append one row to PLAN.md · **Audit log**:
-  `| YYYY-MM-DD | <scope> | <verdict summary, e.g. 2 blocker / 3 major / 5 minor> | <pointer> |`
-- Add genuinely new SPEC-QUESTIONs to PLAN.md · **Spec questions** (cite doc §; never
-  edit docs/architecture/ itself).
+- Append one record to today's `plan/audits/<YYYY>/<MM>/<YYYY-MM-DD>.md`.
+- Add genuinely new SPEC-QUESTIONs as `plan/questions/SQ-*.md` items (cite doc §).
 
 ## 4. Report
 

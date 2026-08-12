@@ -1,6 +1,6 @@
 ---
 name: sync-docs
-description: Bring the living documents — README.md, PLAN.md, AGENTS.md, CLAUDE.md and the .claude/.codex assets — back in line with the actual repository state. Use after ad-hoc changes, merges, or whenever the Stop hook complains that PLAN.md is stale.
+description: Bring the living documents — README.md, PLAN.md, plan/, AGENTS.md, CLAUDE.md and the .claude/.codex assets — back in line with the actual repository state. Use after ad-hoc changes, merges, or whenever the Stop hook reports stale plan state.
 ---
 
 # Living-document synchronization
@@ -21,10 +21,10 @@ existing; everything else is labeled planned.
 
 ## 2. Per-file contract
 
-- **PLAN.md** — statuses match reality (a milestone with red gates is not ✅); Current
-  focus names the actual next step; Session log has a row for today's work; Spec
-  questions / Verification log / Decision log / Audit log reflect anything that
-  happened. PLAN.md stays reference-only: milestone rows cite doc §, never restate
+- **PLAN.md + plan/** — statuses match reality (a milestone with red gates is not
+  done); Current focus names the actual next step; today's `plan/log/` file records
+  the work; questions, verifications, decisions and audits reflect what happened.
+  The tree stays reference-only: milestone frontmatter cites doc §, never restates
   spec content (rule R-4).
 - **README.md** — status line, repo layout, and commands are currently true; links resolve.
   The opening paragraph (thank-you to Prof. Robin Hanson) and the closing line (Bon
@@ -36,7 +36,7 @@ existing; everything else is labeled planned.
 
 ## 3. Apply and verify
 
-- Minimal, surgical edits; append to logs, never rewrite their history.
+- Minimal, surgical edits; append to day files, never rewrite their history.
 - Check that every relative link you touched resolves.
 - Delegate to the `doc-curator` subagent when the sync is large; do it inline when small.
 
