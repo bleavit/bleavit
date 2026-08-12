@@ -96,16 +96,18 @@ export function finalize<T>(value: T, at: FinalizedBlockRef): Finalized<T> {
  * where the answer was no: a fallback manufactured on a decode-failure path, a caller-supplied
  * id, a payload unwrapped out of somebody else's `Verified<T>`.
  *
- * `derive` grants nothing. It cannot be called without a `Finalized<A>` — a read that already
- * happened — and the pin it attaches is that read's own, never one the caller names. So the
- * only values it can label are values a light-client read is upstream of, which is exactly
- * what the clause permits. A value with no read behind it has nothing to pass in.
+ * `derive` cannot invent a pin. It cannot be called without a `Finalized<A>` — a read that
+ * already happened — and the pin it attaches is that read's own, never one the caller names.
+ * The callback can nevertheless ignore `A` and return unrelated content. The result therefore
+ * proves only that one finalized read was upstream, not that a particular key, decoder,
+ * predicate or security-relevant precondition was evaluated. Consumers such as INV-FE-2's
+ * transaction gate must own those semantics and never accept a caller-derived verdict.
  *
  * It is deliberately **not** variadic. Two reads at two blocks describe no single block, and
  * `meet` already refuses that case with its reason stated; a fold over N reads would have to
  * either repeat that refusal or quietly pick a pin.
  *
- * It is the unary case of {@link meet} and grants nothing the barrel did not already export:
+ * It is the unary case of {@link meet} and grants no new pin the barrel did not already export:
  * `meet(a, a, (v) => f(v))` is exactly this function, and both need a `Finalized<A>` to start
  * from. The unary case simply had no sanctioned spelling, so a reader needing a
  * `Finalized<boolean>` out of a `Finalized<readonly StorageItem[]>` had no path at all — and

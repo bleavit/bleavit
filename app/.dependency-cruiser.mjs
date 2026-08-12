@@ -21,7 +21,7 @@
  * dynamic `import()` Node 22.18 type-strips. What remains here is the rule list, which is
  * data.
  */
-const { CHAIN_SDK_PACKAGES, EXTERNAL, HOST_SDK_PACKAGES, WORKSPACE_SUBPATH, POLKADOT_API_NON_SIGNER } = await import('./tools/depcruise-external.ts');
+const { CHAIN_SDK_PACKAGES, EXTERNAL, HOST_SDK_PACKAGES, WORKSPACE_SUBPATH, POLKADOT_API_NON_SIGNER, TRANSACTION_BUILDER_MACHINE_MODULE } = await import('./tools/depcruise-external.ts');
 const { HANDOFF_PATH, NON_LOCAL_DEPENDENCY_TYPES } = await import('./tools/handoff-packages.ts');
 
 export default {
@@ -134,6 +134,40 @@ export default {
       to: { path: WORKSPACE_SUBPATH('@bleavit/signing/testing', 'packages/signing/dist/testing') },
     },
     {
+      name: 'no-test-gate-mint-in-production',
+      severity: 'error',
+      comment:
+        'INV-FE-2/12: the pure gate evaluator exists only to exercise structural tests while ' +
+        'the public refresh boundary fails closed. A production import of the testing subpath ' +
+        'would recover the caller-controlled proof mint this quarantine removes.',
+      from: { path: '^(src|packages)/', pathNot: '^tests/' },
+      to: {
+        path: WORKSPACE_SUBPATH(
+          '@bleavit/transaction-builder/testing',
+          'packages/transaction-builder/dist/testing',
+          'packages/transaction-builder/src/testing',
+        ),
+      },
+    },
+    {
+      name: 'no-deep-gate-mint-import-in-production',
+      severity: 'error',
+      comment:
+        'INV-FE-2/12: the package root withholds the pure gate evaluator, but a relative import ' +
+        'of the machine module bypasses the exports map. Only the root barrel and quarantined ' +
+        'testing entry point may import that module; every other production edge is forbidden.',
+      from: {
+        path: '^(src|packages)/',
+        pathNot: '^packages/transaction-builder/(src|dist)/(index|testing)($|\\.)',
+      },
+      // A type-only `GatePassed` import grants no runtime constructor. `fees.ts` uses exactly
+      // that shape; value-bearing imports are the capability this rule forbids.
+      to: {
+        path: TRANSACTION_BUILDER_MACHINE_MODULE,
+        dependencyTypesNot: ['type-only'],
+      },
+    },
+    {
       name: 'no-range-minting-outside-ingest',
       severity: 'error',
       comment:
@@ -202,7 +236,7 @@ export default {
         '`BundledChain`s. Note the contrast with `./light-client`, which is safe by typing: ' +
         'its `SmoldotClientFactory` must return a real smoldot `Client`, which an outside ' +
         'caller cannot construct. This one hands out the capability outright, so it needs the ' +
-        'same explicit bar the four `*/testing` subpaths carry.\n\n' +
+        'same explicit bar the five `*/testing` subpaths carry.\n\n' +
         '**Proven in scope, and the witness suite cannot prove it.** This rule\'s `from` is ' +
         '`^(src|packages)/`, and `tests/depcruise-witness` is outside it — a witness module ' +
         'placed there fires `witness-could-not-resolve` instead, which would report success ' +

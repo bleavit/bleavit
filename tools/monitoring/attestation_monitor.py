@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Out-of-band Bleavit release attestation monitor (12 section 5.2).
 
-``release.json`` field names are O1-owned and not frozen.  The live fetcher
-therefore consumes the documented provisional ``bleavit.release.provisional.v1``
-schema, while all comparison and signature functions accept already-extracted
-files, SHA-256 maps, signature blobs, keyrings, and frozen ReleaseChannel bytes.
-O1 can re-key the network adapter without changing the verdict core.
+The live fetcher consumes the same ``bleavit.app-release.v1`` document emitted
+by ``app/tools/release``.  That document pins the asset-only manifest M in
+``arweaveManifestTxId``; the independently provisioned credential index, ArNS,
+and ``ReleaseChannel`` bind the distinct final manifest M-prime that adds
+``release.json``.  Keeping those two addresses separate avoids both the
+self-addressing cycle and a verifier that checks a tree no browser loads.
 
 The production module is verify-only.  Tests contain their own deterministic
 signer solely to produce RFC/minisign-format fixtures.
@@ -57,7 +58,7 @@ from credential_index import (  # noqa: E402
 
 
 LOG = logging.getLogger("bleavit-attestation-monitor")
-PROVISIONAL_SCHEMA = "bleavit.release.provisional.v1"
+APP_RELEASE_SCHEMA = "bleavit.app-release.v1"
 TXID = re.compile(r"^[A-Za-z0-9_-]{43}$")
 SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
 HASH32_HEX = re.compile(r"^0x[0-9a-f]{64}$")
@@ -89,7 +90,7 @@ SERIES: dict[str, SeriesDefinition] = {
         _series("bleavit_release_monitor_valid_release_signatures", "gauge", "Valid non-revoked release signatures."),
         _series("bleavit_release_monitor_valid_attestations", "gauge", "Organizations represented by valid non-revoked attestor signatures."),
         _series("bleavit_release_monitor_keyring_generation", "gauge", "Verified release keyring generation."),
-        _series("bleavit_release_monitor_manifest_matches_channel", "gauge", "Whether release.json and resolver targets match ReleaseChannel."),
+        _series("bleavit_release_monitor_manifest_matches_channel", "gauge", "Whether every resolved final manifest matches ReleaseChannel."),
         _series("bleavit_release_monitor_covering_release", "gauge", "Whether the canonical release covers ReleaseChannel spec_version."),
         _series("bleavit_release_monitor_repoint_channel_lag_blocks", "gauge", "Observed finalized blocks since an ArNS target first differed from ReleaseChannel."),
         _series("bleavit_release_monitor_ant_record_changes_total", "counter", "Observed majority ArNS target changes."),
@@ -356,6 +357,82 @@ class IntegrityVerdict:
     covering_release: bool
 
 
+@dataclass(frozen=True)
+class AppRelease:
+    asset_manifest_txid: str
+    per_file_hashes: Mapping[str, str]
+    primary_spec_version: int
+    recovery_spec_version: int
+    keyring_generation: int
+
+
+def _u32(value: Any, label: str) -> int:
+    if type(value) is not int or not 0 <= value <= 0xFFFF_FFFF:
+        raise MonitoringError(f"release.json {label} must be a u32")
+    return value
+
+
+def _release_path(value: Any) -> str:
+    segments = value.split("/") if isinstance(value, str) else ()
+    if (
+        not isinstance(value, str)
+        or not value
+        or re.fullmatch(r"[A-Za-z0-9._/-]+", value) is None
+        or value.startswith("/")
+        or any(segment in {"", ".", ".."} for segment in segments)
+    ):
+        raise MonitoringError("release.json perFileHashes contains an unsafe path")
+    return value
+
+
+def parse_app_release(document: Any) -> AppRelease:
+    """Project the canonical app-v1 release fields used by the monitor."""
+    if not isinstance(document, dict) or document.get("schema") != APP_RELEASE_SCHEMA:
+        raise MonitoringError(f"release.json must use schema {APP_RELEASE_SCHEMA}")
+    asset_manifest_txid = document.get("arweaveManifestTxId")
+    if not isinstance(asset_manifest_txid, str) or TXID.fullmatch(
+        asset_manifest_txid
+    ) is None:
+        raise MonitoringError(
+            "release.json arweaveManifestTxId must be a published Arweave transaction id"
+        )
+    raw_hashes = document.get("perFileHashes")
+    if not isinstance(raw_hashes, dict) or not raw_hashes:
+        raise MonitoringError("release.json perFileHashes must be a non-empty object")
+    hashes: dict[str, str] = {}
+    for raw_path, digest in raw_hashes.items():
+        path = _release_path(raw_path)
+        if path == "release.json":
+            raise MonitoringError(
+                "release.json cannot hash itself in perFileHashes"
+            )
+        if not isinstance(digest, str) or SHA256_HEX.fullmatch(digest) is None:
+            raise MonitoringError(
+                f"release.json perFileHashes[{path!r}] is not lowercase SHA-256 hex"
+            )
+        hashes[path] = digest
+    raw_range = document.get("specVersionRange")
+    if not isinstance(raw_range, dict):
+        raise MonitoringError("release.json specVersionRange must be an object")
+    primary = _u32(raw_range.get("primary"), "specVersionRange.primary")
+    recovery = _u32(raw_range.get("recovery"), "specVersionRange.recovery")
+    if recovery != primary + 1:
+        raise MonitoringError(
+            "release.json recovery spec version must equal primary + 1"
+        )
+    generation = _u32(document.get("keyringGeneration"), "keyringGeneration")
+    readiness = document.get("readiness")
+    if not isinstance(readiness, dict) or readiness.get("productionReady") is not True:
+        raise MonitoringError("release.json is not marked production ready")
+    return AppRelease(
+        asset_manifest_txid,
+        hashes,
+        primary,
+        recovery,
+        generation,
+    )
+
+
 def _valid_signers(
     message: bytes,
     blobs: Sequence[str],
@@ -394,6 +471,7 @@ def evaluate_integrity(
 ) -> IntegrityVerdict:
     """Format-agnostic comparison core used by live fetching and tamper tests."""
     channel = decode_release_channel(release_channel_bytes)
+    release = parse_app_release(release_document)
     errors: list[str] = []
     mismatches = 0
     for path, expected in sorted(expected_hashes.items()):
@@ -406,18 +484,19 @@ def evaluate_integrity(
         mismatches += len(unexpected)
         errors.append("unlisted served files: " + ", ".join(unexpected))
 
-    manifest_txid = release_document.get("manifest_txid")
-    manifest_matches = isinstance(manifest_txid, str) and manifest_txid == channel.manifest_txid
-    if not manifest_matches:
-        errors.append("release.json manifest_txid differs from ReleaseChannel")
+    if release.asset_manifest_txid == channel.manifest_txid:
+        errors.append(
+            "release.json asset manifest equals the final ReleaseChannel manifest"
+        )
     if hashlib.sha256(release_json_bytes).digest() != channel.release_json_hash:
         errors.append("release.json SHA-256 differs from ReleaseChannel")
 
     divergent = sum(txid != channel.manifest_txid for txid in resolved_txids)
+    manifest_matches = bool(resolved_txids) and divergent == 0
     if divergent:
         errors.append(f"{divergent}-of-{len(resolved_txids)} gateway resolvers diverge")
 
-    generation = release_document.get("keyring_generation")
+    generation = release.keyring_generation
     if generation != channel.keyring_generation or generation != keyring.generation:
         errors.append("release/keyring/ReleaseChannel generation mismatch")
 
@@ -440,13 +519,10 @@ def evaluate_integrity(
             f"{len(attestor_organizations)} < 2"
         )
 
-    supported = release_document.get("supported_spec_version")
-    covering = (
-        isinstance(supported, dict)
-        and isinstance(supported.get("min"), int)
-        and isinstance(supported.get("max"), int)
-        and supported["min"] <= channel.spec_version <= supported["max"]
-    )
+    covering = channel.spec_version in {
+        release.primary_spec_version,
+        release.recovery_spec_version,
+    }
     if not covering:
         errors.append("canonical release does not cover ReleaseChannel spec_version")
     return IntegrityVerdict(
@@ -868,6 +944,41 @@ def fetch_credential_index(
     return index
 
 
+@dataclass(frozen=True)
+class PathManifest:
+    paths: tuple[str, ...]
+    index_path: str
+
+
+def _parse_path_manifest(raw: bytes, label: str) -> PathManifest:
+    try:
+        document = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise MonitoringError(f"{label} is not valid JSON") from error
+    if not isinstance(document, dict):
+        raise MonitoringError(f"{label} is not an object")
+    paths = document.get("paths")
+    if not isinstance(paths, dict) or not paths:
+        raise MonitoringError(f"{label} has no paths object")
+    names: list[str] = []
+    for raw_path, row in paths.items():
+        try:
+            path = _release_path(raw_path)
+        except MonitoringError as error:
+            raise MonitoringError(f"{label} contains an unsafe/non-string path") from error
+        txid = row.get("id") if isinstance(row, dict) else None
+        if not isinstance(txid, str) or TXID.fullmatch(txid) is None:
+            raise MonitoringError(f"{label} path {path!r} has no valid transaction id")
+        names.append(path)
+    index = document.get("index")
+    index_path = index.get("path") if isinstance(index, dict) else None
+    if not isinstance(index_path, str) or index_path not in paths:
+        raise MonitoringError(
+            f"{label} index.path must name one listed bundle path"
+        )
+    return PathManifest(tuple(sorted(names)), index_path)
+
+
 def fetch_release(
     config: Config, channel: ReleaseChannel, fetcher: Fetcher | None = None
 ) -> tuple[
@@ -875,33 +986,22 @@ def fetch_release(
 ]:
     client = fetcher or Fetcher(config)
     resolved = resolve_arns(config, client)
-    raw_manifests: list[bytes] = []
+    raw_final_manifests: list[bytes] = []
     for gateway, txid in zip(config.gateways, resolved):
-        raw_manifests.append(client.get(_format_url(gateway.raw_url, txid=txid)))
-    if any(raw != raw_manifests[0] for raw in raw_manifests):
-        raise MonitoringError("gateway bytes diverge for the resolved path manifest")
-    try:
-        canonical = json.loads(raw_manifests[0])
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise MonitoringError("resolved Arweave path manifest is not valid JSON") from error
-    if not isinstance(canonical, dict):
-        raise MonitoringError("resolved Arweave path manifest is not an object")
-    paths = canonical.get("paths")
-    if not isinstance(paths, dict) or not paths:
-        raise MonitoringError("Arweave path manifest has no paths object")
-    path_names = sorted(paths)
-    if not all(isinstance(path, str) and path and ".." not in Path(path).parts for path in path_names):
-        raise MonitoringError("Arweave path manifest contains an unsafe/non-string path")
-    index = canonical.get("index")
-    index_path = index.get("path") if isinstance(index, dict) else None
-    if not isinstance(index_path, str) or index_path not in paths:
-        raise MonitoringError(
-            "Arweave path manifest index.path must name one listed bundle path"
+        raw_final_manifests.append(
+            client.get(_format_url(gateway.raw_url, txid=txid))
         )
+    if any(raw != raw_final_manifests[0] for raw in raw_final_manifests):
+        raise MonitoringError("gateway bytes diverge for the final path manifest")
+    final_manifest = _parse_path_manifest(
+        raw_final_manifests[0], "final Arweave path manifest"
+    )
 
-    route_values: dict[str, list[bytes]] = {path: [] for path in path_names}
+    route_values: dict[str, list[bytes]] = {
+        path: [] for path in final_manifest.paths
+    }
     for gateway, resolved_txid in zip(config.gateways, resolved):
-        for path in path_names:
+        for path in final_manifest.paths:
             route_values[path].append(
                 client.get(_format_url(gateway.tx_url, txid=resolved_txid, path=path))
             )
@@ -916,14 +1016,50 @@ def fetch_release(
         release_document = json.loads(release_raw)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise MonitoringError("served release.json is invalid JSON") from error
-    if not isinstance(release_document, dict) or release_document.get("schema") != PROVISIONAL_SCHEMA:
-        raise MonitoringError(f"release.json must use provisional schema {PROVISIONAL_SCHEMA}")
-    hashes = release_document.get("files")
-    if not isinstance(hashes, dict) or not all(isinstance(k, str) and isinstance(v, str) for k, v in hashes.items()):
-        raise MonitoringError("release.json files must map paths to SHA-256 hex")
-    expected_paths = set(hashes)
-    if set(path_names) != expected_paths | {"release.json"}:
-        raise MonitoringError("manifest paths must equal release.json files plus release.json")
+    release = parse_app_release(release_document)
+    expected_paths = set(release.per_file_hashes)
+    if release.asset_manifest_txid in resolved:
+        raise MonitoringError(
+            "release.json asset manifest must differ from the final resolved manifest"
+        )
+    raw_asset_manifests = [
+        client.get(
+            _format_url(gateway.raw_url, txid=release.asset_manifest_txid)
+        )
+        for gateway in config.gateways
+    ]
+    if any(raw != raw_asset_manifests[0] for raw in raw_asset_manifests):
+        raise MonitoringError("gateway bytes diverge for the asset path manifest")
+    asset_manifest = _parse_path_manifest(
+        raw_asset_manifests[0], "asset Arweave path manifest"
+    )
+    if set(asset_manifest.paths) != expected_paths:
+        raise MonitoringError(
+            "asset manifest paths must equal release.json perFileHashes"
+        )
+    if set(final_manifest.paths) != expected_paths | {"release.json"}:
+        raise MonitoringError(
+            "final manifest paths must equal asset manifest paths plus release.json"
+        )
+    if asset_manifest.index_path != final_manifest.index_path:
+        raise MonitoringError(
+            "asset and final path manifests select different index.path values"
+        )
+
+    # M is what the signed document authorizes. Fetch it as well as M-prime (the
+    # browser-visible final/name routes) so the two-pass binding is checked in
+    # bytes rather than inferred from matching path names.
+    for gateway in config.gateways:
+        for path in asset_manifest.paths:
+            route_values[path].append(
+                client.get(
+                    _format_url(
+                        gateway.tx_url,
+                        txid=release.asset_manifest_txid,
+                        path=path,
+                    )
+                )
+            )
 
     # Route disagreement is represented as extra mismatch pseudo-paths, keeping
     # the pure comparison core unaware of gateway/network shape.
@@ -939,7 +1075,7 @@ def fetch_release(
     # convention. Probe the actual immutable and named roots independently and
     # bind both to the already hash-checked index path. Explicit root templates
     # keep an operator's path API from being mistaken for the browser route.
-    expected_root = representative[index_path]
+    expected_root = representative[final_manifest.index_path]
     for gateway, resolved_txid in zip(config.gateways, resolved):
         immutable_root = client.get(
             _format_url(gateway.tx_root_url, txid=resolved_txid)
@@ -1040,10 +1176,10 @@ class AttestationMonitor:
         files, document, release_raw, signatures, attestations, resolved = fetch_release(
             self.config, channel
         )
-        hashes = document.get("files", {})
+        release = parse_app_release(document)
         verdict = evaluate_integrity(
             files=files,
-            expected_hashes=hashes,
+            expected_hashes=release.per_file_hashes,
             release_json_bytes=release_raw,
             release_document=document,
             release_signatures=signatures,

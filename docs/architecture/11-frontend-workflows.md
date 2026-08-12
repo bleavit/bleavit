@@ -104,14 +104,26 @@ Carried forward from FE §17.1–§17.3, §17.5, §17.7–§17.8 with the fee re
 ## 11.4 Pre-sign refresh (INV-FE-2)
 
 ```ts
-export async function refreshAndGate<T>(prep: TxPreparation<T>): Promise<Gate> {
-  const at = await client.getFinalizedBlock();                 // B' — single pin
-  const rt = await api.runtimeVersionAt(at.hash);              // compat gate (doc 10)
+export async function refreshAndGate(
+  prep: TxPreparation,
+  nominalConnection: ChainHeadConnection,
+): Promise<Gate> {
+  const reader = await FinalizedReader.open(nominalConnection);
+  const at = reader.at;                                        // B' — single pin
+  const rt = await ownedRuntimeVersionAt(reader);               // compat gate (doc 10)
   if (rt.spec_version !== prep.builtFor.specVersion) return blocked('FE-TX-007', rt);
-  const results = await Promise.all(prep.preconditions.map(p => p.evaluateAt(at.hash)));
+  const results = await ownedEvaluator.evaluateDeclaredRows(prep, at.hash);
   const failed = results.filter(r => !r.ok);
   return failed.length ? blocked('FE-TX-004', failed /* diff view */)
-                       : proceed({ at, results });
+                       : proceed({
+                           at,
+                           prep,
+                           authorization: Object.freeze({
+                             scaleHex: prep.scaleHex,
+                             account: prep.signingAccount,
+                           }),
+                           results,
+                         });
 }
 ```
 
@@ -122,6 +134,21 @@ Rules (normative):
 3. Expected/actual values render in the confirm screen; expert mode shows raw keys and SCALE values (INV-FE-14).
 4. Provider/local-index data never satisfies any precondition (INV-FE-3); every row reads chain state.
 5. A precondition failure shows a diff (expected vs. actual at B′) and returns to Draft with form state preserved.
+6. A passing proof names the exact `TxPreparation` it evaluated and freezes the signing target
+   `{scaleHex, account}` from that preparation. Every signer consumes those bound bytes/account,
+   never parallel request fields; the reducer and signer boundary reject a proof paired with another
+   preparation or a preparation mutated after gating.
+
+**Fail-closed implementation floor (normative).** The evaluator above is a closed internal table:
+it owns every metadata-derived key and argument encoder, decoder, compatibility check and row
+predicate. A caller supplies only the preparation's declared choices and the nominal connection
+object — never executable read/decode/evaluation callbacks, precondition verdicts or a third
+argument. Until that closed table is complete, `refreshAndGate(prep, nominalConnection)` MUST still
+open its own fresh finalized pin and observe the finalized runtime, then return a named `FE-TX-004`
+blocked outcome; it MUST NOT mint a passing gate. A genuine but irrelevant read, or an arbitrary
+value derived from one, proves none of the declared rows. This is a safe staging state under
+INV-FE-12, not satisfaction of rules 1–5: signing remains unavailable until every exact read above
+is implemented.
 
 ---
 

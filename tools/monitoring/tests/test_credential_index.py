@@ -9,7 +9,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 
-from support import integrity_fixture
+from support import FINAL_MANIFEST_TXID, integrity_fixture, release_channel_bytes
 
 import attestation_monitor as am
 import credential_index as ci
@@ -19,6 +19,13 @@ from common import MonitoringError, decode_release_channel
 RELEASE_TXIDS = ("R" * 43, "S" * 43)
 ATTESTATION_TXIDS = ("A" * 43, "B" * 43)
 INDEX_TXID = "I" * 43
+APP_RELEASE_FIXTURE = (
+    Path(__file__).resolve().parents[3]
+    / "app"
+    / "fixtures"
+    / "gateway-transcript"
+    / "cli-release.json"
+)
 
 
 class FakeFetcher:
@@ -31,21 +38,40 @@ class FakeFetcher:
 
 
 class CredentialIndexTests(unittest.TestCase):
-    def test_producer_is_deterministic_and_consumer_binds_final_release(self) -> None:
-        fixture = integrity_fixture()
+    def test_real_app_producer_bytes_feed_index_and_unattended_consumer(self) -> None:
+        release_raw = APP_RELEASE_FIXTURE.read_bytes()
+        release_document = json.loads(release_raw)
+        app_release = am.parse_app_release(release_document)
+        self.assertEqual(
+            app_release.asset_manifest_txid,
+            release_document["arweaveManifestTxId"],
+        )
+        self.assertEqual(app_release.per_file_hashes, release_document["perFileHashes"])
+        self.assertEqual(
+            (app_release.primary_spec_version, app_release.recovery_spec_version),
+            (2, 3),
+        )
+        self.assertEqual(app_release.keyring_generation, 4)
         first = ci.build_credential_index(
-            fixture["release_raw"], RELEASE_TXIDS, ATTESTATION_TXIDS
+            release_raw,
+            FINAL_MANIFEST_TXID,
+            RELEASE_TXIDS,
+            ATTESTATION_TXIDS,
         )
         second = ci.build_credential_index(
-            fixture["release_raw"], RELEASE_TXIDS, ATTESTATION_TXIDS
+            release_raw,
+            FINAL_MANIFEST_TXID,
+            RELEASE_TXIDS,
+            ATTESTATION_TXIDS,
         )
         self.assertEqual(first, second)
-        self.assertNotIn(b"release_signatures", fixture["release_raw"])
+        self.assertNotIn(b"release_signatures", release_raw)
         index = ci.parse_credential_index(first)
         self.assertEqual(
             index.release_json_sha256,
-            hashlib.sha256(fixture["release_raw"]).hexdigest(),
+            hashlib.sha256(release_raw).hexdigest(),
         )
+        self.assertEqual(index.manifest_txid, FINAL_MANIFEST_TXID)
         self.assertEqual(index.release_signature_txids, RELEASE_TXIDS)
         self.assertEqual(index.attestation_txids, ATTESTATION_TXIDS)
 
@@ -74,15 +100,24 @@ class CredentialIndexTests(unittest.TestCase):
         consumed = am.fetch_credential_index(
             config,
             FakeFetcher(responses),
-            fixture["release_raw"],
-            decode_release_channel(fixture["channel"]),
+            release_raw,
+            decode_release_channel(
+                release_channel_bytes(
+                    release_json_hash=hashlib.sha256(release_raw).digest(),
+                    spec_version=2,
+                    generation=4,
+                )
+            ),
         )
         self.assertEqual(consumed, index)
 
     def test_consumer_rejects_wrong_out_of_band_digest_and_release_binding(self) -> None:
         fixture = integrity_fixture()
         raw = ci.build_credential_index(
-            fixture["release_raw"], RELEASE_TXIDS, ATTESTATION_TXIDS
+            fixture["release_raw"],
+            FINAL_MANIFEST_TXID,
+            RELEASE_TXIDS,
+            ATTESTATION_TXIDS,
         )
         gateways = tuple(
             am.Gateway(
@@ -121,7 +156,10 @@ class CredentialIndexTests(unittest.TestCase):
     def test_schema_rejects_unknown_fields_and_duplicate_transactions(self) -> None:
         fixture = integrity_fixture()
         raw = ci.build_credential_index(
-            fixture["release_raw"], RELEASE_TXIDS, ATTESTATION_TXIDS
+            fixture["release_raw"],
+            FINAL_MANIFEST_TXID,
+            RELEASE_TXIDS,
+            ATTESTATION_TXIDS,
         )
         document = json.loads(raw)
         document["unexpected"] = True
@@ -131,6 +169,32 @@ class CredentialIndexTests(unittest.TestCase):
         document["attestations"][1] = document["attestations"][0]
         with self.assertRaisesRegex(ci.CredentialIndexError, "duplicate txid"):
             ci.parse_credential_index(json.dumps(document).encode())
+        document["attestations"] = [{"txid": RELEASE_TXIDS[0]}, {"txid": "Z" * 43}]
+        with self.assertRaisesRegex(ci.CredentialIndexError, "across credential roles"):
+            ci.parse_credential_index(json.dumps(document).encode())
+
+    def test_producer_requires_explicit_distinct_final_manifest(self) -> None:
+        fixture = integrity_fixture()
+        with self.assertRaisesRegex(ci.CredentialIndexError, "must differ"):
+            ci.build_credential_index(
+                fixture["release_raw"],
+                fixture["document"]["arweaveManifestTxId"],
+                RELEASE_TXIDS,
+                ATTESTATION_TXIDS,
+            )
+        provisional = json.dumps(
+            {
+                "schema": "bleavit.release.provisional.v1",
+                "manifest_txid": FINAL_MANIFEST_TXID,
+            }
+        ).encode()
+        with self.assertRaisesRegex(ci.CredentialIndexError, "app-release.v1"):
+            ci.build_credential_index(
+                provisional,
+                FINAL_MANIFEST_TXID,
+                RELEASE_TXIDS,
+                ATTESTATION_TXIDS,
+            )
 
     def test_cli_producer_writes_parseable_bytes_and_reports_the_pin(self) -> None:
         fixture = integrity_fixture()
@@ -139,7 +203,14 @@ class CredentialIndexTests(unittest.TestCase):
             release = root / "release.json"
             output = root / "credentials.json"
             release.write_bytes(fixture["release_raw"])
-            arguments = ["--release-json", str(release), "--output", str(output)]
+            arguments = [
+                "--release-json",
+                str(release),
+                "--final-manifest",
+                FINAL_MANIFEST_TXID,
+                "--output",
+                str(output),
+            ]
             for txid in RELEASE_TXIDS:
                 arguments.extend(("--release-signature", txid))
             for txid in ATTESTATION_TXIDS:

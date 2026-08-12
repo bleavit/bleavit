@@ -16,8 +16,9 @@
  *
  * ## The control is a value, and it can only be built from a gate result
  *
- * `OperatorGate.window` is a `GatePassed`, whose brand only `gate()` mints and only when
- * every clause of every declared row was read at one finalized block. A console renders its
+ * `OperatorGate.window` is a `GatePassed`, whose brand production code can receive only from
+ * the owned `refreshAndGate` path after every clause of every declared row was read at one
+ * finalized block. A console renders its
  * submit control from that field, and its `onSubmit` **takes the window as an argument** — so
  * a screen cannot call the submitter without holding one, and cannot obtain one except from a
  * session in `AwaitingSignature`. The old `() => void` shape is not merely discouraged; it
@@ -30,7 +31,7 @@
  *
  * ## Four refusals this module adds that the machine cannot see
  *
- * 1. **The preparation must declare this call's row, and it must exist.** `gate()` checks
+ * 1. **The preparation must declare this call's row, and it must exist.** The gate checks
  *    that every row a preparation *declares* was read — it cannot check that the declaration
  *    is the right one. A preparation for `guardian.approve_action` declaring `P-1` would gate
  *    perfectly against the market row and authorise the wrong signature, so the binding from

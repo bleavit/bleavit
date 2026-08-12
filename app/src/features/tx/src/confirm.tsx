@@ -95,7 +95,8 @@ export function decodeForConfirm(
   // the type system and nowhere at runtime. Writing it as a computed key threw
   // `ReferenceError: DECODED_FROM_BYTES is not defined` on the first call — a phantom
   // field must never be materialised. The single assertion here is the one mint site, the
-  // same shape `gate()` uses for `GatePassed` and `chain-client` for `Finalized<T>`, and
+  // same shape the quarantined gate evaluator uses for `GatePassed` and `chain-client` for
+  // `Finalized<T>`, and
   // it must stay the only one: `as unknown as` is banned across `app/`, and this is a
   // narrowing assertion rather than a laundering double-cast.
   return { ...raw, fromHex: scaleHex } as DecodedCall;

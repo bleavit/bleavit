@@ -16,9 +16,12 @@ Legend: ⬜ pending · 🔨 active · ✅ done · ⛔ blocked
 > **ACTIVE: 2026-08-12 — remediate the whole-repository security review in
 > draft PR #304.** The immutable review checkpoint is published at commit
 > `3b70e09e`; all 15 findings have implementation patches in the working tree.
-> Remaining closure work is committed-fidelity weight regeneration, genuine
-> clean-source OCI runtime/feed regeneration, scoped quality gates, and the
-> remediation commit/push.
+> A final independent pass also closed two late source blockers: the signing gate
+> now has no caller-controlled evidence port and stays fail-closed until its closed
+> evaluator exists, while the monitor consumes the real app release schema and
+> distinguishes asset manifest M from final manifest M′. Remaining work is the
+> clean source commit, genuine same-SHA OCI runtime/feed regeneration, artifact
+> gates, and the remediation push.
 
 > **PARKED: 2026-08-09 — Track F's code is complete; four milestones wait on
 > external inputs.** F1 needs the user's SQ-940 ruling plus a device lab/live

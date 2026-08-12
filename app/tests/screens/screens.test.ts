@@ -7662,7 +7662,8 @@ const OPENABLE_CALLS = [
 
 test('no operator control opens without a gate result the screen cannot mint', () => {
   // The structural half: `operatorGate` yields a `window` only from `AwaitingSignature`, and
-  // that state has one inbound edge requiring a `GatePassed` whose brand only `gate()` mints.
+  // that state has one inbound edge requiring a `GatePassed` whose brand production code cannot
+  // mint; the explicit-value evaluator exists only behind the firewalled testing subpath.
   for (const call of Object.keys(OPERATOR_SURFACE_ROWS) as (keyof typeof OPERATOR_SURFACE_ROWS)[]) {
     const row = OPERATOR_SURFACE_ROWS[call];
     const notRefreshed = operatorGate(call, preparedSession(row), []);

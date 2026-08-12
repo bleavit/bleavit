@@ -5,7 +5,7 @@ import json
 import unittest
 from types import SimpleNamespace
 
-from support import integrity_fixture
+from support import ASSET_MANIFEST_TXID, FINAL_MANIFEST_TXID, integrity_fixture
 
 import attestation_monitor as am
 import credential_index as ci
@@ -41,18 +41,33 @@ def route_fixture():
         )
         for number in range(3)
     )
-    manifest = {
+    asset_manifest = {
         "manifest": "arweave/paths",
         "version": "0.2.0",
         "index": {"path": "index.html"},
         "paths": {
             path: {"id": chr(ord("A") + index) * 43}
-            for index, path in enumerate([*fixture["files"], "release.json"])
+            for index, path in enumerate(fixture["files"])
         },
     }
-    manifest_raw = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
+    final_manifest = {
+        **asset_manifest,
+        "paths": {
+            **asset_manifest["paths"],
+            "release.json": {"id": "R" * 43},
+        },
+    }
+    asset_manifest_raw = json.dumps(
+        asset_manifest, sort_keys=True, separators=(",", ":")
+    ).encode()
+    final_manifest_raw = json.dumps(
+        final_manifest, sort_keys=True, separators=(",", ":")
+    ).encode()
     credential_raw = ci.build_credential_index(
-        fixture["release_raw"], RELEASE_SIGNATURE_TXIDS, ATTESTATION_TXIDS
+        fixture["release_raw"],
+        FINAL_MANIFEST_TXID,
+        RELEASE_SIGNATURE_TXIDS,
+        ATTESTATION_TXIDS,
     )
     config = SimpleNamespace(
         gateways=gateways,
@@ -63,19 +78,32 @@ def route_fixture():
     responses: dict[str, bytes] = {}
     for gateway in gateways:
         responses[am._format_url(gateway.resolve_url, name=config.arns_name)] = (
-            json.dumps({"txId": "A" * 43}).encode()
+            json.dumps({"txId": FINAL_MANIFEST_TXID}).encode()
         )
-        responses[am._format_url(gateway.raw_url, txid="A" * 43)] = manifest_raw
+        responses[
+            am._format_url(gateway.raw_url, txid=FINAL_MANIFEST_TXID)
+        ] = final_manifest_raw
+        responses[
+            am._format_url(gateway.raw_url, txid=ASSET_MANIFEST_TXID)
+        ] = asset_manifest_raw
         for path, value in {**fixture["files"], "release.json": fixture["release_raw"]}.items():
             responses[
-                am._format_url(gateway.tx_url, txid="A" * 43, path=path)
+                am._format_url(
+                    gateway.tx_url, txid=FINAL_MANIFEST_TXID, path=path
+                )
             ] = value
             responses[
                 am._format_url(gateway.name_url, name=config.arns_name, path=path)
             ] = value
-        responses[am._format_url(gateway.tx_root_url, txid="A" * 43)] = fixture[
-            "files"
-        ]["index.html"]
+        for path, value in fixture["files"].items():
+            responses[
+                am._format_url(
+                    gateway.tx_url, txid=ASSET_MANIFEST_TXID, path=path
+                )
+            ] = value
+        responses[
+            am._format_url(gateway.tx_root_url, txid=FINAL_MANIFEST_TXID)
+        ] = fixture["files"]["index.html"]
         responses[
             am._format_url(gateway.name_root_url, name=config.arns_name)
         ] = fixture["files"]["index.html"]
@@ -86,12 +114,19 @@ def route_fixture():
             ][0].encode()
         for txid, signature in zip(ATTESTATION_TXIDS, fixture["attestations"]):
             responses[am._format_url(gateway.raw_url, txid=txid)] = signature.encode()
-    return fixture, gateways, config, responses, manifest_raw
+    return (
+        fixture,
+        gateways,
+        config,
+        responses,
+        asset_manifest_raw,
+        final_manifest_raw,
+    )
 
 
 class AttestationRouteTests(unittest.TestCase):
     def test_honest_root_and_all_raw_manifest_copies_are_accepted(self) -> None:
-        fixture, _, config, responses, _ = route_fixture()
+        fixture, _, config, responses, _, _ = route_fixture()
         files, document, release_raw, _, _, resolved = am.fetch_release(
             config,
             decode_release_channel(fixture["channel"]),
@@ -108,11 +143,11 @@ class AttestationRouteTests(unittest.TestCase):
             ("name_root_url", "name-root"),
         ):
             with self.subTest(root_field=root_field):
-                fixture, gateways, config, responses, _ = route_fixture()
+                fixture, gateways, config, responses, _, _ = route_fixture()
                 gateway = gateways[1]
                 template = getattr(gateway, root_field)
                 values = (
-                    {"txid": "A" * 43}
+                    {"txid": FINAL_MANIFEST_TXID}
                     if root_field == "tx_root_url"
                     else {"name": config.arns_name}
                 )
@@ -129,7 +164,7 @@ class AttestationRouteTests(unittest.TestCase):
                 self.assertIn(mismatch, files)
                 verdict = am.evaluate_integrity(
                     files=files,
-                    expected_hashes=document["files"],
+                    expected_hashes=document["perFileHashes"],
                     release_json_bytes=release_raw,
                     release_document=document,
                     release_signatures=signatures,
@@ -143,11 +178,13 @@ class AttestationRouteTests(unittest.TestCase):
                 self.assertTrue(any(mismatch in error for error in verdict.errors))
 
     def test_one_gateway_cannot_substitute_path_manifest_bytes(self) -> None:
-        fixture, gateways, config, responses, manifest_raw = route_fixture()
+        fixture, gateways, config, responses, _, final_manifest_raw = route_fixture()
         responses[
-            am._format_url(gateways[1].raw_url, txid="A" * 43)
-        ] = manifest_raw + b" "
-        with self.assertRaisesRegex(MonitoringError, "path manifest"):
+            am._format_url(
+                gateways[1].raw_url, txid=FINAL_MANIFEST_TXID
+            )
+        ] = final_manifest_raw + b" "
+        with self.assertRaisesRegex(MonitoringError, "final path manifest"):
             am.fetch_release(
                 config,
                 decode_release_channel(fixture["channel"]),
@@ -155,15 +192,113 @@ class AttestationRouteTests(unittest.TestCase):
             )
 
     def test_manifest_index_must_name_a_listed_path(self) -> None:
-        fixture, gateways, config, responses, manifest_raw = route_fixture()
-        manifest = json.loads(manifest_raw)
+        fixture, gateways, config, responses, _, final_manifest_raw = route_fixture()
+        manifest = json.loads(final_manifest_raw)
         manifest["index"]["path"] = "missing.html"
         replacement = json.dumps(
             manifest, sort_keys=True, separators=(",", ":")
         ).encode()
         for gateway in gateways:
-            responses[am._format_url(gateway.raw_url, txid="A" * 43)] = replacement
+            responses[
+                am._format_url(gateway.raw_url, txid=FINAL_MANIFEST_TXID)
+            ] = replacement
         with self.assertRaisesRegex(MonitoringError, "index.path"):
+            am.fetch_release(
+                config,
+                decode_release_channel(fixture["channel"]),
+                FakeFetcher(responses),
+            )
+
+    def test_asset_manifest_paths_must_equal_the_signed_file_map(self) -> None:
+        fixture, gateways, config, responses, asset_manifest_raw, _ = route_fixture()
+        manifest = json.loads(asset_manifest_raw)
+        manifest["paths"]["extra.js"] = {"id": "X" * 43}
+        replacement = json.dumps(
+            manifest, sort_keys=True, separators=(",", ":")
+        ).encode()
+        for gateway in gateways:
+            responses[
+                am._format_url(gateway.raw_url, txid=ASSET_MANIFEST_TXID)
+            ] = replacement
+        with self.assertRaisesRegex(MonitoringError, "asset manifest paths"):
+            am.fetch_release(
+                config,
+                decode_release_channel(fixture["channel"]),
+                FakeFetcher(responses),
+            )
+
+    def test_provisional_release_schema_has_no_compatibility_alias(self) -> None:
+        fixture, gateways, config, responses, _, _ = route_fixture()
+        provisional = json.dumps(
+            {
+                "schema": "bleavit.release.provisional.v1",
+                "manifest_txid": FINAL_MANIFEST_TXID,
+                "files": fixture["hashes"],
+            }
+        ).encode()
+        for gateway in gateways:
+            responses[
+                am._format_url(
+                    gateway.tx_url,
+                    txid=FINAL_MANIFEST_TXID,
+                    path="release.json",
+                )
+            ] = provisional
+            responses[
+                am._format_url(
+                    gateway.name_url,
+                    name=config.arns_name,
+                    path="release.json",
+                )
+            ] = provisional
+        with self.assertRaisesRegex(MonitoringError, "bleavit.app-release.v1"):
+            am.fetch_release(
+                config,
+                decode_release_channel(fixture["channel"]),
+                FakeFetcher(responses),
+            )
+
+    def test_asset_and_final_manifest_addresses_must_be_distinct(self) -> None:
+        fixture, gateways, config, responses, _, _ = route_fixture()
+        document = {**fixture["document"], "arweaveManifestTxId": FINAL_MANIFEST_TXID}
+        collapsed = json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
+        for gateway in gateways:
+            responses[
+                am._format_url(
+                    gateway.tx_url,
+                    txid=FINAL_MANIFEST_TXID,
+                    path="release.json",
+                )
+            ] = collapsed
+            responses[
+                am._format_url(
+                    gateway.name_url,
+                    name=config.arns_name,
+                    path="release.json",
+                )
+            ] = collapsed
+        with self.assertRaisesRegex(MonitoringError, "must differ"):
+            am.fetch_release(
+                config,
+                decode_release_channel(fixture["channel"]),
+                FakeFetcher(responses),
+            )
+
+    def test_credential_index_final_manifest_must_match_channel(self) -> None:
+        fixture, gateways, config, responses, _, _ = route_fixture()
+        other_final = "Z" * 43
+        credential_raw = ci.build_credential_index(
+            fixture["release_raw"],
+            other_final,
+            RELEASE_SIGNATURE_TXIDS,
+            ATTESTATION_TXIDS,
+        )
+        config.credential_index_sha256 = hashlib.sha256(credential_raw).hexdigest()
+        for gateway in gateways:
+            responses[
+                am._format_url(gateway.raw_url, txid=INDEX_TXID)
+            ] = credential_raw
+        with self.assertRaisesRegex(MonitoringError, "differs from ReleaseChannel"):
             am.fetch_release(
                 config,
                 decode_release_channel(fixture["channel"]),

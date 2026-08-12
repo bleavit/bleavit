@@ -10,8 +10,8 @@
  * So the structure carries it, in three ways that are each testable without a chain:
  *
  *  1. `AwaitingSignature` is reachable **only** from `Refreshing`, and only by an event
- *     that carries a `GatePassed` — a value this module alone can construct, and only
- *     from `refreshAndGate` owning every read at one finalized block.
+ *     that carries a `GatePassed` — a value production callers cannot construct. Until
+ *     the closed metadata-derived evaluator exists, `refreshAndGate` always fails closed.
  *  2. The reducer's edge set is enumerable, so `tests/transaction-builder` asserts against
  *     the lifecycle 11 §11.3 writes out, in both directions. A new edge that skipped the
  *     gate would show up as an edge the specification does not draw.
@@ -24,7 +24,6 @@
 import { FinalizedReader } from '@bleavit/chain-client';
 import type {
   ChainHeadConnection,
-  Finalized,
   FinalizedBlockRef,
 } from '@bleavit/chain-client';
 import { callIsProven, callUnavailableReason, type CompatClassification } from '@bleavit/descriptors';
@@ -119,7 +118,8 @@ declare const GATE_PASSED: unique symbol;
  * Branded for the same reason `Finalized<T>` is: without the phantom field, any object
  * literal of the right shape would open `AwaitingSignature`, and "the machine has no
  * bypass edge" would be a claim about the code rather than a property of the types. The
- * symbol is not exported, so only `refreshAndGate()` below can produce one.
+ * symbol is not exported. Production callers have no constructor; the pure evaluator is
+ * reachable only through the dependency-firewalled `/testing` subpath.
  *
  * ## The proof names what it proves
  *
@@ -239,34 +239,6 @@ export const TX_TERMINAL_STATES: ReadonlySet<TxState> = new Set<TxState>([
  */
 export type GateCompat = CompatClassification | undefined;
 
-/**
- * The reads `refreshAndGate` owns at its freshly opened finalized pin.
- *
- * Every answer is a branded `Finalized<T>`. Production code therefore cannot satisfy this
- * contract with literals, cached provider data, or results evaluated before the submit click;
- * it must perform a chain-client read (or a pure derivation from one). The callbacks expose
- * decoding policy without handing the caller control of the pin or the gate result.
- */
-export interface GateRefreshReads {
-  readonly runtime: (reader: FinalizedReader) => Promise<Finalized<BuiltFor>>;
-  readonly compatibility: (
-    reader: FinalizedReader,
-    runtime: Finalized<BuiltFor>,
-  ) => Promise<Finalized<GateCompat>>;
-  readonly preconditions: (
-    reader: FinalizedReader,
-    prep: TxPreparation,
-  ) => Promise<readonly Finalized<PreconditionResult>[]>;
-}
-
-const samePin = (
-  at: FinalizedBlockRef,
-  status: Finalized<unknown>['status'],
-): boolean =>
-  status.chain === at.chain &&
-  status.blockHash === at.blockHash &&
-  status.blockNumber === at.blockNumber;
-
 const refreshFailure = (
   at: FinalizedBlockRef,
   detail: string,
@@ -305,78 +277,46 @@ function gateContext(
 }
 
 /**
- * Re-open the finalized head, re-read every permitting fact at that one pin, and gate `prep`.
+ * Open one fresh finalized pin on the nominal connection, observe its finalized runtime, and
+ * fail closed until this package ships the complete closed evaluator required by INV-FE-2.
  *
- * This is the only exported proof-producing path. In particular, callers never supply a block,
- * a live runtime, a compatibility classification, or precondition results as plain values. The
- * function owns the fresh pin and invokes every read itself, making 11 §11.4 rule 1 / INV-FE-2
- * a package boundary rather than a calling convention.
+ * The missing evaluator must own its metadata-derived keys, argument encoders, decoders and
+ * predicates. Accepting any of those as callbacks would let a caller turn an irrelevant genuine
+ * read — or an arbitrary derived value — into a permitting verdict. Therefore this public
+ * boundary has exactly two arguments and cannot mint `GatePassed` in the interim.
  *
- * The connection is the nominal production class, not the structural `ChainHeadTransport`
- * interface. Its private fields make an object-literal transport ineligible here: a caller must
- * hand the refresh owner the live chain-client connection that owns the follow subscription.
+ * The connection is the nominal class, not the structural `ChainHeadTransport` interface, so an
+ * object-literal transport cannot be passed directly. That is a shape boundary, not proof of
+ * trusted origin: the current public connection factory can wrap an injected provider. This is
+ * safe only because the interim path cannot mint; the eventual evaluator must receive the
+ * topology-issued light-client capability rather than treating nominal typing as provenance.
  */
 export async function refreshAndGate(
-  prep: TxPreparation,
-  transport: ChainHeadConnection,
-  reads: GateRefreshReads,
+  _prep: TxPreparation,
+  nominalConnection: ChainHeadConnection,
 ): Promise<GateOutcome> {
-  const reader = await FinalizedReader.open(transport);
+  const reader = await FinalizedReader.open(nominalConnection);
   const at = reader.at;
+  const runtime = nominalConnection.finalizedRuntime();
+  const observation = runtime === undefined
+    ? 'the nominal connection has not established a finalized runtime'
+    : `the nominal connection observed finalized spec_version ${runtime.specVersion}`;
 
-  let live: Finalized<BuiltFor>;
-  let compat: Finalized<GateCompat>;
-  try {
-    live = await reads.runtime(reader);
-    if (!samePin(at, live.status)) {
-      return refreshFailure(
-        at,
-        'the runtime identity was not read at the refresh pin; stale or cross-chain runtime ' +
-          'evidence cannot authorise a signature (INV-FE-2).',
-      );
-    }
-    compat = await reads.compatibility(reader, live);
-    if (!samePin(at, compat.status)) {
-      return refreshFailure(
-        at,
-        'the compatibility verdict was not established at the refresh pin; a verdict from ' +
-          'another block cannot authorise a signature (INV-FE-2, INV-FE-12).',
-      );
-    }
-  } catch (error) {
-    return refreshFailure(
-      at,
-      `the runtime refresh could not be completed at the finalized pin: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-
-  const contextFailure = gateContext(prep, at, live.value, compat.value);
-  if (contextFailure !== undefined) return contextFailure;
-
-  let finalizedResults: readonly Finalized<PreconditionResult>[];
-  try {
-    finalizedResults = await reads.preconditions(reader, prep);
-  } catch (error) {
-    return refreshFailure(
-      at,
-      `the pre-sign preconditions could not all be re-read at the finalized pin: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  }
-  const offPin = finalizedResults.filter((result) => !samePin(at, result.status));
-  if (offPin.length > 0) {
-    return refreshFailure(
-      at,
-      `${offPin.length} precondition result(s) came from a different finalized pin; the set ` +
-        'does not describe one state and cannot authorise a signature.',
-      offPin.map((result) => result.value),
-    );
-  }
-
-  return gateEvaluated(prep, at, live.value, compat.value, finalizedResults.map((result) => result.value));
+  return refreshFailure(
+    at,
+    `signing is unavailable: ${observation}, and this client does not yet ship the closed, ` +
+      'metadata-derived compatibility and precondition evaluator required to turn that fresh ' +
+      'pin into signing evidence. Caller-supplied callbacks or derived values cannot substitute ' +
+      'for the owned evaluator (INV-FE-2, INV-FE-12).',
+  );
 }
 
 /**
- * Evaluate already-refreshed values. Private: only `refreshAndGate` may feed it evidence.
+ * Evaluate explicit values for structural tests only.
+ *
+ * The package root omits this symbol. The quarantined `/testing` subpath is forbidden from all
+ * production packages by dependency-cruiser, so this pure evaluator cannot become a production
+ * proof mint while the public boundary remains fail closed.
  *
  * ## The compatibility verdict is checked first, and that is INV-FE-12 becoming structural
  *
@@ -409,7 +349,7 @@ export async function refreshAndGate(
  * pass and the bytes still be wrong. Order matters here in a way it does not between the rows
  * themselves.
  */
-function gateEvaluated(
+export function gateEvaluatedForTesting(
   prep: TxPreparation,
   at: FinalizedBlockRef,
   live: BuiltFor,
@@ -548,8 +488,8 @@ export function reduce(session: TxSession, event: TxEvent): TxSession {
       return session;
 
     case 'Refreshing':
-      // The ONLY edge into AwaitingSignature, and it requires a `GatePassed` only the
-      // read-owning `refreshAndGate` path can mint. Everything else follows from that.
+      // The ONLY edge into AwaitingSignature, and it requires a `GatePassed` production callers
+      // cannot mint. The public refresh path is fail-closed until its owned evaluator exists.
       if (event.type === 'gate-result') {
         if (event.outcome.kind !== 'proceed') {
           return at('Blocked', { failed: event.outcome.failed, lastError: event.outcome.code });
@@ -656,8 +596,14 @@ export function txTransitionEdges(): readonly (readonly [TxState, TxState])[] {
     disabled: [],
     proven: [],
   };
-  const proceed = gateEvaluated(prep, pin, prep.builtFor, proven, passing);
-  const blocked = gateEvaluated(prep, pin, { specVersion: 2, metadataHash: '0x00' }, proven, passing);
+  const proceed = gateEvaluatedForTesting(prep, pin, prep.builtFor, proven, passing);
+  const blocked = gateEvaluatedForTesting(
+    prep,
+    pin,
+    { specVersion: 2, metadataHash: '0x00' },
+    proven,
+    passing,
+  );
 
   const states: TxState[] = [
     'Draft', 'Prepared', 'Refreshing', 'Blocked', 'AwaitingSignature',

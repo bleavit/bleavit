@@ -35,7 +35,7 @@ packages:
   # was.** Membership confines a *root dependency*; a *subpath export* of a package ten
   # workspace members already declare is reachable from all of them. The bar is the explicit
   # dependency-cruiser rule `no-node-light-client-in-the-bundle`, with its witness module —
-  # the same shape the four `*/testing` subpaths carry, and for the same reason.
+  # the same shape the five `*/testing` subpaths carry, and for the same reason.
   - 'tools/drill-client'
   # `optional/indexer` (10 §8.2/§8.5.2, F24) is a member for the same reason as `tools/snapshot`,
   # and it is the reference implementation §8.2 names by path. It imports the canonical serializer

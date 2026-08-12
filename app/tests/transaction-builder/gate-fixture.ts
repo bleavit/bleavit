@@ -1,6 +1,5 @@
-/** Test-only driver for the production `refreshAndGate` boundary. */
+/** Test-only driver for the quarantined pure gate evaluator. */
 
-import { refreshAndGate } from '@bleavit/transaction-builder';
 import type {
   BuiltFor,
   GateCompat,
@@ -8,9 +7,9 @@ import type {
   PreconditionResult,
   TxPreparation,
 } from '@bleavit/transaction-builder';
+import { gateForTest as evaluateGateForTest } from '@bleavit/transaction-builder/testing';
 import { ChainHeadConnection } from '@bleavit/chain-client';
-import type { FinalizedBlockRef } from '@bleavit/chain-client';
-import { finalize } from '@bleavit/chain-client/testing';
+import type { FinalizedBlockRef, RuntimeVersionReport } from '@bleavit/chain-client';
 import { createMockRuntime } from '@bleavit/mock-runtime';
 
 import { SUBSCRIPTION, bundle, recordedProvider } from '../chain-client/recorded-provider.ts';
@@ -56,16 +55,41 @@ const headerFor = (blockNumber: number) =>
 /**
  * Open the real nominal transport over the repository's wire-level recorded-provider harness.
  *
- * Only the follow handshake and header vary: callbacks below deliberately perform no storage or
- * runtime calls, so an unexpected RPC falls through to the transcript-backed mock and fails.
+ * Only the follow handshake, finalized runtime report and header vary. The public refresh makes
+ * no storage/runtime-API calls while its closed evaluator is absent, so any unexpected RPC falls
+ * through to the transcript-backed mock and fails.
  */
+const DEFAULT_RUNTIME: RuntimeVersionReport = {
+  specName: 'bleavit',
+  specVersion: 2,
+  implVersion: 1,
+  transactionVersion: 1,
+};
+
 export async function gateConnectionForTest(
   at: FinalizedBlockRef,
+  runtimeReport: RuntimeVersionReport | null = DEFAULT_RUNTIME,
 ): Promise<ChainHeadConnection> {
   const { provider } = recordedProvider(runtime, {
     onFollow({ id, emit, followEvent }) {
       emit({ jsonrpc: '2.0', id, result: SUBSCRIPTION });
-      followEvent({ event: 'initialized', finalizedBlockHashes: [at.blockHash] });
+      followEvent({
+        event: 'initialized',
+        finalizedBlockHashes: [at.blockHash],
+        ...(runtimeReport === null
+          ? {}
+          : {
+              finalizedBlockRuntime: {
+                type: 'valid',
+                spec: {
+                  ...runtimeReport,
+                  implName: runtimeReport.specName,
+                  authoringVersion: 1,
+                  apis: [],
+                },
+              },
+            }),
+      } as never);
       return true;
     },
     intercept(request, { emit }) {
@@ -81,11 +105,12 @@ export async function gateConnectionForTest(
 }
 
 /**
- * Feed explicit fixture values through the real refresh owner.
+ * Feed explicit fixture values through the quarantined pure evaluator.
  *
- * The literals are branded only here, through the quarantined chain-client testing surface;
- * production code cannot import that mint. This keeps gate-logic tests compact while ensuring
- * the package barrel exposes no caller-fabricable proof constructor.
+ * These values are deliberately not represented as chain reads. The package's `/testing`
+ * subpath exists only for structural machine/signer tests and is forbidden from production
+ * packages; the public two-argument refresh boundary cannot call this helper or accept these
+ * values. This keeps the old gate-logic coverage without pretending fixtures are proof.
  */
 export function gateForTest(
   prep: TxPreparation,
@@ -94,15 +119,5 @@ export function gateForTest(
   compat: GateCompat,
   results: readonly PreconditionResult[],
 ): Promise<GateOutcome> {
-  return gateConnectionForTest(at).then(async (connection) => {
-    try {
-      return await refreshAndGate(prep, connection, {
-        runtime: async () => finalize(live, at),
-        compatibility: async () => finalize(compat, at),
-        preconditions: async () => results.map((result) => finalize(result, result.at)),
-      });
-    } finally {
-      connection.close();
-    }
-  });
+  return Promise.resolve(evaluateGateForTest(prep, at, live, compat, results));
 }

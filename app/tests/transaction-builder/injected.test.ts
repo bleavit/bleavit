@@ -110,7 +110,7 @@ const PREP: TxPreparation = {
   feeAsset: 'USDC',
 };
 
-/** A real gate proof — only the production refresh owner mints one (10 §2.1). */
+/** A structural-test gate proof from the quarantined test-only evaluator (10 §2.1). */
 const windowFor = async (prep: TxPreparation): Promise<GatePassed> => {
   const at = { chain: TEST_CHAIN, blockHash: `0x${'11'.repeat(32)}` as const, blockNumber: 7 };
   // Every obligation `P-1` imposes, not one result naming the row: coverage is per clause.

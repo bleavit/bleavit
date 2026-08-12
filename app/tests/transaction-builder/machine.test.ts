@@ -28,8 +28,8 @@ import {
   evaluate,
   refreshAndGate,
   reduce,
-  txTransitionEdges,
 } from '@bleavit/transaction-builder';
+import { txTransitionEdges } from '@bleavit/transaction-builder/testing';
 import type {
   ClauseId,
   DeclarableRowId,
@@ -45,7 +45,8 @@ import type { CompatClassification } from '@bleavit/descriptors';
 import type { FinalizedBlockRef } from '@bleavit/chain-client';
 import { INJECTED_DESCRIPTOR, RAW_PAYLOAD_DESCRIPTOR, SigningBindingError, SignerCapabilityError, SignerRegistry, requireCapability } from '@bleavit/signing';
 import { MOCK_SIGNER_DESCRIPTOR, MockSigner } from '@bleavit/signing/testing';
-// `finalize` is test-only on purpose — see packages/chain-client/src/testing.ts.
+// A unit fixture still needs one branded read for the standalone precondition evaluator.
+// Production packages cannot import this quarantined construction surface.
 import { finalize } from '@bleavit/chain-client/testing';
 import { gateConnectionForTest, gateForTest as gate } from './gate-fixture.ts';
 
@@ -118,52 +119,34 @@ function windowOf(session: TxSession): GatePassed {
 const BASE_GATE = await gate(PREP, PIN, BUILT_FOR, PROVEN, covering());
 assert.equal(BASE_GATE.kind, 'proceed', 'the base gate fixture no longer opens');
 
-test('refreshAndGate owns the fresh pin and invokes every branded read itself', async () => {
-  const called: string[] = [];
+test('refreshAndGate owns a fresh pin/runtime observation and fails closed without its evaluator', async () => {
   const connection = await gateConnectionForTest(PIN);
   try {
-    const outcome = await refreshAndGate(PREP, connection, {
-      runtime: async () => {
-        called.push('runtime');
-        return finalize(BUILT_FOR, PIN);
-      },
-      compatibility: async () => {
-        called.push('compatibility');
-        return finalize(PROVEN, PIN);
-      },
-      preconditions: async () => {
-        called.push('preconditions');
-        return covering().map((result) => finalize(result, PIN));
-      },
-    });
-    assert.equal(outcome.kind, 'proceed');
-    assert.ok(outcome.kind === 'proceed');
-    assert.equal(outcome.passed.at.blockHash, PIN.blockHash);
-    assert.deepEqual(called, ['runtime', 'compatibility', 'preconditions']);
+    const outcome = await refreshAndGate(PREP, connection);
+    assert.equal(outcome.kind, 'blocked');
+    assert.ok(outcome.kind === 'blocked');
+    assert.equal(outcome.code, 'FE-TX-004');
+    assert.deepEqual(outcome.at, PIN);
+    assert.deepEqual(outcome.failed, []);
+    assert.match(outcome.detail, /observed finalized spec_version 2/);
+    assert.match(outcome.detail, /does not yet ship the closed, metadata-derived/);
+    assert.match(outcome.detail, /Caller-supplied callbacks or derived values cannot substitute/);
   } finally {
     connection.close();
   }
 });
 
-test('refreshAndGate rejects a branded read from any pin but the one it opened', async () => {
-  const elsewhere: FinalizedBlockRef = {
-    chain: TEST_CHAIN,
-    blockHash: `0x${'99'.repeat(32)}`,
-    blockNumber: PIN.blockNumber - 1,
-  };
-  const connection = await gateConnectionForTest(PIN);
+test('refreshAndGate fails closed when the nominal connection has no finalized runtime', async () => {
+  const connection = await gateConnectionForTest(PIN, null);
   try {
-    const outcome = await refreshAndGate(PREP, connection, {
-      runtime: async () => finalize(BUILT_FOR, elsewhere),
-      compatibility: async () => {
-        throw new Error('a wrong-pin runtime must stop before compatibility');
-      },
-      preconditions: async () => {
-        throw new Error('a wrong-pin runtime must stop before preconditions');
-      },
-    });
+    const outcome = await refreshAndGate(PREP, connection);
     assert.equal(outcome.kind, 'blocked');
-    assert.match(outcome.detail, /not read at the refresh pin/);
+    assert.ok(outcome.kind === 'blocked');
+    assert.equal(outcome.code, 'FE-TX-004');
+    assert.deepEqual(outcome.at, PIN);
+    assert.deepEqual(outcome.failed, []);
+    assert.match(outcome.detail, /has not established a finalized runtime/);
+    assert.doesNotMatch(outcome.detail, /precondition passed/i);
   } finally {
     connection.close();
   }

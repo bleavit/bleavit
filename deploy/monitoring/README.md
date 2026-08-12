@@ -176,7 +176,7 @@ per-operator probe exporter that feeds this series — it is a declared seam
 today, so the rule is specified but cannot fire — and any stricter per-operator
 shortfall sub-alerts.
 
-## Attestation configuration and provisional release schema
+## Attestation configuration and release schema
 
 Copy [attestation-monitor.example.toml](attestation-monitor.example.toml) and
 replace all placeholders. At least three independently operated gateways and at
@@ -202,13 +202,21 @@ disjoint from ArNS controllers** (12 §2.2/§5.2/§6.5). Software cannot prove
 natural-person or organizational disjointness; the signer registry and
 operations ceremony must enforce it.
 
-Until O1 freezes `release.json`, the adapter expects
-`schema = "bleavit.release.provisional.v1"` with:
+The adapter consumes the app producer's canonical
+`schema = "bleavit.app-release.v1"` document. The monitoring-critical fields use
+the producer's camelCase names:
 
-- `manifest_txid`, `keyring_generation`, and
-  `supported_spec_version = {min, max}`;
-- `files`, a path → lowercase SHA-256 map covering every manifest path except
-  `release.json` itself (the signed document cannot contain its own hash).
+- `arweaveManifestTxId` is the pass-1 asset manifest **M**;
+- `perFileHashes` is the non-empty path → lowercase SHA-256 map for every
+  asset in M; it excludes `release.json` because the signed document cannot hash
+  itself;
+- `specVersionRange = {primary, recovery}` carries the adjacent runtime pair;
+- `keyringGeneration` selects the release/attestor key generation; and
+- `readiness.productionReady` must be `true` for an unattended production
+  verdict.
+
+There are no snake_case or provisional-schema aliases. A document using the old
+monitor-only shape is rejected instead of being interpreted as a release.
 
 Credential TXIDs deliberately do **not** appear in those signed bytes. After
 uploading the final `release.json` and its detached credentials, produce the
@@ -217,6 +225,7 @@ independent deterministic index:
 ```sh
 python3 tools/monitoring/credential_index.py \
   --release-json release.json \
+  --final-manifest FINAL_MANIFEST_TXID \
   --release-signature RELEASE_SIGNATURE_TXID_1 \
   --release-signature RELEASE_SIGNATURE_TXID_2 \
   --attestation ATTESTATION_TXID_1 \
@@ -232,24 +241,28 @@ same two pins in the release notes as a redundant public record; that copy is
 not the monitor's trust root. The example deliberately uses invalid placeholders
 and configuration validation also rejects all-zero pins. The
 index schema is `bleavit.release-credentials.v1`: it binds
-`release_json_sha256` and `manifest_txid` to separate `release_signatures` and
-`attestations` TXID lists. The monitor fetches the exact configured index TXID
-through every gateway, requires byte equality and the out-of-band SHA-256 pin,
-and refuses a release/index/channel binding mismatch.
+`release_json_sha256` and the explicitly supplied final-manifest **M′**
+`manifest_txid` to separate `release_signatures` and `attestations` TXID lists.
+Its exact field set is strict; unknown/duplicate fields, duplicate transaction
+IDs, cross-role reuse, or fewer than two entries per credential role are
+rejected. M′ is what ArNS and `ReleaseChannel` identify, and it must differ from
+the asset manifest M named by `release.json`. The monitor fetches the exact
+configured index TXID through every gateway, requires byte equality and the
+out-of-band SHA-256 pin, and refuses a release/index/channel binding mismatch.
 
-Detached signatures and the index stay outside the served path manifest,
-avoiding the circular file-hash/signature dependency. The monitor fetches the
-whole path manifest by resolved TXID and by name through every gateway, compares
-all raw manifest copies, verifies both browser-visible root routes against the
-manifest-selected index, and treats even one resolver disagreement as an
+Detached signatures and the index stay outside both release path manifests,
+avoiding the circular file-hash/signature dependency. The monitor fetches M
+from `arweaveManifestTxId` and M′ from every resolved TXID through every gateway,
+requires M's paths to equal `perFileHashes` and M′'s paths to equal M plus
+`release.json`, then compares the asset routes under both manifests and the
+browser-visible final/name routes. It verifies both root routes against M′'s
+manifest-selected index and treats even one resolver disagreement as an
 integrity failure. It fetches detached signature transactions through every
 gateway, supports
 minisign `Ed` and `ED` (BLAKE2b-512 prehash), requires the configured
 release-key minimum and attestations from at least two distinct organizations,
-applies the on-chain revocation mask, and binds the keyring generation and
-manifest TXID to `ReleaseChannel`. O1 can replace only this extraction/fetch
-adapter; the verdict core already accepts format-agnostic
-maps/blobs/keyrings/channel bytes.
+applies the on-chain revocation mask, and binds `keyringGeneration` and final M′
+to `ReleaseChannel` while keeping asset M distinct.
 
 ## Privacy boundary
 

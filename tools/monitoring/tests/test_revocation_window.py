@@ -59,7 +59,7 @@ def _publish_generation_8(fixture: dict[str, Any], compromised_id: bytes) -> dic
     """Perform §2.3 step 3 as a release-metadata-only next release."""
     published = copy.deepcopy(fixture)
     document = copy.deepcopy(fixture["document"])
-    document["keyring_generation"] = 8
+    document["keyringGeneration"] = 8
     release_raw = json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
     message = hashlib.sha256(release_raw).digest()
 

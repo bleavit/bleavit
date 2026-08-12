@@ -5,7 +5,7 @@
 // cruising a graph with no edges in it. A witness that does not share the thing it
 // witnesses is decoration.
 const { default: production } = await import('../../.dependency-cruiser.mjs');
-const { CHAIN_SDK_PACKAGES, EXTERNAL, HOST_SDK_PACKAGES, WORKSPACE_SUBPATH, POLKADOT_API_NON_SIGNER } = await import('../../tools/depcruise-external.ts');
+const { CHAIN_SDK_PACKAGES, EXTERNAL, HOST_SDK_PACKAGES, WORKSPACE_SUBPATH, POLKADOT_API_NON_SIGNER, TRANSACTION_BUILDER_MACHINE_MODULE } = await import('../../tools/depcruise-external.ts');
 const { NON_LOCAL_DEPENDENCY_TYPES } = await import('../../tools/handoff-packages.ts');
 
 export default {
@@ -78,6 +78,28 @@ export default {
       to: {
         path: WORKSPACE_SUBPATH('@bleavit/local-index/testing', 'packages/local-index/dist/testing'),
       },
+    },
+    {
+      // The quarantined pure gate evaluator. Its matcher is parameterised independently of
+      // the signer and provenance testing subpaths, so it needs its own liveness witness.
+      name: 'witness-transaction-builder-testing-subpath',
+      severity: 'error',
+      from: { path: '^tests/depcruise-witness/' },
+      to: {
+        path: WORKSPACE_SUBPATH(
+          '@bleavit/transaction-builder/testing',
+          'packages/transaction-builder/dist/testing',
+          'packages/transaction-builder/src/testing',
+        ),
+      },
+    },
+    {
+      // A relative import does not pass through the `/testing` subpath at all. This separately
+      // proves the production deep-module matcher sees the resolved source-machine spelling.
+      name: 'witness-transaction-builder-machine-module',
+      severity: 'error',
+      from: { path: '^tests/depcruise-witness/' },
+      to: { path: TRANSACTION_BUILDER_MACHINE_MODULE },
     },
     {
       // The sampling-rate subpath. Witnessed on its own for the same reason as the two

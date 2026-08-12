@@ -279,8 +279,11 @@ export interface Mortality {
  * An era anchored to the wrong block is therefore not an off-by-one; it is the bound not
  * being applied, and it is invisible because the transaction still looks perfectly valid.
  *
- * So the anchor is taken from `GatePassed`, which only `refreshAndGate()` can mint. "The era starts at
- * the block the preconditions were read at" stops being a convention a caller must honour.
+ * So the anchor is taken from `GatePassed`, which production callers cannot mint. The public
+ * `refreshAndGate()` path remains fail closed until it owns the complete evaluator; the pure
+ * structural-test mint is quarantined behind the dependency-firewalled `/testing` subpath.
+ * "The era starts at the block the preconditions were read at" stops being a convention a caller
+ * must honour.
  *
  * A raw-external payload gets the longer era because it makes a round trip through an
  * air-gapped device or a QR scan, and a 64-block era would expire mid-transcription. It is

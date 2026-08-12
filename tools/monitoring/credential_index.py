@@ -19,6 +19,7 @@ from typing import Any, Iterable
 
 
 SCHEMA = "bleavit.release-credentials.v1"
+APP_RELEASE_SCHEMA = "bleavit.app-release.v1"
 TXID = re.compile(r"^[A-Za-z0-9_-]{43}$")
 SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
 
@@ -112,6 +113,7 @@ def parse_credential_index(raw: bytes) -> CredentialIndex:
 
 def build_credential_index(
     release_json: bytes,
+    final_manifest_txid: str,
     release_signature_txids: Iterable[str],
     attestation_txids: Iterable[str],
 ) -> bytes:
@@ -119,15 +121,34 @@ def build_credential_index(
         release_document = json.loads(release_json)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise CredentialIndexError(f"release.json is not valid JSON: {error}") from error
-    manifest_txid = (
-        release_document.get("manifest_txid")
-        if isinstance(release_document, dict)
-        else None
-    )
+    if not isinstance(release_document, dict):
+        raise CredentialIndexError("release.json must be a JSON object")
+    if release_document.get("schema") != APP_RELEASE_SCHEMA:
+        raise CredentialIndexError(
+            f"release.json schema must be {APP_RELEASE_SCHEMA}"
+        )
+    asset_manifest_txid = release_document.get("arweaveManifestTxId")
+    if not isinstance(asset_manifest_txid, str) or TXID.fullmatch(
+        asset_manifest_txid
+    ) is None:
+        raise CredentialIndexError(
+            "release.json arweaveManifestTxId must be a published Arweave transaction id"
+        )
+    if not isinstance(final_manifest_txid, str) or TXID.fullmatch(
+        final_manifest_txid
+    ) is None:
+        raise CredentialIndexError(
+            "final manifest must be a 43-character Arweave transaction id"
+        )
+    if final_manifest_txid == asset_manifest_txid:
+        raise CredentialIndexError(
+            "final manifest must differ from release.json arweaveManifestTxId: "
+            "the final manifest adds release.json to the asset manifest"
+        )
     document = {
         "schema": SCHEMA,
         "release_json_sha256": hashlib.sha256(release_json).hexdigest(),
-        "manifest_txid": manifest_txid,
+        "manifest_txid": final_manifest_txid,
         "release_signatures": [{"txid": value} for value in release_signature_txids],
         "attestations": [{"txid": value} for value in attestation_txids],
     }
@@ -143,6 +164,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         description="Build the deterministic Bleavit release credential index."
     )
     parser.add_argument("--release-json", type=Path, required=True)
+    parser.add_argument(
+        "--final-manifest",
+        required=True,
+        help="final path-manifest TXID (M-prime), not release.json's asset manifest",
+    )
     parser.add_argument("--release-signature", action="append", required=True)
     parser.add_argument("--attestation", action="append", required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -154,6 +180,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         encoded = build_credential_index(
             args.release_json.read_bytes(),
+            args.final_manifest,
             args.release_signature,
             args.attestation,
         )

@@ -24,6 +24,16 @@ import '@bleavit/signing/testing';
 // minting `origin: 'self'` and laundering backfilled data into light-client-verified.
 import '@bleavit/local-index/testing';
 
+// The test-only pure gate evaluator is a proof mint from explicit values. The production
+// boundary deliberately cannot import or accept it while the owned evaluator is incomplete.
+import '@bleavit/transaction-builder/testing';
+// The resolved-relative spelling of the same capability. dependency-cruiser records this as
+// `packages/transaction-builder/src/testing.ts`, so the bare/dist arms alone do not cover it.
+import '../../packages/transaction-builder/src/testing.js';
+// The testing entry point is not the only possible relative reach: the evaluator is exported by
+// the machine module for that entry point. This must fire the independent deep-module rule.
+import '../../packages/transaction-builder/src/machine.js';
+
 // The sampling-rate subpath, witnessed on its own for the same parameterisation reason. A
 // typo in either half of `WORKSPACE_SUBPATH('@bleavit/providers/testing', …)` leaves
 // `no-loosened-sampling-rate-in-production` unable to fire while every other subpath witness

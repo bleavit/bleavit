@@ -4,10 +4,11 @@
  * ## The hole this closes, measured rather than reasoned
  *
  * 10 §2.1 names a `package.json` `exports` map restricted to `"."` and `"./testing"` as one of
- * three enforcement layers, and four packages use it to keep a capability out of production
+ * three enforcement layers, and five packages use it to keep a capability out of production
  * reach: `chain-client`'s `finalize` (mints `Finalized<T>`), `local-index`'s `selfRange` (mints
  * `origin: 'self'`), `signing`'s `MockSigner` (a signer that must never ship), and `providers`'
- * rate-taking sampling entry points (a way to switch the sampler off).
+ * rate-taking sampling entry points (a way to switch the sampler off), plus
+ * `transaction-builder`'s explicit-value `GatePassed` evaluator and edge enumerator.
  *
  * Each is guarded by a dependency-cruiser rule against importing the **subpath**. None of those
  * rules can see a **re-export**: one line in the package barrel — `export { finalize } from
@@ -16,9 +17,9 @@
  * mutation survived `build`, `depcruise`, `depcruise:witness`, `test:firewall`, `check:casts`
  * and the whole suite set. The barrels defended themselves with a **comment**.
  *
- * ## Why it is one helper and not four tests
+ * ## Why it is one helper and not five tests
  *
- * Four hand-written tests are four chances to enumerate the names by hand, which is the second
+ * Five hand-written tests are five chances to enumerate the names by hand, which is the second
  * half of the same defect: `providers`' first barrel test listed two names, so a third loosened
  * export would have slipped past it. This takes the whole `/testing` **namespace object** and
  * requires every key in it to be absent from the barrel, so a name added to the quarantine is

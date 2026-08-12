@@ -80,9 +80,11 @@ Practical consequences:
    status; carry one** — `derive(read, compute)` from `@bleavit/chain-client` for a value
    computed from a read, `combine`/`combine2` for several, `externalProposal` for an imported
    request, and a caller's `Verified<T>` passed through unchanged. `derive` is exported where
-   `finalize` is withheld precisely because it grants nothing: it takes the `Finalized<A>` a
-   read produced and attaches *that* read's pin, so a caller holding no read has nothing to
-   pass in.
+   `finalize` is withheld because it cannot invent a pin: it takes the `Finalized<A>` a read
+   produced and attaches *that* read's pin. Its callback can still ignore the value and invent
+   unrelated content, so a security boundary MUST NOT treat the resulting brand alone as proof
+   that a particular key, decoder, predicate, or precondition was evaluated. INV-FE-2's gate
+   therefore owns those operations and accepts no derived verdicts from callers.
 
    **A value no read produced has no status, and the honest rendering is absence.** The six
    statuses all describe an observation of some strength; *"the client could not establish
@@ -104,7 +106,12 @@ Practical consequences:
 4. **Pre-sign refresh (INV-FE-2, 11 §11.4).** Every submit path goes through the
    structural `refreshAndGate` — never add a code path that reaches a signer without
    it. The handoff import path's only output is a `TxPreparation` entering **Draft**;
-   it adds no edge to the tx machine.
+   it adds no edge to the tx machine. Until the complete closed, metadata-derived
+   compatibility and precondition evaluator exists, the public boundary accepts only
+   `(prep, nominalConnection)`, owns a fresh finalized pin/runtime observation, and
+   returns `FE-TX-004`; it MUST NOT accept caller-supplied read, decode, compatibility
+   or evaluation callbacks. A genuine but irrelevant read and a value derived from it
+   are not evidence for any declared precondition.
 5. **Zero infrastructure (INV-FE-4/6).** Every protocol workflow must work with no
    indexer, no RPC, no provider, no external tool, cleared storage. If a feature needs
    a server, it is out of scope — do not centralize it. **No MCP** in any form: no
@@ -313,7 +320,12 @@ this file loads whenever a session touches `app/**`, which is when they apply.
 
 · **`pnpm run build`** — `tsc -b` over the project-reference graph, which is the *primary* firewall gate: a forbidden import fails module resolution rather than being reported
 
-· `pnpm run depcruise` (the redundant second gate)
+· `pnpm run depcruise` (the redundant second gate). Test-only `GatePassed` evaluation is
+  quarantined both at `@bleavit/transaction-builder/testing` and at the underlying `machine`
+  module; value-bearing relative deep imports are forbidden while type-only consumers remain
+  permitted. `tests/transaction-builder/firewall-rule.test.ts` drives the production config
+  from production package paths and requires both named rules, so an unrelated witness failure
+  cannot mask either rule going dead.
 
 · **`pnpm run depcruise:witness`** — a known-forbidden edge that MUST still be caught, because a checker that can no longer detect anything reports success, and a config change once made every rule vacuous under a fully green run
 
