@@ -150,15 +150,15 @@
 | SQ-1015 | [**The two epoch resolvers disagree when git cannot answer a…](questions/SQ-1015.md) | 12 §1.1 | 2026-08-08 | B7 |
 | SQ-1016 | [**A discharged `[VERIFY]` is still open in two documents.**…](questions/SQ-1016.md) | 02 §8; 10 §5.4; 00 | 2026-08-08 | B7 |
 | SQ-1017 | [**The same drift, second instance.** 11 §11.9.1 still carri…](questions/SQ-1017.md) | 02 §7.7; 11 §11.9.1 | 2026-08-08 | B7 |
-| SQ-1018 | [§11.8.2's propose-flow precondition list is closed at "allo…](questions/SQ-1018.md) | [11] (docs/architecture/11-frontend-workflows… | 2026-08-08 | B7 |
-| SQ-1019 | [§11.8.2's approve row and §11.12 E20 disagree on what gates…](questions/SQ-1019.md) | [11] (docs/architecture/11-frontend-workflows… | 2026-08-08 | B7 |
-| SQ-1020 | [Which surface answers `OracleDeadlock`'s `contains_key(targ…](questions/SQ-1020.md) | [11] (docs/architecture/11-frontend-workflows… | 2026-08-08 | B7 |
-| SQ-1021 | [`operatorRowsFor(instance)` has no production caller and `o…](questions/SQ-1021.md) | [11] (docs/architecture/11-frontend-workflows… | 2026-08-08 | B7 |
-| SQ-1022 | [**A guardian propose can still reach `ready` on a bound the…](questions/SQ-1022.md) | [02] (docs/architecture/02-integration-contra… | 2026-08-08 | B7 |
+| SQ-1018 | [§11.8.2's propose-flow precondition list is closed at "allo…](questions/SQ-1018.md) | [11] (../../docs/architecture/11-frontend-wor… | 2026-08-08 | B7 |
+| SQ-1019 | [§11.8.2's approve row and §11.12 E20 disagree on what gates…](questions/SQ-1019.md) | [11] (../../docs/architecture/11-frontend-wor… | 2026-08-08 | B7 |
+| SQ-1020 | [Which surface answers `OracleDeadlock`'s `contains_key(targ…](questions/SQ-1020.md) | [11] (../../docs/architecture/11-frontend-wor… | 2026-08-08 | B7 |
+| SQ-1021 | [`operatorRowsFor(instance)` has no production caller and `o…](questions/SQ-1021.md) | [11] (../../docs/architecture/11-frontend-wor… | 2026-08-08 | B7 |
+| SQ-1022 | [**A guardian propose can still reach `ready` on a bound the…](questions/SQ-1022.md) | [02] (../../docs/architecture/02-integration-… | 2026-08-08 | B7 |
 | SQ-1027 | [**Does 10 §3.1's terminal `WrongChain` state permit destroy…](questions/SQ-1027.md) | 10 §3.1, §4.1; 15 §2 (INV-FE-11), §6 | 2026-08-08 | B7 |
 | SQ-1028 | [**Which INV-FE-9 provenance status does an observed genesis…](questions/SQ-1028.md) | 10 §2.1, §6.3; 15 §2 (INV-FE-9) | 2026-08-08 | B7 |
 | SQ-1029 | [**Is 11 E17's `R: retry AH sync` satisfied by a control tha…](questions/SQ-1029.md) | 11 E17, §11.9.1; 02 §7.7 | 2026-08-08 | B7 |
-| SQ-1031 | [**Three of `registry_core::file`'s five refusals have no re…](questions/SQ-1031.md) | [11] (docs/architecture/11-frontend-workflows… | 2026-08-08 | B7 |
+| SQ-1031 | [**Three of `registry_core::file`'s five refusals have no re…](questions/SQ-1031.md) | [11] (../../docs/architecture/11-frontend-wor… | 2026-08-08 | B7 |
 | SQ-1035 | [**The 12 §5.2 out-of-band monitor reads its credentials fro…](questions/SQ-1035.md) | 12 §1.2, §1.4, §2.1, §5.2 | 2026-08-09 (F13 Codex ro… | B7 |
 | SQ-1036 | [**Three files carry release key material before the ceremon…](questions/SQ-1036.md) | 12 §2.1, §2.2 | 2026-08-09 (F13 Codex ro… | B7 |
 | SQ-1037 | [**The registry challenge row names neither the epoch nor th…](questions/SQ-1037.md) | 11 §11.8.6; 02 §7.4 | 2026-08-09 (F17 evidence… | B7 |
@@ -166,12 +166,12 @@
 | SQ-1039 | [**12 §1.5's expedited lane is undecidable from the publishe…](questions/SQ-1039.md) | 12 §1.1, §1.5 | 2026-08-09 (F13 Codex P1) | B7 |
 | SQ-1040 | [**No byte budget measures the stylesheet.** 10 §9.4's row i…](questions/SQ-1040.md) | 10 §9.4 | 2026-08-09 (F28) | B7 |
 | SQ-1041 | [**No document states an accessibility or contrast target fo…](questions/SQ-1041.md) | 10 §2.1; 15 §4.8, §6 | 2026-08-09 (F28 R-6 revi… | B7 |
-| SQ-1042 | [**10 §9.4 enumerates `FE-COMPAT-001..003` and publishes rai…](questions/SQ-1042.md) | [10] (docs/architecture/10-frontend-architect… | 2026-08-09 | B7 |
-| SQ-1043 | [**10 §3.1 fixes the backoff endpoints and never states the…](questions/SQ-1043.md) | [10] (docs/architecture/10-frontend-architect… | 2026-08-09 | B7 |
-| SQ-1044 | [**02 §9's Phase-3 row reads as an exhaustive enumeration of…](questions/SQ-1044.md) | [02] (docs/architecture/02-integration-contra… | 2026-08-09 | B7 |
-| SQ-1045 | [**11 §11.12's E21 row still reads *"R: disappears on verifi…](questions/SQ-1045.md) | [11] (docs/architecture/11-frontend-workflows… | 2026-08-09 | B7 |
-| SQ-1046 | [**11 §11.8.1 states a disclosure obligation for unreadable…](questions/SQ-1046.md) | [11] (docs/architecture/11-frontend-workflows… | 2026-08-09 | B7 |
-| SQ-1047 | [**10 §3.1 gives `CompatUnavailable` the renderable surface…](questions/SQ-1047.md) | [10] (docs/architecture/10-frontend-architect… | 2026-08-09 | B7 |
+| SQ-1042 | [**10 §9.4 enumerates `FE-COMPAT-001..003` and publishes rai…](questions/SQ-1042.md) | [10] (../../docs/architecture/10-frontend-arc… | 2026-08-09 | B7 |
+| SQ-1043 | [**10 §3.1 fixes the backoff endpoints and never states the…](questions/SQ-1043.md) | [10] (../../docs/architecture/10-frontend-arc… | 2026-08-09 | B7 |
+| SQ-1044 | [**02 §9's Phase-3 row reads as an exhaustive enumeration of…](questions/SQ-1044.md) | [02] (../../docs/architecture/02-integration-… | 2026-08-09 | B7 |
+| SQ-1045 | [**11 §11.12's E21 row still reads *"R: disappears on verifi…](questions/SQ-1045.md) | [11] (../../docs/architecture/11-frontend-wor… | 2026-08-09 | B7 |
+| SQ-1046 | [**11 §11.8.1 states a disclosure obligation for unreadable…](questions/SQ-1046.md) | [11] (../../docs/architecture/11-frontend-wor… | 2026-08-09 | B7 |
+| SQ-1047 | [**10 §3.1 gives `CompatUnavailable` the renderable surface…](questions/SQ-1047.md) | [10] (../../docs/architecture/10-frontend-arc… | 2026-08-09 | B7 |
 
 ## Resolved
 
@@ -590,8 +590,8 @@
 | SQ-1011 | [**10 §3.1's boot machine has no edge for a `CompatCheck` th…](questions/SQ-1011.md) | 10 §3.1/§3.2 | 2026-08-08 | none |
 | SQ-1012 | [**10 §5.2's foreign lattice has the same hole one chain ove…](questions/SQ-1012.md) | 02 §7.7; 10 §5.2 | 2026-08-08 | none |
 | SQ-1013 | [**11 §11.9.1's Asset Hub compat row needs two smoldot chain…](questions/SQ-1013.md) | 10 §9.3/§9.4; 11 §11.9.1 | 2026-08-08 | none |
-| SQ-1030 | [**A guardian approval reaches the fifth signature on two ma…](questions/SQ-1030.md) | [02] (docs/architecture/02-integration-contra… | 2026-08-08 | none |
-| SQ-1032 | [**12 §5.2 point 2 and §1.4 gate 2 count attestations differ…](questions/SQ-1032.md) | [12] (docs/architecture/12-release-and-operat… | 2026-08-08 | none |
+| SQ-1030 | [**A guardian approval reaches the fifth signature on two ma…](questions/SQ-1030.md) | [02] (../../docs/architecture/02-integration-… | 2026-08-08 | none |
+| SQ-1032 | [**12 §5.2 point 2 and §1.4 gate 2 count attestations differ…](questions/SQ-1032.md) | [12] (../../docs/architecture/12-release-and-… | 2026-08-08 | none |
 | SQ-1033 | [**`chainLabel` is a pin-matching key wearing a display labe…](questions/SQ-1033.md) | 02 §7.7 · 10 §5.2 | 2026-08-08 | none |
 | SQ-1034 | [**§11.9.1's D-13 row is structurally unpassable: nothing in…](questions/SQ-1034.md) | 11 §11.9.1 · 02 §7.4, §9 · 13 §1 (`phase3.*`) | 2026-08-08 | none |
 

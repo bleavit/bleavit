@@ -29,6 +29,7 @@ converter itself used to write it.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 from pathlib import Path
@@ -45,10 +46,92 @@ MILESTONE_HEADER = ["ID", "Milestone", "Spec", "Depends", "Status", "Notes"]
 _EMPHASIS = re.compile(r"[*_`]+")
 _WHITESPACE = re.compile(r"\s+")
 
+# A Markdown inline link: [label](target). The negative lookbehind excludes
+# an image (`![alt](src)`) — mirrors tools/ci/check-doc-links.py's LINK_RE.
+_MD_LINK_RE = re.compile(r"(?<!!)\[([^\]]*)\]\(([^)]+)\)")
+_SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*:")
+_LEADING_UPLEVELS_RE = re.compile(r"^(?:\.\./)+")
+
+
+def _split_link_target(raw: str) -> tuple[str, str]:
+    """(path, fragment) — fragment keeps its leading '#', '' if there is none."""
+    path, sep, frag = raw.strip().partition("#")
+    return path, (sep + frag)
+
+
+def _is_external_link(path_part: str) -> bool:
+    """A scheme (http:, mailto:, …) or an anchor-only target — never rewritten."""
+    return not path_part or bool(_SCHEME_RE.match(path_part))
+
+
+def rewrite_repo_links(text: str, root: Path, emit_dir: Path) -> str:
+    """Re-base each Markdown link in `text` so it resolves from `emit_dir`.
+
+    Source prose (PLAN.md, at the repo root) writes every relative doc
+    citation as root-relative, e.g. "docs/architecture/02-integration-
+    contract.md" — correct only for a reader starting at the repo root. Once
+    that text is lifted verbatim into an item file under `plan/<kind>/`
+    (Task 6's `plan/questions/`, and by the same reasoning Task 8's
+    `plan/verifications/` and Task 9's day files), the identical target no
+    longer resolves: GitHub and `tools/ci/check-doc-links.py` both resolve a
+    relative link against the *file's own* directory, two levels below root.
+
+    A target already resolving from `emit_dir` (a cross-reference the item
+    tree itself introduced, or one that happens to already be correct) is
+    left untouched — this only re-bases a target that is right somewhere
+    else, never invents one. A target resolving from neither base is left
+    untouched too: whether it is broken is `check-doc-links.py`'s question
+    to answer on the regenerated tree, not this function's to guess at.
+
+    Read this together with `normalize_prose`'s `_canonicalize_link_targets`
+    call, immediately below: whatever form this rewrites a target INTO, that
+    must normalize it back to the same root-relative form the untouched
+    source cell already has, or `prove_lossless`/`verify_round_trip` would
+    see a rewritten link as a lost cell.
+    """
+
+    def replace(match: re.Match[str]) -> str:
+        label, raw_target = match.group(1), match.group(2)
+        path_part, fragment = _split_link_target(raw_target)
+        if _is_external_link(path_part) or path_part.startswith("/"):
+            return match.group(0)
+        if (emit_dir / path_part).resolve().exists():
+            return match.group(0)  # already resolves from here
+        candidate = (root / path_part).resolve()
+        if not candidate.exists():
+            return match.group(0)  # resolves from neither base; not this function's call
+        relative = Path(os.path.relpath(candidate, emit_dir)).as_posix()
+        return f"[{label}]({relative}{fragment})"
+
+    return _MD_LINK_RE.sub(replace, text)
+
+
+def _canonicalize_link_targets(text: str) -> str:
+    """Undo `rewrite_repo_links`'s re-basing for comparison purposes only.
+
+    Strips any leading `../` run from a link target, which is exactly what
+    turns a `rewrite_repo_links` output back into the root-relative form the
+    untouched source cell carries — regardless of how many directory levels
+    deep the emitting item file lives, since `os.path.relpath` always emits
+    exactly that many leading `../` segments and no more. A target with no
+    leading `../` (already root-relative, or a same-directory cross-
+    reference) passes through unchanged.
+    """
+
+    def replace(match: re.Match[str]) -> str:
+        label, raw_target = match.group(1), match.group(2)
+        path_part, fragment = _split_link_target(raw_target)
+        if _is_external_link(path_part):
+            return match.group(0)
+        return f"[{label}]({_LEADING_UPLEVELS_RE.sub('', path_part)}{fragment})"
+
+    return _MD_LINK_RE.sub(replace, text)
+
 
 def normalize_prose(text: str) -> str:
     """Reduce a block to the words it carries, ignoring markup and escaping."""
     text = text.replace("\\|", "|")
+    text = _canonicalize_link_targets(text)
     text = _EMPHASIS.sub("", text)
     return _WHITESPACE.sub(" ", text).strip()
 
@@ -679,18 +762,31 @@ def migrate_questions(plan_text: str, out: Path) -> list[Path]:
         found = _DATE_IN_TEXT.search(status_cell)
         resolved = found.group(1) if (status == "resolved" and found) else None
 
+        # The source cell is root-relative (PLAN.md's own location); this
+        # item file lives two directories deeper, so any doc citation the
+        # cell carries must be re-based or it 404s for a reader on GitHub —
+        # see `rewrite_repo_links`. `title` (derived from `question` below)
+        # and `spec_ref` both land in frontmatter as plain text in the same
+        # file check-doc-links.py scans whole, so they need the rewritten
+        # form exactly like the body sections do — 14 real spec_ref cells
+        # carry a citation as a Markdown link (e.g. "[11](docs/architecture/
+        # 11-frontend-workflows.md) §11.8.2"), not only prose.
+        question_rw = rewrite_repo_links(question, out, directory)
+        status_cell_rw = rewrite_repo_links(status_cell, out, directory)
+        spec_ref_rw = rewrite_repo_links(spec_ref, out, directory)
+
         # No `path.exists()` check here (unlike a first-draft version of this
         # function): re-running the converter over an already-populated
         # directory is the ordinary case, not a collision — `seen` above is
         # what actually catches two rows sharing one id within this run, the
         # same way `migrate_milestones` relies on its own `seen` set alone.
         path = directory / f"{identifier}.md"
-        title = _frontmatter_title(question)
+        title = _frontmatter_title(question_rw)
         lines = [
             "---",
             f"id: {identifier}",
             f"title: {_yaml_scalar(title)}",
-            f"spec_ref: {_yaml_scalar(spec_ref)}",
+            f"spec_ref: {_yaml_scalar(spec_ref_rw)}",
             f"raised: {_yaml_scalar(raised)}",
             f"status: {status}",
         ]
@@ -702,11 +798,11 @@ def migrate_questions(plan_text: str, out: Path) -> list[Path]:
             "",
             "## Question",
             "",
-            question,
+            question_rw,
             "",
             "## Status",
             "",
-            status_cell,
+            status_cell_rw,
             "",
         ]
         path.write_text("\n".join(lines), encoding="utf-8")
@@ -714,14 +810,14 @@ def migrate_questions(plan_text: str, out: Path) -> list[Path]:
         expected_values: dict[str, str | list[str]] = {
             "id": identifier,
             "title": title,
-            "spec_ref": spec_ref,
+            "spec_ref": spec_ref_rw,
             "raised": raised,
             "status": status,
             "batch": batch,
         }
         if resolved:
             expected_values["resolved"] = resolved
-        expected_body = f"## Question\n\n{question}\n\n## Status\n\n{status_cell}"
+        expected_body = f"## Question\n\n{question_rw}\n\n## Status\n\n{status_cell_rw}"
         mismatches = verify_round_trip(path, expected_values, expected_body)
         if mismatches:
             raise ValueError(f"{path}: round-trip self-check failed: " + "; ".join(mismatches))

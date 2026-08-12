@@ -31,11 +31,13 @@ from tools.plan.migrate import (
     main,
     migrate_milestones,
     migrate_questions,
+    normalize_prose,
     prove_lossless,
     prove_question_batch_mapping,
     prove_question_status_mapping,
     prove_status_mapping,
     question_source_cells_of,
+    rewrite_repo_links,
     source_cells_of,
     verify_round_trip,
 )
@@ -455,3 +457,118 @@ class MigrateQuestionsTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertTrue((self.root / "plan" / "questions" / "SQ-615.md").exists())
         self.assertTrue((self.root / "plan" / "questions" / "SQ-616.md").exists())
+
+
+class RewriteRepoLinksTests(unittest.TestCase):
+    """rewrite_repo_links re-bases a root-relative doc link so it resolves
+    from the emitting item file's own directory — the coordinator's fix-round-1
+    finding: a link left as-is 404s for a reader on GitHub once PLAN.md's prose
+    is lifted into plan/questions/<ID>.md, two directories below root."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        (self.root / "docs" / "architecture").mkdir(parents=True)
+        (self.root / "docs" / "architecture" / "02-integration-contract.md").write_text(
+            "hi\n", encoding="utf-8"
+        )
+        self.emit_dir = self.root / "plan" / "questions"
+        self.emit_dir.mkdir(parents=True)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_a_root_relative_link_is_rebased_to_resolve_from_emit_dir(self):
+        text = "see [02](docs/architecture/02-integration-contract.md) for it"
+        rewritten = rewrite_repo_links(text, self.root, self.emit_dir)
+        self.assertIn("[02](../../docs/architecture/02-integration-contract.md)", rewritten)
+        # And it must actually resolve on disk from the emitting directory.
+        target = rewritten.split("(", 1)[1].split(")", 1)[0]
+        self.assertTrue((self.emit_dir / target).resolve().exists())
+
+    def test_a_link_already_correct_from_emit_dir_is_left_untouched(self):
+        text = "see [02](../../docs/architecture/02-integration-contract.md) for it"
+        self.assertEqual(rewrite_repo_links(text, self.root, self.emit_dir), text)
+
+    def test_an_external_link_is_left_untouched(self):
+        text = "see [spec](https://example.com/spec.md) for it"
+        self.assertEqual(rewrite_repo_links(text, self.root, self.emit_dir), text)
+
+    def test_a_mailto_link_is_left_untouched(self):
+        text = "contact [us](mailto:a@example.com)"
+        self.assertEqual(rewrite_repo_links(text, self.root, self.emit_dir), text)
+
+    def test_an_anchor_only_link_is_left_untouched(self):
+        text = "see [above](#section)"
+        self.assertEqual(rewrite_repo_links(text, self.root, self.emit_dir), text)
+
+    def test_a_fragment_on_a_rebased_link_survives(self):
+        text = "see [02](docs/architecture/02-integration-contract.md#section) for it"
+        rewritten = rewrite_repo_links(text, self.root, self.emit_dir)
+        self.assertIn(
+            "[02](../../docs/architecture/02-integration-contract.md#section)", rewritten
+        )
+
+    def test_a_target_resolving_from_neither_base_is_left_untouched(self):
+        text = "see [x](docs/architecture/does-not-exist.md) for it"
+        self.assertEqual(rewrite_repo_links(text, self.root, self.emit_dir), text)
+
+    def test_normalize_prose_makes_rebased_and_source_forms_compare_equal(self):
+        """The half of the fix that keeps prove_lossless/verify_round_trip
+        honest: whatever rewrite_repo_links produces, normalize_prose must
+        read back as the same root-relative form the untouched source cell
+        already has, at any depth."""
+        source = "see [02](docs/architecture/02-integration-contract.md) for it"
+        rewritten = rewrite_repo_links(source, self.root, self.emit_dir)
+        self.assertNotEqual(source, rewritten)  # the fixture actually rebased
+        self.assertEqual(normalize_prose(source), normalize_prose(rewritten))
+
+    def test_normalize_prose_is_not_vacuous_on_links(self):
+        """A genuinely different target must not compare equal."""
+        a = "see [02](docs/architecture/02-integration-contract.md) for it"
+        b = "see [02](docs/architecture/09-execution-upgrades-and-rollout.md) for it"
+        self.assertNotEqual(normalize_prose(a), normalize_prose(b))
+
+
+QUESTIONS_WITH_A_LINK = """## Spec questions
+
+| Batch | Rows | Members |
+|---|---|---|
+| B7 | 1 | SQ-700 |
+
+| ID | Question | Spec ref | Raised | Status |
+|---|---|---|---|---|
+| SQ-700 | Does [02](docs/architecture/02-integration-contract.md) freeze it? | 02 §7.4 | 2026-07-19 | open |
+"""
+
+
+class MigrateQuestionsLinkRewriteTests(unittest.TestCase):
+    """End-to-end: migrate_questions itself must emit a resolving link, not
+    just the standalone rewrite_repo_links helper."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        (self.root / "docs" / "architecture").mkdir(parents=True)
+        (self.root / "docs" / "architecture" / "02-integration-contract.md").write_text(
+            "hi\n", encoding="utf-8"
+        )
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_emitted_body_link_resolves_from_plan_questions(self):
+        written = migrate_questions(QUESTIONS_WITH_A_LINK, self.root)
+        path = next(p for p in written if p.stem == "SQ-700")
+        text = path.read_text(encoding="utf-8")
+        self.assertIn("(../../docs/architecture/02-integration-contract.md)", text)
+        self.assertNotIn("(docs/architecture/02-integration-contract.md)", text)
+
+    def test_round_trip_and_lossless_proof_both_still_pass(self):
+        written = migrate_questions(QUESTIONS_WITH_A_LINK, self.root)
+        missing = prove_lossless(question_source_cells_of(QUESTIONS_WITH_A_LINK), written)
+        self.assertEqual(missing, [])
+        items, errors = load_questions(self.root)
+        self.assertEqual(errors, [])
+        sq700 = next(i for i in items if i.id == "SQ-700")
+        self.assertIn("../../docs/architecture/02-integration-contract.md", sq700.title)
