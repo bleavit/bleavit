@@ -28,10 +28,32 @@ if [ -f PLAN.md ]; then
   awk '/^## Current focus/{f=1;next} /^## /{f=0} f' PLAN.md | sed '/^[[:space:]]*$/d' | head -25
   echo
   echo "--- Next pending / in-progress milestones ---"
-  grep -E '^\|.*(⬜|🔨|⛔)' PLAN.md | head -8 || echo "(none found — check PLAN.md)"
+  # Match the Status *cell* (column 5), not the row's prose. A description that
+  # merely mentions ⬜/🔨/⛔ is not an open milestone, and matching the whole row
+  # selected 194 rows where 16 are genuinely open. Cells escape pipes as `\|`
+  # (GFM splits on a bare one), so mask those before splitting. Rows are also
+  # truncated: PLAN.md rows carry full prose, and eight untruncated ones came to
+  # 93k chars — past the size at which this hook's whole output is replaced by a
+  # 2k preview, which is how every section below it stopped reaching sessions.
+  awk '
+    /^## (Milestones|Track E)/ {f=1; next}
+    /^## / {f=0}
+    !f {next}
+    /^\|/ {
+      line=$0; gsub(/\\\|/, "\001", line)
+      n=split(line, c, "|")
+      if (n < 7) next
+      st=c[6]; gsub(/^[ \t]+|[ \t]+$/, "", st)
+      if (st !~ /^(⬜|🔨|⛔)$/) next
+      id=c[2]; gsub(/^[ \t]+|[ \t]+$/, "", id)
+      ms=c[3]; gsub(/\001/, "|", ms); gsub(/^[ \t]+/, "", ms)
+      printf "%s %s  %s\n", st, id, substr(ms, 1, 150)
+      if (++k == 8) exit
+    }
+  ' PLAN.md || echo "(none found — check PLAN.md)"
   echo
   echo "--- Last session log entries ---"
-  awk '/^## Session log/{f=1;next} /^## /{f=0} f' PLAN.md | grep -E '^\| 20[0-9]{2}-' | tail -3 || echo "(no session log entries yet)"
+  awk '/^## Session log/{f=1;next} /^## /{f=0} f' PLAN.md | grep -E '^\| 20[0-9]{2}-' | tail -3 | cut -c1-300 || echo "(no session log entries yet)"
 else
   echo
   echo "WARNING: PLAN.md is missing. Recreate it per AGENTS.md · rule R-3 before any other work."
