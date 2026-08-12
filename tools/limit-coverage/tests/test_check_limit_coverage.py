@@ -107,18 +107,22 @@ class LimitCoverageTests(unittest.TestCase):
         self.write("tools/limit-coverage/registry.toml", BASE_MANIFEST)
         self.write("tools/limit-coverage/genesis-keys.json", '["epoch.length"]\n')
         self.write("pallets/epoch/src/tests.rs", BASE_RUST)
-        self.write(
-            "PLAN.md",
-            "| ID | Milestone | Spec | Depends | Status | Notes |\n"
-            "|---|---|---|---|---|---|\n"
-            "| B10 | Wiring | 13 | — | ⬜ | pending |\n",
-        )
+        self.write_milestone("B10", "B", "Wiring", "pending")
 
     def tearDown(self) -> None:
         self.temporary.cleanup()
 
     def write(self, relative: str, value: str) -> None:
         (self.root / relative).write_text(value, encoding="utf-8")
+
+    def write_milestone(self, identifier: str, track: str, title: str, status: str) -> None:
+        directory = self.root / "plan" / "milestones"
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / f"{identifier}.md").write_text(
+            f"---\nid: {identifier}\ntrack: {track}\ntitle: {title}\n"
+            f"spec: [a]\ndepends: []\nstatus: {status}\n---\n\nbody\n",
+            encoding="utf-8",
+        )
 
     def failures(self) -> list[str]:
         failures, _, _ = checker.validate(self.root)
@@ -353,25 +357,18 @@ class LimitCoverageTests(unittest.TestCase):
         )
         self.write("tools/limit-coverage/registry.toml", manifest)
         self.assertEqual(self.failures(), [])
-        self.write(
-            "PLAN.md",
-            "| ID | Milestone | Spec | Depends | Status | Notes |\n"
-            "|---|---|---|---|---|---|\n"
-            "| B10 | Wiring | 13 | — | ✅ | done |\n",
-        )
+        self.write_milestone("B10", "B", "Wiring", "done")
         self.assert_fails_with("unwired key 'IntakeQueue' names completed owner 'B10'")
 
-    def test_escaped_pipe_row_reports_its_real_status(self) -> None:
-        """S7's Milestone cell holds escaped pipes; its status is ✅, not the Spec ref."""
-        self.write(
-            "PLAN.md",
-            "| ID | Milestone | Spec | Depends | Status | Notes |\n"
-            "|---|---|---|---|---|---|\n"
-            "| S7 | graph (a \\| b \\| c) | 13 §1 | S6 | ✅ | done |\n",
-        )
-        identifiers, completed, failures = checker.load_milestone_ids(
-            self.root / "PLAN.md"
-        )
+    def test_title_with_pipes_reports_its_real_status(self) -> None:
+        """A frontmatter title may contain literal pipes with no table-cell escaping.
+
+        This is the structural fix for the defect a GFM table parse produced: S7's
+        Milestone cell held escaped pipes, and two consumers split on the wrong
+        column and read its status as its Spec ref forever (a done milestone
+        counted as open)."""
+        self.write_milestone("S7", "S", "graph (a | b | c)", "done")
+        identifiers, completed, failures = checker.load_milestone_ids(self.root)
         self.assertEqual(failures, [])
         self.assertIn("S7", identifiers)
         self.assertIn("S7", completed)
@@ -384,12 +381,7 @@ class LimitCoverageTests(unittest.TestCase):
         )
         self.write("tools/limit-coverage/registry.toml", manifest)
         self.assertEqual(self.failures(), [])
-        self.write(
-            "PLAN.md",
-            "| ID | Milestone | Spec | Depends | Status | Notes |\n"
-            "|---|---|---|---|---|---|\n"
-            "| B10 | Wiring | 13 | — | ✅ | done |\n",
-        )
+        self.write_milestone("B10", "B", "Wiring", "done")
         self.assert_fails_with("consumer_binding defers to B10, which is complete")
 
 
