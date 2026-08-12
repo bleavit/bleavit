@@ -44,7 +44,19 @@ for item in rows[:8]:
 PY
   echo
   echo "--- Last session log entries ---"
-  awk '/^## Session log/{f=1;next} /^## /{f=0} f' PLAN.md | grep -E '^\| 20[0-9]{2}-' | tail -3 | cut -c1-300 || echo "(no session log entries yet)"
+  python3 - <<'PY' || echo "(no session log entries yet — check plan/log/)"
+from pathlib import Path
+import sys
+sys.path.insert(0, ".")
+from tools.plan.migrate import read_day_records
+
+records, errors = read_day_records(Path("."), "log")
+for error in errors[:3]:
+    print(f"WARNING: {error}")
+for record in records[-3:]:
+    summary = " ".join(record.body.split())[:240]
+    print(f"{record.date}  {record.heading}  {summary}")
+PY
 else
   echo
   echo "WARNING: PLAN.md is missing. Recreate it per AGENTS.md · rule R-3 before any other work."
@@ -52,5 +64,5 @@ fi
 
 echo
 echo "Protocol reminder (AGENTS.md): implement from the spec · keep going past a closed milestone (R-5)"
-echo "in docs/architecture/ · verify per doc 15 · update PLAN.md before stopping."
+echo "in docs/architecture/ · verify per doc 15 · update the plan tree before stopping."
 exit 0

@@ -1,8 +1,8 @@
 # Splitting PLAN.md into item files and day files
 
 **Date:** 2026-08-12
-**Status:** design approved, implementation not started
-**Owner:** the next implementation session
+**Status:** implemented 2026-08-12 on `plan/split-tree`
+**Owner:** complete; the `plan/` item tree and renderer own ongoing maintenance
 
 `PLAN.md` is 4,369,718 bytes. GitHub refuses to render a Markdown file above
 1 MB, so the file does not display there at all. This design replaces the single

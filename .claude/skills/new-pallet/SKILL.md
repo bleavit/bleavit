@@ -1,6 +1,6 @@
 ---
 name: new-pallet
-description: Scaffold a new FRAME pallet in this workspace following the project conventions — Cargo wiring, lib.rs skeleton with Config/storage/events/errors named per the frozen integration contract, mock runtime, per-extrinsic test stubs, benchmark stubs, and the mandatory try-state hook. Use when a PLAN.md milestone introduces a pallet.
+description: Scaffold a new FRAME pallet in this workspace following the project conventions — Cargo wiring, lib.rs skeleton with Config/storage/events/errors named per the frozen integration contract, mock runtime, per-extrinsic test stubs, benchmark stubs, and the mandatory try-state hook. Use when a plan-tree milestone introduces a pallet.
 argument-hint: "<pallet-name, e.g. conditional-ledger>"
 ---
 

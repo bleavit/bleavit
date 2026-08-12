@@ -7,7 +7,7 @@ authoritative specification already exists; the job of every session is to turn 
 into code, one milestone at a time, without ever degrading the specification or the
 project's living documents.
 
-Read this file first. Then read `PLAN.md`. Then work.
+Read this file first. Then read `PLAN.md` and the linked `plan/` items. Then work.
 
 ## Ground truth
 
@@ -24,9 +24,10 @@ Read this file first. Then read `PLAN.md`. Then work.
   references them — including code (kernel constants from `futarchy-primitives`,
   tunables from `pallet-constitution::Params`; the frontend reads chain
   metadata/storage, never hardcodes).
-- **`PLAN.md` is the single source of implementation status** — what is done, in
-  progress, blocked, and next. It references architecture sections and never restates
-  their content.
+- **`PLAN.md` and `plan/` are the single source of implementation status** — the
+  short focus/index in `PLAN.md`, stable-id items under `plan/{milestones,questions,
+  verifications}/`, and dated records under `plan/{log,decisions,audits,changes}/`.
+  They reference architecture sections and never restate normative content.
 
 ## Rules
 
@@ -38,9 +39,9 @@ Read this file first. Then read `PLAN.md`. Then work.
   + 00's decision record if a D-n is affected; bump `INTEGRATION_CONTRACT_VERSION` per
   02 §13 when 02 changes; changes to `02` or the INV-FE texts need the joint
   backend+frontend sign-off those docs mandate — the user speaks for both sides or
-  names who does), and record substantive changes in PLAN.md · *Decision log*. When a
-  semantic change is non-obvious, record the reasoning in the *Decision log* (and raise a
-  *Spec questions* row if it opens a genuinely separate question) — then **decide it and
+  names who does), and record substantive changes in `plan/decisions/`. When a
+  semantic change is non-obvious, record the reasoning there (and create a
+  `plan/questions/SQ-*.md` item if it opens a genuinely separate question) — then **decide it and
   proceed** rather than waiting. Values-layer numbers, spec rulings and
   integration-contract bumps are all yours to call: the user owns both sides of the
   sign-off 02 §13 mandates and has delegated it (2026-07-25). Reserve real questions for
@@ -52,7 +53,7 @@ Read this file first. Then read `PLAN.md`. Then work.
   slices of 02, 13, and 15. Every observable behavior must be traceable to spec text.
   Never **guess** a parameter value, name, or semantics, and never resolve a
   `[VERIFY]` tag by assumption — verify against live sources and log the result in
-  PLAN.md · *Verification log*.
+  `plan/verifications/V-*.md`.
 
   **A genuinely required new parameter may be introduced** (amended 2026-07-25 by
   explicit user instruction). The prohibition is on fabrication, not on the values
@@ -73,24 +74,26 @@ Read this file first. Then read `PLAN.md`. Then work.
      the bounds, max-Δ and cooldown must therefore be. A parameter whose unsafe
      direction is unbounded is not ready.
   4. **Record it** in 13 (the only home for values, §1/§2), in the limit-coverage
-     registry, and in PLAN.md · *Decision log* with the necessity argument.
+     registry, and in `plan/decisions/` with the necessity argument.
 
   Escalate to the user only for a value whose **error direction is unsafe** and which
   no evidence anchors — that is a values judgement, not an implementation choice.
 - **R-3 — The living documents stay true.** After every change to the repository,
-  `PLAN.md` is updated in the same session (status, session log); `README.md`,
+  the affected `plan/` item and `plan/log/<YYYY>/<MM>/<YYYY-MM-DD>.md` are updated in
+  the same session; `PLAN.md` is updated when the current focus changes. `README.md`,
   `AGENTS.md`, and `CLAUDE.md` are refreshed whenever the repo shape, commands, or
   workflow they describe changed. A session that leaves the living documents stale is
   an unfinished session (a Stop hook will remind you).
-- **R-4 — PLAN.md is status, not spec.** Milestone rows cite `docs/architecture/`
-  sections; PLAN.md never duplicates normative content. If you feel the need to
-  explain protocol design in PLAN.md, you are writing in the wrong file.
+- **R-4 — The plan tree is status, not spec.** Milestone frontmatter cites
+  `docs/architecture/`; each milestone's status prose lives in that item's body.
+  `PLAN.md` and `plan/` never duplicate normative content. If you feel the need to
+  explain protocol design there, you are writing in the wrong place.
 - **R-5 — Keep going; park cleanly, never mid-air.** Work the in-progress milestone,
   else the next one whose *Depends* are ✅, else what the user names — and when it
   closes, **continue to the next item without waiting to be asked**: a session ends
   when the work or the user says so, not when a milestone happens to close. What *is*
   binding is the hand-off: finish or park each item cleanly with exact resume notes,
-  and never leave the repo red without saying so in PLAN.md.
+  and never leave the repo red without saying so in the affected plan item and session log.
 - **R-6 — Quality gates before "done".** A milestone is ✅ only when the gates below
   pass and a spec-compliance review found no blockers. Never mark done with failing
   tests; report failures verbatim instead.
@@ -103,18 +106,17 @@ Read this file first. Then read `PLAN.md`. Then work.
   regime (mock-runtime × error paths × origin misuse, PT-1…PT-8 property suites,
   differential vectors vs the reference model, generated limit-coverage suite,
   try-state everywhere, fuzz/bench/weights). Milestones carry their verification
-  obligations in PLAN.md's *Verify* column — they are part of the milestone, not
+  obligations in milestone `verify:` frontmatter — they are part of the milestone, not
   follow-up work.
 - **R-9 — Commit discipline.** Conventional commits with the milestone ID, e.g.
   `feat(ledger): split/merge families with per-branch supplies (A2)`. Commit only
   when the user asks (or has standing instructions); never push, publish, or tag
   without an explicit ask. Never commit with red gates. Enable
-  `git config rerere.enabled true` locally — `PLAN.md`'s `Current focus`,
-  `Milestones`, and `Session log` sections are touched by nearly every PR, so the
-  same conflict shapes recur across branches; rerere replays your own past
-  resolutions automatically instead of re-solving them by hand each time.
+  `git config rerere.enabled true` locally. The split `plan/` tree reduces the old
+  single-file collision surface, but `PLAN.md` focus and same-day log files can still
+  conflict; rerere replays your own past resolutions automatically.
 - **R-10 — Honest reporting.** Report what happened: gates that failed, spec
-  questions found, work left open. The next session inherits your PLAN.md state —
+  questions found, work left open. The next session inherits the plan-tree state —
   optimistic status lines are technical debt with interest.
 - **R-11 — README's pinned lines are fixed.** `README.md` always opens, as the first
   paragraph right after the `# Bleavit` heading, with:
@@ -134,7 +136,7 @@ Read this file first. Then read `PLAN.md`. Then work.
   code state is coherent and locally verified, commit and open a draft PR. Run the
   exhaustive gate exactly once for that state, then mark the PR ready and continue
   with the next logical work. A later documentation-only/status-only commit (for
-  example, the final `PLAN.md` closure) does not require the session to wait for an
+  example, the final plan-tree closure) does not require the session to wait for an
   identical exhaustive CI rerun before moving on. This is a handoff rule, not a
   gate waiver: meaningful code, build, workflow, dependency, generated-artifact,
   or test changes still require their appropriate fresh evidence, and any observed
@@ -174,8 +176,8 @@ Read this file first. Then read `PLAN.md`. Then work.
 
 ## Session protocol
 
-1. **Orient** — read the injected session context, then `PLAN.md` (Current focus,
-   next milestones, last session log rows, open Spec questions).
+1. **Orient** — read the injected session context, then `PLAN.md`, the selected
+   `plan/milestones/<ID>.md`, recent `plan/log/` records, and relevant open questions.
 2. **Select** — the in-progress milestone, else the first pending one whose
    dependencies are ✅, else what the user names. Confirm scope in one sentence.
 3. **Read the spec** — the milestone's cited sections, before any code (R-2).
@@ -183,7 +185,8 @@ Read this file first. Then read `PLAN.md`. Then work.
    surrounding code; delegate bulk test authoring to the `test-engineer` agent and
    compliance review to the `spec-reviewer` agent.
 5. **Verify** — run the quality gates; fix or honestly report.
-6. **Close** — update the living documents (R-3), report results, suggest the commit.
+6. **Close** — update the affected plan item and today's `plan/log/` file (R-3),
+   refresh `PLAN.md` focus when needed, report results, and suggest the commit.
    Apply R-12 at PR handoff: do not block the next logical work on a redundant
    exhaustive rerun caused only by a final documentation/status commit.
 
@@ -192,7 +195,7 @@ encode this loop verbatim.
 
 ## Quality gates
 
-Run what exists; gates grow with the repo (PLAN.md's *Verify* column is authoritative
+Run what exists; gates grow with the repo (milestone `verify:` frontmatter is authoritative
 per milestone):
 
 > **Local prerequisites for the exhaustive Rust gate (verified 2026-07-29).** The
@@ -247,7 +250,7 @@ and `ls -lL` rather than `ls -l` (which happily shows a dangling one).
 | Release sweep (04 §4 cadence) | full ≥10⁷-point corpus: `python3 tools/reference-model/generate-vectors.py --sweep-out <dir>` then `BLEAVIT_SWEEP_DIR=<dir> BLEAVIT_SWEEP_REQUIRE_FULL=1 cargo test -p futarchy-fixed --release --locked --test sweep -- --ignored`; runs in `release.yml` and on kernel/numerics changes via `sweep.yml` — not per-commit |
 | App (`app/`) | `pnpm -C app install --frozen-lockfile`, then the gates catalogued in `.claude/rules/app-code.md` · *Quality gates for `app/`*. That file loads automatically whenever a session touches `app/**`, which is exactly when these gates bind. They are unchanged and non-optional — read it before running or changing any `app/` gate |
 | Explainer (`explainer/`) | `npm -C explainer install`, then `npm -C explainer run verify`. A **local** gate — no `ci.yml` job — but `explainer/package-lock.json` is scanned by the release-blocking Supply chain job. Rules in `.claude/rules/explainer.md` |
-| Docs | `python3 tools/ci/check-plan-tables.py` · `check-dispatch-mirror.py` (15 §4.8) · `check-spec-question-batches.py` · `check-execute-error-codes.py` · `check-unreadable-obligations.py` · `check-release-blocker-citations.py` · `check-client-surface-obligations.py` · `tools/deploy/check-runbooks.py` · `tools/deploy/check-signers.py` · `check-integration-abi.py`; and every relative link in the living documents resolves |
+| Docs | `python3 tools/plan/render.py --check` · `python3 tools/ci/check-plan-tables.py` · `check-dispatch-mirror.py` (15 §4.8) · `check-spec-question-batches.py` · `check-execute-error-codes.py` · `check-unreadable-obligations.py` · `check-release-blocker-citations.py` · `check-client-surface-obligations.py` · `tools/deploy/check-runbooks.py` · `tools/deploy/check-signers.py` · `check-integration-abi.py`; and every relative link in the living documents resolves |
 
 > **Why each of these gates exists, and the defect it caught, lives in
 > `.claude/rules/quality-gates.md`** — moved out of this always-loaded file
@@ -259,7 +262,7 @@ and `ls -lL` rather than `ls -l` (which happily shows a dangling one).
 ## Repository layout
 
 The *Status* column names what a path **is**, not how far it has got. Milestone
-status lives in PLAN.md and nowhere else (R-4).
+status lives in `PLAN.md` plus `plan/` and nowhere else (R-4).
 
 | Path | Status | What it is |
 |---|---|---|
@@ -267,7 +270,9 @@ status lives in PLAN.md and nowhere else (R-4).
 | `docs/integration/` | living | **Human-facing client documentation** (N11): nine plain-language files for people integrating the hosted question service. Non-normative — `docs/architecture/` wins on conflict, and [16](docs/architecture/16-hosted-question-service.md) is the owning doc. The quickstart's code is the integration drill's code, so CI notices when it rots |
 | `docs/design/` | derived | Non-normative design-context pack (`claude-design-kit/`: spec distillations + Claude Design prompt); spec wins on conflict; regenerate after any spec change |
 | `docs/superpowers/specs/` | design | Approved designs for repository-shape changes, one dated file each, written before implementation. Non-normative — `docs/architecture/` wins on conflict, and PLAN.md still owns status |
-| `PLAN.md` | living | Implementation roadmap, status, session log |
+| `PLAN.md` | living | Short implementation focus, Track-E arithmetic and generated plan index |
+| `plan/` | living | Per-id milestones/questions/verifications, dated logs/decisions/audits/changes, and generated human indexes |
+| `tools/plan/` | tooling | Strict plan frontmatter model, one-shot migration/losslessness tools, and generated-index renderer |
 | `README.md` | living | Human orientation |
 | `AGENTS.md` / `CLAUDE.md` | living | This manual / Claude Code wiring |
 | `.claude/` | living | Settings, hooks, skills, subagents, path rules |
@@ -303,13 +308,13 @@ is warranted, follow **R-1**: make it consistent across the whole doc set (ownin
 every referencing doc + 00's decision record if a D-n is affected), bump
 `INTEGRATION_CONTRACT_VERSION` per 02 §13 when 02 changes, honor the joint
 backend+frontend sign-off that 02 §13 and 15 §2.1 mandate for `02`/INV-FE edits, and
-record what changed (and why, and who authorized it) in PLAN.md · *Decision log*. If a
-semantic change is non-obvious, raise it in PLAN.md · *Spec questions* and confirm with
+record what changed (and why, and who authorized it) in `plan/decisions/`. If a
+semantic change is non-obvious, create a `plan/questions/SQ-*.md` item and confirm with
 the user first.
 
 ## Where things live
 
 - Claude Code specifics (skills, subagents, hooks): `CLAUDE.md`, `.claude/`
 - Codex playbooks: `.codex/README.md`, `.codex/prompts/`
-- Roadmap and status: `PLAN.md` · Human orientation: `README.md`
+- Roadmap and status: `PLAN.md`, `plan/` · Human orientation: `README.md`
 - The spec: `docs/architecture/` — start at its README

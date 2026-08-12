@@ -1,5 +1,9 @@
 # PLAN.md Split Implementation Plan
 
+> **Status (2026-08-12):** implementation and local verification complete on
+> `plan/split-tree`. The final commit/push/PR actions remain unperformed because
+> AGENTS.md R-9 requires an explicit user request.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the single 4.37 MB `PLAN.md` with one file per item and one file per day, plus generated indexes, so the tree renders on GitHub and every gate parses exact fields instead of table cells.
@@ -61,7 +65,7 @@ Effects: `guard-track-goal.sh` with `track: S` blocks a session forever on a fin
 
 Exactly one row in the whole file omits its trailing pipe (SQ-523, line 4472). Exactly one row carries escaped pipes in a way that misleads a naive splitter (S7, line 3896).
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `tools/plan/tests/test_gfm.py`:
 
@@ -111,7 +115,7 @@ class SplitCellsTests(unittest.TestCase):
         self.assertEqual(unescape_cell(cells[0]), "a | b")
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 ```bash
 cd /home/chralt/development/bleavit
@@ -120,7 +124,7 @@ python3 -m unittest discover -s tools/plan/tests -t . -v
 
 Expected: FAIL with `ModuleNotFoundError: No module named 'tools.plan.gfm'`.
 
-- [ ] **Step 3: Move the existing splitter into a shared module**
+- [x] **Step 3: Move the existing splitter into a shared module**
 
 Create `tools/plan/__init__.py` and `tools/plan/tests/__init__.py` as empty files.
 
@@ -146,7 +150,7 @@ from tools.plan.gfm import is_separator_row, split_cells  # noqa: E402
 
 There must be exactly one implementation. The whole point of this task is that a second one disagreed with the first.
 
-- [ ] **Step 4: Run both test suites to verify they pass**
+- [x] **Step 4: Run both test suites to verify they pass**
 
 ```bash
 python3 -m unittest discover -s tools/plan/tests -t . -v
@@ -156,7 +160,7 @@ python3 tools/ci/check-plan-tables.py
 
 Expected: PASS in both, and the table checker still reports every table well-formed. The `check-plan-tables.py` tests are the regression net for the move.
 
-- [ ] **Step 5: Write the failing test for the limit-coverage gate**
+- [x] **Step 5: Write the failing test for the limit-coverage gate**
 
 Append to `tools/limit-coverage/tests/test_check_limit_coverage.py`:
 
@@ -178,7 +182,7 @@ Append to `tools/limit-coverage/tests/test_check_limit_coverage.py`:
 
 Add `load_milestone_ids` to that file's imports if it is not already imported, and set `self.tmp` from a `tempfile.TemporaryDirectory` in `setUp` if the class has none.
 
-- [ ] **Step 6: Run it to verify it fails**
+- [x] **Step 6: Run it to verify it fails**
 
 ```bash
 python3 -m unittest discover -s tools/limit-coverage/tests -v 2>&1 | tail -20
@@ -186,7 +190,7 @@ python3 -m unittest discover -s tools/limit-coverage/tests -v 2>&1 | tail -20
 
 Expected: FAIL — `'S7' not found in set()` for `completed`.
 
-- [ ] **Step 7: Fix `check-limit-coverage.py`**
+- [x] **Step 7: Fix `check-limit-coverage.py`**
 
 Replace the body of the loop in `load_milestone_ids` (currently around line 645):
 
@@ -228,7 +232,7 @@ from tools.plan.gfm import is_separator_row, split_cells, unescape_cell  # noqa:
 
 Note the cell index moves from `cells[5]` to `cells[4]`, because `split_cells` drops the empty leading cell that `line.split("|")` produces.
 
-- [ ] **Step 8: Run both suites**
+- [x] **Step 8: Run both suites**
 
 ```bash
 python3 -m unittest discover -s tools/limit-coverage/tests -v 2>&1 | tail -5
@@ -237,7 +241,7 @@ python3 tools/limit-coverage/check-limit-coverage.py
 
 Expected: PASS, and the checker still exits 0 with its usual counts.
 
-- [ ] **Step 9: Fix `guard-track-goal.sh`**
+- [x] **Step 9: Fix `guard-track-goal.sh`**
 
 In the heredoc Python block, replace:
 
@@ -274,7 +278,7 @@ for match in row.finditer(text):
 
 and replace the two later uses of `match.group(1)` with `cells[0]`.
 
-- [ ] **Step 10: Prove the guard now reads S7 correctly**
+- [x] **Step 10: Prove the guard now reads S7 correctly**
 
 ```bash
 printf 'track: S\n' > .claude/session-goal
@@ -284,7 +288,7 @@ rm .claude/session-goal
 
 Expected: the guard reports Track S as complete or names a genuinely open S milestone. It must not name `S7`.
 
-- [ ] **Step 11: Run the full docs and tooling gate set**
+- [x] **Step 11: Run the full docs and tooling gate set**
 
 ```bash
 python3 tools/ci/check-plan-tables.py
@@ -295,7 +299,7 @@ python3 -m unittest discover -s tools/plan/tests -t . 2>&1 | grep -E '^(OK|FAILE
 
 Expected: all green.
 
-- [ ] **Step 12: Update PLAN.md and commit**
+- [x] **Step 12: Update PLAN.md and commit**
 
 Add an *Unplanned changes* entry naming S7, both gates, and the effect of each. Then:
 
@@ -323,7 +327,7 @@ git commit -m "fix(plan): honour the \\| escape when reading milestone status ce
   - `load_milestones(root: Path) -> tuple[list[Milestone], list[str]]`, and the same shape for `load_questions` and `load_verifications`. The second element is the error list, empty on success.
   - `STATUS_GLYPHS: dict[str, str]` mapping the milestone enum to `⬜ 🔨 ⛔ ✅`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Create `tools/plan/tests/test_model.py`:
 
@@ -428,7 +432,7 @@ class LoadMilestonesTests(FrontmatterTests):
         self.assertTrue(any("unknown key 'owner'" in e for e in errors))
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 ```bash
 python3 -m unittest discover -s tools/plan/tests -t . -v 2>&1 | tail -20
@@ -436,7 +440,7 @@ python3 -m unittest discover -s tools/plan/tests -t . -v 2>&1 | tail -20
 
 Expected: FAIL with `ImportError: cannot import name 'PlanError'`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Create `tools/plan/model.py`:
 
@@ -746,7 +750,7 @@ def load_verifications(root: Path) -> tuple[list[Verification], list[str]]:
     return _load(root, "verifications", build, errors), errors
 ```
 
-- [ ] **Step 4: Run to verify it passes**
+- [x] **Step 4: Run to verify it passes**
 
 ```bash
 python3 -m unittest discover -s tools/plan/tests -t . -v 2>&1 | tail -5
@@ -754,7 +758,7 @@ python3 -m unittest discover -s tools/plan/tests -t . -v 2>&1 | tail -5
 
 Expected: PASS, 13 tests.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add tools/plan
@@ -775,7 +779,7 @@ This must land before Task 3 creates `plan/`. Until it does, a session that edit
 - Consumes: nothing.
 - Produces: nothing importable. The guard's contract becomes: block when the tree has non-plan changes **and** neither `PLAN.md` nor anything under `plan/` was touched.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `tools/ci/tests/test_stop_plan_guard.py`:
 
@@ -843,7 +847,7 @@ class StopPlanGuardTests(unittest.TestCase):
         self.assertEqual(run_guard(self.repo).strip(), "")
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 ```bash
 python3 -m unittest discover -s tools/ci/tests -v 2>&1 | grep -A5 'test_accepts_a_plan_directory_edit'
@@ -851,7 +855,7 @@ python3 -m unittest discover -s tools/ci/tests -v 2>&1 | grep -A5 'test_accepts_
 
 Expected: FAIL on `test_accepts_a_plan_directory_edit` — the guard emits a block.
 
-- [ ] **Step 3: Modify the guard**
+- [x] **Step 3: Modify the guard**
 
 In `.claude/hooks/stop-plan-guard.sh`, replace:
 
@@ -871,7 +875,7 @@ PLAN_TOUCHED=$(git status --porcelain -- PLAN.md plan 2>/dev/null || true)
 
 Update the block message to say: *"append an entry to `plan/log/<YYYY>/<MM>/<YYYY-MM-DD>.md`"* in place of *"append a Session log row"*.
 
-- [ ] **Step 4: Run to verify it passes**
+- [x] **Step 4: Run to verify it passes**
 
 ```bash
 python3 -m unittest discover -s tools/ci/tests -v 2>&1 | grep -E '^(OK|FAILED|Ran )'
@@ -879,7 +883,7 @@ python3 -m unittest discover -s tools/ci/tests -v 2>&1 | grep -E '^(OK|FAILED|Ra
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add .claude/hooks/stop-plan-guard.sh tools/ci/tests/test_stop_plan_guard.py
@@ -903,7 +907,7 @@ git commit -m "fix(plan): let the Stop guard accept a plan/ edit as satisfying R
   - `migrate_milestones(plan_text: str, out: Path) -> list[Path]`.
   - CLI: `python3 tools/plan/migrate.py milestones --plan PLAN.md --out .`
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `tools/plan/tests/test_migrate.py`:
 
@@ -985,7 +989,7 @@ class MigrateMilestonesTests(unittest.TestCase):
             migrate_milestones(bad, self.root)
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 ```bash
 python3 -m unittest discover -s tools/plan/tests -t . -v 2>&1 | tail -10
@@ -993,7 +997,7 @@ python3 -m unittest discover -s tools/plan/tests -t . -v 2>&1 | tail -10
 
 Expected: FAIL with `ModuleNotFoundError: No module named 'tools.plan.migrate'`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Create `tools/plan/migrate.py`:
 
@@ -1167,7 +1171,7 @@ if __name__ == "__main__":
     raise SystemExit(main())
 ```
 
-- [ ] **Step 4: Run to verify it passes**
+- [x] **Step 4: Run to verify it passes**
 
 ```bash
 python3 -m unittest discover -s tools/plan/tests -t . -v 2>&1 | tail -5
@@ -1175,7 +1179,7 @@ python3 -m unittest discover -s tools/plan/tests -t . -v 2>&1 | tail -5
 
 Expected: PASS, 6 new tests.
 
-- [ ] **Step 5: Run the real conversion and read the proof**
+- [x] **Step 5: Run the real conversion and read the proof**
 
 ```bash
 python3 tools/plan/migrate.py milestones --plan PLAN.md --out .
@@ -1183,7 +1187,7 @@ python3 tools/plan/migrate.py milestones --plan PLAN.md --out .
 
 Expected: about 117 files written, then `losslessness proof: OK`. **If any block is lost, stop and fix the converter.** Do not hand-edit an emitted file to make the proof pass — the proof exists to catch exactly that.
 
-- [ ] **Step 6: Verify the tree loads back cleanly**
+- [x] **Step 6: Verify the tree loads back cleanly**
 
 ```bash
 python3 -c "
@@ -1199,7 +1203,7 @@ import collections; print(collections.Counter(i.status for i in items))
 
 Expected: 0 errors, and a status count of `done 101 / pending 10 / active 6` over 117 milestones.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add tools/plan plan/milestones
@@ -1223,7 +1227,7 @@ git commit -m "feat(plan): convert the milestone tables into plan/milestones/ it
   - `escape_cell(text: str) -> str` — escapes `|` as `\|` so a rendered row can never be severed.
   - CLI: `python3 tools/plan/render.py --write` and `python3 tools/plan/render.py --check`.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Create `tools/plan/tests/test_render.py`:
 
@@ -1295,7 +1299,7 @@ class RenderTests(unittest.TestCase):
             self.assertEqual(main(["--check", "--root", str(root)]), 1)
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 ```bash
 python3 -m unittest discover -s tools/plan/tests -t . -v 2>&1 | tail -10
@@ -1303,7 +1307,7 @@ python3 -m unittest discover -s tools/plan/tests -t . -v 2>&1 | tail -10
 
 Expected: FAIL with `ModuleNotFoundError: No module named 'tools.plan.render'`.
 
-- [ ] **Step 3: Write the implementation**
+- [x] **Step 3: Write the implementation**
 
 Create `tools/plan/render.py`:
 
@@ -1396,7 +1400,7 @@ if __name__ == "__main__":
     raise SystemExit(main())
 ```
 
-- [ ] **Step 4: Run to verify it passes**
+- [x] **Step 4: Run to verify it passes**
 
 ```bash
 python3 -m unittest discover -s tools/plan/tests -t . -v 2>&1 | tail -5
@@ -1404,7 +1408,7 @@ python3 -m unittest discover -s tools/plan/tests -t . -v 2>&1 | tail -5
 
 Expected: PASS, 5 new tests.
 
-- [ ] **Step 5: Generate the real index and read it**
+- [x] **Step 5: Generate the real index and read it**
 
 ```bash
 python3 tools/plan/render.py --write
@@ -1414,7 +1418,7 @@ awk '{ if (length($0) > 200) print FILENAME": "NR" is "length($0)" chars" }' pla
 
 Expected: the index is written, `--check` is clean, and **no row exceeds 200 characters**. If a row is longer, lower `TITLE_WIDTH`.
 
-- [ ] **Step 6: Wire it into CI**
+- [x] **Step 6: Wire it into CI**
 
 In `.github/workflows/ci.yml`, in the `docs` job, after the `check-plan-tables.py` step, add:
 
@@ -1423,7 +1427,7 @@ In `.github/workflows/ci.yml`, in the `docs` job, after the `check-plan-tables.p
         run: python3 tools/plan/render.py --check
 ```
 
-- [ ] **Step 7: Verify the workflow-wiring suite still passes**
+- [x] **Step 7: Verify the workflow-wiring suite still passes**
 
 ```bash
 python3 -m unittest discover -s tools/ci/tests 2>&1 | grep -E '^(OK|FAILED|Ran )'
@@ -1431,7 +1435,7 @@ python3 -m unittest discover -s tools/ci/tests 2>&1 | grep -E '^(OK|FAILED|Ran )
 
 Expected: PASS. That suite reads `ci.yml` itself.
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add tools/plan plan/MILESTONES.md .github/workflows/ci.yml
@@ -1465,7 +1469,7 @@ git commit -m "feat(plan): render the milestone index and gate its freshness in 
 - Consumes: `tools.plan.model.load_milestones`.
 - Produces: nothing importable. Each consumer's contract is unchanged; only its input moves.
 
-- [ ] **Step 1: Change the monitoring gate's fixture to a plan/ tree**
+- [x] **Step 1: Change the monitoring gate's fixture to a plan/ tree**
 
 In `tools/monitoring/tests/test_coverage_checker.py`, replace each fixture that writes a `PLAN.md` milestone table with one that writes item files:
 
@@ -1480,7 +1484,7 @@ In `tools/monitoring/tests/test_coverage_checker.py`, replace each fixture that 
         )
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 ```bash
 python3 -m unittest discover -s tools/monitoring/tests -v 2>&1 | tail -10
@@ -1488,7 +1492,7 @@ python3 -m unittest discover -s tools/monitoring/tests -v 2>&1 | tail -10
 
 Expected: FAIL — the gate still reads `PLAN.md` and finds no milestone table.
 
-- [ ] **Step 3: Rewrite `load_milestone_statuses`**
+- [x] **Step 3: Rewrite `load_milestone_statuses`**
 
 Replace the whole function in `tools/monitoring/check_alert_coverage.py` with:
 
@@ -1505,7 +1509,7 @@ def load_milestone_statuses(root: Path) -> tuple[dict[str, str], list[str]]:
 
 Add the import, and update its one call site to pass the repository root rather than `root / "PLAN.md"`. Every comparison against `"✅"` becomes a comparison against `"done"`.
 
-- [ ] **Step 4: Run to verify it passes**
+- [x] **Step 4: Run to verify it passes**
 
 ```bash
 python3 -m unittest discover -s tools/monitoring/tests -v 2>&1 | grep -E '^(OK|FAILED|Ran )'
@@ -1514,7 +1518,7 @@ python3 tools/monitoring/check_alert_coverage.py
 
 Expected: PASS, and the checker exits 0.
 
-- [ ] **Step 5: Do the same for `check-limit-coverage.py`**
+- [x] **Step 5: Do the same for `check-limit-coverage.py`**
 
 Replace `load_milestone_ids` with:
 
@@ -1530,7 +1534,7 @@ def load_milestone_ids(root: Path) -> tuple[set[str], set[str], list[str]]:
 
 Update its call site to pass `root` instead of `root / "PLAN.md"`, and update the fixtures in `tools/limit-coverage/tests/test_check_limit_coverage.py` to write item files.
 
-- [ ] **Step 6: Run both suites and both checkers**
+- [x] **Step 6: Run both suites and both checkers**
 
 ```bash
 python3 -m unittest discover -s tools/limit-coverage/tests 2>&1 | grep -E '^(OK|FAILED|Ran )'
@@ -1539,7 +1543,7 @@ python3 tools/limit-coverage/check-limit-coverage.py
 
 Expected: PASS, exit 0.
 
-- [ ] **Step 7: Rewrite the track-goal guard's counting block**
+- [x] **Step 7: Rewrite the track-goal guard's counting block**
 
 Replace the heredoc Python's milestone loop with:
 
@@ -1568,7 +1572,7 @@ else:
 
 Keep the `> **PARKED:**` escape exactly as it is. It still reads `PLAN.md`.
 
-- [ ] **Step 8: Prove the guard against every track**
+- [x] **Step 8: Prove the guard against every track**
 
 ```bash
 for t in M A B E N S F O G; do
@@ -1582,7 +1586,7 @@ rm .claude/session-goal
 
 Expected: each track reports a plausible next milestone or no block. Compare against `plan/MILESTONES.md` by eye. **Track S must not name S7.**
 
-- [ ] **Step 9: Rewrite the session-context hook's milestone block**
+- [x] **Step 9: Rewrite the session-context hook's milestone block**
 
 Replace the awk block added on 2026-08-12 with:
 
@@ -1604,7 +1608,7 @@ for item in rows[:8]:
 PY
 ```
 
-- [ ] **Step 10: Run the hook and read its whole output**
+- [x] **Step 10: Run the hook and read its whole output**
 
 ```bash
 CLAUDE_PROJECT_DIR=$PWD .claude/hooks/session-context.sh | tee /tmp/hook.txt | head -60
@@ -1613,7 +1617,7 @@ wc -c /tmp/hook.txt
 
 Expected: under 8,000 characters, and the milestone list matches `plan/MILESTONES.md`.
 
-- [ ] **Step 11: Commit**
+- [x] **Step 11: Commit**
 
 ```bash
 git add .claude/hooks tools/limit-coverage tools/monitoring
@@ -1661,7 +1665,7 @@ Every non-`open` word maps to `resolved`, and that **preserves today's behavior 
 
 **10 of the 389 resolved rows carry no date.** `resolved:` is omitted for those rather than invented.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append to `tools/plan/tests/test_migrate.py`:
 
@@ -1717,7 +1721,7 @@ class MigrateQuestionsTests(unittest.TestCase):
         self.assertIn("SQ-616", str(caught.exception))
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 ```bash
 python3 -m unittest discover -s tools/plan/tests -t . -v 2>&1 | tail -10
@@ -1725,7 +1729,7 @@ python3 -m unittest discover -s tools/plan/tests -t . -v 2>&1 | tail -10
 
 Expected: FAIL with `ImportError: cannot import name 'migrate_questions'`.
 
-- [ ] **Step 3: Implement `migrate_questions`**
+- [x] **Step 3: Implement `migrate_questions`**
 
 Add to `tools/plan/migrate.py`:
 
@@ -1855,7 +1859,7 @@ def _section(text: str, heading: str) -> str:
 
 Replace the existing `_milestones_section` with a call to `_section(text, "## Milestones")` and delete it. Extend `main`'s `kind` choices to `["milestones", "questions"]` and dispatch on it, keeping the same proof.
 
-- [ ] **Step 4: Run to verify it passes**
+- [x] **Step 4: Run to verify it passes**
 
 ```bash
 python3 -m unittest discover -s tools/plan/tests -t . -v 2>&1 | tail -5
@@ -1863,7 +1867,7 @@ python3 -m unittest discover -s tools/plan/tests -t . -v 2>&1 | tail -5
 
 Expected: PASS.
 
-- [ ] **Step 5: Run the real conversion**
+- [x] **Step 5: Run the real conversion**
 
 ```bash
 python3 tools/plan/migrate.py questions --plan PLAN.md --out .
@@ -1872,7 +1876,7 @@ ls plan/questions | wc -l
 
 Expected: 583 files, and `losslessness proof: OK`. A raised `ValueError` names the exact question to fix. **Fix the converter or the source row, never the emitted file.**
 
-- [ ] **Step 6: Add `render_questions` and regenerate**
+- [x] **Step 6: Add `render_questions` and regenerate**
 
 Add to `tools/plan/render.py`, following `render_milestones` exactly, grouping by `status` (open first) and emitting `| ID | Question | Spec ref | Raised | Batch |` with the id linked to its file. Add `plan/QUESTIONS.md` to the `outputs` dict. Add a test mirroring `test_check_fails_on_a_hand_edited_index`.
 
@@ -1880,7 +1884,7 @@ Add to `tools/plan/render.py`, following `render_milestones` exactly, grouping b
 python3 tools/plan/render.py --write && python3 tools/plan/render.py --check && echo clean
 ```
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add tools/plan plan/questions plan/QUESTIONS.md
@@ -1902,11 +1906,11 @@ git commit -m "feat(plan): convert the spec-question table into plan/questions/ 
 - Consumes: `tools.plan.model.load_questions`.
 - Produces: nothing importable.
 
-- [ ] **Step 1: Change one gate's fixtures first**
+- [x] **Step 1: Change one gate's fixtures first**
 
 In `tools/ci/tests/test_check_release_blocker_citations.py`, replace each fixture that writes a `PLAN.md` question table with one writing `plan/questions/SQ-n.md` files, using the helper shape from Task 5 step 1.
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 ```bash
 python3 -m unittest discover -s tools/ci/tests -v 2>&1 | tail -12
@@ -1914,7 +1918,7 @@ python3 -m unittest discover -s tools/ci/tests -v 2>&1 | tail -12
 
 Expected: FAIL — the gate reads `PLAN.md` and parses no questions.
 
-- [ ] **Step 3: Replace the loader in all three gates**
+- [x] **Step 3: Replace the loader in all three gates**
 
 Each of the three files carries a near-identical `load_question_statuses`. Replace each with:
 
@@ -1932,7 +1936,7 @@ def load_question_statuses(root: Path) -> tuple[dict[str, str], list[str]]:
 
 Update each call site to pass the repository root. Every `startswith("open")` test becomes `== "open"`.
 
-- [ ] **Step 4: Run every affected suite and checker**
+- [x] **Step 4: Run every affected suite and checker**
 
 ```bash
 python3 -m unittest discover -s tools/ci/tests 2>&1 | grep -E '^(OK|FAILED|Ran )'
@@ -1943,7 +1947,7 @@ python3 tools/ci/check-client-surface-obligations.py
 
 Expected: PASS, and all three exit 0 with their usual counts.
 
-- [ ] **Step 5: Shrink the batch checker**
+- [x] **Step 5: Shrink the batch checker**
 
 In `tools/ci/check-spec-question-batches.py`, delete the duplicate-id check, the per-batch row-count check and the two-batch check. Each is now impossible: an id is a filename, and `batch:` is one scalar on one file. Keep only:
 
@@ -1960,7 +1964,7 @@ def check(root: Path) -> list[str]:
 
 Delete the now-dead tests in `tools/ci/tests/test_check_spec_question_batches.py` and add one asserting an undeclared batch label fails.
 
-- [ ] **Step 6: Run the suite and the checker**
+- [x] **Step 6: Run the suite and the checker**
 
 ```bash
 python3 -m unittest discover -s tools/ci/tests 2>&1 | grep -E '^(OK|FAILED|Ran )'
@@ -1969,7 +1973,7 @@ python3 tools/ci/check-spec-question-batches.py
 
 Expected: PASS, exit 0.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add tools/ci
@@ -1998,25 +2002,25 @@ The table is `| ID | Item | Spec ref | Status | Result |`, uniformly 5 cells acr
 
 `milestone:` comes from the Result cell's first milestone-shaped token. When there is none, the converter writes `milestone: "—"` rather than guessing.
 
-- [ ] **Step 1: Write the failing test, mirroring Task 6 step 1**
+- [x] **Step 1: Write the failing test, mirroring Task 6 step 1**
 
 Use a three-row `## Verification log` fixture: one dated row, one row whose Status cell carries no date, and one row whose Result names no milestone. Assert that the undated row loads with `date is None` and that **no exception is raised**, that the milestone-less row gets `"—"`, and that `prose_blocks` before equals after.
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 ```bash
 python3 -m unittest discover -s tools/plan/tests -t . -v 2>&1 | tail -10
 ```
 
-- [ ] **Step 3: Implement `migrate_verifications`**, following `migrate_questions` line for line: read the section, skip separators and the header, require 5 cells, require an id matching `V-\d+`, extract the date **when there is one**, refuse a duplicate filename, and write the frontmatter with the Status and Result cells in the body. Collect the undated ids and print them at the end, as `migrate_questions` prints its partial ids.
+- [x] **Step 3: Implement `migrate_verifications`**, following `migrate_questions` line for line: read the section, skip separators and the header, require 5 cells, require an id matching `V-\d+`, extract the date **when there is one**, refuse a duplicate filename, and write the frontmatter with the Status and Result cells in the body. Collect the undated ids and print them at the end, as `migrate_questions` prints its partial ids.
 
-- [ ] **Step 4: Run to verify it passes**
+- [x] **Step 4: Run to verify it passes**
 
 ```bash
 python3 -m unittest discover -s tools/plan/tests -t . -v 2>&1 | tail -5
 ```
 
-- [ ] **Step 5: Run the real conversion**
+- [x] **Step 5: Run the real conversion**
 
 ```bash
 python3 tools/plan/migrate.py verifications --plan PLAN.md --out .
@@ -2025,11 +2029,11 @@ ls plan/verifications | wc -l
 
 Expected: 224 files and `losslessness proof: OK`.
 
-- [ ] **Step 6: Delete the V-id uniqueness check**
+- [x] **Step 6: Delete the V-id uniqueness check**
 
 In `tools/ci/check-plan-tables.py`, delete the grandfathered-duplicate list and the uniqueness pass, and the note explaining them. A duplicate is now a duplicate filename, which the filesystem refuses. Delete the corresponding tests and add one line to the module docstring saying where the guarantee moved.
 
-- [ ] **Step 7: Run everything touched**
+- [x] **Step 7: Run everything touched**
 
 ```bash
 python3 -m unittest discover -s tools/ci/tests 2>&1 | grep -E '^(OK|FAILED|Ran )'
@@ -2037,7 +2041,7 @@ python3 tools/ci/check-plan-tables.py
 python3 tools/plan/render.py --write && python3 tools/plan/render.py --check && echo clean
 ```
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add tools/plan tools/ci plan/verifications plan/VERIFICATIONS.md
@@ -2085,17 +2089,17 @@ def _day_and_span(cell: str) -> tuple[str, str | None]:
     return day, (text if text != day else None)
 ```
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Append to `tools/plan/tests/test_migrate.py` a fixture per kind, and assert: the emitted path is `plan/<kind>/2026/08/2026-08-09.md`, two records on the same date land in **one** file in source order, and `prose_blocks` before equals after.
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 ```bash
 python3 -m unittest discover -s tools/plan/tests -t . -v 2>&1 | tail -10
 ```
 
-- [ ] **Step 3: Implement `migrate_day_records` and `read_day_records`**
+- [x] **Step 3: Implement `migrate_day_records` and `read_day_records`**
 
 The day-file shape is fixed by the spec:
 
@@ -2111,13 +2115,13 @@ The classifier probes exactly the frozen set…
 
 `read_day_records` must refuse a `## ` heading whose next non-blank lines are not a `key: value` block when the kind declares fields, and must refuse a file whose `# ` title date does not match its path.
 
-- [ ] **Step 4: Run to verify it passes**
+- [x] **Step 4: Run to verify it passes**
 
 ```bash
 python3 -m unittest discover -s tools/plan/tests -t . -v 2>&1 | tail -5
 ```
 
-- [ ] **Step 5: Run all four conversions**
+- [x] **Step 5: Run all four conversions**
 
 ```bash
 for kind in log decisions audits changes; do
@@ -2129,7 +2133,7 @@ ls -S $(find plan/log -name '*.md') | head -1 | xargs wc -c
 
 Expected: every conversion prints `losslessness proof: OK`, and **the largest day file is under 200,000 bytes**. If one is larger, that day carried an unusual volume and stays as it is — the GitHub limit is 1 MB.
 
-- [ ] **Step 6: Add `render_decisions` and regenerate**
+- [x] **Step 6: Add `render_decisions` and regenerate**
 
 Only decisions are indexed. Emit `| Date | Amendment | Authorized by |` with the amendment linked to its day file and heading anchor. Add `plan/DECISIONS.md` to `outputs`.
 
@@ -2140,7 +2144,7 @@ python3 tools/ci/check-doc-links.py | tail -1
 
 Expected: clean, and every generated anchor resolves.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add tools/plan plan/log plan/decisions plan/audits plan/changes plan/DECISIONS.md
@@ -2163,7 +2167,7 @@ git commit -m "feat(plan): convert the session, decision, audit and change logs 
 
 The Current focus stack is 3,712 lines of dated blockquote narrative separated by two `---` rules. A block is datable when its first bolded run contains a `YYYY-MM-DD`. Every other block goes to the holding file **intact and in source order**. The converter never infers a date from position.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 ```python
 FOCUS = """## Current focus
@@ -2215,15 +2219,15 @@ class MigrateCurrentFocusTests(unittest.TestCase):
         self.assertEqual(prose_blocks(FOCUS) - after, type(after)())
 ```
 
-- [ ] **Step 2: Run to verify it fails**
+- [x] **Step 2: Run to verify it fails**
 
 ```bash
 python3 -m unittest discover -s tools/plan/tests -t . -v 2>&1 | tail -10
 ```
 
-- [ ] **Step 3: Implement `migrate_current_focus`** per the rule above, appending to an existing day file rather than overwriting one Task 9 wrote.
+- [x] **Step 3: Implement `migrate_current_focus`** per the rule above, appending to an existing day file rather than overwriting one Task 9 wrote.
 
-- [ ] **Step 4: Run to verify it passes, then run it for real**
+- [x] **Step 4: Run to verify it passes, then run it for real**
 
 ```bash
 python3 -m unittest discover -s tools/plan/tests -t . -v 2>&1 | tail -5
@@ -2233,7 +2237,7 @@ wc -c plan/log/unsorted-current-focus.md
 
 Expected: `losslessness proof: OK`. Report the holding file's size — it is the honest measure of what could not be dated.
 
-- [ ] **Step 5: Rewrite PLAN.md**
+- [x] **Step 5: Rewrite PLAN.md**
 
 Delete `## Milestones`, `## Spec questions`, `## Verification log`, `## Decision log`, `## Audit log`, `## Unplanned changes` and `## Session log`. Replace the Current focus body with the current park block only. Add an index:
 
@@ -2251,7 +2255,7 @@ The index is **generated**, by a `render_index()` added to `render.py` alongside
 
 Build each link with the bracket and parenthesis in separate string literals, exactly as `render_milestones` does, and for the same reason.
 
-- [ ] **Step 6: Prove PLAN.md is small and the whole tree still parses**
+- [x] **Step 6: Prove PLAN.md is small and the whole tree still parses**
 
 ```bash
 wc -c PLAN.md
@@ -2266,7 +2270,7 @@ find plan -name '*.md' | xargs wc -c | sort -n | tail -3
 
 Expected: `PLAN.md` under 10,000 bytes, every gate green, every guard exit 0, and no file in `plan/` above 1 MB.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add PLAN.md plan tools/plan
@@ -2287,7 +2291,7 @@ git commit -m "feat(plan): shrink PLAN.md to its focus and index, and file the f
 - Consumes: everything above.
 - Produces: nothing importable.
 
-- [ ] **Step 1: Update `AGENTS.md`**
+- [x] **Step 1: Update `AGENTS.md`**
 
 - *Ground truth*: `PLAN.md` **and the `plan/` tree** are the single source of implementation status.
 - *R-3*: a session records its work in `plan/log/<YYYY>/<MM>/<YYYY-MM-DD>.md`, not in a Session log row.
@@ -2295,15 +2299,15 @@ git commit -m "feat(plan): shrink PLAN.md to its focus and index, and file the f
 - *Repository layout*: add a `plan/` row, and a `tools/plan/` row.
 - *Quality gates* · Docs: add `python3 tools/plan/render.py --check`.
 
-- [ ] **Step 2: Update `CLAUDE.md`**
+- [x] **Step 2: Update `CLAUDE.md`**
 
 Rewrite the `stop-plan-guard.sh` bullet: the guard now watches `PLAN.md` **and** `plan/`, so committing a PLAN edit incrementally no longer re-arms it in the same way. Rewrite the `guard-track-goal.sh` bullet: it counts `status:` frontmatter, and the `> **PARKED:**` escape still lives in `PLAN.md`.
 
-- [ ] **Step 3: Update `.claude/rules/quality-gates.md`**
+- [x] **Step 3: Update `.claude/rules/quality-gates.md`**
 
 Add a `## Plan index` section: `render.py --check` fails when a committed index differs from a fresh render, and the item files are the only input, so an index can never become a second source of truth.
 
-- [ ] **Step 4: Run the complete gate set**
+- [x] **Step 4: Run the complete gate set**
 
 ```bash
 python3 tools/ci/check-plan-tables.py
@@ -2328,7 +2332,7 @@ python3 -m unittest discover -s tools/plan/tests -t . 2>&1 | grep -E '^(OK|FAILE
 
 Expected: every line green. Report any failure verbatim (R-10); do not proceed past one.
 
-- [ ] **Step 5: Prove CI parity before pushing**
+- [x] **Step 5: Prove CI parity before pushing**
 
 ```bash
 python3 tools/ci/check-ci-parity.py
@@ -2336,9 +2340,14 @@ python3 tools/ci/check-ci-parity.py
 
 This is required here, because this work changes `tools/ci/`. It runs each environment-sensitive gate in a CI-shaped shallow clone and fails on any gate that depends on state only the worktree has.
 
-- [ ] **Step 6: Record the work and commit**
+- [x] **Step 6a: Record the work**
 
 Add an entry to `plan/changes/2026/<MM>/<date>.md` — the new home for unplanned changes — covering the whole split, the S7 defect Task 0 fixed, and the size of `plan/log/unsorted-current-focus.md`.
+
+- [ ] **Step 6b: Commit and publish when the user explicitly requests it**
+
+R-9 requires an explicit user request for commit, push and PR actions. The worktree
+is complete and verified, but those publication actions are intentionally deferred.
 
 ```bash
 git add AGENTS.md CLAUDE.md README.md .claude/rules/quality-gates.md plan PLAN.md
@@ -2347,7 +2356,7 @@ git push -u origin plan/split-tree
 gh pr create --draft --title "Split PLAN.md into item files and day files" --body-file docs/superpowers/specs/2026-08-12-plan-split-design.md
 ```
 
-- [ ] **Step 7: Run the exhaustive gate once, then mark the PR ready**
+- [x] **Step 7a: Run the exhaustive gate once**
 
 Per R-12, run the exhaustive gate exactly once for this state rather than after every commit.
 
@@ -2360,7 +2369,12 @@ readlink -f "$LIBCLANG_PATH/libclang.so" && ls -lL "$LIBCLANG_PATH/libclang.so"
 tools/ci/rust-workspace-gates.sh
 ```
 
-No Rust source changes in this plan, so this run is a regression check rather than a gate on new code. Mark the PR ready once CI is green.
+No Rust source changes in this plan, so this run is a regression check rather than a gate on new code.
+
+- [ ] **Step 7b: Mark the PR ready after publication and green CI**
+
+This is downstream of Step 6b and likewise remains a publication action rather than
+unfinished implementation.
 
 ---
 

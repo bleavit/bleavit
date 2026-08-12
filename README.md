@@ -31,7 +31,8 @@ rollout that removes `sudo` at Phase 4.
   of an adversarial design review. Treat changes to it as rare and deliberate — the
   implementation follows the spec — but it is editable, not guarded; see rule R-1 in
   [AGENTS.md](AGENTS.md).
-- Implementation progress, milestones, and the session log live in [`PLAN.md`](PLAN.md).
+- Implementation focus and indexes live in [`PLAN.md`](PLAN.md); per-item status and
+  dated history live in [`plan/`](plan/).
 
 ## Repository map
 
@@ -40,7 +41,7 @@ rollout that removes `sudo` at Phase 4.
 | [`docs/architecture/`](docs/architecture/README.md) | The specification (00–16). Start with its README; reading order 01 → 02 → 03 → 04 → 05 |
 | [`docs/integration/`](docs/integration/README.md) | **For clients** — plain-language guides to using Bleavit's hosted question service from a parachain, a contract, or an off-chain service |
 | [`docs/design/`](docs/design/claude-design-kit/00-START-HERE.md) | Derived, non-normative design assets: `claude-design-kit/` packs the spec into ≤10 files + a ready prompt for generating frontend design prototypes with Claude Design |
-| [`PLAN.md`](PLAN.md) | Implementation roadmap, milestone status, session log — the living source of "where are we" |
+| [`PLAN.md`](PLAN.md), [`plan/`](plan/) | Implementation focus, per-item status, generated indexes, and dated history — the living source of "where are we" |
 | [`AGENTS.md`](AGENTS.md) | Operating manual + rules for all coding agents (and useful for humans) |
 | [`CLAUDE.md`](CLAUDE.md) | Claude Code wiring: skills, subagents, hooks |
 | [`SIGNERS.md`](SIGNERS.md) | The 12 §2.2 signer registry: every release key, ANT controller and attestor key mapped to a named holder and organization. Empty until the key ceremony, and reported as unseated rather than as a clean separation |
@@ -73,7 +74,7 @@ rollout that removes `sudo` at Phase 4.
 
 ## How this gets built
 
-The project is implemented **incrementally across many agent sessions**, one PLAN.md
+The project is implemented **incrementally across many agent sessions**, one plan-tree
 milestone at a time, under three standing constraints:
 
 1. every observable behavior traces to a spec section; the spec is the source of
@@ -82,7 +83,8 @@ milestone at a time, under three standing constraints:
 3. the living documents (PLAN/README/AGENTS/CLAUDE) are updated in the same session
    as any change — enforced by a Stop hook.
 
-Humans and agents alike: read [AGENTS.md](AGENTS.md), then [PLAN.md](PLAN.md), then work.
+Humans and agents alike: read [AGENTS.md](AGENTS.md), then [PLAN.md](PLAN.md) and its
+linked plan items, then work.
 
 ## Toolchain (pinned)
 
@@ -93,7 +95,8 @@ Humans and agents alike: read [AGENTS.md](AGENTS.md), then [PLAN.md](PLAN.md), t
   via permaweb-deploy/Turbo; Playwright + Lighthouse CI (01 §9, 10, 12).
 - **Reference model:** Python high-precision reference math, CI-regenerated vector corpus, and the ≥10⁷-point release-gated differential sweep (04 §5, 15 §4.4; B8).
 
-M0 re-verified the initial platform pins on 2026-07-13; the detailed result is tracked as V-1 in [PLAN.md](PLAN.md).
+M0 re-verified the initial platform pins on 2026-07-13; the detailed result is
+[V-1](plan/verifications/V-1.md).
 
 ## License
 

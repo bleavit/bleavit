@@ -842,6 +842,151 @@ def migrate_questions(plan_text: str, out: Path) -> list[Path]:
 
 
 ## ---------------------------------------------------------------------
+## Verification records (Task 8): one stable-id file per finding.
+## ---------------------------------------------------------------------
+
+VERIFICATION_HEADER = ["ID", "Item", "Spec ref", "Status", "Result"]
+VERIFICATION_COVERAGE_COLUMNS = ("source_id", "item", "spec_ref", "status_cell", "result")
+
+# Four ids each named two different findings in the legacy table (V-142).
+# Keep the first occurrence at its cited id and give the second a fresh id.
+# The original id remains in the item's body, so the migration loses no
+# history while the new filesystem makes another collision impossible.
+LEGACY_DUPLICATE_VERIFICATION_IDS = {
+    ("V-72", 2): "V-386",
+    ("V-73", 2): "V-387",
+    ("V-98", 2): "V-388",
+    ("V-99", 2): "V-389",
+}
+
+
+def _iter_verification_rows(plan_text: str):
+    section = _section(plan_text, "## Verification log")
+    occurrences: dict[str, int] = {}
+    for line in section.split("\n"):
+        if not line.lstrip().startswith("|") or is_separator_row(line):
+            continue
+        cells = [unescape_cell(cell) for cell in split_cells(line)]
+        if cells == VERIFICATION_HEADER:
+            continue
+        if not cells or not re.fullmatch(r"V-\d+", cells[0]):
+            continue
+        if len(cells) != 5:
+            raise ValueError(
+                f"verification row {cells[0]!r} has {len(cells)} cells, expected 5"
+            )
+        source_id = cells[0]
+        occurrences[source_id] = occurrences.get(source_id, 0) + 1
+        identifier = LEGACY_DUPLICATE_VERIFICATION_IDS.get(
+            (source_id, occurrences[source_id]), source_id
+        )
+        yield identifier, source_id, cells[1], cells[2], cells[3], cells[4]
+
+
+def verification_source_cells_of(plan_text: str) -> list[str]:
+    cells: list[str] = []
+    for _identifier, source_id, item, spec_ref, status_cell, result in _iter_verification_rows(
+        plan_text
+    ):
+        per_column = {
+            "source_id": [source_id],
+            "item": [item],
+            "spec_ref": [spec_ref],
+            "status_cell": [status_cell],
+            "result": [result],
+        }
+        assert set(per_column) == set(VERIFICATION_COVERAGE_COLUMNS)
+        for column in VERIFICATION_COVERAGE_COLUMNS:
+            cells.extend(per_column[column])
+    return cells
+
+
+def _verification_milestone(result: str) -> str:
+    match = re.search(r"(?<![A-Za-z0-9])([A-Z][A-Za-z]*\d+[a-z]?)(?![A-Za-z0-9])", result)
+    return match.group(1) if match else "—"
+
+
+def migrate_verifications(plan_text: str, out: Path) -> list[Path]:
+    """Write plan/verifications/<ID>.md for every verification finding."""
+    directory = out / "plan" / "verifications"
+    directory.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+    seen: set[str] = set()
+    undated: list[str] = []
+
+    for identifier, source_id, item, spec_ref, status_cell, result in _iter_verification_rows(
+        plan_text
+    ):
+        if identifier in seen:
+            raise ValueError(f"duplicate verification id {identifier!r}")
+        seen.add(identifier)
+
+        found = _DATE_IN_TEXT.search(status_cell)
+        date = found.group(1) if found else None
+        if date is None:
+            undated.append(identifier)
+        milestone = _verification_milestone(result)
+        emit_dir = directory
+        item_rw = rewrite_repo_links(item, out, emit_dir)
+        spec_ref_rw = rewrite_repo_links(spec_ref, out, emit_dir)
+        status_rw = rewrite_repo_links(status_cell, out, emit_dir)
+        result_rw = rewrite_repo_links(result, out, emit_dir)
+        title = _frontmatter_title(item_rw)
+        path = directory / f"{identifier}.md"
+        body_parts = []
+        if source_id != identifier:
+            body_parts += ["## Legacy ID", "", source_id, ""]
+        body_parts += [
+            "## Item",
+            "",
+            item_rw,
+            "",
+            "## Spec ref",
+            "",
+            spec_ref_rw,
+            "",
+            "## Status",
+            "",
+            status_rw,
+        ]
+        if result_rw:
+            body_parts += ["", "## Result", "", result_rw]
+        body = "\n".join(body_parts)
+        lines = [
+            "---",
+            f"id: {identifier}",
+        ]
+        if date:
+            lines.append(f"date: {date}")
+        lines += [
+            f"milestone: {_yaml_scalar(milestone)}",
+            f"title: {_yaml_scalar(title)}",
+            "---",
+            "",
+            body,
+            "",
+        ]
+        path.write_text("\n".join(lines), encoding="utf-8")
+
+        expected_values: dict[str, str | list[str]] = {
+            "id": identifier,
+            "milestone": milestone,
+            "title": title,
+        }
+        if date:
+            expected_values["date"] = date
+        mismatches = verify_round_trip(path, expected_values, body)
+        if mismatches:
+            raise ValueError(f"{path}: round-trip self-check failed: " + "; ".join(mismatches))
+        written.append(path)
+        print(f"wrote {path.relative_to(out)}", file=sys.stderr)
+
+    if undated:
+        print("UNDATED verification records: " + ", ".join(undated), file=sys.stderr)
+    return written
+
+
+## ---------------------------------------------------------------------
 ## Day records (Task 9): the four chronological record kinds.
 ##
 ## `## Session log`, `## Decision log` and `## Audit log` are 4-cell GFM
@@ -1168,6 +1313,11 @@ def read_day_records(root: Path, kind: str) -> tuple[list[DayRecord], list[str]]
         errors.append(f"plan/{kind}: directory is missing")
         return records, errors
     for path in sorted(directory.rglob("*.md")):
+        # Honest holding area for Current-focus blocks whose first bold lead
+        # has no date. It is deliberately not a day file and must not be
+        # parsed as one merely because it lives beside them.
+        if kind == "log" and path.name == "unsorted-current-focus.md":
+            continue
         try:
             records.extend(_parse_day_file(path, kind))
         except ValueError as error:
@@ -1430,14 +1580,189 @@ def prove_day_lossless(source_cells: list[str], emitted: list[Path]) -> list[str
     return [c for c in source_cells if normalize_prose(c) and normalize_prose(c) not in haystack]
 
 
+def _current_focus_blocks(plan_text: str) -> list[str]:
+    section = _section(plan_text, "## Current focus")
+    body = section.split("\n", 1)[1] if "\n" in section else ""
+    blocks: list[str] = []
+    current: list[str] = []
+    for line in body.split("\n"):
+        if line == "---":
+            block = "\n".join(current).strip("\n")
+            if block:
+                blocks.append(block)
+            current = []
+        else:
+            current.append(line)
+    block = "\n".join(current).strip("\n")
+    if block:
+        blocks.append(block)
+    return blocks
+
+
+def migrate_current_focus(plan_text: str, out: Path) -> tuple[list[Path], Path]:
+    """Archive dated Current-focus blocks; keep ambiguous blocks intact.
+
+    Only a date in the block's first bold run is accepted. Position and a
+    neighbouring block's date are never evidence. Dated blocks append to the
+    Task-9 day file; undated blocks retain source order in the holding file.
+    """
+    blocks = _current_focus_blocks(plan_text)
+    grouped: dict[str, list[str]] = {}
+    holding_blocks: list[str] = []
+    for block in blocks:
+        lead = re.search(r"\*\*(.+?)\*\*", block, re.S)
+        found = _DATE_IN_TEXT.search(lead.group(1)) if lead else None
+        if found is None:
+            holding_blocks.append(block)
+        else:
+            grouped.setdefault(found.group(1), []).append(block)
+
+    written: list[Path] = []
+    for day, day_blocks in sorted(grouped.items()):
+        path = _day_path(out, "log", day)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            text = path.read_text(encoding="utf-8").rstrip("\n")
+        else:
+            text = f"# {KIND_TITLE['log']} — {day}"
+        additions: list[str] = []
+        for block in day_blocks:
+            lead = re.search(r"\*\*(.+?)\*\*", block, re.S)
+            assert lead is not None
+            heading, _overflow = _bound_heading(normalize_prose(lead.group(1)))
+            body = rewrite_repo_links(block, out, path.parent)
+            additions.extend([f"## {heading}", "", body])
+        path.write_text(text + "\n\n" + "\n\n".join(additions) + "\n", encoding="utf-8")
+        written.append(path)
+
+    holding = out / "plan" / "log" / "unsorted-current-focus.md"
+    holding.parent.mkdir(parents=True, exist_ok=True)
+    holding_text = "# Unsorted current-focus history\n"
+    if holding_blocks:
+        rewritten = [
+            "\n".join(
+                line.rstrip()
+                for line in rewrite_repo_links(block, out, holding.parent).splitlines()
+            )
+            for block in holding_blocks
+        ]
+        holding_text += "\n" + "\n\n---\n\n".join(rewritten) + "\n"
+    holding.write_text(holding_text, encoding="utf-8")
+
+    haystack = "\n".join(
+        normalize_prose(path.read_text(encoding="utf-8")) for path in [*written, holding]
+    )
+    missing = [block for block in blocks if normalize_prose(block) not in haystack]
+    if missing:
+        raise ValueError(f"current-focus losslessness proof failed for {len(missing)} block(s)")
+    return written, holding
+
+
+def shrink_plan(plan_text: str) -> str:
+    """Return the post-split PLAN.md shell, preserving the Track-E analysis.
+
+    The full Current-focus stack must already have been archived by
+    `migrate_current_focus`; this function intentionally retains only the
+    current handoff. All seven converted sections are represented by the
+    generated index that `render.py --write` appends next.
+    """
+    track_e = _section(
+        plan_text, "## Track E — crossover arithmetic and the self-funding statement"
+    ).rstrip()
+    return f"""# PLAN.md — Implementation Roadmap and Status
+
+**`PLAN.md` and the `plan/` tree are the single source of implementation
+status.** The files reference `docs/architecture/` and never restate normative
+behaviour (AGENTS.md R-4).
+
+Work the active milestone, otherwise the first pending milestone whose
+dependencies are done. A milestone is done only after its verification gates
+and blocker-free spec-compliance review. Record each session in
+`plan/log/<YYYY>/<MM>/<YYYY-MM-DD>.md`.
+
+Legend: ⬜ pending · 🔨 active · ✅ done · ⛔ blocked
+
+## Current focus
+
+> **PARKED: 2026-08-09 — Track F's code is complete; four milestones wait on
+> external inputs.** F1 needs the user's SQ-940 ruling plus a device lab/live
+> chain/hardware/ar.io credentials. F11 needs the production rollout inputs and
+> FE-P7 evidence. F13 needs the key ceremony, real signer identities/keys and a
+> live gateway. F14 needs the physical device lab and Playwright probe. The
+> merged implementation is `acf9c1ae`; Track F is 26/30 done.
+
+> The complete historical focus stack is archived in
+> `plan/log/2026/08/2026-08-09.md` and
+> `plan/log/unsorted-current-focus.md`. The latter is intentionally unsorted:
+> its first bold lead contains no date, and the migration never inferred one
+> from position.
+
+{track_e}
+"""
+
+
+def archive_section_notes(plan_text: str, out: Path) -> Path:
+    """Preserve prose outside converted table rows from the seven old sections.
+
+    Item/day migration accounts for every row cell. The section introductions,
+    track leads and batch-priority prose are not row cells, so they need their
+    own non-normative archive rather than disappearing when PLAN.md shrinks.
+    """
+    headings = (
+        "## Milestones",
+        "## Spec questions",
+        "## Verification log",
+        "## Decision log",
+        "## Audit log",
+        "## Unplanned changes",
+        "## Session log",
+    )
+    parts = ["# Pre-split section notes", ""]
+    for heading in headings:
+        section = _section(plan_text, heading)
+        kept = [line for line in section.split("\n") if not line.lstrip().startswith("|")]
+        text = "\n".join(kept).strip("\n")
+        parts.extend([text, ""])
+    path = out / "plan" / "SECTION-NOTES.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rendered = rewrite_repo_links("\n".join(parts).rstrip() + "\n", out, path.parent)
+    path.write_text(rendered, encoding="utf-8")
+    return path
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("kind", choices=["milestones", "questions", *DAY_KINDS])
+    parser.add_argument(
+        "kind",
+        choices=[
+            "milestones",
+            "questions",
+            "verifications",
+            "current-focus",
+            "section-notes",
+            "shrink",
+            *DAY_KINDS,
+        ],
+    )
     parser.add_argument("--plan", type=Path, default=Path("PLAN.md"))
     parser.add_argument("--out", type=Path, default=Path("."))
     args = parser.parse_args(argv)
 
     text = args.plan.read_text(encoding="utf-8")
+    if args.kind == "current-focus":
+        days, holding = migrate_current_focus(text, args.out)
+        print(f"{len(days)} dated files, holding file {holding}")
+        print("losslessness proof: OK")
+        return 0
+    if args.kind == "shrink":
+        args.plan.write_text(shrink_plan(text), encoding="utf-8")
+        print(f"wrote {args.plan}")
+        return 0
+    if args.kind == "section-notes":
+        path = archive_section_notes(text, args.out)
+        print(f"wrote {path}")
+        print("section-prose preservation: OK")
+        return 0
     is_day_kind = args.kind in DAY_KINDS
 
     if args.kind == "milestones":
@@ -1446,6 +1771,9 @@ def main(argv: list[str] | None = None) -> int:
     elif args.kind == "questions":
         directory = args.out / "plan" / "questions"
         written = migrate_questions(text, args.out)
+    elif args.kind == "verifications":
+        directory = args.out / "plan" / "verifications"
+        written = migrate_verifications(text, args.out)
     else:
         directory = args.out / "plan" / args.kind
         section = _section(text, KIND_SECTION_HEADING[args.kind])
@@ -1467,6 +1795,8 @@ def main(argv: list[str] | None = None) -> int:
         source_cells = source_cells_of(text)
     elif args.kind == "questions":
         source_cells = question_source_cells_of(text)
+    elif args.kind == "verifications":
+        source_cells = verification_source_cells_of(text)
     else:
         source_cells = day_source_cells_of(text, args.kind)
     missing = (prove_day_lossless if is_day_kind else prove_lossless)(source_cells, written)
@@ -1491,7 +1821,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"STATUS MISMATCH: {row}", file=sys.stderr)
             print(f"{len(mapping_mismatches)} rows failed the status mapping proof", file=sys.stderr)
             return 1
-    else:
+    elif args.kind == "questions":
         mapping_mismatches = prove_question_status_mapping(text, written) + prove_question_batch_mapping(
             text, written
         )
@@ -1501,6 +1831,8 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"STATUS MISMATCH: {row}", file=sys.stderr)
             print(f"{len(mapping_mismatches)} rows failed the status mapping proof", file=sys.stderr)
             return 1
+    else:
+        print(f"{len(written)} rows, 0 mapping mismatches (all source columns are coverage-checked)")
 
     print("losslessness proof: OK")
     return 0

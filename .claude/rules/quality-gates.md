@@ -216,7 +216,12 @@ repository red.
 
 ## Docs
 
-**PLAN.md table structure** (`python3 tools/ci/check-plan-tables.py`). Standing
+**Plan indexes** (`python3 tools/plan/render.py --check`). The files under
+`plan/{milestones,questions,verifications}/` and `plan/decisions/` are the only
+inputs. A committed index that differs from a fresh render fails, so generated
+tables cannot become a second source of truth.
+
+**Living/spec table structure** (`python3 tools/ci/check-plan-tables.py`). Standing
 user instruction from 2026-07-17: table formatting must never drift or break.
 Also a Stop hook.
 
@@ -231,8 +236,9 @@ precondition on a clock that `execute` itself starts survived since X-11i
 (SQ-552).
 
 **Spec-question batch consistency** (`python3
-tools/ci/check-spec-question-batches.py`): unique ids, every open row in exactly
-one batch, no batch naming a closed row.
+tools/ci/check-spec-question-batches.py`): every question's `batch:` names a
+declared batch and resolved items are not kept in the open backlog. Unique ids
+are now structurally enforced by one file per id.
 
 **The canonical client's `execute` reason codes are the runtime's own** (`python3
 tools/ci/check-execute-error-codes.py`, 11 §11.5). The dispatch mirror binds two
@@ -260,9 +266,7 @@ contract v28 resolved SQ-615/616/619 in a branch's own base and three entries
 stayed, so the guardian console, the upgrade crank and the registry challenge
 panel could not reach `ready` at all — and a screen that can never open is one
 nothing has exercised, so its suite had settled for asserting the refusal. Every
-cited id must be a PLAN.md row whose status cell **begins** with "open", read the
-same way `check-spec-question-batches.py` reads it, since open rows legitimately
-contain the word "resolved" in their prose.
+cited id must be a `plan/questions/` item whose `status:` enum is `open`.
 
 **Every release readiness blocker expires with the question it waits on**
 (`python3 tools/ci/check-release-blocker-citations.py`, added 2026-08-07) — the
@@ -272,9 +276,9 @@ same defect one layer over. `app/tools/release/` emits the blockers
 F4 had landed every artifact the set needs: the feed directory, the PAPI
 descriptor entry and `FOREIGN_CHAIN_PINS`. So a finished deliverable was reported
 as somebody else's open decision, under fully green CI, because neither half can
-see the other — the pipeline cannot know a question closed, and PLAN.md cannot
+see the other — the pipeline cannot know a question closed, and the plan tree cannot
 know who cites it. Every `SQ-nnn` appearing **anywhere** under that directory must
-be a PLAN.md row whose status cell begins with "open". The breadth is the design
+be a `plan/questions/` item whose `status:` is `open`. The breadth is the design
 rather than laziness: the stale claim sat in a doc comment as well as in the
 emitted string, and the strings are built by multi-line concatenation, so a rule
 scoped to blocker text would need the tokenizer whose holes three gates here have
@@ -296,7 +300,7 @@ references from docs 10/11 and keeps only those whose prefix is a real
 `construct_runtime!` pallet — an earlier prose sweep without that restriction
 reported every capitalised dotted pair and had to be thrown away, since a gate
 that noisy gets switched off rather than fixed. Gaps are waived **by open
-spec-question id only**, and the waiver expires mechanically when PLAN.md closes
+spec-question id only**, and the waiver expires mechanically when its plan item closes
 that row, so the waiver file cannot become the problem's permanent home.
 
 **The runbook set stays bound to doc 12 §6.1/§6.3** (`python3

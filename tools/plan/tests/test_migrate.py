@@ -33,13 +33,16 @@ from tools.plan.migrate import (
     _section,
     _split_lead,
     RECORD_HEADING_WIDTH,
+    archive_section_notes,
     find_day_orphans,
     find_orphans,
     day_source_cells_of,
     main,
     migrate_day_records,
+    migrate_current_focus,
     migrate_milestones,
     migrate_questions,
+    migrate_verifications,
     normalize_prose,
     prove_day_lossless,
     prove_lossless,
@@ -47,6 +50,7 @@ from tools.plan.migrate import (
     prove_question_status_mapping,
     prove_status_mapping,
     question_source_cells_of,
+    verification_source_cells_of,
     read_day_records,
     rewrite_repo_links,
     source_cells_of,
@@ -54,7 +58,13 @@ from tools.plan.migrate import (
     KIND_SECTION_HEADING,
     TABLE_HEADER,
 )
-from tools.plan.model import STATUS_GLYPHS, load_milestones, load_questions, parse_frontmatter
+from tools.plan.model import (
+    STATUS_GLYPHS,
+    load_milestones,
+    load_questions,
+    load_verifications,
+    parse_frontmatter,
+)
 
 PLAN = """## Milestones
 
@@ -470,6 +480,128 @@ class MigrateQuestionsTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertTrue((self.root / "plan" / "questions" / "SQ-615.md").exists())
         self.assertTrue((self.root / "plan" / "questions" / "SQ-616.md").exists())
+
+
+VERIFICATIONS = """## Verification log
+
+| ID | Item | Spec ref | Status | Result |
+|---|---|---|---|---|
+| V-1 | Dated verification | 15 §4.8 | verified 2026-08-09 | F28 gate green |
+| V-2 | Undated verification | 15 §4.5 | complete | S7 gate green |
+| V-3 | Finding with no milestone | 02 §7 | measured 2026-08-08 | no owner named |
+| V-72 | First legacy finding | 12 §1.1 | complete 2026-08-03 | F19 evidence |
+| V-72 | Second legacy finding | 02 §3 | verified 2026-08-02 | N10 evidence |
+"""
+
+
+class MigrateVerificationsTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_optional_date_and_milestone_sentinel(self):
+        migrate_verifications(VERIFICATIONS, self.root)
+        items, errors = load_verifications(self.root)
+        self.assertEqual(errors, [])
+        by_id = {item.id: item for item in items}
+        self.assertIsNone(by_id["V-2"].date)
+        self.assertEqual(by_id["V-3"].milestone, "—")
+
+    def test_legacy_duplicate_gets_a_fresh_id_and_keeps_the_old_one(self):
+        migrate_verifications(VERIFICATIONS, self.root)
+        items, errors = load_verifications(self.root)
+        self.assertEqual(errors, [])
+        self.assertIn("V-386", {item.id for item in items})
+        body = (self.root / "plan" / "verifications" / "V-386.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("## Legacy ID\n\nV-72", body)
+
+    def test_conversion_is_lossless(self):
+        written = migrate_verifications(VERIFICATIONS, self.root)
+        self.assertEqual(
+            prove_lossless(verification_source_cells_of(VERIFICATIONS), written), []
+        )
+
+    def test_main_dispatches_verifications(self):
+        plan_path = self.root / "PLAN.md"
+        plan_path.write_text(VERIFICATIONS, encoding="utf-8")
+        self.assertEqual(
+            main(["verifications", "--plan", str(plan_path), "--out", str(self.root)]), 0
+        )
+
+
+FOCUS = """## Current focus
+
+> **PARKED: 2026-08-09 — Track F's code is done.**
+>
+> Some prose about the park.
+
+---
+
+> **F27 is ✅ as of 2026-08-08.** Both R-6 conjuncts are met.
+
+---
+
+> **A block with no date at all.** It says something, but not when.
+"""
+
+
+class MigrateCurrentFocusTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_dated_blocks_go_to_their_day(self):
+        days, _holding = migrate_current_focus(FOCUS, self.root)
+        self.assertEqual(sorted(path.name for path in days), ["2026-08-08.md", "2026-08-09.md"])
+
+    def test_undated_block_goes_to_holding_intact(self):
+        _days, holding = migrate_current_focus(FOCUS, self.root)
+        text = holding.read_text(encoding="utf-8")
+        self.assertIn("A block with no date at all", text)
+        self.assertIn("It says something, but not when", text)
+
+    def test_holding_file_has_no_trailing_whitespace(self):
+        focus = FOCUS.replace("> **A block with no date", "> \n> **A block with no date")
+        _days, holding = migrate_current_focus(focus, self.root)
+        self.assertFalse(any(line.endswith(" ") for line in holding.read_text().splitlines()))
+
+    def test_existing_day_file_is_appended_not_overwritten(self):
+        path = self.root / "plan" / "log" / "2026" / "08" / "2026-08-09.md"
+        path.parent.mkdir(parents=True)
+        path.write_text("# Session log — 2026-08-09\n\n## Existing\n\nkept\n", encoding="utf-8")
+        migrate_current_focus(FOCUS, self.root)
+        text = path.read_text(encoding="utf-8")
+        self.assertIn("## Existing", text)
+        self.assertIn("PARKED", text)
+
+
+class ArchiveSectionNotesTests(unittest.TestCase):
+    def test_non_row_prose_survives_without_copying_table_rows(self):
+        sections = "\n\n".join(
+            f"{heading}\n\nintro for {heading[3:]}\n\n| a | b |\n|---|---|\n| x | y |"
+            for heading in (
+                "## Milestones",
+                "## Spec questions",
+                "## Verification log",
+                "## Decision log",
+                "## Audit log",
+                "## Unplanned changes",
+                "## Session log",
+            )
+        )
+        with tempfile.TemporaryDirectory() as raw:
+            path = archive_section_notes(sections, Path(raw))
+            text = path.read_text(encoding="utf-8")
+            self.assertIn("intro for Milestones", text)
+            self.assertNotIn("| x | y |", text)
 
 
 class RewriteRepoLinksTests(unittest.TestCase):

@@ -33,7 +33,7 @@ instruction and each replaced a prior pin: the effort was raised from `xhigh` on
 accepted by codex-cli 0.146.0 by reading `model:` / `reasoning effort:` back from the
 job header rather than assuming the flags took.
 If Codex hits a capacity/quota wall, fall back to Claude subagents at matched
-model/effort and disclose the substitution in PLAN.md — losing the provider must not
+model/effort and disclose the substitution in today's `plan/log/` entry — losing the provider must not
 lose the independent-second-opinion pattern.
 
 **Parallel Codex jobs and the worktree rule (R-13's operational corollary).** A
@@ -76,23 +76,22 @@ redistribution is not.
 
 ## Hooks (installed via `.claude/settings.json` — expect these behaviors)
 
-- **SessionStart** injects git state + PLAN.md focus/milestones/last log rows. Trust it
-  for orientation, but still read PLAN.md before implementing.
+- **SessionStart** injects git state, PLAN.md focus, milestone frontmatter, and the
+  newest `plan/log/` records. Trust it for orientation, but still open the selected
+  plan item before implementing.
 - **Stop guard** (`stop-plan-guard.sh`) blocks ending a session when the tree changed
-  but PLAN.md wasn't updated. Comply (update PLAN.md) instead of retrying.
+  but neither `PLAN.md` nor `plan/` was updated. Comply by updating the affected item
+  and today's log instead of retrying.
 
   **Its exact condition is about the *working tree*, not the session** (clarified
-  2026-07-29): it blocks when `git status --porcelain` shows non-`PLAN.md` changes
-  **and** PLAN.md itself is *clean*. Two consequences that are not obvious and that
-  cost a session real time:
+  2026-08-12): it blocks when `git status --porcelain` shows changes outside the
+  plan tree **and** both `PLAN.md` and `plan/` are clean. Two consequences matter:
 
-  1. **Committing PLAN.md incrementally re-arms it.** A session that commits its
-     PLAN update, then keeps working, makes PLAN clean while other files stay dirty —
-     so the guard fires again, and again, however thoroughly PLAN already describes
-     the work. Do not answer that by appending near-duplicate Session log rows; the
-     log is append-only and padding it to satisfy a checker degrades the one artifact
-     the next session actually reads. Either finish and commit the remaining work, or
-     leave the PLAN edit **uncommitted** alongside it so the pending state is
+  1. **Committing the plan update incrementally re-arms it.** A session that commits
+     its item/log update, then keeps working, makes the plan tree clean while other
+     files stay dirty. Do not answer that by appending near-duplicate log records.
+     Either finish and commit the remaining work, or leave the plan edit
+     **uncommitted** alongside it so the pending state is
      self-describing.
   2. **Background agents writing into the tree keep it armed.** When a subagent is
      still writing while you try to stop, the guard is correct to object: an unfinished
@@ -103,11 +102,11 @@ redistribution is not.
 - **Stop guard (`guard-readme.sh`)** blocks ending a session if README.md's pinned
   opening (thank-you to Prof. Robin Hanson) or closing (Bon appétit) line has been
   altered (rule R-11, AGENTS.md). Restore the exact wording instead of retrying.
-- **Stop guard (`guard-plan-tables.sh`)** blocks ending a session if any PLAN.md
-  Markdown table is structurally broken (orphaned rows severed from their header by
+- **Stop guard (`guard-plan-tables.sh`)** blocks ending a session if any hand-written
+  living/spec Markdown table is structurally broken (orphaned rows severed from its header by
   a blank line, wrong cell count, unescaped `|` — GFM splits cells on pipes even
-  inside backticks; escape as `\|`). Standing user instruction (2026-07-17): PLAN.md
-  table formatting must never drift/break. Fix the reported rows (same checker as
+  inside backticks; escape as `\|`). Standing user instruction (2026-07-17): table
+  formatting must never drift/break. Fix the reported rows (same checker as
   the docs CI job: `python3 tools/ci/check-plan-tables.py`) instead of retrying.
 
 - **Stop guard (`guard-track-goal.sh`)** blocks ending a session while a declared track
@@ -121,7 +120,7 @@ redistribution is not.
   track: F
   ```
 
-  With it present the hook counts that track's milestone rows in PLAN.md and blocks with
+  With it present the hook counts `status:` in `plan/milestones/*.md` and blocks with
   the next one named. Two things about it are deliberate and worth knowing before trying
   to route around it:
 
@@ -177,6 +176,6 @@ delete the branch once nothing points at it.
 
 ## Memory notes
 
-Auto-memory exists for this project. PLAN.md — not memory — is the canonical
-implementation status; keep memories as pointers (e.g. "status lives in PLAN.md"),
+Auto-memory exists for this project. `PLAN.md` plus `plan/` — not memory — is the canonical
+implementation status; keep memories as pointers (e.g. "status lives in the plan tree"),
 never as duplicated status that can go stale.

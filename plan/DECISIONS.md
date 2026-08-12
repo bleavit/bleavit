@@ -22,7 +22,7 @@
 | 2026-07-15 | [A5 oracle R-1 amendments (user-delegated) + Codex…](decisions/2026/07/2026-07-15.md#a5-oracle-r-1-amendments-user-delegated-codex) | User (Christopher Altmann), e… |
 | 2026-07-15 | [02 contract reconciliation — v2 → v3 (A5,…](decisions/2026/07/2026-07-15.md#02-contract-reconciliation-v2-v3-a5) | User (Christopher Altmann) —… |
 | 2026-07-15 | [A6 code-design decisions + dual-review fixes](decisions/2026/07/2026-07-15.md#a6-code-design-decisions-dual-review-fixes) | User (Christopher Altmann), e… |
-| 2026-07-16 | [B4 re-review clarifications in 09 (teleport scope +…](decisions/2026/07/2026-07-16.md#b4-re-review-clarifications-in-09-teleport-scope) | Session decision under R-1 (l… |
+| 2026-07-16 | [B4 re-review clarifications in 09 (teleport scope +…](decisions/2026/07/2026-07-16.md#b4-re-review-clarifications-in-09-teleport-scope-) | Session decision under R-1 (l… |
 | 2026-07-16 | [B4 review-driven 09 §6.1 amendment + 13 §3.5 additions.](decisions/2026/07/2026-07-16.md#b4-review-driven-09-61-amendment-13-35-additions) | Session decision under R-1 (m… |
 | 2026-07-16 | [Cleared four B4-scope `VERIFY` annotations with their…](decisions/2026/07/2026-07-16.md#cleared-four-b4-scope-verify-annotations-with-their) | Session decision under R-1 (a… |
 | 2026-07-16 | [06 §3.2 gained the…](decisions/2026/07/2026-07-16.md#06-32-gained-the) | Session decision under R-1 (r… |
@@ -87,7 +87,7 @@
 | 2026-07-21 | [Orphan-epoch Baseline finalization admitted into the…](decisions/2026/07/2026-07-21.md#orphan-epoch-baseline-finalization-admitted-into-the) | User (standing batch-X delega… |
 | 2026-07-21 | [Batch X — A13 constitution/params cluster (SQ-36,…](decisions/2026/07/2026-07-21.md#batch-x-a13-constitutionparams-cluster-sq-36) | Claude (standing batch-X dele… |
 | 2026-07-21 | [Batch X wave 1 — 25 rulings under delegated authority,…](decisions/2026/07/2026-07-21.md#batch-x-wave-1-25-rulings-under-delegated-authority) | Claude (standing user delegat… |
-| 2026-07-21 | [05 §1.3 and §2.1 completed for `RolloverExhausted` —…](decisions/2026/07/2026-07-21.md#05-13-and-21-completed-for-rolloverexhausted) | PR #124 Codex review (P2); di… |
+| 2026-07-21 | [05 §1.3 and §2.1 completed for `RolloverExhausted` —…](decisions/2026/07/2026-07-21.md#05-13-and-21-completed-for-rolloverexhausted-) | PR #124 Codex review (P2); di… |
 | 2026-07-21 | [Integration contract v6 (batch C) — one bump, 32 rows…](decisions/2026/07/2026-07-21.md#integration-contract-v6-batch-c-one-bump-32-rows) | User (owner for both backend… |
 | 2026-07-21 | [Batch D ratification — 26 doc-truing amendments across…](decisions/2026/07/2026-07-21.md#batch-d-ratification-26-doc-truing-amendments-across) | The user ("Resolve batch D …… |
 | 2026-07-21 | [Five values calls ruled inside batch D](decisions/2026/07/2026-07-21.md#five-values-calls-ruled-inside-batch-d) | The user, 2026-07-21 (explici… |
@@ -171,7 +171,7 @@
 | 2026-07-31 | [Splitting an identity creates a try-state obligation,…](decisions/2026/07/2026-07-31.md#splitting-an-identity-creates-a-try-state-obligation) | Claude (implementation-level… |
 | 2026-07-31 | [13 §3.1's decision-window row corrected: it is not a…](decisions/2026/07/2026-07-31.md#13-31s-decision-window-row-corrected-it-is-not-a) | Claude (R-1; doc-truing again… |
 | 2026-07-31 | [05 §3.3's `k = 3` failure mode corrected: a permanent…](decisions/2026/07/2026-07-31.md#05-33s-k-3-failure-mode-corrected-a-permanent) | Claude (R-1; the claim was fa… |
-| 2026-07-31 | [SQ-536 ruled: `collator.comp_epoch` re-anchored 2,000 →…](decisions/2026/07/2026-07-31.md#sq-536-ruled-collatorcomp_epoch-re-anchored-2000) | R-1/R-2 (values layer; user's… |
+| 2026-07-31 | [SQ-536 ruled: `collator.comp_epoch` re-anchored 2,000 →…](decisions/2026/07/2026-07-31.md#sq-536-ruled-collatorcomp_epoch-re-anchored-2000-) | R-1/R-2 (values layer; user's… |
 | 2026-07-31 | [Ruled: renewal timing is a normative operating rule,…](decisions/2026/07/2026-07-31.md#ruled-renewal-timing-is-a-normative-operating-rule) | Me, under R-1 (the user owns… |
 | 2026-07-31 | [SQ-540(b) ruled: the reserve haircut has THREE…](decisions/2026/07/2026-07-31.md#sq-540b-ruled-the-reserve-haircut-has-three) | Me, under R-1; audit scope A,… |
 | 2026-07-31 | [SQ-540(e) implemented: the XCM execution fee is…](decisions/2026/07/2026-07-31.md#sq-540e-implemented-the-xcm-execution-fee-is) | Me, under R-1; audit scope A,… |
@@ -226,8 +226,8 @@
 | 2026-08-06 | [SQ-615, SQ-616 and SQ-619 are executed in the client,…](decisions/2026/08/2026-08-06.md#sq-615-sq-616-and-sq-619-are-executed-in-the-client) | this session (R-1 delegation,… |
 | 2026-08-06 | [`derive` joins `meet` in `packages/chain-client`'s…](decisions/2026/08/2026-08-06.md#derive-joins-meet-in-packageschain-clients) | implementation (no normative… |
 | 2026-08-06 | [S3's trade screen renders 02 §4's two published figures…](decisions/2026/08/2026-08-06.md#s3s-trade-screen-renders-02-4s-two-published-figures) | implementation (no normative… |
-| 2026-08-06 | [A reading of 11 §11.5 P-1 settled without amending it —…](decisions/2026/08/2026-08-06.md#a-reading-of-11-115-p-1-settled-without-amending-it) | R-1 delegated (2026-07-25) |
-| 2026-08-06 | [09 §1.2(1)'s queue-state check said `maturity ≤ now ≤…](decisions/2026/08/2026-08-06.md#09-121s-queue-state-check-said-maturity-now) | R-1 delegated (2026-07-25) |
+| 2026-08-06 | [A reading of 11 §11.5 P-1 settled without amending it —…](decisions/2026/08/2026-08-06.md#a-reading-of-11-115-p-1-settled-without-amending-it-) | R-1 delegated (2026-07-25) |
+| 2026-08-06 | [09 §1.2(1)'s queue-state check said `maturity ≤ now ≤…](decisions/2026/08/2026-08-06.md#09-121s-queue-state-check-said-maturity-now-) | R-1 delegated (2026-07-25) |
 | 2026-08-06 | [10 §9.4's two enforcement cells corrected — the render…](decisions/2026/08/2026-08-06.md#10-94s-two-enforcement-cells-corrected-the-render) | Claude (delegated R-1 authori… |
 | 2026-08-06 | [10 §9's load model now counts both resource partitions…](decisions/2026/08/2026-08-06.md#10-9s-load-model-now-counts-both-resource-partitions) | The user (owner for both side… |
 | 2026-08-06 | [Integration contract v28 — the six operator reads 11…](decisions/2026/08/2026-08-06.md#integration-contract-v28-the-six-operator-reads-11) | The user (owner for both side… |

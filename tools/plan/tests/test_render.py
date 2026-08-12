@@ -10,8 +10,16 @@ import unittest
 from pathlib import Path
 
 from tools.plan.migrate import migrate_day_records
-from tools.plan.model import Milestone, Question
-from tools.plan.render import _anchor, escape_cell, main, render_decisions, render_milestones, render_questions
+from tools.plan.model import Milestone, Question, Verification
+from tools.plan.render import (
+    _anchor,
+    escape_cell,
+    main,
+    render_decisions,
+    render_milestones,
+    render_questions,
+    render_verifications,
+)
 
 
 def milestone(**kwargs):
@@ -46,6 +54,19 @@ def question(**kwargs):
     return Question(**defaults)
 
 
+def verification(**kwargs):
+    defaults = dict(
+        id="V-383",
+        date="2026-08-09",
+        milestone="F28",
+        title="F28 style-coverage gate proved bidirectional",
+        body="",
+        path=Path("plan/verifications/V-383.md"),
+    )
+    defaults.update(kwargs)
+    return Verification(**defaults)
+
+
 class RenderTests(unittest.TestCase):
     def test_row_carries_the_glyph_not_the_enum(self):
         out = render_milestones([milestone()])
@@ -72,6 +93,7 @@ class RenderTests(unittest.TestCase):
             root = Path(name)
             (root / "plan" / "milestones").mkdir(parents=True)
             (root / "plan" / "questions").mkdir(parents=True)
+            (root / "plan" / "verifications").mkdir(parents=True)
             (root / "plan" / "decisions").mkdir(parents=True)
             (root / "plan" / "milestones" / "F8.md").write_text(
                 "---\nid: F8\ntrack: F\ntitle: t\nspec: [a]\ndepends: []\nstatus: done\n---\n\nbody\n",
@@ -114,6 +136,7 @@ class RenderQuestionsTests(unittest.TestCase):
             root = Path(name)
             (root / "plan" / "milestones").mkdir(parents=True)
             (root / "plan" / "questions").mkdir(parents=True)
+            (root / "plan" / "verifications").mkdir(parents=True)
             (root / "plan" / "decisions").mkdir(parents=True)
             (root / "plan" / "milestones" / "F8.md").write_text(
                 "---\nid: F8\ntrack: F\ntitle: t\nspec: [a]\ndepends: []\nstatus: done\n---\n\nbody\n",
@@ -129,6 +152,26 @@ class RenderQuestionsTests(unittest.TestCase):
             index = root / "plan" / "QUESTIONS.md"
             index.write_text(index.read_text(encoding="utf-8") + "| tampered |\n", encoding="utf-8")
             self.assertEqual(main(["--check", "--root", str(root)]), 1)
+
+
+class RenderVerificationsTests(unittest.TestCase):
+    def test_rows_are_numeric_and_linked(self):
+        out = render_verifications(
+            [verification(id="V-20"), verification(id="V-3", date=None, milestone="—")]
+        )
+        self.assertLess(out.index("| V-3 |"), out.index("| V-20 |"))
+        self.assertIn("verifications/V-3.md", out)
+        self.assertIn("| — | — |", out)
+
+    def test_title_is_bounded(self):
+        out = render_verifications([verification(title="x" * 300)])
+        row = next(line for line in out.splitlines() if line.startswith("| V-383 |"))
+        self.assertLess(len(row), 180)
+
+    def test_index_has_one_terminal_newline(self):
+        out = render_verifications([verification()])
+        self.assertTrue(out.endswith("\n"))
+        self.assertFalse(out.endswith("\n\n"))
 
 
 DECISION_SECTION = """## Decision log

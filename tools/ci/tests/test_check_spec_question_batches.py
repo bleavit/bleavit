@@ -7,9 +7,8 @@ batches because `batch:` is one scalar on one file.
 
 The other four did NOT disappear — an earlier revision of the checker wrongly
 deleted them along with the two that had, and a review round caught it before
-this suite (which it was supposed to prove) ever ran green on the mistake.
-`batch:` (per-item frontmatter) and PLAN.md's batch-index table (hand-
-maintained prose) are now two independent artifacts that CAN drift, which is
+this suite ever ran green on the mistake. `batch:` (question frontmatter) and
+`plan/batches/` (batch frontmatter) are independent artifacts that CAN drift, which is
 exactly the incident class the original docstring named ("batch B1 was left
 declaring rows that a later PR had already resolved"). These tests pin all
 four surviving invariants and construct a violating fixture for each.
@@ -32,16 +31,6 @@ sys.modules[SPEC.name] = checker
 SPEC.loader.exec_module(checker)
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-
-BATCH_INDEX = """## Spec questions
-
-| Batch | Rows | Members |
-|---|---:|---|
-| **B1 · ratify 05 — lifecycle** | 0 | **closed.** All rows disposed; SQ-3 reclassified to X. |
-| **B2 · ratify 06 — governance** | 1 | SQ-1 |
-| **X · code — real implementation work** | 2 | SQ-3, SQ-4 |
-"""
-
 
 def write_question(
     root: Path,
@@ -82,9 +71,20 @@ def write_question(
     (directory / f"{identifier}.md").write_text("\n".join(lines), encoding="utf-8")
 
 
+def write_batch(root: Path, identifier: str, *, rows: int, status: str = "open") -> None:
+    directory = root / "plan" / "batches"
+    directory.mkdir(parents=True, exist_ok=True)
+    (directory / f"{identifier}.md").write_text(
+        f"---\nid: {identifier}\ntitle: {identifier} batch\nrows: {rows}\nstatus: {status}\n---\n",
+        encoding="utf-8",
+    )
+
+
 def _fixture_root(raw: str) -> Path:
     root = Path(raw)
-    (root / "PLAN.md").write_text(BATCH_INDEX, encoding="utf-8")
+    write_batch(root, "B1", rows=0, status="closed")
+    write_batch(root, "B2", rows=1)
+    write_batch(root, "X", rows=2)
     write_question(root, "SQ-1", status="open", batch="B2")
     write_question(root, "SQ-2", status="resolved", batch="none", resolved="2026-02-01")
     write_question(root, "SQ-3", status="open", batch="X")
@@ -214,7 +214,7 @@ class TestLoadErrorsPropagate(unittest.TestCase):
     def test_a_broken_plan_questions_tree_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
-            (root / "PLAN.md").write_text(BATCH_INDEX, encoding="utf-8")
+            write_batch(root, "B1", rows=0, status="closed")
             # No plan/questions/ directory at all.
             errors = checker.check(root)
             self.assertTrue(errors, "a missing plan/questions/ tree must report an error, not silence")

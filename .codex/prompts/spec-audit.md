@@ -3,7 +3,7 @@ docs/architecture/ (AGENTS.md is binding). REPORT-ONLY: do not fix anything, and
 never modify docs/architecture/.
 
 1. SCOPE. Use the scope named at the end of this prompt (component, path, milestone
-   ID, or "all"); default = everything changed since the last row in PLAN.md · Audit
+   ID, or "all"); default = everything changed since the last record in `plan/audits/`
    log, else everything implemented. Owning docs: constitution→06+13 · conditional
    ledger→03 · market/fixed-point→04 · epoch/welfare/decision→05 · origins/guardian/
    attestor→06 · oracle/registry→07 · treasury→08 · execution-guard→09 · runtime
@@ -23,8 +23,8 @@ never modify docs/architecture/.
    citations (e.g. `03 §6.3`) and `path:line`. blocker = invariant/contract/guarantee
    violation; major = observable deviation from normative text; minor = drift or
    missing test obligation. List SPEC-QUESTIONs (spec ambiguous/contradictory/silent)
-   separately — these go to PLAN.md · Spec questions, never into the spec itself.
+   separately — these become `plan/questions/SQ-*.md` items, never silent assumptions.
 
-4. RECORD. Append to PLAN.md · Audit log: `| YYYY-MM-DD | <scope> | <verdict> | <where
-   the full report lives> |`, and add any new rows to PLAN.md · Spec questions. Since
-   PLAN.md changed, this satisfies the living-documents rule; end with the report.
+4. RECORD. Append a record to today's `plan/audits/<YYYY>/<MM>/<YYYY-MM-DD>.md`, and
+   create any new `plan/questions/SQ-*.md` items. Append today's `plan/log/` record;
+   then end with the report.
