@@ -1001,6 +1001,58 @@ def _split_lead(cell: str) -> tuple[str, str]:
     return first_line, rest
 
 
+# Fix round 2, finding 4: a decision Amendment cell (and, less often, the
+# other three kinds' lead cell) is a full sentence or paragraph, not a
+# title — median 101 characters, p90 159, max 1,450 in the real Decision
+# log. Round 1 tried to solve that at the anchor/label layer and both
+# routes were wrong: a truncated-prefix anchor matched no real heading
+# (259/262 broken), and a full-heading anchor is unusable Markdown and an
+# unusable `DECISIONS.md` row (1,417 characters, round 1's own finding).
+# The heading itself has to be bounded, once, at emit time, for every kind
+# — "one behaviour rather than four" — with the untruncated text kept, not
+# dropped, as the record body's own first paragraph.
+#
+# The width is derived from the one place a heading is embedded in
+# something with its own hard limit — a `plan/DECISIONS.md` row must stay
+# ≤ 200 characters — and is the largest width satisfying that, checked by
+# generating the real row for every one of the 262 decisions at each
+# candidate width. The row's fixed shape is
+#
+#   "| " + date(10) + " | [" + label + "](" + target + "#" + anchor + ") | " + authorized_by + " |"
+#
+# date is always 10 chars; target is always
+# "decisions/YYYY/MM/YYYY-MM-DD.md" = 31 chars; authorized_by is bounded to
+# `AUTHORIZED_BY_WIDTH` = 30 (render.py). The literal punctuation around
+# them ("| ", " | [", "](", "#", ") | ", " |") is 25 chars. That leaves
+# 200 - 25 - 31 - 30 = 114 characters for label + anchor, and both are
+# derived from the same bounded heading (worst case each ≈ its width), so
+# 2 * WIDTH <= 114 => WIDTH <= 57 — which is exactly where the measured
+# search (`WIDTH` from 60 down to 40, computing every real row) crosses the
+# line: 58 -> max row 202, 57 -> max row 197.
+RECORD_HEADING_WIDTH = 57
+
+
+def _bound_heading(text: str, width: int = RECORD_HEADING_WIDTH) -> tuple[str, str | None]:
+    """(bounded, overflow): `bounded` is `text` truncated to `width` at the
+    last word boundary at or before it, with a trailing ellipsis; `overflow`
+    is the original `text` when truncation happened, `None` when it did not
+    (so the caller can tell "nothing to move" from "moved text is the
+    original", and never duplicate a heading that was already short enough).
+
+    Word-boundary, not a hard character cut, so a truncated heading never
+    ends mid-word — `_truncate` (render.py) cuts at a character boundary
+    instead, which is fine for a table cell but reads worse in a Markdown
+    heading, which is prose rather than a data cell.
+    """
+    if len(text) <= width:
+        return text, None
+    cut = text[: width - 1]
+    space = cut.rfind(" ")
+    if space > 0:
+        cut = cut[:space]
+    return cut.rstrip() + "…", text
+
+
 @dataclass(frozen=True)
 class DayRecord:
     date: str
@@ -1206,7 +1258,11 @@ def _verify_day_placement_and_order(section: str, kind: str, out: Path, columns:
     expected_by_day: dict[str, list[str]] = {}
     for date_cell, heading in _source_day_and_heading_rows(section, kind, columns):
         day = _independent_day(date_cell)
-        heading_rw = rewrite_repo_links(heading, out, _day_path(out, kind, day).parent)
+        # Bound before rewrite, matching migrate_day_records's own order
+        # (bounding happens in `add()`, before `grouped`; rewrite_repo_links
+        # runs per-record in the write loop, after).
+        bounded_heading, _overflow = _bound_heading(heading)
+        heading_rw = rewrite_repo_links(bounded_heading, out, _day_path(out, kind, day).parent)
         expected_by_day.setdefault(day, []).append(heading_rw)
 
     for day, expected_headings in expected_by_day.items():
@@ -1237,7 +1293,13 @@ def migrate_day_records(section: str, kind: str, out: Path, columns: list[str]) 
     def add(day: str, span: str | None, heading: str, fields: dict[str, str], body: str) -> None:
         if span is not None:
             fields = {**fields, "span": span}
-        grouped.setdefault(day, []).append((heading, fields, body))
+        # Fix round 2, finding 4: bound the heading for every kind, in this
+        # one place, and move anything it lost to the front of the body
+        # rather than dropping it — nothing is lost, it moves one line down.
+        bounded_heading, overflow = _bound_heading(heading)
+        if overflow is not None:
+            body = f"{overflow}\n\n{body}" if body else overflow
+        grouped.setdefault(day, []).append((bounded_heading, fields, body))
 
     if kind == "changes":
         for date_cell, full_text in _iter_change_bullets(section):

@@ -18,6 +18,7 @@ unchanged and a column it transforms need different tests (fix round 2,
 
 import contextlib
 import io
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -27,9 +28,11 @@ from tools.plan.migrate import (
     MAPPING_CHECKED_COLUMNS,
     QUESTION_COVERAGE_COLUMNS,
     QUESTION_MAPPING_COLUMNS,
+    _bound_heading,
     _day_and_span,
     _section,
     _split_lead,
+    RECORD_HEADING_WIDTH,
     find_day_orphans,
     find_orphans,
     day_source_cells_of,
@@ -654,6 +657,34 @@ class SplitLeadTests(unittest.TestCase):
         self.assertEqual(body, "")
 
 
+class BoundHeadingTests(unittest.TestCase):
+    """Fix round 2, finding 4: the heading itself is bounded at emit time,
+    at a word boundary, with nothing dropped — the overflow moves to the
+    body's first paragraph instead."""
+
+    def test_a_short_heading_is_returned_unchanged_with_no_overflow(self):
+        bounded, overflow = _bound_heading("Short heading.", width=57)
+        self.assertEqual(bounded, "Short heading.")
+        self.assertIsNone(overflow)
+
+    def test_a_long_heading_truncates_at_a_word_boundary_and_keeps_the_original_as_overflow(self):
+        original = (
+            "This heading is deliberately much longer than the fifty-seven "
+            "character bound so it must truncate at a word boundary."
+        )
+        bounded, overflow = _bound_heading(original, width=57)
+        self.assertLessEqual(len(bounded), 57)
+        self.assertTrue(bounded.endswith("…"))
+        self.assertNotIn(" …", bounded)  # cut at a word boundary, not mid-word
+        self.assertEqual(overflow, original)
+
+    def test_the_default_width_matches_the_derived_constant(self):
+        # RECORD_HEADING_WIDTH is derived (see its own docstring) from the
+        # 200-character plan/DECISIONS.md row ceiling; pinned here so a
+        # future edit to the constant is a visible, deliberate test change.
+        self.assertEqual(RECORD_HEADING_WIDTH, 57)
+
+
 class MigrateDayRecordsTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
@@ -699,14 +730,23 @@ class MigrateDayRecordsTests(unittest.TestCase):
     def test_body_prose_survives_the_round_trip_unchanged(self):
         """The 'prose_blocks before equals after' guarantee the brief names:
         every body paragraph a record carries reads back identical to what
-        was written, modulo nothing — not just as a coverage substring."""
+        was written, modulo nothing — not just as a coverage substring.
+
+        The 'Track F' amendment (69 chars) is longer than
+        `RECORD_HEADING_WIDTH` (57, fix round 2), so its heading truncates
+        and the full original heading becomes the body's first paragraph —
+        the body is no longer just the original body prose alone."""
         for kind in ("log", "decisions", "audits", "changes"):
             with self.subTest(kind=kind):
                 self._migrate(kind)
         records, errors = read_day_records(self.root, "decisions")
         self.assertEqual(errors, [])
         rec = next(r for r in records if r.heading.startswith("Track F"))
-        self.assertEqual(rec.body, "The classifier probes exactly the frozen set.")
+        self.assertEqual(
+            rec.body,
+            "Track F compat verdict reaches the shell without a new contract bump.\n\n"
+            "The classifier probes exactly the frozen set.",
+        )
 
     def test_each_kind_passes_its_own_coverage_and_round_trip_proof(self):
         for kind in ("log", "decisions", "audits", "changes"):
@@ -746,6 +786,63 @@ class MigrateDayRecordsTests(unittest.TestCase):
         exit_code = main(["decisions", "--plan", str(plan_path), "--out", str(self.root)])
         self.assertEqual(exit_code, 0)
         self.assertTrue((self.root / "plan" / "decisions" / "2026" / "08" / "2026-08-09.md").exists())
+
+    def test_a_long_heading_truncates_and_its_full_text_survives_in_the_body(self):
+        long_amendment = (
+            "**This amendment title is deliberately much longer than the "
+            "fifty-seven character record-heading bound, so it must truncate "
+            "in the emitted file.** Ordinary body prose follows the title."
+        )
+        section = f"""## Decision log
+
+| Date | Amendment | Authorized by | Docs touched |
+|---|---|---|---|
+| 2026-08-11 | {long_amendment} | user | none |
+"""
+        migrate_day_records(section, "decisions", self.root, ["Date", "Amendment", "Authorized by", "Docs touched"])
+        records, errors = read_day_records(self.root, "decisions")
+        self.assertEqual(errors, [])
+        record = records[0]
+        original_title = (
+            "This amendment title is deliberately much longer than the "
+            "fifty-seven character record-heading bound, so it must truncate "
+            "in the emitted file."
+        )
+        self.assertLessEqual(len(record.heading), 57)
+        self.assertTrue(record.heading.endswith("…"))
+        self.assertIn(original_title, record.body)
+        self.assertIn("Ordinary body prose follows the title.", record.body)
+        # And the coverage proof still finds the untruncated original text —
+        # it moved to the body, it was not dropped.
+        missing = prove_day_lossless(day_source_cells_of(section, "decisions"), [record.path])
+        self.assertEqual(missing, [])
+
+    def test_two_headings_that_truncate_to_the_same_string_still_get_distinct_anchors(self):
+        common_prefix = "This decision title is the same for the first fifty-seven characters"
+        section = f"""## Decision log
+
+| Date | Amendment | Authorized by | Docs touched |
+|---|---|---|---|
+| 2026-08-11 | **{common_prefix} but then diverges into the first ending.** First body. | a | x |
+| 2026-08-11 | **{common_prefix} but then diverges into a second, different ending.** Second body. | b | y |
+"""
+        written = migrate_day_records(
+            section, "decisions", self.root, ["Date", "Amendment", "Authorized by", "Docs touched"]
+        )
+        records, errors = read_day_records(self.root, "decisions")
+        self.assertEqual(errors, [])
+        self.assertEqual(len(records), 2)
+        # Both headings truncated to the identical bounded string...
+        self.assertEqual(records[0].heading, records[1].heading)
+        self.assertTrue(records[0].heading.endswith("…"))
+        # ...but render_decisions must still hand them distinct anchors.
+        from tools.plan.render import render_decisions
+
+        text, render_errors = render_decisions(self.root)
+        self.assertEqual(render_errors, [])
+        anchors = re.findall(r"#([a-z0-9-]+)\)", text)
+        self.assertEqual(len(anchors), len(set(anchors)))
+        self.assertEqual(len(written), 1)  # both records landed in one day file
 
 
 class ReadDayRecordsTests(unittest.TestCase):
