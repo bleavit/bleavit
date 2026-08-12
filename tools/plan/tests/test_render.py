@@ -9,8 +9,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from tools.plan.migrate import migrate_day_records
 from tools.plan.model import Milestone, Question
-from tools.plan.render import escape_cell, main, render_milestones, render_questions
+from tools.plan.render import _anchor, escape_cell, main, render_decisions, render_milestones, render_questions
 
 
 def milestone(**kwargs):
@@ -71,6 +72,7 @@ class RenderTests(unittest.TestCase):
             root = Path(name)
             (root / "plan" / "milestones").mkdir(parents=True)
             (root / "plan" / "questions").mkdir(parents=True)
+            (root / "plan" / "decisions").mkdir(parents=True)
             (root / "plan" / "milestones" / "F8.md").write_text(
                 "---\nid: F8\ntrack: F\ntitle: t\nspec: [a]\ndepends: []\nstatus: done\n---\n\nbody\n",
                 encoding="utf-8",
@@ -112,6 +114,7 @@ class RenderQuestionsTests(unittest.TestCase):
             root = Path(name)
             (root / "plan" / "milestones").mkdir(parents=True)
             (root / "plan" / "questions").mkdir(parents=True)
+            (root / "plan" / "decisions").mkdir(parents=True)
             (root / "plan" / "milestones" / "F8.md").write_text(
                 "---\nid: F8\ntrack: F\ntitle: t\nspec: [a]\ndepends: []\nstatus: done\n---\n\nbody\n",
                 encoding="utf-8",
@@ -126,3 +129,66 @@ class RenderQuestionsTests(unittest.TestCase):
             index = root / "plan" / "QUESTIONS.md"
             index.write_text(index.read_text(encoding="utf-8") + "| tampered |\n", encoding="utf-8")
             self.assertEqual(main(["--check", "--root", str(root)]), 1)
+
+
+DECISION_SECTION = """## Decision log
+
+| Date | Amendment | Authorized by | Docs touched |
+|---|---|---|---|
+| 2026-08-09 | **Track F compat verdict reaches the shell without a new contract bump.** The classifier probes exactly the frozen set. | user | 10 §5.2 |
+"""
+
+# A single 250-character, no-bold Amendment cell: exercises `render_decisions`'s
+# link-target-and-anchor truncation without the whole cell landing in the row.
+LONG_AMENDMENT = "x" * 250
+DECISION_SECTION_LONG = f"""## Decision log
+
+| Date | Amendment | Authorized by | Docs touched |
+|---|---|---|---|
+| 2026-08-10 | {LONG_AMENDMENT} | user | none |
+"""
+
+
+class RenderDecisionsTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_only_decisions_get_an_index_row_per_record(self):
+        migrate_day_records(
+            DECISION_SECTION,
+            "decisions",
+            self.root,
+            ["Date", "Amendment", "Authorized by", "Docs touched"],
+        )
+        text, errors = render_decisions(self.root)
+        self.assertEqual(errors, [])
+        self.assertIn("| 2026-08-09 |", text)
+        self.assertIn("decisions/2026/08/2026-08-09.md#", text)
+        self.assertIn("user", text)
+
+    def test_row_stays_under_200_characters_for_a_long_no_bold_amendment(self):
+        migrate_day_records(
+            DECISION_SECTION_LONG,
+            "decisions",
+            self.root,
+            ["Date", "Amendment", "Authorized by", "Docs touched"],
+        )
+        text, errors = render_decisions(self.root)
+        self.assertEqual(errors, [])
+        row = next(line for line in text.split("\n") if line.startswith("| 2026-08-10 "))
+        self.assertLess(len(row), 200)
+
+    def test_anchor_is_a_bounded_lowercase_hyphenated_slug(self):
+        self.assertEqual(_anchor("Track F compat verdict"), "track-f-compat-verdict")
+        # Truncated at ANCHOR_SOURCE_WIDTH, never the whole (possibly huge) heading.
+        self.assertLessEqual(len(_anchor("x" * 500)), 40)
+
+    def test_missing_decisions_directory_is_reported_as_an_error_not_a_crash(self):
+        # No plan/decisions directory at all under this empty root.
+        text, errors = render_decisions(self.root)
+        self.assertEqual(text, "")
+        self.assertTrue(errors)

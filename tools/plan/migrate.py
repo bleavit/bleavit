@@ -32,6 +32,7 @@ import argparse
 import os
 import re
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -840,23 +841,477 @@ def migrate_questions(plan_text: str, out: Path) -> list[Path]:
     return written
 
 
+## ---------------------------------------------------------------------
+## Day records (Task 9): the four chronological record kinds.
+##
+## `## Session log`, `## Decision log` and `## Audit log` are 4-cell GFM
+## tables; `## Unplanned changes` is a bullet list. All four are append-only
+## history rather than entities with state, so they land as day files —
+## `plan/<kind>/YYYY/MM/YYYY-MM-DD.md` — instead of one file per row.
+##
+## **Deviation from the task brief, recorded here rather than silently
+## taken:** the brief's Interfaces section places `read_day_records` in
+## `tools/plan/model.py`. The task's own Prohibitions list (separate from
+## the brief, given by the orchestrating session) states plainly: "Do NOT
+## modify `tools/plan/gfm.py` or `model.py` ... You may extend `migrate.py`
+## and `render.py`." That is unambiguous and it is the more specific,
+## more recently stated instruction, so `DayRecord` and `read_day_records`
+## live here instead. Nothing about their behaviour changes as a result —
+## `render.py` imports `read_day_records` from this module exactly as it
+## would have imported it from `model.py`.
+##
+## **Per-record guarantee.** Milestones/questions get `verify_round_trip`
+## against `parse_frontmatter`; day files carry no frontmatter at all (a
+## day file holds several records, not one item), so there is no
+## `---`-delimited block to parse. The equivalent here is `_parse_day_file`:
+## after writing a day file, it is read straight back with the same strict
+## grammar `read_day_records` uses, and the (heading, fields, body) tuple
+## this run intended for every record in that file is compared against what
+## the parser reports, by equality — exact, per-file, per-record, per-field,
+## matching `verify_round_trip`'s own guarantee and no weaker. A file that
+## fails this check raises immediately; nothing is written and left unverified.
+##
+## **Coverage, not mapping, for every column.** Unlike the milestone table's
+## status glyph (an enum encoding transformed on write, MAPPING_CHECKED),
+## every day-record column here is COPIED THROUGH, never re-encoded: the
+## heading is a verbatim substring of its source cell (the leading `**bold**`
+## run, markers stripped by `_split_lead`, exactly as `normalize_prose`
+## already strips them for the coverage proof), the body is the verbatim
+## remainder, and every field value is a verbatim column cell. So all four
+## kinds are 100% coverage-checked and none needs a mapping proof:
+## `day_source_cells_of` collects the raw cells position-for-position with
+## `_iter_table_day_rows`/`_iter_change_bullets` (the same functions that
+## write them), and `prove_day_lossless` is `prove_lossless`'s design
+## re-applied to a day file's plain text instead of a frontmatter file's
+## parsed values, because a day file has no keys to exclude in the first
+## place — the whole file, modulo markup, is normalized_prose'd content.
+## ---------------------------------------------------------------------
+
+DAY_KINDS = ("log", "decisions", "audits", "changes")
+
+# The source section each kind reads, and the title each day file opens
+# with ("# <title> — YYYY-MM-DD"). `decisions`/`audits` intentionally do not
+# echo their source section's exact name (`## Decision log`) — `decisions`
+# matches the brief's own worked example ("# Decisions — 2026-08-09"), and
+# `audits` keeps the source name because there is no shorter accepted one.
+KIND_SECTION_HEADING = {
+    "log": "## Session log",
+    "decisions": "## Decision log",
+    "audits": "## Audit log",
+    "changes": "## Unplanned changes",
+}
+KIND_TITLE = {
+    "log": "Session log",
+    "decisions": "Decisions",
+    "audits": "Audit log",
+    "changes": "Unplanned changes",
+}
+
+# The real PLAN.md table headers (verified 2026-08-12 against the live file —
+# the brief's own prose description, "Date | Milestone | What was done | What
+# comes next", is NOT the literal header row; the real one reads "Date |
+# Milestone(s) | Done | Next"). `changes` has no table header at all.
+TABLE_HEADER: dict[str, list[str]] = {
+    "log": ["Date", "Milestone(s)", "Done", "Next"],
+    "decisions": ["Date", "Amendment", "Authorized by", "Docs touched"],
+    "audits": ["Date", "Scope", "Verdict", "Pointer"],
+}
+
+# Declared `key: value` fields per kind, in write order. `log` and `changes`
+# declare none: log's two remaining columns (What was done / What comes
+# next) are prose that folds into the body, not fields; `changes` has no
+# columns left over once the heading is drawn from the bullet's own bold
+# lead. `span` (see `_day_and_span`) is always additionally permitted, on
+# every kind, without being declared here — it is optional and per-record,
+# not a property of the kind.
+KIND_FIELDS: dict[str, tuple[str, ...]] = {
+    "log": (),
+    "decisions": ("authorized_by", "docs_touched"),
+    "audits": ("verdict", "pointer"),
+    "changes": (),
+}
+
+# A record's date cell begins with a date and may be a range
+# ("2026-07-15–16", "2026-08-07/08"). Filed under its first day; the
+# original string survives in a `span:` field so the range is never
+# silently flattened. Verified 2026-08-12: exactly 3 such rows, all in the
+# Session log; Decision log (262 rows) and Audit log (11 rows) have none.
+_DAY_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})")
+
+
+def _day_and_span(cell: str) -> tuple[str, str | None]:
+    text = cell.strip("*_` ")
+    match = _DAY_RE.match(text)
+    if match is None:
+        raise ValueError(f"record date cell does not begin with a date: {cell[:40]!r}")
+    day = match.group(1)
+    return day, (text if text != day else None)
+
+
+# The cell's leading **bold** run becomes the record heading; everything
+# after it (with one separating space, if any) becomes the body. A cell
+# with no leading bold run — genuinely common: 5 of 262 Decision log rows, 2
+# of 11 Audit log rows, 6 of 16 Unplanned-changes bullets, and every Session
+# log Milestone cell — becomes its own heading verbatim, with an empty
+# body. Nothing is lost by that fallback: the coverage proof reads the
+# heading as a value exactly like the body, and the whole original cell is
+# checked as one coverage unit by `day_source_cells_of` regardless of how
+# `_split_lead` divided it.
+_BOLD_LEAD_RE = re.compile(r"^\*\*(.+?)\*\*")
+
+
+def _split_lead(cell: str) -> tuple[str, str]:
+    match = _BOLD_LEAD_RE.match(cell)
+    if match is not None:
+        heading = match.group(1)
+        rest = cell[match.end() :]
+        if rest.startswith(" "):
+            rest = rest[1:]
+        return heading, rest
+    # No leading bold run. The heading can never itself contain a newline —
+    # written as `## {heading}`, an embedded "\n" would silently split into
+    # further physical lines that read back as body prose on the very next
+    # parse, corrupting the round trip (caught 2026-08-12 against the real
+    # Unplanned-changes corpus: a bullet's indented continuation paragraph
+    # is real embedded "\n"s, not markup, so `cell` alone can be multi-line
+    # even with no bold run in it). So only the first line becomes the
+    # heading; anything after it becomes body instead of being silently
+    # dropped — for a single-line cell (every table lead cell; a bulletless
+    # `changes` entry) `rest` is simply "".
+    first_line, _, rest = cell.partition("\n")
+    return first_line, rest
+
+
+@dataclass(frozen=True)
+class DayRecord:
+    date: str
+    heading: str
+    fields: dict[str, str]
+    body: str
+    path: Path
+
+
+_DAY_TITLE_RE = re.compile(r"^# (.+) — (\d{4}-\d{2}-\d{2})$")
+_DAY_HEADING_RE = re.compile(r"^## (.+)$")
+_FIELD_LINE_RE_CACHE: dict[frozenset[str], re.Pattern[str]] = {}
+
+
+def _field_line_re(allowed_keys: frozenset[str]) -> re.Pattern[str]:
+    """A `^(key1|key2|...): (.*)$` pattern over exactly `allowed_keys`.
+
+    Anchoring on the declared key names (rather than any `[a-z_]+:` prefix)
+    is what lets ordinary body prose safely start a line with a word and a
+    colon without being misread as a field — the same reasoning
+    `tools/plan/model.py`'s `TOP_LEVEL_RE` states for frontmatter, applied
+    here to a body block that is not frontmatter and so is not that file's
+    concern to police.
+    """
+    if allowed_keys not in _FIELD_LINE_RE_CACHE:
+        alternation = "|".join(sorted(allowed_keys))
+        _FIELD_LINE_RE_CACHE[allowed_keys] = re.compile(rf"^({alternation}): (.*)$")
+    return _FIELD_LINE_RE_CACHE[allowed_keys]
+
+
+def _day_path(out: Path, kind: str, day: str) -> Path:
+    year, month, _ = day.split("-")
+    return out / "plan" / kind / year / month / f"{day}.md"
+
+
+def _parse_day_file(path: Path, kind: str) -> list[DayRecord]:
+    """Read one day file back into its records. Refuses, never guesses:
+
+    a missing/garbled title line, a title date that disagrees with the
+    file's own path, a `## ` heading whose field block is incomplete when
+    the kind declares fields, or a duplicate field key within one record.
+    """
+    text = path.read_text(encoding="utf-8")
+    lines = text.split("\n")
+    if not lines or not lines[0].startswith("# "):
+        raise ValueError(f"{path}: must open with a '# <Title> — <date>' line")
+    title_match = _DAY_TITLE_RE.match(lines[0])
+    if title_match is None:
+        raise ValueError(f"{path}: title line does not match '# <Title> — YYYY-MM-DD': {lines[0]!r}")
+    title, title_date = title_match.groups()
+    if title != KIND_TITLE[kind]:
+        raise ValueError(f"{path}: title {title!r} does not match {KIND_TITLE[kind]!r} for kind {kind!r}")
+    year, month, _ = title_date.split("-")
+    expected_tail = (kind, year, month, f"{title_date}.md")
+    if path.parts[-4:] != expected_tail:
+        raise ValueError(f"{path}: title date {title_date} does not match its path {path}")
+
+    declared = frozenset(KIND_FIELDS[kind])
+    field_re = _field_line_re(declared | {"span"})
+
+    records: list[DayRecord] = []
+    index = 1
+    while index < len(lines):
+        if lines[index].strip() == "":
+            index += 1
+            continue
+        heading_match = _DAY_HEADING_RE.match(lines[index])
+        if heading_match is None:
+            raise ValueError(f"{path}:{index + 1}: expected a '## ' record heading, found {lines[index]!r}")
+        heading = heading_match.group(1)
+        index += 1
+
+        fields: dict[str, str] = {}
+        while index < len(lines):
+            field_match = field_re.match(lines[index])
+            if field_match is None:
+                break
+            key, value = field_match.groups()
+            if key in fields:
+                raise ValueError(f"{path}:{index + 1}: duplicate field {key!r} in record {heading!r}")
+            fields[key] = value
+            index += 1
+
+        missing = declared - fields.keys()
+        if missing:
+            raise ValueError(
+                f"{path}: record {heading!r} is missing required field(s) {sorted(missing)} "
+                f"— kind {kind!r} declares fields but this heading's field block is incomplete"
+            )
+
+        if index < len(lines) and lines[index] == "":
+            index += 1
+        body_lines: list[str] = []
+        while index < len(lines) and not lines[index].startswith("## "):
+            body_lines.append(lines[index])
+            index += 1
+        body = "\n".join(body_lines).strip("\n")
+
+        records.append(DayRecord(date=title_date, heading=heading, fields=fields, body=body, path=path))
+    return records
+
+
+def read_day_records(root: Path, kind: str) -> tuple[list[DayRecord], list[str]]:
+    """Read every day file under plan/<kind>/ back into DayRecords, in file order.
+
+    File order is chronological by construction: `YYYY/MM/YYYY-MM-DD.md`
+    sorts lexicographically exactly as it sorts by date.
+    """
+    directory = root / "plan" / kind
+    errors: list[str] = []
+    records: list[DayRecord] = []
+    if not directory.is_dir():
+        errors.append(f"plan/{kind}: directory is missing")
+        return records, errors
+    for path in sorted(directory.rglob("*.md")):
+        try:
+            records.extend(_parse_day_file(path, kind))
+        except ValueError as error:
+            errors.append(str(error))
+    return records, errors
+
+
+def _iter_table_day_rows(section: str, header: list[str]):
+    """Yield each 4-cell row's cells, unescaped, skipping the header/separator rows."""
+    for line in section.split("\n"):
+        if not line.lstrip().startswith("|"):
+            continue
+        if is_separator_row(line):
+            continue
+        cells = split_cells(line)
+        if cells == header:
+            continue
+        if len(cells) != 4:
+            raise ValueError(f"day-record row has {len(cells)} cells, expected 4: {line[:80]!r}")
+        yield [unescape_cell(cell) for cell in cells]
+
+
+_CHANGE_BULLET_START_RE = re.compile(r"(?m)^(?=- \d{4}-\d{2}-\d{2} — )")
+_CHANGE_BULLET_HEAD_RE = re.compile(r"^- (\d{4}-\d{2}-\d{2}) — (.*)$")
+
+
+def _iter_change_bullets(section: str):
+    """Yield (date_cell, full_text) for every `## Unplanned changes` bullet.
+
+    `full_text` is the bullet's first line plus every indented continuation
+    paragraph up to the next bullet (or end of section), joined by real
+    newlines — `_split_lead` then draws the heading from its bold lead the
+    same way a table row's lead cell does.
+    """
+    start_match = re.search(r"(?m)^- \d{4}-\d{2}-\d{2} — ", section)
+    if start_match is None:
+        raise ValueError("'## Unplanned changes' has no bullet in the expected '- YYYY-MM-DD — ' shape")
+    body = section[start_match.start() :]
+    for block in _CHANGE_BULLET_START_RE.split(body):
+        if not block:
+            continue
+        first_line, _, rest = block.partition("\n")
+        head_match = _CHANGE_BULLET_HEAD_RE.match(first_line)
+        if head_match is None:
+            raise ValueError(f"unplanned-change bullet does not match the expected shape: {first_line[:80]!r}")
+        date_cell, first_text = head_match.groups()
+        full_text = first_text if not rest else f"{first_text}\n{rest}"
+        yield date_cell, full_text.rstrip("\n")
+
+
+def migrate_day_records(section: str, kind: str, out: Path, columns: list[str]) -> list[Path]:
+    """Write plan/<kind>/YYYY/MM/YYYY-MM-DD.md for every record in `section`.
+
+    `columns` is the source table's real header row (`TABLE_HEADER[kind]`);
+    it is unused for `kind == "changes"`, whose own bullet reader validates
+    shape by regex instead of by header comparison. Two records on the same
+    date land in one file, in source order.
+    """
+    grouped: dict[str, list[tuple[str, dict[str, str], str]]] = {}
+
+    def add(day: str, span: str | None, heading: str, fields: dict[str, str], body: str) -> None:
+        if span is not None:
+            fields = {**fields, "span": span}
+        grouped.setdefault(day, []).append((heading, fields, body))
+
+    if kind == "changes":
+        for date_cell, full_text in _iter_change_bullets(section):
+            day, span = _day_and_span(date_cell)
+            heading, body = _split_lead(full_text)
+            add(day, span, heading, {}, body)
+    elif kind == "log":
+        for date_cell, milestone, done, next_ in _iter_table_day_rows(section, columns):
+            day, span = _day_and_span(date_cell)
+            body = f"{done}\n\n**What comes next:** {next_}"
+            add(day, span, milestone, {}, body)
+    elif kind in ("decisions", "audits"):
+        field_names = KIND_FIELDS[kind]
+        for date_cell, lead_cell, field1, field2 in _iter_table_day_rows(section, columns):
+            day, span = _day_and_span(date_cell)
+            heading, body = _split_lead(lead_cell)
+            add(day, span, heading, {field_names[0]: field1, field_names[1]: field2}, body)
+    else:
+        raise ValueError(f"unknown day-record kind {kind!r}")
+
+    written: list[Path] = []
+    for day in sorted(grouped):
+        records = grouped[day]
+        path = _day_path(out, kind, day)
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        rewritten: list[tuple[str, dict[str, str], str]] = []
+        lines = [f"# {KIND_TITLE[kind]} — {day}", ""]
+        for heading, fields, body in records:
+            heading_rw = rewrite_repo_links(heading, out, path.parent)
+            if not heading_rw:
+                raise ValueError(f"{path}: refusing to emit a record with an empty heading")
+            fields_rw = {key: rewrite_repo_links(value, out, path.parent) for key, value in fields.items()}
+            # `.strip("\n")` matches `_parse_day_file`'s own body extraction
+            # exactly (`"\n".join(body_lines).strip("\n")`): a `changes`
+            # bullet's continuation paragraph is separated from its first
+            # line by a real blank line, so `_split_lead`'s body can open
+            # with a leading "\n" that the file format never actually
+            # stores — reading the file back trims it, so the in-memory
+            # expectation must be trimmed the same way or the round-trip
+            # self-check below sees a mismatch that was never really written.
+            body_rw = rewrite_repo_links(body, out, path.parent).strip("\n")
+
+            lines.append(f"## {heading_rw}")
+            for key in (*KIND_FIELDS[kind], "span"):
+                if key in fields_rw:
+                    lines.append(f"{key}: {fields_rw[key]}")
+            lines.append("")
+            if body_rw:
+                lines.append(body_rw)
+                lines.append("")
+            rewritten.append((heading_rw, fields_rw, body_rw))
+
+        path.write_text("\n".join(lines).rstrip("\n") + "\n", encoding="utf-8")
+
+        actual = _parse_day_file(path, kind)
+        actual_tuples = [(record.heading, record.fields, record.body) for record in actual]
+        if actual_tuples != rewritten:
+            raise ValueError(f"{path}: round-trip self-check failed: wrote {rewritten!r}, read {actual_tuples!r}")
+
+        written.append(path)
+        print(f"wrote {path.relative_to(out)}", file=sys.stderr)
+
+    return written
+
+
+def find_day_orphans(directory: Path, written: list[Path]) -> list[Path]:
+    """`find_orphans`'s design, recursive: day files nest under YYYY/MM/."""
+    if not directory.is_dir():
+        return []
+    written_set = {p.resolve() for p in written}
+    return sorted(p for p in directory.rglob("*.md") if p.resolve() not in written_set)
+
+
+def day_source_cells_of(plan_text: str, kind: str) -> list[str]:
+    """The atomic units every emitted day file, together, must cover.
+
+    Every column is coverage-checked (see the module-level note above), but
+    a lead cell that `_split_lead` divides is checked as its **two** derived
+    pieces (heading, body) rather than as the whole original cell — measured
+    necessary, not assumed: `decisions` and `audits` write field lines
+    (`authorized_by`/`docs_touched`, `verdict`/`pointer`) *between* the
+    heading and the body, so the two pieces are no longer contiguous in the
+    emitted file and a whole-cell substring search on the pre-split text
+    reliably fails even though every word survived. `log` and `changes`
+    declare no fields, so heading and body stay contiguous there and either
+    check would pass — split checking is used for all four anyway, so one
+    rule governs every kind instead of one rule that happens to work for two
+    of them. This mirrors how `source_cells_of` checks a milestone's split
+    `spec`/`depends` refs rather than the whole raw column text.
+    """
+    section = _section(plan_text, KIND_SECTION_HEADING[kind])
+    cells: list[str] = []
+    if kind == "changes":
+        for date_cell, full_text in _iter_change_bullets(section):
+            heading, body = _split_lead(full_text)
+            cells.extend([date_cell, heading, body])
+    elif kind == "log":
+        for date_cell, milestone, done, next_ in _iter_table_day_rows(section, TABLE_HEADER[kind]):
+            cells.extend([date_cell, milestone, done, next_])
+    else:
+        for date_cell, lead_cell, field1, field2 in _iter_table_day_rows(section, TABLE_HEADER[kind]):
+            heading, body = _split_lead(lead_cell)
+            cells.extend([date_cell, heading, body, field1, field2])
+    return cells
+
+
+def day_item_text(path: Path) -> str:
+    """Everything a day file carries, normalized — no frontmatter to strip,
+    unlike `item_text`, because a day file holds several records rather than
+    one item's frontmatter-plus-body."""
+    return normalize_prose(path.read_text(encoding="utf-8"))
+
+
+def prove_day_lossless(source_cells: list[str], emitted: list[Path]) -> list[str]:
+    """`prove_lossless`'s design, re-applied to plain day-file text.
+
+    Same coverage-only guarantee and the same limits (see `prove_lossless`'s
+    own docstring): tells you a piece of source text survived *somewhere in
+    the tree*, never that it landed in the right record. The per-record
+    guarantee for day files comes from the round-trip self-check inside
+    `migrate_day_records`, exactly as `verify_round_trip` is the real
+    guarantee for milestones/questions.
+    """
+    haystack = "\n".join(day_item_text(path) for path in emitted)
+    return [c for c in source_cells if normalize_prose(c) and normalize_prose(c) not in haystack]
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("kind", choices=["milestones", "questions"])
+    parser.add_argument("kind", choices=["milestones", "questions", *DAY_KINDS])
     parser.add_argument("--plan", type=Path, default=Path("PLAN.md"))
     parser.add_argument("--out", type=Path, default=Path("."))
     args = parser.parse_args(argv)
 
     text = args.plan.read_text(encoding="utf-8")
+    is_day_kind = args.kind in DAY_KINDS
 
     if args.kind == "milestones":
         directory = args.out / "plan" / "milestones"
         written = migrate_milestones(text, args.out)
-    else:
+    elif args.kind == "questions":
         directory = args.out / "plan" / "questions"
         written = migrate_questions(text, args.out)
+    else:
+        directory = args.out / "plan" / args.kind
+        section = _section(text, KIND_SECTION_HEADING[args.kind])
+        columns = TABLE_HEADER.get(args.kind, [])
+        written = migrate_day_records(section, args.kind, args.out, columns)
 
-    orphans = find_orphans(directory, written)
+    orphans = (find_day_orphans if is_day_kind else find_orphans)(directory, written)
     if orphans:
         for orphan in orphans:
             print(f"ORPHAN: {orphan} — present on disk but not written by this run", file=sys.stderr)
@@ -869,9 +1324,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.kind == "milestones":
         source_cells = source_cells_of(text)
-    else:
+    elif args.kind == "questions":
         source_cells = question_source_cells_of(text)
-    missing = prove_lossless(source_cells, written)
+    else:
+        source_cells = day_source_cells_of(text, args.kind)
+    missing = (prove_day_lossless if is_day_kind else prove_lossless)(source_cells, written)
     print(f"{len(written)} files, {len(source_cells)} cells checked, {len(missing)} cells missing")
     if missing:
         for cell in missing[:20]:
@@ -879,18 +1336,30 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{len(missing)} cells missing from the emitted tree", file=sys.stderr)
         return 1
 
-    if args.kind == "milestones":
+    if is_day_kind:
+        # Every day-record column is coverage-checked; none is transformed
+        # the way the milestone status glyph or question status/batch are,
+        # so there is no separate mapping proof to run (see the module-level
+        # note above `DAY_KINDS`).
+        print(f"{len(written)} files, 0 status-mapping mismatches (all columns are coverage-checked)")
+    elif args.kind == "milestones":
         mapping_mismatches = prove_status_mapping(text, written)
+        print(f"{len(written)} rows, {len(mapping_mismatches)} status-mapping mismatches")
+        if mapping_mismatches:
+            for row in mapping_mismatches[:20]:
+                print(f"STATUS MISMATCH: {row}", file=sys.stderr)
+            print(f"{len(mapping_mismatches)} rows failed the status mapping proof", file=sys.stderr)
+            return 1
     else:
         mapping_mismatches = prove_question_status_mapping(text, written) + prove_question_batch_mapping(
             text, written
         )
-    print(f"{len(written)} rows, {len(mapping_mismatches)} status-mapping mismatches")
-    if mapping_mismatches:
-        for row in mapping_mismatches[:20]:
-            print(f"STATUS MISMATCH: {row}", file=sys.stderr)
-        print(f"{len(mapping_mismatches)} rows failed the status mapping proof", file=sys.stderr)
-        return 1
+        print(f"{len(written)} rows, {len(mapping_mismatches)} status-mapping mismatches")
+        if mapping_mismatches:
+            for row in mapping_mismatches[:20]:
+                print(f"STATUS MISMATCH: {row}", file=sys.stderr)
+            print(f"{len(mapping_mismatches)} rows failed the status mapping proof", file=sys.stderr)
+            return 1
 
     print("losslessness proof: OK")
     return 0

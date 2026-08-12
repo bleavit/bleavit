@@ -27,19 +27,29 @@ from tools.plan.migrate import (
     MAPPING_CHECKED_COLUMNS,
     QUESTION_COVERAGE_COLUMNS,
     QUESTION_MAPPING_COLUMNS,
+    _day_and_span,
+    _section,
+    _split_lead,
+    find_day_orphans,
     find_orphans,
+    day_source_cells_of,
     main,
+    migrate_day_records,
     migrate_milestones,
     migrate_questions,
     normalize_prose,
+    prove_day_lossless,
     prove_lossless,
     prove_question_batch_mapping,
     prove_question_status_mapping,
     prove_status_mapping,
     question_source_cells_of,
+    read_day_records,
     rewrite_repo_links,
     source_cells_of,
     verify_round_trip,
+    KIND_SECTION_HEADING,
+    TABLE_HEADER,
 )
 from tools.plan.model import STATUS_GLYPHS, load_milestones, load_questions, parse_frontmatter
 
@@ -572,3 +582,207 @@ class MigrateQuestionsLinkRewriteTests(unittest.TestCase):
         self.assertEqual(errors, [])
         sq700 = next(i for i in items if i.id == "SQ-700")
         self.assertIn("../../docs/architecture/02-integration-contract.md", sq700.title)
+
+
+DAY_PLAN = """## Session log
+
+Append-only; newest last. Format: `| Date | Milestone(s) | Done | Next |`
+
+| Date | Milestone(s) | Done | Next |
+|---|---|---|---|
+| 2026-07-12 | M0 | Did the thing. | Do the next thing. |
+| 2026-07-15–16 | M1 | Range row done. | Range next. |
+| 2026-07-12 | M2 | Second row, same day as M0. | Second next. |
+
+## Decision log
+
+Spec changes and other project decisions.
+
+| Date | Amendment | Authorized by | Docs touched |
+|---|---|---|---|
+| 2026-08-09 | **Track F compat verdict reaches the shell without a new contract bump.** The classifier probes exactly the frozen set. | user | 10 §5.2 |
+| 2026-08-09 | Plain amendment with no bold lead at all. | Claude | none |
+
+## Audit log
+
+`/spec-audit` runs.
+
+| Date | Scope | Verdict | Pointer |
+|---|---|---|---|
+| 2026-07-15 | **Track M audit.** Some prose here. | 0 blocker | Session log 2026-07-15 |
+
+## Unplanned changes
+
+Repo changes outside any milestone — one line each.
+
+- 2026-07-12 — Added something (user-requested): a longer explanation follows here.
+- 2026-07-17 — **PLAN.md table-structure gate added.** More text about it here.
+
+  Continuation paragraph indented under the same bullet.
+
+## Next section
+"""
+
+
+class DayAndSpanTests(unittest.TestCase):
+    def test_a_bare_date_carries_no_span(self):
+        self.assertEqual(_day_and_span("2026-07-12"), ("2026-07-12", None))
+
+    def test_a_range_files_under_its_first_date_and_keeps_the_original_string(self):
+        self.assertEqual(_day_and_span("2026-07-15–16"), ("2026-07-15", "2026-07-15–16"))
+        self.assertEqual(_day_and_span("2026-08-07/08"), ("2026-08-07", "2026-08-07/08"))
+
+    def test_a_cell_with_no_leading_date_raises(self):
+        with self.assertRaises(ValueError):
+            _day_and_span("not a date")
+
+
+class SplitLeadTests(unittest.TestCase):
+    def test_a_leading_bold_run_becomes_the_heading_and_the_rest_the_body(self):
+        heading, body = _split_lead("**Title.** Rest of the prose.")
+        self.assertEqual(heading, "Title.")
+        self.assertEqual(body, "Rest of the prose.")
+
+    def test_a_cell_with_no_leading_bold_becomes_its_own_heading_with_an_empty_body(self):
+        heading, body = _split_lead("Plain cell, no bold anywhere.")
+        self.assertEqual(heading, "Plain cell, no bold anywhere.")
+        self.assertEqual(body, "")
+
+    def test_mid_sentence_bold_does_not_count_as_a_leading_run(self):
+        heading, body = _split_lead("Track M (M0–M3) remediation **complete** — done")
+        self.assertEqual(heading, "Track M (M0–M3) remediation **complete** — done")
+        self.assertEqual(body, "")
+
+
+class MigrateDayRecordsTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _migrate(self, kind: str):
+        section = _section(DAY_PLAN, KIND_SECTION_HEADING[kind])
+        columns = TABLE_HEADER.get(kind, [])
+        return migrate_day_records(section, kind, self.root, columns)
+
+    def test_emitted_path_shape(self):
+        written = self._migrate("decisions")
+        self.assertEqual(
+            sorted(p.relative_to(self.root).as_posix() for p in written),
+            ["plan/decisions/2026/08/2026-08-09.md"],
+        )
+
+    def test_two_records_on_the_same_date_land_in_one_file_in_source_order(self):
+        written = self._migrate("log")
+        same_day = next(p for p in written if p.name == "2026-07-12.md")
+        records, errors = read_day_records(self.root, "log")
+        self.assertEqual(errors, [])
+        headings = [r.heading for r in records if r.path == same_day]
+        self.assertEqual(headings, ["M0", "M2"])  # source order, not sorted
+
+    def test_a_range_row_files_under_its_first_date_and_carries_a_span_field(self):
+        written = self._migrate("log")
+        self.assertIn("plan/log/2026/07/2026-07-15.md", [p.relative_to(self.root).as_posix() for p in written])
+        records, errors = read_day_records(self.root, "log")
+        self.assertEqual(errors, [])
+        m1 = next(r for r in records if r.heading == "M1")
+        self.assertEqual(m1.date, "2026-07-15")
+        self.assertEqual(m1.fields.get("span"), "2026-07-15–16")
+
+    def test_body_prose_survives_the_round_trip_unchanged(self):
+        """The 'prose_blocks before equals after' guarantee the brief names:
+        every body paragraph a record carries reads back identical to what
+        was written, modulo nothing — not just as a coverage substring."""
+        for kind in ("log", "decisions", "audits", "changes"):
+            with self.subTest(kind=kind):
+                self._migrate(kind)
+        records, errors = read_day_records(self.root, "decisions")
+        self.assertEqual(errors, [])
+        rec = next(r for r in records if r.heading.startswith("Track F"))
+        self.assertEqual(rec.body, "The classifier probes exactly the frozen set.")
+
+    def test_each_kind_passes_its_own_coverage_and_round_trip_proof(self):
+        for kind in ("log", "decisions", "audits", "changes"):
+            with self.subTest(kind=kind):
+                written = self._migrate(kind)
+                cells = day_source_cells_of(DAY_PLAN, kind)
+                missing = prove_day_lossless(cells, written)
+                self.assertEqual(missing, [])
+                records, errors = read_day_records(self.root, kind)
+                self.assertEqual(errors, [])
+                self.assertTrue(records)
+
+    def test_a_decisions_row_with_the_wrong_cell_count_raises(self):
+        bad_section = _section(
+            DAY_PLAN.replace(
+                "| 2026-08-09 | Plain amendment with no bold lead at all. | Claude | none |",
+                "| 2026-08-09 | Plain amendment with no bold lead at all. | Claude |",
+            ),
+            "## Decision log",
+        )
+        with self.assertRaises(ValueError):
+            migrate_day_records(bad_section, "decisions", self.root, TABLE_HEADER["decisions"])
+
+    def test_find_day_orphans_detects_a_stale_file_two_directories_deep(self):
+        written = self._migrate("decisions")
+        directory = self.root / "plan" / "decisions"
+        stray = directory / "2099" / "01" / "2099-01-01.md"
+        stray.parent.mkdir(parents=True)
+        stray.write_text("stray file this run did not write", encoding="utf-8")
+        orphans = find_day_orphans(directory, written)
+        self.assertEqual(orphans, [stray])
+        self.assertTrue(stray.exists())
+
+    def test_main_dispatches_on_a_day_kind(self):
+        plan_path = self.root / "PLAN.md"
+        plan_path.write_text(DAY_PLAN, encoding="utf-8")
+        exit_code = main(["decisions", "--plan", str(plan_path), "--out", str(self.root)])
+        self.assertEqual(exit_code, 0)
+        self.assertTrue((self.root / "plan" / "decisions" / "2026" / "08" / "2026-08-09.md").exists())
+
+
+class ReadDayRecordsTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _write(self, relative: str, text: str) -> Path:
+        path = self.root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        return path
+
+    def test_refuses_a_heading_with_no_field_block_when_fields_are_declared(self):
+        self._write(
+            "plan/decisions/2026/08/2026-08-09.md",
+            "# Decisions — 2026-08-09\n\n## A heading\n\nBody with no fields at all.\n",
+        )
+        records, errors = read_day_records(self.root, "decisions")
+        self.assertEqual(records, [])
+        self.assertEqual(len(errors), 1)
+        self.assertIn("missing required field", errors[0])
+
+    def test_refuses_a_title_date_that_disagrees_with_its_path(self):
+        self._write(
+            "plan/decisions/2026/08/2026-08-09.md",
+            "# Decisions — 2026-08-10\n\n## H\nauthorized_by: x\ndocs_touched: y\n\nBody\n",
+        )
+        records, errors = read_day_records(self.root, "decisions")
+        self.assertEqual(records, [])
+        self.assertEqual(len(errors), 1)
+        self.assertIn("does not match its path", errors[0])
+
+    def test_accepts_a_kind_declaring_no_fields_with_no_field_block(self):
+        self._write(
+            "plan/log/2026/07/2026-07-12.md",
+            "# Session log — 2026-07-12\n\n## M0\n\nDid the thing.\n",
+        )
+        records, errors = read_day_records(self.root, "log")
+        self.assertEqual(errors, [])
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].fields, {})
