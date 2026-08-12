@@ -131,6 +131,22 @@ parent repository is deliberately not exposed to the build container. The
 wrapper rechecks that the checkout stayed clean and at that commit before
 accepting the outputs.
 
+Those OCI bytes remain canonical after the build. The release workflow passes
+the primary `runtime.wasm` explicitly to both `generate-chain-specs.sh` and the
+later `generate-relay-specs.sh`; neither stage rebuilds the ordinary runtime on
+the host. Dev/local and the ordinary/migration drill specs therefore embed the
+same primary bytes that assembly ships and environment evidence names. Primary
+metadata extraction deliberately boots the generated dev spec without
+`--embed-wasm`, so its `:code` comparison proves that handoff. Recovery has no
+canonical genesis spec and uses `--embed-wasm` with its separately shipped
+recovery bytes. The fast-timing drill remains an explicit test-only build and is
+not part of this release binding. The hosted-service drills also boot the
+separately built `bleavit-client-runtime`; release CI therefore generates
+`bleavit-client-local.json` before evidence runs. The evidence producer derives
+all prerequisites from each selected topology, binds only the exact primary
+spec names to `runtime.wasm`, recognizes the client and fast-timing specs as
+separate runtimes, and rejects any unclassified `bleavit-*` spec.
+
 | Profile | Base | Recovery | Sudo in metadata | Multi-block migrations |
 |---|---|---:|---:|---:|
 | `bootstrap` | `bootstrap` | no | yes | normal |
@@ -321,17 +337,30 @@ From the repository root:
 ```sh
 python3 -m pip install websockets==15.0.1
 export RUNTIME_PROFILE=bootstrap
-tools/deploy/generate-chain-specs.sh
-cargo build -p bleavit-node --release --locked
 # Unset RUNTIME_PROFILE to use runtime-profiles.json's release_default. The OCI
 # wrapper builds both the selected primary and its paired recovery artifact.
 tools/release/build-runtime-oci.sh release-work/runtime
+tools/deploy/generate-chain-specs.sh \
+  --runtime-wasm release-work/runtime/runtime.wasm
+cargo build -p bleavit-node --release --locked
+# This later generator must receive the same path or it would replace dev/local
+# and build the ordinary drill specs from a host runtime.
+tools/env/generate-relay-specs.sh \
+  --runtime-wasm release-work/runtime/runtime.wasm
+# Release-tier hosted-service drills declare this separately built harness
+# para, so it is a prerequisite even though its :code is not the primary Wasm.
+tools/deploy/generate-client-chain-spec.sh
 tools/ci/supply-chain-gates.sh --summary-out release-work/supply-chain-summary.json
 python3 tools/release/extract-metadata.py \
   --wasm release-work/runtime/runtime.wasm \
   --out-dir release-work/runtime
+python3 tools/release/extract-metadata.py \
+  --wasm release-work/runtime/recovery/runtime.wasm \
+  --out-dir release-work/runtime/recovery \
+  --embed-wasm
 python3 tools/release/record-chainhead-fixtures.py \
   --metadata release-work/runtime/metadata.scale \
+  --recovery-metadata release-work/runtime/recovery/metadata.scale \
   --out-dir release-work/chainhead \
   --allow-missing
 python3 tools/reference-model/generate-vectors.py --check

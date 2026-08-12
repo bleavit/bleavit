@@ -90,6 +90,7 @@ class WorkflowContractTests(unittest.TestCase):
         build_node = workflow.index("Build the release node")
         fetch = workflow.index("tools/env/fetch-binaries.sh")
         generate = workflow.index("tools/env/generate-relay-specs.sh")
+        generate_client = workflow.index("tools/deploy/generate-client-chain-spec.sh")
         prewarm = workflow.index(
             'npx --yes "@acala-network/chopsticks@${CHOPSTICKS_VERSION}" --help >/dev/null'
         )
@@ -97,7 +98,8 @@ class WorkflowContractTests(unittest.TestCase):
         assemble = workflow.index("python3 tools/release/assemble-release.py")
         self.assertLess(build_node, fetch)
         self.assertLess(fetch, generate)
-        self.assertLess(generate, prewarm)
+        self.assertLess(generate, generate_client)
+        self.assertLess(generate_client, prewarm)
         self.assertLess(prewarm, produce)
         self.assertLess(produce, assemble)
         self.assertSetsUpNode(workflow, "the release workflow must set up Node")
@@ -145,6 +147,28 @@ class WorkflowContractTests(unittest.TestCase):
             '--recovery-metadata "$RELEASE_WORK/runtime/recovery/metadata.scale"',
             workflow,
         )
+
+    def test_release_specs_and_drills_embed_the_oci_primary_without_host_rebuild(
+        self,
+    ) -> None:
+        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        runtime = '--runtime-wasm "$RELEASE_WORK/runtime/runtime.wasm"'
+        deploy = workflow.index("tools/deploy/generate-chain-specs.sh")
+        environments = workflow.index("tools/env/generate-relay-specs.sh")
+        extract = workflow.index("python3 tools/release/extract-metadata.py")
+        self.assertEqual(workflow.count(runtime), 2)
+        self.assertIn(runtime, workflow[deploy:environments])
+        self.assertIn(runtime, workflow[environments:extract])
+
+        # Primary extraction deliberately boots the canonical spec, so its
+        # existing :code↔--wasm comparison also proves the generated spec used
+        # the shipped OCI bytes. Recovery has no canonical genesis spec and
+        # therefore embeds its own separately shipped Wasm in a temporary copy.
+        recovery_extract = workflow.index(
+            '--wasm "$RELEASE_WORK/runtime/recovery/runtime.wasm"'
+        )
+        self.assertNotIn("--embed-wasm", workflow[extract:recovery_extract])
+        self.assertIn("--embed-wasm", workflow[recovery_extract:])
 
     def test_standing_gate_runs_explicit_runtime_profile_matrix(self) -> None:
         script = (ROOT / "tools/ci/rust-workspace-gates.sh").read_text(

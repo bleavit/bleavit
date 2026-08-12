@@ -6,6 +6,35 @@ repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 # shellcheck source=pins.env
 source "$repo_root/tools/env/pins.env"
 
+runtime_wasm=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --runtime-wasm)
+      if [[ $# -lt 2 ]]; then
+        echo "--runtime-wasm requires a path" >&2
+        exit 2
+      fi
+      runtime_wasm=$2
+      shift 2
+      ;;
+    --help)
+      echo "usage: $0 [--runtime-wasm PATH]"
+      exit 0
+      ;;
+    *)
+      echo "unknown argument: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+if [[ -n "$runtime_wasm" ]]; then
+  if [[ ! -f "$runtime_wasm" || ! -s "$runtime_wasm" ]]; then
+    echo "--runtime-wasm must name a non-empty regular file: $runtime_wasm" >&2
+    exit 1
+  fi
+  runtime_wasm=$(realpath -- "$runtime_wasm")
+fi
+
 # Everything cargo writes must be redirectable. `generator_target` is handed to
 # the Paseo sub-build as its literal CARGO_TARGET_DIR, so pinning it under
 # $repo_root makes it unredirectable — and on an ecryptfs $HOME (the documented
@@ -141,11 +170,22 @@ PY
 # release bootstrap PhaseFlags. Export the release local preset, merge that
 # one drill override, and feed the result through the builder's verified
 # `create ... patch` route.
-"$repo_root/tools/deploy/generate-chain-specs.sh"
-# These READ cargo build outputs of the script invoked on the line above, so
-# they resolve through the same `$bleavit_target` defined at the top.
+runtime_args=()
+if [[ -n "$runtime_wasm" ]]; then
+  runtime_args=(--runtime-wasm "$runtime_wasm")
+fi
+"$repo_root/tools/deploy/generate-chain-specs.sh" "${runtime_args[@]}"
 builder="$bleavit_target/tools/bin/chain-spec-builder"
-wasm="$bleavit_target/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm"
+if [[ -n "$runtime_wasm" ]]; then
+  # The release workflow passes the OCI primary through both generators. The
+  # ordinary and migration drill specs therefore run against the same shipped
+  # bytes as dev/local; only the explicitly test-only fast-timing specs below
+  # use another runtime.
+  wasm="$runtime_wasm"
+else
+  # Developer mode reads the cargo output produced by the deploy generator.
+  wasm="$bleavit_target/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm"
+fi
 preset_patch="$bleavit_target/env/bleavit-local-preset.json"
 drill_patch="$bleavit_target/env/bleavit-drill-patch.json"
 properties="tokenSymbol=VIT,tokenDecimals=12,ss58Format=7777"

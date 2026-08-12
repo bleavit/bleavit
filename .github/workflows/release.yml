@@ -193,7 +193,9 @@ jobs:
           primary_profile=$(python3 tools/release/runtime_profiles.py --profile "$requested_profile" --field primary_profile)
           tools/release/build-runtime-oci.sh "$RELEASE_WORK/runtime" "$primary_profile"
       - name: Generate and validate chain specs
-        run: tools/deploy/generate-chain-specs.sh
+        run: >-
+          tools/deploy/generate-chain-specs.sh
+          --runtime-wasm "$RELEASE_WORK/runtime/runtime.wasm"
       - name: Build the release node
         run: cargo build -p bleavit-node --release --locked
       - name: Build the keeper (separate workspace; the drill topology launches it as node `keeper`)
@@ -202,7 +204,11 @@ jobs:
       - name: Fetch pinned environment binaries
         run: tools/env/fetch-binaries.sh
       - name: Generate local relay and parachain specs
-        run: tools/env/generate-relay-specs.sh
+        run: >-
+          tools/env/generate-relay-specs.sh
+          --runtime-wasm "$RELEASE_WORK/runtime/runtime.wasm"
+      - name: Generate the hosted-service client parachain spec
+        run: tools/deploy/generate-client-chain-spec.sh
       - name: Build the client, for drill 14 (F27)
         # **Drill 14's subject under test is `app/` build output**, and this job had no `pnpm`
         # step at all — so a release-tier suite that shells out to `node

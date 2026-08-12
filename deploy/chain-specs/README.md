@@ -1,11 +1,11 @@
 # Bleavit chain-spec pipeline
 
 Chain specs are generated from the runtime's committed genesis presets with the
-pinned `staging-chain-spec-builder`:
+pinned `staging-chain-spec-builder`. Developer mode selects and builds the
+reviewed runtime profile locally:
 
 ```sh
-cargo install staging-chain-spec-builder --version 19.0.0 --locked
-cargo build -p bleavit-runtime --release --features substrate-wasm-builder
+tools/deploy/generate-chain-specs.sh
 ```
 
 The pinned wasm builder names the resulting release artifact
@@ -13,26 +13,42 @@ The pinned wasm builder names the resulting release artifact
 That basename was verified against `substrate-wasm-builder` 32.0.0's compact,
 compressed output naming and the runtime crate name (`bleavit_runtime`).
 
-For the reproducible dev and local outputs, run:
+Release mode MUST receive the already-built OCI primary instead of rebuilding
+the runtime on the host:
 
 ```sh
-tools/deploy/generate-chain-specs.sh
+tools/deploy/generate-chain-specs.sh \
+  --runtime-wasm release-work/runtime/runtime.wasm
 ```
 
-The script invokes these pinned builder commands (after building the runtime):
+That mode rejects an absent or empty input and embeds those exact bytes in both
+generated specs. The release workflow also passes the same path through
+`tools/env/generate-relay-specs.sh --runtime-wasm ...`, so its later drill-spec
+generation cannot overwrite dev/local with a host build or run B7 evidence
+against different bytes.
+
+The N10 hosted-service topologies additionally declare
+`zombienet/specs/out/bleavit-client-local.json`. Generate that test-harness
+parachain with `tools/deploy/generate-client-chain-spec.sh` after the relay/drill
+specs and before `run-evidence.py`. It carries the separate
+`bleavit-client-runtime`, so the evidence runner requires the file but never
+compares its genesis `:code` with the primary Bleavit `runtime.wasm`.
+
+The script invokes these pinned builder commands; `<runtime.wasm>` is either the
+developer build above or the exact prebuilt file supplied in release mode:
 
 ```sh
 target/tools/bin/chain-spec-builder --chain-spec-path deploy/chain-specs/out/bleavit-dev.json create \
   --chain-name "Bleavit Development" --chain-id bleavit_dev -t development \
   --relay-chain paseo-local --para-id 4242 \
-  --runtime target/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm \
+  --runtime <runtime.wasm> \
   --properties tokenSymbol=VIT,tokenDecimals=12,ss58Format=7777 \
   named-preset development
 
 target/tools/bin/chain-spec-builder --chain-spec-path deploy/chain-specs/out/bleavit-local.json create \
   --chain-name "Bleavit Local" --chain-id bleavit_local -t local \
   --relay-chain paseo-local --para-id 4242 \
-  --runtime target/release/wbuild/bleavit-runtime/bleavit_runtime.compact.compressed.wasm \
+  --runtime <runtime.wasm> \
   --properties tokenSymbol=VIT,tokenDecimals=12,ss58Format=7777 \
   named-preset local_testnet
 ```
