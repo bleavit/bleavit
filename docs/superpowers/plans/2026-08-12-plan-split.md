@@ -1,8 +1,8 @@
 # PLAN.md Split Implementation Plan
 
 > **Status (2026-08-12):** implementation and local verification complete on
-> `plan/split-tree`. The final commit/push/PR actions remain unperformed because
-> AGENTS.md R-9 requires an explicit user request.
+> `plan/split-tree`; published as draft [PR #301](https://github.com/bleavit/bleavit/pull/301).
+> Readiness remains pending on the PR's CI.
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
@@ -2344,10 +2344,10 @@ This is required here, because this work changes `tools/ci/`. It runs each envir
 
 Add an entry to `plan/changes/2026/<MM>/<date>.md` — the new home for unplanned changes — covering the whole split, the S7 defect Task 0 fixed, and the size of `plan/log/unsorted-current-focus.md`.
 
-- [ ] **Step 6b: Commit and publish when the user explicitly requests it**
+- [x] **Step 6b: Commit and publish when the user explicitly requests it**
 
-R-9 requires an explicit user request for commit, push and PR actions. The worktree
-is complete and verified, but those publication actions are intentionally deferred.
+R-9 requires an explicit user request for commit, push and PR actions. The user gave
+that instruction on 2026-08-12; commit `dd702c6b` was pushed and draft PR #301 opened.
 
 ```bash
 git add AGENTS.md CLAUDE.md README.md .claude/rules/quality-gates.md plan PLAN.md
