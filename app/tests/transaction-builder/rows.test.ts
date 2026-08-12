@@ -61,6 +61,7 @@ import type {
 import { CRITICAL_SURFACE } from '@bleavit/descriptors';
 import { blake2b } from '@noble/hashes/blake2b';
 import type { SurfaceId } from '@bleavit/descriptors';
+import { specQuestionStatus } from '../shared/plan-questions.ts';
 
 // `satisfies` rather than a bare literal: 11 §11.5's fifteen rows are checked against the
 // union `rows.ts` publishes, so a row added there without one here (or vice versa) is a
@@ -1084,35 +1085,25 @@ test('P-13 splits "round open" from "report window not elapsed"', () => {
   assert.ok(keys.includes('report-window'), 'the report-window clause is missing');
 });
 
-/** The plan item's frontmatter status, or `undefined` when the item does not exist or parse. */
-function specQuestionStatus(id: string): string | undefined {
-  try {
-    const item = readFileSync(join(REPO, 'plan', 'questions', `${id}.md`), 'utf8');
-    return /^status:\s*(open|resolved)\s*$/m.exec(item)?.[1];
-  } catch {
-    return undefined;
-  }
-}
-
 test('an unreadable obligation names an OPEN spec question, and blocking ones close a control', () => {
   // The declaration expires the way the limit-coverage registry's unwired keys do — by the
-  // plan/questions item resolving, not by somebody remembering to delete a comment.
+  // plan/questions/ item's status changing, not by somebody remembering to delete a comment.
   //
   // **That is what this test says and, until 2026-08-06, not what it checked.** It asserted
-  // the cited id was *a row* in the table and never looked at the row's status, so contract
+  // the cited id was *a row* in the old table and never looked at the row's status, so contract
   // v28 could resolve SQ-615, SQ-616 and SQ-619 — freezing six surfaces in this branch's own
   // base — while three `blocking` entries stayed behind and closed S15, S17 and S19 for good.
   // A screen that can never reach `ready` is a screen nothing has exercised, and the operator
-  // suite had settled for asserting the block. The status cell is now read.
+  // suite had settled for asserting the block. The canonical status enum is now read.
   const all = [...ROW_IDS, ...OPERATOR_IDS].flatMap((id) => unreadableObligationsFor(id));
   assert.ok(all.length > 0, 'no obligations declared — this test would be vacuous');
   for (const entry of all) {
     assert.match(entry.specQuestion, /^SQ-\d+$/, `${entry.requirement} cites no spec question`);
-    const status = specQuestionStatus(entry.specQuestion);
-    assert.ok(status !== undefined, `${entry.specQuestion} is not a plan/questions item`);
+    const status = specQuestionStatus(REPO, entry.specQuestion);
+    assert.ok(status !== undefined, `${entry.specQuestion} is not a plan/questions/ item`);
     assert.ok(
-      /open/i.test(status) && !/^resolved/i.test(status),
-      `${entry.specQuestion} is "${status}" in plan/questions, so this declaration outlived the ` +
+      status === 'open',
+      `${entry.specQuestion} is "${status}" in plan/questions/, so this declaration outlived the ` +
         'question it waits on and is closing a control for a reason that no longer holds',
     );
     assert.ok(entry.reason.length > 40, `${entry.specQuestion}'s reason says nothing usable`);
@@ -1120,7 +1111,7 @@ test('an unreadable obligation names an OPEN spec question, and blocking ones cl
   // Anti-vacuity for the status check itself: a resolved row must be rejected, or the
   // predicate above could be matching everything.
   assert.ok(
-    !/open/i.test(specQuestionStatus('SQ-615') ?? ''),
+    specQuestionStatus(REPO, 'SQ-615') === 'resolved',
     'SQ-615 reads as open — the resolved-row half of this check proves nothing',
   );
   // `stated` is §11.8.1's SQ-564 posture — the transaction is offered and the gap is named.

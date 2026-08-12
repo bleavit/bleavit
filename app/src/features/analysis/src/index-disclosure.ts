@@ -33,9 +33,9 @@
  *   behind it is the same defect these records exist to prevent, one level up.
  *
  * A suite binds both halves mechanically: every `stated` citation must resolve to a real
- * section of a real architecture document, and every `awaiting` slot must name spec-question
- * rows PLAN.md still lists as **open**. The second is a mechanical expiry — the day SQ-604 is
- * ruled, the suite fails and the copy has to be written.
+ * section of a real architecture document, and every `awaiting` slot must name
+ * `plan/questions/<ID>.md` items whose status is still **open**. The second is a mechanical
+ * expiry — the day SQ-604 is ruled, the suite fails and the copy has to be written.
  *
  * ## `unchecked` gets the most care, because it is the state that reads as a pass
  *
@@ -157,7 +157,7 @@ export type DisclosureCopy =
       readonly kind: 'awaiting';
       /** The 10 §9.4 taxonomy code that owes this text, and does not yet carry it. */
       readonly code: string;
-      /** The PLAN.md rows that must be ruled. Asserted **open** by the suite. */
+      /** The plan/questions/ items that must be ruled. Asserted **open** by the suite. */
       readonly questions: readonly string[];
       /** What those rows have to decide, in one line. */
       readonly asks: string;

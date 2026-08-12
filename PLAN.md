@@ -28,7 +28,9 @@ Legend: ⬜ pending · 🔨 active · ✅ done · ⛔ blocked
 > digest-pinned primary/recovery pair, v31 chain feed, chainHead fixtures,
 > descriptors and downstream generated consumers have been regenerated from that
 > exact commit, with zero assembly corruption and their focused gates green.
-> Remaining work is the generated-artifact/status commit, push, and PR CI handoff.
+> The generated-artifact/status closure is committed at `40475015`. Current
+> `main`'s single app plan-consumer repair has been integrated and its overlap
+> gates pass; remaining work is the merge push and PR CI handoff.
 
 > **PARKED: 2026-08-09 — Track F's code is complete; four milestones wait on
 > external inputs.** F1 needs the user's SQ-940 ruling plus a device lab/live
