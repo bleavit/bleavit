@@ -216,12 +216,22 @@ kind. Every gate imports it, so there is one parser to test rather than seven.
 | `check-plan-tables.py` | Keeps the living documents and `docs/architecture/`. Drops V-id uniqueness. |
 | `.github/workflows/ci.yml` | Add `python3 tools/plan/render.py --check` to the `docs` job. |
 
-### 6.1 A defect the migration fixes
+### 6.1 A claim this design made, and which turned out to be false
 
-`check_alert_coverage.py` reads milestone statuses only under the single
-`## Milestones` heading. `PLAN.md` carries a second milestone table under
-`## Track E`, so Track E milestones are invisible to that gate today. A `track:`
-field on every milestone makes them visible.
+An earlier draft of this section asserted that `check_alert_coverage.py` misses a
+second milestone table under `## Track E`. **That is wrong, and it was checked
+during implementation rather than believed.**
+
+`PLAN.md` has one `## Milestones` heading holding all 117 milestone rows,
+including `### Track E — Protocol revenue and treasury sustainability` (E1 to E6)
+as a level-3 subsection. The separate level-2 `## Track E — crossover arithmetic
+and the self-funding statement` is an analysis section carrying a
+`| Quantity | Value | Source |` table and no milestones at all.
+
+Both the old parse and the new one see all 117 milestones with identical
+statuses, and no monitoring seam's expiry changes. The record is kept here rather
+than deleted, because a design that quietly drops a falsified claim teaches the
+next reader nothing.
 
 ## 7. Conversion, and the losslessness proof
 

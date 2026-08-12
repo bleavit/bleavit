@@ -1197,7 +1197,7 @@ import collections; print(collections.Counter(i.status for i in items))
 "
 ```
 
-Expected: 0 errors, and a status count matching `✅ 97 / ⬜ 10 / 🔨 6` plus whatever the Track E table adds.
+Expected: 0 errors, and a status count of `done 101 / pending 10 / active 6` over 117 milestones.
 
 - [ ] **Step 7: Commit**
 
@@ -1442,6 +1442,17 @@ git commit -m "feat(plan): render the milestone index and gate its freshness in 
 
 ### Task 5: Move the four milestone consumers to frontmatter
 
+> **Correction, made during implementation.** An earlier draft of this plan and
+> of the spec claimed `check_alert_coverage.py` misses a second milestone table
+> under `## Track E`. That is **false**. `PLAN.md` has one `## Milestones`
+> heading holding all 117 rows, including `### Track E — Protocol revenue and
+> treasury sustainability` (E1 to E6) as a level-3 subsection. The separate
+> level-2 `## Track E — crossover arithmetic and the self-funding statement`
+> carries a `| Quantity \| Value \| Source |`-shaped table and no milestones.
+> Old and new parses both see 117 milestones with identical statuses, and no
+> seam expiry changes. This task fixes no pre-existing gate defect: it changes
+> how status is read, not what is read.
+
 **Files:**
 - Modify: `.claude/hooks/guard-track-goal.sh` (the heredoc Python block)
 - Modify: `.claude/hooks/session-context.sh:30-52`
@@ -1485,9 +1496,8 @@ Replace the whole function in `tools/monitoring/check_alert_coverage.py` with:
 def load_milestone_statuses(root: Path) -> tuple[dict[str, str], list[str]]:
     """Milestone id -> status enum, from the plan/ item tree.
 
-    Replaces a GFM table parse that required exactly one '## Milestones'
-    heading, and therefore never saw the second milestone table under
-    '## Track E'.
+    Replaces a GFM table parse that read the status by cell position, which
+    is what let escaped pipes in row S7 be read as a status.
     """
     items, errors = load_milestones(root)
     return {item.id: item.status for item in items}, errors
@@ -2356,7 +2366,7 @@ No Rust source changes in this plan, so this run is a regression check rather th
 
 ## Self-review
 
-**Spec coverage.** Section 3 file layout → Tasks 3, 6, 8, 9, 10. Section 4 frontmatter contract → Task 1, with day files in Task 9. Section 5 renderer → Tasks 4, 6, 8, 9. Section 6 consumer migration → Tasks 2, 5, 7, 8, and the `ci.yml` step in Task 4. Section 6.1 (the invisible Track E table) → Task 5 step 3. Section 7 losslessness → Task 3 steps 1 and 5, repeated in every later conversion. Section 7.1 the undatable focus blocks → Task 10. Section 8 verification → every task's own steps, plus Task 11 steps 4 and 5. Section 9 non-goals → nothing here summarizes or prunes. Section 10 risks → the `git blame` cost is accepted in the spec and not re-litigated here.
+**Spec coverage.** Section 3 file layout → Tasks 3, 6, 8, 9, 10. Section 4 frontmatter contract → Task 1, with day files in Task 9. Section 5 renderer → Tasks 4, 6, 8, 9. Section 6 consumer migration → Tasks 2, 5, 7, 8, and the `ci.yml` step in Task 4. Section 6.1's claim was FALSIFIED during Task 5 — see the correction in that task and in the spec. Section 7 losslessness → Task 3 steps 1 and 5, repeated in every later conversion. Section 7.1 the undatable focus blocks → Task 10. Section 8 verification → every task's own steps, plus Task 11 steps 4 and 5. Section 9 non-goals → nothing here summarizes or prunes. Section 10 risks → the `git blame` cost is accepted in the spec and not re-litigated here.
 
 **Additions beyond the spec.** Task 0 exists because reading the row shapes exposed a live defect the spec did not know about. It is separable and ships first.
 
