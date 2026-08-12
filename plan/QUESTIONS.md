@@ -175,6 +175,16 @@
 | SQ-1053 | [**CI compiles the `runtime-benchmarks` feature everywhere a…](questions/SQ-1053.md) | [15] (../../docs/architecture/15-invariants-a… | 2026-08-11 | B7 |
 | SQ-1054 | [**Six pallet mocks do not COMPILE under `runtime-benchmarks…](questions/SQ-1054.md) | [15] (../../docs/architecture/15-invariants-a… | 2026-08-11 | B7 |
 | SQ-1055 | [**`check-chain-feed.py` compares which pallets exist and wh…](questions/SQ-1055.md) | [15] (../../docs/architecture/15-invariants-a… | 2026-08-11 | B7 |
+| SQ-1057 | [**The hosted service uses the 64-client roster bound as its…](questions/SQ-1057.md) | [16] (../../docs/architecture/16-hosted-quest… | 2026-08-12 | B7 |
+| SQ-1058 | [**The exported transaction `gate()` mints `GatePassed` from…](questions/SQ-1058.md) | [11] (../../docs/architecture/11-frontend-wor… | 2026-08-12 | B7 |
+| SQ-1059 | [**A genuine `GatePassed` for one preparation can authorize…](questions/SQ-1059.md) | [11] (../../docs/architecture/11-frontend-wor… | 2026-08-12 | B7 |
+| SQ-1060 | [**The production inbound XCM barrier recursively admits six…](questions/SQ-1060.md) | [09] (../../docs/architecture/09-execution-up… | 2026-08-12 | B7 |
+| SQ-1061 | [**The release-integrity monitor logs complete secret-bearin…](questions/SQ-1061.md) | [12] (../../docs/architecture/12-release-and-… | 2026-08-12 | B7 |
+| SQ-1062 | [**The out-of-band release monitor accepts one unproved, gen…](questions/SQ-1062.md) | [12] (../../docs/architecture/12-release-and-… | 2026-08-12 | B7 |
+| SQ-1063 | [**The two reproducible app builds share `ubuntu-latest` and…](questions/SQ-1063.md) | [12] (../../docs/architecture/12-release-and-… | 2026-08-12 | B7 |
+| SQ-1064 | [**The reusable client pallet permanently rejects report 129…](questions/SQ-1064.md) | [16] (../../docs/architecture/16-hosted-quest… | 2026-08-12 | B7 |
+| SQ-1065 | [**Release-monitor gateway independence is name-only, and on…](questions/SQ-1065.md) | [12] (../../docs/architecture/12-release-and-… | 2026-08-12 | B7 |
+| SQ-1066 | [**Any signed user can improve decision-grade XCM health by…](questions/SQ-1066.md) | [05] (../../docs/architecture/05-welfare-and-… | 2026-08-12 | B7 |
 
 ## Resolved
 
