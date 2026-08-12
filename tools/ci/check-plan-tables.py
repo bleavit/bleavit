@@ -33,41 +33,9 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-SEPARATOR_CELL_RE = re.compile(r"^:?-+:?$")
 
-
-def split_cells(line: str) -> list[str]:
-    """Split a table row into cells exactly as GFM does: every unescaped `|`
-    delimits — backtick code spans do NOT protect pipes in table rows, only
-    `\\|` does; the leading/trailing delimiters contribute no cells."""
-    cells: list[str] = []
-    current: list[str] = []
-    escaped = False
-    for ch in line:
-        if escaped:
-            current.append(ch)
-            escaped = False
-        elif ch == "\\":
-            current.append(ch)
-            escaped = True
-        elif ch == "|":
-            cells.append("".join(current).strip())
-            current = []
-        else:
-            current.append(ch)
-    cells.append("".join(current).strip())
-    # A well-formed row is `| a | b |`: drop the empty fragments outside the
-    # outer delimiters so the count is the real cell count.
-    if cells and cells[0] == "":
-        cells = cells[1:]
-    if cells and cells[-1] == "":
-        cells = cells[:-1]
-    return cells
-
-
-def is_separator_row(line: str) -> bool:
-    cells = split_cells(line)
-    return bool(cells) and all(SEPARATOR_CELL_RE.match(c) for c in cells)
+sys.path.insert(0, str(ROOT))
+from tools.plan.gfm import is_separator_row, split_cells  # noqa: E402
 
 
 def check_text(text: str, name: str) -> list[str]:

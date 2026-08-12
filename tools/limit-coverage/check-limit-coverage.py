@@ -19,6 +19,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+from tools.plan.gfm import is_separator_row, split_cells, unescape_cell  # noqa: E402
+
 try:
     import tomllib
 except ModuleNotFoundError:  # Python 3.10 compatibility for the local quality gate.
@@ -644,13 +647,18 @@ def load_milestone_ids(path: Path) -> tuple[set[str], set[str], list[str]]:
     identifiers: set[str] = set()
     completed: set[str] = set()
     for line in text.splitlines():
-        match = re.match(r"^\|\s*([A-Za-z][A-Za-z0-9]*)\s*\|", line)
-        if not match:
+        if not line.lstrip().startswith("|"):
             continue
-        identifiers.add(match.group(1))
-        cells = [cell.strip() for cell in line.split("|")]
-        if len(cells) >= 6 and "✅" in cells[5]:
-            completed.add(match.group(1))
+        try:
+            cells = split_cells(line)
+        except ValueError:
+            continue
+        # A milestone row is: id | what | spec | depends | status | notes.
+        if len(cells) != 6 or not re.fullmatch(r"[A-Za-z][A-Za-z0-9]*", cells[0]):
+            continue
+        identifiers.add(cells[0])
+        if "✅" in cells[4]:
+            completed.add(cells[0])
     if not identifiers:
         return set(), set(), ["PLAN.md contains no milestone table row identifiers"]
     return identifiers, completed, []

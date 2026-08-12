@@ -361,6 +361,21 @@ class LimitCoverageTests(unittest.TestCase):
         )
         self.assert_fails_with("unwired key 'IntakeQueue' names completed owner 'B10'")
 
+    def test_escaped_pipe_row_reports_its_real_status(self) -> None:
+        """S7's Milestone cell holds escaped pipes; its status is ✅, not the Spec ref."""
+        self.write(
+            "PLAN.md",
+            "| ID | Milestone | Spec | Depends | Status | Notes |\n"
+            "|---|---|---|---|---|---|\n"
+            "| S7 | graph (a \\| b \\| c) | 13 §1 | S6 | ✅ | done |\n",
+        )
+        identifiers, completed, failures = checker.load_milestone_ids(
+            self.root / "PLAN.md"
+        )
+        self.assertEqual(failures, [])
+        self.assertIn("S7", identifiers)
+        self.assertIn("S7", completed)
+
     def test_consumer_binding_expires_when_b10_completes(self) -> None:
         manifest = BASE_MANIFEST.replace(
             'class = "param-bounds"\ngenesis = true',

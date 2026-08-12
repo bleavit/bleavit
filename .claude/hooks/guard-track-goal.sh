@@ -51,21 +51,25 @@ if focus and re.search(r"^>\s*\*\*PARKED:\*\*", focus.group(1), re.M):
     print("PARKED")
     raise SystemExit
 
-row = re.compile(rf"^\|\s*({re.escape(track)}\d+)\s*\|(.*)$", re.M)
+sys.path.insert(0, ".")
+from tools.plan.gfm import is_separator_row, split_cells
+
+row = re.compile(rf"^\|\s*{re.escape(track)}\d+\s*\|.*$", re.M)
 done = 0
 open_rows = []
 for match in row.finditer(text):
-    cells = [cell.strip() for cell in match.group(2).split("|")]
-    # A milestone row is: id | what | spec | depends | status | notes. The status is the
-    # 4th cell after the id; anything shorter is some other table that happens to start
-    # with a matching label, and is skipped rather than guessed at.
-    if len(cells) < 5:
+    try:
+        cells = split_cells(match.group(0))
+    except ValueError:
         continue
-    status = cells[3]
+    # A milestone row is: id | what | spec | depends | status | notes.
+    if len(cells) != 6:
+        continue
+    status = cells[4]
     if "✅" in status:          # ✅
         done += 1
     else:
-        open_rows.append((match.group(1), status))
+        open_rows.append((cells[0], status))
 
 if not open_rows and done == 0:
     print("NOTRACK")
