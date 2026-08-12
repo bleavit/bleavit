@@ -14,11 +14,13 @@ git rev-parse --is-inside-work-tree >/dev/null 2>&1 || exit 0
 CHANGES=$(git status --porcelain 2>/dev/null | grep -vE '\.claude/settings\.local\.json$' || true)
 [ -z "$CHANGES" ] && exit 0
 
-NONPLAN=$(grep -vE '(^|[[:space:]])PLAN\.md$' <<<"$CHANGES" || true)
-PLAN_TOUCHED=$(git status --porcelain -- PLAN.md 2>/dev/null || true)
+# The plan tree is PLAN.md plus plan/. A session that records its work in
+# plan/log/<date>.md satisfies R-3 exactly as a Session log row used to.
+NONPLAN=$(grep -vE '(^|[[:space:]])(PLAN\.md|plan/)' <<<"$CHANGES" || true)
+PLAN_TOUCHED=$(git status --porcelain -- PLAN.md plan 2>/dev/null || true)
 
 if [ -n "$NONPLAN" ] && [ -z "$PLAN_TOUCHED" ]; then
-  jq -n '{decision:"block", reason:"The working tree has changes but PLAN.md was not updated (rule R-3, AGENTS.md). Before stopping: (1) set the status of the affected milestone(s) in PLAN.md; (2) append a Session log row: | date | milestone | what was done | what comes next |; (3) if the repo layout, commands, or workflow changed, refresh README.md / AGENTS.md / CLAUDE.md as well (or run /sync-docs). If the changes pre-date this session or are trivial, still record one Session log line saying exactly that, so the next session inherits accurate state."}'
+  jq -n '{decision:"block", reason:"The working tree has changes but PLAN.md and plan/ were not updated (rule R-3, AGENTS.md). Before stopping: (1) set the status of the affected milestone(s) in PLAN.md; (2) append an entry to plan/log/<YYYY>/<MM>/<YYYY-MM-DD>.md; (3) if the repo layout, commands, or workflow changed, refresh README.md / AGENTS.md / CLAUDE.md as well (or run /sync-docs). If the changes pre-date this session or are trivial, still record one entry saying exactly that, so the next session inherits accurate state."}'
   exit 0
 fi
 exit 0
