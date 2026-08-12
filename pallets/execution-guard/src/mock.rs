@@ -6,7 +6,7 @@ use crate::*;
 use frame_support::{
     derive_impl, parameter_types,
     traits::{EitherOfDiverse, EnsureOrigin, IsSubType, UnfilteredDispatchable},
-    weights::Weight,
+    weights::{constants::RocksDbWeight, Weight},
 };
 use futarchy_primitives::{
     keeper::{CrankClass, KeeperRebateSink},
@@ -54,6 +54,7 @@ impl frame_system::Config for Test {
     type Hash = SpH256;
     type Hashing = BlakeTwo256;
     type Version = MockVersion;
+    type DbWeight = RocksDbWeight;
 }
 
 impl pallet_origins::Config for Test {
@@ -402,6 +403,8 @@ impl EpochHandoff for TestEpoch {
 
 pub struct TestPreimages;
 
+pub const TEST_RECOVERY_IMAGE_UNPIN_WEIGHT: Weight = Weight::from_parts(42_000, 128);
+
 impl Preimages for TestPreimages {
     fn len(hash: H256) -> Option<u32> {
         PreimageData::get()
@@ -457,6 +460,9 @@ impl RecoveryImages for TestPreimages {
     fn pin(hash: H256) -> frame_support::dispatch::DispatchResult {
         RecoveryPins::mutate(|pins| pins.push(hash));
         Ok(())
+    }
+    fn unpin_weight() -> Weight {
+        TEST_RECOVERY_IMAGE_UNPIN_WEIGHT
     }
     fn unpin(hash: H256) -> frame_support::dispatch::DispatchResult {
         if RecoveryUnpinRefuses::get() {

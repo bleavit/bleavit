@@ -6,7 +6,7 @@ use frame_support::{
     assert_noop, assert_ok,
     dispatch::{DispatchClass, DispatchErrorWithPostInfo, GetDispatchInfo, Pays, PostDispatchInfo},
     traits::Hooks,
-    weights::Weight,
+    weights::{constants::RocksDbWeight, Weight},
 };
 use futarchy_primitives::{keeper::CrankClass, DispatchOutcomeCode, RejectReason};
 use parity_scale_codec::Encode;
@@ -2165,7 +2165,13 @@ fn recovery_image_release_failure_uses_the_halt_bridge_and_retries_until_repaire
         PendingAnchorCapture::<Test>::put(true);
         RecoveryUnpinRefuses::set(true);
 
-        let _ = GuardPallet::on_initialize(System::block_number());
+        let failed_weight = GuardPallet::on_initialize(System::block_number());
+        assert_eq!(
+            failed_weight,
+            RocksDbWeight::get()
+                .reads(8)
+                .saturating_add(TEST_RECOVERY_IMAGE_UNPIN_WEIGHT),
+        );
 
         assert!(PendingAnchorCapture::<Test>::get());
         assert!(RecoveryImage::<Test>::exists());
@@ -2176,7 +2182,13 @@ fn recovery_image_release_failure_uses_the_halt_bridge_and_retries_until_repaire
         // block. Only then are both the dedicated source and aggregate halt
         // cleared and the one-shot capture latch consumed.
         RecoveryUnpinRefuses::set(false);
-        let _ = GuardPallet::on_initialize(System::block_number().saturating_add(1));
+        let repaired_weight = GuardPallet::on_initialize(System::block_number().saturating_add(1));
+        assert_eq!(
+            repaired_weight,
+            RocksDbWeight::get()
+                .reads_writes(8, 2)
+                .saturating_add(TEST_RECOVERY_IMAGE_UNPIN_WEIGHT),
+        );
 
         assert!(!PendingAnchorCapture::<Test>::get());
         assert!(!RecoveryImage::<Test>::exists());
@@ -2202,7 +2214,13 @@ fn completed_migration_release_failure_remains_retryable_after_capture_latch_is_
         PreMigrationAnchor::<Test>::put((1, [9; 32]));
         RecoveryUnpinRefuses::set(true);
 
-        let _ = GuardPallet::migration_completed();
+        let failed_weight = GuardPallet::migration_completed();
+        assert_eq!(
+            failed_weight,
+            RocksDbWeight::get()
+                .reads_writes(1, 1)
+                .saturating_add(TEST_RECOVERY_IMAGE_UNPIN_WEIGHT),
+        );
 
         assert!(PreMigrationAnchor::<Test>::get().is_none());
         assert!(!PendingAnchorCapture::<Test>::get());
@@ -2210,7 +2228,13 @@ fn completed_migration_release_failure_remains_retryable_after_capture_latch_is_
         assert!(MigrationHalt::<Test>::get());
 
         RecoveryUnpinRefuses::set(false);
-        let _ = GuardPallet::on_initialize(System::block_number().saturating_add(1));
+        let repaired_weight = GuardPallet::on_initialize(System::block_number().saturating_add(1));
+        assert_eq!(
+            repaired_weight,
+            RocksDbWeight::get()
+                .reads_writes(8, 1)
+                .saturating_add(TEST_RECOVERY_IMAGE_UNPIN_WEIGHT),
+        );
 
         assert!(!RecoveryImage::<Test>::exists());
         assert!(!RecoveryImageReleaseHalted::get());

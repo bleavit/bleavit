@@ -10042,6 +10042,13 @@ impl pallet_execution_guard::RecoveryImages for RuntimePreimages {
         <Preimage as QueryPreimage>::request(&Hash::from(hash));
         Ok(())
     }
+    fn unpin_weight() -> Weight {
+        type RuntimePreimageWeight = crate::weights::pallet_preimage::WeightInfo<Runtime>;
+
+        <RuntimePreimageWeight as pallet_preimage::WeightInfo>::ensure_updated(1).saturating_add(
+            <RuntimePreimageWeight as pallet_preimage::WeightInfo>::unrequest_preimage(),
+        )
+    }
     fn unpin(hash: futarchy_primitives::H256) -> DispatchResult {
         let hash = Hash::from(hash);
         if !<Preimage as QueryPreimage>::is_requested(&hash) {

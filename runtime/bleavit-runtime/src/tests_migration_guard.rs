@@ -19,7 +19,7 @@ use frame_support::{
     BoundedVec,
 };
 use futarchy_primitives::kernel;
-use pallet_execution_guard::PhaseState;
+use pallet_execution_guard::{PhaseState, RecoveryImages};
 #[cfg(not(any(
     feature = "runtime-benchmarks",
     feature = "try-runtime",
@@ -2381,8 +2381,19 @@ fn completed_migration_keeps_the_halt_when_the_recovery_image_cannot_be_released
 
         let mandatory_after = *System::block_weight()
             .get(frame_support::dispatch::DispatchClass::Mandatory);
-        let expected_bridge = <Runtime as frame_system::Config>::DbWeight::get()
-            .reads(1)
+        type PreimageWeight = crate::weights::pallet_preimage::WeightInfo<Runtime>;
+        let expected_unpin =
+            <PreimageWeight as pallet_preimage::WeightInfo>::ensure_updated(1).saturating_add(
+                <PreimageWeight as pallet_preimage::WeightInfo>::unrequest_preimage(),
+            );
+        assert_eq!(
+            <crate::configs::RuntimePreimages as RecoveryImages>::unpin_weight(),
+            expected_unpin,
+        );
+        let expected_callback = <Runtime as frame_system::Config>::DbWeight::get()
+            // PreMigrationAnchor kill + bridge-source read + RecoveryImage get.
+            .reads_writes(2, 1)
+            .saturating_add(expected_unpin)
             .saturating_add(crate::configs::migration_validation_hook_weight());
         type WelfareWeight = <Runtime as pallet_welfare::Config>::WeightInfo;
         let expected_integrity =
@@ -2390,7 +2401,7 @@ fn completed_migration_keeps_the_halt_when_the_recovery_image_cannot_be_released
         assert_eq!(
             mandatory_after,
             mandatory_before
-                .saturating_add(expected_bridge)
+                .saturating_add(expected_callback)
                 .saturating_add(expected_integrity),
         );
 
@@ -2430,9 +2441,15 @@ fn completed_migration_keeps_the_halt_when_the_recovery_image_cannot_be_released
             &sp_core::H256::from([0xb2; 32]),
         );
         System::set_block_number(System::block_number().saturating_add(1));
-        let _ = <ExecutionGuard as frame_support::traits::Hooks<_>>::on_initialize(
+        let repaired_weight = <ExecutionGuard as frame_support::traits::Hooks<_>>::on_initialize(
             System::block_number(),
         );
+        let expected_repaired = <Runtime as frame_system::Config>::DbWeight::get()
+            // Seven fixed hook reads + bridge-source read + RecoveryImage
+            // get/kill + repaired-source read/two writes.
+            .reads_writes(10, 3)
+            .saturating_add(expected_unpin);
+        assert_eq!(repaired_weight, expected_repaired);
 
         assert!(!pallet_execution_guard::RecoveryImage::<Runtime>::exists());
         assert_eq!(

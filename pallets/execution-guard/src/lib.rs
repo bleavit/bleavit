@@ -174,6 +174,9 @@ pub trait RecoveryImages {
         true
     }
     fn pin(hash: H256) -> DispatchResult;
+    /// Conservative weight of one [`Self::unpin`] attempt, including any
+    /// bounded migration of the backing preimage request state.
+    fn unpin_weight() -> Weight;
     fn unpin(hash: H256) -> DispatchResult;
 }
 
@@ -943,7 +946,7 @@ pub mod pallet {
     impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
         fn on_initialize(now: BlockNumberFor<T>) -> Weight {
             let mut writes = 0;
-            let (release_halted, mut bridge_weight) =
+            let (release_halted, mut hook_weight) =
                 T::MigrationHalt::recovery_image_release_halted();
             if PendingAnchorCapture::<T>::get() {
                 let mut capture_consumed = false;
@@ -954,22 +957,27 @@ pub mod pallet {
                         writes += 1;
                         capture_consumed = true;
                     }
-                } else if Self::release_recovery_image().is_ok() {
-                    // The primary image registered no MBMs, so its dormant
-                    // recovery request has no remaining purpose.
-                    writes += 1;
-                    if release_halted {
-                        bridge_weight = bridge_weight
-                            .saturating_add(T::MigrationHalt::recovery_image_release_repaired());
-                    }
-                    capture_consumed = true;
                 } else {
-                    // A corrupt/missing request must not silently consume the
-                    // only cleanup latch. Keep retrying under an execution
-                    // halt until operators repair the pin state.
-                    if !release_halted {
-                        bridge_weight = bridge_weight
-                            .saturating_add(T::MigrationHalt::recovery_image_release_failed());
+                    let (release_result, release_weight) = Self::release_recovery_image();
+                    hook_weight = hook_weight.saturating_add(release_weight);
+                    if release_result.is_ok() {
+                        // The primary image registered no MBMs, so its dormant
+                        // recovery request has no remaining purpose.
+                        if release_halted {
+                            hook_weight =
+                                hook_weight.saturating_add(
+                                    T::MigrationHalt::recovery_image_release_repaired(),
+                                );
+                        }
+                        capture_consumed = true;
+                    } else {
+                        // A corrupt/missing request must not silently consume
+                        // the only cleanup latch. Keep retrying under an
+                        // execution halt until operators repair the pin state.
+                        if !release_halted {
+                            hook_weight = hook_weight
+                                .saturating_add(T::MigrationHalt::recovery_image_release_failed());
+                        }
                     }
                 }
                 if capture_consumed {
@@ -983,9 +991,10 @@ pub mod pallet {
                 // recovery-image release can fail. Keep retrying that cleanup
                 // from the dedicated source; a repaired pin clears exactly
                 // this source, while another migration cause remains latched.
-                if Self::release_recovery_image().is_ok() {
-                    writes += 1;
-                    bridge_weight = bridge_weight
+                let (release_result, release_weight) = Self::release_recovery_image();
+                hook_weight = hook_weight.saturating_add(release_weight);
+                if release_result.is_ok() {
+                    hook_weight = hook_weight
                         .saturating_add(T::MigrationHalt::recovery_image_release_repaired());
                 }
             }
@@ -1006,7 +1015,7 @@ pub mod pallet {
             // two proofs (Cumulus pending code + system authorization).
             T::DbWeight::get()
                 .reads_writes(7, writes)
-                .saturating_add(bridge_weight)
+                .saturating_add(hook_weight)
         }
 
         fn integrity_test() {
@@ -1724,18 +1733,21 @@ pub mod pallet {
         /// rollback interval, so its application anchor must not outlive it.
         pub fn migration_completed() -> Weight {
             PreMigrationAnchor::<T>::kill();
-            let (release_halted, mut bridge_weight) =
-                T::MigrationHalt::recovery_image_release_halted();
-            if Self::release_recovery_image().is_err() {
+            let mut callback_weight = T::DbWeight::get().writes(1);
+            let (release_halted, bridge_weight) = T::MigrationHalt::recovery_image_release_halted();
+            callback_weight = callback_weight.saturating_add(bridge_weight);
+            let (release_result, release_weight) = Self::release_recovery_image();
+            callback_weight = callback_weight.saturating_add(release_weight);
+            if release_result.is_err() {
                 if !release_halted {
-                    bridge_weight = bridge_weight
+                    callback_weight = callback_weight
                         .saturating_add(T::MigrationHalt::recovery_image_release_failed());
                 }
             } else if release_halted {
-                bridge_weight = bridge_weight
+                callback_weight = callback_weight
                     .saturating_add(T::MigrationHalt::recovery_image_release_repaired());
             }
-            bridge_weight
+            callback_weight
         }
 
         /// Validate and materialize the exact pre-authorized recovery image.
@@ -1869,7 +1881,7 @@ pub mod pallet {
             CurrentSpecName::<T>::put(installed_version);
             PreMigrationAnchor::<T>::kill();
             PendingAnchorCapture::<T>::kill();
-            Self::release_recovery_image()?;
+            Self::release_recovery_image().0?;
             Self::persist(state)?;
             Self::deposit_event(Event::RecoveryImageApplied {
                 recovery_hash: recovery.hash,
@@ -1889,12 +1901,20 @@ pub mod pallet {
             });
         }
 
-        fn release_recovery_image() -> DispatchResult {
-            if let Some(recovery) = RecoveryImage::<T>::get() {
-                T::RecoveryImages::unpin(recovery.hash)?;
-                RecoveryImage::<T>::kill();
+        fn release_recovery_image() -> (DispatchResult, Weight) {
+            let mut weight = T::DbWeight::get().reads(1);
+            let Some(recovery) = RecoveryImage::<T>::get() else {
+                return (Ok(()), weight);
+            };
+
+            weight = weight.saturating_add(T::RecoveryImages::unpin_weight());
+            if let Err(error) = T::RecoveryImages::unpin(recovery.hash) {
+                return (Err(error), weight);
             }
-            Ok(())
+
+            RecoveryImage::<T>::kill();
+            weight = weight.saturating_add(T::DbWeight::get().writes(1));
+            (Ok(()), weight)
         }
 
         pub fn queue_reject_reason(pid: ProposalId) -> Option<RejectReason> {
@@ -2519,7 +2539,7 @@ pub mod pallet {
                 PhaseFourBridge::<T>::put(PhaseFourBridgeState::Consumed);
             }
             if RecoveryImage::<T>::get().is_some_and(|recovery| recovery.hash == pending.hash) {
-                Self::release_recovery_image()?;
+                Self::release_recovery_image().0?;
             }
             Self::persist(state)
         }
@@ -2547,7 +2567,7 @@ pub mod pallet {
             ) {
                 PhaseFourBridge::<T>::put(PhaseFourBridgeState::Unused);
             }
-            Self::release_recovery_image()?;
+            Self::release_recovery_image().0?;
             Self::deposit_event(Event::UpgradeAborted {
                 code_hash: pending.hash,
             });
