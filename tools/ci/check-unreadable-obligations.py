@@ -3,14 +3,14 @@
 
 `app/packages/transaction-builder/src/rows.ts` carries a list of reads that
 11 §11.8 requires and that 02 freezes no surface for. Each entry names the
-PLAN.md spec question that owns the gap, and each `blocking` entry closes an
+spec question that owns the gap, and each `blocking` entry closes an
 operator control: `operatorGate` turns it into a refusal the user sees, so the
 screen cannot reach `ready` while the entry stands.
 
 The file has always said those declarations "expire the way the limit-coverage
 registry and the monitoring seams do — by the row closing, not by somebody
 remembering to delete a comment". Nothing checked it. Contract v28 froze six
-surfaces and PLAN.md marked SQ-615, SQ-616 and SQ-619 resolved; three
+surfaces and SQ-615, SQ-616 and SQ-619 were marked resolved; three
 `blocking` entries stayed behind, so the guardian console, the upgrade crank and
 the registry challenge panel could not be opened at all — and because they could
 never reach `ready`, the suite covering them had settled for asserting the
@@ -18,12 +18,11 @@ refusal. A screen nothing can open is a screen nothing has exercised.
 
 So the expiry is mechanical here. One rule:
 
-    every `specQuestion` cited by an `unread(...)` entry is a row of PLAN.md's
-    spec-question table whose status cell begins with "open".
+    every `specQuestion` cited by an `unread(...)` entry is a plan/questions/
+    item whose `status:` frontmatter field is "open".
 
-"Open" is read exactly as `check-spec-question-batches.py` reads it — the status
-cell's leading word, not a keyword search, because open rows legitimately
-contain the word "resolved" in their prose.
+The status is read from `plan/questions/SQ-n.md`'s `status:` enum, not from
+prose — `tools.plan.model.load_questions` already parses it that way.
 
 The check deliberately does NOT verify the other direction (that an open
 question has a declaration): most questions have nothing to do with this table.
@@ -38,11 +37,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 ROWS_TS = ROOT / "app/packages/transaction-builder/src/rows.ts"
-PLAN = ROOT / "PLAN.md"
 
-QUESTION_HEADER = ("ID", "Question", "Spec ref", "Raised", "Status")
-QUESTION_ID_RE = re.compile(r"^SQ-\d+$")
-SEPARATOR_CELL_RE = re.compile(r"^:?-+:?$")
+sys.path.insert(0, str(ROOT))
+from tools.plan.model import load_questions  # noqa: E402
 
 # `unread(row, requirement, reason, specQuestion, disposition, scope?)` — the id
 # and the disposition are string literals in the fourth and fifth positions.
@@ -66,65 +63,15 @@ TAIL_RE = re.compile(
 )
 
 
-def split_cells(line: str) -> list[str]:
-    """Split a GFM table row: every unescaped `|` delimits. Mirrors
-    `check-plan-tables.py` — backticks do not protect a pipe in a table row."""
-    cells: list[str] = []
-    current: list[str] = []
-    escaped = False
-    for ch in line:
-        if escaped:
-            current.append(ch)
-            escaped = False
-        elif ch == "\\":
-            current.append(ch)
-            escaped = True
-        elif ch == "|":
-            cells.append("".join(current).strip())
-            current = []
-        else:
-            current.append(ch)
-    cells.append("".join(current).strip())
-    if cells and cells[0] == "":
-        cells = cells[1:]
-    if cells and cells[-1] == "":
-        cells = cells[:-1]
-    return cells
+def load_question_statuses(root: Path) -> tuple[dict[str, str], list[str]]:
+    """`SQ-n` -> "open" | "resolved", from the plan/ item tree.
 
-
-def is_separator_row(line: str) -> bool:
-    cells = split_cells(line)
-    return bool(cells) and all(SEPARATOR_CELL_RE.match(c) for c in cells)
-
-
-def question_status(text: str) -> dict[str, str]:
-    """`SQ-n` → "open" | "resolved", from PLAN.md's question table."""
-    status: dict[str, str] = {}
-    lines = text.splitlines()
-    in_fence = False
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        if line.lstrip().startswith("```"):
-            in_fence = not in_fence
-            i += 1
-            continue
-        if in_fence or not line.startswith("|"):
-            i += 1
-            continue
-        if tuple(split_cells(line)) == QUESTION_HEADER and i + 1 < len(lines) and is_separator_row(lines[i + 1]):
-            j = i + 2
-            while j < len(lines) and lines[j].startswith("|"):
-                if not is_separator_row(lines[j]):
-                    cells = split_cells(lines[j])
-                    if cells and QUESTION_ID_RE.match(cells[0]):
-                        leading = cells[-1].lstrip("*_ ").lower()
-                        status[cells[0]] = "open" if leading.startswith("open") else "resolved"
-                j += 1
-            i = j
-            continue
-        i += 1
-    return status
+    Replaces a reading that asked whether a status *cell* began with the word
+    "open" — necessary while the cell was prose, because an open row's prose
+    legitimately contains the word "resolved". `status` is now an enum.
+    """
+    items, errors = load_questions(root)
+    return {item.id: item.status for item in items}, errors
 
 
 def declarations(source: str) -> list[tuple[int, str, str]]:
@@ -143,9 +90,15 @@ def declarations(source: str) -> list[tuple[int, str, str]]:
 
 def main() -> int:
     source = ROWS_TS.read_text(encoding="utf-8")
-    status = question_status(PLAN.read_text(encoding="utf-8"))
+    status, load_errors = load_question_statuses(ROOT)
+    if load_errors:
+        # Fail closed: a parse error is not "nothing to check". Treating it as
+        # such would let a broken plan/questions/ tree pass every citation.
+        for error in load_errors:
+            print(error, file=sys.stderr)
+        return 1
     if not status:
-        print("PLAN.md: no spec-question table found (header changed?)", file=sys.stderr)
+        print("plan/questions/: no spec questions found", file=sys.stderr)
         return 1
 
     entries = declarations(source)
@@ -164,10 +117,10 @@ def main() -> int:
             continue
         state = status.get(sq)
         if state is None:
-            errors.append(f"{where}: cites {sq}, which is not a row of PLAN.md's spec-question table")
+            errors.append(f"{where}: cites {sq}, which is not a plan/questions/ item")
         elif state != "open":
             errors.append(
-                f"{where}: cites {sq}, which PLAN.md records as RESOLVED. "
+                f"{where}: cites {sq}, which is recorded RESOLVED. "
                 f"This declaration is {disposition}"
                 + (
                     " — it closes an operator control for a reason that no longer holds, "

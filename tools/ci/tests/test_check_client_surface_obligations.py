@@ -39,6 +39,46 @@ def load():
     return module
 
 
+def write_question(
+    root: Path,
+    identifier: str,
+    *,
+    status: str,
+    title: str | None = None,
+    spec_ref: str = "02 §7",
+    raised: str = "2026-01-01",
+    resolved: str | None = None,
+    batch: str = "X",
+) -> None:
+    """Write a minimal `plan/questions/<identifier>.md` frontmatter fixture."""
+    directory = root / "plan" / "questions"
+    directory.mkdir(parents=True, exist_ok=True)
+    lines = [
+        "---",
+        f"id: {identifier}",
+        f"title: {title or f'{identifier} title'}",
+        f"spec_ref: {spec_ref}",
+        f"raised: {raised}",
+        f"status: {status}",
+    ]
+    if resolved:
+        lines.append(f"resolved: {resolved}")
+    lines += [
+        f"batch: {batch if status == 'open' else 'none'}",
+        "---",
+        "",
+        "## Question",
+        "",
+        f"{identifier} question body.",
+        "",
+        "## Status",
+        "",
+        status,
+        "",
+    ]
+    (directory / f"{identifier}.md").write_text("\n".join(lines), encoding="utf-8")
+
+
 # The anti-vacuity positive controls the checker itself asserts. Repeated here so a test
 # failure names which side broke: the checker's own control, or this suite's model.
 #
@@ -265,50 +305,54 @@ class TestAntiVacuity(unittest.TestCase):
         # quiet. Either way the honest response is to stop, so it raises.
         import tempfile
 
-        table = "\n".join(
-            [
-                "| ID | Question | Spec ref | Raised | Status |",
-                "|---|---|---|---|---|",
-                "| SQ-1 | closed one | 02 §7 | 2026-01-01 | resolved |",
-                "| SQ-2 | closed two | 02 §7 | 2026-01-01 | resolved |",
-            ]
-        )
-        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as handle:
-            handle.write(table + "\n")
-            path = Path(handle.name)
-        original = self.m.PLAN
+        original = self.m.ROOT
         try:
-            self.m.PLAN = path
-            with self.assertRaises(SystemExit):
-                self.m.open_question_ids()
+            with tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                write_question(root, "SQ-1", status="resolved", resolved="2026-01-02")
+                write_question(root, "SQ-2", status="resolved", resolved="2026-01-02")
+                self.m.ROOT = root
+                with self.assertRaises(SystemExit):
+                    self.m.open_question_ids()
         finally:
-            self.m.PLAN = original
-            path.unlink()
+            self.m.ROOT = original
 
-    def test_open_rows_are_detected_by_prefix_not_by_substring(self):
-        # "open" must be tested as a *prefix* of the status cell: an open row
-        # legitimately contains the word "resolved" in its prose ("`gate.v_min`
-        # resolved; two rows remain"), and a substring test would close it.
+    def test_a_tree_with_no_plan_questions_directory_fails_closed(self):
+        # The other empty case: not "zero open", but "could not be parsed at
+        # all". Both must raise, or a broken tree silently expires every waiver.
         import tempfile
 
-        table = "\n".join(
-            [
-                "| ID | Question | Spec ref | Raised | Status |",
-                "|---|---|---|---|---|",
-                "| SQ-7 | a live one | 02 §7 | 2026-01-01 | open — `gate.v_min` resolved; two rows remain |",
-                "| SQ-8 | a closed one | 02 §7 | 2026-01-01 | resolved |",
-            ]
-        )
-        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False) as handle:
-            handle.write(table + "\n")
-            path = Path(handle.name)
-        original = self.m.PLAN
+        original = self.m.ROOT
         try:
-            self.m.PLAN = path
-            self.assertEqual(self.m.open_question_ids(), {7})
+            with tempfile.TemporaryDirectory() as raw:
+                self.m.ROOT = Path(raw)
+                with self.assertRaises(SystemExit):
+                    self.m.open_question_ids()
         finally:
-            self.m.PLAN = original
-            path.unlink()
+            self.m.ROOT = original
+
+    def test_open_ids_reads_the_status_field_not_title_prose(self):
+        # `status` is now an enum read from frontmatter, not a prose cell whose
+        # leading word had to be tested carefully — but the regression this
+        # guarded against (a question wrongly read as closed because its own
+        # text mentions "resolved") still deserves a pinned case.
+        import tempfile
+
+        original = self.m.ROOT
+        try:
+            with tempfile.TemporaryDirectory() as raw:
+                root = Path(raw)
+                write_question(
+                    root,
+                    "SQ-7",
+                    status="open",
+                    title="a live one — `gate.v_min` resolved; two rows remain",
+                )
+                write_question(root, "SQ-8", status="resolved", resolved="2026-01-02")
+                self.m.ROOT = root
+                self.assertEqual(self.m.open_question_ids(), {7})
+        finally:
+            self.m.ROOT = original
 
 
 class TestTheRealWaiverLoader(unittest.TestCase):
