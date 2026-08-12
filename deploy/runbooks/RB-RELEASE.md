@@ -6,7 +6,7 @@ funding_line: ops.arweave / ops.monitoring
 page_immediately: true
 alerts:
   - domain: Release integrity
-    trigger: any byte mismatch; 2-of-3 resolver divergence
+    trigger: any byte mismatch; any resolver divergence
   - domain: Descriptor lead time
     trigger: no covering release at 50% of DescriptorLeadTime
   - domain: ReleaseChannel
@@ -30,7 +30,7 @@ otherwise; the other legs protect upgrade compatibility and stranded users
 
 | Domain | Key series | Trigger |
 |---|---|---|
-| Release integrity | out-of-band bundle-vs-manifest comparison (§5.2), ArNS resolution consistency across gateways, ANT record history | any byte mismatch; 2-of-3 resolver divergence |
+| Release integrity | out-of-band bundle-vs-manifest comparison (§5.2), ArNS resolution consistency across gateways, ANT record history | any byte mismatch; any resolver divergence |
 | Descriptor lead time | `UpgradeAuthorized` age vs covering-release liveness | no covering release at 50% of `DescriptorLeadTime` |
 | ReleaseChannel | staleness vs latest repoint, flag changes | update missing 600 blocks after repoint; any `SECURITY` flip |
 
@@ -46,9 +46,16 @@ means pinned/stranded clients may have stale or security-critical recovery data.
    gateway response headers, and served bytes. Use a headless, cacheless fetcher;
    never trust a service worker in the incident path ([12 §5.2](../../docs/architecture/12-release-and-operations.md)).
 2. Resolve and fetch by both canonical name and immutable TXID. Byte-compare every
-   file with the signed `release.json` map, verify minisign signatures and
-   independent attestations against the current keyring generation and on-chain
-   revocation bits, and cross-check the manifest TXID with `ReleaseChannel`.
+   file with the signed `release.json` map, and require each named and immutable
+   root/default route to equal the path manifest's verified `index.path` bytes.
+   Obtain the credential-index TXID and
+   SHA-256 from the operator's independently authenticated private provisioning
+   record — never from the public release-note copy alone — fetch that exact TXID
+   through every configured gateway, and require byte equality plus the pinned
+   hash. Require its `release_json_sha256` and `manifest_txid` to match the served
+   bytes and `ReleaseChannel`; only then use its transaction IDs to verify minisign
+   signatures and organization-independent attestations against the current
+   keyring generation and on-chain revocation bits.
 3. Determine whether divergence is gateway-local, name-resolution divergence, an
    ANT record change, a signed-manifest mismatch, or altered bytes. Until all
    comparisons agree, keep the hostile-release classification.

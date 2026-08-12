@@ -26,6 +26,7 @@ from release_common import (
     source_date_epoch,
     write_json,
 )
+from rfc78 import metadata_hash
 from runtime_profiles import select_profile, validate_build_profile, validate_metadata_profile
 
 
@@ -238,6 +239,32 @@ def validate_runtime_binding(
                 f"runtime-info.metadata_sha256 {declared!r} does not match shipped "
                 f"metadata.scale sha256 {metadata_actual}"
             )
+        config = build_info.get("rfc78_metadata_hash")
+        if isinstance(config, dict):
+            try:
+                computed_rfc78 = metadata_hash(
+                    metadata_path,
+                    str(config.get("token_symbol", "")),
+                    int(config.get("token_decimals", -1)),
+                )
+            except (
+                OSError,
+                RuntimeError,
+                TypeError,
+                ValueError,
+                subprocess.SubprocessError,
+            ) as error:
+                errors.append(f"cannot independently recompute shipped RFC-78 digest: {error}")
+            else:
+                for label in (
+                    "rfc78_merkleized_metadata_hash",
+                    "embedded_rfc78_metadata_hash",
+                ):
+                    if runtime_info.get(label) != computed_rfc78:
+                        errors.append(
+                            f"runtime-info.{label} {runtime_info.get(label)!r} does not "
+                            f"match shipped metadata.scale RFC-78 digest {computed_rfc78}"
+                        )
     return actual, errors
 
 

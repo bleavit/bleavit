@@ -7,12 +7,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 
-# These tests pin what the release workflow must DO, not which release of a
-# third-party action it does it with. Asserting a literal `@v4` made Dependabot's
-# routine setup-node v4 -> v7 bump (#76) red two of them, because the action
-# major is exactly what Dependabot's job is to move; the toolchain version is
-# what the contract actually cares about and it is asserted separately.
-SETUP_NODE = re.compile(r"actions/setup-node@v\d+")
+# The separate action-pin gate owns exact SHAs. This expression recognizes the
+# pinned action while these tests continue to assert what the workflow does.
+SETUP_NODE = re.compile(r"actions/setup-node@[0-9a-f]{40}\s+#\s+v\d+(?:\.\d+){1,2}")
 
 
 class WorkflowContractTests(unittest.TestCase):
@@ -62,7 +59,12 @@ class WorkflowContractTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
         gates = workflow[workflow.index("  gates:"):workflow.index("  artifacts:")]
         self.assertSetsUpNode(gates, "the tag gates job must set up Node")
-        self.assertIn("node-version: '22'", gates)
+        self.assertIn("node-version-file: app/.nvmrc", gates)
+        self.assertIn("working-directory: app", gates)
+        self.assertLess(
+            gates.index("pnpm install --frozen-lockfile --ignore-scripts"),
+            gates.index('python3 -m unittest discover -s "$suite"'),
+        )
         for suite in (
             "tools/deploy/tests",
             "tools/reference-model/tests",
@@ -129,11 +131,16 @@ class WorkflowContractTests(unittest.TestCase):
             "&& inputs.runtime_profile || '' }}",
             workflow,
         )
-        self.assertIn('tools/release/build-runtime.sh "$RELEASE_WORK/runtime" "$primary_profile"', workflow)
         self.assertIn(
-            'tools/release/build-runtime.sh "$RELEASE_WORK/runtime/recovery" "$recovery_profile"',
+            'tools/release/build-runtime-oci.sh "$RELEASE_WORK/runtime" "$primary_profile"',
             workflow,
         )
+        self.assertIn(
+            'recovery_profile=$(python3 "$profile_tool" --profile "$primary_profile" '
+            '--field recovery_profile)',
+            (ROOT / "tools/release/build-runtime-oci.sh").read_text(encoding="utf-8"),
+        )
+        self.assertNotIn("tools/release/build-runtime.sh", workflow)
         self.assertIn(
             '--recovery-metadata "$RELEASE_WORK/runtime/recovery/metadata.scale"',
             workflow,

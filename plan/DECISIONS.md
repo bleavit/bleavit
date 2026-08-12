@@ -281,4 +281,10 @@
 | 2026-08-11 | [The 2026-08-02 weight-noise rule now has a per-function…](decisions/2026/08/2026-08-11.md#the-2026-08-02-weight-noise-rule-now-has-a-per-function) | Session, applying the 2026-08… |
 | 2026-08-11 | [10 §9.3's metadata measurement is re-taken for the…](decisions/2026/08/2026-08-11.md#10-93s-metadata-measurement-is-re-taken-for-the) | Session, under R-1 (spec ruli… |
 | 2026-08-11 | [15 §4.5 gates `unsound` RustSec advisories instead of…](decisions/2026/08/2026-08-11.md#15-45-gates-unsound-rustsec-advisories-instead-of) | R-1 (spec rulings delegated 2… |
+| 2026-08-12 | [Hosted-service retention is bounded by lawful throughput across the archive horizon](decisions/2026/08/2026-08-12.md#hosted-service-retention-is-bounded-by-lawful-throughput-across-the-archive-horizon) | This session under R-1/R-2 (t… |
+| 2026-08-12 | [A signing authorization owns its reads and freezes exactly one signing target](decisions/2026/08/2026-08-12.md#a-signing-authorization-owns-its-reads-and-freezes-exactly-one-signing-target) | This session under R-1 (imple… |
+| 2026-08-12 | [Decision-grade XCM health is protocol-authored and legacy ingress denies all nine program carriers](decisions/2026/08/2026-08-12.md#decision-grade-xcm-health-is-protocol-authored-and-legacy-ingress-denies-all-nine-program-carriers) | This session under R-1/R-7 (t… |
+| 2026-08-12 | [Release integrity uses independently pinned credentials, exact transport agreement and pinned build inputs](decisions/2026/08/2026-08-12.md#release-integrity-uses-independently-pinned-credentials-exact-transport-agreement-and-pinned-build-inputs) | This session under R-1/R-7 (i… |
+| 2026-08-12 | [Metadata-hash mode 1 is bound to the final runtime artifact](decisions/2026/08/2026-08-12.md#metadata-hash-mode-1-is-bound-to-the-final-runtime-artifact) | This session implementing the… |
+| 2026-08-12 | [Reusable client report retention has an explicit bounded lifecycle](decisions/2026/08/2026-08-12.md#reusable-client-report-retention-has-an-explicit-bounded-lifecycle) | This session under R-1 (imple… |
 

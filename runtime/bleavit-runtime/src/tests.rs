@@ -2506,6 +2506,17 @@ fn canonical_asset_hub_exit_is_public_and_runtime_filter_rejects_sibling_or_unkn
     assert!(RuntimeBaseCallFilter::contains(&call(
         bleavit_xcm::identity::asset_hub_location(),
     )));
+    // SR-04/I-36: this signed call is adversary-controlled. Its router must be
+    // the bare topic router, never the decision-grade protocol router, so even
+    // repeated locally accepted exits cannot improve welfare's X numerator.
+    assert_same_type::<
+        <Runtime as pallet_xcm::Config>::XcmRouter,
+        crate::configs::xcm_config::PublicRouter,
+    >();
+    assert_same_type::<
+        crate::configs::xcm_config::PublicRouter,
+        crate::configs::xcm_config::TopicRouter,
+    >();
     assert!(!RuntimeBaseCallFilter::contains(&call(
         bleavit_xcm::identity::coretime_location(),
     )));
@@ -3691,8 +3702,21 @@ fn production_xcm_config_binds_capped_assets_reserves_barrier_and_trap_claims() 
         <Runtime as pallet_xcm::Config>::XcmExecutor,
         xcm_config::TrapRecoveryExecutor,
     >();
-    assert_same_type::<<xcm_config::XcmConfig as ExecutorConfig>::XcmSender, xcm_config::Router>();
-    assert_same_type::<<Runtime as pallet_xcm::Config>::XcmRouter, xcm_config::Router>();
+    assert_same_type::<xcm_config::PublicRouter, xcm_config::TopicRouter>();
+    assert_same_type::<xcm_config::ClientEgressRouter, xcm_config::PublicRouter>();
+    assert_same_type::<
+        <xcm_config::XcmConfig as ExecutorConfig>::XcmSender,
+        xcm_config::PublicRouter,
+    >();
+    assert_same_type::<<Runtime as pallet_xcm::Config>::XcmRouter, xcm_config::PublicRouter>();
+    assert_same_type::<
+        <xcm_config::XcmConfig<
+            xcm_config::CappedAssets,
+            staging_xcm_builder::TakeWeightCredit,
+            xcm_config::ProtocolRouter,
+        > as ExecutorConfig>::XcmSender,
+        xcm_config::ProtocolRouter,
+    >();
     assert_same_type::<
         <xcm_config::XcmConfig as ExecutorConfig>::IsReserve,
         bleavit_xcm::assets::BleavitReserves,

@@ -86,28 +86,18 @@ impl DenyExecution for DenyTransact {
     }
 }
 
-/// Rejects every instruction outside the reserve-transfer, fee, query and version-negotiation
-/// surface; nested programs are checked recursively (09 §6.1).
+/// Rejects every instruction outside the reserve-transfer, fee, query and
+/// version-negotiation surface (09 §6.1).
+///
+/// All nine instructions carrying an inner program are deliberately absent.
+/// Programs authored locally by the protocol (the Asset Hub reserve probe and
+/// relay/Coretime renewal legs) execute on their destination chain, or through
+/// a private local executor, and do not require widening Bleavit's inbound
+/// barrier.
 pub struct DenyUnsupportedInstructions;
 
 impl DenyUnsupportedInstructions {
     fn all_supported<Call>(instructions: &[Instruction<Call>]) -> bool {
-        let mut remaining = usize::from(MAX_INSTRUCTIONS_TO_DECODE);
-        Self::all_supported_bounded(instructions, 0, &mut remaining)
-    }
-
-    fn all_supported_bounded<Call>(
-        instructions: &[Instruction<Call>],
-        depth: u32,
-        remaining: &mut usize,
-    ) -> bool {
-        if depth > MAX_XCM_DECODE_DEPTH || instructions.len() > *remaining {
-            return false;
-        }
-        let Some(next_remaining) = remaining.checked_sub(instructions.len()) else {
-            return false;
-        };
-        *remaining = next_remaining;
         instructions.iter().all(|instruction| match instruction {
             // This is the closed v1 surface needed by canonical reserve transfers, fee
             // purchase/refund, trapped-asset handling, query responses and version discovery.
@@ -128,15 +118,6 @@ impl DenyUnsupportedInstructions {
             | Instruction::SetTopic(_)
             | Instruction::ClearTopic
             | Instruction::PayFees { .. } => true,
-            Instruction::SetAppendix(xcm) | Instruction::SetErrorHandler(xcm) => depth
-                .checked_add(1)
-                .is_some_and(|next| Self::all_supported_bounded(&xcm.0, next, remaining)),
-            Instruction::TransferReserveAsset { xcm, .. }
-            | Instruction::DepositReserveAsset { xcm, .. }
-            | Instruction::InitiateReserveWithdraw { xcm, .. }
-            | Instruction::InitiateTeleport { xcm, .. } => depth
-                .checked_add(1)
-                .is_some_and(|next| Self::all_supported_bounded(&xcm.0, next, remaining)),
             _ => false,
         })
     }

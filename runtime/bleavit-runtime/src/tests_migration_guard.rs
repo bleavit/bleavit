@@ -2344,17 +2344,10 @@ fn welfare_snapshot_context_migration_try_runtime_proves_the_pairing() {
     });
 }
 
-/// **Regression (audit 2026-07-27, AUD-1).** `ExecutionGuard::migration_completed`
-/// engages the fail-static execution halt directly when the paired recovery image
-/// cannot be released — the guard's own comment calls it "the only cleanup latch".
-/// `MigrationStatusToGuard::completed` used to call it BEFORE
-/// `clear_migration_halt_sources`, whose `sync_execution_migration_halt`
-/// **overwrites** `MigrationHalt` from the `MigrationHaltSources` bitmask alone.
-/// Because the guard's condition sets no source bit, the halt it had just raised
-/// was erased in the same call — and nothing re-raises it, because by then the
-/// cursor is gone and `PendingAnchorCapture` has been consumed, so the guard's
-/// per-block retry no longer runs. The latch was a no-op on the one path it
-/// exists to guard (09 §3.2; R-7). Ordering the clear first is the repair.
+/// SQ-504/SR-13: a failed recovery-image release is a first-class runtime halt
+/// source, not a direct write racing the source bitmap. It emits the ordinary
+/// first-activation diagnostic, survives migration completion, and remains
+/// retryable even though the capture latch and SDK cursor are already gone.
 #[cfg(not(any(
     feature = "runtime-benchmarks",
     feature = "try-runtime",
@@ -2363,6 +2356,8 @@ fn welfare_snapshot_context_migration_try_runtime_proves_the_pairing() {
 #[test]
 fn completed_migration_keeps_the_halt_when_the_recovery_image_cannot_be_released() {
     tests::development_ext().execute_with(|| {
+        // FRAME deliberately drops events at genesis block zero.
+        System::set_block_number(1);
         // A committed recovery image whose preimage was never requested: the
         // `RecoveryImages::unpin` seam refuses with `Unavailable`, which is
         // exactly the corrupt-pin state the guard halts on.
@@ -2379,19 +2374,82 @@ fn completed_migration_keeps_the_halt_when_the_recovery_image_cannot_be_released
         );
         assert_eq!(crate::configs::MigrationHaltSources::get(), 0);
         assert!(!pallet_execution_guard::MigrationHalt::<Runtime>::get());
+        let mandatory_before = *System::block_weight()
+            .get(frame_support::dispatch::DispatchClass::Mandatory);
 
         <crate::configs::MigrationStatusToGuard as frame_support::migrations::MigrationStatusHandler>::completed();
 
-        // The unreleasable image is still pinned, so the latch MUST stand.
+        let mandatory_after = *System::block_weight()
+            .get(frame_support::dispatch::DispatchClass::Mandatory);
+        let expected_bridge = <Runtime as frame_system::Config>::DbWeight::get()
+            .reads(1)
+            .saturating_add(crate::configs::migration_validation_hook_weight());
+        type WelfareWeight = <Runtime as pallet_welfare::Config>::WeightInfo;
+        let expected_integrity =
+            <WelfareWeight as pallet_welfare::WeightInfo>::note_integrity_failure();
+        assert_eq!(
+            mandatory_after,
+            mandatory_before
+                .saturating_add(expected_bridge)
+                .saturating_add(expected_integrity),
+        );
+
+        // The unreleasable image commitment remains, so the latch MUST stand.
         assert!(pallet_execution_guard::RecoveryImage::<Runtime>::get().is_some());
         assert!(
             pallet_execution_guard::MigrationHalt::<Runtime>::get(),
-            "the execution halt raised by migration_completed was silently cleared"
+            "the recovery-image release source did not engage the aggregate halt"
         );
+        assert_ne!(
+            crate::configs::MigrationHaltSources::get()
+                & crate::configs::RECOVERY_IMAGE_RELEASE_HALT,
+            0,
+        );
+        assert_eq!(crate::configs::recovery_trigger(), None);
+        let diagnostics = System::events()
+            .into_iter()
+            .filter(|record| {
+                matches!(
+                    &record.event,
+                    RuntimeEvent::ExecutionGuard(pallet_execution_guard::Event::MigrationHalted {
+                        cursor,
+                        failed_step: None,
+                    }) if cursor.is_empty()
+                )
+            })
+            .count();
+        assert_eq!(diagnostics, 1);
+
+        // A repair clears only this source. Seed another live halt cause to
+        // prove the aggregate cannot resume merely because the pin recovered.
+        crate::configs::note_migration_stall_halt_for_test();
+
+        // Repair only the missing request/pin. The guard's next-block retry
+        // releases the image and clears exactly the dedicated source.
+        <crate::Preimage as frame_support::traits::QueryPreimage>::request(
+            &sp_core::H256::from([0xb2; 32]),
+        );
+        System::set_block_number(System::block_number().saturating_add(1));
+        let _ = <ExecutionGuard as frame_support::traits::Hooks<_>>::on_initialize(
+            System::block_number(),
+        );
+
+        assert!(!pallet_execution_guard::RecoveryImage::<Runtime>::exists());
+        assert_eq!(
+            crate::configs::MigrationHaltSources::get(),
+            crate::configs::MIGRATION_STALL_HALT,
+        );
+        assert!(pallet_execution_guard::MigrationHalt::<Runtime>::get());
+
+        // The ordinary completion transition can still clear the independent
+        // cursor-owned source once its own condition has resolved.
+        <crate::configs::MigrationStatusToGuard as frame_support::migrations::MigrationStatusHandler>::completed();
+        assert_eq!(crate::configs::MigrationHaltSources::get(), 0);
+        assert!(!pallet_execution_guard::MigrationHalt::<Runtime>::get());
     });
 }
 
-/// The ordering repair must not turn the ordinary case into a stuck halt: a
+/// The source bridge must not turn the ordinary case into a stuck halt: a
 /// completed migration whose recovery image releases cleanly leaves the queue
 /// running and the source mask empty.
 #[cfg(not(any(

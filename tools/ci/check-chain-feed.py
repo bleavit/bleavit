@@ -411,8 +411,11 @@ def main() -> int:
         profile = profiles.get(info.get("runtime_profile"), {})
         # Feature-derived, never assumed: `Sudo` sits behind `#[cfg(feature =
         # "bootstrap")]`, so the lawful pallet set is a property of the profile.
-        features = {f for f in profile.get("cargo_features", ["bootstrap"]) if f not in
-                    ("std", "substrate-wasm-builder")}
+        features = {
+            feature
+            for feature in profile.get("cargo_features", ["bootstrap"])
+            if feature not in ("std", "substrate-wasm-builder", "metadata-hash")
+        }
         print(f"-- {directory.name}/ ({info.get('runtime_profile', 'unknown profile')})")
         problems += check_feed(directory / "metadata.scale", info_path, features)
     problems += check_pair(root)

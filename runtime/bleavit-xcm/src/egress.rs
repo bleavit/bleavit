@@ -1,8 +1,9 @@
 //! Best-effort hosted-report egress (16 §9; I-36).
 //!
 //! This module deliberately has no `LocalXcmHealthSink` type parameter. The
-//! runtime binds it to bare `TopicRouter`, while every other protocol send may
-//! continue to use `HealthTrackingRouter`.
+//! runtime binds it to bare `TopicRouter` alongside every externally-triggered
+//! route. Only fixed runtime-authored maintenance may use
+//! `HealthTrackingRouter`.
 
 use core::marker::PhantomData;
 

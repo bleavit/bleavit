@@ -244,22 +244,11 @@ mod benches {
 
     #[benchmark]
     fn set_paused(q: Linear<0, MAX_QUESTIONS_BOUND>) -> Result<(), BenchmarkError> {
-        for index in 0..q {
-            let question = kernel::SERVICE_ID_BASE + u64::from(index) * 3;
-            Questions::<T>::insert(
-                question,
-                QuestionRecord {
-                    client_id: 0,
-                    phase: QuestionPhase::Registered,
-                    window_start: START,
-                    window_end: END,
-                    declared_stake: currency::USDC,
-                    epsilon_1e9: FixedU64(100_000_000),
-                    tolerance_1e9: FixedU64(10_000_000),
-                    markets: [question + 1, question + 2],
-                },
-            );
-        }
+        // Retain the historical component so regenerated weights visibly
+        // collapse its slope to zero: the dispatch now writes one allocator
+        // cutoff and never walks these q live questions.
+        let cutoff = kernel::SERVICE_ID_BASE.saturating_add(u64::from(q).saturating_mul(3));
+        NextServiceId::<T>::put(cutoff);
         <T as Config>::BenchmarkHelper::advance_to(1);
         let origin = <T as pallet_conditional_ledger::Config<Instance1>>::EmergencyPlaybookOrigin::try_successful_origin()
             .map_err(|_| BenchmarkError::Stop("benchmark emergency origin unavailable"))?;
@@ -267,10 +256,8 @@ mod benches {
         #[extrinsic_call]
         _(origin, Some(END));
 
-        assert_eq!(
-            crate::pallet::PauseAffected::<T>::iter().count(),
-            q as usize
-        );
+        assert_eq!(crate::pallet::PauseQuestionCutoff::<T>::get(), cutoff);
+        assert_eq!(crate::pallet::PauseAffected::<T>::iter().count(), 0);
         Ok(())
     }
 

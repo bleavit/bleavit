@@ -15,11 +15,11 @@
  *
  * ## What it does
  *
- * Forwards its arguments to `node --test`, streams the output through unchanged so the TAP
- * report is exactly what it was, then parses the summary and fails if `# tests` is zero or
- * absent. The patterns are passed to **node's own glob**, not the shell's, so
- * `*.test.{js,ts}` matches both extensions and a half-migrated directory keeps running all
- * of its tests.
+ * Resolves its patterns with Node's `fs.globSync`, forwards the resulting files to
+ * `node --test`, streams the output through unchanged so the TAP report is exactly what it
+ * was, then parses the summary and fails if `# tests` is zero or absent. This distinction is
+ * load-bearing on the pinned Node 22: `fs.globSync` expands `*.test.{js,ts}`, while the test
+ * runner's own glob does not expand braces and otherwise executes nothing.
  *
  * Absent is treated the same as zero deliberately: if the summary line cannot be found, this
  * cannot prove anything ran, and an unprovable claim is refused rather than assumed
@@ -27,14 +27,25 @@
  */
 
 import { spawn } from 'node:child_process';
+import { globSync } from 'node:fs';
 
-const patterns = process.argv.slice(2);
-if (patterns.length === 0) {
+const args = process.argv.slice(2);
+if (args.length === 0) {
   console.error('run-suite: needs at least one test pattern');
   process.exit(2);
 }
 
-const child = spawn(process.execPath, ['--test', ...patterns], {
+const options = args.filter((arg) => arg.startsWith('-'));
+const patterns = args.filter((arg) => !arg.startsWith('-'));
+const files = [...new Set(patterns.flatMap((pattern) => globSync(pattern)))].sort();
+if (files.length === 0) {
+  console.error(
+    `run-suite: the pattern(s) ${patterns.join(' ')} matched zero files; refusing a vacuous pass`,
+  );
+  process.exit(1);
+}
+
+const child = spawn(process.execPath, ['--test', ...options, ...files], {
   stdio: ['inherit', 'pipe', 'inherit'],
 });
 

@@ -164,6 +164,17 @@ class WasmBindingTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             EXTRACT.bound_wasm_hashes(b"wasm-a", "0x7761736d2d62")
 
+    def test_embedded_rfc78_digest_decodes_exact_option_shape(self) -> None:
+        digest = bytes(range(32))
+        self.assertEqual(
+            EXTRACT.decode_embedded_rfc78_metadata_hash("0x01" + digest.hex()),
+            "0x" + digest.hex(),
+        )
+        for malformed in ("0x", "0x00", "0x01" + "11" * 31, "0x02" + "11" * 32):
+            with self.subTest(malformed=malformed):
+                with self.assertRaises(RuntimeError):
+                    EXTRACT.decode_embedded_rfc78_metadata_hash(malformed)
+
 
 class NodeRetryTests(unittest.TestCase):
     def test_exit_before_ready_re_reserves_port_and_relaunches(self) -> None:

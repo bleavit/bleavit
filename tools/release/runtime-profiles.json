@@ -1,10 +1,18 @@
 {
+  "build_environment": {
+    "image": "docker.io/paritytech/ci-unified@sha256:a697eab780f23ed77a5d4da75b56480a757ea5deb04f3bfcb3e879b0e0d9e99e",
+    "image_id": "sha256:f10f87f1326650e0ef6db0a9184d15d08256f402bb5f5c85624f6f4c741473e7",
+    "kind": "oci",
+    "platform": "linux/amd64",
+    "upstream_tag": "bullseye-1.88.0-2025-06-27-v202511141243"
+  },
   "profiles": {
     "bootstrap": {
       "base": "bootstrap",
       "cargo_features": [
         "std",
         "substrate-wasm-builder",
+        "metadata-hash",
         "bootstrap"
       ],
       "multi_block_migrations": "normal",
@@ -17,6 +25,7 @@
       "cargo_features": [
         "std",
         "substrate-wasm-builder",
+        "metadata-hash",
         "bootstrap",
         "recovery"
       ],
@@ -30,6 +39,7 @@
       "cargo_features": [
         "std",
         "substrate-wasm-builder",
+        "metadata-hash",
         "phase-four"
       ],
       "multi_block_migrations": "normal",
@@ -42,6 +52,7 @@
       "cargo_features": [
         "std",
         "substrate-wasm-builder",
+        "metadata-hash",
         "phase-four",
         "recovery"
       ],
@@ -52,5 +63,5 @@
     }
   },
   "release_default": "bootstrap",
-  "schema": "bleavit.runtime-profiles.v1"
+  "schema": "bleavit.runtime-profiles.v2"
 }

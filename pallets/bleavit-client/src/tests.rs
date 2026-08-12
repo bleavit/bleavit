@@ -1,4 +1,4 @@
-use crate::{mock::*, Error, Question, Reports, WeightInfo};
+use crate::{mock::*, Error, Question, Reports, ReportsPrunedThrough, WeightInfo};
 use bleavit_client_abi::{ClientRule, RegisterInput};
 use frame_support::{assert_err, assert_ok, weights::Weight};
 use futarchy_primitives::{FixedU64, ReportView, SettlementTrust};
@@ -144,6 +144,47 @@ fn handler_failure_rolls_back_report_storage() {
             Error::<Test>::ReportHandlerRejected
         );
         assert!(!Reports::<Test>::contains_key(8));
+    });
+}
+
+#[test]
+fn governance_pruning_reuses_capacity_without_reopening_replay() {
+    new_test_ext().execute_with(|| {
+        assert_ok!(BleavitClient::receive_report(
+            RuntimeOrigin::root(),
+            report(7)
+        ));
+        assert_ok!(BleavitClient::receive_report(
+            RuntimeOrigin::root(),
+            report(8)
+        ));
+        assert_err!(
+            BleavitClient::receive_report(RuntimeOrigin::root(), report(9)),
+            Error::<Test>::ReportCapacityReached
+        );
+        assert_err!(
+            BleavitClient::prune_reports(RuntimeOrigin::signed(account(1)), 7),
+            Error::<Test>::BadReportPruneOrigin
+        );
+
+        assert_ok!(BleavitClient::prune_reports(RuntimeOrigin::root(), 7));
+        assert_eq!(ReportsPrunedThrough::<Test>::get(), 7);
+        assert!(!Reports::<Test>::contains_key(7));
+        assert!(Reports::<Test>::contains_key(8));
+        assert_err!(
+            BleavitClient::prune_reports(RuntimeOrigin::root(), 7),
+            Error::<Test>::ReportPruneNotAdvanced
+        );
+        assert_ok!(BleavitClient::receive_report(
+            RuntimeOrigin::root(),
+            report(9)
+        ));
+        assert_err!(
+            BleavitClient::receive_report(RuntimeOrigin::root(), report(7)),
+            Error::<Test>::ReportPruned
+        );
+        assert_eq!(HANDLER_CALLS.with(|calls| *calls.borrow()), 3);
+        assert_ok!(BleavitClient::do_try_state());
     });
 }
 

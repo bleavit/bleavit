@@ -108,23 +108,23 @@ def integrity_fixture() -> dict[str, Any]:
         "keyring_generation": 7,
         "supported_spec_version": {"min": 40, "max": 50},
         "files": {name: hashlib.sha256(value).hexdigest() for name, value in files.items()},
-        "release_signatures": [],
-        "attestations": [],
     }
     release_raw = json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
     key_specs = [
-        (11, 21, "release", 0),
-        (12, 22, "attestor", 1),
-        (13, 23, "attestor", 2),
+        (11, 21, "release", 0, "release-org-a"),
+        (12, 22, "attestor", 1, "attestor-org-a"),
+        (13, 23, "attestor", 2, "attestor-org-b"),
     ]
     records: dict[bytes, am.KeyRecord] = {}
     signatures: list[str] = []
     attestations: list[str] = []
     message = hashlib.sha256(release_raw).digest()
-    for seed_byte, id_byte, role, revocation_index in key_specs:
+    for seed_byte, id_byte, role, revocation_index, organization in key_specs:
         seed, public, key_id = keypair(seed_byte, id_byte)
         parsed = am.parse_minisign_public_key(public_text(public, key_id))
-        records[key_id] = am.KeyRecord(key_id, parsed, role, revocation_index)
+        records[key_id] = am.KeyRecord(
+            key_id, parsed, role, revocation_index, organization
+        )
         blob = minisign_text(seed, public, key_id, message)
         (signatures if role == "release" else attestations).append(blob)
     return {
@@ -138,4 +138,3 @@ def integrity_fixture() -> dict[str, Any]:
         "channel": release_channel_bytes(release_json_hash=hashlib.sha256(release_raw).digest()),
         "resolved": ["A" * 43] * 3,
     }
-

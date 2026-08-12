@@ -1,6 +1,6 @@
 {
   "schema": "bleavit.critical-surface.v1",
-  "integration_contract_version": 30,
+  "integration_contract_version": 31,
   "description": "Critical chain/frontend surface frozen by architecture 02 sections 3, 6-9, and 12.",
   "release_blockers": [
     {
@@ -183,7 +183,7 @@
       "citation": "02 §9",
       "layout": {
         "type": "u32",
-        "value": "0x1e000000"
+        "value": "0x1f000000"
       }
     },
     {
@@ -315,7 +315,7 @@
       "citation": "02 §9",
       "layout": {
         "type": "u32",
-        "value": "0x1e000000"
+        "value": "0x1f000000"
       }
     },
     {
@@ -495,7 +495,7 @@
       "citation": "02 §8; 02 §13",
       "layout": {
         "type": "u32",
-        "value": "0x1e000000"
+        "value": "0x1f000000"
       }
     },
     {
@@ -687,7 +687,7 @@
       "citation": "02 §9",
       "layout": {
         "type": "u32",
-        "value": "0x40090000"
+        "value": "0x40460000"
       }
     },
     {
@@ -723,7 +723,7 @@
       "citation": "02 §9",
       "layout": {
         "type": "u32",
-        "value": "0x80000000"
+        "value": "0x803d0000"
       }
     },
     {
@@ -879,7 +879,7 @@
       "citation": "02 §9",
       "layout": {
         "type": "u32",
-        "value": "0x1e000000"
+        "value": "0x1f000000"
       }
     },
     {
@@ -927,7 +927,7 @@
       "citation": "02 §9",
       "layout": {
         "type": "u32",
-        "value": "0x1e000000"
+        "value": "0x1f000000"
       }
     },
     {

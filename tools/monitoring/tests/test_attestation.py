@@ -99,11 +99,28 @@ class AttestationVerdictTests(unittest.TestCase):
         self.assertFalse(verdict.ok)
         self.assertEqual(verdict.resolver_divergent_gateways, 2)
 
-    def test_one_of_three_resolver_difference_is_recorded_but_not_threshold_failure(self) -> None:
+    def test_one_of_three_resolver_difference_fails_integrity(self) -> None:
         fixture = integrity_fixture()
         verdict = evaluate(fixture, resolved_txids=["B" * 43, "A" * 43, "A" * 43])
-        self.assertTrue(verdict.ok, verdict.errors)
+        self.assertFalse(verdict.ok)
         self.assertEqual(verdict.resolver_divergent_gateways, 1)
+
+    def test_two_attestor_keys_from_one_organization_count_once(self) -> None:
+        fixture = integrity_fixture()
+        keys = dict(fixture["keyring"].keys)
+        attestors = [record for record in keys.values() if record.role == "attestor"]
+        replacement = attestors[1]
+        keys[replacement.key_id] = am.KeyRecord(
+            replacement.key_id,
+            replacement.public_key,
+            replacement.role,
+            replacement.revocation_index,
+            attestors[0].organization,
+        )
+        verdict = evaluate(fixture, keyring=am.Keyring(7, keys))
+        self.assertFalse(verdict.ok)
+        self.assertEqual(verdict.valid_attestations, 1)
+        self.assertTrue(any("organizations 1 < 2" in error for error in verdict.errors))
 
     def test_non_covering_release_fixture(self) -> None:
         fixture = integrity_fixture()

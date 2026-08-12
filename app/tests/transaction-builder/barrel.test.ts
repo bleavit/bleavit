@@ -16,6 +16,7 @@ import assert from 'node:assert/strict';
 
 import * as barrel from '@bleavit/signing';
 import * as testing from '@bleavit/signing/testing';
+import * as transactionBuilder from '@bleavit/transaction-builder';
 
 import { assertTestingSubpathIsQuarantined } from '../shared/testing-subpath.ts';
 
@@ -28,5 +29,14 @@ test('the mock signer is not reachable from the @bleavit/signing barrel', () => 
       barrelMustExport: ['describeSigner', 'SignerRegistry'],
     },
     assert,
+  );
+});
+
+test('the transaction-builder barrel exposes only the read-owning gate path', () => {
+  assert.equal(typeof transactionBuilder.refreshAndGate, 'function');
+  assert.equal(
+    Object.hasOwn(transactionBuilder, 'gate'),
+    false,
+    'a caller-fabricable plain-value gate escaped the package boundary',
   );
 });

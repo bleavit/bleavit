@@ -276,6 +276,38 @@ impl MigrationStatusProvider for () {
     }
 }
 
+/// Runtime-owned source tracking for recovery-image release failures.
+///
+/// `MigrationHalt` is the guard's aggregate execution freeze, while the
+/// runtime owns the source bitmap, activation-edge diagnostic and integrity
+/// accounting. The guard must therefore never write that aggregate directly
+/// for a runtime-detected failure. This seam keeps the two representations
+/// atomic and also exposes the dedicated source so `on_initialize` can retry a
+/// failed post-completion release after operators repair the pin state.
+pub trait MigrationHaltBridge {
+    /// Whether the dedicated recovery-image-release source is active, plus the
+    /// bounded weight of obtaining that answer.
+    fn recovery_image_release_halted() -> (bool, Weight);
+    /// Activate the dedicated source and return the bounded bridge weight.
+    fn recovery_image_release_failed() -> Weight;
+    /// Clear only the dedicated source and return the bounded bridge weight.
+    fn recovery_image_release_repaired() -> Weight;
+}
+
+impl MigrationHaltBridge for () {
+    fn recovery_image_release_halted() -> (bool, Weight) {
+        (false, Weight::zero())
+    }
+
+    fn recovery_image_release_failed() -> Weight {
+        Weight::zero()
+    }
+
+    fn recovery_image_release_repaired() -> Weight {
+        Weight::zero()
+    }
+}
+
 /// The execution guard is one of the two exhaustive writers of the frozen
 /// 168-byte ReleaseChannel record (02 §12).
 pub trait ReleaseChannelWriter {
@@ -464,6 +496,7 @@ pub mod pallet {
         type Capabilities: Capabilities<Self::RuntimeCall>;
         type UpgradeSchedule: UpgradeSchedule;
         type MigrationStatus: MigrationStatusProvider;
+        type MigrationHalt: MigrationHaltBridge;
         type Preimages: Preimages;
         type RecoveryImages: RecoveryImages;
         type ReleaseChannel: ReleaseChannelWriter;
@@ -910,6 +943,8 @@ pub mod pallet {
     impl<T: Config> Hooks<BlockNumberFor<T>> for Pallet<T> {
         fn on_initialize(now: BlockNumberFor<T>) -> Weight {
             let mut writes = 0;
+            let (release_halted, mut bridge_weight) =
+                T::MigrationHalt::recovery_image_release_halted();
             if PendingAnchorCapture::<T>::get() {
                 let mut capture_consumed = false;
                 if T::MigrationStatus::cursor_exists() {
@@ -923,19 +958,35 @@ pub mod pallet {
                     // The primary image registered no MBMs, so its dormant
                     // recovery request has no remaining purpose.
                     writes += 1;
+                    if release_halted {
+                        bridge_weight = bridge_weight
+                            .saturating_add(T::MigrationHalt::recovery_image_release_repaired());
+                    }
                     capture_consumed = true;
                 } else {
                     // A corrupt/missing request must not silently consume the
                     // only cleanup latch. Keep retrying under an execution
                     // halt until operators repair the pin state.
-                    MigrationHalt::<T>::put(true);
-                    writes += 1;
+                    if !release_halted {
+                        bridge_weight = bridge_weight
+                            .saturating_add(T::MigrationHalt::recovery_image_release_failed());
+                    }
                 }
                 if capture_consumed {
                     // No cursor means the image registered no MBMs. Either
                     // way, a valid application boundary is consumed once.
                     PendingAnchorCapture::<T>::kill();
                     writes += 1;
+                }
+            } else if release_halted {
+                // Migration completion consumes the capture latch before its
+                // recovery-image release can fail. Keep retrying that cleanup
+                // from the dedicated source; a repaired pin clears exactly
+                // this source, while another migration cause remains latched.
+                if Self::release_recovery_image().is_ok() {
+                    writes += 1;
+                    bridge_weight = bridge_weight
+                        .saturating_add(T::MigrationHalt::recovery_image_release_repaired());
                 }
             }
             if let Some(pending) = PendingUpgrade::<T>::get() {
@@ -953,7 +1004,9 @@ pub mod pallet {
             // Worst case: the capture latch + migration cursor + System parent
             // hash, PendingUpgrade + ScheduledUpgrade, and the schedule seam's
             // two proofs (Cumulus pending code + system authorization).
-            T::DbWeight::get().reads_writes(7, writes)
+            T::DbWeight::get()
+                .reads_writes(7, writes)
+                .saturating_add(bridge_weight)
         }
 
         fn integrity_test() {
@@ -1669,11 +1722,20 @@ pub mod pallet {
 
         /// SDK migration-status callback. A completed MBM has no remaining
         /// rollback interval, so its application anchor must not outlive it.
-        pub fn migration_completed() {
+        pub fn migration_completed() -> Weight {
             PreMigrationAnchor::<T>::kill();
+            let (release_halted, mut bridge_weight) =
+                T::MigrationHalt::recovery_image_release_halted();
             if Self::release_recovery_image().is_err() {
-                MigrationHalt::<T>::put(true);
+                if !release_halted {
+                    bridge_weight = bridge_weight
+                        .saturating_add(T::MigrationHalt::recovery_image_release_failed());
+                }
+            } else if release_halted {
+                bridge_weight = bridge_weight
+                    .saturating_add(T::MigrationHalt::recovery_image_release_repaired());
             }
+            bridge_weight
         }
 
         /// Validate and materialize the exact pre-authorized recovery image.

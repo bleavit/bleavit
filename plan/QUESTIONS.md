@@ -9,7 +9,6 @@
 | SQ-181 | [**The public on-chain/daily telemetry component source is a…](questions/SQ-181.md) | 05 §4.6–§4.7 | 2026-07-17 (B1b judgment… | X |
 | SQ-502 | [**The `P` pillar has no producers, no normalization kernel,…](questions/SQ-502.md) | 05 §4.3, §4.4, §4.6; 14; 15 §4.9 | 2026-07-26 (A14 scoping) | X |
 | SQ-503 | [**Five co-indexed daily prefix families are cleared or fold…](questions/SQ-503.md) | 15 §4.5; 13 §4; I-20 | 2026-07-27 (batch X) | X |
-| SQ-504 | [**The execution guard's own fail-static migration halts can…](questions/SQ-504.md) | 09 §3.2(4); 06; 15 I-10; R-7 | 2026-07-27 (batch X) | X |
 | SQ-505 | [**Thirteen epoch→market seam methods fully bypass their pro…](questions/SQ-505.md) | 15 §4.5; 05 §5.4; R-7 | 2026-07-27 (batch X) | X |
 | SQ-506 | [**The Phase-0 simulation cannot test the revenue hypothesis…](questions/SQ-506.md) | 15 §4.9; 08 §10.2 | 2026-07-29 | E |
 | SQ-507 | [**Eight `ops.*` budget lines are unsizeable from any eviden…](questions/SQ-507.md) | 13:89; 12 §6.1; 09 §4; 08 §10.1 | 2026-07-29 | E |
@@ -159,7 +158,6 @@
 | SQ-1028 | [**Which INV-FE-9 provenance status does an observed genesis…](questions/SQ-1028.md) | 10 §2.1, §6.3; 15 §2 (INV-FE-9) | 2026-08-08 | B7 |
 | SQ-1029 | [**Is 11 E17's `R: retry AH sync` satisfied by a control tha…](questions/SQ-1029.md) | 11 E17, §11.9.1; 02 §7.7 | 2026-08-08 | B7 |
 | SQ-1031 | [**Three of `registry_core::file`'s five refusals have no re…](questions/SQ-1031.md) | [11] (../../docs/architecture/11-frontend-wor… | 2026-08-08 | B7 |
-| SQ-1035 | [**The 12 §5.2 out-of-band monitor reads its credentials fro…](questions/SQ-1035.md) | 12 §1.2, §1.4, §2.1, §5.2 | 2026-08-09 (F13 Codex ro… | B7 |
 | SQ-1036 | [**Three files carry release key material before the ceremon…](questions/SQ-1036.md) | 12 §2.1, §2.2 | 2026-08-09 (F13 Codex ro… | B7 |
 | SQ-1037 | [**The registry challenge row names neither the epoch nor th…](questions/SQ-1037.md) | 11 §11.8.6; 02 §7.4 | 2026-08-09 (F17 evidence… | B7 |
 | SQ-1038 | [**Eight branded types still permit on a payload a spread ca…](questions/SQ-1038.md) | 10 §2.1, §2.2; 11 §11.3, §11.9.1 | 2026-08-09 (F17 brand sw… | B7 |
@@ -175,16 +173,6 @@
 | SQ-1053 | [**CI compiles the `runtime-benchmarks` feature everywhere a…](questions/SQ-1053.md) | [15] (../../docs/architecture/15-invariants-a… | 2026-08-11 | B7 |
 | SQ-1054 | [**Six pallet mocks do not COMPILE under `runtime-benchmarks…](questions/SQ-1054.md) | [15] (../../docs/architecture/15-invariants-a… | 2026-08-11 | B7 |
 | SQ-1055 | [**`check-chain-feed.py` compares which pallets exist and wh…](questions/SQ-1055.md) | [15] (../../docs/architecture/15-invariants-a… | 2026-08-11 | B7 |
-| SQ-1057 | [**The hosted service uses the 64-client roster bound as its…](questions/SQ-1057.md) | [16] (../../docs/architecture/16-hosted-quest… | 2026-08-12 | B7 |
-| SQ-1058 | [**The exported transaction `gate()` mints `GatePassed` from…](questions/SQ-1058.md) | [11] (../../docs/architecture/11-frontend-wor… | 2026-08-12 | B7 |
-| SQ-1059 | [**A genuine `GatePassed` for one preparation can authorize…](questions/SQ-1059.md) | [11] (../../docs/architecture/11-frontend-wor… | 2026-08-12 | B7 |
-| SQ-1060 | [**The production inbound XCM barrier recursively admits six…](questions/SQ-1060.md) | [09] (../../docs/architecture/09-execution-up… | 2026-08-12 | B7 |
-| SQ-1061 | [**The release-integrity monitor logs complete secret-bearin…](questions/SQ-1061.md) | [12] (../../docs/architecture/12-release-and-… | 2026-08-12 | B7 |
-| SQ-1062 | [**The out-of-band release monitor accepts one unproved, gen…](questions/SQ-1062.md) | [12] (../../docs/architecture/12-release-and-… | 2026-08-12 | B7 |
-| SQ-1063 | [**The two reproducible app builds share `ubuntu-latest` and…](questions/SQ-1063.md) | [12] (../../docs/architecture/12-release-and-… | 2026-08-12 | B7 |
-| SQ-1064 | [**The reusable client pallet permanently rejects report 129…](questions/SQ-1064.md) | [16] (../../docs/architecture/16-hosted-quest… | 2026-08-12 | B7 |
-| SQ-1065 | [**Release-monitor gateway independence is name-only, and on…](questions/SQ-1065.md) | [12] (../../docs/architecture/12-release-and-… | 2026-08-12 | B7 |
-| SQ-1066 | [**Any signed user can improve decision-grade XCM health by…](questions/SQ-1066.md) | [05] (../../docs/architecture/05-welfare-and-… | 2026-08-12 | B7 |
 
 ## Resolved
 
@@ -543,6 +531,7 @@
 | SQ-499 | [**Three permissionless cranks each reserve ~389 KB of proof…](questions/SQ-499.md) | 15 §4.5; 13 §5; 08 §6.3 | 2026-07-26 (SQ-490 imple… | none |
 | SQ-500 | [**The guardian's per-block maintenance hook settles an unbo…](questions/SQ-500.md) | 06 §5.1; 15 §4.5; 13 §4; 14 (captured counci… | 2026-07-26 (SQ-490 item… | none |
 | SQ-501 | [**The four occupancy keys are refused in both directions, s…](questions/SQ-501.md) | 13 §5 items 1–4 + the item-6 residual rule;… | 2026-07-26 (Codex review… | none |
+| SQ-504 | [**The execution guard's own fail-static migration halts can…](questions/SQ-504.md) | 09 §3.2(4); 06; 15 I-10; R-7 | 2026-07-27 (batch X) | none |
 | SQ-508 | [**`tools/simulation/run-calibration.py --check` is red on s…](questions/SQ-508.md) | 15 §4.9; `simulation/results/phase0-calibrat… | 2026-07-29 | none |
 | SQ-511 | [**The keeper cannot complete the market lifecycle after E1.…](questions/SQ-511.md) | 08 §8; 04 §2; `keeper/README.md`; 12 §6.3 | 2026-07-29 | none |
 | SQ-512 | [**`sweep_dust` can race Sweep and destroy the POL return.**…](questions/SQ-512.md) | 03 §5.4; 04 §2; 08 §8 | 2026-07-29 | none |
@@ -607,10 +596,21 @@
 | SQ-1032 | [**12 §5.2 point 2 and §1.4 gate 2 count attestations differ…](questions/SQ-1032.md) | [12] (../../docs/architecture/12-release-and-… | 2026-08-08 | none |
 | SQ-1033 | [**`chainLabel` is a pin-matching key wearing a display labe…](questions/SQ-1033.md) | 02 §7.7 · 10 §5.2 | 2026-08-08 | none |
 | SQ-1034 | [**§11.9.1's D-13 row is structurally unpassable: nothing in…](questions/SQ-1034.md) | 11 §11.9.1 · 02 §7.4, §9 · 13 §1 (`phase3.*`) | 2026-08-08 | none |
+| SQ-1035 | [**The 12 §5.2 out-of-band monitor reads its credentials fro…](questions/SQ-1035.md) | 12 §1.2, §1.4, §2.1, §5.2 | 2026-08-09 (F13 Codex ro… | none |
 | SQ-1048 | [**15 §4.5 required the supply-chain gate to preserve cargo-…](questions/SQ-1048.md) | [15] (../../docs/architecture/15-invariants-a… | 2026-08-11 | none |
 | SQ-1049 | [**`MaxScoredMarketsPerAccount` is anchored to `MaxLiveMarke…](questions/SQ-1049.md) | [08] (../../docs/architecture/08-treasury-and… | 2026-08-10 | none |
 | SQ-1050 | [**08 §2.6 says a debit "suspends the participant until they…](questions/SQ-1050.md) | [08] (../../docs/architecture/08-treasury-and… | 2026-08-10 | none |
 | SQ-1051 | [**The score mixes plain USDC with branch-conditional USDC a…](questions/SQ-1051.md) | [08] (../../docs/architecture/08-treasury-and… | 2026-08-10 | none |
 | SQ-1052 | [**The trading reward program may authorize the *whole* Phas…](questions/SQ-1052.md) | [08] (../../docs/architecture/08-treasury-and… | 2026-08-10 | none |
 | SQ-1056 | [*(Raised as SQ-1048 on 2026-08-10 and renumbered on 2026-08…](questions/SQ-1056.md) | [08] (../../docs/architecture/08-treasury-and… | 2026-08-10 | none |
+| SQ-1057 | [**The hosted service uses the 64-client roster bound as its…](questions/SQ-1057.md) | [16] (../../docs/architecture/16-hosted-quest… | 2026-08-12 | none |
+| SQ-1058 | [**The exported transaction `gate()` mints `GatePassed` from…](questions/SQ-1058.md) | [11] (../../docs/architecture/11-frontend-wor… | 2026-08-12 | none |
+| SQ-1059 | [**A genuine `GatePassed` for one preparation can authorize…](questions/SQ-1059.md) | [11] (../../docs/architecture/11-frontend-wor… | 2026-08-12 | none |
+| SQ-1060 | [**The production inbound XCM barrier recursively admits six…](questions/SQ-1060.md) | [09] (../../docs/architecture/09-execution-up… | 2026-08-12 | none |
+| SQ-1061 | [**The release-integrity monitor logs complete secret-bearin…](questions/SQ-1061.md) | [12] (../../docs/architecture/12-release-and-… | 2026-08-12 | none |
+| SQ-1062 | [**The out-of-band release monitor accepts one unproved, gen…](questions/SQ-1062.md) | [12] (../../docs/architecture/12-release-and-… | 2026-08-12 | none |
+| SQ-1063 | [**The two reproducible app builds share `ubuntu-latest` and…](questions/SQ-1063.md) | [12] (../../docs/architecture/12-release-and-… | 2026-08-12 | none |
+| SQ-1064 | [**The reusable client pallet permanently rejects report 129…](questions/SQ-1064.md) | [16] (../../docs/architecture/16-hosted-quest… | 2026-08-12 | none |
+| SQ-1065 | [**Release-monitor gateway independence is name-only, and on…](questions/SQ-1065.md) | [12] (../../docs/architecture/12-release-and-… | 2026-08-12 | none |
+| SQ-1066 | [**Any signed user can improve decision-grade XCM health by…](questions/SQ-1066.md) | [05] (../../docs/architecture/05-welfare-and-… | 2026-08-12 | none |
 

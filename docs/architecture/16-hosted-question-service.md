@@ -291,6 +291,23 @@ snapshots `orc.window` into the internal question terms and stores the checked d
 parameter amendments move neither this seal boundary nor the settlement deadline derived from the
 same snapshot. `seal` after it refuses `DeadlinePassed`; the deadline VOID is the status-quo outcome.
 
+**Live capacity is not retained-history capacity (contract v31; SQ-1057).** The fastest lawful
+turnover of one live slot is the frozen 43,200-block oracle window plus two observations at the
+5-block hard minimum, or 43,210 blocks; omitting the required one-block start lead makes the bound
+conservative. Across `ledger.archive`'s one-year ceiling, at most
+`ceil(5,256,000 / 43,210) + 1 = 123` complete waves coexist, including the current live wave.
+Retained question, terms, pair and market admission therefore use `64·123 = 7,872` question/pair
+rows and `15,744` external market rows, while the live limits remain 64 questions / 128 books. A
+healthy keeper can reap the oldest eligible wave before the envelope fills; stale cleanup applies
+finite backpressure only at that derived horizon. Reusing the 64-client roster bound here would let
+four provisional 16-question deadline-VOID waves close the service for a year with zero live
+questions, and would close it after the same amount of honest throughput.
+
+No dispatch may walk the archive-sized set. In particular, `set_paused` records the service
+allocator's current high-water mark; every lower question id existed before the pause and retains
+the pause-VOID edge after expiry, while later ids do not. This O(1) cutoff replaces per-question
+marking without weakening the snapshot semantics.
+
 **Which branch settles needs no trust at all.** The client pre-commits its `ClientRule` at
 registration; `seal` derives the realized branch **deterministically from the sealed TWAPs**, in the
 same transaction that publishes the report. Nothing can be declared after seeing prices. This is not
@@ -609,9 +626,12 @@ What instancing buys, none of which requires a new invariant:
 **Defense in depth: a disjoint id band.** `kernel::SERVICE_ID_BASE = 1 << 63`; `pallet-epoch`'s
 allocator asserts `id < SERVICE_ID_BASE` and the service allocator starts at it, so every mis-route
 errors `UnknownVault` by construction at zero runtime cost. The service allocator is one monotone,
-non-reusing namespace across question and book ids; pair creation and try-state reject a question,
-Accept id or Reject id that duplicates any role in a retained pair. The property is only as strong
-as those boundary checks, so both domains carry a try-state assertion.
+non-reusing namespace across question and book ids. Each allocation is the exact aligned consecutive
+triple `(question, Accept, Reject)` from `ServiceIdBase`; the service allocator supplies monotonicity
+and the market's alignment/role check makes every valid triple disjoint in O(1), rather than scanning
+retained history on a public registration. Try-state independently walks the retained set and proves the same role
+partition. The property is only as strong as those two boundary checks, so both domains carry the
+assertion.
 
 Routing is **one** small, exhaustive, fuzzable `LedgerRoute::for_book(kind)` in the market shell — a
 single auditable dispatch point for the entire firewall.
@@ -1262,6 +1282,16 @@ where `66` is the drop-in client receiver's `QuestionServiceReceiver` pallet slo
 registry location; no extrinsic caller can choose a destination, selector or payload. A local client
 has no XCM destination, so it records neither an attempt nor a false failure and consumes the pull
 surface directly.
+
+The reusable receiver's `MaxReports` bounds retained report **bodies**, not lifetime delivery.
+Client governance may call the trailing local `prune_reports(through_question_id)` dispatchable
+after its own retention/finality policy makes every older push obsolete. The operation first
+advances a monotone replay floor and then removes bodies at or below the inclusive cutoff; any
+delayed or replayed push at or below that floor is refused before `OnReport`. Thus capacity can be
+reused indefinitely without making removed rows replayable. The pruning origin is a separate
+governance-only client-runtime seam: widening it can permanently suppress a legitimately delayed
+report. It does not alter the frozen remote receiver selector `[66, 0]` or Bleavit's contract
+version because the new call is local to an integrating runtime (SQ-1064).
 
 The exact prepaid amount is the existing [09](./09-execution-upgrades-and-rollout.md) §6.1 USDC
 two-dimensional rate applied, rounding both dimensions up against the client, to the fixed

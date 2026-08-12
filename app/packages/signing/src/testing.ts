@@ -24,6 +24,7 @@ import {
   describeSigner,
   grantsDecodedPayload,
   grantsHashedPayload,
+  signingTarget,
   type SignedPayload,
   type SignerAdapter,
   type SignerDescriptor,
@@ -34,8 +35,9 @@ import {
  * The mock's grants.
  *
  * It no longer claims `metadata-hash`, and that is not an oversight: there is no grant
- * function for it anywhere, because FE-P6 has not established that any wallet honours
- * `CheckMetadataHash` for a custom chain. A mock able to mint a capability no real adapter
+ * function for it anywhere, because B21 establishes chain support but FE-P6 has not
+ * established that any wallet honours `CheckMetadataHash` for Bleavit and displays the call.
+ * A mock able to mint a capability no real adapter
  * can hold would let a test assert behaviour that ships to nobody — which is worse than a
  * missing test, because it reads as coverage.
  */
@@ -72,10 +74,11 @@ export class MockSigner implements SignerAdapter {
   readonly seen: SigningRequest[] = [];
 
   async sign(request: SigningRequest): Promise<SignedPayload> {
+    const target = signingTarget(request);
     this.seen.push(request);
     return {
-      signatureHex: fakeSignature(request.prep.scaleHex, request.account),
-      signedBy: request.account,
+      signatureHex: fakeSignature(target.scaleHex, target.account),
+      signedBy: target.account,
       signerId: this.descriptor.id,
     };
   }

@@ -108,7 +108,21 @@ upload remains a non-public draft.
 ## Build and metadata-hash posture
 
 `runtime-profiles.json` is the reviewed profile product and the single source
-for release-build feature sets:
+for release-build feature sets and the runtime builder's exact OCI identity:
+
+```text
+docker.io/paritytech/ci-unified@sha256:a697eab780f23ed77a5d4da75b56480a757ea5deb04f3bfcb3e879b0e0d9e99e
+platform: linux/amd64
+image config: sha256:f10f87f1326650e0ef6db0a9184d15d08256f402bb5f5c85624f6f4c741473e7
+audited upstream tag: bullseye-1.88.0-2025-06-27-v202511141243
+```
+
+The tag is an audit label only; no build resolves it. `build-runtime-oci.sh`
+pulls the manifest digest, verifies Docker's local image config ID, mounts the
+source read-only, drops every capability, enables no-new-privileges, and builds
+the primary and paired recovery profile in that one container. The worker
+`build-runtime.sh` refuses direct host execution or an OCI identity that differs
+from the reviewed manifest.
 
 | Profile | Base | Recovery | Sudo in metadata | Multi-block migrations |
 |---|---|---:|---:|---:|
@@ -135,18 +149,22 @@ boot-bound to `:code`, both build records bind the release commit, the profiles
 must share one base and `spec_name`, and recovery `spec_version` must equal
 primary + 1.
 
-For example, the bootstrap recipe is:
+Inside that image, the bootstrap recipe is:
 
 ```sh
 cargo build -p bleavit-runtime --release --no-default-features \
-  --features std,substrate-wasm-builder,bootstrap --locked
+  --features std,substrate-wasm-builder,metadata-hash,bootstrap --locked
 ```
 
 It fixes `SOURCE_DATE_EPOCH` to the source commit time unless supplied, sets
 `TZ=UTC`, the C UTF-8 locale, `CARGO_INCREMENTAL=0`, and disables Cargo color.
+The wrapper additionally fixes the writable Cargo/rustup/target homes and sets
+`WASM_BUILD_WORKSPACE_HINT=/src`, which lets substrate-wasm-builder find the
+committed lockfile even though Cargo output lives at the out-of-tree `/target`.
 Those are the environment inputs that can otherwise leak time, locale, or
 incremental state into the builder. `build-info.json` records them with the
-toolchain, host triple, Cargo/rustc versions, source commit, and Wasm hash.
+toolchain, host triple, Cargo/rustc versions, source commit, Wasm hash, exact
+image manifest/config digests, platform, and audited upstream tag.
 It also records the profile name, base, complete Cargo feature list, disabled
 default-feature posture, recovery bit, and multi-block-migration posture.
 
@@ -159,17 +177,25 @@ complete pallet-name set; assembly requires `Sudo` for bootstrap profiles and
 rejects it for phase-four profiles. A profile/feature/proof/metadata mismatch
 is integrity corruption even in `--allow-missing` mode.
 
-The honest claim is recipe reproducibility: same source and same pinned
-toolchain should produce the same bytes. The host image is not yet pinned by
-digest, so an independent two-container srtool-style byte-identity gate remains
-follow-up work.
+The exact claim is narrower than an attestation: same source, canonical recipe,
+and exact OCI image digest should produce the same runtime bytes. The image
+ships the native Substrate build dependencies; its pinned rustup installs the
+repository's exact Rust 1.89.0 toolchain and targets into an isolated writable
+mount. The image digest does not pin the runner kernel, CPU, Docker daemon, or
+the separately downloaded Rust component bytes, and CI does not yet compare an
+independent second runtime build byte-for-byte. Those limitations are recorded
+verbatim in `build-info.json`; the image pin is not presented as that stronger
+proof.
 
-The runtime currently calls `WasmBuilder::build_using_defaults()` and has no
-`metadata-hash` build feature. Therefore the release publishes SHA-256 of the
-raw SCALE metadata and Wasm, but does not claim an RFC-78 merkleized metadata
-hash. `runtime-info.json` records this explicitly. The transaction metadata-hash
-extension being linked into the runtime is not itself evidence that build-time
-RFC-78 hashing was enabled.
+Every release profile enables the runtime's `metadata-hash` feature. Its build
+script calls `enable_metadata_hash("VIT", 12)`, with both values derived from
+the frozen chain-spec properties, so `substrate-wasm-builder` performs the
+RFC-78 pass and embeds `RUNTIME_METADATA_HASH`. `build-info.json` records the
+feature and derivation. Metadata extraction calls the booted Wasm's release-only
+`ReleaseMetadataApi_embedded_rfc78_metadata_hash`, independently recomputes the
+digest from `metadata.scale`, and refuses disagreement. Assembly recomputes it
+again and binds both recorded digest fields to the shipped metadata. A build that
+omits the feature returns `None`, is not a release profile, and is ineligible.
 
 Metadata extraction also reads `:code` from the booted chain and refuses to
 continue unless its SHA-256 equals the exact `--wasm` bytes. Assembly then
@@ -290,8 +316,9 @@ python3 -m pip install websockets==15.0.1
 export RUNTIME_PROFILE=bootstrap
 tools/deploy/generate-chain-specs.sh
 cargo build -p bleavit-node --release --locked
-# Unset RUNTIME_PROFILE to use runtime-profiles.json's release_default.
-tools/release/build-runtime.sh release-work/runtime
+# Unset RUNTIME_PROFILE to use runtime-profiles.json's release_default. The OCI
+# wrapper builds both the selected primary and its paired recovery artifact.
+tools/release/build-runtime-oci.sh release-work/runtime
 tools/ci/supply-chain-gates.sh --summary-out release-work/supply-chain-summary.json
 python3 tools/release/extract-metadata.py \
   --wasm release-work/runtime/runtime.wasm \

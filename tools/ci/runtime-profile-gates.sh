@@ -17,6 +17,7 @@ profiles=(
 for profile in "${profiles[@]}"; do
   features=$(python3 "$profile_tool" --profile "$profile" --field features)
   test_features=${features/,substrate-wasm-builder/}
+  test_features=${test_features/,metadata-hash/}
   if [[ "$profile" == phase-four* ]]; then
     cargo test -p bleavit-runtime --lib --no-default-features \
       --features "$test_features" --locked tests_migration_guard

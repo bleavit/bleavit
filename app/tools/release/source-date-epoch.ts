@@ -21,8 +21,8 @@
  *
  * ## The derivation is the chain pipeline's, deliberately
  *
- * `tools/release/build-runtime.sh` already resolves it exactly this way — injected value
- * first, `git show -s --format=%ct HEAD` otherwise — and `tools/release/release_common.py`
+ * `tools/release/build-runtime-oci.sh` and its in-container worker resolve it exactly this
+ * way — injected value first, `git show -s --format=%ct HEAD` otherwise — and `tools/release/release_common.py`
  * validates it the same way (an integer, non-negative). Two release pipelines in one
  * repository disagreeing about whether the recipe's own variable applies would be the *one
  * thing, two answers* defect. Deriving rather than choosing is also what satisfies R-2:
@@ -114,7 +114,7 @@ export function commitEpoch(repoRoot: string): string {
  *
  * Writing it back into the environment is the half that does the work: `vite` and `esbuild`
  * are child processes, and a variable this process resolved but did not export is one they
- * never see. It is the same `export SOURCE_DATE_EPOCH` line `build-runtime.sh` carries, and
+ * never see. It is the same exported value the chain-side OCI build carries, and
  * it is why `release:manifest` can read the resolved value off the environment rather than
  * having its own opinion about how to derive one.
  *

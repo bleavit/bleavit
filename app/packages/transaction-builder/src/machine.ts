@@ -11,7 +11,7 @@
  *
  *  1. `AwaitingSignature` is reachable **only** from `Refreshing`, and only by an event
  *     that carries a `GatePassed` — a value this module alone can construct, and only
- *     from a gate evaluation in which every precondition passed at one finalized block.
+ *     from `refreshAndGate` owning every read at one finalized block.
  *  2. The reducer's edge set is enumerable, so `tests/transaction-builder` asserts against
  *     the lifecycle 11 §11.3 writes out, in both directions. A new edge that skipped the
  *     gate would show up as an edge the specification does not draw.
@@ -21,7 +21,12 @@
  *     warnings.
  */
 
-import type { FinalizedBlockRef } from '@bleavit/chain-client';
+import { FinalizedReader } from '@bleavit/chain-client';
+import type {
+  ChainHeadConnection,
+  Finalized,
+  FinalizedBlockRef,
+} from '@bleavit/chain-client';
 import { callIsProven, callUnavailableReason, type CompatClassification } from '@bleavit/descriptors';
 import type { HexString } from '@bleavit/shared-types';
 import type { ClauseId, PreconditionResult } from './preconditions.js';
@@ -80,6 +85,8 @@ export interface BuiltFor {
 export interface TxPreparation {
   /** The exact bytes to be signed. The confirm summary is decoded from THIS. */
   readonly scaleHex: HexString;
+  /** The account whose signer and nonce these exact bytes were prepared for. */
+  readonly signingAccount: string;
   readonly builtFor: BuiltFor;
   /** The block the preparation was assembled at (B). B′ is taken by the refresh. */
   readonly preparedAt: FinalizedBlockRef;
@@ -112,11 +119,11 @@ declare const GATE_PASSED: unique symbol;
  * Branded for the same reason `Finalized<T>` is: without the phantom field, any object
  * literal of the right shape would open `AwaitingSignature`, and "the machine has no
  * bypass edge" would be a claim about the code rather than a property of the types. The
- * symbol is not exported, so only `gate()` below can produce one.
+ * symbol is not exported, so only `refreshAndGate()` below can produce one.
  *
  * ## The proof names what it proves
  *
- * `prep` is not a convenience. Without it this value said only *"some call to `gate()`
+ * `prep` is not a convenience. Without it this value said only *"some refresh gate
  * succeeded"* — it carried no preparation, no call and no `scaleHex` — so an authentic window
  * could be paired with **different bytes** and still typecheck, and every consumer that takes
  * a `GatePassed` as authorisation was authorising an unnamed transaction. A submitter must
@@ -154,6 +161,17 @@ export interface GatePassed extends ProducedByGate {
   readonly at: FinalizedBlockRef;
   /** The exact preparation these results were evaluated for — bytes, rows and fee asset. */
   readonly prep: TxPreparation;
+  /**
+   * The immutable signing target captured when the gate passed.
+   *
+   * Signers consume this field, never an independently supplied preparation or account. The
+   * snapshot also detects a preparation object mutated after gating: `signingTarget` refuses
+   * when these values no longer agree with `prep`.
+   */
+  readonly authorization: Readonly<{
+    readonly scaleHex: HexString;
+    readonly account: string;
+  }>;
   readonly results: readonly PreconditionResult[];
   readonly [GATE_PASSED]: true;
 }
@@ -222,7 +240,143 @@ export const TX_TERMINAL_STATES: ReadonlySet<TxState> = new Set<TxState>([
 export type GateCompat = CompatClassification | undefined;
 
 /**
- * Run the gate — 11 §11.4's `refreshAndGate`, with the reads injected.
+ * The reads `refreshAndGate` owns at its freshly opened finalized pin.
+ *
+ * Every answer is a branded `Finalized<T>`. Production code therefore cannot satisfy this
+ * contract with literals, cached provider data, or results evaluated before the submit click;
+ * it must perform a chain-client read (or a pure derivation from one). The callbacks expose
+ * decoding policy without handing the caller control of the pin or the gate result.
+ */
+export interface GateRefreshReads {
+  readonly runtime: (reader: FinalizedReader) => Promise<Finalized<BuiltFor>>;
+  readonly compatibility: (
+    reader: FinalizedReader,
+    runtime: Finalized<BuiltFor>,
+  ) => Promise<Finalized<GateCompat>>;
+  readonly preconditions: (
+    reader: FinalizedReader,
+    prep: TxPreparation,
+  ) => Promise<readonly Finalized<PreconditionResult>[]>;
+}
+
+const samePin = (
+  at: FinalizedBlockRef,
+  status: Finalized<unknown>['status'],
+): boolean =>
+  status.chain === at.chain &&
+  status.blockHash === at.blockHash &&
+  status.blockNumber === at.blockNumber;
+
+const refreshFailure = (
+  at: FinalizedBlockRef,
+  detail: string,
+  failed: readonly PreconditionResult[] = [],
+): GateOutcome => ({ kind: 'blocked', code: 'FE-TX-004', at, failed, detail });
+
+/** Checks that must pass before old-metadata precondition decoders may run. */
+function gateContext(
+  prep: TxPreparation,
+  at: FinalizedBlockRef,
+  live: BuiltFor,
+  compat: GateCompat,
+): GateOutcome | undefined {
+  if (compat === undefined || !callIsProven(compat, '*')) {
+    return refreshFailure(
+      at,
+      compat === undefined
+        ? 'this client has not established which runtime the chain is on, so no surface has ' +
+            'been proven compatible and nothing may be signed (10 §3.2, INV-FE-12).'
+        : `signing is unavailable: ${callUnavailableReason(compat, 'this call') ?? 'compatibility is unproven.'}`,
+    );
+  }
+  if (live.specVersion !== prep.builtFor.specVersion || live.metadataHash !== prep.builtFor.metadataHash) {
+    return {
+      kind: 'blocked',
+      code: 'FE-TX-007',
+      at,
+      failed: [],
+      detail:
+        `the runtime changed under this transaction (built for spec_version ${prep.builtFor.specVersion}, ` +
+        `now ${live.specVersion}). The prepared bytes were encoded against metadata that is no longer ` +
+        'current, so they must be rebuilt rather than re-checked.',
+    };
+  }
+  return undefined;
+}
+
+/**
+ * Re-open the finalized head, re-read every permitting fact at that one pin, and gate `prep`.
+ *
+ * This is the only exported proof-producing path. In particular, callers never supply a block,
+ * a live runtime, a compatibility classification, or precondition results as plain values. The
+ * function owns the fresh pin and invokes every read itself, making 11 §11.4 rule 1 / INV-FE-2
+ * a package boundary rather than a calling convention.
+ *
+ * The connection is the nominal production class, not the structural `ChainHeadTransport`
+ * interface. Its private fields make an object-literal transport ineligible here: a caller must
+ * hand the refresh owner the live chain-client connection that owns the follow subscription.
+ */
+export async function refreshAndGate(
+  prep: TxPreparation,
+  transport: ChainHeadConnection,
+  reads: GateRefreshReads,
+): Promise<GateOutcome> {
+  const reader = await FinalizedReader.open(transport);
+  const at = reader.at;
+
+  let live: Finalized<BuiltFor>;
+  let compat: Finalized<GateCompat>;
+  try {
+    live = await reads.runtime(reader);
+    if (!samePin(at, live.status)) {
+      return refreshFailure(
+        at,
+        'the runtime identity was not read at the refresh pin; stale or cross-chain runtime ' +
+          'evidence cannot authorise a signature (INV-FE-2).',
+      );
+    }
+    compat = await reads.compatibility(reader, live);
+    if (!samePin(at, compat.status)) {
+      return refreshFailure(
+        at,
+        'the compatibility verdict was not established at the refresh pin; a verdict from ' +
+          'another block cannot authorise a signature (INV-FE-2, INV-FE-12).',
+      );
+    }
+  } catch (error) {
+    return refreshFailure(
+      at,
+      `the runtime refresh could not be completed at the finalized pin: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
+  const contextFailure = gateContext(prep, at, live.value, compat.value);
+  if (contextFailure !== undefined) return contextFailure;
+
+  let finalizedResults: readonly Finalized<PreconditionResult>[];
+  try {
+    finalizedResults = await reads.preconditions(reader, prep);
+  } catch (error) {
+    return refreshFailure(
+      at,
+      `the pre-sign preconditions could not all be re-read at the finalized pin: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  const offPin = finalizedResults.filter((result) => !samePin(at, result.status));
+  if (offPin.length > 0) {
+    return refreshFailure(
+      at,
+      `${offPin.length} precondition result(s) came from a different finalized pin; the set ` +
+        'does not describe one state and cannot authorise a signature.',
+      offPin.map((result) => result.value),
+    );
+  }
+
+  return gateEvaluated(prep, at, live.value, compat.value, finalizedResults.map((result) => result.value));
+}
+
+/**
+ * Evaluate already-refreshed values. Private: only `refreshAndGate` may feed it evidence.
  *
  * ## The compatibility verdict is checked first, and that is INV-FE-12 becoming structural
  *
@@ -255,7 +409,7 @@ export type GateCompat = CompatClassification | undefined;
  * pass and the bytes still be wrong. Order matters here in a way it does not between the rows
  * themselves.
  */
-export function gate(
+function gateEvaluated(
   prep: TxPreparation,
   at: FinalizedBlockRef,
   live: BuiltFor,
@@ -267,31 +421,8 @@ export function gate(
   // fail-closes to `mode === 'full'` for every name. A per-call name enters here when the
   // manifest gains calls, and this line is where it lands; passing `prep`'s own call would
   // imply a granularity the frozen surface cannot yet answer at.
-  if (compat === undefined || !callIsProven(compat, '*')) {
-    return {
-      kind: 'blocked',
-      code: 'FE-TX-004',
-      at,
-      failed: [],
-      detail:
-        compat === undefined
-          ? 'this client has not established which runtime the chain is on, so no surface has ' +
-            'been proven compatible and nothing may be signed (10 §3.2, INV-FE-12).'
-          : `signing is unavailable: ${callUnavailableReason(compat, 'this call') ?? 'compatibility is unproven.'}`,
-    };
-  }
-  if (live.specVersion !== prep.builtFor.specVersion || live.metadataHash !== prep.builtFor.metadataHash) {
-    return {
-      kind: 'blocked',
-      code: 'FE-TX-007',
-      at,
-      failed: [],
-      detail:
-        `the runtime changed under this transaction (built for spec_version ${prep.builtFor.specVersion}, ` +
-        `now ${live.specVersion}). The prepared bytes were encoded against metadata that is no longer ` +
-        'current, so they must be rebuilt rather than re-checked.',
-    };
-  }
+  const contextFailure = gateContext(prep, at, live, compat);
+  if (contextFailure !== undefined) return contextFailure;
   const failed = results.filter((r) => !r.ok);
   if (failed.length > 0) {
     return {
@@ -374,7 +505,24 @@ export function gate(
         'the set does not describe one state and cannot authorise a signature.',
     };
   }
-  return { kind: 'proceed', passed: { at, prep, results } as GatePassed };
+  if (typeof prep.signingAccount !== 'string' || prep.signingAccount.length === 0) {
+    return refreshFailure(
+      at,
+      'this preparation does not bind a signing account, so the gate cannot authorise which ' +
+        'account may sign its bytes.',
+    );
+  }
+  const authorization = Object.freeze({
+    scaleHex: prep.scaleHex,
+    account: prep.signingAccount,
+  });
+  const passed = Object.freeze({
+    at: Object.freeze({ ...at }),
+    prep,
+    authorization,
+    results: Object.freeze([...results]),
+  }) as GatePassed;
+  return { kind: 'proceed', passed };
 }
 
 /**
@@ -400,8 +548,8 @@ export function reduce(session: TxSession, event: TxEvent): TxSession {
       return session;
 
     case 'Refreshing':
-      // The ONLY edge into AwaitingSignature, and it requires a `GatePassed` this module
-      // alone can mint. Everything else about "no bypass" follows from that.
+      // The ONLY edge into AwaitingSignature, and it requires a `GatePassed` only the
+      // read-owning `refreshAndGate` path can mint. Everything else follows from that.
       if (event.type === 'gate-result') {
         if (event.outcome.kind !== 'proceed') {
           return at('Blocked', { failed: event.outcome.failed, lastError: event.outcome.code });
@@ -461,6 +609,7 @@ export function reduce(session: TxSession, event: TxEvent): TxSession {
 export function txTransitionEdges(): readonly (readonly [TxState, TxState])[] {
   const prep: TxPreparation = {
     scaleHex: '0x00',
+    signingAccount: 'transition-enumerator',
     builtFor: { specVersion: 1, metadataHash: '0x00' },
     // Same chain as `pin` below: this enumerator walks the real machine, and a preparation
     // built against one chain gated by a pin from another is a transition the machine must
@@ -507,8 +656,8 @@ export function txTransitionEdges(): readonly (readonly [TxState, TxState])[] {
     disabled: [],
     proven: [],
   };
-  const proceed = gate(prep, pin, prep.builtFor, proven, passing);
-  const blocked = gate(prep, pin, { specVersion: 2, metadataHash: '0x00' }, proven, passing);
+  const proceed = gateEvaluated(prep, pin, prep.builtFor, proven, passing);
+  const blocked = gateEvaluated(prep, pin, { specVersion: 2, metadataHash: '0x00' }, proven, passing);
 
   const states: TxState[] = [
     'Draft', 'Prepared', 'Refreshing', 'Blocked', 'AwaitingSignature',

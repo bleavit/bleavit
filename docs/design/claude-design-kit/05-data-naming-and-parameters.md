@@ -1,7 +1,7 @@
 # Data surface, canonical naming & UI-visible parameter values
 
 > **DERIVED, NON-NORMATIVE.** Refreshed 2026-08-01 through Track N / N7 from the frozen spec —
-> doc 02 (hosted-service contract v22 in force), doc 13 (the
+> doc 02 (hosted-service contract v31 in force), doc 13 (the
 > single home of parameter values), and doc 16 (hosted question service) —
 > for upload to Claude Design. Where this file and the spec disagree, the spec wins. All names
 > below are CANONICAL: use these exact spellings in UI copy, labels and mock data. Values
@@ -21,7 +21,7 @@ Block-time basis for human-time conversions: **6 s/block, 14,400 blocks/day** (1
 | **VIT** (native governance token) | **12 decimals**; total supply 10^9; existential deposit 0.01 VIT |
 | Prices / scores | fixed-point, **1e9 scale** at every API/event boundary; quote clamp [0.001, 0.999]; `p_S = 1 − p_L`; gate books map YES ↦ LONG |
 | Time | all deadlines are block numbers (`decide_at`, `maturity`, `grace_end`, `challenge_deadline`, `next_boundary`) — the UI computes countdowns from them |
-| Contract version | `INTEGRATION_CONTRACT_VERSION = 22`, a runtime constant, echoed in `release.json` |
+| Contract version | `INTEGRATION_CONTRACT_VERSION = 31`, a runtime constant, echoed in `release.json` |
 
 ### A2. What the UI can read and display (02 §3–§4, §7)
 
@@ -355,9 +355,9 @@ live. For mock data these are the correct realistic values.
 |---|---|---|
 | `MaxClients` | **64** | hard bounded roster; a 65th admission refuses before taking a bond |
 | `MaxServiceAttestors` | **16** | SCALE-bounded named settlement set; the 17th name refuses before dispatch or custody |
-| `MaxExternalBookPairs` | **64** | retained question→Accept/Reject/funder records; cleanup backpressure is bounded |
-| `MaxLiveExternalMarkets` / `MaxStoredExternalMarkets` | **128 / 128** | service books never consume primary live-POL or retained capacity; a `svc.max_live` cut gates new admission while existing questions drain |
-| `MaxAllStoredMarkets` | **2,368** | physical shared-map ceiling = 2,240 primary + 128 external rows |
+| `MaxExternalBookPairs` | **7,872** | retained question→Accept/Reject/funder records; derived as 64 fastest-lawful live slots × 123 waves across the one-year archive horizon |
+| `MaxLiveExternalMarkets` / `MaxStoredExternalMarkets` | **128 / 15,744** | service books never consume primary live-POL or retained capacity; live admission and archive-horizon retention are independently bounded |
+| `MaxAllStoredMarkets` | **17,984** | physical shared-map ceiling = 2,240 primary + 15,744 external rows |
 | `svc.client_bond` | **100,000 VIT** (adopted 2026-08-04), native VIT, seeded at genesis | admission is open; an absent row still returns `ClientBondUnset`, so never show absence as a fallback value |
 | `delivery_float` | client-selected USDC balance, not a parameter | optional report push stops when dry; pull remains authoritative; never depict the native VIT bond paying postage |
 | `svc.fee_bps` | **1,000 bps = 10 %** (adopted 2026-08-02), seeded at genesis | an absent row would return `ServiceRateUnset`; the fee is `max(393 USDC, 10 % x declared stake)` |

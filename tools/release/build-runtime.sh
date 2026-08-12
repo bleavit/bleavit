@@ -25,11 +25,32 @@ recovery=$(python3 "$profile_tool" --profile "$profile" --field recovery)
 multi_block_migrations=$(python3 "$profile_tool" --profile "$profile" --field multi_block_migrations)
 recipe=$(python3 "$profile_tool" --profile "$profile" --field recipe)
 recovery_test_recipe=$(python3 "$profile_tool" --profile "$profile" --field recovery_test_recipe)
-toolchain=$(sed -n 's/^channel = "\([^"]*\)"/\1/p' rust-toolchain.toml)
-if [[ -z "$toolchain" ]]; then
-  echo "rust-toolchain.toml does not declare a channel" >&2
+toolchain=$(python3 "$profile_tool" --field toolchain)
+
+# This worker may only emit a build record from the reviewed OCI wrapper.  The
+# wrapper pulls by manifest digest and verifies the image config id before
+# starting the container; these equality checks bind that executed identity to
+# build-info rather than trusting caller-supplied descriptive text.
+expected_image=$(python3 "$profile_tool" --field build_image)
+expected_image_id=$(python3 "$profile_tool" --field build_image_id)
+expected_platform=$(python3 "$profile_tool" --field build_platform)
+expected_upstream_tag=$(python3 "$profile_tool" --field build_upstream_tag)
+if [[ "${BLEAVIT_RUNTIME_BUILD_IN_CONTAINER:-}" != "1" || ! -f /.dockerenv ]]; then
+  echo "build-runtime.sh is an OCI worker; run tools/release/build-runtime-oci.sh" >&2
   exit 1
 fi
+for binding in \
+  "BLEAVIT_RUNTIME_BUILD_IMAGE:$expected_image" \
+  "BLEAVIT_RUNTIME_BUILD_IMAGE_ID:$expected_image_id" \
+  "BLEAVIT_RUNTIME_BUILD_PLATFORM:$expected_platform" \
+  "BLEAVIT_RUNTIME_BUILD_UPSTREAM_TAG:$expected_upstream_tag"; do
+  variable=${binding%%:*}
+  expected=${binding#*:}
+  if [[ "${!variable:-}" != "$expected" ]]; then
+    echo "$variable does not match the reviewed runtime build environment" >&2
+    exit 1
+  fi
+done
 
 if [[ -z "${SOURCE_DATE_EPOCH:-}" ]]; then
   SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)
@@ -40,6 +61,9 @@ export LANG=C.UTF-8
 export LC_ALL=C.UTF-8
 export CARGO_INCREMENTAL=0
 export CARGO_TERM_COLOR=never
+# substrate-wasm-builder cannot locate the workspace lockfile from the
+# wrapper's out-of-tree /target without this canonical source-root hint.
+export WASM_BUILD_WORKSPACE_HINT="$repo_root"
 
 cargo build -p bleavit-runtime --release --no-default-features --features "$features" --locked
 
@@ -50,6 +74,7 @@ cargo build -p bleavit-runtime --release --no-default-features --features "$feat
 profile_verification_result=""
 if [[ "$recovery" == "true" ]]; then
   test_features=${features/,substrate-wasm-builder/}
+  test_features=${test_features/,metadata-hash/}
   verification_log=$(mktemp)
   trap 'rm -f "$verification_log"' EXIT
   cargo test -p bleavit-runtime --no-default-features --features "$test_features" \
@@ -74,7 +99,10 @@ TOOLCHAIN="$toolchain" OUT_DIR="$out_dir" RUNTIME_PROFILE="$profile" \
 BASE_PROFILE="$base_profile" CARGO_FEATURES="$features" RECOVERY="$recovery" \
 MULTI_BLOCK_MIGRATIONS="$multi_block_migrations" RECIPE="$recipe" \
 RECOVERY_TEST_RECIPE="$recovery_test_recipe" \
-PROFILE_VERIFICATION_RESULT="$profile_verification_result" python3 - <<'PY'
+PROFILE_VERIFICATION_RESULT="$profile_verification_result" \
+BUILD_IMAGE="$expected_image" BUILD_IMAGE_ID="$expected_image_id" \
+BUILD_PLATFORM="$expected_platform" BUILD_UPSTREAM_TAG="$expected_upstream_tag" \
+python3 - <<'PY'
 import hashlib
 import json
 import os
@@ -96,7 +124,7 @@ host = next(
 commit = command("git", "rev-parse", "HEAD")
 digest = hashlib.sha256(wasm.read_bytes()).hexdigest()
 info = {
-    "schema": "bleavit.runtime-build.v2",
+    "schema": "bleavit.runtime-build.v3",
     "git_commit": commit,
     "source_date_epoch": int(os.environ["SOURCE_DATE_EPOCH"]),
     "toolchain": os.environ["TOOLCHAIN"],
@@ -126,17 +154,34 @@ info = {
         else None
     ),
     "normalized_environment": {
+        "CARGO_HOME": os.environ["CARGO_HOME"],
         "CARGO_INCREMENTAL": os.environ["CARGO_INCREMENTAL"],
+        "CARGO_TARGET_DIR": os.environ["CARGO_TARGET_DIR"],
         "CARGO_TERM_COLOR": os.environ["CARGO_TERM_COLOR"],
+        "HOME": os.environ["HOME"],
         "LANG": os.environ["LANG"],
         "LC_ALL": os.environ["LC_ALL"],
+        "RUSTUP_HOME": os.environ["RUSTUP_HOME"],
         "SOURCE_DATE_EPOCH": os.environ["SOURCE_DATE_EPOCH"],
         "TZ": os.environ["TZ"],
+        "WASM_BUILD_WORKSPACE_HINT": os.environ["WASM_BUILD_WORKSPACE_HINT"],
     },
-    "reproducibility_scope": "same toolchain + same source => same bytes; host/container image is not yet digest-pinned",
+    "build_environment": {
+        "image": os.environ["BUILD_IMAGE"],
+        "image_id": os.environ["BUILD_IMAGE_ID"],
+        "kind": "oci",
+        "platform": os.environ["BUILD_PLATFORM"],
+        "upstream_tag": os.environ["BUILD_UPSTREAM_TAG"],
+    },
+    "reproducibility_scope": (
+        "same source + canonical recipe + exact OCI image digest => same runtime bytes; "
+        "independent runtime byte comparison is not yet automated"
+    ),
     "rfc78_metadata_hash": {
-        "enabled": False,
-        "reason": "runtime build.rs uses build_using_defaults and Cargo.toml has no metadata-hash feature",
+        "enabled": True,
+        "token_symbol": "VIT",
+        "token_decimals": 12,
+        "source": "RUNTIME_METADATA_HASH embedded by substrate-wasm-builder",
     },
 }
 (out_dir / "build-info.json").write_text(

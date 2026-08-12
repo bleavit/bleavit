@@ -207,13 +207,13 @@ import {
   OPERATOR_ROWS,
   OPERATOR_SURFACE_ROWS,
   declaredCoverageIds,
-  gate,
   obligationAppliesTo,
   operatorRowsFor,
   rowsFor,
   scopedObligationsFor,
   unreadableObligationsFor,
 } from '@bleavit/transaction-builder';
+import { gateForTest } from '../transaction-builder/gate-fixture.ts';
 import type {
   ClauseId,
   DeclarableRowId,
@@ -319,7 +319,8 @@ const DOC11 = join(REPO, 'docs/architecture/11-frontend-workflows.md');
  * and the one place in this suite that needed it had quietly written its own status object
  * with a different hash. Deriving the hash removes the trap rather than documenting it.
  */
-const blockHashAt = (blockNumber: number): HexString => `0xdead${blockNumber.toString(16)}`;
+const blockHashAt = (blockNumber: number): HexString =>
+  `0x${blockNumber.toString(16).padStart(64, '0')}`;
 const finalized = <T>(value: T, blockNumber = 1_000_000): Verified<T> => ({
   value,
   status: {
@@ -770,6 +771,7 @@ test('an epoch shrink renders slot counts, never money', () => {
 
 const PREP: TxPreparation = {
   scaleHex: '0x0a0b0c0d',
+  signingAccount: '5Grw',
   builtFor: { specVersion: 2, metadataHash: '0xfeed' },
   preparedAt: AT,
   requires: ['P-1'],
@@ -1541,12 +1543,15 @@ const session = (overrides: Partial<TxSession> = {}): TxSession => ({
  * the only thing that can mint one, and the reason `as unknown as` is banned across
  * `app/` (10 §2.1). The rows are the ones the caller wants the confirm surface to show.
  */
-const gatePassedAt = (at: FinalizedBlockRef, rows: readonly DeclarableRowId[]): GatePassed => {
+const gatePassedAt = async (
+  at: FinalizedBlockRef,
+  rows: readonly DeclarableRowId[],
+): Promise<GatePassed> => {
   const prep: TxPreparation = { ...PREP, requires: rows };
   const results = rows.flatMap((row) =>
     coverageOf(row).map((id) => ({ ...PASSING_ROW, id, at })),
   );
-  const outcome = gate(prep, at, prep.builtFor, PROVEN, results);
+  const outcome = await gateForTest(prep, at, prep.builtFor, PROVEN, results);
   assert.equal(outcome.kind, 'proceed', 'the gate fixture no longer opens');
   return outcome.passed;
 };
@@ -1564,15 +1569,35 @@ const confirmInputs = () => ({
  * operator console that could be driven by a hand-made object would prove nothing about the
  * property under test.
  */
+const READY_ROWS = [
+  'P-1', 'P-2', 'P-3', 'P-4', 'P-5', 'P-6', 'P-7', 'P-8', 'P-9', 'P-10',
+  'P-11', 'P-12', 'P-13', 'P-14', 'P-15',
+  'O-1', 'O-2', 'O-3', 'O-4', 'O-5', 'O-6', 'O-7', 'O-8', 'O-9',
+  'G-1', 'G-2', 'G-3', 'G-4', 'G-5', 'G-6', 'G-7', 'G-8', 'G-9',
+] as const satisfies readonly DeclarableRowId[];
+const READY_WINDOWS_PER_ROW = 32;
+const READY_WINDOWS = new Map<DeclarableRowId, readonly GatePassed[]>(
+  await Promise.all(
+    READY_ROWS.map(async (row) => [
+      row,
+      await Promise.all(
+        Array.from({ length: READY_WINDOWS_PER_ROW }, async () => gatePassedAt(AT, [row])),
+      ),
+    ] as const),
+  ),
+);
+const READY_WINDOW_CURSOR = new Map<DeclarableRowId, number>();
+
 const readySession = (row: DeclarableRowId): TxSession => {
-  const prep: TxPreparation = { ...PREP, requires: [row] };
   // Every obligation of the row, because the gate demands one result per clause — and the
   // preparation the proof names must be the one the session holds, because `reduce` and
   // `operatorGate` both refuse a proof minted for different bytes.
-  const results = coverageOf(row).map((id) => ({ ...PASSING_ROW, id, at: AT }));
-  const outcome = gate(prep, AT, prep.builtFor, PROVEN, results);
-  assert.equal(outcome.kind, 'proceed', 'the operator gate fixture no longer opens');
-  return session({ state: 'AwaitingSignature', prep, signingWindow: outcome.passed });
+  const windows = READY_WINDOWS.get(row);
+  const cursor = READY_WINDOW_CURSOR.get(row) ?? 0;
+  const window = windows?.[cursor];
+  assert.ok(window, `the operator gate fixture has no proof for ${row}`);
+  READY_WINDOW_CURSOR.set(row, cursor + 1);
+  return session({ state: 'AwaitingSignature', prep: window.prep, signingWindow: window });
 };
 
 /** A session that has not been refreshed — a prepared transaction, no gate result. */
@@ -1721,8 +1746,8 @@ test('no confirm screen exists before the chain has been re-read', () => {
   }
 });
 
-test('AwaitingSignature renders the gate’s own passing rows', () => {
-  const passed = gatePassedAt(AT, ['P-1', 'P-2']);
+test('AwaitingSignature renders the gate’s own passing rows', async () => {
+  const passed = await gatePassedAt(AT, ['P-1', 'P-2']);
   const props = confirmProps(
     session({ state: 'AwaitingSignature', prep: PREP, signingWindow: passed }),
     confirmInputs(),
@@ -1732,14 +1757,17 @@ test('AwaitingSignature renders the gate’s own passing rows', () => {
   assert.equal(mayOfferSigning(session({ state: 'AwaitingSignature' })), true);
 });
 
-test('Blocked renders the failures only — rule 5’s diff view, not a padded set', () => {
+test('Blocked renders the failures only — rule 5’s diff view, not a padded set', async () => {
   const failed = [{ ...PASSING_ROW, id: firstCoverage('P-2'), ok: false, expected: 'Open', actual: 'Closed' }];
   // The session MUST carry a stale signing window, and the first version of this test did
   // not: with `signingWindow: undefined` a controller that preferred the window would fall
   // back to `failed` and pass. Mutation M34 survived on exactly that. The dangerous session
   // is `Blocked` reached *after* a gate once passed — a full set of rows that were true at
   // a block B′ has already moved past.
-  const stale = gatePassedAt({ chain: TEST_CHAIN, blockHash: '0xold', blockNumber: 999 }, ['P-1', 'P-3']);
+  const stale = await gatePassedAt(
+    { chain: TEST_CHAIN, blockHash: blockHashAt(999), blockNumber: 999 },
+    ['P-1', 'P-3'],
+  );
   const props = confirmProps(
     session({ state: 'Blocked', prep: PREP, failed, signingWindow: stale }),
     confirmInputs(),

@@ -14,7 +14,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from node_boot import JsonRpcHttp, NodeProcess
 from release_common import write_json
-from runtime_profiles import validate_build_profile
+from rfc78 import metadata_hash
+from runtime_profiles import RFC78_STATUS, validate_build_profile
 from scale_metadata import MetadataDecodeError, decode_metadata
 
 # Versions `scale_metadata.decode_metadata` can read. v16 exists and this runtime
@@ -134,6 +135,30 @@ def bound_wasm_hashes(wasm_bytes: bytes, on_chain_hex: str) -> tuple[str, str]:
     return file_hash, on_chain_hash
 
 
+def compute_rfc78_metadata_hash(
+    metadata_path: Path, build_info: dict[str, object]
+) -> str:
+    """Independently recompute RFC-78 over the extracted metadata artifact."""
+    config = build_info["rfc78_metadata_hash"]
+    assert isinstance(config, dict)  # validate_build_profile checked the exact shape
+    return metadata_hash(
+        metadata_path,
+        str(config["token_symbol"]),
+        int(config["token_decimals"]),
+    )
+
+
+def decode_embedded_rfc78_metadata_hash(raw_hex: str) -> str:
+    """Decode `Option<[u8; 32]>` returned by the booted release-only API."""
+    raw = decode_hex(raw_hex, "ReleaseMetadataApi_embedded_rfc78_metadata_hash")
+    if len(raw) != 33 or raw[0] != 1:
+        raise RuntimeError(
+            "booted runtime did not expose one embedded RFC-78 digest; "
+            "release profile may have omitted metadata-hash generation"
+        )
+    return "0x" + raw[1:].hex()
+
+
 def main() -> int:
     args = parse_args()
     if not args.wasm.is_file():
@@ -173,6 +198,12 @@ def main() -> int:
             runtime_version = rpc.call("state_getRuntimeVersion")
             properties = rpc.call("system_properties")
             on_chain_code = rpc.call("state_getStorage", ["0x3a636f6465"])
+            embedded_rfc78_metadata_hash = decode_embedded_rfc78_metadata_hash(
+                rpc.call(
+                    "state_call",
+                    ["ReleaseMetadataApi_embedded_rfc78_metadata_hash", "0x"],
+                )
+            )
     finally:
         if temporary_spec is not None:
             temporary_spec.cleanup()
@@ -184,6 +215,13 @@ def main() -> int:
     metadata_path = args.out_dir / "metadata.scale"
     metadata_path.write_bytes(metadata)
     metadata_sha = hashlib.sha256(metadata).hexdigest()
+    rfc78_metadata_hash = compute_rfc78_metadata_hash(metadata_path, build_info)
+    if embedded_rfc78_metadata_hash != rfc78_metadata_hash:
+        raise RuntimeError(
+            "booted runtime embedded RFC-78 digest does not match independent "
+            "metadata.scale recomputation: "
+            f"embedded={embedded_rfc78_metadata_hash}, computed={rfc78_metadata_hash}"
+        )
 
     contract_version = None
     contract_status = "not found in decoded metadata constants"
@@ -221,8 +259,9 @@ def main() -> int:
         "metadata_version": metadata_version,
         "metadata_sha256": metadata_sha,
         "metadata_hash_kind": "sha256-of-raw-scale-metadata",
-        "rfc78_merkleized_metadata_hash": None,
-        "rfc78_status": "not enabled by the runtime build recipe",
+        "rfc78_merkleized_metadata_hash": rfc78_metadata_hash,
+        "embedded_rfc78_metadata_hash": embedded_rfc78_metadata_hash,
+        "rfc78_status": RFC78_STATUS,
         "wasm_sha256": wasm_file_sha256,
         "wasm_file_sha256": wasm_file_sha256,
         "on_chain_wasm_sha256": on_chain_wasm_sha256,

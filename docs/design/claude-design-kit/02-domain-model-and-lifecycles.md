@@ -299,8 +299,8 @@ decision or settlement inputs.
 - Lifecycle: `Registered → Open → Sealed → Settled`, with every failure edge ending `Voided`.
   The report is delivered at `Sealed`; `Settled` and `Voided` are the only terminal states.
 - Each question owns exactly two scalar books, Accept and Reject, in the service ledger — never
-  Bleavit gate or Baseline books. Their 128-live/128-retained envelope is independent of the
-  primary 196-live/2,240-retained POL envelope; the shared physical map caps at 2,368 rows.
+  Bleavit gate or Baseline books. Their 128-live/15,744-retained envelope is independent of the
+  primary 196-live/2,240-retained POL envelope; the shared physical map caps at 17,984 rows.
 - Trading and redemption fees are Bleavit service revenue in treasury `MAIN`. The client's maker
   subsidy is not treasury capital: pair-atomic seeding posts two headrooms, leaves no mergeable
   mirror pair with the client, locks the extra raw branch legs in the matching book accounts, and

@@ -114,12 +114,25 @@ The live limit is an **admission** ceiling: lowering `svc.max_live` refuses new 
 invalidate or evict already-open questions, which drain under their existing terminal rules;
 try-state therefore checks retained occupancy against the 128 CODE ceiling, not the newly lowered
 admission value.
-Retained rows have their own 128-row partition (`MaxStoredExternalMarkets`), so external archive
-backlog cannot borrow the primary 2,240-row envelope; the shared physical map is bounded at 2,368.
-The immutable pair/funder records are separately capped at 64 and remain until both books and the
-service vault are archived, after which their removal is permissionless. A tombstoned client
-therefore cannot strand capacity; missing cleanup refuses new service questions rather than growing
-state without bound. First service-terminal observation latches and closes both books in one
+Retained rows have their own throughput-times-retention partition, so external archive backlog
+cannot borrow the primary 2,240-row envelope. The fastest lawful question lifetime is
+`L_min = orc.window_min + 2·mkt.obs_interval_min = 43,200 + 2·5 = 43,210` blocks; the one-block
+`window_start > now` lead is omitted, conservatively. The one-year archive ceiling can therefore
+retain `ceil(5,256,000 / 43,210) + 1 = 123` complete 64-slot waves, where the final term is the
+currently-live wave. Thus `MaxExternalBookPairs = 64·123 = 7,872`,
+`MaxStoredExternalMarkets = 2·7,872 = 15,744`, and the shared physical map is bounded at
+`MaxAllStoredMarkets = 2,240 + 15,744 = 17,984`. A healthy keeper can reap the oldest eligible wave
+before the envelope fills even at the fastest lawful turnover; a missing keeper still applies
+finite backpressure rather than unbounded growth.
+
+The immutable pair/funder records remain until both books and the service vault are archived, after
+which their removal is permissionless. Registration does **not** scan that retained history:
+question, Accept and Reject occupy the exact consecutive roles of one monotone three-id allocation,
+aligned from `ServiceIdBase`. The service allocator supplies monotonicity and the market's exact-role
+and alignment checks make distinct triples disjoint in O(1), while try-state audits the complete retained set. The guardian service pause
+uses the same monotone allocator as an O(1) cutoff; it never walks retained questions in a dispatch.
+A tombstoned client therefore cannot strand capacity, and an archive-sized bound cannot silently
+become a call-sized loop. First service-terminal observation latches and closes both books in one
 storage transaction and releases the external live counter by exactly two; it touches no POL state.
 
 **The funds-moving freeze follows the same exhaustive ledger route.** `buy`, `sell`,

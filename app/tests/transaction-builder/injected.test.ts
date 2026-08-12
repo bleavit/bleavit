@@ -30,9 +30,10 @@ import type {
   PolkadotSignerLike,
   SigningRequest,
 } from '@bleavit/signing';
-import { declaredCoverageIds, gate } from '@bleavit/transaction-builder';
+import { declaredCoverageIds } from '@bleavit/transaction-builder';
 import type { GatePassed, TxPreparation } from '@bleavit/transaction-builder';
 import type { CompatClassification } from '@bleavit/descriptors';
+import { gateForTest } from './gate-fixture.ts';
 
 /**
  * The compat verdict this fixture gates against — 10 §3.2's `full` row.
@@ -102,22 +103,23 @@ function fakeApi(
 
 const PREP: TxPreparation = {
   scaleHex: '0x0102030405',
+  signingAccount: ALICE,
   builtFor: { specVersion: 2, metadataHash: `0x${'ab'.repeat(32)}` },
   preparedAt: { chain: TEST_CHAIN, blockHash: `0x${'22'.repeat(32)}`, blockNumber: 6 },
   requires: ['P-1'],
   feeAsset: 'USDC',
 };
 
-/** A real gate proof — `GatePassed` is branded and only `gate()` mints one (10 §2.1). */
-const WINDOW: GatePassed = (() => {
+/** A real gate proof — only the production refresh owner mints one (10 §2.1). */
+const windowFor = async (prep: TxPreparation): Promise<GatePassed> => {
   const at = { chain: TEST_CHAIN, blockHash: `0x${'11'.repeat(32)}` as const, blockNumber: 7 };
   // Every obligation `P-1` imposes, not one result naming the row: coverage is per clause.
-  const outcome = gate(
-    PREP,
+  const outcome = await gateForTest(
+    prep,
     at,
-    PREP.builtFor,
+    prep.builtFor,
     PROVEN,
-    declaredCoverageIds('P-1', PREP.feeAsset).map((id) => ({
+    declaredCoverageIds('P-1', prep.feeAsset).map((id) => ({
       id,
       ok: true,
       requirement: 'r',
@@ -128,9 +130,18 @@ const WINDOW: GatePassed = (() => {
   );
   assert.equal(outcome.kind, 'proceed', 'the gate fixture no longer opens');
   return outcome.passed;
-})();
+};
 
-const request = (account: string): SigningRequest => ({ prep: PREP, window: WINDOW, account });
+const WINDOWS = new Map<string, GatePassed>([
+  [ALICE, await windowFor(PREP)],
+  [BOB, await windowFor({ ...PREP, signingAccount: BOB })],
+]);
+
+const request = (account: string): SigningRequest => {
+  const window = WINDOWS.get(account);
+  assert.ok(window, `no gated fixture for ${account}`);
+  return { window };
+};
 
 /**
  * A signer that must never be reached — `requireCapability` refuses before it would be.
@@ -151,9 +162,8 @@ const notSigned = (): Promise<never> => {
  * The adapter's runtime guard is the subject (INV-FE-14: the exact raw SCALE bytes), and
  * the compile-time half being right is why the cast is needed to ask the question.
  */
-const withPayloadHex = (scaleHex: string): SigningRequest => ({
-  ...request(ALICE),
-  prep: { ...PREP, scaleHex: scaleHex as TxPreparation['scaleHex'] },
+const withPayloadHex = async (scaleHex: string): Promise<SigningRequest> => ({
+  window: await windowFor({ ...PREP, scaleHex: scaleHex as TxPreparation['scaleHex'] }),
 });
 
 test('an absent extension is named, not surfaced as a generic failure', async () => {
@@ -218,7 +228,7 @@ test('the injected signer cannot claim a decode it cannot perform', async () => 
   );
 
   for (const d of [descriptor, adapter.descriptor]) {
-    assert.equal(d.capabilities.has('metadata-hash'), false, 'metadata-hash: the runtime emits no digest, so mode 1 is rejected on chain (SQ-594/B21)');
+    assert.equal(d.capabilities.has('metadata-hash'), false, 'metadata-hash: runtime support does not prove this injected wallet verifies and displays Bleavit calls');
     assert.equal(d.capabilities.has('hashed-payload'), false);
   }
 });
@@ -371,13 +381,13 @@ test('a non-hex payload is refused rather than signed as zero bytes (#20)', asyn
   const adapter = await connectInjected(api, 'talisman', 'Bleavit');
   const withPayload = withPayloadHex;
 
-  await assert.rejects(() => adapter.sign(withPayload('0xzz')), /not 0x-prefixed hex/);
-  await assert.rejects(() => adapter.sign(withPayload('0x01g2')), /not 0x-prefixed hex/);
-  await assert.rejects(() => adapter.sign(withPayload('0102')), /not 0x-prefixed hex/);
-  await assert.rejects(() => adapter.sign(withPayload('0x')), /empty payload/);
-  await assert.rejects(() => adapter.sign(withPayload('0x123')), /odd-length/);
+  await assert.rejects(async () => adapter.sign(await withPayload('0xzz')), /not 0x-prefixed hex/);
+  await assert.rejects(async () => adapter.sign(await withPayload('0x01g2')), /not 0x-prefixed hex/);
+  await assert.rejects(async () => adapter.sign(await withPayload('0102')), /not 0x-prefixed hex/);
+  await assert.rejects(async () => adapter.sign(await withPayload('0x')), /empty payload/);
+  await assert.rejects(async () => adapter.sign(await withPayload('0x123')), /odd-length/);
 
   // A real payload still signs, so the guard is not simply refusing everything.
-  const ok = await adapter.sign(withPayload('0x0102030405'));
+  const ok = await adapter.sign(await withPayload('0x0102030405'));
   assert.match(ok.signatureHex, /^0x[0-9a-f]+$/);
 });

@@ -118,6 +118,7 @@ default = ["std", "bootstrap"]
 bootstrap = []
 phase-four = []
 recovery = []
+metadata-hash = ["substrate-wasm-builder/metadata-hash"]
 std = [
   "bleavit-xcm/std",
   "cumulus-pallet-aura-ext/std",

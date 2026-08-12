@@ -13,6 +13,13 @@ Legend: ⬜ pending · 🔨 active · ✅ done · ⛔ blocked
 
 ## Current focus
 
+> **ACTIVE: 2026-08-12 — remediate the whole-repository security review in
+> draft PR #304.** The immutable review checkpoint is published at commit
+> `3b70e09e`; all 15 findings have implementation patches in the working tree.
+> Remaining closure work is committed-fidelity weight regeneration, genuine
+> clean-source OCI runtime/feed regeneration, scoped quality gates, and the
+> remediation commit/push.
+
 > **PARKED: 2026-08-09 — Track F's code is complete; four milestones wait on
 > external inputs.** F1 needs the user's SQ-940 ruling plus a device lab/live
 > chain/hardware/ar.io credentials. F11 needs the production rollout inputs and

@@ -17,6 +17,7 @@ import argparse
 import base64
 import collections
 import hashlib
+import ipaddress
 import json
 import logging
 import re
@@ -48,12 +49,27 @@ from common import (  # noqa: E402
     hex_bytes,
     serve_metrics,
 )
+from credential_index import (  # noqa: E402
+    CredentialIndex,
+    CredentialIndexError,
+    parse_credential_index,
+)
 
 
 LOG = logging.getLogger("bleavit-attestation-monitor")
 PROVISIONAL_SCHEMA = "bleavit.release.provisional.v1"
 TXID = re.compile(r"^[A-Za-z0-9_-]{43}$")
 SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
+HASH32_HEX = re.compile(r"^0x[0-9a-f]{64}$")
+STABLE_IDENTIFIER = re.compile(r"^[a-z0-9](?:[a-z0-9._-]*[a-z0-9])?$")
+
+
+def _stable_identifier(value: Any, label: str) -> str:
+    if not isinstance(value, str) or STABLE_IDENTIFIER.fullmatch(value) is None:
+        raise MonitoringError(
+            f"{label} must be a lowercase stable identifier using a-z, 0-9, dot, dash, or underscore"
+        )
+    return value
 
 
 def _series(name: str, kind: str, help_text: str) -> SeriesDefinition:
@@ -71,7 +87,7 @@ SERIES: dict[str, SeriesDefinition] = {
         _series("bleavit_release_monitor_bundle_byte_mismatches", "gauge", "Files/routes whose bytes differ from the signed map."),
         _series("bleavit_release_monitor_resolver_divergent_gateways", "gauge", "Gateway resolutions differing from ReleaseChannel manifest_txid."),
         _series("bleavit_release_monitor_valid_release_signatures", "gauge", "Valid non-revoked release signatures."),
-        _series("bleavit_release_monitor_valid_attestations", "gauge", "Distinct valid non-revoked attestor signatures."),
+        _series("bleavit_release_monitor_valid_attestations", "gauge", "Organizations represented by valid non-revoked attestor signatures."),
         _series("bleavit_release_monitor_keyring_generation", "gauge", "Verified release keyring generation."),
         _series("bleavit_release_monitor_manifest_matches_channel", "gauge", "Whether release.json and resolver targets match ReleaseChannel."),
         _series("bleavit_release_monitor_covering_release", "gauge", "Whether the canonical release covers ReleaseChannel spec_version."),
@@ -268,6 +284,7 @@ class KeyRecord:
     public_key: MinisignPublicKey
     role: str
     revocation_index: int
+    organization: str
 
 
 @dataclass(frozen=True)
@@ -293,9 +310,16 @@ def load_keyring(path: Path) -> Keyring:
     for index, row in enumerate(rows, 1):
         if not isinstance(row, dict):
             raise MonitoringError(f"keyring entry {index} must be a table")
+        expected_fields = {"role", "revocation_index", "public_key", "organization"}
+        if set(row) != expected_fields:
+            raise MonitoringError(
+                f"keyring entry {index} must contain exactly "
+                "role, revocation_index, public_key, organization"
+            )
         role = row.get("role")
         revocation_index = row.get("revocation_index")
         encoded = row.get("public_key")
+        organization = row.get("organization")
         if role not in {"release", "attestor"}:
             raise MonitoringError(f"keyring entry {index} role must be release or attestor")
         if not isinstance(revocation_index, int) or not 0 <= revocation_index < 64:
@@ -304,6 +328,9 @@ def load_keyring(path: Path) -> Keyring:
             raise MonitoringError(f"keyring revocation_index {revocation_index} is duplicated")
         if not isinstance(encoded, str):
             raise MonitoringError(f"keyring entry {index} public_key must be a string")
+        organization = _stable_identifier(
+            organization, f"keyring entry {index} organization"
+        )
         try:
             public = parse_minisign_public_key(encoded)
         except ValueError as error:
@@ -312,7 +339,7 @@ def load_keyring(path: Path) -> Keyring:
             raise MonitoringError(f"keyring key id {public.key_id.hex()} is duplicated")
         indexes.add(revocation_index)
         keys[public.key_id] = KeyRecord(
-            public.key_id, public, role, revocation_index
+            public.key_id, public, role, revocation_index, organization
         )
     return Keyring(generation, keys)
 
@@ -335,8 +362,8 @@ def _valid_signers(
     keyring: Keyring,
     channel: ReleaseChannel,
     role: str,
-) -> set[bytes]:
-    valid: set[bytes] = set()
+) -> dict[bytes, KeyRecord]:
+    valid: dict[bytes, KeyRecord] = {}
     for blob in blobs:
         try:
             signature = parse_minisign_signature(blob)
@@ -348,7 +375,7 @@ def _valid_signers(
         if channel.revoked_key_bits & (1 << record.revocation_index):
             continue
         if verify_minisign(message, blob, record.public_key):
-            valid.add(record.key_id)
+            valid[record.key_id] = record
     return valid
 
 
@@ -387,7 +414,7 @@ def evaluate_integrity(
         errors.append("release.json SHA-256 differs from ReleaseChannel")
 
     divergent = sum(txid != channel.manifest_txid for txid in resolved_txids)
-    if divergent >= 2:
+    if divergent:
         errors.append(f"{divergent}-of-{len(resolved_txids)} gateway resolvers diverge")
 
     generation = release_document.get("keyring_generation")
@@ -402,12 +429,16 @@ def evaluate_integrity(
     attestor_keys = _valid_signers(
         signed_message, attestations, keyring, channel, "attestor"
     )
+    attestor_organizations = {record.organization for record in attestor_keys.values()}
     if len(release_keys) < minimum_release_signatures:
         errors.append(
             f"valid release signatures {len(release_keys)} < operator minimum {minimum_release_signatures}"
         )
-    if len(attestor_keys) < 2:
-        errors.append(f"valid independent attestations {len(attestor_keys)} < 2")
+    if len(attestor_organizations) < 2:
+        errors.append(
+            "valid independent attestation organizations "
+            f"{len(attestor_organizations)} < 2"
+        )
 
     supported = release_document.get("supported_spec_version")
     covering = (
@@ -424,7 +455,7 @@ def evaluate_integrity(
         mismatches,
         divergent,
         len(release_keys),
-        len(attestor_keys),
+        len(attestor_organizations),
         manifest_matches,
         covering,
     )
@@ -434,33 +465,121 @@ def evaluate_integrity(
 @dataclass(frozen=True)
 class Gateway:
     name: str
+    operator: str
     resolve_url: str
     raw_url: str
     tx_url: str
     name_url: str
+    tx_root_url: str
+    name_root_url: str
+
+
+@dataclass(frozen=True)
+class RpcEndpoint:
+    operator: str
+    url: str
 
 
 @dataclass(frozen=True)
 class Config:
     gateways: tuple[Gateway, ...]
-    node_urls: tuple[str, ...]
+    rpc_endpoints: tuple[RpcEndpoint, ...]
+    expected_genesis_hash: str
+    credential_index_txid: str
+    credential_index_sha256: str
     arns_name: str
     keyring_file: Path
     bind: str
     check_interval_seconds: int
+    rpc_poll_interval_seconds: int
     minimum_release_signatures: int
     max_file_bytes: int
     max_bundle_bytes: int
     webhooks: Mapping[str, tuple[str, ...]]
 
 
+def _normalized_origin(value: str, label: str, schemes: set[str]) -> str:
+    try:
+        parsed = urllib.parse.urlsplit(value)
+        port = parsed.port
+    except ValueError as error:
+        raise MonitoringError(f"{label} is not a valid URL: {error}") from error
+    if parsed.scheme not in schemes or parsed.hostname is None:
+        raise MonitoringError(
+            f"{label} must use one of {', '.join(sorted(schemes))} and include a host"
+        )
+    if parsed.username is not None or parsed.password is not None:
+        raise MonitoringError(f"{label} must not contain URL userinfo")
+    raw_host = parsed.hostname.rstrip(".")
+    if not raw_host:
+        raise MonitoringError(f"{label} has an empty host")
+    try:
+        host = ipaddress.ip_address(raw_host).compressed
+    except ValueError:
+        try:
+            host = raw_host.encode("idna").decode("ascii").lower()
+        except UnicodeError as error:
+            raise MonitoringError(f"{label} has an invalid internationalized host") from error
+        labels = host.split(".")
+        if any(
+            not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", part)
+            for part in labels
+        ):
+            raise MonitoringError(f"{label} has an invalid DNS host")
+    if port is None:
+        port = 443 if parsed.scheme in {"https", "wss"} else 80
+    rendered_host = f"[{host}]" if ":" in host else host
+    return f"{parsed.scheme}://{rendered_host}:{port}"
+
+
 def _template(value: Any, label: str, fields: Iterable[str]) -> str:
-    if not isinstance(value, str) or not value.startswith("https://"):
+    if not isinstance(value, str):
         raise MonitoringError(f"{label} must be an https:// URL template")
-    missing = [field for field in fields if "{" + field + "}" not in value]
-    if missing:
-        raise MonitoringError(f"{label} is missing placeholders: {', '.join(missing)}")
+    expected_fields = set(fields)
+    actual_fields = re.findall(r"{([^{}]+)}", value)
+    if (
+        value.count("{") != len(actual_fields)
+        or value.count("}") != len(actual_fields)
+        or set(actual_fields) != expected_fields
+    ):
+        raise MonitoringError(
+            f"{label} placeholders must be exactly: {', '.join(sorted(expected_fields))}"
+        )
+    parsed = urllib.parse.urlsplit(value)
+    origin_probe = value
+    for field, replacement in {
+        "name": "origin-check",
+        "txid": "A" * 43,
+        "path": "origin-check",
+    }.items():
+        origin_probe = origin_probe.replace("{" + field + "}", replacement)
+    _normalized_origin(origin_probe, label, {"https"})
+    if parsed.query or parsed.fragment:
+        raise MonitoringError(f"{label} must not contain a query or fragment")
+    for field in ("txid", "path"):
+        if "{" + field + "}" in parsed.netloc:
+            raise MonitoringError(
+                f"{label} must keep the dynamic {field} placeholder outside the URL authority"
+            )
     return value
+
+
+def _rpc_url(value: Any, label: str) -> tuple[str, str]:
+    if not isinstance(value, str):
+        raise MonitoringError(f"{label} must be a ws:// or wss:// URL")
+    origin = _normalized_origin(value, label, {"ws", "wss"})
+    parsed = urllib.parse.urlsplit(value)
+    if parsed.query or parsed.fragment:
+        raise MonitoringError(f"{label} must not contain a query or fragment")
+    if parsed.scheme == "ws":
+        host = parsed.hostname or ""
+        try:
+            loopback = ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            loopback = host.lower().rstrip(".") == "localhost"
+        if not loopback:
+            raise MonitoringError(f"{label} may use plaintext ws:// only on loopback")
+    return value, origin
 
 
 def load_config(path: Path) -> Config:
@@ -471,39 +590,131 @@ def load_config(path: Path) -> Config:
         raise MonitoringError(f"cannot load config {path}: {error}") from error
     monitor = document.get("monitor")
     gateway_rows = document.get("gateway")
+    rpc_rows = document.get("rpc")
     webhooks = document.get("webhooks")
     if not isinstance(monitor, dict):
         raise MonitoringError("config requires [monitor]")
-    if not isinstance(gateway_rows, list) or len(gateway_rows) < 3:
-        raise MonitoringError("config requires at least three [[gateway]] entries")
-    names: set[str] = set()
-    gateways: list[Gateway] = []
-    for index, row in enumerate(gateway_rows, 1):
-        if not isinstance(row, dict) or not isinstance(row.get("name"), str):
-            raise MonitoringError(f"gateway {index} needs a string name")
-        name = row["name"]
-        if name in names:
-            raise MonitoringError(f"gateway name {name!r} is duplicated")
-        names.add(name)
-        gateways.append(
-            Gateway(
-                name,
-                _template(row.get("resolve_url"), f"gateway {name} resolve_url", ("name",)),
-                _template(row.get("raw_url"), f"gateway {name} raw_url", ("txid",)),
-                _template(row.get("tx_url"), f"gateway {name} tx_url", ("txid", "path")),
-                _template(row.get("name_url"), f"gateway {name} name_url", ("name", "path")),
-            )
+    monitor_fields = {
+        "expected_genesis_hash",
+        "credential_index_txid",
+        "credential_index_sha256",
+        "arns_name",
+        "keyring_file",
+        "bind",
+        "check_interval_seconds",
+        "rpc_poll_interval_seconds",
+        "minimum_release_signatures",
+        "max_file_bytes",
+        "max_bundle_bytes",
+    }
+    missing_monitor_fields = sorted(monitor_fields - set(monitor))
+    unexpected_monitor_fields = sorted(set(monitor) - monitor_fields)
+    if missing_monitor_fields:
+        raise MonitoringError(
+            "monitor configuration is missing operator-supplied fields: "
+            + ", ".join(missing_monitor_fields)
         )
-    node_urls = monitor.get("node_urls")
-    if not isinstance(node_urls, list) or not node_urls or not all(
-        isinstance(url, str) and url.startswith(("ws://", "wss://")) for url in node_urls
-    ):
-        raise MonitoringError("monitor.node_urls must be a non-empty ws:// or wss:// list")
+    if unexpected_monitor_fields:
+        raise MonitoringError(
+            "monitor configuration contains undocumented fields: "
+            + ", ".join(unexpected_monitor_fields)
+        )
     arns_name = monitor.get("arns_name")
     if not isinstance(arns_name, str) or not re.fullmatch(r"[a-z0-9_-]+", arns_name):
         raise MonitoringError("monitor.arns_name must contain lowercase ArNS name characters")
+    if not isinstance(gateway_rows, list) or len(gateway_rows) < 3:
+        raise MonitoringError("config requires at least three [[gateway]] entries")
+    names: set[str] = set()
+    gateway_operators: set[str] = set()
+    gateway_origins: set[str] = set()
+    gateways: list[Gateway] = []
+    for index, row in enumerate(gateway_rows, 1):
+        if not isinstance(row, dict) or set(row) != {
+            "name",
+            "operator",
+            "resolve_url",
+            "raw_url",
+            "tx_url",
+            "name_url",
+            "tx_root_url",
+            "name_root_url",
+        }:
+            raise MonitoringError(f"gateway {index} must contain exactly the documented fields")
+        name = _stable_identifier(row.get("name"), f"gateway {index} name")
+        operator = _stable_identifier(row.get("operator"), f"gateway {index} operator")
+        if name in names:
+            raise MonitoringError(f"gateway name {name!r} is duplicated")
+        if operator in gateway_operators:
+            raise MonitoringError(f"gateway operator {operator!r} is duplicated")
+        urls = (
+            _template(row.get("resolve_url"), f"gateway {name} resolve_url", ("name",)),
+            _template(row.get("raw_url"), f"gateway {name} raw_url", ("txid",)),
+            _template(row.get("tx_url"), f"gateway {name} tx_url", ("txid", "path")),
+            _template(row.get("name_url"), f"gateway {name} name_url", ("name", "path")),
+            _template(row.get("tx_root_url"), f"gateway {name} tx_root_url", ("txid",)),
+            _template(row.get("name_root_url"), f"gateway {name} name_root_url", ("name",)),
+        )
+        origins = {
+            _normalized_origin(
+                _format_url(
+                    url,
+                    name=arns_name,
+                    txid="A" * 43,
+                    path="origin-check",
+                ),
+                f"gateway {name} URL",
+                {"https"},
+            )
+            for url in urls
+        }
+        overlap = origins & gateway_origins
+        if overlap:
+            raise MonitoringError(
+                f"gateway {name} reuses normalized origin {sorted(overlap)[0]}"
+            )
+        names.add(name)
+        gateway_operators.add(operator)
+        gateway_origins.update(origins)
+        gateways.append(
+            Gateway(
+                name,
+                operator,
+                *urls,
+            )
+        )
+    if not isinstance(rpc_rows, list) or len(rpc_rows) < 3:
+        raise MonitoringError("config requires at least three [[rpc]] entries")
+    rpc_operators: set[str] = set()
+    rpc_origins: set[str] = set()
+    rpc_endpoints: list[RpcEndpoint] = []
+    for index, row in enumerate(rpc_rows, 1):
+        if not isinstance(row, dict) or set(row) != {"operator", "url"}:
+            raise MonitoringError(f"rpc {index} must contain exactly operator and url")
+        operator = _stable_identifier(row.get("operator"), f"rpc {index} operator")
+        url, origin = _rpc_url(row.get("url"), f"rpc {operator} url")
+        if operator in rpc_operators:
+            raise MonitoringError(f"rpc operator {operator!r} is duplicated")
+        if origin in rpc_origins:
+            raise MonitoringError(f"rpc normalized origin {origin} is duplicated")
+        rpc_operators.add(operator)
+        rpc_origins.add(origin)
+        rpc_endpoints.append(RpcEndpoint(operator, url))
+    expected_genesis_hash = monitor.get("expected_genesis_hash")
+    if not isinstance(expected_genesis_hash, str) or HASH32_HEX.fullmatch(expected_genesis_hash) is None:
+        raise MonitoringError("monitor.expected_genesis_hash must be 32-byte lowercase 0x hex")
+    if expected_genesis_hash == "0x" + "0" * 64:
+        raise MonitoringError("monitor.expected_genesis_hash must not be the all-zero placeholder")
+    credential_index_txid = monitor.get("credential_index_txid")
+    if not isinstance(credential_index_txid, str) or TXID.fullmatch(credential_index_txid) is None:
+        raise MonitoringError("monitor.credential_index_txid must be an Arweave transaction id")
+    credential_index_sha256 = monitor.get("credential_index_sha256")
+    if not isinstance(credential_index_sha256, str) or SHA256_HEX.fullmatch(credential_index_sha256) is None:
+        raise MonitoringError("monitor.credential_index_sha256 must be lowercase SHA-256 hex")
+    if credential_index_sha256 == "0" * 64:
+        raise MonitoringError("monitor.credential_index_sha256 must not be the all-zero placeholder")
     bind = monitor.get("bind")
     interval = monitor.get("check_interval_seconds")
+    rpc_poll_interval = monitor.get("rpc_poll_interval_seconds")
     minimum = monitor.get("minimum_release_signatures")
     max_file = monitor.get("max_file_bytes")
     max_bundle = monitor.get("max_bundle_bytes")
@@ -511,6 +722,14 @@ def load_config(path: Path) -> Config:
         raise MonitoringError("monitor.bind must be HOST:PORT")
     if not isinstance(interval, int) or not 1 <= interval <= 3600:
         raise MonitoringError("monitor.check_interval_seconds must be 1..3600 (hourly floor)")
+    if (
+        not isinstance(rpc_poll_interval, int)
+        or rpc_poll_interval < 1
+        or rpc_poll_interval > interval
+    ):
+        raise MonitoringError(
+            "monitor.rpc_poll_interval_seconds must be 1..check_interval_seconds"
+        )
     if not isinstance(minimum, int) or minimum < 2:
         raise MonitoringError(
             "monitor.minimum_release_signatures must be operator-supplied and >= 2 "
@@ -528,21 +747,29 @@ def load_config(path: Path) -> Config:
         keyring_file = path.parent / keyring_file
     if not isinstance(webhooks, dict):
         raise MonitoringError("config requires [webhooks]")
+    if set(webhooks) != {"paging", "status_page", "community"}:
+        raise MonitoringError("webhooks must contain exactly paging, status_page, community")
     parsed_webhooks: dict[str, tuple[str, ...]] = {}
     for channel in ("paging", "status_page", "community"):
         values = webhooks.get(channel)
         if not isinstance(values, list) or not values or not all(
-            isinstance(value, str) and value.startswith("https://") for value in values
+            isinstance(value, str) for value in values
         ):
             raise MonitoringError(f"webhooks.{channel} must be a non-empty https:// URL list")
+        for index, value in enumerate(values, 1):
+            _normalized_origin(value, f"webhooks.{channel}[{index}]", {"https"})
         parsed_webhooks[channel] = tuple(values)
     return Config(
         tuple(gateways),
-        tuple(node_urls),
+        tuple(rpc_endpoints),
+        expected_genesis_hash,
+        credential_index_txid,
+        credential_index_sha256,
         arns_name,
         keyring_file,
         bind,
         interval,
+        rpc_poll_interval,
         minimum,
         max_file,
         max_bundle,
@@ -613,40 +840,73 @@ def resolver_consensus(resolved: Sequence[str]) -> str | None:
     return txid if count * 2 > len(resolved) else None
 
 
-def fetch_release(config: Config, channel: ReleaseChannel) -> tuple[
+def fetch_credential_index(
+    config: Config,
+    fetcher: Fetcher,
+    release_json_bytes: bytes,
+    channel: ReleaseChannel,
+) -> CredentialIndex:
+    copies = [
+        fetcher.get(
+            _format_url(gateway.raw_url, txid=config.credential_index_txid)
+        )
+        for gateway in config.gateways
+    ]
+    if any(copy != copies[0] for copy in copies):
+        raise MonitoringError("gateway bytes diverge for the credential index")
+    actual_digest = hashlib.sha256(copies[0]).hexdigest()
+    if actual_digest != config.credential_index_sha256:
+        raise MonitoringError("credential index SHA-256 differs from operator pin")
+    try:
+        index = parse_credential_index(copies[0])
+    except CredentialIndexError as error:
+        raise MonitoringError(str(error)) from error
+    if index.release_json_sha256 != hashlib.sha256(release_json_bytes).hexdigest():
+        raise MonitoringError("credential index binds a different release.json")
+    if index.manifest_txid != channel.manifest_txid:
+        raise MonitoringError("credential index manifest_txid differs from ReleaseChannel")
+    return index
+
+
+def fetch_release(
+    config: Config, channel: ReleaseChannel, fetcher: Fetcher | None = None
+) -> tuple[
     dict[str, bytes], dict[str, Any], bytes, list[str], list[str], list[str]
 ]:
-    fetcher = Fetcher(config)
-    resolved = resolve_arns(config, fetcher)
-    manifests: list[Mapping[str, Any]] = []
+    client = fetcher or Fetcher(config)
+    resolved = resolve_arns(config, client)
+    raw_manifests: list[bytes] = []
     for gateway, txid in zip(config.gateways, resolved):
-        raw_manifest = fetcher.get(
-            _format_url(gateway.raw_url, txid=txid),
-            json_value=True,
-        )
-        if not isinstance(raw_manifest, dict):
-            raise MonitoringError(f"gateway {gateway.name} manifest is not an object")
-        manifests.append(raw_manifest)
-    canonical_txid = channel.manifest_txid
-    canonical = next(
-        (manifest for txid, manifest in zip(resolved, manifests) if txid == canonical_txid),
-        manifests[0],
-    )
+        raw_manifests.append(client.get(_format_url(gateway.raw_url, txid=txid)))
+    if any(raw != raw_manifests[0] for raw in raw_manifests):
+        raise MonitoringError("gateway bytes diverge for the resolved path manifest")
+    try:
+        canonical = json.loads(raw_manifests[0])
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise MonitoringError("resolved Arweave path manifest is not valid JSON") from error
+    if not isinstance(canonical, dict):
+        raise MonitoringError("resolved Arweave path manifest is not an object")
     paths = canonical.get("paths")
     if not isinstance(paths, dict) or not paths:
         raise MonitoringError("Arweave path manifest has no paths object")
     path_names = sorted(paths)
     if not all(isinstance(path, str) and path and ".." not in Path(path).parts for path in path_names):
         raise MonitoringError("Arweave path manifest contains an unsafe/non-string path")
+    index = canonical.get("index")
+    index_path = index.get("path") if isinstance(index, dict) else None
+    if not isinstance(index_path, str) or index_path not in paths:
+        raise MonitoringError(
+            "Arweave path manifest index.path must name one listed bundle path"
+        )
 
     route_values: dict[str, list[bytes]] = {path: [] for path in path_names}
     for gateway, resolved_txid in zip(config.gateways, resolved):
         for path in path_names:
             route_values[path].append(
-                fetcher.get(_format_url(gateway.tx_url, txid=resolved_txid, path=path))
+                client.get(_format_url(gateway.tx_url, txid=resolved_txid, path=path))
             )
             route_values[path].append(
-                fetcher.get(_format_url(gateway.name_url, name=config.arns_name, path=path))
+                client.get(_format_url(gateway.name_url, name=config.arns_name, path=path))
             )
     representative = {path: values[0] for path, values in route_values.items()}
     release_raw = representative.get("release.json")
@@ -675,17 +935,32 @@ def fetch_release(config: Config, channel: ReleaseChannel) -> tuple[
         elif any(value != representative[path] for value in values):
             compared_files[f"__route_mismatch__/{path}"] = b"mismatch"
 
-    def signature_transactions(field: str) -> list[str]:
-        rows = release_document.get(field)
-        if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
-            raise MonitoringError(f"release.json {field} must be a list of objects")
+    # A browser opens the manifest-selected root route, not `/index.html` by
+    # convention. Probe the actual immutable and named roots independently and
+    # bind both to the already hash-checked index path. Explicit root templates
+    # keep an operator's path API from being mistaken for the browser route.
+    expected_root = representative[index_path]
+    for gateway, resolved_txid in zip(config.gateways, resolved):
+        immutable_root = client.get(
+            _format_url(gateway.tx_root_url, txid=resolved_txid)
+        )
+        named_root = client.get(
+            _format_url(gateway.name_root_url, name=config.arns_name)
+        )
+        if immutable_root != expected_root:
+            compared_files[
+                f"__route_mismatch__/{gateway.name}/immutable-root"
+            ] = b"mismatch"
+        if named_root != expected_root:
+            compared_files[f"__route_mismatch__/{gateway.name}/name-root"] = b"mismatch"
+
+    credential_index = fetch_credential_index(config, client, release_raw, channel)
+
+    def signature_transactions(field: str, txids: Sequence[str]) -> list[str]:
         blobs: list[str] = []
-        for row in rows:
-            txid = row.get("txid")
-            if not isinstance(txid, str) or TXID.fullmatch(txid) is None:
-                raise MonitoringError(f"release.json {field} contains an invalid txid")
+        for txid in txids:
             copies = [
-                fetcher.get(_format_url(gateway.raw_url, txid=txid))
+                client.get(_format_url(gateway.raw_url, txid=txid))
                 for gateway in config.gateways
             ]
             if any(copy != copies[0] for copy in copies):
@@ -700,29 +975,49 @@ def fetch_release(config: Config, channel: ReleaseChannel) -> tuple[
         compared_files,
         release_document,
         release_raw,
-        signature_transactions("release_signatures"),
-        signature_transactions("attestations"),
+        signature_transactions(
+            "release_signatures", credential_index.release_signature_txids
+        ),
+        signature_transactions("attestations", credential_index.attestation_txids),
         resolved,
     )
+
+
+def _webhook_error_summary(error: Exception) -> str:
+    if isinstance(error, urllib.error.HTTPError):
+        return f"HTTP {error.code}"
+    if isinstance(error, urllib.error.URLError):
+        return f"transport {type(error.reason).__name__}"
+    if isinstance(error, MonitoringError):
+        status = re.fullmatch(r"HTTP ([0-9]{3})", str(error))
+        return status.group(0) if status is not None else "MonitoringError"
+    return type(error).__name__
 
 
 def post_webhooks(config: Config, payload: Mapping[str, Any], store: MetricStore) -> None:
     body = json.dumps(payload, sort_keys=True).encode("utf-8")
     for channel, urls in config.webhooks.items():
         for url in urls:
-            request = urllib.request.Request(
-                url,
-                data=body,
-                method="POST",
-                headers={"Content-Type": "application/json", "User-Agent": "bleavit-attestation-monitor/1"},
-            )
             try:
+                request = urllib.request.Request(
+                    url,
+                    data=body,
+                    method="POST",
+                    headers={
+                        "Content-Type": "application/json",
+                        "User-Agent": "bleavit-attestation-monitor/1",
+                    },
+                )
                 with urllib.request.urlopen(request, timeout=10) as response:
                     if not 200 <= response.status < 300:
                         raise MonitoringError(f"HTTP {response.status}")
             except Exception as error:
                 store.inc("bleavit_release_monitor_webhook_failures_total")
-                LOG.error("%s webhook failed for %s: %s", channel, url, error)
+                LOG.error(
+                    "%s webhook delivery failed: %s",
+                    channel,
+                    _webhook_error_summary(error),
+                )
 
 
 class AttestationMonitor:
@@ -822,6 +1117,59 @@ def read_channel(rpc: WsRpc, block_hash: str) -> bytes:
     return raw
 
 
+@dataclass(frozen=True)
+class RpcQuorumObservation:
+    block_hash: str
+    block_number: int
+    release_channel_bytes: bytes
+
+
+def _hash32(value: Any, label: str) -> str:
+    decoded = hex_bytes(value, label)
+    if decoded is None or len(decoded) != 32:
+        raise MonitoringError(f"{label} must contain exactly 32 bytes")
+    return "0x" + decoded.hex()
+
+
+def read_rpc_quorum(
+    connections: Sequence[tuple[RpcEndpoint, WsRpc]],
+    expected_genesis_hash: str,
+) -> RpcQuorumObservation:
+    """Require exact m-of-m RPC agreement; this is not storage-proof verification."""
+    if len(connections) < 3:
+        raise MonitoringError("RPC quorum requires at least three independent endpoints")
+    observations: list[tuple[str, RpcQuorumObservation]] = []
+    for endpoint, rpc in connections:
+        genesis = _hash32(
+            rpc.call("chain_getBlockHash", [0]),
+            f"rpc {endpoint.operator} genesis hash",
+        )
+        if genesis != expected_genesis_hash:
+            raise MonitoringError(
+                f"rpc {endpoint.operator} genesis hash differs from the configured Bleavit chain"
+            )
+        block_hash = _hash32(
+            rpc.call("chain_getFinalizedHead"),
+            f"rpc {endpoint.operator} finalized hash",
+        )
+        block = header_number(rpc.call("chain_getHeader", [block_hash]))
+        channel_bytes = read_channel(rpc, block_hash)
+        observations.append(
+            (
+                endpoint.operator,
+                RpcQuorumObservation(block_hash, block, channel_bytes),
+            )
+        )
+    first_operator, first = observations[0]
+    for operator, observation in observations[1:]:
+        if observation != first:
+            raise MonitoringError(
+                "RPC quorum disagreement between operators "
+                f"{first_operator} and {operator}"
+            )
+    return first
+
+
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Verify canonical Bleavit releases out of band.")
     parser.add_argument("--config", type=Path, required=True, help="operator TOML configuration")
@@ -846,39 +1194,40 @@ def run(args: argparse.Namespace) -> int:
         except (OSError, MonitoringError) as error:
             LOG.error("metrics bind failed: %s", error)
             return 2
-    endpoint = 0
     backoff = 1.0
     last_channel: bytes | None = None
     last_check = 0.0
     while True:
-        rpc: WsRpc | None = None
+        connections: list[tuple[RpcEndpoint, WsRpc]] = []
         try:
-            rpc = WsRpc(config.node_urls[endpoint % len(config.node_urls)])
-            block_hash = rpc.call("chain_getFinalizedHead")
-            block = header_number(rpc.call("chain_getHeader", [block_hash]))
-            channel_bytes = read_channel(rpc, block_hash)
-            verdict = monitor.check(channel_bytes, block)
+            for endpoint in config.rpc_endpoints:
+                connections.append((endpoint, WsRpc(endpoint.url)))
+            observation = read_rpc_quorum(connections, config.expected_genesis_hash)
+            verdict = monitor.check(
+                observation.release_channel_bytes, observation.block_number
+            )
             last_check = time.monotonic()
-            last_channel = channel_bytes
+            last_channel = observation.release_channel_bytes
             if args.once:
                 sys.stdout.write(store.render())
                 return 0 if verdict.ok else 1
-            subscription = rpc.subscribe_finalized()
+            trigger_rpc = connections[0][1]
+            subscription = trigger_rpc.subscribe_finalized()
             backoff = 1.0
             while True:
-                remaining = max(0.1, config.check_interval_seconds - (time.monotonic() - last_check))
-                header = rpc.next_finalized(subscription, timeout=remaining)
-                if header is None:
-                    block_hash = rpc.call("chain_getFinalizedHead")
-                    block = header_number(rpc.call("chain_getHeader", [block_hash]))
-                else:
-                    block_hash = header.get("hash")
-                    if not isinstance(block_hash, str):
-                        block_hash = rpc.call("chain_getFinalizedHead")
-                        block = header_number(rpc.call("chain_getHeader", [block_hash]))
-                    else:
-                        block = header_number(header)
-                channel_bytes = read_channel(rpc, block_hash)
+                remaining = max(
+                    0.1,
+                    config.check_interval_seconds - (time.monotonic() - last_check),
+                )
+                trigger_rpc.next_finalized(
+                    subscription,
+                    timeout=min(remaining, config.rpc_poll_interval_seconds),
+                )
+                observation = read_rpc_quorum(
+                    connections, config.expected_genesis_hash
+                )
+                channel_bytes = observation.release_channel_bytes
+                block = observation.block_number
                 monitor.note_finalized_head(block)
                 channel_changed = channel_bytes != last_channel
                 hourly_due = time.monotonic() - last_check >= config.check_interval_seconds
@@ -905,11 +1254,10 @@ def run(args: argparse.Namespace) -> int:
             if args.once:
                 sys.stdout.write(store.render())
                 return 2
-            endpoint += 1
             time.sleep(backoff)
             backoff = min(backoff * 2, 60.0)
         finally:
-            if rpc is not None:
+            for _, rpc in connections:
                 try:
                     rpc.close()
                 except Exception:

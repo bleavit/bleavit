@@ -1,6 +1,6 @@
 use crate::{
     assets::{BleavitReserves, PinnedAssetMatcher},
-    barrier::{AcceptedXcmOrigins, DenyTransact},
+    barrier::{AcceptedXcmOrigins, DenyTransact, DenyUnsupportedInstructions},
     caps::CappedInflows,
     coretime::coretime_renewal_program,
     filter::{classify_pallet_xcm_call, ReserveTransferFilter, XcmCallDisposition},
@@ -296,6 +296,98 @@ fn barrier_group_origin_mutation_and_assertion_instructions_are_default_denied()
             &mut properties,
         )
         .is_err());
+    }
+}
+
+#[test]
+fn barrier_group_all_nine_inner_program_instructions_are_default_denied() {
+    let local = Xcm(vec![ClearOrigin]);
+    let remote = Xcm(vec![ClearOrigin]);
+    let inner_programs: Vec<(&str, Instruction<()>)> = vec![
+        (
+            "TransferReserveAsset",
+            TransferReserveAsset {
+                assets: Assets::from(asset(usdc_location(), 1)),
+                dest: relay_location(),
+                xcm: remote.clone(),
+            },
+        ),
+        (
+            "DepositReserveAsset",
+            DepositReserveAsset {
+                assets: Wild(AllCounted(1)),
+                dest: relay_location(),
+                xcm: remote.clone(),
+            },
+        ),
+        (
+            "InitiateReserveWithdraw",
+            InitiateReserveWithdraw {
+                assets: Wild(AllCounted(1)),
+                reserve: relay_location(),
+                xcm: remote.clone(),
+            },
+        ),
+        (
+            "InitiateTeleport",
+            InitiateTeleport {
+                assets: Wild(AllCounted(1)),
+                dest: coretime_location(),
+                xcm: remote.clone(),
+            },
+        ),
+        (
+            "InitiateTransfer",
+            InitiateTransfer {
+                destination: relay_location(),
+                remote_fees: None,
+                preserve_origin: true,
+                assets: Default::default(),
+                remote_xcm: remote.clone(),
+            },
+        ),
+        (
+            "ExportMessage",
+            ExportMessage {
+                network: NetworkId::Kusama,
+                destination: [Parachain(7)].into(),
+                xcm: remote,
+            },
+        ),
+        ("SetErrorHandler", SetErrorHandler(local.clone())),
+        ("SetAppendix", SetAppendix(local.clone())),
+        (
+            "ExecuteWithOrigin",
+            ExecuteWithOrigin {
+                descendant_origin: Some([PalletInstance(7)].into()),
+                xcm: local,
+            },
+        ),
+    ];
+
+    for (name, instruction) in inner_programs {
+        let mut direct = vec![instruction.clone()];
+        let mut properties = Properties {
+            weight_credit: MAX_WEIGHT,
+            message_id: None,
+        };
+        assert!(
+            DenyUnsupportedInstructions::deny_execution(
+                &asset_hub_location(),
+                &mut direct,
+                MAX_WEIGHT,
+                &mut properties,
+            )
+            .is_err(),
+            "{name} bypassed the closed instruction allowlist",
+        );
+
+        let mut paid = paid_message(asset(usdc_location(), 1_000));
+        paid.0.push(instruction);
+        assert!(
+            !barrier_result::<BarrierWithKnownResponse>(asset_hub_location(), paid),
+            "paid Asset Hub traffic admitted disabled {name}",
+        );
     }
 }
 
@@ -729,7 +821,7 @@ fn probe_group_response_delivery_is_bounded_by_holding_and_never_uses_jit() {
         ]);
         assert!(!contains_jit(&bounded_program));
         let mut id = [11; 32];
-        let outcome = BleavitXcmExecutor::prepare_and_execute(
+        let outcome = RemoteProgramExecutor::prepare_and_execute(
             origin.clone(),
             bounded_program,
             &mut id,
@@ -752,7 +844,7 @@ fn probe_group_response_delivery_is_bounded_by_holding_and_never_uses_jit() {
         reset_test_state();
         set_send_fee(Assets::from(asset(dot_location(), fee_envelope + 1)));
         let mut id = [12; 32];
-        let outcome = BleavitXcmExecutor::prepare_and_execute(
+        let outcome = RemoteProgramExecutor::prepare_and_execute(
             origin,
             Xcm(vec![
                 WithdrawAsset(
@@ -1831,11 +1923,10 @@ fn caps_group_pre_mint_gate_ignores_a_refundable_pay_fees() {
 }
 
 #[test]
-fn caps_group_pre_mint_gate_ignores_fee_when_error_handler_can_deposit_full_holding() {
-    // A failing `PayFees` transfers nothing to the fee register and immediately runs
-    // the installed error handler. If that handler contains a local deposit, it can
-    // therefore meter the full pre-fee holding. The pre-mint gate must not subtract
-    // the nominal fee and admit a mint that can only fail later at the deposit leg.
+fn barrier_group_error_handler_is_denied_before_any_mint() {
+    // `SetErrorHandler` is one of 09 §6.1's nine disabled inner-program
+    // instructions. Even a paid Asset Hub program must fail at the barrier,
+    // before its nominal fee or fallback deposit can affect local state.
     new_test_ext().execute_with(|| {
         set_caps(u128::MAX, 90);
         let incoming = asset(usdc_location(), 100);
@@ -2164,13 +2255,12 @@ fn caps_group_withdraw_fed_holding_cannot_evade_the_pre_mint_gate() {
 }
 
 #[test]
-fn caps_group_deposit_reserve_asset_is_a_metered_local_deposit_leg() {
-    // Adversarial: `DepositReserveAsset` deposits into `dest`'s local sovereign
-    // account before sending onward, so it is a second metered deposit leg. With no
-    // `DepositAsset` present the beneficiary list is empty and a naive `all()` is
-    // vacuously true, letting the mint execute and the refusal strand the holding.
+fn barrier_group_deposit_reserve_asset_is_denied_before_any_mint() {
+    // An accepted chain cannot use `DepositReserveAsset` to turn Bleavit into
+    // an onward router. The instruction is rejected before the reserve mint,
+    // independent of the separate inflow-cap posture.
     new_test_ext().execute_with(|| {
-        set_caps(u128::MAX, 1);
+        set_caps(u128::MAX, u128::MAX);
         let incoming = asset(usdc_location(), 100);
         let program: Xcm<()> = Xcm(vec![
             ReserveAssetDeposited(Assets::from(incoming.clone())),
@@ -2198,7 +2288,7 @@ fn caps_group_deposit_reserve_asset_is_a_metered_local_deposit_leg() {
                     ..
                 }
             ),
-            "an over-cap DepositReserveAsset leg must be refused pre-mint: {outcome:?}"
+            "DepositReserveAsset must be refused by the closed barrier: {outcome:?}"
         );
         assert_eq!(
             ForeignAssets::total_supply(usdc_location()),
@@ -2261,11 +2351,11 @@ fn caps_group_mixed_mint_and_withdraw_sources_are_counted_together() {
 }
 
 #[test]
-fn caps_group_nested_appendix_deposit_leg_is_scanned() {
-    // `SetAppendix` executes locally, so a deposit leg hidden there is as real as a
-    // top-level one and must be bound by the same per-account check.
+fn barrier_group_set_appendix_is_denied_before_any_mint() {
+    // `SetAppendix` is disabled wholesale. A compromised accepted chain cannot
+    // hide a local deposit (or any other side effect) in its nested program.
     new_test_ext().execute_with(|| {
-        set_caps(u128::MAX, 1);
+        set_caps(u128::MAX, u128::MAX);
         let incoming = asset(usdc_location(), 100);
         let program: Xcm<()> = Xcm(vec![
             ReserveAssetDeposited(Assets::from(incoming.clone())),
@@ -2291,7 +2381,7 @@ fn caps_group_nested_appendix_deposit_leg_is_scanned() {
                     ..
                 }
             ),
-            "an appendix deposit leg must be bound too: {outcome:?}"
+            "SetAppendix must be refused by the closed barrier: {outcome:?}"
         );
         assert_eq!(trapped_assets_events(), 0);
     });

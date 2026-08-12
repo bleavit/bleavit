@@ -58,7 +58,7 @@ Four things about it are not obvious:
 - **One key in that block is a recipe fact, not an environment axis.** 12 §1.1
   fixes `SOURCE_DATE_EPOCH`, so `source-date-epoch.ts` resolves and exports it — injected
   value first, `git show -s --format=%ct HEAD` otherwise, the shape the repository root's
-  `tools/release/build-runtime.sh` already uses on the chain side — and the
+  `tools/release/build-runtime-oci.sh` entry point and in-container worker use on the chain side — and the
   comparator both **requires the two environments to carry the same one** and refuses to let
   it count towards the difference above. The refusal names the *recipe*: reported as a file
   diff, its cheapest repair is to unset the variable, which is the failure the convention
@@ -69,10 +69,11 @@ Four things about it are not obvious:
   `buildRecipeDigest` already uses, so there is one convention here rather than two. It is
   implemented twice, in TypeScript and in Python, and `app/fixtures/tree-digest-cases.json`
   is read in place by both suites so the two cannot drift.
-- **What it does not prove.** Both jobs run the same runner image, the same Node pin and the
-  same pnpm pin, so this is evidence about the *build*, not about *builders*. 12 §1.4 gate 2
-  wants two attestations from different organizations, and CI is one organization holding no
-  keys (§1.4). That half is the key ceremony's, not this gate's.
+- **What it does not prove.** The jobs use distinct digest-pinned Debian images and paths but
+  deliberately share the exact Node and pnpm recipe. This is evidence about the *build*, not
+  independent builder organizations. 12 §1.4 gate 2 wants two attestations from different
+  organizations, and CI is one organization holding no keys (§1.4). That half is the key
+  ceremony's, not this gate's.
 
 ## What is committed, and what is derived
 

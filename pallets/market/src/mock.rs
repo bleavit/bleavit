@@ -13,7 +13,7 @@ use frame_system::{EnsureSigned, RawOrigin};
 use futarchy_primitives::{
     bounds,
     keeper::{CrankClass, KeeperRebateSink},
-    kernel, Balance, MarketId,
+    kernel, Balance, MarketId, QuestionId,
 };
 use parity_scale_codec::{Decode, Encode};
 use sp_runtime::{traits::AccountIdConversion, BuildStorage};
@@ -541,6 +541,17 @@ pub struct TestMarketBenchmarkHelper;
 impl pallet_market::BenchmarkHelper<AccountId> for TestMarketBenchmarkHelper {
     fn external_funder() -> AccountId {
         10
+    }
+
+    fn prime_external_terminal_vault(
+        question: QuestionId,
+        vault: pallet_conditional_ledger::core_ledger::VaultInfo,
+    ) {
+        pallet_conditional_ledger::Vaults::<Test, Instance1>::insert(question, vault);
+        pallet_conditional_ledger::VaultTerminalAt::<Test, Instance1>::insert(
+            question,
+            System::block_number(),
+        );
     }
 }
 

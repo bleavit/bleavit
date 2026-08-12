@@ -12,8 +12,8 @@ use parity_scale_codec::{Decode, Encode, MaxEncodedLen};
 use sp_runtime::traits::Block as BlockT;
 
 use super::{
-    runtime_decl_for_futarchy_api, runtime_decl_for_telemetry_api, FutarchyApi,
-    MAX_QUEUED_EXECUTIONS,
+    runtime_decl_for_futarchy_api, runtime_decl_for_release_metadata_api,
+    runtime_decl_for_telemetry_api, FutarchyApi, MAX_QUEUED_EXECUTIONS,
 };
 
 struct MockApi;
@@ -492,6 +492,14 @@ fn runtime_api_id_and_version_are_frozen() {
     // silent version drift fails rather than passes. It just did its job: the
     // bump was intentional and this assertion is what made it explicit.
     assert_eq!(runtime_decl_for_telemetry_api::VERSION, 5);
+    // ReleaseMetadataApi is outside 02 and exists only for architecture 12's
+    // booted-artifact evidence. Freeze it independently so a rename/version
+    // drift breaks the extractor loudly rather than making RFC-78 proof vanish.
+    assert_eq!(
+        runtime_decl_for_release_metadata_api::ID,
+        [82, 169, 132, 82, 48, 151, 238, 78]
+    );
+    assert_eq!(runtime_decl_for_release_metadata_api::VERSION, 1);
 }
 
 #[test]

@@ -533,22 +533,7 @@ impl pallet_question_service::BenchmarkHelper<RuntimeOrigin, AccountId> for () {
 
     fn prime_report_egress(_: u32) {}
 
-    fn prime_register_scan(funder: &AccountId) {
-        for index in 0..bounds::MAX_EXTERNAL_BOOK_PAIRS.saturating_sub(1) {
-            let question = kernel::SERVICE_ID_BASE
-                .saturating_add(1_000)
-                .saturating_add(u64::from(index).saturating_mul(3));
-            pallet_market::ExternalBookPairs::<Test>::insert(
-                question,
-                pallet_market::ExternalBookPair {
-                    client: 0,
-                    funder: *funder,
-                    accept: question.saturating_add(1),
-                    reject: question.saturating_add(2),
-                },
-            );
-        }
-    }
+    fn prime_register_scan(_: &AccountId) {}
 
     fn advance_to(block: u32) {
         System::set_block_number(u64::from(block));

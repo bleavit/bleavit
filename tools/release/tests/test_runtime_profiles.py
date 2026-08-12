@@ -36,6 +36,24 @@ class RuntimeProfileTests(unittest.TestCase):
                 "disabled" if row["recovery"] else "normal",
             )
 
+    def test_manifest_declares_exact_digest_pinned_oci_environment(self) -> None:
+        environment = PROFILES.runtime_build_environment()
+        self.assertEqual(environment["kind"], "oci")
+        self.assertRegex(environment["image"], r"^docker\.io/.+@sha256:[0-9a-f]{64}$")
+        self.assertRegex(environment["image_id"], r"^sha256:[0-9a-f]{64}$")
+        self.assertEqual(environment["platform"], "linux/amd64")
+        self.assertTrue(environment["upstream_tag"])
+
+        for key, bad_value in (
+            ("image", "docker.io/paritytech/ci-unified:latest"),
+            ("image_id", "sha256:short"),
+            ("platform", "linux/arm64"),
+        ):
+            document = copy.deepcopy(self.document)
+            document["build_environment"][key] = bad_value
+            with self.assertRaises(PROFILES.ProfileError, msg=key):
+                PROFILES.validate_profiles(document)
+
     def test_ambiguous_or_missing_base_is_rejected(self) -> None:
         for features in (
             ["std", "substrate-wasm-builder"],
@@ -88,12 +106,36 @@ class RuntimeProfileTests(unittest.TestCase):
                 "result": "passed",
                 "test": PROFILES.RECOVERY_TEST,
             },
+            "rfc78_metadata_hash": PROFILES.RFC78_METADATA_HASH,
+            "build_environment": PROFILES.runtime_build_environment(),
+            "host_triple": "x86_64-unknown-linux-gnu",
+            "reproducibility_scope": PROFILES.RUNTIME_REPRODUCIBILITY_SCOPE,
+            "toolchain": PROFILES.runtime_toolchain(),
+            "cargo_version": "cargo 1.89.0 (fixture)",
+            "rustc_version": "rustc 1.89.0 (fixture)",
+            "source_date_epoch": 1,
+            "normalized_environment": PROFILES.runtime_normalized_environment(1),
         }
         self.assertEqual(PROFILES.validate_build_profile(info), [])
         for mutation in (
             {"profile_verification": None},
             {"multi_block_migrations": "enabled"},
             {"cargo_default_features": True},
+        ):
+            invalid = {**info, **mutation}
+            self.assertTrue(PROFILES.validate_build_profile(invalid), mutation)
+        for mutation in (
+            {"build_environment": None},
+            {
+                "build_environment": {
+                    **PROFILES.runtime_build_environment(),
+                    "image": "docker.io/paritytech/ci-unified@sha256:" + "0" * 64,
+                }
+            },
+            {"host_triple": "aarch64-unknown-linux-gnu"},
+            {"reproducibility_scope": "same source means same bytes"},
+            {"toolchain": "stable"},
+            {"normalized_environment": {}},
         ):
             invalid = {**info, **mutation}
             self.assertTrue(PROFILES.validate_build_profile(invalid), mutation)
@@ -112,6 +154,9 @@ class RuntimeProfileTests(unittest.TestCase):
                 {
                     "runtime_profile": "phase-four",
                     "metadata_pallets": ["System", "Timestamp"],
+                    "rfc78_merkleized_metadata_hash": "0x" + "1" * 64,
+                    "embedded_rfc78_metadata_hash": "0x" + "1" * 64,
+                    "rfc78_status": PROFILES.RFC78_STATUS,
                 },
             ),
             [],
@@ -121,6 +166,9 @@ class RuntimeProfileTests(unittest.TestCase):
             {
                 "runtime_profile": "phase-four",
                 "metadata_pallets": ["Sudo", "System"],
+                "rfc78_merkleized_metadata_hash": "0x" + "1" * 64,
+                "embedded_rfc78_metadata_hash": "0x" + "1" * 64,
+                "rfc78_status": PROFILES.RFC78_STATUS,
             },
         )
         self.assertTrue(any("omit Sudo" in error for error in errors))
@@ -131,6 +179,9 @@ class RuntimeProfileTests(unittest.TestCase):
             {
                 "runtime_profile": "bootstrap",
                 "metadata_pallets": ["System"],
+                "rfc78_merkleized_metadata_hash": "0x" + "1" * 64,
+                "embedded_rfc78_metadata_hash": "0x" + "1" * 64,
+                "rfc78_status": PROFILES.RFC78_STATUS,
             },
         )
         self.assertTrue(any("contain Sudo" in error for error in errors))

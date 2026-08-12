@@ -296,11 +296,20 @@ pub mod pallet {
         OptionQuery,
     >;
 
-    /// Pause impact is snapshotted per bounded live question so expiry or
-    /// playbook reversion cannot erase the question's mandatory VOID edge.
+    /// Legacy/eager per-question pause marker retained for state compatibility.
+    /// New pauses use the O(1) monotone cutoff below; either representation keeps
+    /// the mandatory VOID edge after expiry or playbook reversion.
     #[pallet::storage]
     pub type PauseAffected<T: Config> =
         StorageMap<_, Blake2_128Concat, QuestionId, (), OptionQuery>;
+
+    /// Monotone service-id cutoff captured whenever intake is paused. Every
+    /// question below it existed before that pause and therefore keeps the
+    /// mandatory VOID edge after the pause expires or is cleared. The monotone
+    /// allocator makes this O(1); scanning retained history here would turn the
+    /// archive-capacity bound into a dispatch-time bound.
+    #[pallet::storage]
+    pub type PauseQuestionCutoff<T: Config> = StorageValue<_, QuestionId, ValueQuery>;
 
     #[pallet::storage]
     pub type PausedUntil<T: Config> = StorageValue<_, BlockNumber, OptionQuery>;
@@ -629,14 +638,8 @@ pub mod pallet {
             match until {
                 Some(until) => {
                     ensure!(until > Self::now(), Error::<T>::DeadlineNotReached);
-                    for (question_id, question) in Questions::<T>::iter() {
-                        if !matches!(
-                            question.phase,
-                            QuestionPhase::Settled | QuestionPhase::Voided
-                        ) {
-                            PauseAffected::<T>::insert(question_id, ());
-                        }
-                    }
+                    let cutoff = NextServiceId::<T>::get().max(kernel::SERVICE_ID_BASE);
+                    PauseQuestionCutoff::<T>::mutate(|stored| *stored = (*stored).max(cutoff));
                     PausedUntil::<T>::put(until);
                     Self::deposit_event(Event::ServicePauseSet { until });
                 }
@@ -902,7 +905,7 @@ pub mod pallet {
                 Error::<T>::SlotsExhausted
             );
             ensure!(
-                Questions::<T>::count() < bounds::MAX_CLIENTS,
+                Questions::<T>::count() < bounds::MAX_EXTERNAL_BOOK_PAIRS,
                 Error::<T>::SlotsExhausted
             );
             ensure!(
@@ -1353,7 +1356,9 @@ pub mod pallet {
                     VoidReason::EscrowInsufficient,
                 );
             }
-            if PauseAffected::<T>::contains_key(question_id) {
+            if PauseAffected::<T>::contains_key(question_id)
+                || question_id < PauseQuestionCutoff::<T>::get()
+            {
                 return Self::terminal_void(
                     question_id,
                     question,
@@ -1411,9 +1416,11 @@ pub mod pallet {
                         Self::now() >= terms.seal_deadline,
                         Error::<T>::DeadlineNotReached
                     );
+                    let pause_affected = PauseAffected::<T>::contains_key(question_id)
+                        || question_id < PauseQuestionCutoff::<T>::get();
                     let reason = if !Self::service_ledger_solvent() {
                         VoidReason::EscrowInsufficient
-                    } else if PauseAffected::<T>::contains_key(question_id) {
+                    } else if pause_affected {
                         VoidReason::ServicePaused
                     } else {
                         VoidReason::DeadlineMissed
@@ -1682,17 +1689,25 @@ pub mod pallet {
             let mut service_ids = BTreeMap::<u64, ()>::new();
             let mut live_by_client = BTreeMap::<ClientId, u32>::new();
             ensure!(
-                Questions::<T>::count() <= bounds::MAX_CLIENTS,
+                Questions::<T>::count() <= bounds::MAX_EXTERNAL_BOOK_PAIRS,
                 TryRuntimeError::Other("question-service: retained question bound exceeded")
+            );
+            let pause_cutoff = PauseQuestionCutoff::<T>::get();
+            let next_service = NextServiceId::<T>::get().max(kernel::SERVICE_ID_BASE);
+            ensure!(
+                pause_cutoff == 0
+                    || (pause_cutoff >= kernel::SERVICE_ID_BASE && pause_cutoff <= next_service),
+                TryRuntimeError::Other("question-service: invalid pause id cutoff")
             );
             for (question_id, question) in Questions::<T>::iter() {
                 ensure!(
                     question_id >= kernel::SERVICE_ID_BASE
-                        && question.markets[0] >= kernel::SERVICE_ID_BASE
-                        && question.markets[1] >= kernel::SERVICE_ID_BASE
-                        && question_id != question.markets[0]
-                        && question_id != question.markets[1]
-                        && question.markets[0] != question.markets[1]
+                        && question_id
+                            .checked_sub(kernel::SERVICE_ID_BASE)
+                            .is_some_and(|offset| offset % 3 == 0)
+                        && question.markets[0] == question_id.saturating_add(1)
+                        && question.markets[1] == question_id.saturating_add(2)
+                        && question_id < next_service
                         && service_ids.insert(question_id, ()).is_none()
                         && service_ids.insert(question.markets[0], ()).is_none()
                         && service_ids.insert(question.markets[1], ()).is_none(),

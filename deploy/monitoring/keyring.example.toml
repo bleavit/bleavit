@@ -5,15 +5,17 @@ generation = 1
 [[key]]
 role = "release"
 revocation_index = 0
+organization = "release-organization-a"
 public_key = "REPLACE_WITH_MINISIGN_PUBLIC_KEY_PACKET"
 
 [[key]]
 role = "attestor"
 revocation_index = 1
+organization = "builder-organization-a"
 public_key = "REPLACE_WITH_MINISIGN_PUBLIC_KEY_PACKET"
 
 [[key]]
 role = "attestor"
 revocation_index = 2
+organization = "builder-organization-b"
 public_key = "REPLACE_WITH_MINISIGN_PUBLIC_KEY_PACKET"
-

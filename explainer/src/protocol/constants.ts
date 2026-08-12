@@ -207,17 +207,22 @@ export const SVC_TOLERANCE_MAX = 0.25;
 /** Compile-time ceilings on the service's storage (doc 13 §4). */
 export const MAX_CLIENTS = 64;
 export const MAX_SERVICE_ATTESTORS = 16;
-/** One immutable record per external question; reuses the client ceiling. */
-export const MAX_EXTERNAL_BOOK_PAIRS = MAX_CLIENTS;
-/** Two books per question, so twice the pair ceiling. */
-export const MAX_LIVE_EXTERNAL_MARKETS = MAX_EXTERNAL_BOOK_PAIRS * 2;
+/** Complete hosted-question waves retained across the one-year archive horizon. */
+export const MAX_RETAINED_EXTERNAL_QUESTION_BATCHES = 123;
+/** Immutable external question pairs retained across every coexisting wave. */
+export const MAX_EXTERNAL_BOOK_PAIRS =
+  MAX_CLIENTS * MAX_RETAINED_EXTERNAL_QUESTION_BATCHES;
+/** Two live books per concurrently admitted question. */
+export const MAX_LIVE_EXTERNAL_MARKETS = MAX_CLIENTS * 2;
+/** Two retained books per immutable external pair. */
+export const MAX_STORED_EXTERNAL_MARKETS = MAX_EXTERNAL_BOOK_PAIRS * 2;
 
 // --- Chain identity --------------------------------------------------------
 
 export const SS58_PREFIX = 7777;
 export const USDC_DECIMALS = 6;
 export const VIT_DECIMALS = 12;
-export const INTEGRATION_CONTRACT_VERSION = 30;
+export const INTEGRATION_CONTRACT_VERSION = 31;
 
 /**
  * Phase-start offsets as fractions of `epoch.length` — the single most

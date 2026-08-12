@@ -9,7 +9,7 @@ use core::convert::TryFrom;
 use parity_scale_codec::{Decode, DecodeWithMemTracking, Encode, MaxEncodedLen};
 use scale_info::TypeInfo;
 
-pub const INTEGRATION_CONTRACT_VERSION: u32 = 30;
+pub const INTEGRATION_CONTRACT_VERSION: u32 = 31;
 
 pub type Balance = u128;
 pub type ProposalId = u64;
@@ -1134,10 +1134,23 @@ pub mod bounds {
     /// Per-question named attestor capacity. Reuses the established 16-seat
     /// attestor-roster envelope rather than introducing an uncalibrated key.
     pub const MAX_SERVICE_ATTESTORS: u32 = 16;
-    /// Retained immutable external question/book/funder records. It reuses the
-    /// roster ceiling by derivation, but remains a separately named consumer
-    /// bound so the two cannot drift silently.
-    pub const MAX_EXTERNAL_BOOK_PAIRS: u32 = MAX_CLIENTS;
+    /// Minimum lifetime of one admitted hosted question before its live slot
+    /// can be reused: the frozen oracle window plus the two-observation market
+    /// window. The one-block `window_start > now` lead is deliberately omitted
+    /// so this is a conservative lower bound.
+    pub const MIN_EXTERNAL_QUESTION_LIFETIME_BLOCKS: u32 =
+        super::kernel::ORC_WINDOW_BLOCKS + 2 * super::kernel::MIN_MKT_OBS_INTERVAL_BLOCKS;
+    /// Whole terminal waves that can remain inside the one-year archive
+    /// horizon, plus the currently-live wave. This is the external counterpart
+    /// of [`MAX_ARCHIVE_MARKET_BATCHES`], derived from the service's actual
+    /// fastest lawful lifecycle rather than from the client-roster count.
+    pub const MAX_RETAINED_EXTERNAL_QUESTION_BATCHES: u32 =
+        super::kernel::MAX_ARCHIVE_DELAY_BLOCKS.div_ceil(MIN_EXTERNAL_QUESTION_LIFETIME_BLOCKS) + 1;
+    /// Retained immutable external question/book/funder records. A healthy
+    /// keeper can reap the oldest wave before this throughput-times-retention
+    /// envelope fills, even when all 64 live slots turn over at the fastest
+    /// lawful cadence.
+    pub const MAX_EXTERNAL_BOOK_PAIRS: u32 = MAX_CLIENTS * MAX_RETAINED_EXTERNAL_QUESTION_BATCHES;
     pub const MAX_PROPOSAL_SUMMARIES: u32 = 32;
     pub const MAX_ACCOUNT_POSITIONS: u32 = 64;
     /// Canonical on-chain execution-history ring bound (09 §1.5 / 13 §4).
@@ -1160,9 +1173,10 @@ pub mod bounds {
     /// Books whose ledger terminal latch has not yet been observed. This is
     /// also the maximum live POL-commitment vector length.
     pub const MAX_LIVE_MARKETS: u32 = 196;
-    /// Two external books for each question at the hard `svc.max_live` ceiling.
-    /// External books never consume [`MAX_LIVE_MARKETS`].
-    pub const MAX_LIVE_EXTERNAL_MARKETS: u32 = MAX_EXTERNAL_BOOK_PAIRS * 2;
+    /// Two live external books for each question at the hard `svc.max_live`
+    /// ceiling. Retained terminal pairs have a separate bound below and never
+    /// consume [`MAX_LIVE_MARKETS`].
+    pub const MAX_LIVE_EXTERNAL_MARKETS: u32 = MAX_CLIENTS * 2;
     pub const BOOKS_PER_PROPOSAL: u32 = 6;
     /// Maximum books opened by one epoch at the registry's maximum slot count.
     pub const MAX_MARKETS_PER_EPOCH: u32 = MAX_COHORT_PROPOSALS * BOOKS_PER_PROPOSAL + 1;
@@ -1176,9 +1190,10 @@ pub mod bounds {
     /// 196 + 28 * (12 * 6 + 1) = 2,240.
     pub const MAX_STORED_MARKETS: u32 =
         MAX_LIVE_MARKETS + MAX_ARCHIVE_MARKET_BATCHES * MAX_MARKETS_PER_EPOCH;
-    /// Retained external-book partition. Terminal rows apply backpressure until
-    /// reap rather than consuming the primary domain's archive budget.
-    pub const MAX_STORED_EXTERNAL_MARKETS: u32 = MAX_LIVE_EXTERNAL_MARKETS;
+    /// Retained external-book partition. Terminal rows apply backpressure at
+    /// the fastest-lawful-throughput × archive-horizon envelope rather than at
+    /// the unrelated live/client-roster ceiling.
+    pub const MAX_STORED_EXTERNAL_MARKETS: u32 = MAX_EXTERNAL_BOOK_PAIRS * 2;
     /// Physical upper bound of the shared `Markets` map across both partitions.
     pub const MAX_ALL_STORED_MARKETS: u32 = MAX_STORED_MARKETS + MAX_STORED_EXTERNAL_MARKETS;
     /// Maximum TWAP checkpoints and registered decision windows per market
@@ -1432,6 +1447,10 @@ pub mod kernel {
     /// T18→T23 retry interval before the T22 keeper transition (05 §2.1).
     pub const EXECUTION_RETRY_WINDOW_BLOCKS: u32 = 3 * BLOCKS_PER_DAY;
     pub const WATCHTOWER_EXTENSION_BLOCKS: u32 = 28_800;
+    /// Hard lower bound of `mkt.obs_interval` (13 §1). Retained hosted-service
+    /// capacity uses the fastest lawful two-observation window, so the bound
+    /// must share the same compile-time home as the registry seed.
+    pub const MIN_MKT_OBS_INTERVAL_BLOCKS: u32 = 5;
     /// The 72 h optimistic challenge window (`orc.window`, 07 §5.2/§7), a frozen
     /// shared kernel floor (META ≤ 120 h, never lowered). Single home for the
     /// value the oracle reporting game and the `pallet-registry` filing windows
@@ -1668,8 +1687,11 @@ pub mod kernel {
     /// `max_encoded_len()` against this figure, so struct growth reopens the
     /// derivation rather than silently invalidating it.
     pub const MARKET_BOOK_MAX_BYTES: u32 = 208;
-    /// 13 §5 item 1: the retained `Markets` map byte budget (512 KiB).
-    pub const RETAINED_MARKETS_BUDGET_BYTES: u32 = 512 * 1024;
+    /// 13 §5 item 1: the exact retained `Markets` map envelope. This is
+    /// derived from the independently enforced primary and hosted-service row
+    /// ceilings, so lowering it would make the admission bound lie.
+    pub const RETAINED_MARKETS_BUDGET_BYTES: u32 =
+        super::bounds::MAX_ALL_STORED_MARKETS * MARKET_BOOK_MAX_BYTES;
     /// 13 §5 item 2: the **pinned** per-vault ceiling. Deliberately the pinned
     /// ~256 B and not the measured 160 B — the occupancy screen must not admit
     /// a parameter change that only fits because today's struct happens to be
@@ -2187,7 +2209,7 @@ mod tests {
         // `spec_version` does not move: no runtime is deployed, and that counter's
         // contract is about a replacement image on a live chain. v13, v21 and v23 each
         // added metadata constants at `spec_version` 2 for the same reason.
-        assert_eq!(INTEGRATION_CONTRACT_VERSION, 30);
+        assert_eq!(INTEGRATION_CONTRACT_VERSION, 31);
     }
 
     #[test]
@@ -2809,10 +2831,13 @@ mod tests {
         );
         assert_eq!(bounds::MAX_LIVE_MARKETS, 196);
         assert_eq!(bounds::MAX_STORED_MARKETS, 2_240);
-        assert_eq!(bounds::MAX_EXTERNAL_BOOK_PAIRS, bounds::MAX_CLIENTS);
+        assert_eq!(kernel::MIN_MKT_OBS_INTERVAL_BLOCKS, 5);
+        assert_eq!(bounds::MIN_EXTERNAL_QUESTION_LIFETIME_BLOCKS, 43_210);
+        assert_eq!(bounds::MAX_RETAINED_EXTERNAL_QUESTION_BATCHES, 123);
+        assert_eq!(bounds::MAX_EXTERNAL_BOOK_PAIRS, 7_872);
         assert_eq!(bounds::MAX_LIVE_EXTERNAL_MARKETS, 128);
-        assert_eq!(bounds::MAX_STORED_EXTERNAL_MARKETS, 128);
-        assert_eq!(bounds::MAX_ALL_STORED_MARKETS, 2_368);
+        assert_eq!(bounds::MAX_STORED_EXTERNAL_MARKETS, 15_744);
+        assert_eq!(bounds::MAX_ALL_STORED_MARKETS, 17_984);
     }
 
     /// SQ-501: the occupancy derivations must reproduce 13 §5 items 1–4's
@@ -2850,17 +2875,17 @@ mod tests {
         let retained = kernel::derived_retained_markets(&worst_case).expect("derivable");
         assert_eq!(retained, 2_240);
         assert_eq!(retained, bounds::MAX_STORED_MARKETS);
-        // "2,240 books × 208 B = 465,920 B = 455 KiB, within a 512 KiB budget".
+        // "2,240 books × 208 B = 465,920 B = 455 KiB".
         let retained_bytes = retained * kernel::MARKET_BOOK_MAX_BYTES;
         assert_eq!(retained_bytes, 465_920);
         assert_eq!(retained_bytes / 1024, 455);
         assert!(retained_bytes <= kernel::RETAINED_MARKETS_BUDGET_BYTES);
-        // N6's disjoint 128-row external partition keeps the shared physical
-        // map under the same byte budget without consuming the primary rows.
+        // The disjoint service partition covers the complete one-year archive
+        // horizon without consuming the primary rows.
         let all_retained = bounds::MAX_ALL_STORED_MARKETS * kernel::MARKET_BOOK_MAX_BYTES;
-        assert_eq!(all_retained, 492_544);
-        assert_eq!(all_retained / 1024, 481);
-        assert!(all_retained <= kernel::RETAINED_MARKETS_BUDGET_BYTES);
+        assert_eq!(all_retained, 3_740_672);
+        assert_eq!(all_retained / 1024, 3_653);
+        assert_eq!(all_retained, kernel::RETAINED_MARKETS_BUDGET_BYTES);
 
         // --- item 2 -------------------------------------------------------
         // "≤ 32 live + 4 cohorts × 5 settling = ≤ 52 × 160 B ≈ 8.1 KiB, within

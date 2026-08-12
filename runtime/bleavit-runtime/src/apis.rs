@@ -12,7 +12,7 @@ use sp_api::impl_runtime_apis;
 use sp_consensus_aura::sr25519::AuthorityId as AuraId;
 use sp_core::{crypto::KeyTypeId, OpaqueMetadata};
 use sp_runtime::{
-    traits::Block as BlockT,
+    traits::{Block as BlockT, TransactionExtension},
     transaction_validity::{TransactionSource, TransactionValidity},
     ApplyExtrinsicResult,
 };
@@ -234,6 +234,15 @@ impl_runtime_apis! {
 
         fn service_partition() -> Option<futarchy_runtime_api::ServicePartitionTelemetry> {
             crate::telemetry::service_partition()
+        }
+    }
+
+    impl futarchy_runtime_api::ReleaseMetadataApi<Block> for Runtime {
+        fn embedded_rfc78_metadata_hash() -> Option<[u8; 32]> {
+            frame_metadata_hash_extension::CheckMetadataHash::<Runtime>::new(true)
+                .implicit()
+                .ok()
+                .flatten()
         }
     }
 

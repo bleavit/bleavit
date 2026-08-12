@@ -1,7 +1,6 @@
 //! FRAME v2 benchmarks for every public market call and internal admin operation.
 
 use crate::*;
-use alloc::vec::Vec;
 use frame_benchmarking::v2::*;
 use frame_support::{
     traits::{fungibles::Mutate, ConstU32, Contains, EnsureOrigin, Get},
@@ -11,7 +10,7 @@ use frame_system::RawOrigin;
 use futarchy_primitives::{
     bounds, kernel, Balance, Branch, EpochId, FixedU64, MarketId, ScalarSide,
 };
-use market_core::{BookKind, MarketPhase, TwapCumulative, TwapWindow};
+use market_core::{BookKind, MarketBook, MarketPhase, TwapCumulative, TwapWindow};
 use pallet_conditional_ledger::core_ledger::proposal_positions;
 use sp_runtime::traits::Saturating;
 
@@ -491,24 +490,12 @@ mod benchmarks {
         let now = frame_system::Pallet::<T>::block_number();
         let vault_template = pallet_conditional_ledger::Vaults::<T>::get(1)
             .expect("benchmark proposal vault exists");
-        let mut template = Markets::<T>::get(1).expect("benchmark book exists");
-        template.phase = MarketPhase::Closed;
-        Markets::<T>::insert(1, template.clone());
-        ClosedAt::<T>::insert(1, now);
-        SettlementObservedAt::<T>::insert(1, now);
-        pallet_conditional_ledger::VaultTerminalAt::<T>::insert(1, now);
-        ActiveMarketCount::<T>::put(0);
-        LivePolCommitments::<T>::kill();
-        // Book 1's vault is deliberately RETAINED. It used to be removed here to
-        // stand for an already-archived vault, but book 1 is seeded and carries no
-        // 04 §2 swept marker, and the ordering guard added with the
-        // `MarketSweepStatus` seam makes "seeded, unswept, vault archived"
-        // unreachable on-chain — the dust sweep now refuses while a seeded book is
-        // unswept. A benchmark fixture that builds state the runtime cannot reach
-        // measures a scan that cannot happen, so the removal is dropped rather
-        // than the invariant weakened. The vault-absent branch is still measured:
-        // the 2,239 bulk books below are swept *and* keep settled vaults, which is
-        // the archive's real resting state and the heavier scan of the two.
+        Pallet::<T>::close(admin_origin::<T>(), 1).expect("benchmark close succeeds");
+        void_and_latch::<T>(1);
+        let sweep_caller: T::AccountId = account("try-state-sweeper", 0, 0);
+        Pallet::<T>::sweep_revenue(RawOrigin::Signed(sweep_caller).into(), 1)
+            .expect("benchmark terminal book sweep succeeds");
+        let template = Markets::<T>::get(1).expect("benchmark book exists");
         RerunSeededMarkets::<T>::insert(1, ());
 
         // `try_state` has no dispatch parameter, so its benchmark fixture must
@@ -516,7 +503,8 @@ mod benchmarks {
         // 4,480 distinct ownership-index accounts, while 196 active books carry
         // full checkpoint/window/owner vectors (including the bounded quadratic
         // duplicate-owner check), seed/rerun markers and the full POL vector.
-        // The remaining books are seeded/rerun/swept terminal archives,
+        // The remaining primary books are seeded/rerun terminal archives except
+        // for the 196 active rows; every terminal row is swept,
         // maximizing both unbounded-map scans under their Markets-derived bound
         // — including the I-33 book-half return check, which is only reached for
         // a book that carries the 04 §2 swept marker.
@@ -526,6 +514,60 @@ mod benchmarks {
             winner: Branch::Accept,
             s: SETTLE_SCORE,
         };
+        // Eight windows over exactly eight distinct boundaries is the maximum
+        // shape reachable through `register_decision_window`: the call bounds
+        // both the window vector and the union of all boundary blocks at eight.
+        // One observation can cross and checkpoint all eight boundaries, while
+        // 32 distinct proposal owners can lawfully share every exact window.
+        let window_boundaries = [
+            (1, 2, 3),
+            (1, 2, 4),
+            (1, 2, 5),
+            (1, 2, 6),
+            (1, 2, 7),
+            (1, 2, 8),
+            (2, 3, 4),
+            (2, 3, 5),
+        ];
+        let saturated_windows: BoundedVec<
+            TwapWindow,
+            ConstU32<{ bounds::MAX_TWAP_WINDOWS_PER_MARKET }>,
+        > = BoundedVec::truncate_from(
+            window_boundaries
+                .into_iter()
+                .map(|(start, trailing_start, end)| TwapWindow {
+                    start,
+                    trailing_start,
+                    end,
+                    observations: 0,
+                    stale_events: 0,
+                    contest_capital_blocks: 0,
+                    contest_accrued_until: end,
+                    contest_valid: true,
+                    close_spot: Some(FixedU64(500_000_000)),
+                    sealed: true,
+                })
+                .collect(),
+        );
+        let saturated_checkpoints = BoundedVec::truncate_from(
+            (1..=bounds::MAX_TWAP_WINDOWS_PER_MARKET)
+                .map(|boundary| (boundary, TwapCumulative::ZERO))
+                .collect(),
+        );
+        let saturated_owners = BoundedVec::truncate_from(
+            (0..bounds::MAX_LIVE_PROPOSALS)
+                .flat_map(|owner| {
+                    saturated_windows.iter().map(move |window| {
+                        (
+                            u64::from(owner),
+                            window.start,
+                            window.trailing_start,
+                            window.end,
+                        )
+                    })
+                })
+                .collect(),
+        );
         let mut commitments =
             BoundedVec::<(MarketId, Balance), ConstU32<{ bounds::MAX_LIVE_MARKETS }>>::default();
         for offset in 0..u64::from(bounds::MAX_STORED_MARKETS).saturating_sub(1) {
@@ -563,42 +605,9 @@ mod benchmarks {
                 commitments
                     .try_push((id, commitment))
                     .expect("active commitment fits the live bound");
-                let windows: Vec<_> = (0..bounds::MAX_TWAP_WINDOWS_PER_MARKET)
-                    .map(|window| {
-                        let start = window.saturating_mul(3).saturating_add(1);
-                        TwapWindow {
-                            start,
-                            trailing_start: start.saturating_add(1),
-                            end: start.saturating_add(2),
-                            observations: 0,
-                            stale_events: 0,
-                            contest_capital_blocks: 0,
-                            contest_accrued_until: start.saturating_add(2),
-                            contest_valid: true,
-                            close_spot: Some(FixedU64(500_000_000)),
-                            sealed: true,
-                        }
-                    })
-                    .collect();
-                let checkpoints: Vec<_> = windows
-                    .iter()
-                    .map(|window| (window.end, TwapCumulative::ZERO))
-                    .collect();
-                let owners: Vec<_> = (0..bounds::MAX_LIVE_PROPOSALS)
-                    .flat_map(|owner| {
-                        windows.iter().map(move |window| {
-                            (
-                                u64::from(owner),
-                                window.start,
-                                window.trailing_start,
-                                window.end,
-                            )
-                        })
-                    })
-                    .collect();
-                TwapCheckpoints::<T>::insert(id, BoundedVec::truncate_from(checkpoints));
-                DecisionWindows::<T>::insert(id, BoundedVec::truncate_from(windows));
-                DecisionWindowOwners::<T>::insert(id, BoundedVec::truncate_from(owners));
+                TwapCheckpoints::<T>::insert(id, saturated_checkpoints.clone());
+                DecisionWindows::<T>::insert(id, saturated_windows.clone());
+                DecisionWindowOwners::<T>::insert(id, saturated_owners.clone());
             } else {
                 ClosedAt::<T>::insert(id, now);
                 SettlementObservedAt::<T>::insert(id, now);
@@ -618,9 +627,15 @@ mod benchmarks {
             .expect("benchmark POL mirror accepts the saturated commitment set");
 
         // N7 adds a second independently bounded partition to every scan above.
-        // Populate it through the real pair constructor/seed/window APIs so the
-        // measured fixture includes all 64 pair rows, 128 live external books,
-        // their service-ledger vaults and their ownership/window indexes.
+        // Populate the live ceiling through the real pair constructor/seed/window
+        // APIs, then retain terminal book and pair rows up to the separately
+        // derived throughput-times-retention ceiling. The terminal rows model
+        // the heaviest reachable archive interleaving: a registered and seeded
+        // pair was voided, swept and durably observed while its service vault
+        // remains terminal but not yet archived. This gives the out-of-band
+        // try-state benchmark the complete 17,984-row physical Markets shape
+        // and forces its return-completeness scan through every external book's
+        // position keys instead of short-circuiting on an absent vault.
         <T as Config>::BenchmarkHelper::prime_external_capacity();
         let external_origin = T::ExternalMarketAdmin::try_successful_origin()
             .map_err(|_| BenchmarkError::Stop("benchmark external-client origin unavailable"))?;
@@ -635,7 +650,9 @@ mod benchmarks {
             &external_funder
         ));
         fund::<T>(&external_funder, 1_000_000 * UNIT);
-        for offset in 0..bounds::MAX_EXTERNAL_BOOK_PAIRS {
+        let mut voided_service_vault = pallet_conditional_ledger::core_ledger::VaultInfo::open(0);
+        voided_service_vault.state = futarchy_primitives::VaultState::Voided;
+        for offset in 0..bounds::MAX_CLIENTS {
             let question =
                 kernel::SERVICE_ID_BASE.saturating_add(u64::from(offset).saturating_mul(3));
             let accept = question.saturating_add(1);
@@ -674,9 +691,51 @@ mod benchmarks {
                 .map_err(|_| {
                     BenchmarkError::Stop("benchmark external window registration failed")
                 })?;
+                TwapCheckpoints::<T>::insert(market, saturated_checkpoints.clone());
+                DecisionWindows::<T>::insert(market, saturated_windows.clone());
+                DecisionWindowOwners::<T>::insert(market, saturated_owners.clone());
             }
         }
 
+        for offset in bounds::MAX_CLIENTS..bounds::MAX_EXTERNAL_BOOK_PAIRS {
+            let question =
+                kernel::SERVICE_ID_BASE.saturating_add(u64::from(offset).saturating_mul(3));
+            <T as Config>::BenchmarkHelper::prime_external_terminal_vault(
+                question,
+                voided_service_vault,
+            );
+            let pair = ExternalBookPair {
+                client: external_client,
+                funder: external_funder.clone(),
+                accept: question.saturating_add(1),
+                reject: question.saturating_add(2),
+            };
+            ExternalBookPairs::<T>::insert(question, pair.clone());
+            for (market, branch) in [(pair.accept, Branch::Accept), (pair.reject, Branch::Reject)] {
+                let book_account = T::MarketAccounts::book(market);
+                let fees_account = T::MarketAccounts::fees(market);
+                let mut book = MarketBook::open(
+                    market,
+                    BookKind::External {
+                        question,
+                        client: external_client,
+                        branch,
+                    },
+                    book_account.clone(),
+                    fees_account.clone(),
+                    B,
+                );
+                book.phase = MarketPhase::Closed;
+                Markets::<T>::insert(market, book);
+                MarketProtocolAccounts::<T>::insert(book_account, 1);
+                MarketProtocolAccounts::<T>::insert(fees_account, 1);
+                SeededMarkets::<T>::insert(market, external_funder.clone());
+                SweptMarkets::<T>::insert(market, ());
+                ClosedAt::<T>::insert(market, now);
+                SettlementObservedAt::<T>::insert(market, now);
+            }
+        }
+        StoredExternalMarketCount::<T>::put(bounds::MAX_STORED_EXTERNAL_MARKETS);
         assert_eq!(Markets::<T>::count(), bounds::MAX_ALL_STORED_MARKETS);
         assert_eq!(
             MarketProtocolAccounts::<T>::count(),
@@ -692,9 +751,9 @@ mod benchmarks {
         );
         assert_eq!(
             SweptMarkets::<T>::iter_keys().count(),
-            bounds::MAX_STORED_MARKETS
+            bounds::MAX_ALL_STORED_MARKETS
                 .saturating_sub(bounds::MAX_LIVE_MARKETS)
-                .saturating_sub(1) as usize,
+                .saturating_sub(bounds::MAX_LIVE_EXTERNAL_MARKETS) as usize,
         );
         assert_eq!(
             LivePolCommitments::<T>::get().len(),

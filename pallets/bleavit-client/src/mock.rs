@@ -106,6 +106,7 @@ impl pallet_bleavit_client::Config for Test {
     // The reference runtime is fail-closed: only governance/root may spend
     // the shared sovereign account until an integrator explicitly widens it.
     type SpendingOrigin = EnsureRoot<AccountId>;
+    type ReportPruneOrigin = EnsureRoot<AccountId>;
     type OnReport = TestHandler;
     type MaxReports = MaxReports;
     type WeightInfo = ();
