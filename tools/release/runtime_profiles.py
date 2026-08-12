@@ -28,6 +28,7 @@ RFC78_METADATA_HASH = {
 RFC78_STATUS = "enabled and independently recomputed from metadata.scale"
 OCI_REFERENCE = re.compile(r"^docker\.io/[a-z0-9._/-]+@sha256:[0-9a-f]{64}$")
 OCI_IMAGE_ID = re.compile(r"^sha256:[0-9a-f]{64}$")
+GIT_COMMIT = re.compile(r"^[0-9a-f]{40}$")
 TOOLCHAIN_CHANNEL = re.compile(r'^channel = "([^"]+)"$', re.MULTILINE)
 RUNTIME_STATIC_ENVIRONMENT = {
     "CARGO_HOME": "/cargo-home",
@@ -244,6 +245,12 @@ def validate_build_profile(info: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     if info.get("schema") != BUILD_SCHEMA:
         return [f"build-info.schema must be {BUILD_SCHEMA}"]
+    if not isinstance(info.get("git_commit"), str) or not GIT_COMMIT.fullmatch(
+        info["git_commit"]
+    ):
+        errors.append(
+            "build-info.git_commit must be a 40-character lowercase Git object id"
+        )
     name = info.get("runtime_profile")
     try:
         selected, profile = select_profile(name if isinstance(name, str) else None)

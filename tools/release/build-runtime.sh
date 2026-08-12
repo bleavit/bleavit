@@ -52,8 +52,13 @@ for binding in \
   fi
 done
 
-if [[ -z "${SOURCE_DATE_EPOCH:-}" ]]; then
-  SOURCE_DATE_EPOCH=$(git show -s --format=%ct HEAD)
+if [[ ! "${BLEAVIT_SOURCE_COMMIT:-}" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "BLEAVIT_SOURCE_COMMIT must be a 40-character lowercase Git object id" >&2
+  exit 1
+fi
+if [[ ! "${SOURCE_DATE_EPOCH:-}" =~ ^[0-9]+$ ]]; then
+  echo "SOURCE_DATE_EPOCH must be a non-negative integer" >&2
+  exit 1
 fi
 export SOURCE_DATE_EPOCH
 export TZ=UTC
@@ -121,7 +126,7 @@ host = next(
     (line.split(":", 1)[1].strip() for line in rustc_verbose.splitlines() if line.startswith("host:")),
     platform.machine(),
 )
-commit = command("git", "rev-parse", "HEAD")
+commit = os.environ["BLEAVIT_SOURCE_COMMIT"]
 digest = hashlib.sha256(wasm.read_bytes()).hexdigest()
 info = {
     "schema": "bleavit.runtime-build.v3",

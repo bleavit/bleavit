@@ -8,6 +8,21 @@ set -euo pipefail
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 cd "$repo_root"
 
+# A linked worktree's `.git` file points outside this source directory, and that
+# parent repository is intentionally not mounted into the confined container.
+# Resolve the provenance binding here, where Git is available, and refuse to
+# describe bytes from a dirty or moving source tree as a commit build.
+source_status=$(git status --porcelain --untracked-files=all)
+if [[ -n "$source_status" ]]; then
+  echo "runtime OCI build requires a clean source tree" >&2
+  exit 1
+fi
+source_commit=$(git rev-parse HEAD)
+if [[ ! "$source_commit" =~ ^[0-9a-f]{40}$ ]]; then
+  echo "source commit must be a 40-character lowercase Git object id" >&2
+  exit 1
+fi
+
 out_dir=${1:-release-work/runtime}
 requested_profile=${2:-${RUNTIME_PROFILE:-}}
 profile_tool=tools/release/runtime_profiles.py
@@ -22,7 +37,7 @@ image_id=$(python3 "$profile_tool" --field build_image_id)
 platform=$(python3 "$profile_tool" --field build_platform)
 upstream_tag=$(python3 "$profile_tool" --field build_upstream_tag)
 toolchain=$(python3 "$profile_tool" --field toolchain)
-source_date_epoch=${SOURCE_DATE_EPOCH:-$(git show -s --format=%ct HEAD)}
+source_date_epoch=${SOURCE_DATE_EPOCH:-$(git show -s --format=%ct "$source_commit")}
 if [[ ! "$source_date_epoch" =~ ^[0-9]+$ ]]; then
   echo "SOURCE_DATE_EPOCH must be a non-negative integer" >&2
   exit 1
@@ -69,6 +84,7 @@ docker run --rm --pull=never --platform "$platform" --read-only \
   --env RUSTUP_HOME=/rustup-home \
   --env CARGO_TARGET_DIR=/target \
   --env SOURCE_DATE_EPOCH="$source_date_epoch" \
+  --env BLEAVIT_SOURCE_COMMIT="$source_commit" \
   --env BLEAVIT_RUNTIME_BUILD_IMAGE="$image" \
   --env BLEAVIT_RUNTIME_BUILD_IMAGE_ID="$image_id" \
   --env BLEAVIT_RUNTIME_BUILD_PLATFORM="$platform" \
@@ -88,6 +104,12 @@ docker run --rm --pull=never --platform "$platform" --read-only \
     /src/tools/release/build-runtime.sh /out "$BLEAVIT_PRIMARY_PROFILE"
     /src/tools/release/build-runtime.sh /out/recovery "$BLEAVIT_RECOVERY_PROFILE"
   '
+
+if [[ "$(git rev-parse HEAD)" != "$source_commit" ]] || \
+  [[ -n "$(git status --porcelain --untracked-files=all)" ]]; then
+  echo "source tree changed during the runtime OCI build; refusing its artifacts" >&2
+  exit 1
+fi
 
 for artifact in runtime.wasm build-info.json recovery/runtime.wasm recovery/build-info.json; do
   if [[ ! -f "$out_dir/$artifact" ]]; then

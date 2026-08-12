@@ -123,7 +123,13 @@ source read-only, drops every capability, enables no-new-privileges, disables
 rustup self-update (the image's rustup binary is immutable), and builds the
 primary and paired recovery profile in that one container. The worker
 `build-runtime.sh` refuses direct host execution or an OCI identity that differs
-from the reviewed manifest.
+from the reviewed manifest. The wrapper also refuses a dirty checkout, resolves
+the source commit and its default `SOURCE_DATE_EPOCH` before entering OCI, and
+passes the commit as an explicit evidence binding. This is required for linked
+worktrees: their `.git` file points outside the read-only source mount, and the
+parent repository is deliberately not exposed to the build container. The
+wrapper rechecks that the checkout stayed clean and at that commit before
+accepting the outputs.
 
 | Profile | Base | Recovery | Sudo in metadata | Multi-block migrations |
 |---|---|---:|---:|---:|

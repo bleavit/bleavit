@@ -92,6 +92,7 @@ class RuntimeProfileTests(unittest.TestCase):
         _, profile = PROFILES.select_profile("phase-four-recovery")
         info = {
             "schema": PROFILES.BUILD_SCHEMA,
+            "git_commit": "a" * 40,
             "runtime_profile": "phase-four-recovery",
             "base_profile": "phase-four",
             "recovery": True,
@@ -136,6 +137,7 @@ class RuntimeProfileTests(unittest.TestCase):
             {"reproducibility_scope": "same source means same bytes"},
             {"toolchain": "stable"},
             {"normalized_environment": {}},
+            {"git_commit": "not-a-commit"},
         ):
             invalid = {**info, **mutation}
             self.assertTrue(PROFILES.validate_build_profile(invalid), mutation)
