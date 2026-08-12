@@ -16,7 +16,7 @@
  * - **The architecture documents**, parsed at test time. Every sentence this client states must
  *   cite a section that exists; every empty copy slot must name a 10 §9.4 taxonomy code that
  *   really is in the taxonomy.
- * - **PLAN.md's spec-question table**, parsed at test time. Every empty slot must name rows that
+ * - **The `plan/questions/` item tree**, parsed at test time. Every empty slot must name items that
  *   are still **open**. That is a mechanical expiry: the day SQ-604 is ruled this suite fails and
  *   the copy has to be written, rather than the placeholder quietly outliving its reason.
  */
@@ -58,6 +58,7 @@ import {
 } from '@bleavit/local-index';
 import { legacyIndexV1, selfRange } from '@bleavit/local-index/testing';
 import { releaseChainSpecs, releaseParaChain, releaseWorkerSource, startChainSession } from '@bleavit/application';
+import { specQuestionStatus } from '../shared/plan-questions.ts';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const APP = resolve(HERE, '../..');
@@ -116,48 +117,13 @@ function interfaceFields(source: string, name: string): readonly string[] {
   return members;
 }
 
-// --------------------------------------------------------------- PLAN.md's question table
-
-/** GFM cell splitting, as `tools/ci/check-spec-question-batches.py` does it: `\|` escapes. */
-function splitCells(line: string): readonly string[] {
-  const cells: string[] = [];
-  let current = '';
-  let escaped = false;
-  for (const char of line) {
-    if (escaped) {
-      current += char;
-      escaped = false;
-    } else if (char === '\\') {
-      current += char;
-      escaped = true;
-    } else if (char === '|') {
-      cells.push(current.trim());
-      current = '';
-    } else {
-      current += char;
-    }
-  }
-  cells.push(current.trim());
-  return cells.filter((cell, index) => !(cell === '' && (index === 0 || index === cells.length - 1)));
-}
-
-const PLAN = readFileSync(join(REPO, 'PLAN.md'), 'utf8');
-
 /**
- * Whether PLAN.md still lists a spec question as open.
- *
- * The same rule the batch checker applies — the **status cell starts with** `open` — rather than
- * a search for the word anywhere in the row, because an open row's text legitimately discusses
- * what resolving it would mean.
+ * Whether the canonical plan item still records a spec question as open.
  */
 function questionIsOpen(id: string): boolean {
-  for (const line of PLAN.split('\n')) {
-    if (!line.startsWith(`| ${id} |`)) continue;
-    const cells = splitCells(line);
-    const status = cells[cells.length - 1] ?? '';
-    return status.replace(/^[*_\s]+/, '').toLowerCase().startsWith('open');
-  }
-  assert.fail(`${id} is not a row of PLAN.md's spec-question table`);
+  const status = specQuestionStatus(REPO, id);
+  assert.ok(status !== undefined, `${id} is not a plan/questions/ item`);
+  return status === 'open';
 }
 
 // ------------------------------------------------------------------------------- fixtures
@@ -449,7 +415,7 @@ test('which slots are blocked is itself a claim, not an accident of what got wri
   );
 });
 
-test('every empty copy slot waits on questions PLAN.md still lists as OPEN', () => {
+test('every empty copy slot waits on questions plan/questions/ still records as open', () => {
   // The mechanical expiry. When SQ-604 or SQ-783 is ruled this fails, and the wording has to be
   // written rather than the placeholder outliving the reason it exists.
   const awaiting = everyItem()

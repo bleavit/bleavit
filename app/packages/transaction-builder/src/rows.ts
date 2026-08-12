@@ -722,8 +722,9 @@ export const CRANK_CALLS = Object.keys(CRANK_STALENESS) as readonly CrankCall[];
  *   unproven capability is *absent*, and absence disables the dependent surface.
  *
  * Every entry carries the open spec-question id that owns it, so the declaration expires
- * the way the limit-coverage registry and the monitoring seams do — by the row closing,
- * not by somebody remembering to delete a comment.
+ * the way the limit-coverage registry and the monitoring seams do — by the owning
+ * `plan/questions/<ID>.md` item's status changing, not by somebody remembering to delete a
+ * comment.
  */
 /**
  * The guardian power an obligation is scoped to, when it is scoped to one at all.
@@ -765,7 +766,7 @@ export interface UnreadableObligation {
   readonly requirement: string;
   /** Why no frozen surface answers it. */
   readonly reason: string;
-  /** The open PLAN.md spec-question id. */
+  /** The open plan/questions/ item id. */
   readonly specQuestion: string;
   readonly disposition: 'stated' | 'blocking';
   /**
@@ -1287,12 +1288,13 @@ export const OPERATOR_SURFACE_ROWS: Readonly<Record<OperatorSurfaceCall, RowId>>
  * The previous version of this comment said these declarations *"expire the way the
  * limit-coverage registry and the monitoring seams do — by the row closing, not by somebody
  * remembering to delete a comment"*, and nothing checked it. Contract v28 froze six of the
- * surfaces in this list and PLAN.md marked SQ-615, SQ-616 and SQ-619 resolved **in this
- * branch's own base**, and the entries stayed — so `operatorGate` kept converting each into a
- * block and S15, S17 and S19 could not reach `ready` at all. A screen that can never open is
- * a screen nothing has exercised end to end, and its tests had settled for asserting the
- * block. `tools/ci/check-unreadable-obligations.py` now fails when a cited question is not an
- * open row of PLAN.md's table, which is the property this paragraph used to only assert.
+ * surfaces in this list and the plan tree recorded SQ-615, SQ-616 and SQ-619 as resolved **in
+ * this branch's own base**, and the entries stayed — so `operatorGate` kept converting each
+ * into a block and S15, S17 and S19 could not reach `ready` at all. A screen that can never
+ * open is a screen nothing has exercised end to end, and its tests had settled for asserting
+ * the block. `tools/ci/check-unreadable-obligations.py` now fails when a cited
+ * `plan/questions/<ID>.md` item's status is not `open`, which is the property this paragraph
+ * used to only assert.
  *
  * Retired at contract v28: `O-3` (SQ-616 — `Guardian.PendingActions`/`Approvals`), `O-6`
  * (SQ-615 — `System.AuthorizedUpgrade`, `ExecutionGuard.PendingUpgrade`) and `O-9` (SQ-619 —
