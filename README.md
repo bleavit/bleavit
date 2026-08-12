@@ -7,96 +7,257 @@
 Futarchy was invented by Prof. Robin Hanson — thank you for your work; this
 project exists to build one.
 
-A **futarchy-governed Polkadot parachain**: token holders vote on *values* (what the
-chain should optimize), while conditional prediction markets decide *beliefs* (which
-proposals actually get executed). All consensus-critical logic is native Rust FRAME
-pallets — no smart-contract environment in the trusted computing base. The canonical
-client is a fully decentralized frontend: an Arweave-distributed static app running an
-in-browser light client (smoldot), with no backend, no indexer dependency, and no
-telemetry.
+<p align="center">
+  <a href="https://github.com/bleavit/bleavit/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/bleavit/bleavit/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="LICENSE"><img alt="License GPL-3.0" src="https://img.shields.io/badge/license-GPL--3.0-blue"></a>
+  <a href="rust-toolchain.toml"><img alt="Rust 1.89.0" src="https://img.shields.io/badge/rust-1.89.0-b7410e"></a>
+  <img alt="Polkadot SDK stable2606" src="https://img.shields.io/badge/polkadot--sdk-stable2606-e6007a">
+</p>
 
-Core mechanics (see the architecture set for the normative detail): scalar Mode B
-futarchy over a welfare score, LMSR market maker in verified 64.64 fixed point, a
-purpose-built conditional ledger with machine-checked solvency invariants, a bonded
-optimistic oracle with escalating disputes, an execution guard with narrow
-class-specific origins (no unrestricted Root), and an eight-phase evidence-gated
-rollout that removes `sudo` at Phase 4.
+**Bleavit is a futarchy-governed Polkadot parachain.** Token holders vote on
+*values* — what the chain should optimize. Conditional prediction markets decide
+*beliefs* — which proposals actually reach execution. Every consensus-critical
+rule is a native Rust FRAME pallet, so no smart-contract environment enters the
+trusted computing base.
 
-## Status
+> [!IMPORTANT]
+> **Bleavit is not deployed.** The Phase 0 and Phase 1 exit gates passed. Phase 2
+> puts the chain on the Paseo testnet, and that gate is still open. Do not commit
+> real funds to any part of this repository.
+> [`docs/reviews/`](docs/reviews/) holds the review reports the project has
+> received so far.
 
-**Specification complete (2026-07-12) · Track M (M0–M3), Track A, B1a, B1b, B3, B4, B5, B6, B7, B9, B11, S1, S2, S3 and S5 implemented (2026-07-17).**
+## Contents
 
-- The authoritative spec is [`docs/architecture/`](docs/architecture/README.md) —
-  16 component documents + decision record, produced by resolving all 101 findings
-  of an adversarial design review. Treat changes to it as rare and deliberate — the
-  implementation follows the spec — but it is editable, not guarded; see rule R-1 in
-  [AGENTS.md](AGENTS.md).
-- Implementation focus and indexes live in [`PLAN.md`](PLAN.md); per-item status and
-  dated history live in [`plan/`](plan/).
+- [What Bleavit is](#what-bleavit-is)
+- [How it works](#how-it-works)
+- [Project status](#project-status)
+- [Quick start](#quick-start)
+- [Documentation](#documentation)
+- [Repository map](#repository-map)
+- [Development](#development)
+- [Contributing](#contributing)
+- [Security](#security)
+- [License](#license)
+
+## What Bleavit is
+
+Ordinary governance mixes two questions into one vote. Bleavit separates them
+into two layers, and gives each layer a mechanism suited to it.
+
+- **Values — what should we want?** VIT holders vote through `pallet-referenda`
+  and `pallet-conviction-voting`. This layer defines the welfare metric and its
+  weights. It can never enact an operational proposal.
+- **Beliefs — what will actually work?** Conditional prediction markets price
+  each proposal against the world without it. A proposal executes only when its
+  markets say it raises the welfare score, and only when no ruin gate vetoes it.
+
+The canonical client matches that posture. It is a static app distributed over
+Arweave, and it runs an in-browser light client. It has no backend, no indexer
+dependency, and no telemetry.
+
+## How it works
+
+Each mechanism below has one owning specification document. Follow the link for
+the normative detail.
+
+- **Scalar Mode B futarchy** over a normalized welfare score — [05](docs/architecture/05-welfare-and-decision-engine.md)
+- **An LMSR market maker** in verified 64.64 fixed point — [04](docs/architecture/04-markets-and-pricing.md)
+- **A purpose-built conditional ledger** with machine-checked solvency invariants — [03](docs/architecture/03-conditional-ledger.md)
+- **A bonded optimistic oracle** with escalating disputes and a hard latency cap — [07](docs/architecture/07-oracle-and-disputes.md)
+- **An execution guard** with narrow class-specific origins, never unrestricted Root — [09](docs/architecture/09-execution-upgrades-and-rollout.md)
+- **A hosted question service** that other chains call over XCM — [16](docs/architecture/16-hosted-question-service.md)
+- **An eight-phase rollout** that removes `pallet-sudo` at Phase 4 — [09](docs/architecture/09-execution-upgrades-and-rollout.md)
+
+Two rules shape the whole repository. Every observable behavior traces to a
+specification section. Every parameter value lives in exactly two documents —
+[02](docs/architecture/02-integration-contract.md) for the contract surface, and
+[13](docs/architecture/13-parameters.md) for everything else.
+
+## Project status
+
+**The specification is complete. The chain is not deployed.**
+
+[`PLAN.md`](PLAN.md) and the [`plan/`](plan/) tree are the single source of
+implementation status, and they win over the summary below.
+
+| Track | What it covers | Status |
+|---|---|---|
+| **M** — Foundations | Cargo workspace, shared primitives, 64.64 fixed point, reference model | ✅ Done |
+| **A** — Protocol pallets | Ledger, markets, welfare, oracle, guardians, treasury, execution guard | ✅ Done |
+| **N** — External clients | The hosted question service other chains call over XCM | ✅ Done |
+| **B** — Runtime, node and chain | Cumulus runtime, collator, XCM layer, release pipeline, keeper | 🔨 Mostly done |
+| **E** — Revenue and sustainability | Redemption fee and the self-funding statement | 🔨 Mostly done |
+| **S** — Verification and simulation | TLA⁺ models, fuzz targets, property suites, economic simulation | 🔨 Mostly done |
+| **F** — Canonical client | The Arweave-distributed app in `app/` and its light client | 🔨 In progress |
+| **O** — Release and operations | Runbooks, monitoring, bootnode operations | 🔨 In progress |
+| **G** — Rollout gates | Eight evidence-gated phases, from local drills to a self-governing chain | 🔨 Phase 2 next |
+
+The specification came from an adversarial design review, and it resolves all 101
+findings that review raised. Treat changes to it as rare and deliberate. It is
+editable rather than guarded — see rule R-1 in [AGENTS.md](AGENTS.md).
+
+## Quick start
+
+### Prerequisites
+
+| Tool | Version | Where the pin lives |
+|---|---|---|
+| Rust | 1.89.0, with the two wasm targets | [`rust-toolchain.toml`](rust-toolchain.toml) — `rustup` reads it for you |
+| Node.js | 22.18.0 | [`app/.nvmrc`](app/.nvmrc) |
+| pnpm | 10.23.0, through corepack | `packageManager` in `app/package.json` |
+| Python | 3.12 | [`.github/workflows/ci.yml`](.github/workflows/ci.yml) |
+
+The Rust build needs two native packages. On Debian or Ubuntu, install them with
+`sudo apt-get install -y libclang-dev protobuf-compiler`.
+
+### 1. Read the specification
+
+This path needs no installation. Start at
+[`docs/architecture/README.md`](docs/architecture/README.md). Then read
+01 → 02 → 03 → 04 → 05 in that order.
+
+### 2. Run the explainer
+
+The explainer animates every mechanism in fourteen scenes. It reads no chain, so
+it starts in seconds.
+
+```bash
+npm -C explainer install
+npm -C explainer run dev
+```
+
+### 3. Spawn a local network
+
+This path builds the collator and boots a relay chain beside it. Expect a long
+first build.
+
+```bash
+tools/env/fetch-binaries.sh
+tools/env/generate-relay-specs.sh
+cargo build --release -p bleavit-node --locked
+(cd keeper && cargo build --release --locked -p bleavit-keeper)
+zombienet/bin/zombienet -p native spawn zombienet/networks/bleavit-local.toml
+```
+
+[`zombienet/README.md`](zombienet/README.md) documents the drills, the fast-timing
+test spec, and the host requirements. The fetch script verifies every download,
+then installs it. [`tools/env/pins.env`](tools/env/pins.env) is the one home for
+those pins.
+
+### 4. Run the canonical client
+
+```bash
+(cd app && corepack enable && corepack install)
+pnpm -C app install --frozen-lockfile
+pnpm -C app dev
+```
+
+## Documentation
+
+| If you want to | Start here |
+|---|---|
+| Understand the protocol | [`docs/architecture/`](docs/architecture/README.md) — 16 component documents plus the decision record |
+| Watch the protocol move | [`explainer/`](explainer/README.md) — an interactive teaching site, not the canonical client |
+| Integrate a client | [`docs/integration/`](docs/integration/README.md) — plain language, non-normative, nine guides |
+| Know what is built | [`PLAN.md`](PLAN.md) for current focus and [`plan/`](plan/) for per-item status, generated indexes and dated history |
+| Contribute code | [`AGENTS.md`](AGENTS.md) — the rules, the quality gates, the session loop |
+| Operate a node | [`deploy/runbooks/`](deploy/runbooks/) and [`deploy/monitoring/`](deploy/monitoring/README.md) |
+| Design a frontend | [`docs/design/`](docs/design/claude-design-kit/00-START-HERE.md) — a derived, non-normative design kit |
+| Report a vulnerability | [`SECURITY.md`](SECURITY.md) |
 
 ## Repository map
 
 | Path | What it is |
 |---|---|
-| [`docs/architecture/`](docs/architecture/README.md) | The specification (00–16). Start with its README; reading order 01 → 02 → 03 → 04 → 05 |
-| [`docs/integration/`](docs/integration/README.md) | **For clients** — plain-language guides to using Bleavit's hosted question service from a parachain, a contract, or an off-chain service |
-| [`docs/design/`](docs/design/claude-design-kit/00-START-HERE.md) | Derived, non-normative design assets: `claude-design-kit/` packs the spec into ≤10 files + a ready prompt for generating frontend design prototypes with Claude Design |
-| [`PLAN.md`](PLAN.md), [`plan/`](plan/) | Implementation focus, per-item status, generated indexes, and dated history — the living source of "where are we" |
-| [`AGENTS.md`](AGENTS.md) | Operating manual + rules for all coding agents (and useful for humans) |
-| [`CLAUDE.md`](CLAUDE.md) | Claude Code wiring: skills, subagents, hooks |
-| [`SIGNERS.md`](SIGNERS.md) | The 12 §2.2 signer registry: every release key, ANT controller and attestor key mapped to a named holder and organization. Empty until the key ceremony, and reported as unseated rather than as a clean separation |
-| `.claude/` | Automation: session-context injection, skills, subagents, path-scoped rules, and Stop-hook guards for PLAN.md freshness and README's pinned lines |
-| `.codex/` | Codex CLI session playbooks mirroring the skills |
-| [`Cargo.toml`](Cargo.toml), [`rust-toolchain.toml`](rust-toolchain.toml), [`.github/workflows/ci.yml`](.github/workflows/ci.yml), [`tools/ci/rust-workspace-gates.sh`](tools/ci/rust-workspace-gates.sh), [`tools/ci/check-doc-links.py`](tools/ci/check-doc-links.py) | M0 bootstrap: Rust workspace manifest, pinned toolchain components, CI skeleton, and local gate scripts; B8 added [`tools/ci/supply-chain-gates.sh`](tools/ci/supply-chain-gates.sh) (pinned cargo-audit + lockfile gates, annotated exceptions in `.cargo/audit.toml`) and the kernel-change full-sweep workflow [`sweep.yml`](.github/workflows/sweep.yml) |
-| [`tools/release/`](tools/release/README.md), [`.github/workflows/release.yml`](.github/workflows/release.yml) | B8/B16: the tag-triggered release-artifact publication pipeline (02 §11; 15 §5) — reproducibly builds the selected primary runtime profile and its mandatory same-commit terminal-recovery pair, boots both artifacts for metadata/`:code` binding, then assembles chain specs, environment evidence, deterministic chainHead fixtures and the ≥10⁷-point reference sweep into a content-addressed readiness report; publishes as a prerelease until an operator attaches Arweave mirror evidence |
-| `crates/futarchy-primitives/` | M1 shared primitive crate: `no_std` contract/view types, version constant, and kernel/chain/currency bounds |
-| `crates/futarchy-fixed/` | M2 deterministic 64.64 fixed-point LMSR/transcendental crate with generated regression fixtures |
-| `crates/question-service-core/` | N5 frame-free, `no_std` hosted-question lifecycle, sealed-report assembly, conservative manipulation certificate and identity-bound attestor median |
-| `crates/bleavit-client-abi/` | N9/N10 `no_std`, runtime-independent wire ABI: the fixed hosted-report receiver (`[66, 0] ++ SCALE(ReportView)`), register/open/seal/settle encoders, and the correct-by-construction positional ingress builder |
-| [`reference-model/`](reference-model/pyproject.toml), [`tools/reference-model/generate-vectors.py`](tools/reference-model/generate-vectors.py) | M3 independent Python executable spec and CI-regenerated JSON vector corpus; E5 added doc 08 §10 sustainability arithmetic, S6 added lifecycle/dispute/occupancy derivations, and N5 added the hosted-question service model |
-| [`simulation/`](simulation/README.md), [`tools/simulation/run-calibration.py`](tools/simulation/run-calibration.py) | S4 agent-based Phase-0 economic simulation (15 §4.9): executed-trade LMSR ledger with adversarial agents, committed deterministic calibration evidence; sim-gated parameter publication parked pending SQ-231 |
-| `pallets/`, `crates/*-core/` | Track A (complete) plus Track N through N10: each `crates/<name>-core/` is a frame-free functional core and each matching production pallet its FRAME shell. N4 adds `client-registry-core` / `pallet-client-registry`; N7 adds `pallet-question-service`; N8 wires the identity to the XCM executor; N9 adds separate client-funded USDC delivery custody and best-effort egress; N10 adds `pallet-bleavit-client`, a drop-in shell for client runtimes that is intentionally not wired into Bleavit's production runtime |
-| `pallets/inflow-caps/` | B4 residual state-only pallet: the shared Phase-3 cumulative per-account USDC inflow meter and total-local-issuance mint admission check (09 §5.2); no dispatchables or standalone weights, because callers include it in their transaction/weight envelopes |
-| `runtime/bleavit-runtime/` | The real Cumulus parachain runtime — `construct_runtime!` over custom + standard/system pallets (`Epoch` 61, `ExecutionGuard` 62, `InflowCaps` 63, `TrackOrigins` 64, `ClientRegistry` 65, `QuestionService` 66, `ServiceLedger` 67), `BaseCallFilter = SafetyFilter`, live constitution-backed parameters, production XCM posture, custody adapters, migrations, generated weights and PoV budgets |
-| `runtime/bleavit-client-runtime/` | N10 standalone client-para harness runtime: one example `Config` for `pallet-bleavit-client`, separate from and never instantiated by `bleavit-runtime`; its raw `pallet_xcm` sender exists only for the negative ingress drill |
-| `runtime/bleavit-xcm/` | B4 + N8/N9 XCM layer (runtime-independent library the runtime wires): default-deny ingress barrier (unpaid execution refused; `Transact` admitted only through N8's exact six-position client template, exact registered `Location` conversion and `ExternalClient` call domain), plus N9's separately routed, client-USDC-prepaid fixed report `Transact` that cannot reach XCM-health accounting; pinned USDC/DOT matchers, governed weight trader, reserve-probe dispatcher, coretime renewal, inflow-cap adapters and the `pallet_xcm` classifier |
-| `runtime-api/` | `futarchy-runtime-api`: the `sp_api::decl_runtime_apis!` declaration of the frozen 16-method `FutarchyApi` (02 §3–§4a) over the view types in `futarchy-primitives`; contract v29 appends `bond_quote` and `treasury_streams` so a client can price a bond and a stream claim before committing to either, while the monitoring-only `TelemetryApi` stays outside the integration contract |
-| `node/bleavit-node/` | B3: the collator node — a thin branding of the pinned `polkadot-omni-node` stack; the runtime ships in the chain spec, not in the node |
-| `deploy/`, `tools/deploy/` | B3: chain-spec pipeline (pinned `staging-chain-spec-builder`), WSS bootnode operator manifests + the 02 §10 threshold validator, production genesis-allocation template, prepared ss58-7777 registry submission |
-| [`keeper/`](keeper/README.md) | B9: the off-chain keeper reference implementation (`bleavit-keeper`) — a subxt-based service any operator can run to crank the chain's permissionless extrinsics (phase ticks, TWAP observations, decide, execute, settle, oracle/registry closes, cleanup), with Prometheus metrics per 12 §6.3. A separate cargo workspace so its dependency tree cannot disturb the runtime's exact pins; the on-chain rebate meter (08 §6.3) lives in the treasury pallet |
-| [`deploy/monitoring/`](deploy/monitoring/README.md), `tools/monitoring/` | O5 + B15: the 12 §6.3 monitoring/alerting stack — Prometheus + Alertmanager configuration covering all 21 tabulated alert rows with runbook labels and release-integrity paging, the on-chain-event alerting exporter (frozen `FutarchyApi` reads, raw `ReleaseChannel`, storage prefix counts, finalized events), the 12 §5.2 out-of-band attestation monitor, and the spec-anchored alert-coverage gate. SQ-484 adds the monitoring-only local reserve-line F+R runway method plus an independently reconnecting, metadata-decoded Asset Hub collector for canonical sovereign USDC and usable DOT; malformed/unavailable remote state fails only that readiness family closed and RB-XCM owns the alerts. Infrastructure only — the frontend ships no telemetry |
-| `zombienet/`, `chopsticks/`, `tools/env/` | B7 + N10: test-environment definitions as release artifacts (15 §4.7) — the existing multi-node/upgrade suite plus client-para both-way and no-return topologies, the quickstart, eight-case malformed-ingress, and finalized-proof report-pull drills; `tools/env/pins.env` remains the single pin home |
-| [`models/`](models/README.md), `tools/verify/` | S1: TLA⁺ formal models of the conditional ledger and the T1–T24 proposal machine (15 §4.1) plus the pinned-TLC runner — main configs prove the invariants above anti-vacuity floors, witness configs must *violate* (reachability), mutation configs prove the invariants can fail |
-| [`fuzz/`](fuzz/README.md) | S2 + Track N: `bleavit-fuzz` — five cargo-fuzz targets covering SCALE payload decode, nested-wrapper filtering, LMSR trade paths, hosted-service settlement and N8's exact XCM ingress template. Each asserts a protocol invariant rather than mere no-panic. A separate nightly-pinned cargo workspace (like `keeper/`) keeps libFuzzer + nightly from disturbing the runtime's exact pins; curated seed corpora + the `fuzz` CI job (`tools/ci/fuzz-gates.sh`) |
-| [`tools/phase-gates/`](tools/phase-gates/README.md) | G0: the machine-checked 09 §7.1 Phase-0 exit gate — `check-phase0-exit.py` runs the reference-model ≡ pallets differential legs against the real repo and consumes the S4-published sim-calibration artifact **fail-closed** (absent ⇒ pending, never pass), publishing `bleavit.phase0-evidence.v1` |
-| `app/` | The single client monorepo (10 §10.1). Track F builds the canonical cross-platform Bleavit client here — Arweave-distributed web app and installable PWA, with a serverless LLM handoff: verified context out, semantic intent in, and Bleavit re-derives and reconstructs every transaction itself. `packages/protocol` is the normative TypeScript port of the market math — it reproduces the runtime's *integer* arithmetic rather than out-precisioning it, because the client's job is to say what the chain will charge before you sign. Also hosts N10's `packages/bleavit-client-ts`, a proof-backed PAPI bridge facade for off-chain registration, open/seal submission and finalized report reads |
-| [`explainer/`](explainer/README.md) | An interactive teaching site for the whole runtime: fourteen scenes in three acts, each an animated model of one machine, with every on-screen number tagged as specification, derived, or simulated. **Not the canonical client** — it ships no signing affordance and reads no chain. Its `src/protocol/` is a third independent port of the spec arithmetic, certified against the same `reference-model/fixtures/vectors.json` corpus the Rust differential suites replay, plus the runtime's own recorded quote fixture. A standalone npm project with its own lockfile, deliberately outside `app/`'s pnpm workspace, so a dependency added for an animation can never enter the tree the canonical client resolves from. `npm run verify` in that directory is its whole gate |
+| [`docs/architecture/`](docs/architecture/README.md) | The specification, and the source of truth for every behavior |
+| [`docs/integration/`](docs/integration/README.md) | Human-facing guides for people who integrate a client |
+| [`PLAN.md`](PLAN.md), [`plan/`](plan/), [`AGENTS.md`](AGENTS.md), [`CLAUDE.md`](CLAUDE.md) | Current focus, detailed status, the operating manual, and the Claude Code wiring |
+| `crates/` | Shared primitives, the fixed-point kernel, and frame-free `no_std` functional cores |
+| `pallets/` | Production FRAME pallets, mostly thin shells over those functional cores |
+| `runtime/`, `runtime-api/`, `node/` | The Cumulus runtime, the frozen `FutarchyApi`, and the collator binary |
+| `app/` | The canonical client, and the TypeScript port of the market math |
+| [`explainer/`](explainer/README.md) | The interactive teaching site — no signing affordance, no chain reads |
+| [`reference-model/`](reference-model/pyproject.toml), [`simulation/`](simulation/README.md) | An independent executable specification in Python, plus the economic simulation |
+| [`models/`](models/README.md), [`fuzz/`](fuzz/README.md) | TLA⁺ formal models and the invariant fuzz targets |
+| [`keeper/`](keeper/README.md) | The off-chain keeper that cranks permissionless lifecycle extrinsics |
+| `deploy/`, `zombienet/`, `chopsticks/` | Chain specs, runbooks, monitoring, and the test environments |
+| `tools/` | CI gate tooling and the [release pipeline](tools/release/README.md) |
+| [`SIGNERS.md`](SIGNERS.md) | The signer registry, whose populations print as unseated until the key ceremony |
 
-## How this gets built
+[AGENTS.md · Repository layout](AGENTS.md#repository-layout) carries the long-form version of this
+table, one row per path.
 
-The project is implemented **incrementally across many agent sessions**, one plan-tree
-milestone at a time, under three standing constraints:
+## Development
 
-1. every observable behavior traces to a spec section; the spec is the source of
-   truth and changes to it are rare and deliberate (rule R-1);
-2. parameter values come only from doc 13 / the contract surface in doc 02;
-3. the living documents (PLAN/README/AGENTS/CLAUDE) are updated in the same session
-   as any change — enforced by a Stop hook.
+### Pinned toolchain
 
-Humans and agents alike: read [AGENTS.md](AGENTS.md), then [PLAN.md](PLAN.md) and its
-linked plan items, then work.
+- **Runtime:** Rust and the Polkadot SDK on release line `polkadot-stable2606`,
+  with FRAME and Cumulus. Verification uses Zombienet, Chopsticks, try-runtime,
+  TLA⁺ and cargo-fuzz.
+- **Client:** TypeScript, polkadot-api 2.x, smoldot 3.x, Vite 8 and Dexie 4.
+  Arweave distribution runs through permaweb-deploy and Turbo.
+- **Reference model:** Python high-precision arithmetic, a regenerated vector
+  corpus, and a release-gated differential sweep of at least 10⁷ points.
 
-## Toolchain (pinned)
+### Quality gates
 
-- **Runtime:** Rust / Polkadot SDK, release line `polkadot-stable2606` (umbrella crate
-  `polkadot-sdk = "2606.0.0"`; D-19), FRAME + Cumulus; Zombienet, Chopsticks, try-runtime,
-  TLA⁺/Quint, cargo-fuzz, frame-benchmarking (01 §9, 15 §4).
-- **Frontend:** TypeScript, polkadot-api 2.x, smoldot 3.x, Vite 8, Dexie 4; Arweave
-  via permaweb-deploy/Turbo; Playwright + Lighthouse CI (01 §9, 10, 12).
-- **Reference model:** Python high-precision reference math, CI-regenerated vector corpus, and the ≥10⁷-point release-gated differential sweep (04 §5, 15 §4.4; B8).
+Run the changed-scope Rust gate while you work. It locks the dependency graph and
+skips what your change cannot reach.
 
-M0 re-verified the initial platform pins on 2026-07-13; the detailed result is
-[V-1](plan/verifications/V-1.md).
+```bash
+tools/ci/rust-workspace-gates.sh --changed <package>
+```
+
+The same script with no argument runs the exhaustive gate. That run takes hours
+on a cold machine, so let CI carry it. The other suites each own one area:
+
+```bash
+pnpm -C app install --frozen-lockfile && pnpm -C app test
+npm -C explainer run verify
+PYTHONPATH=reference-model/src python3 -m unittest discover -s reference-model/tests
+```
+
+[AGENTS.md · Quality gates](AGENTS.md#quality-gates) lists every gate with the specification
+section that mandates it.
+
+### How this gets built
+
+Coding agents build the project one [`plan/`](plan/) milestone at a time, under
+three standing constraints:
+
+1. Every observable behavior traces to a specification section (rule R-1).
+2. Parameter values come only from document 13, or from the contract surface in
+   document 02.
+3. The living documents stay true in the same session as any change (rule R-3).
+
+Humans and agents alike: read [AGENTS.md](AGENTS.md), then [PLAN.md](PLAN.md) and
+its linked plan items, then work.
+
+## Contributing
+
+This repository has no separate contributing guide, because
+[AGENTS.md](AGENTS.md) is that guide for humans and agents alike. Read it first.
+Then read [PLAN.md](PLAN.md) and its linked plan items for the current focus.
+
+Three things matter more here than in most repositories:
+
+1. **Read the owning specification section before you write code.** Never guess a
+   parameter value, a name, or a semantic.
+2. **Never mark work done with a failing gate.** Report the failure verbatim
+   instead.
+3. **Use conventional commits with the milestone id**, as in
+   `feat(ledger): split/merge families with per-branch supplies (A2)`.
+
+## Security
+
+Report vulnerabilities through GitHub's private reporting feature, and never
+through a public issue or pull request. [`SECURITY.md`](SECURITY.md) gives the
+full process and the response times.
+
+Bleavit is financial infrastructure. Solvency-critical code carries adversarial
+tests. It rounds against the claimant, and it defaults to the status quo on every
+failure path.
 
 ## License
 

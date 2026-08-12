@@ -13,14 +13,6 @@ Legend: ⬜ pending · 🔨 active · ✅ done · ⛔ blocked
 
 ## Current focus
 
-> **PR #301 handoff, 2026-08-12 — the plan split is complete and reconciled
-> through `main` at `d55f3673`.** The legacy updates that landed after the
-> branch fork are now represented in the split tree: 117 milestone records,
-> 592 question records and 223 verification records, plus the dated 2026-08-10
-> and 2026-08-11 records. The conflict resolution and plan/documentation gates
-> are green; [PR #301](https://github.com/bleavit/bleavit/pull/301) is ready for
-> review, with GitHub CI owning the final merge gate.
-
 > **PARKED: 2026-08-09 — Track F's code is complete; four milestones wait on
 > external inputs.** F1 needs the user's SQ-940 ruling plus a device lab/live
 > chain/hardware/ar.io credentials. F11 needs the production rollout inputs and
