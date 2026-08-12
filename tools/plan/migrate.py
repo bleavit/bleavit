@@ -74,13 +74,28 @@ def prove_lossless(source_cells: list[str], emitted: list[Path]) -> list[str]:
     Returns the cells that do not. Substring containment is the right test
     here: one source cell legitimately becomes several frontmatter fields.
 
-    This is a coverage proof, not a correctness proof: it can tell whether a
-    piece of source text survived *somewhere*, but not whether it landed on
-    the *right row*, and it is the wrong tool for a column the converter
-    transforms rather than copies (fix round 2, finding 3) — a transformed
-    value never appears verbatim, so `source_cells` must never include one.
-    See `COVERAGE_CHECKED_COLUMNS` / `MAPPING_CHECKED_COLUMNS` and
-    `prove_status_mapping`.
+    **What this proves, precisely, and no more (fix round 3, finding 4):** the
+    haystack is the union of the *whole emitted tree*, so this can tell only
+    whether a piece of source text survived *somewhere in the tree* — never
+    whether it landed on the right row, the right field, or even a field at
+    all. A cell whose normalized text happens to recur anywhere else (which,
+    empirically, is most of them: deleting S7's `depends` block, corrupting
+    F9's first spec ref, swapping S7's and B14's bodies, and rewriting every
+    `track:` to `A` were all tried against the real 117-file tree, and every
+    one still reported `0 cells missing`) passes regardless of whether *this*
+    row's own value is right. It is genuinely useful for exactly one thing:
+    catching text the converter derived **nowhere at all** — which is what
+    finding 1's echo-based design was gaming, and what a field left out of a
+    column mapping entirely (a whole cell dropped, not merely misplaced)
+    would still trip.
+
+    **Every actual per-row guarantee comes from `verify_round_trip`, not from
+    this function.** Any task reusing this proof design (Tasks 6, 8, 9, 10 —
+    spec questions, verification records, day files) MUST also call
+    `verify_round_trip` for every item it writes; copying `prove_lossless`
+    alone inherits none of the real guarantee. See `COVERAGE_CHECKED_COLUMNS`
+    / `MAPPING_CHECKED_COLUMNS` and `prove_status_mapping` for the companion
+    check a transformed (not merely copied) column needs on top of both.
     """
     haystack = "\n".join(item_text(path) for path in emitted)
     return [c for c in source_cells if normalize_prose(c) and normalize_prose(c) not in haystack]
@@ -231,6 +246,41 @@ def _iter_milestone_rows(plan_text: str):
         yield number, track, raw_cells
 
 
+def verify_round_trip(
+    path: Path, expected_values: dict[str, str | list[str]], expected_body: str
+) -> list[str]:
+    """Read `path` straight back and compare every field against what was intended.
+
+    This is the check that actually holds per row (fix round 3, finding 4) —
+    `prove_lossless` does not, and cannot: it only tells you a piece of text
+    survived *somewhere in the tree*, never that *this file's own* fields are
+    right. `verify_round_trip` is the opposite kind of guarantee: exact,
+    per-file, per-field equality between what the converter meant to write and
+    what the strict parser reads back, catching corruption a substring search
+    is structurally blind to (this is what caught fix round 1's comma
+    corruption — every corrupted fragment was still a valid scalar on its
+    own, so `load_milestones` alone reported 0 errors throughout).
+
+    **Mandatory, not optional, for any task reusing this proof design** —
+    copying `prove_lossless` without also calling this on every item written
+    inherits none of the real per-row guarantee.
+
+    `expected_values` maps frontmatter key -> the scalar or list value the
+    caller intended for that key; `expected_body` is the intended body text.
+    Returns one human-readable mismatch message per disagreeing field, or an
+    empty list if the file reproduces its own input exactly.
+    """
+    values, body = parse_frontmatter(path)
+    mismatches: list[str] = []
+    for key, expected in expected_values.items():
+        actual = values.get(key)
+        if actual != expected:
+            mismatches.append(f"{key}: wrote {expected!r}, read {actual!r}")
+    if body != expected_body:
+        mismatches.append(f"body: wrote {expected_body!r}, read {body!r}")
+    return mismatches
+
+
 def migrate_milestones(plan_text: str, out: Path) -> list[Path]:
     """Write plan/milestones/<ID>.md for every milestone row. Returns the paths."""
     directory = out / "plan" / "milestones"
@@ -268,28 +318,18 @@ def migrate_milestones(plan_text: str, out: Path) -> list[Path]:
         ]
         path.write_text("\n".join(lines), encoding="utf-8")
 
-        # Converter-level self-check: a converter that cannot reproduce its own
-        # input has not converted anything. Read the file straight back with
-        # the strict parser and compare against what was intended, field by
-        # field — this is what caught the finding-2 comma corruption, which
-        # `load_milestones` alone could not (every corrupted fragment is a
-        # valid scalar on its own).
-        values, body = parse_frontmatter(path)
-        mismatches = []
-        if values.get("id") != identifier:
-            mismatches.append(f"id: wrote {identifier!r}, read {values.get('id')!r}")
-        if values.get("track") != track:
-            mismatches.append(f"track: wrote {track!r}, read {values.get('track')!r}")
-        if values.get("title") != title:
-            mismatches.append(f"title: wrote {title!r}, read {values.get('title')!r}")
-        if values.get("spec") != spec_list:
-            mismatches.append(f"spec: wrote {spec_list!r}, read {values.get('spec')!r}")
-        if values.get("depends") != depends_list:
-            mismatches.append(f"depends: wrote {depends_list!r}, read {values.get('depends')!r}")
-        if values.get("status") != status:
-            mismatches.append(f"status: wrote {status!r}, read {values.get('status')!r}")
-        if body != notes:
-            mismatches.append(f"body: wrote {notes!r}, read {body!r}")
+        mismatches = verify_round_trip(
+            path,
+            {
+                "id": identifier,
+                "track": track,
+                "title": title,
+                "spec": spec_list,
+                "depends": depends_list,
+                "status": status,
+            },
+            notes,
+        )
         if mismatches:
             raise ValueError(f"{path}: round-trip self-check failed: " + "; ".join(mismatches))
 
@@ -297,6 +337,26 @@ def migrate_milestones(plan_text: str, out: Path) -> list[Path]:
         print(f"wrote {path.relative_to(out)}", file=sys.stderr)
 
     return written
+
+
+def find_orphans(directory: Path, written: list[Path]) -> list[Path]:
+    """`*.md` files present in `directory` that this run did not write.
+
+    `migrate_milestones` never clears the output directory (`mkdir(exist_ok=True)`
+    only), so rerunning over a `PLAN.md` with a row removed leaves the stale
+    file behind — absent from `written`, and invisible to both `prove_lossless`
+    and `prove_status_mapping` (fix round 3, finding 5): neither checks what
+    exists on disk, only what the current run produced. `load_milestones` and
+    every downstream consumer would still see the stale file, though.
+
+    Never deletes anything — a converter that removes files nobody asked it to
+    remove is its own hazard. The caller (`main`) fails loudly instead, naming
+    the orphans, so the operator can clear the directory deliberately.
+    """
+    if not directory.is_dir():
+        return []
+    written_set = {p.resolve() for p in written}
+    return sorted(p for p in directory.glob("*.md") if p.resolve() not in written_set)
 
 
 def source_cells_of(plan_text: str) -> list[str]:
@@ -316,16 +376,30 @@ def source_cells_of(plan_text: str) -> list[str]:
     with its separators still in it — matching `migrate_milestones`'s own
     `_split_refs`/`_split_depends` calls, via the same `_iter_milestone_rows`
     both draw from, so the two can never drift against each other.
+
+    Iterates `COVERAGE_CHECKED_COLUMNS` itself, and asserts each row's derived
+    columns match it exactly (fix round 3, finding 4 item 3) — the tuple was
+    previously referenced only by docstrings, so nothing stopped it drifting
+    from what this function actually checks. A test also pins the tuple's
+    contents directly, independent of this function's own use of it.
     """
     cells: list[str] = []
     for _number, track, raw_cells in _iter_milestone_rows(plan_text):
         identifier, title, spec, depends, _status_cell, notes = raw_cells
-        cells.append(identifier)
-        cells.append(title)
-        cells.extend(_split_refs(unescape_cell(spec)))
-        cells.extend(_split_depends(unescape_cell(depends)))
-        cells.append(notes)
-        cells.append(track)
+        per_column: dict[str, list[str]] = {
+            "id": [identifier],
+            "title": [title],
+            "spec": _split_refs(unescape_cell(spec)),
+            "depends": _split_depends(unescape_cell(depends)),
+            "notes": [notes],
+            "track": [track],
+        }
+        assert set(per_column) == set(COVERAGE_CHECKED_COLUMNS), (
+            f"source_cells_of's per-row columns {sorted(per_column)} must exactly match "
+            f"COVERAGE_CHECKED_COLUMNS {sorted(COVERAGE_CHECKED_COLUMNS)}"
+        )
+        for column in COVERAGE_CHECKED_COLUMNS:
+            cells.extend(per_column[column])
     return cells
 
 
@@ -338,6 +412,18 @@ def main(argv: list[str] | None = None) -> int:
 
     text = args.plan.read_text(encoding="utf-8")
     written = migrate_milestones(text, args.out)
+
+    directory = args.out / "plan" / "milestones"
+    orphans = find_orphans(directory, written)
+    if orphans:
+        for orphan in orphans:
+            print(f"ORPHAN: {orphan} — present on disk but not written by this run", file=sys.stderr)
+        print(
+            f"{len(orphans)} orphaned file(s) in {directory}: not written by this run. "
+            "Clear the directory deliberately and rerun; this converter never deletes.",
+            file=sys.stderr,
+        )
+        return 1
 
     source_cells = source_cells_of(text)
     missing = prove_lossless(source_cells, written)

@@ -16,15 +16,22 @@ unchanged and a column it transforms need different tests (fix round 2,
   by design (round 1's version did exactly that).
 """
 
+import contextlib
+import io
 import tempfile
 import unittest
 from pathlib import Path
 
 from tools.plan.migrate import (
+    COVERAGE_CHECKED_COLUMNS,
+    MAPPING_CHECKED_COLUMNS,
+    find_orphans,
+    main,
     migrate_milestones,
     prove_lossless,
     prove_status_mapping,
     source_cells_of,
+    verify_round_trip,
 )
 from tools.plan.model import STATUS_GLYPHS, load_milestones, parse_frontmatter
 
@@ -127,6 +134,118 @@ class MigrateMilestonesTests(unittest.TestCase):
         bad = PLAN.replace("| ✅ | **Done.**", "| 🎉 | **Done.**")
         with self.assertRaises(ValueError):
             migrate_milestones(bad, self.root)
+
+    def test_a_row_with_the_wrong_cell_count_raises(self):
+        """The converter must never guess a missing or extra cell (fix round 3
+        fold-in): tested directly, not merely exercised by a controller
+        review."""
+        bad = PLAN.replace(
+            "| F8 | FE-6 `packages/local-index` — three-layer history | 10 §6–§7 | F3 | ✅ | "
+            "**Done.** Gap-tolerant coverage, candles. |",
+            "| F8 | FE-6 `packages/local-index` — three-layer history | 10 §6–§7 | F3 | ✅ |",
+        )
+        with self.assertRaises(ValueError):
+            migrate_milestones(bad, self.root)
+
+    def test_a_row_before_any_track_heading_raises(self):
+        no_heading = """## Milestones
+
+| ID | Milestone | Spec | Depends | Status | Notes |
+|---|---|---|---|---|---|
+| X1 | orphan row | — | — | ✅ | No `### Track` heading precedes this row. |
+"""
+        with self.assertRaises(ValueError):
+            migrate_milestones(no_heading, self.root)
+
+    def test_a_duplicate_milestone_id_raises(self):
+        dup = PLAN + "| F8 | duplicate of the F8 above | — | — | ✅ | Must raise, not overwrite. |\n"
+        with self.assertRaises(ValueError):
+            migrate_milestones(dup, self.root)
+
+    def test_verify_round_trip_passes_for_a_correctly_written_file(self):
+        written = migrate_milestones(PLAN, self.root)
+        f8 = next(p for p in written if p.stem == "F8")
+        mismatches = verify_round_trip(
+            f8,
+            {
+                "id": "F8",
+                "track": "F",
+                "title": "FE-6 `packages/local-index` — three-layer history",
+                "spec": ["10 §6–§7"],
+                "depends": ["F3"],
+                "status": "done",
+            },
+            "**Done.** Gap-tolerant coverage, candles.",
+        )
+        self.assertEqual(mismatches, [])
+
+    def test_verify_round_trip_reports_a_field_that_disagrees(self):
+        """This is the check finding 4 says actually holds per row — unlike
+        prove_lossless, which cannot distinguish a right value from a wrong
+        one that merely recurs elsewhere in the tree."""
+        written = migrate_milestones(PLAN, self.root)
+        f8 = next(p for p in written if p.stem == "F8")
+        mismatches = verify_round_trip(
+            f8,
+            {
+                "id": "F8",
+                "track": "F",
+                "title": "a title the converter never actually wrote",
+                "spec": ["10 §6–§7"],
+                "depends": ["F3"],
+                "status": "done",
+            },
+            "**Done.** Gap-tolerant coverage, candles.",
+        )
+        self.assertEqual(len(mismatches), 1)
+        self.assertIn("title", mismatches[0])
+
+    def test_coverage_and_mapping_columns_partition_every_row_field(self):
+        """Fix round 3, finding 4 item 3: COVERAGE_CHECKED_COLUMNS and
+        MAPPING_CHECKED_COLUMNS must together be exactly the six row cells
+        plus the track letter, and must not overlap — pinned independently of
+        source_cells_of's own (also asserting) use of the tuple."""
+        all_columns = {"id", "title", "spec", "depends", "status", "notes", "track"}
+        self.assertEqual(set(COVERAGE_CHECKED_COLUMNS) | set(MAPPING_CHECKED_COLUMNS), all_columns)
+        self.assertEqual(set(COVERAGE_CHECKED_COLUMNS) & set(MAPPING_CHECKED_COLUMNS), set())
+
+    def test_find_orphans_detects_a_stale_file_without_deleting_it(self):
+        written = migrate_milestones(PLAN, self.root)
+        directory = self.root / "plan" / "milestones"
+        stray = directory / "ZZZ-not-a-real-row.md"
+        stray.write_text("stray file this run did not write", encoding="utf-8")
+        orphans = find_orphans(directory, written)
+        self.assertEqual(orphans, [stray])
+        self.assertTrue(stray.exists(), "find_orphans must never delete anything")
+
+    def test_find_orphans_reports_nothing_for_a_clean_rerun(self):
+        written = migrate_milestones(PLAN, self.root)
+        directory = self.root / "plan" / "milestones"
+        self.assertEqual(find_orphans(directory, written), [])
+
+    def test_main_fails_loudly_and_names_an_orphaned_file(self):
+        """Demonstrates fix round 3, finding 5 end to end through the CLI: a
+        clean run succeeds; planting a stray file the next run did not write
+        makes main() fail (exit 1) and name the file on stderr, rather than
+        silently deleting it or silently ignoring it."""
+        plan_path = self.root / "PLAN.md"
+        plan_path.write_text(PLAN, encoding="utf-8")
+
+        exit_code = main(["milestones", "--plan", str(plan_path), "--out", str(self.root)])
+        self.assertEqual(exit_code, 0)
+
+        orphan = self.root / "plan" / "milestones" / "ZZZ-not-a-real-row.md"
+        orphan.write_text(
+            "---\nid: ZZZ-not-a-real-row\ntrack: Z\ntitle: stray\nspec: []\ndepends: []\nstatus: done\n---\n\nstray\n",
+            encoding="utf-8",
+        )
+
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            exit_code = main(["milestones", "--plan", str(plan_path), "--out", str(self.root)])
+        self.assertEqual(exit_code, 1)
+        self.assertIn("ZZZ-not-a-real-row.md", stderr.getvalue())
+        self.assertTrue(orphan.exists(), "main() must never delete an orphan itself")
 
     def test_status_glyph_is_excluded_from_coverage_checked_cells(self):
         """Fix round 2, finding 3: the status glyph is never written to any
