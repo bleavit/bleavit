@@ -9,8 +9,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from tools.plan.model import Milestone
-from tools.plan.render import escape_cell, main, render_milestones
+from tools.plan.model import Milestone, Question
+from tools.plan.render import escape_cell, main, render_milestones, render_questions
 
 
 def milestone(**kwargs):
@@ -27,6 +27,22 @@ def milestone(**kwargs):
     )
     defaults.update(kwargs)
     return Milestone(**defaults)
+
+
+def question(**kwargs):
+    defaults = dict(
+        id="SQ-616",
+        title="Which arm raises QueueFull?",
+        spec_ref="09 §1.2",
+        raised="2026-07-20",
+        status="open",
+        resolved=None,
+        batch="B7",
+        body="",
+        path=Path("plan/questions/SQ-616.md"),
+    )
+    defaults.update(kwargs)
+    return Question(**defaults)
 
 
 class RenderTests(unittest.TestCase):
@@ -54,6 +70,7 @@ class RenderTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)
             (root / "plan" / "milestones").mkdir(parents=True)
+            (root / "plan" / "questions").mkdir(parents=True)
             (root / "plan" / "milestones" / "F8.md").write_text(
                 "---\nid: F8\ntrack: F\ntitle: t\nspec: [a]\ndepends: []\nstatus: done\n---\n\nbody\n",
                 encoding="utf-8",
@@ -61,5 +78,51 @@ class RenderTests(unittest.TestCase):
             self.assertEqual(main(["--write", "--root", str(root)]), 0)
             self.assertEqual(main(["--check", "--root", str(root)]), 0)
             index = root / "plan" / "MILESTONES.md"
+            index.write_text(index.read_text(encoding="utf-8") + "| tampered |\n", encoding="utf-8")
+            self.assertEqual(main(["--check", "--root", str(root)]), 1)
+
+
+class RenderQuestionsTests(unittest.TestCase):
+    def test_open_group_precedes_resolved(self):
+        out = render_questions(
+            [question(id="SQ-1", status="resolved"), question(id="SQ-2", status="open")]
+        )
+        self.assertLess(out.index("## Open"), out.index("## Resolved"))
+        self.assertLess(out.index("SQ-2"), out.index("SQ-1"))
+
+    def test_title_is_truncated_and_linked(self):
+        long_title = "x" * 200
+        out = render_questions([question(title=long_title)])
+        row = next(line for line in out.split("\n") if line.startswith("| SQ-616 "))
+        self.assertLess(len(row), 200)
+        self.assertIn("[", row)
+        self.assertIn("questions/SQ-616.md", row)
+
+    def test_a_pipe_in_a_title_is_escaped(self):
+        out = render_questions([question(title="a | b")])
+        self.assertIn("a \\| b", out)
+
+    def test_batch_column_carries_the_batch_not_the_status(self):
+        out = render_questions([question(batch="X")])
+        row = next(line for line in out.split("\n") if line.startswith("| SQ-616 "))
+        self.assertTrue(row.rstrip("|").rstrip().endswith("X"))
+
+    def test_check_fails_on_a_hand_edited_index(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            (root / "plan" / "milestones").mkdir(parents=True)
+            (root / "plan" / "questions").mkdir(parents=True)
+            (root / "plan" / "milestones" / "F8.md").write_text(
+                "---\nid: F8\ntrack: F\ntitle: t\nspec: [a]\ndepends: []\nstatus: done\n---\n\nbody\n",
+                encoding="utf-8",
+            )
+            (root / "plan" / "questions" / "SQ-616.md").write_text(
+                "---\nid: SQ-616\ntitle: t\nspec_ref: a\nraised: 2026-07-20\nstatus: open\nbatch: B7\n"
+                "---\n\nbody\n",
+                encoding="utf-8",
+            )
+            self.assertEqual(main(["--write", "--root", str(root)]), 0)
+            self.assertEqual(main(["--check", "--root", str(root)]), 0)
+            index = root / "plan" / "QUESTIONS.md"
             index.write_text(index.read_text(encoding="utf-8") + "| tampered |\n", encoding="utf-8")
             self.assertEqual(main(["--check", "--root", str(root)]), 1)

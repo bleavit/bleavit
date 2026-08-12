@@ -66,6 +66,28 @@ class DocLinkCheckerTests(unittest.TestCase):
         self.write("docs/b.md", "hi\n")
         self.assertEqual(self.run_checker().returncode, 0)
 
+    def test_a_question_item_files_link_resolves_at_the_repo_root(self) -> None:
+        """plan/questions/<ID>.md (Task 6) carries PLAN.md's spec-question prose
+        verbatim, unrewritten — including real doc citations the source wrote
+        assuming PLAN.md's own root-level location. A link in that body must
+        resolve from the repo root, not from plan/questions/, or every such
+        citation reads as broken the moment it is lifted into its own file."""
+        self.write("docs/target.md", "hi\n")
+        self.write(
+            "plan/questions/SQ-1.md",
+            "---\nid: SQ-1\n---\n\nsee [t](docs/target.md)\n",
+        )
+        self.assertEqual(self.run_checker().returncode, 0)
+
+    def test_a_question_item_files_broken_link_still_fails(self) -> None:
+        self.write(
+            "plan/questions/SQ-1.md",
+            "---\nid: SQ-1\n---\n\nsee [t](docs/nowhere.md)\n",
+        )
+        result = self.run_checker()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("missing link target: docs/nowhere.md", result.stderr)
+
     def test_broken_links_inside_a_git_excluded_path_are_skipped(self) -> None:
         """The defect: a nested worktree's stale copies failed a clean tree.
 

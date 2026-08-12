@@ -25,15 +25,21 @@ from pathlib import Path
 from tools.plan.migrate import (
     COVERAGE_CHECKED_COLUMNS,
     MAPPING_CHECKED_COLUMNS,
+    QUESTION_COVERAGE_COLUMNS,
+    QUESTION_MAPPING_COLUMNS,
     find_orphans,
     main,
     migrate_milestones,
+    migrate_questions,
     prove_lossless,
+    prove_question_batch_mapping,
+    prove_question_status_mapping,
     prove_status_mapping,
+    question_source_cells_of,
     source_cells_of,
     verify_round_trip,
 )
-from tools.plan.model import STATUS_GLYPHS, load_milestones, parse_frontmatter
+from tools.plan.model import STATUS_GLYPHS, load_milestones, load_questions, parse_frontmatter
 
 PLAN = """## Milestones
 
@@ -274,3 +280,178 @@ class MigrateMilestonesTests(unittest.TestCase):
         # F8, S7 and S8 are "done" (✅); F11 is "active" (🔨) — every one of
         # them is affected by swapping exactly those two glyphs.
         self.assertEqual(mismatched_ids, {"F8", "F11", "S7", "S8"})
+
+
+QUESTIONS = """## Spec questions
+
+| Batch | Rows | Members |
+|---|---|---|
+| B7 | 2 | SQ-615, SQ-616 |
+
+| ID | Question | Spec ref | Raised | Status |
+|---|---|---|---|---|
+| SQ-615 | Does 11 §11.8 need a frozen surface? | 02 §7.4 | 2026-07-19 | resolved 2026-08-06 — contract v28 froze it |
+| SQ-616 | Which arm raises QueueFull? | 09 §1.2 | 2026-07-20 | open — the guard declares it, execute never returns it |
+"""
+
+
+class MigrateQuestionsTests(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_status_enum_and_batch_come_from_the_right_places(self):
+        migrate_questions(QUESTIONS, self.root)
+        items, errors = load_questions(self.root)
+        self.assertEqual(errors, [])
+        by_id = {i.id: i for i in items}
+        self.assertEqual(by_id["SQ-615"].status, "resolved")
+        self.assertEqual(by_id["SQ-615"].resolved, "2026-08-06")
+        self.assertEqual(by_id["SQ-615"].batch, "B7")
+        self.assertEqual(by_id["SQ-616"].status, "open")
+        self.assertIsNone(by_id["SQ-616"].resolved)
+        self.assertEqual(by_id["SQ-616"].batch, "B7")
+
+    def test_the_whole_status_cell_survives_in_the_body(self):
+        migrate_questions(QUESTIONS, self.root)
+        body = (self.root / "plan" / "questions" / "SQ-616.md").read_text(encoding="utf-8")
+        self.assertIn("the guard declares it, execute never returns it", body)
+
+    def test_the_whole_question_cell_survives_in_the_body(self):
+        """Insurance for a title that `_frontmatter_title` has to fold (see the
+        real SQ-71): the frontmatter title need not be byte-identical to the
+        source cell, but the body's own `## Question` section always is."""
+        migrate_questions(QUESTIONS, self.root)
+        body = (self.root / "plan" / "questions" / "SQ-616.md").read_text(encoding="utf-8")
+        self.assertIn("Which arm raises QueueFull?", body)
+
+    def test_a_question_in_no_batch_is_an_error(self):
+        text = QUESTIONS.replace("| B7 | 2 | SQ-615, SQ-616 |", "| B7 | 1 | SQ-615 |")
+        with self.assertRaises(ValueError) as caught:
+            migrate_questions(text, self.root)
+        self.assertIn("SQ-616", str(caught.exception))
+
+    def test_a_resolved_question_named_by_no_batch_gets_the_sentinel(self):
+        """The batch index only ever tracks the open backlog — a resolved row
+        it never named is the ordinary case, not an error (measured against
+        the real PLAN.md: 417 resolved rows, 0 of them in any batch)."""
+        text = QUESTIONS.replace("| B7 | 2 | SQ-615, SQ-616 |", "| B7 | 1 | SQ-616 |")
+        migrate_questions(text, self.root)
+        items, errors = load_questions(self.root)
+        self.assertEqual(errors, [])
+        by_id = {i.id: i for i in items}
+        self.assertEqual(by_id["SQ-615"].batch, "none")
+
+    def test_a_question_named_by_two_batches_is_an_error(self):
+        text = QUESTIONS.replace(
+            "| B7 | 2 | SQ-615, SQ-616 |",
+            "| B7 | 2 | SQ-615, SQ-616 |\n| X | 1 | SQ-616 |",
+        )
+        with self.assertRaises(ValueError) as caught:
+            migrate_questions(text, self.root)
+        self.assertIn("SQ-616", str(caught.exception))
+
+    def test_conversion_is_lossless(self):
+        written = migrate_questions(QUESTIONS, self.root)
+        missing = prove_lossless(question_source_cells_of(QUESTIONS), written)
+        self.assertEqual(missing, [])
+
+    def test_coverage_and_mapping_columns_partition_every_row_field(self):
+        all_columns = {"id", "question", "spec_ref", "raised", "status_cell", "status", "batch"}
+        self.assertEqual(set(QUESTION_COVERAGE_COLUMNS) | set(QUESTION_MAPPING_COLUMNS), all_columns)
+        self.assertEqual(set(QUESTION_COVERAGE_COLUMNS) & set(QUESTION_MAPPING_COLUMNS), set())
+
+    def test_prove_question_status_mapping_passes_for_a_correct_conversion(self):
+        written = migrate_questions(QUESTIONS, self.root)
+        self.assertEqual(prove_question_status_mapping(QUESTIONS, written), [])
+
+    def test_prove_question_status_mapping_fails_if_the_word_map_were_inverted(self):
+        written = migrate_questions(QUESTIONS, self.root)
+        by_id = {p.stem: p for p in written}
+        # Corrupt SQ-616's own emitted status directly, bypassing the
+        # converter, to prove the check is not vacuous.
+        path = by_id["SQ-616"]
+        text = path.read_text(encoding="utf-8").replace("status: open", "status: resolved")
+        path.write_text(text, encoding="utf-8")
+        mismatches = prove_question_status_mapping(QUESTIONS, written)
+        self.assertEqual(len(mismatches), 1)
+        self.assertIn("SQ-616", mismatches[0])
+
+    def test_prove_question_batch_mapping_passes_for_a_correct_conversion(self):
+        written = migrate_questions(QUESTIONS, self.root)
+        self.assertEqual(prove_question_batch_mapping(QUESTIONS, written), [])
+
+    def test_prove_question_batch_mapping_catches_a_wrong_batch_field(self):
+        written = migrate_questions(QUESTIONS, self.root)
+        by_id = {p.stem: p for p in written}
+        path = by_id["SQ-615"]
+        text = path.read_text(encoding="utf-8").replace("batch: B7", "batch: X")
+        path.write_text(text, encoding="utf-8")
+        mismatches = prove_question_batch_mapping(QUESTIONS, written)
+        self.assertEqual(len(mismatches), 1)
+        self.assertIn("SQ-615", mismatches[0])
+
+    def test_an_unknown_status_word_raises(self):
+        bad = QUESTIONS.replace(
+            "| SQ-615 | Does 11 §11.8 need a frozen surface? | 02 §7.4 | 2026-07-19 | "
+            "resolved 2026-08-06 — contract v28 froze it |",
+            "| SQ-615 | Does 11 §11.8 need a frozen surface? | 02 §7.4 | 2026-07-19 | "
+            "unicorn 2026-08-06 — contract v28 froze it |",
+        )
+        with self.assertRaises(ValueError):
+            migrate_questions(bad, self.root)
+
+    def test_a_row_with_the_wrong_cell_count_raises(self):
+        bad = QUESTIONS.replace(
+            "| SQ-616 | Which arm raises QueueFull? | 09 §1.2 | 2026-07-20 | "
+            "open — the guard declares it, execute never returns it |",
+            "| SQ-616 | Which arm raises QueueFull? | 09 §1.2 | 2026-07-20 |",
+        )
+        with self.assertRaises(ValueError):
+            migrate_questions(bad, self.root)
+
+    def test_a_duplicate_question_id_raises(self):
+        dup = QUESTIONS + (
+            "| SQ-615 | duplicate of the SQ-615 above | — | 2026-07-19 | open |\n"
+        )
+        with self.assertRaises(ValueError):
+            migrate_questions(dup, self.root)
+
+    def test_verify_round_trip_passes_for_a_correctly_written_file(self):
+        written = migrate_questions(QUESTIONS, self.root)
+        sq615 = next(p for p in written if p.stem == "SQ-615")
+        mismatches = verify_round_trip(
+            sq615,
+            {
+                "id": "SQ-615",
+                "title": "Does 11 §11.8 need a frozen surface?",
+                "spec_ref": "02 §7.4",
+                "raised": "2026-07-19",
+                "status": "resolved",
+                "resolved": "2026-08-06",
+                "batch": "B7",
+            },
+            "## Question\n\nDoes 11 §11.8 need a frozen surface?\n\n"
+            "## Status\n\nresolved 2026-08-06 — contract v28 froze it",
+        )
+        self.assertEqual(mismatches, [])
+
+    def test_find_orphans_detects_a_stale_question_file(self):
+        written = migrate_questions(QUESTIONS, self.root)
+        directory = self.root / "plan" / "questions"
+        stray = directory / "SQ-9999-not-a-real-row.md"
+        stray.write_text("stray file this run did not write", encoding="utf-8")
+        orphans = find_orphans(directory, written)
+        self.assertEqual(orphans, [stray])
+        self.assertTrue(stray.exists())
+
+    def test_main_dispatches_on_kind_questions(self):
+        plan_path = self.root / "PLAN.md"
+        plan_path.write_text(QUESTIONS, encoding="utf-8")
+        exit_code = main(["questions", "--plan", str(plan_path), "--out", str(self.root)])
+        self.assertEqual(exit_code, 0)
+        self.assertTrue((self.root / "plan" / "questions" / "SQ-615.md").exists())
+        self.assertTrue((self.root / "plan" / "questions" / "SQ-616.md").exists())

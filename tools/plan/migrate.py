@@ -403,17 +403,363 @@ def source_cells_of(plan_text: str) -> list[str]:
     return cells
 
 
+def _section(text: str, heading: str) -> str:
+    """The text of one `## ` section, from its heading up to (not including) the next."""
+    lines = text.split("\n")
+    start = lines.index(heading)
+    for index in range(start + 1, len(lines)):
+        if lines[index].startswith("## "):
+            return "\n".join(lines[start:index])
+    return "\n".join(lines[start:])
+
+
+QUESTION_HEADER = ["ID", "Question", "Spec ref", "Raised", "Status"]
+BATCH_HEADER = ["Batch", "Rows", "Members"]
+_DATE_IN_TEXT = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
+
+# A real batch row's first cell is the bold label plus a title, e.g.
+# "**B7 · grounding findings — rulings raised by executing the spec (...)**"
+# — the `\*{0,2}` and the `|$` alternative also admit a bare "B7" cell (no
+# bold markup, no title), which is the shape unit tests use. The bold form
+# mirrors tools/ci/check-spec-question-batches.py's own BATCH_LABEL_RE,
+# already proven against this exact table by the batch-index CI gate.
+BATCH_LABEL_RE = re.compile(r"^\*{0,2}([BDCXE][0-9]?)(?:\s*[·.]|$)")
+
+# The status vocabulary as it is, not as it ought to be. Every non-"open" word
+# already counts as resolved for the four citation gates, which ask only
+# whether the cell begins with "open". This map preserves that reading
+# exactly; changing it is a separate decision from moving the data. Measured
+# 2026-08-12 over the real PLAN.md: open 166, resolved 389, ✅ 7, closed 7,
+# ruled 7, reconciled 3, ratified 1, largely 1, oracle 1, diagnosed; 1 = 583.
+STATUS_WORDS = {
+    "open": "open",
+    "resolved": "resolved",
+    "✅": "resolved",
+    "closed": "resolved",
+    "ruled": "resolved",
+    "reconciled": "resolved",
+    "ratified": "resolved",
+    "largely": "resolved",
+    "oracle": "resolved",
+    "diagnosed;": "resolved",
+}
+
+# Rows whose status word itself admits the question is only partly settled.
+# They ship as resolved, unchanged from today, and the run reports them for a
+# human ruling.
+PARTIAL_WORDS = {"largely", "oracle", "diagnosed;"}
+
+# SQ-593 is the fourth genuinely partial row ("ruled 2026-08-05; execution
+# pending"), but its status word is the ordinary "ruled" that six other, fully
+# resolved rows also use — word-level detection cannot separate it from them,
+# so it is named explicitly rather than guessed at. Verified by reading the
+# row (2026-08-12); do not extend this set without doing the same.
+KNOWN_PARTIAL_IDS = {"SQ-593"}
+
+# Sentinel `batch:` value for a resolved question the triage batches never
+# named. The batch index exists to retire the *open* backlog in coherent
+# units (PLAN.md's own words: "Every open row is assigned to exactly one
+# batch below"); measured 2026-08-12, the 11 real batch rows' Members total
+# exactly the 166 open ids and never a resolved one — the same rule
+# tools/ci/check-spec-question-batches.py enforces the other way (a resolved
+# id named by a batch is itself an error). So "resolved and unbatched" is the
+# ordinary case, not a gap the converter failed to fill.
+UNBATCHED = "none"
+
+
+def _question_batches(section: str) -> dict[str, str]:
+    """id -> short batch label (e.g. "B7", "X"), read from the batch index table.
+
+    A duplicate assignment (one id named by two batch rows) raises immediately
+    — the same "named by no batch, or by two, is an error" rule the question
+    loop enforces for the open/unbatched case.
+    """
+    batches: dict[str, str] = {}
+    for line in section.split("\n"):
+        if not line.lstrip().startswith("|"):
+            continue
+        if is_separator_row(line):
+            continue
+        cells = split_cells(line)
+        if cells == BATCH_HEADER or len(cells) != 3:
+            continue
+        label_cell, rows_cell, members_cell = cells
+        match = BATCH_LABEL_RE.match(label_cell)
+        if match is None:
+            continue
+        label = match.group(1)
+        try:
+            declared = int(rows_cell.strip())
+        except ValueError:
+            raise ValueError(f"batch {label}: row count {rows_cell!r} is not a number") from None
+        # A closed batch (0 rows) uses its Members cell for disposition prose,
+        # not a member list; a trailing "— annotation" clause on an open batch
+        # is likewise not part of the list. Neither should be scanned for ids.
+        head = re.split(r"\s+—\s+", unescape_cell(members_cell))[0]
+        ids = re.findall(r"SQ-\d+", head) if declared else []
+        if len(ids) != declared:
+            raise ValueError(f"batch {label} declares {declared} rows but lists {len(ids)}")
+        for member in ids:
+            if member in batches:
+                raise ValueError(f"{member} is named by both batch {batches[member]} and batch {label}")
+            batches[member] = label
+    return batches
+
+
+def _iter_question_rows(section: str):
+    """Yield (id, question, spec_ref, raised, status_cell) for every question row.
+
+    Shared by migrate_questions (which writes the files) and the proofs (which
+    need the same source cells independently of what got written), so the two
+    can never drift against each other — matching `_iter_milestone_rows`.
+    """
+    for line in section.split("\n"):
+        if not line.lstrip().startswith("|"):
+            continue
+        if is_separator_row(line):
+            continue
+        cells = [unescape_cell(cell) for cell in split_cells(line)]
+        if cells == QUESTION_HEADER:
+            continue
+        # A 3-cell batch-index row is a different table sharing this heading;
+        # it is not a malformed question row, so it is skipped here rather
+        # than raised on — `_question_batches` reads it separately. Anything
+        # whose id cell genuinely looks like a question id, though, is held
+        # to the 5-cell shape: the converter never guesses a missing cell.
+        if not cells or not re.fullmatch(r"SQ-\d+", cells[0]):
+            continue
+        if len(cells) != 5:
+            raise ValueError(f"question row {cells[0]!r} has {len(cells)} cells, expected 5")
+        yield cells[0], cells[1], cells[2], cells[3], cells[4]
+
+
+def _frontmatter_title(question: str) -> str:
+    """A frontmatter-safe rendering of the raw question text.
+
+    Nearly every row's question passes straight through `_yaml_scalar`
+    unmodified. One row in the real corpus (SQ-71) opens with a literal `"` —
+    which forces quoting — and also carries embedded `"` characters elsewhere
+    in the same cell, which the strict double-quoted grammar (model.py
+    `_scalar`) forbids outright: there is no lossless single-line encoding for
+    that shape (see `_yaml_scalar`'s own docstring). The frontmatter title is
+    a readable label, not that row's record of truth: every question's raw
+    cell survives untouched under the body's `## Question` heading, so folding
+    embedded double quotes to the typographic '”' mark here is a legible,
+    deterministic fallback, not a loss.
+    """
+    try:
+        _yaml_scalar(question)
+        return question
+    except ValueError:
+        folded = question.replace('"', "”")
+        _yaml_scalar(folded)  # must now be safe; a still-failing fold is a new shape to look at, not paper over
+        return folded
+
+
+# Every question-row column, classified once exactly like
+# COVERAGE_CHECKED_COLUMNS/MAPPING_CHECKED_COLUMNS above. `question` and
+# `status_cell` are copied through unchanged — `question` into the body's
+# `## Question` section (frontmatter `title` may be a folded rendering, per
+# `_frontmatter_title`, so the coverage proof must not rely on it) and
+# `status_cell` into `## Status` — so both are coverage-checked. `status` (the
+# derived enum) and `batch` (an index lookup, not a row cell at all) are each
+# transformed rather than copied, so both are mapping-checked instead.
+QUESTION_COVERAGE_COLUMNS = ("id", "question", "spec_ref", "raised", "status_cell")
+QUESTION_MAPPING_COLUMNS = ("status", "batch")
+
+
+def question_source_cells_of(plan_text: str) -> list[str]:
+    """The atomic units every emitted question file, together, must cover."""
+    section = _section(plan_text, "## Spec questions")
+    cells: list[str] = []
+    for identifier, question, spec_ref, raised, status_cell in _iter_question_rows(section):
+        per_column = {
+            "id": [identifier],
+            "question": [question],
+            "spec_ref": [spec_ref],
+            "raised": [raised],
+            "status_cell": [status_cell],
+        }
+        assert set(per_column) == set(QUESTION_COVERAGE_COLUMNS), (
+            f"question_source_cells_of's per-row columns {sorted(per_column)} must exactly match "
+            f"QUESTION_COVERAGE_COLUMNS {sorted(QUESTION_COVERAGE_COLUMNS)}"
+        )
+        for column in QUESTION_COVERAGE_COLUMNS:
+            cells.extend(per_column[column])
+    return cells
+
+
+def _status_word(status_cell: str) -> str:
+    parts = status_cell.split()
+    return parts[0].strip("*_`.,").lower() if parts else ""
+
+
+def prove_question_status_mapping(plan_text: str, emitted: list[Path]) -> list[str]:
+    """For every source row, the emitted status must map back to its source word.
+
+    Per row, not aggregate — mirrors `prove_status_mapping`.
+    """
+    section = _section(plan_text, "## Spec questions")
+    by_id = {path.stem: path for path in emitted}
+    mismatches: list[str] = []
+    for identifier, _question, _spec_ref, _raised, status_cell in _iter_question_rows(section):
+        path = by_id.get(identifier)
+        if path is None:
+            mismatches.append(f"{identifier}: no emitted file to check")
+            continue
+        values, _body = parse_frontmatter(path)
+        word = _status_word(status_cell)
+        expected = STATUS_WORDS.get(word)
+        actual = values.get("status")
+        if actual != expected:
+            mismatches.append(f"{identifier}: status word {word!r} maps to {expected!r}, emitted status {actual!r}")
+    return mismatches
+
+
+def prove_question_batch_mapping(plan_text: str, emitted: list[Path]) -> list[str]:
+    """For every source row, the emitted `batch:` must match the id-to-batch map.
+
+    An OPEN row must carry its real batch label; a resolved row the batch
+    index never named must carry the `UNBATCHED` sentinel — never a guess.
+    """
+    section = _section(plan_text, "## Spec questions")
+    batches = _question_batches(section)
+    by_id = {path.stem: path for path in emitted}
+    mismatches: list[str] = []
+    for identifier, _question, _spec_ref, _raised, status_cell in _iter_question_rows(section):
+        path = by_id.get(identifier)
+        if path is None:
+            mismatches.append(f"{identifier}: no emitted file to check")
+            continue
+        values, _body = parse_frontmatter(path)
+        status = STATUS_WORDS.get(_status_word(status_cell))
+        expected = batches.get(identifier, UNBATCHED if status != "open" else None)
+        actual = values.get("batch")
+        if actual != expected:
+            mismatches.append(f"{identifier}: expected batch {expected!r}, emitted {actual!r}")
+    return mismatches
+
+
+def migrate_questions(plan_text: str, out: Path) -> list[Path]:
+    """Write plan/questions/<ID>.md for every spec-question row. Returns the paths."""
+    section = _section(plan_text, "## Spec questions")
+    batches = _question_batches(section)
+    directory = out / "plan" / "questions"
+    directory.mkdir(parents=True, exist_ok=True)
+
+    written: list[Path] = []
+    partial: list[str] = []
+    seen: set[str] = set()
+
+    for identifier, question, spec_ref, raised, status_cell in _iter_question_rows(section):
+        if identifier in seen:
+            raise ValueError(f"duplicate spec question id {identifier!r}")
+        seen.add(identifier)
+
+        word = _status_word(status_cell)
+        if word not in STATUS_WORDS:
+            raise ValueError(
+                f"spec question {identifier}: unknown status word {word!r}. "
+                f"Add it to STATUS_WORDS only after reading the row — do not default it."
+            )
+        status = STATUS_WORDS[word]
+        if word in PARTIAL_WORDS or identifier in KNOWN_PARTIAL_IDS:
+            partial.append(identifier)
+
+        batch = batches.get(identifier)
+        if batch is None:
+            if status == "open":
+                raise ValueError(f"spec question {identifier} is OPEN but named by no batch")
+            batch = UNBATCHED
+
+        # A resolved row may carry no date. 10 of the 389 "resolved"-word rows
+        # (plus a further 2 among the ✅/closed/ruled family) do not, and
+        # inventing one would be a fabrication the losslessness proof cannot
+        # catch.
+        found = _DATE_IN_TEXT.search(status_cell)
+        resolved = found.group(1) if (status == "resolved" and found) else None
+
+        # No `path.exists()` check here (unlike a first-draft version of this
+        # function): re-running the converter over an already-populated
+        # directory is the ordinary case, not a collision — `seen` above is
+        # what actually catches two rows sharing one id within this run, the
+        # same way `migrate_milestones` relies on its own `seen` set alone.
+        path = directory / f"{identifier}.md"
+        title = _frontmatter_title(question)
+        lines = [
+            "---",
+            f"id: {identifier}",
+            f"title: {_yaml_scalar(title)}",
+            f"spec_ref: {_yaml_scalar(spec_ref)}",
+            f"raised: {_yaml_scalar(raised)}",
+            f"status: {status}",
+        ]
+        if resolved:
+            lines.append(f"resolved: {resolved}")
+        lines += [
+            f"batch: {_yaml_scalar(batch)}",
+            "---",
+            "",
+            "## Question",
+            "",
+            question,
+            "",
+            "## Status",
+            "",
+            status_cell,
+            "",
+        ]
+        path.write_text("\n".join(lines), encoding="utf-8")
+
+        expected_values: dict[str, str | list[str]] = {
+            "id": identifier,
+            "title": title,
+            "spec_ref": spec_ref,
+            "raised": raised,
+            "status": status,
+            "batch": batch,
+        }
+        if resolved:
+            expected_values["resolved"] = resolved
+        expected_body = f"## Question\n\n{question}\n\n## Status\n\n{status_cell}"
+        mismatches = verify_round_trip(path, expected_values, expected_body)
+        if mismatches:
+            raise ValueError(f"{path}: round-trip self-check failed: " + "; ".join(mismatches))
+
+        written.append(path)
+        print(f"wrote {path.relative_to(out)}", file=sys.stderr)
+
+    for identifier in batches:
+        if not (directory / f"{identifier}.md").exists():
+            raise ValueError(f"batch names {identifier}, which is not a row of the question table")
+
+    if partial:
+        ordered = sorted(set(partial), key=lambda i: int(i.split("-")[1]))
+        print(
+            "PARTIAL — these shipped as resolved, unchanged from today, and need a human ruling: "
+            + ", ".join(ordered),
+            file=sys.stderr,
+        )
+
+    return written
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("kind", choices=["milestones"])
+    parser.add_argument("kind", choices=["milestones", "questions"])
     parser.add_argument("--plan", type=Path, default=Path("PLAN.md"))
     parser.add_argument("--out", type=Path, default=Path("."))
     args = parser.parse_args(argv)
 
     text = args.plan.read_text(encoding="utf-8")
-    written = migrate_milestones(text, args.out)
 
-    directory = args.out / "plan" / "milestones"
+    if args.kind == "milestones":
+        directory = args.out / "plan" / "milestones"
+        written = migrate_milestones(text, args.out)
+    else:
+        directory = args.out / "plan" / "questions"
+        written = migrate_questions(text, args.out)
+
     orphans = find_orphans(directory, written)
     if orphans:
         for orphan in orphans:
@@ -425,7 +771,10 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
 
-    source_cells = source_cells_of(text)
+    if args.kind == "milestones":
+        source_cells = source_cells_of(text)
+    else:
+        source_cells = question_source_cells_of(text)
     missing = prove_lossless(source_cells, written)
     print(f"{len(written)} files, {len(source_cells)} cells checked, {len(missing)} cells missing")
     if missing:
@@ -434,7 +783,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{len(missing)} cells missing from the emitted tree", file=sys.stderr)
         return 1
 
-    mapping_mismatches = prove_status_mapping(text, written)
+    if args.kind == "milestones":
+        mapping_mismatches = prove_status_mapping(text, written)
+    else:
+        mapping_mismatches = prove_question_status_mapping(text, written) + prove_question_batch_mapping(
+            text, written
+        )
     print(f"{len(written)} rows, {len(mapping_mismatches)} status-mapping mismatches")
     if mapping_mismatches:
         for row in mapping_mismatches[:20]:

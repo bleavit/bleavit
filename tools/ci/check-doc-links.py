@@ -64,10 +64,22 @@ def ignored(candidates: list[Path]) -> set[Path]:
 VERBATIM_DIR = ROOT / "docs" / "design" / "claude-design-kit"
 ARCHITECTURE_DIR = ROOT / "docs" / "architecture"
 
+# tools/plan/migrate.py (Task 6, 2026-08-12) lifts each PLAN.md spec-question
+# row's raw prose verbatim into plan/questions/<ID>.md's body — same rule as
+# the VERBATIM_DIR case above: that prose was written assuming PLAN.md's own
+# location at the repo root, and it genuinely embeds root-relative doc links
+# (e.g. "[02](docs/architecture/02-integration-contract.md)"), which the
+# converter must not rewrite (that would corrupt the round-trip proof). So
+# their base resolves at the repo root rather than at plan/questions/, one
+# directory the same way VERBATIM_DIR is one directory.
+QUESTIONS_DIR = ROOT / "plan" / "questions"
+
 
 def link_base(md: Path) -> Path:
     if md.parent == VERBATIM_DIR and md.name.endswith("-VERBATIM.md"):
         return ARCHITECTURE_DIR
+    if md.parent == QUESTIONS_DIR:
+        return ROOT
     return md.parent
 
 
