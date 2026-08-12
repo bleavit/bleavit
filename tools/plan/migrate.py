@@ -1,10 +1,8 @@
 """One-shot conversion of PLAN.md's tables into the plan/ item tree.
 
-Every conversion carries its own losslessness proof: every normalized source
-cell of every milestone row must survive, as a substring, into the emitted
-tree's frontmatter values or body. The converter never guesses. An
-unrecognised status glyph, a row with the wrong cell count, or a track heading
-it cannot read is an error, not a default.
+Every conversion carries its own losslessness proof. The converter never
+guesses. An unrecognised status glyph, a row with the wrong cell count, or a
+track heading it cannot read is an error, not a default.
 
 The proof is content coverage, not block-multiset equality (2026-08-12
 controller ruling, fix round 1): the multiset design let a converter pass by
@@ -12,6 +10,20 @@ echoing each source row verbatim into its own file, which is true by
 construction regardless of whether the frontmatter or body captured anything.
 Coverage cannot be satisfied that way, because nothing is echoed — a source
 cell must actually appear in a *value* the converter derived.
+
+Fix round 2 refined that further: coverage (does the source text survive
+verbatim, as a substring, somewhere in the emitted tree?) is the right proof
+for a column the converter copies through unchanged, but not for one it
+*transforms*. The status column is transformed — a glyph (✅/⬜/🔨/⛔) becomes
+an enum word (done/pending/active/blocked) that never appears verbatim in any
+emitted file — so a coverage check on it can only pass by coincidence (some
+*other* row's notes prose happening to mention the same glyph character) and
+would keep passing even if `STATUS_GLYPHS` were inverted tomorrow. Every other
+column (id, title, spec refs, depends refs, notes, and the track letter) is
+copied through unchanged and belongs in `COVERAGE_CHECKED_COLUMNS`; the status
+column belongs in `MAPPING_CHECKED_COLUMNS` and is proven instead by
+`prove_status_mapping`, per row, against the same `STATUS_GLYPHS` table the
+converter itself used to write it.
 """
 
 from __future__ import annotations
@@ -61,9 +73,63 @@ def prove_lossless(source_cells: list[str], emitted: list[Path]) -> list[str]:
 
     Returns the cells that do not. Substring containment is the right test
     here: one source cell legitimately becomes several frontmatter fields.
+
+    This is a coverage proof, not a correctness proof: it can tell whether a
+    piece of source text survived *somewhere*, but not whether it landed on
+    the *right row*, and it is the wrong tool for a column the converter
+    transforms rather than copies (fix round 2, finding 3) — a transformed
+    value never appears verbatim, so `source_cells` must never include one.
+    See `COVERAGE_CHECKED_COLUMNS` / `MAPPING_CHECKED_COLUMNS` and
+    `prove_status_mapping`.
     """
     haystack = "\n".join(item_text(path) for path in emitted)
     return [c for c in source_cells if normalize_prose(c) and normalize_prose(c) not in haystack]
+
+
+# Every milestone-row column, classified once and named loudly so a later
+# migration task reusing this proof cannot inherit finding 3's hole by
+# accident: a column belongs in exactly one list, and the two need different
+# proofs (fix round 2). `track` is not a table column — it comes from the
+# governing `### Track X` heading, not the row — but it is copied through
+# unchanged exactly like the six column cells, so the same coverage proof
+# applies to it and it is listed alongside them.
+COVERAGE_CHECKED_COLUMNS = ("id", "title", "spec", "depends", "notes", "track")
+MAPPING_CHECKED_COLUMNS = ("status",)
+
+
+def prove_status_mapping(
+    plan_text: str, emitted: list[Path], glyphs: dict[str, str] = STATUS_GLYPHS
+) -> list[str]:
+    """For every source row, the emitted status must map back to its source glyph.
+
+    Per row, not aggregate: an aggregate count (e.g. "101 done, 10 pending, 6
+    active" matches "101 ✅, 10 ⬜, 6 🔨") would still pass under a map that
+    permuted which *rows* got which status, so this reads each emitted file's
+    own `status` value and checks it against that same row's own source glyph
+    — `glyphs[emitted_status] == source_glyph` — not merely that the right
+    totals occur somewhere. Returns one message per row that fails.
+
+    `glyphs` defaults to the real `STATUS_GLYPHS` and takes an override only so
+    a test can prove this function is not vacuous by feeding it a deliberately
+    wrong (e.g. inverted) map and checking that every row then fails.
+    """
+    by_id = {path.stem: path for path in emitted}
+    mismatches: list[str] = []
+    for _number, _track, raw_cells in _iter_milestone_rows(plan_text):
+        identifier, _title, _spec, _depends, source_glyph, _notes = raw_cells
+        path = by_id.get(identifier)
+        if path is None:
+            mismatches.append(f"{identifier}: no emitted file to check")
+            continue
+        values, _body = parse_frontmatter(path)
+        emitted_status = values.get("status")
+        mapped_back = glyphs.get(emitted_status)
+        if mapped_back != unescape_cell(source_glyph):
+            mismatches.append(
+                f"{identifier}: source glyph {source_glyph!r}, emitted status {emitted_status!r} "
+                f"maps back to {mapped_back!r}"
+            )
+    return mismatches
 
 
 def _yaml_scalar(value: str) -> str:
@@ -236,6 +302,14 @@ def migrate_milestones(plan_text: str, out: Path) -> list[Path]:
 def source_cells_of(plan_text: str) -> list[str]:
     """The atomic units every emitted file, together, must cover.
 
+    Covers exactly `COVERAGE_CHECKED_COLUMNS`: id, title, split spec refs,
+    split depends refs, notes, and the row's track letter. **Deliberately
+    excludes the status glyph** (fix round 2, finding 3) — it is
+    mapping-checked by `prove_status_mapping` instead, because the converter
+    transforms it (glyph → enum word) rather than copying it through, so no
+    emitted file ever contains the glyph verbatim and a coverage check on it
+    can only pass by coincidence.
+
     Spec/Depends columns legitimately become several frontmatter list items
     each (the semicolon/comma/slash split), so the units that must
     individually survive are the split refs, not the whole raw column text
@@ -245,12 +319,11 @@ def source_cells_of(plan_text: str) -> list[str]:
     """
     cells: list[str] = []
     for _number, track, raw_cells in _iter_milestone_rows(plan_text):
-        identifier, title, spec, depends, status_cell, notes = raw_cells
+        identifier, title, spec, depends, _status_cell, notes = raw_cells
         cells.append(identifier)
         cells.append(title)
         cells.extend(_split_refs(unescape_cell(spec)))
         cells.extend(_split_depends(unescape_cell(depends)))
-        cells.append(status_cell)
         cells.append(notes)
         cells.append(track)
     return cells
@@ -274,6 +347,15 @@ def main(argv: list[str] | None = None) -> int:
             print(f"MISSING: {cell[:160]}", file=sys.stderr)
         print(f"{len(missing)} cells missing from the emitted tree", file=sys.stderr)
         return 1
+
+    mapping_mismatches = prove_status_mapping(text, written)
+    print(f"{len(written)} rows, {len(mapping_mismatches)} status-mapping mismatches")
+    if mapping_mismatches:
+        for row in mapping_mismatches[:20]:
+            print(f"STATUS MISMATCH: {row}", file=sys.stderr)
+        print(f"{len(mapping_mismatches)} rows failed the status mapping proof", file=sys.stderr)
+        return 1
+
     print("losslessness proof: OK")
     return 0
 
