@@ -35,7 +35,7 @@
  * unusable: `32` and `64` are hash widths, hex-string lengths and array sizes throughout,
  * so the gate would fire dozens of times a day on nothing and be switched off — the
  * failure mode this repository designs against. It is therefore applied only to values
- * that are **distinctive**: 43,200 and 2,368 and 65,536 mean one thing in this codebase.
+ * that are **distinctive**: 43,200 and 17,984 and 65,536 mean one thing in this codebase.
  *
  * Both rules **constant-fold** the arithmetic somebody would reach for instead of writing
  * the number: `1n << 63n`, `2 ** 63`, `0x10000`, `2 * 21600`. app-code rule 8 names the

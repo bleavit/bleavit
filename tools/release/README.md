@@ -108,7 +108,44 @@ upload remains a non-public draft.
 ## Build and metadata-hash posture
 
 `runtime-profiles.json` is the reviewed profile product and the single source
-for release-build feature sets:
+for release-build feature sets and the runtime builder's exact OCI identity:
+
+```text
+docker.io/paritytech/ci-unified@sha256:a697eab780f23ed77a5d4da75b56480a757ea5deb04f3bfcb3e879b0e0d9e99e
+platform: linux/amd64
+image config: sha256:f10f87f1326650e0ef6db0a9184d15d08256f402bb5f5c85624f6f4c741473e7
+audited upstream tag: bullseye-1.88.0-2025-06-27-v202511141243
+```
+
+The tag is an audit label only; no build resolves it. `build-runtime-oci.sh`
+pulls the manifest digest, verifies Docker's local image config ID, mounts the
+source read-only, drops every capability, enables no-new-privileges, disables
+rustup self-update (the image's rustup binary is immutable), and builds the
+primary and paired recovery profile in that one container. The worker
+`build-runtime.sh` refuses direct host execution or an OCI identity that differs
+from the reviewed manifest. The wrapper also refuses a dirty checkout, resolves
+the source commit and its default `SOURCE_DATE_EPOCH` before entering OCI, and
+passes the commit as an explicit evidence binding. This is required for linked
+worktrees: their `.git` file points outside the read-only source mount, and the
+parent repository is deliberately not exposed to the build container. The
+wrapper rechecks that the checkout stayed clean and at that commit before
+accepting the outputs.
+
+Those OCI bytes remain canonical after the build. The release workflow passes
+the primary `runtime.wasm` explicitly to both `generate-chain-specs.sh` and the
+later `generate-relay-specs.sh`; neither stage rebuilds the ordinary runtime on
+the host. Dev/local and the ordinary/migration drill specs therefore embed the
+same primary bytes that assembly ships and environment evidence names. Primary
+metadata extraction deliberately boots the generated dev spec without
+`--embed-wasm`, so its `:code` comparison proves that handoff. Recovery has no
+canonical genesis spec and uses `--embed-wasm` with its separately shipped
+recovery bytes. The fast-timing drill remains an explicit test-only build and is
+not part of this release binding. The hosted-service drills also boot the
+separately built `bleavit-client-runtime`; release CI therefore generates
+`bleavit-client-local.json` before evidence runs. The evidence producer derives
+all prerequisites from each selected topology, binds only the exact primary
+spec names to `runtime.wasm`, recognizes the client and fast-timing specs as
+separate runtimes, and rejects any unclassified `bleavit-*` spec.
 
 | Profile | Base | Recovery | Sudo in metadata | Multi-block migrations |
 |---|---|---:|---:|---:|
@@ -135,18 +172,22 @@ boot-bound to `:code`, both build records bind the release commit, the profiles
 must share one base and `spec_name`, and recovery `spec_version` must equal
 primary + 1.
 
-For example, the bootstrap recipe is:
+Inside that image, the bootstrap recipe is:
 
 ```sh
 cargo build -p bleavit-runtime --release --no-default-features \
-  --features std,substrate-wasm-builder,bootstrap --locked
+  --features std,substrate-wasm-builder,metadata-hash,bootstrap --locked
 ```
 
 It fixes `SOURCE_DATE_EPOCH` to the source commit time unless supplied, sets
 `TZ=UTC`, the C UTF-8 locale, `CARGO_INCREMENTAL=0`, and disables Cargo color.
+The wrapper additionally fixes the writable Cargo/rustup/target homes and sets
+`WASM_BUILD_WORKSPACE_HINT=/src`, which lets substrate-wasm-builder find the
+committed lockfile even though Cargo output lives at the out-of-tree `/target`.
 Those are the environment inputs that can otherwise leak time, locale, or
 incremental state into the builder. `build-info.json` records them with the
-toolchain, host triple, Cargo/rustc versions, source commit, and Wasm hash.
+toolchain, host triple, Cargo/rustc versions, source commit, Wasm hash, exact
+image manifest/config digests, platform, and audited upstream tag.
 It also records the profile name, base, complete Cargo feature list, disabled
 default-feature posture, recovery bit, and multi-block-migration posture.
 
@@ -159,17 +200,25 @@ complete pallet-name set; assembly requires `Sudo` for bootstrap profiles and
 rejects it for phase-four profiles. A profile/feature/proof/metadata mismatch
 is integrity corruption even in `--allow-missing` mode.
 
-The honest claim is recipe reproducibility: same source and same pinned
-toolchain should produce the same bytes. The host image is not yet pinned by
-digest, so an independent two-container srtool-style byte-identity gate remains
-follow-up work.
+The exact claim is narrower than an attestation: same source, canonical recipe,
+and exact OCI image digest should produce the same runtime bytes. The image
+ships the native Substrate build dependencies; its pinned rustup installs the
+repository's exact Rust 1.89.0 toolchain and targets into an isolated writable
+mount. The image digest does not pin the runner kernel, CPU, Docker daemon, or
+the separately downloaded Rust component bytes, and CI does not yet compare an
+independent second runtime build byte-for-byte. Those limitations are recorded
+verbatim in `build-info.json`; the image pin is not presented as that stronger
+proof.
 
-The runtime currently calls `WasmBuilder::build_using_defaults()` and has no
-`metadata-hash` build feature. Therefore the release publishes SHA-256 of the
-raw SCALE metadata and Wasm, but does not claim an RFC-78 merkleized metadata
-hash. `runtime-info.json` records this explicitly. The transaction metadata-hash
-extension being linked into the runtime is not itself evidence that build-time
-RFC-78 hashing was enabled.
+Every release profile enables the runtime's `metadata-hash` feature. Its build
+script calls `enable_metadata_hash("VIT", 12)`, with both values derived from
+the frozen chain-spec properties, so `substrate-wasm-builder` performs the
+RFC-78 pass and embeds `RUNTIME_METADATA_HASH`. `build-info.json` records the
+feature and derivation. Metadata extraction calls the booted Wasm's release-only
+`ReleaseMetadataApi_embedded_rfc78_metadata_hash`, independently recomputes the
+digest from `metadata.scale`, and refuses disagreement. Assembly recomputes it
+again and binds both recorded digest fields to the shipped metadata. A build that
+omits the feature returns `None`, is not a release profile, and is ineligible.
 
 Metadata extraction also reads `:code` from the booted chain and refuses to
 continue unless its SHA-256 equals the exact `--wasm` bytes. Assembly then
@@ -288,16 +337,30 @@ From the repository root:
 ```sh
 python3 -m pip install websockets==15.0.1
 export RUNTIME_PROFILE=bootstrap
-tools/deploy/generate-chain-specs.sh
+# Unset RUNTIME_PROFILE to use runtime-profiles.json's release_default. The OCI
+# wrapper builds both the selected primary and its paired recovery artifact.
+tools/release/build-runtime-oci.sh release-work/runtime
+tools/deploy/generate-chain-specs.sh \
+  --runtime-wasm release-work/runtime/runtime.wasm
 cargo build -p bleavit-node --release --locked
-# Unset RUNTIME_PROFILE to use runtime-profiles.json's release_default.
-tools/release/build-runtime.sh release-work/runtime
+# This later generator must receive the same path or it would replace dev/local
+# and build the ordinary drill specs from a host runtime.
+tools/env/generate-relay-specs.sh \
+  --runtime-wasm release-work/runtime/runtime.wasm
+# Release-tier hosted-service drills declare this separately built harness
+# para, so it is a prerequisite even though its :code is not the primary Wasm.
+tools/deploy/generate-client-chain-spec.sh
 tools/ci/supply-chain-gates.sh --summary-out release-work/supply-chain-summary.json
 python3 tools/release/extract-metadata.py \
   --wasm release-work/runtime/runtime.wasm \
   --out-dir release-work/runtime
+python3 tools/release/extract-metadata.py \
+  --wasm release-work/runtime/recovery/runtime.wasm \
+  --out-dir release-work/runtime/recovery \
+  --embed-wasm
 python3 tools/release/record-chainhead-fixtures.py \
   --metadata release-work/runtime/metadata.scale \
+  --recovery-metadata release-work/runtime/recovery/metadata.scale \
   --out-dir release-work/chainhead \
   --allow-missing
 python3 tools/reference-model/generate-vectors.py --check

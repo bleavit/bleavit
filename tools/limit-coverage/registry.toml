@@ -968,7 +968,7 @@ reason = "13 §4 / 16 §6.3: SCALE decoding of the bounded registration input re
 key = "MaxExternalBookPairs"
 class = "dispatch-limit"
 error = "Market::TooManyExternalMarkets"
-reason = "13 §4 / 04 §3: the 65th immutable external pair is refused before vault, book, counter, or account-index mutation."
+reason = "13 §4 / 04 §3: the 7,873rd immutable external pair is refused before vault, book, counter, or account-index mutation; the retained ceiling covers fastest lawful throughput across the archive horizon."
 
 [[entry]]
 key = "Books per proposal"
@@ -1002,7 +1002,7 @@ reason = "13 §4 / 04 §3: a pair that would exceed the independent 128-live-ext
 key = "MaxStoredExternalMarkets"
 class = "dispatch-limit"
 error = "Market::TooManyExternalMarkets"
-reason = "13 §4 / 04 §3: a pair that would exceed the independent 128-retained-external-row envelope is refused before any state mutation."
+reason = "13 §4 / 04 §3: a pair that would exceed the independent 15,744-retained-external-row archive-horizon envelope is refused before any state mutation."
 
 [[entry]]
 key = "MaxAllStoredMarkets"

@@ -11,14 +11,14 @@ Non-normative; [16 §2–§3](../architecture/16-hosted-question-service.md) and
 
 1. Get admitted with the exact client `Location` and open HRMP in both directions.
 2. Add `pallet-bleavit-client` to your runtime and implement the route constants, `BleavitOrigin`,
-   the fail-closed `SpendingOrigin`, and `OnReport` handler.
+   the fail-closed `SpendingOrigin`, governance-only `ReportPruneOrigin`, and `OnReport` handler.
 3. Fund the client-side USDC route and Bleavit's separate delivery float.
 4. Dispatch `BleavitClient::ask`, then `open` and `seal` with typed arguments through the
    configured spending/governance origin.
 
 The pallet derives the subsidy budget and absolute window, encodes the frozen register/open/seal
 calls, and builds the strict positional ingress program. A malformed or underfunded request returns
-a stable `CLIENT-001`…`CLIENT-016` code before a message is sent.
+a stable `CLIENT-001`…`CLIENT-019` code before a message is sent.
 
 ## Spending authority and callback weight
 
@@ -32,6 +32,7 @@ use frame_system::EnsureRoot;
 impl pallet_bleavit_client::Config for Runtime {
     // ... route constants and the other associated types ...
     type SpendingOrigin = EnsureRoot<AccountId>;
+    type ReportPruneOrigin = EnsureRoot<AccountId>;
 }
 ```
 
@@ -44,6 +45,12 @@ convenience default.
 bound with `fn weight() -> Weight`; under-declaring it can overfill a block. The callback returns
 `DispatchResultWithPostInfo` and may report its actual handler weight so the pallet can refund the
 difference. The obligation belongs to the client runtime that implements the callback.
+
+Retained report bodies use a bounded map, but reception is not lifetime-capped. Client governance
+periodically calls `prune_reports(through_question_id)` after its local retention/finality policy
+makes every older delivery obsolete. The call permanently advances a replay floor before removing
+the bodies, so a delayed or replayed old push cannot execute `OnReport`. Choosing a cutoff too early
+can reject a legitimately delayed push, which is why the origin is governance-only.
 
 For registration, the documented escrow and service-fee envelope remain in the sovereign account
 for `QuestionService::register` to seed. The positional XCM template withdraws only `XcmFee` at

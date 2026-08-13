@@ -159,12 +159,12 @@ groups:
           threshold: "window < 30 d on the joint fleet"
 
       - alert: BleavitReleaseIntegrity
-        expr: bleavit_release_monitor_bundle_byte_mismatches > 0 or bleavit_release_monitor_resolver_divergent_gateways >= 2 or bleavit_release_monitor_integrity_ok == 0
+        expr: bleavit_release_monitor_bundle_byte_mismatches > 0 or bleavit_release_monitor_resolver_divergent_gateways >= 1 or bleavit_release_monitor_integrity_ok == 0
         labels: {severity: page, runbook: RB-RELEASE, alert_channel: release-integrity, domain: "Release integrity"}
         annotations:
           summary: "Release integrity: signed bytes or gateway resolution do not agree"
           key_series: "out-of-band bundle-vs-manifest comparison (§5.2), ArNS resolution consistency across gateways, ANT record history"
-          threshold: "any byte mismatch; 2-of-3 resolver divergence"
+          threshold: "any byte mismatch; any resolver divergence"
 
       - alert: BleavitDescriptorLeadTimeUncovered
         expr: (bleavit_chain_pending_upgrade_age_blocks > (0.5 * bleavit_chain_descriptor_lead_time_blocks)) and on() (bleavit_release_monitor_covering_release == 0)

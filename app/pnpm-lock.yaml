@@ -8,6 +8,9 @@ importers:
 
   .:
     devDependencies:
+      '@polkadot-api/merkleize-metadata':
+        specifier: 1.2.3
+        version: 1.2.3
       '@polkadot-api/substrate-bindings':
         specifier: 0.20.3
         version: 0.20.3

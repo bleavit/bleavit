@@ -1583,7 +1583,7 @@ pub fn occupancy_params_for(
 /// values?
 ///
 /// `false` means at least one re-derived envelope — retained `Markets` rows and
-/// their 512 KiB budget, vault occupancy and its 13 KiB budget, the `market.reap`
+/// their 3,740,672-byte budget, vault occupancy and its 13 KiB budget, the `market.reap`
 /// protocol-position cells, or either keeper observation load — has grown past
 /// the frozen figure 13 §5 publishes and the runtime compiles against. That is
 /// the occupancy family's exact analogue of [`class_floors_survive`]: items 1–4
@@ -1904,7 +1904,7 @@ pub fn genesis_params() -> Vec<ParamRecord> {
         row(
             b"mkt.obs_interval",
             ParamValue::U32(10),
-            ParamValue::U32(5),
+            ParamValue::U32(kernel::MIN_MKT_OBS_INTERVAL_BLOCKS),
             ParamValue::U32(50),
             Some(MaxDelta::Absolute(ParamValue::U32(5))),
             1,

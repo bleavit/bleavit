@@ -14,6 +14,10 @@ if str(MONITORING) not in sys.path:
 import attestation_monitor as am
 
 
+ASSET_MANIFEST_TXID = "M" * 43
+FINAL_MANIFEST_TXID = "A" * 43
+
+
 def encode_point(point: tuple[int, int, int, int]) -> bytes:
     x, y, z, _ = point
     inverse = pow(z, am.Q - 2, am.Q)
@@ -76,7 +80,7 @@ def minisign_text(
 
 def release_channel_bytes(
     *,
-    manifest_txid: str = "A" * 43,
+    manifest_txid: str = FINAL_MANIFEST_TXID,
     release_json_hash: bytes = b"R" * 32,
     generation: int = 7,
     revoked: int = 0,
@@ -103,39 +107,41 @@ def release_channel_bytes(
 def integrity_fixture() -> dict[str, Any]:
     files = {"index.html": b"<h1>Bleavit</h1>", "app.js": b"console.log('ok')"}
     document = {
-        "schema": am.PROVISIONAL_SCHEMA,
-        "manifest_txid": "A" * 43,
-        "keyring_generation": 7,
-        "supported_spec_version": {"min": 40, "max": 50},
-        "files": {name: hashlib.sha256(value).hexdigest() for name, value in files.items()},
-        "release_signatures": [],
-        "attestations": [],
+        "schema": am.APP_RELEASE_SCHEMA,
+        "arweaveManifestTxId": ASSET_MANIFEST_TXID,
+        "keyringGeneration": 7,
+        "specVersionRange": {"primary": 42, "recovery": 43},
+        "perFileHashes": {
+            name: hashlib.sha256(value).hexdigest() for name, value in files.items()
+        },
+        "readiness": {"productionReady": True, "blockers": [], "note": "fixture"},
     }
     release_raw = json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
     key_specs = [
-        (11, 21, "release", 0),
-        (12, 22, "attestor", 1),
-        (13, 23, "attestor", 2),
+        (11, 21, "release", 0, "release-org-a"),
+        (12, 22, "attestor", 1, "attestor-org-a"),
+        (13, 23, "attestor", 2, "attestor-org-b"),
     ]
     records: dict[bytes, am.KeyRecord] = {}
     signatures: list[str] = []
     attestations: list[str] = []
     message = hashlib.sha256(release_raw).digest()
-    for seed_byte, id_byte, role, revocation_index in key_specs:
+    for seed_byte, id_byte, role, revocation_index, organization in key_specs:
         seed, public, key_id = keypair(seed_byte, id_byte)
         parsed = am.parse_minisign_public_key(public_text(public, key_id))
-        records[key_id] = am.KeyRecord(key_id, parsed, role, revocation_index)
+        records[key_id] = am.KeyRecord(
+            key_id, parsed, role, revocation_index, organization
+        )
         blob = minisign_text(seed, public, key_id, message)
         (signatures if role == "release" else attestations).append(blob)
     return {
         "files": files,
-        "hashes": document["files"],
+        "hashes": document["perFileHashes"],
         "document": document,
         "release_raw": release_raw,
         "keyring": am.Keyring(7, records),
         "signatures": signatures,
         "attestations": attestations,
         "channel": release_channel_bytes(release_json_hash=hashlib.sha256(release_raw).digest()),
-        "resolved": ["A" * 43] * 3,
+        "resolved": [FINAL_MANIFEST_TXID] * 3,
     }
-

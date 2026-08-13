@@ -49,6 +49,7 @@ def _with_historical_compromised_key(fixture: dict[str, Any]) -> bytes:
         parsed,
         "release",
         COMPROMISED_INDEX,
+        "release-org-b",
     )
     fixture["keyring"] = am.Keyring(7, keys)
     return key_id
@@ -58,7 +59,7 @@ def _publish_generation_8(fixture: dict[str, Any], compromised_id: bytes) -> dic
     """Perform §2.3 step 3 as a release-metadata-only next release."""
     published = copy.deepcopy(fixture)
     document = copy.deepcopy(fixture["document"])
-    document["keyring_generation"] = 8
+    document["keyringGeneration"] = 8
     release_raw = json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
     message = hashlib.sha256(release_raw).digest()
 
@@ -109,7 +110,7 @@ class RevocationWindowStep:
             self.lawful
             and not self.verdict.ok
             and self.verdict.byte_mismatches == 0
-            and self.verdict.resolver_divergent_gateways < 2
+            and self.verdict.resolver_divergent_gateways == 0
         )
 
 
@@ -185,7 +186,7 @@ class RevocationWindowTests(unittest.TestCase):
         publication of that keyring until the next release.  The monitor demands
         all three generations equal and therefore reports failure at every head
         in between, driving the page-severity RB-RELEASE alert despite zero byte
-        mismatches and no 2-of-3 resolver divergence.
+        mismatches and no resolver divergence.
         """
         baseline, observed, still_waiting, next_release = revocation_window_steps()
         self.assertTrue(baseline.verdict.ok, baseline.verdict.errors)

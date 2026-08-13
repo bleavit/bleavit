@@ -47,7 +47,7 @@
 | B1a | [Runtime-level FRAME assembly — turn the B1 composition model into a real runtim…](milestones/B1a.md) | 01 §1/§5/§9; 06 §3; 09 §5 | A1–A11, B1 | ✅ |
 | B1b | [A8 runtime wiring — `Epoch: pallet_epoch = 61` + swap every fail-closed epoch-s…](milestones/B1b.md) | 05 §1–§5; 02 §7.1; 06 §3; 09 §1 | A8, A11, B1a, B6 | ✅ |
 | B20 | [**Phase-4 community distribution** — bounded community-schedule creation from t…](milestones/B20.md) | 08 §2.1; 06 §3.2; 09 §7.2; 13 §3.5/§4 | B10 | ✅ |
-| B21 | [**Runtime metadata-hash generation** — build the runtime with `enable_metadata_…](milestones/B21.md) | 11 §11.13; 02 §8 | — | ⬜ |
+| B21 | [**Runtime metadata-hash generation** — build the runtime with `enable_metadata_…](milestones/B21.md) | 11 §11.13; 02 §8 | — | 🔨 |
 
 ## Track E
 

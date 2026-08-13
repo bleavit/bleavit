@@ -6,6 +6,7 @@ use crate::*;
 use frame_support::{
     derive_impl, parameter_types,
     traits::{EitherOfDiverse, EnsureOrigin, IsSubType, UnfilteredDispatchable},
+    weights::{constants::RocksDbWeight, Weight},
 };
 use futarchy_primitives::{
     keeper::{CrankClass, KeeperRebateSink},
@@ -53,6 +54,7 @@ impl frame_system::Config for Test {
     type Hash = SpH256;
     type Hashing = BlakeTwo256;
     type Version = MockVersion;
+    type DbWeight = RocksDbWeight;
 }
 
 impl pallet_origins::Config for Test {
@@ -285,6 +287,8 @@ parameter_types! {
     pub static ObservedSpecName: Vec<u8> = b"test".to_vec();
     pub static ObservedArtifactVersions: Vec<(H256, RuntimeVersionConstraint)> = Vec::new();
     pub static MigrationCursorExists: bool = false;
+    pub static RecoveryUnpinRefuses: bool = false;
+    pub static RecoveryImageReleaseHalted: bool = false;
     pub static UpgradeDispatchOrigins: Vec<UpgradeDispatchOrigin> = Vec::new();
     pub static UpgradeSchedulingPerformed: bool = false;
     pub static ExactPhaseThree: bool = false;
@@ -399,6 +403,8 @@ impl EpochHandoff for TestEpoch {
 
 pub struct TestPreimages;
 
+pub const TEST_RECOVERY_IMAGE_UNPIN_WEIGHT: Weight = Weight::from_parts(42_000, 128);
+
 impl Preimages for TestPreimages {
     fn len(hash: H256) -> Option<u32> {
         PreimageData::get()
@@ -455,7 +461,13 @@ impl RecoveryImages for TestPreimages {
         RecoveryPins::mutate(|pins| pins.push(hash));
         Ok(())
     }
+    fn unpin_weight() -> Weight {
+        TEST_RECOVERY_IMAGE_UNPIN_WEIGHT
+    }
     fn unpin(hash: H256) -> frame_support::dispatch::DispatchResult {
+        if RecoveryUnpinRefuses::get() {
+            return Err(DispatchError::Unavailable);
+        }
         RecoveryPins::mutate(|pins| pins.retain(|candidate| *candidate != hash));
         PreimageData::mutate(|items| items.retain(|(candidate, _)| *candidate != hash));
         Unpinned::mutate(|items| items.push(hash));
@@ -864,6 +876,26 @@ pub struct TestMigrationStatus;
 impl MigrationStatusProvider for TestMigrationStatus {
     fn cursor_exists() -> bool {
         MigrationCursorExists::get()
+    }
+}
+
+pub struct TestMigrationHaltBridge;
+
+impl MigrationHaltBridge for TestMigrationHaltBridge {
+    fn recovery_image_release_halted() -> (bool, Weight) {
+        (RecoveryImageReleaseHalted::get(), Weight::zero())
+    }
+
+    fn recovery_image_release_failed() -> Weight {
+        RecoveryImageReleaseHalted::set(true);
+        MigrationHalt::<Test>::put(true);
+        Weight::zero()
+    }
+
+    fn recovery_image_release_repaired() -> Weight {
+        RecoveryImageReleaseHalted::set(false);
+        MigrationHalt::<Test>::put(false);
+        Weight::zero()
     }
 }
 
@@ -1327,6 +1359,7 @@ impl pallet_execution_guard::Config for Test {
     type Capabilities = TestCapabilities;
     type UpgradeSchedule = TestUpgradeSchedule;
     type MigrationStatus = TestMigrationStatus;
+    type MigrationHalt = TestMigrationHaltBridge;
     type Preimages = TestPreimages;
     type RecoveryImages = TestPreimages;
     type ReleaseChannel = TestReleaseChannel;
@@ -1434,6 +1467,8 @@ pub fn reset_statics() {
     ObservedSpecName::set(b"test".to_vec());
     ObservedArtifactVersions::set(Vec::new());
     MigrationCursorExists::set(false);
+    RecoveryUnpinRefuses::set(false);
+    RecoveryImageReleaseHalted::set(false);
     UpgradeDispatchOrigins::set(Vec::new());
     RecordKeeperRebates::set(false);
     KeeperRebates::set(Vec::new());

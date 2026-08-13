@@ -86,14 +86,14 @@ fn market_map_ceiling_within_13_5_budget() {
         "MarketBook measured MaxEncodedLen drifted from the 13 §5 item 1 figure"
     );
     assert_eq!(
-        MAX_ALL_STORED_MARKETS, 2_368,
+        MAX_ALL_STORED_MARKETS, 17_984,
         "all-stored-market bound drifted"
     );
     let budget = futarchy_primitives::kernel::RETAINED_MARKETS_BUDGET_BYTES as usize;
-    assert_eq!(budget, 512 * KIB);
+    assert_eq!(budget, 3_740_672);
     assert!(
         MAX_ALL_STORED_MARKETS * book <= budget,
-        "stored-market map ceiling exceeds the 512 KiB budget: {} B",
+        "stored-market map ceiling exceeds the 3,740,672-byte budget: {} B",
         MAX_ALL_STORED_MARKETS * book
     );
 }

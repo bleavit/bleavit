@@ -4,7 +4,7 @@
  * The safety property this package exists for is not "sign correctly"; it is **a signer
  * cannot be reached without a gate that passed**. 11 §11.4 rule 1 asks for that
  * structurally, and the structure is here: `SigningRequest` requires a `GatePassed`, which
- * `@bleavit/transaction-builder` alone can mint and only from an evaluation in which every
+ * `@bleavit/transaction-builder` alone can mint and only from a refresh it owns in which every
  * precondition held at one finalized block. There is no overload, no options bag and no
  * "advanced" path that takes bytes alone — an unguarded signature is untypeable rather
  * than discouraged.
@@ -157,8 +157,9 @@ export interface SignerDescriptor {
  * `capabilities` is computed here from the grants rather than accepted from the caller, so
  * the set cannot contain anything nobody established. There is deliberately no
  * `metadata-hash` grant function at all: whether a wallet honours `CheckMetadataHash` for a
- * custom chain is FE-P6, unresolved, so the capability is currently *unreachable* rather
- * than merely undeclared — and a future probe result is what should mint it.
+ * custom chain is FE-P6's remaining device/display question, so the capability is currently
+ * *unreachable* rather than merely undeclared. B21 proves the chain accepts mode 1; only a
+ * future wallet probe can prove the independent display channel and mint this grant.
  */
 export function describeSigner(input: {
   readonly id: string;
@@ -186,14 +187,55 @@ export function describeSigner(input: {
  * A request to sign.
  *
  * Carrying the `GatePassed` rather than a boolean is the point: a boolean can be written
- * by anyone, and this cannot. It also carries *which block* the gate ran at, so the
- * confirm surface can tell the user what the signature is being taken against.
+ * by anyone, and this cannot. The window is also the sole source of signing bytes and account,
+ * so an authentic proof cannot be paired with a different request. It carries *which block*
+ * the gate ran at, so the confirm surface can tell the user what the signature is against.
  */
 export interface SigningRequest {
-  readonly prep: TxPreparation;
   readonly window: GatePassed;
-  /** SS58 address of the account the payload was built for. */
+  /** Independent overrides are forbidden: the gate proof is the sole authority. */
+  readonly prep?: never;
+  readonly account?: never;
+}
+
+export class SigningBindingError extends Error {
+  constructor(message: string) {
+    super(`the signing request does not match its gate proof: ${message}`);
+    this.name = 'SigningBindingError';
+  }
+}
+
+/**
+ * Resolve the only bytes/account a signer may consume.
+ *
+ * The request has no independent values to pair with a valid window. The runtime checks keep
+ * the same rule fail-closed for untyped JavaScript callers and detect mutation of the named
+ * preparation after the gate captured its immutable authorization snapshot.
+ */
+export function signingTarget(request: SigningRequest): Readonly<{
+  readonly prep: TxPreparation;
+  readonly scaleHex: HexString;
   readonly account: string;
+}> {
+  if ('prep' in request || 'account' in request) {
+    throw new SigningBindingError(
+      'bytes and account must come from window.authorization; independent overrides are refused',
+    );
+  }
+  const { prep, authorization } = request.window;
+  if (
+    prep.scaleHex !== authorization.scaleHex ||
+    prep.signingAccount !== authorization.account
+  ) {
+    throw new SigningBindingError(
+      'the preparation changed after the gate passed; refresh and gate the exact bytes/account again',
+    );
+  }
+  return Object.freeze({
+    prep,
+    scaleHex: authorization.scaleHex,
+    account: authorization.account,
+  });
 }
 
 export interface SignedPayload {

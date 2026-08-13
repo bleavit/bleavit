@@ -3,7 +3,7 @@ from __future__ import annotations
 import copy
 import unittest
 
-from support import integrity_fixture, release_channel_bytes
+from support import FINAL_MANIFEST_TXID, integrity_fixture, release_channel_bytes
 
 import attestation_monitor as am
 
@@ -85,33 +85,67 @@ class AttestationVerdictTests(unittest.TestCase):
         self.assertFalse(verdict.ok)
         self.assertEqual(verdict.valid_attestations, 1)
 
-    def test_manifest_txid_mismatch_fixture(self) -> None:
+    def test_asset_and_final_manifest_addresses_cannot_collapse(self) -> None:
         fixture = integrity_fixture()
         document = copy.deepcopy(fixture["document"])
-        document["manifest_txid"] = "B" * 43
+        document["arweaveManifestTxId"] = FINAL_MANIFEST_TXID
         verdict = evaluate(fixture, release_document=document)
         self.assertFalse(verdict.ok)
-        self.assertFalse(verdict.manifest_matches_channel)
+        self.assertTrue(
+            any("asset manifest equals the final" in error for error in verdict.errors)
+        )
 
     def test_two_of_three_gateway_resolver_divergence_fixture(self) -> None:
         fixture = integrity_fixture()
-        verdict = evaluate(fixture, resolved_txids=["B" * 43, "B" * 43, "A" * 43])
+        verdict = evaluate(
+            fixture,
+            resolved_txids=["B" * 43, "B" * 43, FINAL_MANIFEST_TXID],
+        )
         self.assertFalse(verdict.ok)
         self.assertEqual(verdict.resolver_divergent_gateways, 2)
 
-    def test_one_of_three_resolver_difference_is_recorded_but_not_threshold_failure(self) -> None:
+    def test_one_of_three_resolver_difference_fails_integrity(self) -> None:
         fixture = integrity_fixture()
-        verdict = evaluate(fixture, resolved_txids=["B" * 43, "A" * 43, "A" * 43])
-        self.assertTrue(verdict.ok, verdict.errors)
+        verdict = evaluate(
+            fixture,
+            resolved_txids=["B" * 43, FINAL_MANIFEST_TXID, FINAL_MANIFEST_TXID],
+        )
+        self.assertFalse(verdict.ok)
         self.assertEqual(verdict.resolver_divergent_gateways, 1)
+
+    def test_two_attestor_keys_from_one_organization_count_once(self) -> None:
+        fixture = integrity_fixture()
+        keys = dict(fixture["keyring"].keys)
+        attestors = [record for record in keys.values() if record.role == "attestor"]
+        replacement = attestors[1]
+        keys[replacement.key_id] = am.KeyRecord(
+            replacement.key_id,
+            replacement.public_key,
+            replacement.role,
+            replacement.revocation_index,
+            attestors[0].organization,
+        )
+        verdict = evaluate(fixture, keyring=am.Keyring(7, keys))
+        self.assertFalse(verdict.ok)
+        self.assertEqual(verdict.valid_attestations, 1)
+        self.assertTrue(any("organizations 1 < 2" in error for error in verdict.errors))
 
     def test_non_covering_release_fixture(self) -> None:
         fixture = integrity_fixture()
         document = copy.deepcopy(fixture["document"])
-        document["supported_spec_version"] = {"min": 1, "max": 2}
+        document["specVersionRange"] = {"primary": 1, "recovery": 2}
         verdict = evaluate(fixture, release_document=document)
         self.assertFalse(verdict.ok)
         self.assertFalse(verdict.covering_release)
+
+    def test_release_file_map_rejects_normalization_aliases(self) -> None:
+        fixture = integrity_fixture()
+        for path in ("assets//app.js", "assets/../app.js", "./app.js", "app.js/"):
+            with self.subTest(path=path):
+                document = copy.deepcopy(fixture["document"])
+                document["perFileHashes"] = {path: "a" * 64}
+                with self.assertRaisesRegex(am.MonitoringError, "unsafe path"):
+                    am.parse_app_release(document)
 
     def test_operator_release_signature_threshold_is_not_silently_defaulted(self) -> None:
         fixture = integrity_fixture()

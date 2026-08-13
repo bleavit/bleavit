@@ -17,7 +17,6 @@ import {
   admitRate,
   declaredCoverageIds,
   estimateFee,
-  gate,
   mortalityFor,
   nonceFor,
   phaseBoundaryWarning,
@@ -33,6 +32,7 @@ import { finalize } from '@bleavit/chain-client/testing';
 import type { Finalized, FinalizedBlockRef } from '@bleavit/chain-client';
 import type { HexString } from '@bleavit/shared-types';
 import type { CompatClassification } from '@bleavit/descriptors';
+import { gateForTest } from './gate-fixture.ts';
 
 /**
  * The compat verdict this fixture gates against — 10 §3.2's `full` row.
@@ -58,6 +58,7 @@ const rate = (value: bigint, reference = 1_000_000n): Finalized<VitUsdcRate> =>
 /** The preparation the gate fixture below runs over. Its contents are not the subject. */
 const GATE_PREP: TxPreparation = {
   scaleHex: '0x0403aabbcc',
+  signingAccount: '5Grw',
   builtFor: { specVersion: 2, metadataHash: `0x${'ab'.repeat(32)}` },
   preparedAt: { chain: TEST_CHAIN, blockHash: `0x${'22'.repeat(32)}`, blockNumber: 99 },
   requires: ['P-1'],
@@ -88,11 +89,33 @@ const passingResults = (at: FinalizedBlockRef): readonly PreconditionResult[] =>
  * own pin*, so the fixture is obtained by running the gate, the only way anything can. The
  * suite then proves they refuse a mismatched one.
  */
-const gatePin = (blockHash: HexString = `0x${'11'.repeat(32)}`, blockNumber = 1): GatePassed => {
+const makeGatePin = async (blockHash: HexString, blockNumber: number): Promise<GatePassed> => {
   const at: FinalizedBlockRef = { chain: TEST_CHAIN, blockHash, blockNumber };
-  const outcome = gate(GATE_PREP, at, GATE_PREP.builtFor, PROVEN, passingResults(at));
+  const outcome = await gateForTest(GATE_PREP, at, GATE_PREP.builtFor, PROVEN, passingResults(at));
   assert.equal(outcome.kind, 'proceed', 'the gate fixture no longer opens');
   return outcome.passed;
+};
+
+const GATE_PIN_CASES = [
+  [`0x${'11'.repeat(32)}` as HexString, 1],
+  [`0x${'11'.repeat(32)}` as HexString, 500],
+  [`0x${'11'.repeat(32)}` as HexString, 900],
+  [`0x${'22'.repeat(32)}` as HexString, 12],
+  [`0x${'99'.repeat(32)}` as HexString, 1],
+  [`0x${'ab'.repeat(32)}` as HexString, 1],
+] as const;
+const GATE_PINS = new Map<string, GatePassed>(
+  await Promise.all(
+    GATE_PIN_CASES.map(async ([hash, number]) => [
+      `${hash}:${number}`,
+      await makeGatePin(hash, number),
+    ] as const),
+  ),
+);
+const gatePin = (blockHash: HexString = `0x${'11'.repeat(32)}`, blockNumber = 1): GatePassed => {
+  const passed = GATE_PINS.get(`${blockHash}:${blockNumber}`);
+  assert.ok(passed, `no gate fixture for ${blockHash} at ${blockNumber}`);
+  return passed;
 };
 
 test('a rate inside [0.1x, 10x] of its reference is admitted', () => {

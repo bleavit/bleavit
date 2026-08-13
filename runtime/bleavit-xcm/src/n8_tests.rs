@@ -21,11 +21,12 @@ use staging_xcm_executor::traits::{Properties, ShouldExecute};
 
 const MAX_WEIGHT: Weight = Weight::from_parts(100, 100);
 
-/// Frozen copy of the complete pre-N8 barrier. Do not replace this with a
-/// production alias: this type is the independent before-side of the §16
-/// differential and must keep spelling out all three deny components and the
-/// old allow composition.
-type FrozenPreN8Barrier = DenyThenTry<
+/// Frozen copy of the complete non-client legacy branch. Do not replace this
+/// with a production alias: this type is the independent before-side of the
+/// §16 differential and must keep spelling out all three deny components and
+/// the legacy allow composition. The deny components include the authorized
+/// post-N8 closed-allowlist amendment recorded on 2026-08-12.
+type FrozenNonClientBarrier = DenyThenTry<
     (
         DenyTransact,
         DenyUnsupportedInstructions,
@@ -46,25 +47,26 @@ type FrozenPreN8Barrier = DenyThenTry<
 >;
 
 /// BLAKE2-256 of the exact `barrier.rs` source slice from `DenyTransact`
-/// through the end of `DenyOverCapInflows` as N8 landed. The differential's
-/// old side deliberately reuses those production types; this tripwire makes
-/// that reuse a frozen snapshot rather than a moving oracle.
-const FROZEN_PRE_N8_DENY_SOURCE_HASH: [u8; 32] = [
-    0x09, 0x97, 0x00, 0x98, 0xf3, 0xc0, 0xc3, 0xe2, 0xf9, 0x19, 0x97, 0xbb, 0xb1, 0xe7, 0xf5, 0x73,
-    0x28, 0x0c, 0xbd, 0xba, 0xc8, 0x13, 0x57, 0x67, 0x45, 0xc9, 0xda, 0x9c, 0xed, 0x0d, 0xec, 0xd2,
+/// through the end of `DenyOverCapInflows`. The differential's non-client side
+/// deliberately reuses those production types; this tripwire makes that reuse
+/// a reviewed snapshot rather than a moving oracle. An authorized amendment to
+/// any deny component must update this digest and the owning decision record.
+const FROZEN_NON_CLIENT_DENY_SOURCE_HASH: [u8; 32] = [
+    0x26, 0xe8, 0x0f, 0x55, 0x09, 0xf7, 0x54, 0x4c, 0x37, 0xe1, 0x3e, 0x8d, 0x93, 0xc7, 0x5c, 0x7d,
+    0x00, 0x0c, 0xf6, 0x7c, 0xfe, 0xd6, 0xc9, 0x97, 0xb4, 0xee, 0x5f, 0xd3, 0x85, 0xd3, 0x86, 0x92,
 ];
 
 #[test]
-fn frozen_pre_n8_deny_implementations_have_not_drifted() {
+fn frozen_non_client_deny_implementations_have_not_drifted() {
     const START: &str = "pub struct DenyTransact;";
-    const END: &str = "/// The exact pre-N8 barrier";
+    const END: &str = "/// The exact non-client legacy barrier";
     let source = include_str!("barrier.rs");
     let observed = source.find(START).and_then(|start| {
         source[start..].find(END).map(|relative_end| {
             sp_io::hashing::blake2_256(&source.as_bytes()[start..start + relative_end])
         })
     });
-    assert_eq!(observed, Some(FROZEN_PRE_N8_DENY_SOURCE_HASH));
+    assert_eq!(observed, Some(FROZEN_NON_CLIENT_DENY_SOURCE_HASH));
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -162,7 +164,7 @@ fn asset_filter_strategy() -> BoxedStrategy<AssetFilter> {
 }
 
 /// Broad non-`Transact` leaf alphabet. It deliberately includes both the
-/// closed pre-N8 surface and unsupported origin/issuance/value-redirection
+/// closed non-client surface and unsupported origin/issuance/value-redirection
 /// instructions so the differential exercises accept, reject and mutation
 /// paths rather than degenerating into one result.
 fn no_transact_leaf_strategy() -> BoxedStrategy<Instruction<()>> {
@@ -574,10 +576,10 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(2_048))]
 
     /// The highest-value N8 regression: adding the client shape is a pure
-    /// extension. Every no-`Transact` program sees the exact pre-N8 result and
+    /// extension. Every no-`Transact` program sees the exact non-client result and
     /// exact post-barrier mutations, byte for byte.
     #[test]
-    fn frozen_pre_n8_barrier_is_byte_identical_for_programs_without_transact(
+    fn frozen_non_client_barrier_is_byte_identical_for_programs_without_transact(
         origin in location_strategy(),
         instructions in no_transact_program_strategy(),
         max_ref_time in any::<u64>(),
@@ -594,7 +596,7 @@ proptest! {
 
         let (before, after) = new_test_ext().execute_with(|| {
             (
-                barrier_bytes::<FrozenPreN8Barrier>(
+                barrier_bytes::<FrozenNonClientBarrier>(
                     &origin,
                     instructions.clone(),
                     max_weight,

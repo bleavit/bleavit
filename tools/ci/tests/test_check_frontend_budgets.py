@@ -358,15 +358,17 @@ class FrontendBudgets(unittest.TestCase):
         # took slot 68 — a whole pallet, so this is the largest step the anchor has taken.
         # 489_180 -> 492_363 the same day, re-recording the feed for that pallet's two new
         # error variants, which is the step that finally moved the *rounded* gz figure.
+        # 492_363 -> 493_122 on 2026-08-13 when PR #304's exact-source feed was regenerated;
+        # gzip moved to 155,848 B and the published two-decimal figure remained 0.16 MB.
         # The anchor moves with the measurement by design — this test proves the gate notices
         # a drift, and a stale anchor would make it silently unable to apply its own mutation.
         # It is also the thing that caught the incomplete edit: updating the gate constant and
         # doc 10 §9.3 without this line left `tooling-suites` red, which is the pair working.
         self.assert_mutation_caught(
             ARTIFACT_GATE,
-            "const MEASURED_BLOB_RAW_BYTES = 492_363;",
+            "const MEASURED_BLOB_RAW_BYTES = 493_122;",
             "const MEASURED_BLOB_RAW_BYTES = 500_000;",
-            "publishes measured blob raw size as 492363",
+            "publishes measured blob raw size as 493122",
         )
 
     def test_moving_the_published_metadata_cell_without_the_gate_fails(self) -> None:

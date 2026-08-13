@@ -3,12 +3,12 @@
   "binding": {
     "genesisHash": "0x91b171bb158e2d3848fa23a9f1c25182fb8e20313b2c1eb49219da7a70ce90c3",
     "specVersion": 2,
-    "contractVersion": 30
+    "contractVersion": 31
   },
   "action": {
     "kind": "prepare_pass_position",
     "id": "7",
     "collateral": "25000000"
   },
-  "digest": "fbcce363d044acf054d4d7e7abf0816ae45612313561463c98f11a365d8380d8"
+  "digest": "65e12c65d64dbb6c8e0a91dccd1c77f0aaefe733cb1b072e78f213f9e596529c"
 }

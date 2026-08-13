@@ -35,7 +35,7 @@ EXPECTED_EXPRESSIONS = {
     "BleavitNumericsAnomalySpike": "increase(bleavit_runtime_lmsr_domain_rejections_total[5m]) > 0 or bleavit_runtime_numeric_anomaly_spike > 0",
     "BleavitBootnodeCommitment": 'sum(bleavit_bootnode_browser_dial_success) < 8 or sum(bleavit_bootnode_browser_dial_success{port="443"}) < 2 or min(bleavit_bootnode_wss_certificate_days_remaining) < 14',
     "BleavitServedStateWindowShort": "max(bleavit_bootnode_served_state_retention_days) < 30",
-    "BleavitReleaseIntegrity": "bleavit_release_monitor_bundle_byte_mismatches > 0 or bleavit_release_monitor_resolver_divergent_gateways >= 2 or bleavit_release_monitor_integrity_ok == 0",
+    "BleavitReleaseIntegrity": "bleavit_release_monitor_bundle_byte_mismatches > 0 or bleavit_release_monitor_resolver_divergent_gateways >= 1 or bleavit_release_monitor_integrity_ok == 0",
     "BleavitDescriptorLeadTimeUncovered": "(bleavit_chain_pending_upgrade_age_blocks > (0.5 * bleavit_chain_descriptor_lead_time_blocks)) and on() (bleavit_release_monitor_covering_release == 0)",
     "BleavitReleaseChannelLagOrSecurityFlip": "bleavit_release_monitor_repoint_channel_lag_blocks > 600 or increase(bleavit_chain_release_channel_security_flips_total[5m]) > 0",
     "BleavitKeeperBudgetHigh": "bleavit_chain_keeper_budget_utilization_ratio > 0.8",

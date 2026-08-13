@@ -5,7 +5,9 @@
  * > has no bypass edge), not by convention.
  *
  * The machine already makes that true at the type level: `AwaitingSignature` has one
- * inbound edge and it requires a `GatePassed` whose brand only `gate()` can mint. This
+ * inbound edge and it requires a `GatePassed` production code cannot mint directly. The public
+ * refresh boundary is the only production path and stays fail-closed until its owned evaluator
+ * exists. This
  * module is the screen's half, and its job is to not undo that.
  *
  * ## What could undo it, and what stops each

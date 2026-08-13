@@ -1154,8 +1154,11 @@ const MIGRATION_FAILURE_HALT: u8 = 0b001;
 pub(crate) const MIGRATION_STALL_HALT: u8 = 0b010;
 const APPLIED_DETECTION_HALT: u8 = 0b100;
 const UPGRADE_ABORT_TRIGGER: u8 = 0b1000;
-const EXECUTION_HALT_SOURCES: u8 =
-    MIGRATION_FAILURE_HALT | MIGRATION_STALL_HALT | APPLIED_DETECTION_HALT;
+pub(crate) const RECOVERY_IMAGE_RELEASE_HALT: u8 = 0b1_0000;
+const EXECUTION_HALT_SOURCES: u8 = MIGRATION_FAILURE_HALT
+    | MIGRATION_STALL_HALT
+    | APPLIED_DETECTION_HALT
+    | RECOVERY_IMAGE_RELEASE_HALT;
 
 fn sync_execution_migration_halt(sources: u8) {
     pallet_execution_guard::MigrationHalt::<Runtime>::put(sources & EXECUTION_HALT_SOURCES != 0);
@@ -1178,11 +1181,12 @@ fn set_migration_halt_source(source: u8) {
         // 05 §4.3.2 `Π`, `IntegrityFault::FailStaticLatch` — "a fail-static
         // latch engaged out of a detected inconsistency". All three clauses
         // hold: the runtime holds unconditionally that the code it runs is the
-        // code its guard scheduled and that a registered migration completes
-        // within its declared budget; engaging the halt freezes the execution
-        // queue; and nothing restores the boundary that was violated — the halt
-        // lifts only when a *later, different* upgrade applies validly, which
-        // is a new fact, not a repair of the lost one.
+        // code its guard scheduled, that a registered migration completes
+        // within its declared budget, and that a committed recovery request
+        // can be retired; engaging the halt freezes the execution queue. For a
+        // recovery-release source, repairing the pin restores operability but
+        // cannot undo that this integrity boundary was crossed: `Π` records
+        // the incident, while the source bitmap records the current halt.
         //
         // **The activation edge is the increment, not every write.** A second
         // source setting while the halt is already engaged is the same latch
@@ -1225,7 +1229,8 @@ pub(crate) fn complete_terminal_recovery_state() {
         MIGRATION_FAILURE_HALT
             | MIGRATION_STALL_HALT
             | APPLIED_DETECTION_HALT
-            | UPGRADE_ABORT_TRIGGER,
+            | UPGRADE_ABORT_TRIGGER
+            | RECOVERY_IMAGE_RELEASE_HALT,
     );
 }
 
@@ -1235,7 +1240,8 @@ fn emit_migration_halted() {
         .unwrap_or_default();
     // The B16 type-bound regression proves the SDK cursor's MaxEncodedLen fits
     // this derived envelope, so `truncate_from` cannot truncate a real cursor.
-    // A source-less halt yields empty bytes.
+    // A source-less genesis drill, or a recovery-image release failure after
+    // the SDK cursor has cleared, yields empty bytes.
     let cursor = pallet_execution_guard::pallet::MigrationHaltCursor::truncate_from(cursor_bytes);
     crate::ExecutionGuard::note_migration_halted(cursor, MigrationFailedStep::get());
 }
@@ -1251,6 +1257,33 @@ pub(crate) fn note_upgrade_abort_trigger_for_test() {
 #[cfg(test)]
 pub(crate) fn note_migration_stall_halt_for_test() {
     set_migration_halt_source(MIGRATION_STALL_HALT);
+}
+
+/// Bridge the guard's recovery-image cleanup failures into the runtime-owned
+/// source bitmap. This is deliberately not a terminal-recovery trigger: after
+/// a migration completed successfully, re-installing the paired recovery image
+/// would roll the runtime backward. The guard retries only the failed unpin and
+/// clears this source once operators repair the pin state.
+pub struct RuntimeMigrationHaltBridge;
+impl pallet_execution_guard::MigrationHaltBridge for RuntimeMigrationHaltBridge {
+    fn recovery_image_release_halted() -> (bool, Weight) {
+        (
+            MigrationHaltSources::get() & RECOVERY_IMAGE_RELEASE_HALT != 0,
+            <Runtime as frame_system::Config>::DbWeight::get().reads(1),
+        )
+    }
+
+    fn recovery_image_release_failed() -> Weight {
+        set_migration_halt_source(RECOVERY_IMAGE_RELEASE_HALT);
+        // Covers the bitmap/aggregate writes plus the first-edge cursor/event
+        // diagnostic. Welfare's integrity recorder self-charges its own work.
+        migration_validation_hook_weight()
+    }
+
+    fn recovery_image_release_repaired() -> Weight {
+        clear_migration_halt_sources(RECOVERY_IMAGE_RELEASE_HALT);
+        <Runtime as frame_system::Config>::DbWeight::get().reads_writes(1, 2)
+    }
 }
 
 fn clear_migration_halt_sources(mask: u8) {
@@ -1360,20 +1393,17 @@ impl frame_support::migrations::MigrationStatusHandler for MigrationStatusToGuar
         // callback resolves that condition. The additional try-state-before-
         // lift coupling is intentionally still an open specification question.
         //
-        // **This clear MUST precede `migration_completed` (audit 2026-07-27,
-        // AUD-1).** `migration_completed` raises the guard's own fail-static
-        // latch — a committed recovery image the completed migration could not
-        // release — by writing `MigrationHalt` directly. `MigrationHalt` is
-        // otherwise derived from `MigrationHaltSources` by
-        // `sync_execution_migration_halt`, so running the clear *after* the
-        // callback wrote the halt straight back to `false` in this very call,
-        // and nothing re-raises it: the cursor is gone and
-        // `PendingAnchorCapture` has already been consumed, so the guard's
-        // per-block retry no longer runs. The latch was a no-op on the one path
-        // it exists for. Ordering the clear first is the whole repair; it adds
-        // no storage read or write, so no benchmarked weight moves.
+        // Clear cursor-owned sources before the guard reports a recovery-image
+        // release failure. That failure enters the bitmap through
+        // `RuntimeMigrationHaltBridge`, so it survives this callback, emits the
+        // first-activation diagnostic when it is the remaining cause, and is
+        // retried independently after the cursor has gone.
         clear_migration_halt_sources(MIGRATION_FAILURE_HALT | MIGRATION_STALL_HALT);
-        crate::ExecutionGuard::migration_completed();
+        let bridge_weight = crate::ExecutionGuard::migration_completed();
+        frame_system::Pallet::<Runtime>::register_extra_weight_unchecked(
+            bridge_weight,
+            DispatchClass::Mandatory,
+        );
     }
 }
 
@@ -1507,10 +1537,17 @@ pub(crate) mod xcm_config {
     /// every sibling probe fail local validation (SQ-380).
     pub type NetworkRouter = (RelayRouter, XcmpQueue);
     pub type TopicRouter = WithUniqueTopic<NetworkRouter>;
-    /// I-36 review point: hosted-report egress is the bare topic router. It is
-    /// intentionally not the welfare-observing `Router` alias below.
-    pub type ClientEgressRouter = TopicRouter;
-    pub type Router = bleavit_xcm::health::HealthTrackingRouter<TopicRouter, XcmTrafficRecorder>;
+    /// Public and externally-triggered sends must never improve decision-grade
+    /// XCM health (I-24/I-36). This includes signed reserve exits, inbound
+    /// executor responses and hosted-report egress. They therefore share the
+    /// bare topic router and cannot reach `XcmTrafficRecorder` by construction.
+    pub type PublicRouter = TopicRouter;
+    pub type ClientEgressRouter = PublicRouter;
+    /// Only fixed, runtime-authored maintenance programs use this router. The
+    /// reserve probe remains on `PublicRouter` and accounts its own send result
+    /// explicitly, after its budget+send transaction commits.
+    pub type ProtocolRouter =
+        bleavit_xcm::health::HealthTrackingRouter<TopicRouter, XcmTrafficRecorder>;
     pub type BaseWeigher = FixedWeightBounds<UnitWeightCost, RuntimeCall, MaxInstructions>;
     pub type Weigher =
         bleavit_xcm::probe::ProbeAwareWeightBounds<BaseWeigher, super::RuntimeProbeCallbackWeight>;
@@ -1539,18 +1576,19 @@ pub(crate) mod xcm_config {
         staging_xcm_builder::SignedToAccountId32<RuntimeOrigin, AccountId, RelayNetwork>,
     );
 
-    pub struct XcmConfig<Assets = CappedAssets, BarrierType = Barrier>(
-        core::marker::PhantomData<(Assets, BarrierType)>,
+    pub struct XcmConfig<Assets = CappedAssets, BarrierType = Barrier, Sender = PublicRouter>(
+        core::marker::PhantomData<(Assets, BarrierType, Sender)>,
     );
     impl<
             Assets: staging_xcm_executor::traits::TransactAsset,
             BarrierType: staging_xcm_executor::traits::ShouldExecute,
-        > staging_xcm_executor::Config for XcmConfig<Assets, BarrierType>
+            Sender: staging_xcm::latest::SendXcm,
+        > staging_xcm_executor::Config for XcmConfig<Assets, BarrierType, Sender>
     {
         type RuntimeCall = RuntimeCall;
-        // The Coretime route's local reserve withdrawal targets Parent, so the
-        // production sender is the canonical parachain→relay UMP adapter.
-        type XcmSender = Router;
+        // The default sender is the bare public router. The separately typed
+        // protocol executor opts into the health-tracking sender explicitly.
+        type XcmSender = Sender;
         type XcmEventEmitter = PolkadotXcm;
         type AssetTransactor = Assets;
         type OriginConverter = OriginConverter;
@@ -1597,6 +1635,13 @@ pub(crate) mod xcm_config {
     /// Executor used by inbound DMP/XCMP transport: every reserve mint and
     /// beneficiary deposit passes through the live Phase-3 cap adapter.
     pub type Executor = XcmExecutor<XcmConfig<CappedAssets>>;
+    /// Trusted local executor for the one fixed coretime-renewal program. It
+    /// receives weight credit from the treasury dispatcher, bypasses the
+    /// inbound default-deny barrier, and is the only executor whose sends feed
+    /// decision-grade local transport health.
+    #[allow(dead_code)]
+    pub type ProtocolExecutor =
+        XcmExecutor<XcmConfig<CappedAssets, staging_xcm_builder::TakeWeightCredit, ProtocolRouter>>;
     /// `pallet-xcm` reconstructs an existing trapped imbalance by calling its
     /// configured executor's `mint_asset`, then immediately balances the clone
     /// so issuance is unchanged. The recovery transactor bypasses only that
@@ -1669,9 +1714,9 @@ impl pallet_xcm::Config for Runtime {
     type RuntimeEvent = RuntimeEvent;
     type SendXcmOrigin = staging_xcm_builder::EnsureXcmOrigin<RuntimeOrigin, ()>;
     #[cfg(feature = "runtime-benchmarks")]
-    type XcmRouter = xcm_config::Router;
+    type XcmRouter = xcm_config::PublicRouter;
     #[cfg(not(feature = "runtime-benchmarks"))]
-    type XcmRouter = xcm_config::Router;
+    type XcmRouter = xcm_config::PublicRouter;
     type ExecuteXcmOrigin =
         staging_xcm_builder::EnsureXcmOrigin<RuntimeOrigin, xcm_config::LocalOriginToLocation>;
     type XcmExecuteFilter = Nothing;
@@ -1718,12 +1763,12 @@ impl staging_xcm_builder::EnsureDelivery for XcmBenchmarkDelivery {
         ParachainSystem::open_outbound_hrmp_channel_for_benchmarks_or_tests(
             cumulus_primitives_core::ParaId::from(chain_identity::ASSET_HUB_PARA_ID),
         );
-        <xcm_config::Router as staging_xcm::latest::SendXcm>::ensure_successful_delivery(Some(
-            staging_xcm::latest::Location::parent(),
-        ));
-        <xcm_config::Router as staging_xcm::latest::SendXcm>::ensure_successful_delivery(Some(
-            dest.clone(),
-        ));
+        <xcm_config::PublicRouter as staging_xcm::latest::SendXcm>::ensure_successful_delivery(
+            Some(staging_xcm::latest::Location::parent()),
+        );
+        <xcm_config::PublicRouter as staging_xcm::latest::SendXcm>::ensure_successful_delivery(
+            Some(dest.clone()),
+        );
 
         let caller = frame_benchmarking::whitelisted_caller::<AccountId>();
         let _ = <Balances as Currency<AccountId>>::make_free_balance_be(
@@ -1742,9 +1787,9 @@ impl pallet_xcm::benchmarking::Config for Runtime {
         ParachainSystem::open_outbound_hrmp_channel_for_benchmarks_or_tests(
             cumulus_primitives_core::ParaId::from(chain_identity::ASSET_HUB_PARA_ID),
         );
-        <xcm_config::Router as staging_xcm::latest::SendXcm>::ensure_successful_delivery(Some(
-            staging_xcm::latest::Location::parent(),
-        ));
+        <xcm_config::PublicRouter as staging_xcm::latest::SendXcm>::ensure_successful_delivery(
+            Some(staging_xcm::latest::Location::parent()),
+        );
         Some(bleavit_xcm::identity::asset_hub_location())
     }
 
@@ -8451,7 +8496,7 @@ parameter_types! {
 
 #[cfg(all(not(feature = "runtime-benchmarks"), not(test)))]
 type ProductionRenewalDispatch = bleavit_xcm::coretime::XcmRenewalDispatcher<
-    xcm_config::Executor,
+    xcm_config::ProtocolExecutor,
     RuntimeCall,
     CoretimeTreasuryLocation,
     CoretimeFeeBudget,
@@ -9997,6 +10042,13 @@ impl pallet_execution_guard::RecoveryImages for RuntimePreimages {
         <Preimage as QueryPreimage>::request(&Hash::from(hash));
         Ok(())
     }
+    fn unpin_weight() -> Weight {
+        type RuntimePreimageWeight = crate::weights::pallet_preimage::WeightInfo<Runtime>;
+
+        <RuntimePreimageWeight as pallet_preimage::WeightInfo>::ensure_updated(1).saturating_add(
+            <RuntimePreimageWeight as pallet_preimage::WeightInfo>::unrequest_preimage(),
+        )
+    }
     fn unpin(hash: futarchy_primitives::H256) -> DispatchResult {
         let hash = Hash::from(hash);
         if !<Preimage as QueryPreimage>::is_requested(&hash) {
@@ -10769,7 +10821,8 @@ impl cumulus_pallet_parachain_system::OnSystemEvent for ExecutionGuardSystemEven
                 MIGRATION_FAILURE_HALT
                     | MIGRATION_STALL_HALT
                     | APPLIED_DETECTION_HALT
-                    | UPGRADE_ABORT_TRIGGER,
+                    | UPGRADE_ABORT_TRIGGER
+                    | RECOVERY_IMAGE_RELEASE_HALT,
             );
         }
     }
@@ -10801,6 +10854,7 @@ impl pallet_execution_guard::Config for Runtime {
     type Capabilities = RuntimeCapabilities;
     type UpgradeSchedule = RuntimeUpgradeSchedule;
     type MigrationStatus = RuntimeMigrationStatus;
+    type MigrationHalt = RuntimeMigrationHaltBridge;
     type Preimages = RuntimePreimages;
     type RecoveryImages = RuntimePreimages;
     type ReleaseChannel = RuntimeReleaseChannel;
@@ -11334,6 +11388,18 @@ impl pallet_market::BenchmarkHelper<AccountId> for RuntimeBenchmarkHelper {
                 record.value = pallet_constitution::ParamValue::U32(bounds::MAX_CLIENTS);
             }
         });
+    }
+
+    fn prime_external_terminal_vault(
+        question: futarchy_primitives::QuestionId,
+        vault: pallet_conditional_ledger::core_ledger::VaultInfo,
+    ) {
+        type ServiceInstance = frame_support::instances::Instance1;
+        pallet_conditional_ledger::Vaults::<Runtime, ServiceInstance>::insert(question, vault);
+        pallet_conditional_ledger::VaultTerminalAt::<Runtime, ServiceInstance>::insert(
+            question,
+            System::block_number(),
+        );
     }
 
     fn prime_pol_custody(line: pallet_market::PolLine, amount: Balance) {
@@ -12157,7 +12223,7 @@ impl pallet_question_service::BenchmarkHelper<RuntimeOrigin, AccountId> for Runt
         );
     }
 
-    fn prime_register_scan(funder: &AccountId) {
+    fn prime_register_scan(_funder: &AccountId) {
         for pid in 1..=bounds::MAX_LIVE_PROPOSALS {
             let mut proposal = benchmark_epoch_proposal(
                 u64::from(pid),
@@ -12216,20 +12282,6 @@ impl pallet_question_service::BenchmarkHelper<RuntimeOrigin, AccountId> for Runt
                 );
             }
             pallet_epoch::Proposals::<Runtime>::insert(u64::from(pid), proposal);
-        }
-        for index in 0..bounds::MAX_EXTERNAL_BOOK_PAIRS.saturating_sub(1) {
-            let question = kernel::SERVICE_ID_BASE
-                .saturating_add(1_000)
-                .saturating_add(u64::from(index).saturating_mul(3));
-            pallet_market::ExternalBookPairs::<Runtime>::insert(
-                question,
-                pallet_market::ExternalBookPair {
-                    client: 0,
-                    funder: funder.clone(),
-                    accept: question.saturating_add(1),
-                    reject: question.saturating_add(2),
-                },
-            );
         }
     }
 

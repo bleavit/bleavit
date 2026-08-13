@@ -127,6 +127,37 @@ fn fee_unset_is_the_atomic_arming_gate() -> TestResult {
 }
 
 #[test]
+fn four_terminal_live_waves_do_not_exhaust_retained_admission() -> TestResult {
+    new_test_ext().execute_with(|| -> TestResult {
+        // Reproduce the cheap exhaustion sequence: one admitted client turns
+        // over all 16 provisional live slots four times, with every terminal
+        // question retained. Fee and escrow refunds let the same funding serve
+        // each wave. The 65th registration must still enter normally.
+        for wave in 0..4u32 {
+            let start = 10 + wave * 50;
+            let mut questions = Vec::new();
+            for _ in 0..16 {
+                let question = NextServiceId::<Test>::get().max(kernel::SERVICE_ID_BASE);
+                assert_ok!(QuestionService::register(client_origin(), input(start)?));
+                questions.push(question);
+            }
+            assert_eq!(LiveQuestionCount::<Test>::get(), 16);
+            System::set_block_number(u64::from(start + 40));
+            for question in questions {
+                assert_ok!(QuestionService::void(RuntimeOrigin::signed(DAVE), question));
+            }
+            assert_eq!(LiveQuestionCount::<Test>::get(), 0);
+        }
+        assert_eq!(Questions::<Test>::count(), bounds::MAX_CLIENTS);
+
+        assert_ok!(QuestionService::register(client_origin(), input(210)?));
+        assert_eq!(Questions::<Test>::count(), bounds::MAX_CLIENTS + 1);
+        assert_eq!(LiveQuestionCount::<Test>::get(), 1);
+        Ok(())
+    })
+}
+
+#[test]
 fn registration_accepts_exact_escrow_plus_fee_and_not_one_unit_less() -> TestResult {
     new_test_ext().execute_with(|| -> TestResult {
         let registration = input(10)?;
@@ -1317,6 +1348,8 @@ fn guardian_pause_marks_live_questions_and_voids_at_their_deadline() -> TestResu
             RuntimeOrigin::signed(EMERGENCY),
             Some(40),
         ));
+        assert!(question < PauseQuestionCutoff::<Test>::get());
+        assert!(!PauseAffected::<Test>::contains_key(question));
         assert!(QuestionService::trading_open(question));
         assert_noop!(
             QuestionService::register(client_origin(), input(50)?),
@@ -1332,6 +1365,43 @@ fn guardian_pause_marks_live_questions_and_voids_at_their_deadline() -> TestResu
             Error::<Test>::DeadlineNotReached
         );
         System::set_block_number(50);
+        assert_ok!(QuestionService::void(
+            RuntimeOrigin::signed(ALICE),
+            question
+        ));
+        assert!(System::events().iter().any(|record| {
+            matches!(
+                record.event,
+                RuntimeEvent::QuestionService(Event::QuestionVoided {
+                    question_id,
+                    reason: VoidReason::ServicePaused,
+                }) if question_id == question
+            )
+        }));
+        Ok(())
+    })
+}
+
+#[test]
+fn guardian_pause_after_seal_still_forces_the_service_paused_terminal_edge() -> TestResult {
+    new_test_ext().execute_with(|| -> TestResult {
+        let (question, _) = register_and_bond()?;
+        open_and_observe(question)?;
+        seal(question)?;
+        assert_eq!(
+            Questions::<Test>::get(question).map(|stored| stored.phase),
+            Some(QuestionPhase::Sealed)
+        );
+
+        assert_ok!(QuestionService::set_paused(
+            RuntimeOrigin::signed(EMERGENCY),
+            Some(60),
+        ));
+        assert!(question < PauseQuestionCutoff::<Test>::get());
+        let deadline = Terms::<Test>::get(question)
+            .and_then(|terms| terms.settlement_deadline)
+            .ok_or("settlement deadline")?;
+        System::set_block_number(u64::from(deadline));
         assert_ok!(QuestionService::void(
             RuntimeOrigin::signed(ALICE),
             question

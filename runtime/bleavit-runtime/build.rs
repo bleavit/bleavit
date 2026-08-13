@@ -1,6 +1,9 @@
 fn main() {
     #[cfg(feature = "substrate-wasm-builder")]
     {
-        substrate_wasm_builder::WasmBuilder::build_using_defaults();
+        let builder = substrate_wasm_builder::WasmBuilder::init_with_defaults();
+        #[cfg(feature = "metadata-hash")]
+        let builder = builder.enable_metadata_hash("VIT", 12);
+        builder.build();
     }
 }

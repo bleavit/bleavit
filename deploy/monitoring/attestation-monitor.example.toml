@@ -1,9 +1,16 @@
 [monitor]
-node_urls = ["wss://node-a.example.invalid", "wss://node-b.example.invalid"]
+# Replace all-zero/hash placeholders from the exact released chain and the
+# independently uploaded credential index before starting the monitor.
+expected_genesis_hash = "REPLACE_WITH_0x_32_BYTE_LOWERCASE_GENESIS_HASH"
+credential_index_txid = "REPLACE_WITH_43_CHARACTER_ARWEAVE_TXID_____"
+credential_index_sha256 = "REPLACE_WITH_64_CHARACTER_LOWERCASE_SHA256"
 arns_name = "futarchy"
 keyring_file = "keyring.example.toml"
 bind = "127.0.0.1:9618"
 check_interval_seconds = 3600
+# Operator-selected liveness cadence. Every poll reads all RPCs and requires
+# exact agreement; it is not a storage-proof verification interval.
+rpc_poll_interval_seconds = 15
 # 12 §1.4 fixes the floor at two valid signatures from distinct active keys of
 # the current keyring generation. A deployment MAY require more and MUST state
 # its minimum explicitly rather than inherit one silently; it MUST NOT go lower.
@@ -12,29 +19,49 @@ minimum_release_signatures = 2
 max_file_bytes = 67108864
 max_bundle_bytes = 536870912
 
+[[rpc]]
+operator = "rpc-operator-a"
+url = "wss://node-a.example.invalid"
+
+[[rpc]]
+operator = "rpc-operator-b"
+url = "wss://node-b.example.invalid"
+
+[[rpc]]
+operator = "rpc-operator-c"
+url = "wss://node-c.example.invalid"
+
 [[gateway]]
 name = "gateway-a"
+operator = "gateway-operator-a"
 resolve_url = "https://gateway-a.example.invalid/ar-io/resolver/{name}"
 raw_url = "https://gateway-a.example.invalid/raw/{txid}"
 tx_url = "https://gateway-a.example.invalid/{txid}/{path}"
 name_url = "https://{name}.gateway-a.example.invalid/{path}"
+tx_root_url = "https://gateway-a.example.invalid/{txid}/"
+name_root_url = "https://{name}.gateway-a.example.invalid/"
 
 [[gateway]]
 name = "gateway-b"
+operator = "gateway-operator-b"
 resolve_url = "https://gateway-b.example.invalid/ar-io/resolver/{name}"
 raw_url = "https://gateway-b.example.invalid/raw/{txid}"
 tx_url = "https://gateway-b.example.invalid/{txid}/{path}"
 name_url = "https://{name}.gateway-b.example.invalid/{path}"
+tx_root_url = "https://gateway-b.example.invalid/{txid}/"
+name_root_url = "https://{name}.gateway-b.example.invalid/"
 
 [[gateway]]
 name = "gateway-c"
+operator = "gateway-operator-c"
 resolve_url = "https://gateway-c.example.invalid/ar-io/resolver/{name}"
 raw_url = "https://gateway-c.example.invalid/raw/{txid}"
 tx_url = "https://gateway-c.example.invalid/{txid}/{path}"
 name_url = "https://{name}.gateway-c.example.invalid/{path}"
+tx_root_url = "https://gateway-c.example.invalid/{txid}/"
+name_root_url = "https://{name}.gateway-c.example.invalid/"
 
 [webhooks]
 paging = ["https://paging-webhook.example.invalid/bleavit"]
 status_page = ["https://status-page-webhook.example.invalid/bleavit"]
 community = ["https://community-webhook.example.invalid/bleavit"]
-

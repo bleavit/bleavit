@@ -27,8 +27,9 @@
  * extrinsic encoder to decompose. Capability claims here are about what the signing path
  * does, never about what the counterparty could do if asked differently.
  *
- * It does **not** declare `metadata-hash`, which is now unreachable rather than merely
- * undeclared — there is no grant function for it anywhere while FE-P6 is unresolved. It
+ * It does **not** declare `metadata-hash`, which is unreachable rather than merely
+ * undeclared — B21 proves chain support, but no grant exists until FE-P6 verifies a real
+ * wallet's independent display channel. It
  * does not declare `hashed-payload` either: an extension that falls back to signing a hash
  * of an oversized payload is signing something it did not show anyone, which is the
  * substitution this whole surface exists to prevent.
@@ -43,6 +44,7 @@
 import {
   describeSigner,
   grantsExternalKeyCustody,
+  signingTarget,
   type SignTxFn,
   type SignedPayload,
   type SignerAdapter,
@@ -172,7 +174,7 @@ export const INJECTED_DESCRIPTOR = (extensionName: string): SignerDescriptor =>
     id: `injected:${extensionName}`,
     label: `${extensionName} (browser extension)`,
     // `metadata-hash` is unreachable by construction — there is no grant function for it
-    // while FE-P6 is unresolved. `hashed-payload` is deliberately absent: an extension that
+    // until FE-P6's device/display probe closes. `hashed-payload` is deliberately absent: an extension that
     // falls back to signing a hash of an oversized payload is signing something it did not
     // show anyone, which is the substitution this surface exists to prevent.
     grants: [
@@ -217,22 +219,23 @@ export async function connectInjected(
   return {
     descriptor,
     async sign(request: SigningRequest): Promise<SignedPayload> {
+      const target = signingTarget(request);
       // Re-read the accounts per signature. An extension's account set changes while the
       // page is open — the user switches, locks, or revokes — and a set captured at
       // connect time would let a revoked account look signable right up to the prompt.
       const accounts = extension.getAccounts();
-      const match = accounts.find((account) => account.address === request.account);
+      const match = accounts.find((account) => account.address === target.account);
       if (match === undefined) {
         throw new AccountNotHeldError(
-          request.account,
+          target.account,
           accounts.map((account) => account.address),
           descriptor.label,
         );
       }
-      const signature = await match.polkadotSigner.signBytes(hexToBytes(request.prep.scaleHex));
+      const signature = await match.polkadotSigner.signBytes(hexToBytes(target.scaleHex));
       return {
         signatureHex: toHex(signature),
-        signedBy: request.account,
+        signedBy: target.account,
         signerId: descriptor.id,
       };
     },

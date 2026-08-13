@@ -351,9 +351,10 @@ impl pallet_bleavit_client::Config for Runtime {
     // This standalone reference runtime has no application operator origin;
     // keep the drop-in pallet fail-closed until a client adds governance.
     type SpendingOrigin = EnsureRoot<AccountId>;
+    type ReportPruneOrigin = EnsureRoot<AccountId>;
     type OnReport = ();
     type MaxReports = MaxReports;
-    type WeightInfo = ();
+    type WeightInfo = pallet_bleavit_client::weights::SubstrateWeight<Runtime>;
 }
 
 pub fn session_keys(aura: AuraId) -> SessionKeys {

@@ -16,6 +16,8 @@ import assert from 'node:assert/strict';
 
 import * as barrel from '@bleavit/signing';
 import * as testing from '@bleavit/signing/testing';
+import * as transactionBuilder from '@bleavit/transaction-builder';
+import * as transactionBuilderTesting from '@bleavit/transaction-builder/testing';
 
 import { assertTestingSubpathIsQuarantined } from '../shared/testing-subpath.ts';
 
@@ -29,4 +31,23 @@ test('the mock signer is not reachable from the @bleavit/signing barrel', () => 
     },
     assert,
   );
+});
+
+test('the transaction-builder barrel exposes only the fail-closed production gate boundary', () => {
+  assertTestingSubpathIsQuarantined(
+    {
+      packageName: '@bleavit/transaction-builder',
+      barrel: transactionBuilder,
+      testing: transactionBuilderTesting,
+      barrelMustExport: ['refreshAndGate', 'reduce'],
+    },
+    assert,
+  );
+  for (const legacyMint of ['gate', 'gateEvaluatedForTesting', 'txTransitionEdges']) {
+    assert.equal(
+      Object.hasOwn(transactionBuilder, legacyMint),
+      false,
+      `the test-only gate mint ${legacyMint} escaped the package root`,
+    );
+  }
 });

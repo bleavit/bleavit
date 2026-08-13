@@ -113,8 +113,8 @@ SERIES: dict[str, SeriesDefinition] = {
         _series("bleavit_reserve_probe_remote_dot_planck", "gauge", "Usable DOT balance of Bleavit's independently queried Asset Hub sovereign account."),
         _series("bleavit_reserve_probe_remote_required_dot_planck", "gauge", "Remote DOT required for fail and recovery envelopes plus refill margin."),
         _series("bleavit_reserve_probe_dot_refill_margin_planck", "gauge", "Configured positive operations refill margin in DOT plancks."),
-        _series("bleavit_chain_storage_map_entries", "gauge", "Counted map occupancy for a metadata-discovered prefix.", "pallet", "item"),
-        _series("bleavit_chain_storage_map_bound", "gauge", "Metadata constant bound paired with a counted map.", "pallet", "item"),
+        _series("bleavit_chain_storage_map_entries", "gauge", "Bounded storage occupancy resolved from finalized state.", "pallet", "item"),
+        _series("bleavit_chain_storage_map_bound", "gauge", "Metadata constant bound paired with bounded storage occupancy.", "pallet", "item"),
         _series("bleavit_chain_guardian_actions_total", "counter", "Finalized GuardianAction events."),
         _series("bleavit_chain_upgrade_authorized_total", "counter", "Finalized UpgradeAuthorized events."),
         _series("bleavit_chain_upgrade_applied_total", "counter", "Finalized UpgradeApplied events."),
@@ -140,7 +140,7 @@ COUNTED_MAPS = (
     ("Epoch", "Proposals", "Epoch", "MaxLiveProposals"),
     ("Epoch", "IntakeProposals", "Epoch", "MaxIntakeQueue"),
     ("Epoch", "Cohorts", "Epoch", "MaxNonTerminalCohorts"),
-    ("Market", "Markets", "Market", "MaxStoredMarkets"),
+    ("Market", "Markets", "Market", "MaxAllStoredMarkets"),
     ("ExecutionGuard", "Queue", "ExecutionGuard", "MaxLiveProposals"),
     ("Constitution", "Params", "Constitution", "MaxParams"),
 )
@@ -731,16 +731,57 @@ class ChainExporter:
         return complete
 
     def _storage_counts(self, block_hash: str) -> None:
+        market_total: int | None = None
         for pallet, item, bound_pallet, bound_name in COUNTED_MAPS:
             labels = {"pallet": pallet, "item": item}
+            entries = self._count_prefix(pallet, item, block_hash)
             self.store.set(
                 "bleavit_chain_storage_map_entries",
-                self._count_prefix(pallet, item, block_hash),
+                entries,
                 labels,
             )
             self.store.set(
                 "bleavit_chain_storage_map_bound",
                 self._constant(bound_pallet, bound_name, block_hash),
+                labels,
+            )
+            if (pallet, item) == ("Market", "Markets"):
+                market_total = entries
+
+        if market_total is None:
+            raise MonitoringError("Market.Markets is absent from bounded storage monitoring")
+
+        active_primary = self._storage("Market", "ActiveMarketCount", block_hash)
+        active_external = self._storage("Market", "ActiveExternalMarketCount", block_hash)
+        stored_external = self._storage("Market", "StoredExternalMarketCount", block_hash)
+        for name, value in (
+            ("ActiveMarketCount", active_primary),
+            ("ActiveExternalMarketCount", active_external),
+            ("StoredExternalMarketCount", stored_external),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise MonitoringError(f"Market.{name} is not a non-negative integer")
+
+        stored_primary = market_total - stored_external
+        if (
+            stored_primary < 0
+            or active_primary > stored_primary
+            or active_external > stored_external
+            or active_external % 2 != 0
+        ):
+            raise MonitoringError("Market storage partition counters are inconsistent")
+
+        for item, entries, bound_name in (
+            ("ActiveMarketCount", active_primary, "MaxLiveMarkets"),
+            ("ActiveExternalMarketCount", active_external, "MaxLiveExternalMarkets"),
+            ("StoredPrimaryMarketCount", stored_primary, "MaxStoredMarkets"),
+            ("StoredExternalMarketCount", stored_external, "MaxStoredExternalMarkets"),
+        ):
+            labels = {"pallet": "Market", "item": item}
+            self.store.set("bleavit_chain_storage_map_entries", entries, labels)
+            self.store.set(
+                "bleavit_chain_storage_map_bound",
+                self._constant("Market", bound_name, block_hash),
                 labels,
             )
 

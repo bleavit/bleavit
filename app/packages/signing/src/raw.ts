@@ -21,29 +21,20 @@
  * to the transport, and the standard to verify is raised as SQ-579. The hex path needs no
  * framing and works today.
  *
- * **`metadata-hash` is refused, and the reason is now verified rather than pending.**
- * This started as "FE-P6 is unresolved, so assume nothing". Reading the pinned
- * `frame-metadata-hash-extension` settled the load-bearing half without a device (SQ-594,
- * V-122): the digest comes from a **compile-time** `RUNTIME_METADATA_HASH` env var that
- * `substrate-wasm-builder` sets only when metadata-hash generation is enabled, and the
- * extension returns `Err(UnknownTransaction::CannotLookup)` for mode `Enabled` when it is
- * absent. Bleavit's runtime declares `CheckMetadataHash` in its `TxExtension` stack but is
- * built with `build_using_defaults()` and no `metadata-hash` feature — so **the chain
- * rejects every transaction signed with mode 1**, today.
+ * **`metadata-hash` is still refused, but the chain-side blocker is closed.** B21 enables
+ * `substrate-wasm-builder` metadata-hash generation in every release profile and the release
+ * extractor independently recomputes the RFC-78 digest. A mode-1 transaction therefore has
+ * a chain-valid implicit value instead of failing `CannotLookup`.
  *
- * That changes what this refusal means. It is not caution about an unknown device: granting
- * the capability would build transactions this chain is guaranteed to refuse, and the user
- * would meet the failure after signing on a hardware wallet. The runtime fix is milestone
- * B21; until it lands and this comment is re-derived against the rebuilt runtime, the
- * capability stays absent with a named reason (INV-FE-12).
- *
- * The narrower question that still needs hardware is whether a Ledger app falls back to
- * blind signing when a chain offers no digest — which is exactly the outcome the mechanism
- * exists to prevent, and so is not a fallback this client may rely on either way.
+ * That fact proves nothing about a particular device's display. The remaining FE-P6 probe
+ * must establish that a Ledger app verifies Bleavit's digest and renders the call rather
+ * than blind-signing it. Until that happens there is no grant function for the capability:
+ * chain support is necessary, but INV-FE-12 forbids presenting it as proof of wallet review.
  */
 
 import {
   RAW_PAYLOAD_DESCRIPTOR,
+  signingTarget,
   type SignedPayload,
   type SignerAdapter,
   type SigningRequest,
@@ -64,7 +55,7 @@ export interface RawPayloadTransport {
 }
 
 export interface RawPayloadPresentation {
-  /** Exactly `prep.scaleHex`. */
+  /** Exactly the immutable `window.authorization.scaleHex`. */
   readonly payloadHex: HexString;
   /** The account the payload was built for, so the device screen can be compared to it. */
   readonly account: string;
@@ -122,7 +113,8 @@ function validateSignature(raw: string): HexString {
  * Adapt a transport into a signer.
  *
  * The descriptor is shared with `adapters.ts` rather than rebuilt per transport: the
- * capability set is a property of the *raw-payload flow* — no metadata-hash until FE-P6 —
+ * capability set is a property of the *raw-payload flow* — no metadata-hash until FE-P6's
+ * remaining device/display probe —
  * not of whichever QR library or USB bridge is carrying the bytes. A transport that could
  * declare its own capabilities could declare that one.
  */
@@ -134,15 +126,16 @@ export function rawPayloadSigner(transport: RawPayloadTransport): SignerAdapter 
       label: transport.label,
     },
     async sign(request: SigningRequest): Promise<SignedPayload> {
+      const target = signingTarget(request);
       const signature = await transport.present({
-        payloadHex: request.prep.scaleHex,
-        account: request.account,
+        payloadHex: target.scaleHex,
+        account: target.account,
         atBlock: request.window.at.blockNumber,
         mortalityBlocks: RAW_EXTERNAL_ERA_BLOCKS,
       });
       return {
         signatureHex: validateSignature(signature),
-        signedBy: request.account,
+        signedBy: target.account,
         signerId: `${RAW_PAYLOAD_DESCRIPTOR.id}:${transport.id}`,
       };
     },

@@ -4628,10 +4628,10 @@ fn external_pair_uses_disjoint_capacity_and_never_touches_pol() {
 }
 
 #[test]
-fn external_capacity_is_exactly_128_books_and_never_borrows_primary_slots() {
-    // limit-coverage: MaxExternalBookPairs
+fn external_live_capacity_is_exactly_128_books_and_never_borrows_primary_slots() {
+    // limit-coverage: MaxLiveExternalMarkets
     new_test_ext().execute_with(|| {
-        for pair_index in 0_u64..u64::from(futarchy_primitives::bounds::MAX_EXTERNAL_BOOK_PAIRS) {
+        for pair_index in 0_u64..u64::from(futarchy_primitives::bounds::MAX_CLIENTS) {
             let question = QUESTION + pair_index * 3;
             let accept = question + 1;
             let reject = question + 2;
@@ -4658,8 +4658,7 @@ fn external_capacity_is_exactly_128_books_and_never_borrows_primary_slots() {
         assert_eq!(Markets::<Test>::count(), 128);
         assert!(LivePolCommitments::<Test>::get().is_empty());
 
-        let question =
-            QUESTION + u64::from(futarchy_primitives::bounds::MAX_EXTERNAL_BOOK_PAIRS) * 3;
+        let question = QUESTION + u64::from(futarchy_primitives::bounds::MAX_CLIENTS) * 3;
         let accept = question + 1;
         let reject = question + 2;
         assert_noop!(
@@ -4683,6 +4682,46 @@ fn external_capacity_is_exactly_128_books_and_never_borrows_primary_slots() {
         assert_eq!(Markets::<Test>::count(), 128);
         assert_ok!(Market::do_try_state());
         assert_ok!(ServiceLedger::do_try_state());
+    });
+}
+
+#[test]
+fn retained_external_pair_capacity_uses_the_archive_throughput_bound() {
+    // limit-coverage: MaxExternalBookPairs
+    new_test_ext().execute_with(|| {
+        // The constructor reads the counted-map counter before it writes any
+        // book or vault. Prime that single boundary key rather than materialize
+        // 7,872 deliberately incomplete archive fixtures in a unit test.
+        sp_io::storage::set(
+            &ExternalBookPairs::<Test>::counter_storage_final_key(),
+            &futarchy_primitives::bounds::MAX_EXTERNAL_BOOK_PAIRS.encode(),
+        );
+        assert_eq!(
+            ExternalBookPairs::<Test>::count(),
+            futarchy_primitives::bounds::MAX_EXTERNAL_BOOK_PAIRS
+        );
+
+        assert_noop!(
+            Market::create_external_pair(
+                signed(ALICE),
+                ExternalPairInput {
+                    question: QUESTION,
+                    client: EXTERNAL_CLIENT_ID,
+                    funder: ALICE,
+                    accept: EXTERNAL_ACCEPT,
+                    accept_account: TestMarketAccounts::book(EXTERNAL_ACCEPT),
+                    accept_fees: TestMarketAccounts::fees(EXTERNAL_ACCEPT),
+                    reject: EXTERNAL_REJECT,
+                    reject_account: TestMarketAccounts::book(EXTERNAL_REJECT),
+                    reject_fees: TestMarketAccounts::fees(EXTERNAL_REJECT),
+                    b: B,
+                },
+            ),
+            E::TooManyExternalMarkets
+        );
+        assert_eq!(Markets::<Test>::count(), 0);
+        assert_eq!(ActiveExternalMarketCount::<Test>::get(), 0);
+        assert_eq!(StoredExternalMarketCount::<Test>::get(), 0);
     });
 }
 
@@ -4824,7 +4863,9 @@ fn external_pair_creation_and_seed_refuse_wrong_domain_or_funder_atomically() {
             E::WrongFundingDomain
         );
 
-        let another_question = QUESTION + 20;
+        // Keep the question on the three-id service-family boundary so this
+        // case reaches the independent reserved-funder guard.
+        let another_question = QUESTION + 21;
         assert_noop!(
             Market::create_external_pair(
                 signed(ALICE),

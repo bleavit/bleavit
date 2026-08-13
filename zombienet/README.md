@@ -22,6 +22,7 @@ Run from the repository root:
 ```bash
 tools/env/fetch-binaries.sh
 tools/env/generate-relay-specs.sh
+tools/deploy/generate-client-chain-spec.sh
 cargo build --release -p bleavit-node --locked
 (cd keeper && cargo build --release --locked -p bleavit-keeper)
 zombienet/bin/zombienet -p native spawn zombienet/networks/bleavit-local.toml
@@ -39,7 +40,12 @@ pin, builds it with `--locked`, proves all three required local chain names are
 accepted, and emits valid JSON specs. It then
 reuses [`tools/deploy/generate-chain-specs.sh`](../tools/deploy/generate-chain-specs.sh)
 for the Bleavit plain spec and converts that same spec to raw form for
-Chopsticks.
+Chopsticks. The separate client generator supplies the N10 client-parachain
+spec declared by drills 10–13. Before a suite starts, the evidence runner
+resolves every `chain_spec_path` from that suite's topology and requires the
+file. Only the exact ordinary/migration Bleavit spec names bind to the release
+primary; the client harness and fast-timing specs are explicit separate-runtime
+classes, and an unknown `bleavit-*` name fails closed.
 
 [`genesis/drill-overrides.json`](genesis/drill-overrides.json) is a
 chain-spec-builder patch, with its owning citations here because JSON has no

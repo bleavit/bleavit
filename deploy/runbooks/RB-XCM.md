@@ -48,8 +48,11 @@ requires an ownership-safe disposition and an auditable recovery record
    Preserve the source and destination execution traces when available.
 2. Inspect `Welfare::XcmTraffic(epoch, day)` for its real `Accepted`,
    `SendFailed`, and `ProbeTimeout` counters. `HealthTrackingRouter` records only
-   local validation/delivery; an accepted send is not evidence of remote
-   execution success ([09 §6.4](../../docs/architecture/09-execution-upgrades-and-rollout.md)).
+   runtime-authored protocol traffic (currently fixed coretime renewal); public,
+   inbound, and hosted-client sends use the bare router and cannot improve these
+   decision-grade counters. Even for protocol traffic, an accepted send records
+   local validation/delivery and is not evidence of remote execution success
+   ([09 §6.4](../../docs/architecture/09-execution-upgrades-and-rollout.md)).
 3. Inspect `Oracle::ReserveHealth` and the `ReserveProbeSent`,
    `ReserveProbeResult`, `ReserveUnhealthy`, and `ReserveRecovered` events. Confirm
    whether `XcmProbeDispatcher` sent the Asset Hub program and whether

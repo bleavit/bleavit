@@ -1571,8 +1571,7 @@ class TryStateLegTests(unittest.TestCase):
 
 
 class SuiteChainSpecBindingTests(unittest.TestCase):
-    """MAX-S2. The artifact binding must cover every spec the selected suites
-    actually boot, not a hardcoded pair."""
+    """MAX-S2. Primary binding and separate-runtime classification are exact."""
 
     def suites(self, *identifiers: str) -> list[object]:
         root = Path(RUNNER.__file__).resolve().parents[2]
@@ -1594,26 +1593,34 @@ class SuiteChainSpecBindingTests(unittest.TestCase):
 
         self.assertIn("bleavit-drill-migration.json", [path.name for path in paths])
 
-    def test_compressed_timing_drills_bind_their_own_chain_specs(self) -> None:
+    def test_compressed_timing_drills_are_not_bound_to_the_primary_wasm(self) -> None:
         paths = RUNNER.suite_chain_specs(
             self.root(), self.suites("09-three-unattended-epochs")
         )
 
-        self.assertTrue(
-            any(path.name.startswith("bleavit-drill-fast") for path in paths), paths
-        )
+        self.assertEqual(paths, [])
 
-    def test_every_release_and_g1_drill_names_a_bleavit_spec(self) -> None:
+    def test_every_release_drill_names_a_primary_bleavit_spec(self) -> None:
         # Fail-closed: a suite whose topology names no Bleavit spec would
         # otherwise run unbound to the release runtime and say nothing.
         root = self.root()
         drills = [
-            suite for suite in RUNNER.load_manifest(root) if suite.kind == "zombienet"
+            suite
+            for suite in RUNNER.load_manifest(root)
+            if suite.kind == "zombienet" and suite.tier == "release"
         ]
         self.assertTrue(drills)
         for suite in drills:
             with self.subTest(suite=suite.identifier):
                 self.assertTrue(RUNNER.suite_chain_specs(root, [suite]))
+
+    def test_client_para_is_declared_but_not_bound_to_the_primary_wasm(self) -> None:
+        suite = self.suites("10-client-integration")[0]
+        declared = RUNNER.suite_declared_chain_specs(self.root(), suite)
+        bound = RUNNER.suite_chain_specs(self.root(), [suite])
+
+        self.assertIn("bleavit-client-local.json", [path.name for path in declared])
+        self.assertEqual([path.name for path in bound], ["bleavit-drill.json"])
 
     def test_relay_and_system_parachain_specs_are_not_bound(self) -> None:
         # They come from the pinned Paseo tree and carry a different `:code`;
@@ -1625,7 +1632,7 @@ class SuiteChainSpecBindingTests(unittest.TestCase):
 
         self.assertTrue(paths)
         for path in paths:
-            self.assertTrue(path.name.startswith("bleavit-"), path)
+            self.assertIn(path.name, RUNNER.PRIMARY_RUNTIME_SPEC_NAMES)
 
     def test_every_committed_topology_keeps_its_specs_in_the_generated_directory(
         self,
@@ -1640,9 +1647,76 @@ class SuiteChainSpecBindingTests(unittest.TestCase):
             suite for suite in RUNNER.load_manifest(root) if suite.kind == "zombienet"
         ]
         for suite in drills:
-            for path in RUNNER.suite_chain_specs(root, [suite]):
+            for path in RUNNER.suite_declared_chain_specs(root, suite):
                 with self.subTest(suite=suite.identifier, spec=path.name):
                     self.assertEqual(path.parent, generated)
+
+    def test_missing_declared_client_spec_fails_prerequisites(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            drill = root / "zombienet/drills/client.zndsl"
+            topology = root / "zombienet/networks/client.toml"
+            generated = root / "zombienet/specs/out"
+            drill.parent.mkdir(parents=True)
+            topology.parent.mkdir(parents=True)
+            generated.mkdir(parents=True)
+            drill.write_text(
+                "Network: zombienet/networks/client.toml\n", encoding="utf-8"
+            )
+            topology.write_text(
+                'chain_spec_path = "zombienet/specs/out/paseo-local.json"\n'
+                'chain_spec_path = "zombienet/specs/out/bleavit-drill.json"\n'
+                'chain_spec_path = "zombienet/specs/out/bleavit-client-local.json"\n',
+                encoding="utf-8",
+            )
+            for name in (
+                "paseo-local.json",
+                "bleavit-drill.json",
+                "bleavit-drill-raw.json",
+            ):
+                (generated / name).write_text("{}\n", encoding="utf-8")
+
+            executables = [
+                root / "zombienet/bin/zombienet",
+                root / "zombienet/bin/polkadot",
+                root / "zombienet/bin/polkadot-prepare-worker",
+                root / "zombienet/bin/polkadot-execute-worker",
+                root / "zombienet/bin/polkadot-parachain",
+                root / "target/release/bleavit-node",
+                root / "keeper/target/release/bleavit-keeper",
+            ]
+            for executable in executables:
+                executable.parent.mkdir(parents=True, exist_ok=True)
+                executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+                executable.chmod(0o755)
+
+            suite = RUNNER.Suite(
+                identifier="client",
+                kind="zombienet",
+                path=Path("zombienet/drills/client.zndsl"),
+                tier="release",
+                gated_on=(),
+                timeout_seconds=60,
+                spec="15 §5",
+            )
+            with self.assertRaises(RUNNER.EvidenceError) as caught:
+                RUNNER.validate_prerequisites(
+                    root,
+                    [suite],
+                    root / "zombienet/bin/zombienet",
+                    root / "target/release/bleavit-node",
+                )
+            self.assertIn("bleavit-client-local.json", str(caught.exception))
+
+            (generated / "bleavit-client-local.json").write_text(
+                "{}\n", encoding="utf-8"
+            )
+            RUNNER.validate_prerequisites(
+                root,
+                [suite],
+                root / "zombienet/bin/zombienet",
+                root / "target/release/bleavit-node",
+            )
 
 
 class DeclaredChainSpecPathTests(unittest.TestCase):
@@ -1655,7 +1729,7 @@ class DeclaredChainSpecPathTests(unittest.TestCase):
         """A minimal tree whose drill boots `declared`.
 
         Returns the root, the release `runtime.wasm`, and the suite. The
-        generated directory always holds a *matching* `bleavit-drill-alt.json`
+        generated directory always holds a *matching* `bleavit-drill-migration.json`
         decoy, so a binding that reduces the declaration to its basename and
         re-roots it under `zombienet/specs/out` passes while the file the drill
         actually boots is never read. That is the exact shape of the defect.
@@ -1682,11 +1756,14 @@ class DeclaredChainSpecPathTests(unittest.TestCase):
             encoding="utf-8",
         )
         # The decoy the basename reduction would have found instead.
-        spec(generated / "bleavit-drill-alt.json", code if decoy_matches else other)
+        spec(
+            generated / "bleavit-drill-migration.json",
+            code if decoy_matches else other,
+        )
         # The file the drill really boots: a runtime that is *not* the release.
         elsewhere = root / "zombienet" / "specs" / "custom"
         elsewhere.mkdir(parents=True)
-        spec(elsewhere / "bleavit-drill-alt.json", other)
+        spec(elsewhere / "bleavit-drill-migration.json", other)
 
         topology = root / "zombienet" / "networks" / "alt.toml"
         topology.parent.mkdir(parents=True)
@@ -1710,12 +1787,21 @@ class DeclaredChainSpecPathTests(unittest.TestCase):
         return root, wasm, suite
 
     def test_the_declared_path_is_returned_not_a_re_rooted_basename(self) -> None:
-        root, _, suite = self.build_root("zombienet/specs/custom/bleavit-drill-alt.json")
+        root, _, suite = self.build_root(
+            "zombienet/specs/custom/bleavit-drill-migration.json"
+        )
 
         paths = RUNNER.suite_chain_specs(root, [suite])
 
         self.assertEqual(
-            paths, [(root / "zombienet" / "specs" / "custom" / "bleavit-drill-alt.json")]
+            paths,
+            [
+                root
+                / "zombienet"
+                / "specs"
+                / "custom"
+                / "bleavit-drill-migration.json"
+            ],
         )
 
     def test_binding_hashes_the_file_the_topology_names(self) -> None:
@@ -1723,19 +1809,19 @@ class DeclaredChainSpecPathTests(unittest.TestCase):
         # in `specs/out` and returned the release hash, so a drill booting an
         # unrelated runtime still produced release evidence.
         root, wasm, suite = self.build_root(
-            "zombienet/specs/custom/bleavit-drill-alt.json"
+            "zombienet/specs/custom/bleavit-drill-migration.json"
         )
 
         with self.assertRaises(RUNNER.EvidenceError) as caught:
             RUNNER.validate_artifact_binding(root, wasm, [suite])
 
         message = str(caught.exception)
-        self.assertIn("zombienet/specs/custom/bleavit-drill-alt.json", message)
+        self.assertIn("zombienet/specs/custom/bleavit-drill-migration.json", message)
         self.assertIn("does not match", message)
 
     def test_a_matching_declared_path_binds_cleanly(self) -> None:
         root, wasm, suite = self.build_root(
-            "zombienet/specs/out/bleavit-drill-alt.json", decoy_matches=True
+            "zombienet/specs/out/bleavit-drill-migration.json", decoy_matches=True
         )
 
         self.assertEqual(
@@ -1744,7 +1830,7 @@ class DeclaredChainSpecPathTests(unittest.TestCase):
         )
 
     def test_a_spec_path_escaping_the_repository_is_refused(self) -> None:
-        root, _, suite = self.build_root("../outside/bleavit-drill-alt.json")
+        root, _, suite = self.build_root("../outside/bleavit-drill-migration.json")
 
         with self.assertRaises(RUNNER.EvidenceError) as caught:
             RUNNER.suite_chain_specs(root, [suite])
@@ -1752,12 +1838,30 @@ class DeclaredChainSpecPathTests(unittest.TestCase):
         self.assertIn("resolves outside the repository", str(caught.exception))
 
     def test_an_absolute_spec_path_is_refused(self) -> None:
-        root, _, suite = self.build_root("/etc/bleavit-drill-alt.json")
+        root, _, suite = self.build_root("/etc/bleavit-drill-migration.json")
 
         with self.assertRaises(RUNNER.EvidenceError) as caught:
             RUNNER.suite_chain_specs(root, [suite])
 
         self.assertIn("resolves outside the repository", str(caught.exception))
+
+    def test_unknown_bleavit_runtime_spec_is_refused(self) -> None:
+        root, _, suite = self.build_root("zombienet/specs/out/bleavit-unknown.json")
+
+        with self.assertRaises(RUNNER.EvidenceError) as caught:
+            RUNNER.suite_chain_specs(root, [suite])
+
+        self.assertIn("unclassified Bleavit chain spec", str(caught.exception))
+
+    def test_release_suite_with_only_the_client_runtime_is_refused(self) -> None:
+        root, _, suite = self.build_root(
+            "zombienet/specs/out/bleavit-client-local.json"
+        )
+
+        with self.assertRaises(RUNNER.EvidenceError) as caught:
+            RUNNER.suite_chain_specs(root, [suite])
+
+        self.assertIn("names no primary Bleavit chain spec", str(caught.exception))
 
 
 if __name__ == "__main__":

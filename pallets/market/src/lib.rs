@@ -38,6 +38,15 @@ pub trait BenchmarkHelper<AccountId> {
     fn external_funder() -> AccountId;
     /// Seat the governed live external-book envelope at its hard benchmark max.
     fn prime_external_capacity() {}
+    /// Retain one terminal service vault behind a swept external pair. This is
+    /// the heaviest reachable archive interleaving for market `try_state`: the
+    /// book scan must inspect every paying position instead of short-circuiting
+    /// on an already archived vault.
+    fn prime_external_terminal_vault(
+        _question: futarchy_primitives::QuestionId,
+        _vault: pallet_conditional_ledger::core_ledger::VaultInfo,
+    ) {
+    }
     fn prime_keeper_rebate() {}
     fn assert_keeper_rebate_paid(_: futarchy_primitives::keeper::CrankClass) {}
 
@@ -790,9 +799,10 @@ pub mod pallet {
     #[pallet::storage]
     pub type ActiveExternalMarketCount<T: Config> = StorageValue<_, u32, ValueQuery>;
 
-    /// External-domain rows in [`Markets`], live or retained. The hard 128-row
-    /// partition applies storage backpressure until reap rather than borrowing
-    /// the protocol archive budget.
+    /// External-domain rows in [`Markets`], live or retained. The retained
+    /// partition is derived from fastest lawful service throughput across the
+    /// archive horizon and applies backpressure without borrowing the protocol
+    /// archive budget.
     #[pallet::storage]
     pub type StoredExternalMarketCount<T: Config> = StorageValue<_, u32, ValueQuery>;
 
@@ -3177,34 +3187,27 @@ pub mod pallet {
             ensure!(caller == input.client, Error::<T>::BadOrigin);
             Self::ensure_creation_open()?;
             ensure!(input.b > 0, Error::<T>::TryStateViolation);
+            let expected_accept = input
+                .question
+                .checked_add(1)
+                .ok_or(Error::<T>::ArithmeticOverflow)?;
+            let expected_reject = input
+                .question
+                .checked_add(2)
+                .ok_or(Error::<T>::ArithmeticOverflow)?;
             ensure!(
                 input.question >= kernel::SERVICE_ID_BASE
-                    && input.accept >= kernel::SERVICE_ID_BASE
-                    && input.reject >= kernel::SERVICE_ID_BASE
-                    && input.accept != input.reject
-                    && input.question != input.accept
-                    && input.question != input.reject,
+                    && input
+                        .question
+                        .checked_sub(kernel::SERVICE_ID_BASE)
+                        .is_some_and(|offset| offset % 3 == 0)
+                    && input.accept == expected_accept
+                    && input.reject == expected_reject,
                 Error::<T>::InvalidIdBand
             );
             ensure!(
                 !ExternalBookPairs::<T>::contains_key(input.question),
                 Error::<T>::DuplicateExternalQuestion
-            );
-            // Question and market ids share the service allocator's u64 band.
-            // Reusing any retained pair id would defeat the id-band firewall:
-            // a mistyped id could then name a valid object in the other role.
-            // The scan is bounded by `MAX_CLIENTS = 64`.
-            ensure!(
-                ExternalBookPairs::<T>::iter().all(|(question, pair)| {
-                    [question, pair.accept, pair.reject]
-                        .into_iter()
-                        .all(|existing| {
-                            existing != input.question
-                                && existing != input.accept
-                                && existing != input.reject
-                        })
-                }),
-                Error::<T>::InvalidIdBand
             );
             ensure!(
                 ExternalBookPairs::<T>::count() < bounds::MAX_EXTERNAL_BOOK_PAIRS,
@@ -3927,7 +3930,8 @@ pub mod pallet {
             // Terminal books remain directly readable until archive reap, but no
             // decision can consume their accumulator state. Drop the auxiliary
             // rings at the latch boundary so the always-served history budget is
-            // governed by the 196 active-book envelope, not 2,240 retained rows.
+            // governed by the applicable live-book envelope, not the shared
+            // 17,984-row retained map.
             TwapCheckpoints::<T>::remove(id);
             DecisionWindows::<T>::remove(id);
             DecisionWindowOwners::<T>::remove(id);
@@ -4347,6 +4351,11 @@ pub mod pallet {
             for (question, pair) in ExternalBookPairs::<T>::iter() {
                 ensure!(
                     question >= kernel::SERVICE_ID_BASE
+                        && question
+                            .checked_sub(kernel::SERVICE_ID_BASE)
+                            .is_some_and(|offset| offset % 3 == 0)
+                        && pair.accept == question.saturating_add(1)
+                        && pair.reject == question.saturating_add(2)
                         && pair.accept >= kernel::SERVICE_ID_BASE
                         && pair.reject >= kernel::SERVICE_ID_BASE
                         && pair.accept != pair.reject

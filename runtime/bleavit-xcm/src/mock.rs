@@ -29,11 +29,15 @@ use sp_runtime::{traits::IdentityLookup, AccountId32, BuildStorage};
 use staging_xcm::latest::{prelude::*, SendError, SendResult, XcmHash};
 use staging_xcm::prelude::XcmVersion;
 use staging_xcm_builder::{
-    EnsureXcmOrigin, FixedWeightBounds, FrameTransactionalProcessor, SignedAccountId32AsNative,
-    SignedToAccountId32, SovereignSignedViaLocation, WithUniqueTopic,
+    AllowUnpaidExecutionFrom, EnsureXcmOrigin, FixedWeightBounds, FrameTransactionalProcessor,
+    SignedAccountId32AsNative, SignedToAccountId32, SovereignSignedViaLocation, TakeWeightCredit,
+    WithUniqueTopic,
 };
-use staging_xcm_executor::{traits::OnResponse, XcmExecutor};
-use std::{cell::RefCell, collections::BTreeMap};
+use staging_xcm_executor::{
+    traits::{OnResponse, ShouldExecute},
+    XcmExecutor,
+};
+use std::{cell::RefCell, collections::BTreeMap, marker::PhantomData};
 
 pub type AccountId = AccountId32;
 type Block = frame_system::mocking::MockBlock<Test>;
@@ -542,7 +546,7 @@ pub type TestProbeDispatcher = XcmProbeDispatcher<
     TestHealthSink,
 >;
 pub type TestRenewalDispatcher = XcmRenewalDispatcher<
-    XcmExecutor<XcmConfig>,
+    XcmExecutor<XcmConfig<TakeWeightCredit>>,
     RuntimeCall,
     TreasuryLocation,
     CoretimeFeeBudget,
@@ -559,8 +563,8 @@ pub type LocalOriginConverter = (
     SignedAccountId32AsNative<AnyNetwork, RuntimeOrigin>,
 );
 
-pub struct XcmConfig;
-impl staging_xcm_executor::Config for XcmConfig {
+pub struct XcmConfig<BarrierType = TestBarrier>(PhantomData<BarrierType>);
+impl<BarrierType: ShouldExecute> staging_xcm_executor::Config for XcmConfig<BarrierType> {
     type RuntimeCall = RuntimeCall;
     type XcmSender = TestRouter;
     type XcmEventEmitter = PalletXcm;
@@ -569,7 +573,7 @@ impl staging_xcm_executor::Config for XcmConfig {
     type IsReserve = crate::assets::BleavitReserves;
     type IsTeleporter = ();
     type UniversalLocation = UniversalLocation;
-    type Barrier = TestBarrier;
+    type Barrier = BarrierType;
     type Weigher = TestWeigher;
     type Trader = GovernedWeightTrader<TestRates, ()>;
     type ResponseHandler = TestResponseHandler;
@@ -591,6 +595,11 @@ impl staging_xcm_executor::Config for XcmConfig {
     type HrmpChannelClosingHandler = ();
     type XcmRecorder = PalletXcm;
 }
+
+/// Asset-Hub-side emulator for the locally-authored reserve-probe program.
+/// Bleavit's inbound barrier intentionally rejects `SetAppendix`; this executor
+/// models the remote destination whose barrier owns that program instead.
+pub type RemoteProgramExecutor = XcmExecutor<XcmConfig<AllowUnpaidExecutionFrom<Everything>>>;
 
 pub type LocalOriginToLocation = SignedToAccountId32<RuntimeOrigin, AccountId, AnyNetwork>;
 

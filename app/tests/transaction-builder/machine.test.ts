@@ -26,10 +26,10 @@ import {
   TX_TERMINAL_STATES,
   declaredCoverageIds,
   evaluate,
-  gate,
+  refreshAndGate,
   reduce,
-  txTransitionEdges,
 } from '@bleavit/transaction-builder';
+import { txTransitionEdges } from '@bleavit/transaction-builder/testing';
 import type {
   ClauseId,
   DeclarableRowId,
@@ -43,10 +43,12 @@ import type {
 } from '@bleavit/transaction-builder';
 import type { CompatClassification } from '@bleavit/descriptors';
 import type { FinalizedBlockRef } from '@bleavit/chain-client';
-import { INJECTED_DESCRIPTOR, RAW_PAYLOAD_DESCRIPTOR, SignerCapabilityError, SignerRegistry, requireCapability } from '@bleavit/signing';
+import { INJECTED_DESCRIPTOR, RAW_PAYLOAD_DESCRIPTOR, SigningBindingError, SignerCapabilityError, SignerRegistry, requireCapability } from '@bleavit/signing';
 import { MOCK_SIGNER_DESCRIPTOR, MockSigner } from '@bleavit/signing/testing';
-// `finalize` is test-only on purpose — see packages/chain-client/src/testing.ts.
+// A unit fixture still needs one branded read for the standalone precondition evaluator.
+// Production packages cannot import this quarantined construction surface.
 import { finalize } from '@bleavit/chain-client/testing';
+import { gateConnectionForTest, gateForTest as gate } from './gate-fixture.ts';
 
 /** The chain identity every pin in this file is read against (F18). Named, not inlined:
  *  the field exists so two reads can agree on it, and copies agree until one is edited. */
@@ -74,6 +76,7 @@ const PROVEN: CompatClassification = { mode: 'full', specVersion: 2, disabled: [
 // is empty. An adversarial review found `gate(PREP, PIN, BUILT_FOR, [])` returning `proceed`.
 const PREP: TxPreparation = {
   scaleHex: '0x0403aabbcc',
+  signingAccount: '5Grw',
   builtFor: BUILT_FOR,
   preparedAt: { chain: TEST_CHAIN, blockHash: `0x${'22'.repeat(32)}`, blockNumber: 99 },
   requires: ['P-1'],
@@ -113,11 +116,47 @@ function windowOf(session: TxSession): GatePassed {
   return signingWindow;
 }
 
+const BASE_GATE = await gate(PREP, PIN, BUILT_FOR, PROVEN, covering());
+assert.equal(BASE_GATE.kind, 'proceed', 'the base gate fixture no longer opens');
+
+test('refreshAndGate owns a fresh pin/runtime observation and fails closed without its evaluator', async () => {
+  const connection = await gateConnectionForTest(PIN);
+  try {
+    const outcome = await refreshAndGate(PREP, connection);
+    assert.equal(outcome.kind, 'blocked');
+    assert.ok(outcome.kind === 'blocked');
+    assert.equal(outcome.code, 'FE-TX-004');
+    assert.deepEqual(outcome.at, PIN);
+    assert.deepEqual(outcome.failed, []);
+    assert.match(outcome.detail, /observed finalized spec_version 2/);
+    assert.match(outcome.detail, /does not yet ship the closed, metadata-derived/);
+    assert.match(outcome.detail, /Caller-supplied callbacks or derived values cannot substitute/);
+  } finally {
+    connection.close();
+  }
+});
+
+test('refreshAndGate fails closed when the nominal connection has no finalized runtime', async () => {
+  const connection = await gateConnectionForTest(PIN, null);
+  try {
+    const outcome = await refreshAndGate(PREP, connection);
+    assert.equal(outcome.kind, 'blocked');
+    assert.ok(outcome.kind === 'blocked');
+    assert.equal(outcome.code, 'FE-TX-004');
+    assert.deepEqual(outcome.at, PIN);
+    assert.deepEqual(outcome.failed, []);
+    assert.match(outcome.detail, /has not established a finalized runtime/);
+    assert.doesNotMatch(outcome.detail, /precondition passed/i);
+  } finally {
+    connection.close();
+  }
+});
+
 /** Drive a session to AwaitingSignature the only way the machine allows. */
-function toAwaitingSignature(results: readonly PreconditionResult[] = covering()): TxSession {
+function toAwaitingSignature(): TxSession {
   let s = reduce(INITIAL_TX_SESSION, { type: 'prepared', prep: PREP });
   s = reduce(s, { type: 'submit-requested' });
-  return reduce(s, { type: 'gate-result', outcome: gate(PREP, PIN, BUILT_FOR, PROVEN, results) });
+  return reduce(s, { type: 'gate-result', outcome: BASE_GATE });
 }
 
 test('the reducer reaches exactly the states 11 §11.3 writes out', () => {
@@ -133,14 +172,14 @@ test('the reducer reaches exactly the states 11 §11.3 writes out', () => {
   assert.ok(declared.size >= 10, `parsed only ${declared.size} states — the parser has stopped matching`);
 });
 
-test('AwaitingSignature is reachable ONLY from Refreshing, and only with a passed gate', () => {
+test('AwaitingSignature is reachable ONLY from Refreshing, and only with a passed gate', async () => {
   // This is 11 §11.4 rule 1 as a property of the state space rather than a review note.
   const inbound = txTransitionEdges().filter(([, to]) => to === 'AwaitingSignature');
   assert.deepEqual(inbound, [['Refreshing', 'AwaitingSignature']]);
 
   // And from Refreshing, only a `proceed` outcome opens it.
   const refreshing: TxSession = { ...INITIAL_TX_SESSION, state: 'Refreshing', prep: PREP };
-  const blocked = gate(PREP, PIN, BUILT_FOR, PROVEN, [failRow(firstOf('P-1'))]);
+  const blocked = await gate(PREP, PIN, BUILT_FOR, PROVEN, [failRow(firstOf('P-1'))]);
   assert.equal(reduce(refreshing, { type: 'gate-result', outcome: blocked }).state, 'Blocked');
   const bypasses = [
     { type: 'signed' },
@@ -177,14 +216,14 @@ const READ_ONLY: CompatClassification = {
   proven: [],
 };
 
-test('an unproven runtime blocks the gate, in every mode 10 §3.2 does not enable signing for', () => {
+test('an unproven runtime blocks the gate, in every mode 10 §3.2 does not enable signing for', async () => {
   // The whole lattice, driven rather than sampled: `full` is the one row of §3.2's table whose
   // signing column reads *enabled*, and every other outcome — including having no verdict at
   // all — must refuse. A test naming only `restricted` would pass on a gate that admitted
   // `read-only-incompatible`, which is the mode where the client cannot decode the chain.
   const refusing: readonly (CompatClassification | undefined)[] = [RESTRICTED, READ_ONLY, undefined];
   for (const compat of refusing) {
-    const outcome = gate(PREP, PIN, BUILT_FOR, compat, covering());
+    const outcome = await gate(PREP, PIN, BUILT_FOR, compat, covering());
     assert.equal(outcome.kind, 'blocked', `${compat?.mode ?? 'unestablished'} reached a signer`);
     assert.ok(outcome.kind === 'blocked');
     // Not a failed row: nothing about the preconditions is wrong, and padding the diff view with
@@ -193,32 +232,32 @@ test('an unproven runtime blocks the gate, in every mode 10 §3.2 does not enabl
     assert.match(outcome.detail, /signing is unavailable|nothing may be signed/);
   }
   // …and the mode that does enable it still passes, so the refusal is not vacuous.
-  assert.equal(gate(PREP, PIN, BUILT_FOR, PROVEN, covering()).kind, 'proceed');
+  assert.equal((await gate(PREP, PIN, BUILT_FOR, PROVEN, covering())).kind, 'proceed');
 });
 
-test('the compat refusal is checked before FE-TX-007, because it is the root cause', () => {
+test('the compat refusal is checked before FE-TX-007, because it is the root cause', async () => {
   // Both are true here: the runtime moved under the preparation *and* the session may not sign.
   // A user told only that these bytes are stale would rebuild, and find the new preparation
   // refused for the reason nobody mentioned.
   const moved: TxPreparation['builtFor'] = { specVersion: 9, metadataHash: BUILT_FOR.metadataHash };
-  const outcome = gate(PREP, PIN, moved, RESTRICTED, covering());
+  const outcome = await gate(PREP, PIN, moved, RESTRICTED, covering());
   assert.equal(outcome.kind, 'blocked');
   assert.ok(outcome.kind === 'blocked');
   assert.match(outcome.detail, /signing is unavailable/);
   // …and with a proven runtime the same call reports the staleness it really has.
-  const stale = gate(PREP, PIN, moved, PROVEN, covering());
+  const stale = await gate(PREP, PIN, moved, PROVEN, covering());
   assert.ok(stale.kind === 'blocked');
   assert.equal(stale.code, 'FE-TX-007');
 });
 
-test('no compat mode but `full` can reach AwaitingSignature through the reducer', () => {
+test('no compat mode but `full` can reach AwaitingSignature through the reducer', async () => {
   // The machine half of the same property: `AwaitingSignature` has one inbound edge and it
   // needs a `GatePassed`, so a gate that refuses leaves the session in `Blocked` — there is no
   // second path for a screen to take.
   for (const compat of [RESTRICTED, READ_ONLY, undefined]) {
     let s = reduce(INITIAL_TX_SESSION, { type: 'prepared', prep: PREP });
     s = reduce(s, { type: 'submit-requested' });
-    s = reduce(s, { type: 'gate-result', outcome: gate(PREP, PIN, BUILT_FOR, compat, covering()) });
+    s = reduce(s, { type: 'gate-result', outcome: await gate(PREP, PIN, BUILT_FOR, compat, covering()) });
     assert.equal(s.state, 'Blocked', `${compat?.mode ?? 'unestablished'} opened a signer`);
     assert.equal(s.signingWindow, undefined);
   }
@@ -226,24 +265,24 @@ test('no compat mode but `full` can reach AwaitingSignature through the reducer'
 
 /* ------------------------------------------------ the gate cannot pass by shrinking */
 
-test('a gate over zero reads is BLOCKED — it certifies nothing (adversarial review, 2026-08-04)', () => {
+test('a gate over zero reads is BLOCKED — it certifies nothing (adversarial review, 2026-08-04)', async () => {
   // The defect this replaces: every check in `gate` is a filter over `results`, and every
   // filter over an empty array is empty — so `gate(PREP, PIN, BUILT_FOR, [])` returned
   // `proceed` and the reducer reached AwaitingSignature having read nothing. "Every
   // precondition holds" and "nobody read one" were the same value.
-  const outcome = gate(PREP, PIN, BUILT_FOR, PROVEN, []);
+  const outcome = await gate(PREP, PIN, BUILT_FOR, PROVEN, []);
   assert.equal(outcome.kind, 'blocked');
   assert.match(outcome.detail, /never read at this block/);
 });
 
-test('a declared row with no result blocks, naming the row', () => {
+test('a declared row with no result blocks, naming the row', async () => {
   const twoRows: TxPreparation = { ...PREP, requires: ['P-1', 'P-3'] };
-  const outcome = gate(twoRows, PIN, BUILT_FOR, PROVEN, [...covering('P-1')]);
+  const outcome = await gate(twoRows, PIN, BUILT_FOR, PROVEN, [...covering('P-1')]);
   assert.equal(outcome.kind, 'blocked');
   assert.match(outcome.detail, /P-3/);
 });
 
-test('one result cannot cover a multi-clause row (Codex #3730437892)', () => {
+test('one result cannot cover a multi-clause row (Codex #3730437892)', async () => {
   // The defect: every clause of a row carried the **row's** id, and coverage compared row
   // ids — so a single passing read satisfied the whole row. On `O-1` the registry check
   // alone minted a signing window for a 100,000-USDC stake whose balance, whose stake amount
@@ -253,16 +292,16 @@ test('one result cannot cover a multi-clause row (Codex #3730437892)', () => {
   assert.ok(obligations.length > 1, 'O-1 is no longer multi-clause — this test would be vacuous');
   for (let i = 0; i < obligations.length; i += 1) {
     const partial = obligations.filter((_, index) => index !== i).map(okRow);
-    const outcome = gate(oneRow, PIN, BUILT_FOR, PROVEN, partial);
+    const outcome = await gate(oneRow, PIN, BUILT_FOR, PROVEN, partial);
     assert.equal(outcome.kind, 'blocked', `O-1 passed without ${obligations[i]}`);
     assert.match(outcome.detail, /never read at this block/);
   }
   // And the complete set opens, so the refusal above is coverage and not a gate that never
   // opens for anything.
-  assert.equal(gate(oneRow, PIN, BUILT_FOR, PROVEN, obligations.map(okRow)).kind, 'proceed');
+  assert.equal((await gate(oneRow, PIN, BUILT_FOR, PROVEN, obligations.map(okRow))).kind, 'proceed');
 });
 
-test('the fee asset selects which obligations a row has, and it comes from the preparation', () => {
+test('the fee asset selects which obligations a row has, and it comes from the preparation', async () => {
   // Fee headroom is a `System.Account` read in VIT and a `ForeignAssets` one in USDC, so the
   // obligation set differs by currency. A gate that guessed would demand the wrong read or
   // drop the clause entirely — which is a row that lost a precondition, reported as a row
@@ -271,14 +310,14 @@ test('the fee asset selects which obligations a row has, and it comes from the p
   const vit = declaredCoverageIds('O-1', 'VIT');
   assert.equal(usdc.length, vit.length);
   const inVit: TxPreparation = { ...PREP, requires: ['O-1'], feeAsset: 'VIT' };
-  assert.equal(gate(inVit, PIN, BUILT_FOR, PROVEN, vit.map(okRow)).kind, 'proceed');
+  assert.equal((await gate(inVit, PIN, BUILT_FOR, PROVEN, vit.map(okRow))).kind, 'proceed');
   // The clause ids agree (they share a `key`), so what differs is the surface behind them —
   // asserted in `rows.test.ts`. What matters here is that the gate reads the preparation's
   // own answer rather than assuming one.
   assert.deepEqual([...usdc], [...vit]);
 });
 
-test('a malformed declaration blocks rather than throwing on the signing path', () => {
+test('a malformed declaration blocks rather than throwing on the signing path', async () => {
   // `rowsFor` throws for an unknown row, and this runs from a click handler on the only edge
   // to a signer: a thrown error there is an unhandled rejection that leaves the control in
   // whatever state it was in. Fail closed, and say what happened.
@@ -286,28 +325,28 @@ test('a malformed declaration blocks rather than throwing on the signing path', 
   // exactly who supplies a row id no table has, and the type system cannot reach them.
   const untypedRow = (value: string): DeclarableRowId => value as DeclarableRowId;
   const bogus: TxPreparation = { ...PREP, requires: [untypedRow('P-99')] };
-  const outcome = gate(bogus, PIN, BUILT_FOR, PROVEN, covering());
+  const outcome = await gate(bogus, PIN, BUILT_FOR, PROVEN, covering());
   assert.equal(outcome.kind, 'blocked');
   assert.match(outcome.detail, /could not be expanded into the reads they require/);
 });
 
-test('a gate proof names the preparation it was minted for (Codex #3730437885)', () => {
+test('a gate proof names the preparation it was minted for (Codex #3730437885)', async () => {
   // `GatePassed` used to carry only a block and a result set, so it proved that *some* call
   // to `gate()` succeeded and nothing about which bytes. An authentic window could then be
   // paired with a different preparation and authorise it.
-  const outcome = gate(PREP, PIN, BUILT_FOR, PROVEN, covering());
+  const outcome = await gate(PREP, PIN, BUILT_FOR, PROVEN, covering());
   assert.equal(outcome.kind, 'proceed');
   assert.ok(outcome.kind === 'proceed');
   assert.equal(outcome.passed.prep, PREP, 'the proof does not name what it proves');
   assert.equal(outcome.passed.prep.scaleHex, PREP.scaleHex);
 });
 
-test('a proof for other bytes cannot open THIS session — the machine refuses the pairing', () => {
+test('a proof for other bytes cannot open THIS session — the machine refuses the pairing', async () => {
   // The attack the field exists to stop: gate preparation A, dispatch its outcome into a
   // session holding preparation B, and the signer opens against bytes no precondition was
   // evaluated for.
   const other: TxPreparation = { ...PREP, scaleHex: '0x0403ddeeff' };
-  const foreign = gate(other, PIN, BUILT_FOR, PROVEN, covering());
+  const foreign = await gate(other, PIN, BUILT_FOR, PROVEN, covering());
   assert.equal(foreign.kind, 'proceed');
   let s = reduce(INITIAL_TX_SESSION, { type: 'prepared', prep: PREP });
   s = reduce(s, { type: 'submit-requested' });
@@ -316,23 +355,23 @@ test('a proof for other bytes cannot open THIS session — the machine refuses t
   assert.equal(next.signingWindow, undefined);
   // The same event with this session's own proof does open it, so the refusal is the
   // pairing's and not a machine that never proceeds.
-  const own = gate(PREP, PIN, BUILT_FOR, PROVEN, covering());
+  const own = await gate(PREP, PIN, BUILT_FOR, PROVEN, covering());
   assert.equal(reduce(s, { type: 'gate-result', outcome: own }).state, 'AwaitingSignature');
 });
 
-test('a preparation declaring no rows at all is refused rather than trivially passing', () => {
+test('a preparation declaring no rows at all is refused rather than trivially passing', async () => {
   // 11 §11.5 gives every call at least one row, so an empty `requires` is a defect in the
   // builder — and the fail-open reading of it is a signature nothing gated.
   const noRows: TxPreparation = { ...PREP, requires: [] };
-  const outcome = gate(noRows, PIN, BUILT_FOR, PROVEN, []);
+  const outcome = await gate(noRows, PIN, BUILT_FOR, PROVEN, []);
   assert.equal(outcome.kind, 'blocked');
   assert.match(outcome.detail, /declares no precondition rows/);
 });
 
-test('extra results beyond the declared set do not substitute for a missing one', () => {
+test('extra results beyond the declared set do not substitute for a missing one', async () => {
   // A count-based coverage check would pass this: two declared, two supplied.
   const twoRows: TxPreparation = { ...PREP, requires: ['P-1', 'P-3'] };
-  const outcome = gate(twoRows, PIN, BUILT_FOR, PROVEN, [...covering('P-1'), ...covering('P-7')]);
+  const outcome = await gate(twoRows, PIN, BUILT_FOR, PROVEN, [...covering('P-1'), ...covering('P-7')]);
   assert.equal(outcome.kind, 'blocked');
   assert.match(outcome.detail, /P-3/);
 });
@@ -372,26 +411,26 @@ test('a declined signature drops the window, so re-submitting must re-run the ga
   assert.ok(declined.prep, 'the preparation was discarded along with the window');
 });
 
-test('FE-TX-007 is checked before the preconditions, not alongside them', () => {
+test('FE-TX-007 is checked before the preconditions, not alongside them', async () => {
   // A runtime that changed under the preparation invalidates the *encoding*, so evaluating
   // rows against it would be decoding new metadata with old assumptions: every row could
   // pass and the bytes still be wrong.
-  const outcome = gate(PREP, PIN, { specVersion: 3, metadataHash: BUILT_FOR.metadataHash }, PROVEN, [failRow(firstOf('P-1'))]);
+  const outcome = await gate(PREP, PIN, { specVersion: 3, metadataHash: BUILT_FOR.metadataHash }, PROVEN, [failRow(firstOf('P-1'))]);
   assert.equal(outcome.kind, 'blocked');
   assert.equal(outcome.code, 'FE-TX-007');
   assert.deepEqual(outcome.failed, [], 'precondition results leaked into a runtime-change block');
   assert.match(outcome.detail, /rebuilt rather than re-checked/);
 
   // A changed metadata hash at the same spec_version is equally disqualifying.
-  const rehashed = gate(PREP, PIN, { specVersion: 2, metadataHash: `0x${'cd'.repeat(32)}` }, PROVEN, covering());
+  const rehashed = await gate(PREP, PIN, { specVersion: 2, metadataHash: `0x${'cd'.repeat(32)}` }, PROVEN, covering());
   assert.equal(rehashed.kind, 'blocked');
   assert.equal(rehashed.code, 'FE-TX-007');
 });
 
-test('a blocked gate returns to Draft with the preparation preserved (rule 5)', () => {
+test('a blocked gate returns to Draft with the preparation preserved (rule 5)', async () => {
   let s = reduce(INITIAL_TX_SESSION, { type: 'prepared', prep: PREP });
   s = reduce(s, { type: 'submit-requested' });
-  s = reduce(s, { type: 'gate-result', outcome: gate(PREP, PIN, BUILT_FOR, PROVEN, [...covering(), failRow(firstOf('P-2'))]) });
+  s = reduce(s, { type: 'gate-result', outcome: await gate(PREP, PIN, BUILT_FOR, PROVEN, [...covering(), failRow(firstOf('P-2'))]) });
   assert.equal(s.state, 'Blocked');
   assert.equal(s.lastError, 'FE-TX-004');
   assert.deepEqual(s.failed.map((f) => f.id), [firstOf('P-2')], 'the diff view must carry only the failures');
@@ -402,14 +441,14 @@ test('a blocked gate returns to Draft with the preparation preserved (rule 5)', 
   assert.ok(back.prep, 'form state was lost — that is how people learn to click through warnings');
 });
 
-test('preconditions read at different blocks cannot authorise a signature (INV-FE-2)', () => {
+test('preconditions read at different blocks cannot authorise a signature (INV-FE-2)', async () => {
   // Not a precondition failure — a defect in how the batch was read. Passing it would
   // certify a conjunction that was never simultaneously true.
   const elsewhere: PreconditionResult = {
     ...okRow(firstOf('P-3')),
     at: { chain: TEST_CHAIN, blockHash: `0x${'99'.repeat(32)}`, blockNumber: 101 },
   };
-  const outcome = gate(PREP, PIN, BUILT_FOR, PROVEN, [...covering(), elsewhere]);
+  const outcome = await gate(PREP, PIN, BUILT_FOR, PROVEN, [...covering(), elsewhere]);
   assert.equal(outcome.kind, 'blocked');
   assert.deepEqual(outcome.failed.map((f) => f.id), [firstOf('P-3')]);
   assert.match(outcome.detail, /does not describe one state/);
@@ -453,14 +492,15 @@ test('a signer cannot be called without the gate proof', async () => {
   const signer = new MockSigner();
   const session = toAwaitingSignature();
   const window = windowOf(session);
-  const signed = await signer.sign({ prep: PREP, window, account: '5Grw' });
+  const signed = await signer.sign({ window });
   assert.equal(signed.signerId, 'mock');
   assert.equal(signer.seen.length, 1);
   const seen = signer.seen[0];
   assert.ok(seen, 'the signer recorded no request');
   assert.equal(seen.window.at.blockHash, PIN.blockHash);
-  // Anti-substitution (11 §11.3): the bytes that reach the signer are `prep.scaleHex`.
-  assert.equal(seen.prep.scaleHex, PREP.scaleHex);
+  // Anti-substitution (11 §11.3): the only target is the gate's immutable authorization.
+  assert.equal(seen.window.authorization.scaleHex, PREP.scaleHex);
+  assert.equal(seen.window.authorization.account, PREP.signingAccount);
 });
 
 test('the registry refuses a test-only signer (INV-FE-5)', () => {
@@ -495,17 +535,48 @@ test('capabilities are fail-closed: unproven means absent, with a named reason',
   assert.equal(registry.supporting('hashed-payload').length, 1);
 });
 
-test('the mock signature is derived from the payload, not constant', () => {
+test('the signer derives bytes and account only from each gate proof', async () => {
   // A constant signature could not tell a test whether the right bytes ever reached the
   // signer — which is the only thing 11 §11.3's anti-substitution rule is about.
   const signer = new MockSigner();
   const window = windowOf(toAwaitingSignature());
-  return Promise.all([
-    signer.sign({ prep: PREP, window, account: '5Grw' }),
-    signer.sign({ prep: { ...PREP, scaleHex: '0x0403ddeeff' }, window, account: '5Grw' }),
-    signer.sign({ prep: PREP, window, account: '5Fbc' }),
-  ]).then(([a, b, c]) => {
-    assert.notEqual(a.signatureHex, b.signatureHex, 'different bytes produced the same signature');
-    assert.notEqual(a.signatureHex, c.signatureHex, 'different accounts produced the same signature');
-  });
+  const otherBytes = { ...PREP, scaleHex: '0x0403ddeeff' as const };
+  const otherAccount = { ...PREP, signingAccount: '5Fbc' };
+  const bytesOutcome = await gate(otherBytes, PIN, BUILT_FOR, PROVEN, covering());
+  const accountOutcome = await gate(otherAccount, PIN, BUILT_FOR, PROVEN, covering());
+  assert.equal(bytesOutcome.kind, 'proceed');
+  assert.equal(accountOutcome.kind, 'proceed');
+  const [a, b, c] = await Promise.all([
+    signer.sign({ window }),
+    signer.sign({ window: bytesOutcome.passed }),
+    signer.sign({ window: accountOutcome.passed }),
+  ]);
+  assert.notEqual(a.signatureHex, b.signatureHex, 'different gated bytes produced the same signature');
+  assert.notEqual(a.signatureHex, c.signatureHex, 'different gated accounts produced the same signature');
+});
+
+test('a preparation changed after gating is refused before a signer sees it', async () => {
+  const mutable: TxPreparation = { ...PREP };
+  const outcome = await gate(mutable, PIN, BUILT_FOR, PROVEN, covering());
+  assert.equal(outcome.kind, 'proceed');
+  Object.defineProperty(mutable, 'scaleHex', { value: '0x0403ddeeff' });
+  await assert.rejects(
+    () => new MockSigner().sign({ window: outcome.passed }),
+    SigningBindingError,
+  );
+});
+
+test('an untyped caller cannot override a valid window’s bytes or account', async () => {
+  const signer = new MockSigner();
+  const window = windowOf(toAwaitingSignature());
+  for (const override of [
+    { prep: { ...PREP, scaleHex: '0x0403ddeeff' as const } },
+    { account: '5Fbc' },
+  ]) {
+    await assert.rejects(
+      () => Reflect.apply(signer.sign, signer, [{ window, ...override }]),
+      SigningBindingError,
+    );
+  }
+  assert.equal(signer.seen.length, 0, 'an override reached the signer implementation');
 });

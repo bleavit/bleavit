@@ -7,12 +7,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
 
-# These tests pin what the release workflow must DO, not which release of a
-# third-party action it does it with. Asserting a literal `@v4` made Dependabot's
-# routine setup-node v4 -> v7 bump (#76) red two of them, because the action
-# major is exactly what Dependabot's job is to move; the toolchain version is
-# what the contract actually cares about and it is asserted separately.
-SETUP_NODE = re.compile(r"actions/setup-node@v\d+")
+# The separate action-pin gate owns exact SHAs. This expression recognizes the
+# pinned action while these tests continue to assert what the workflow does.
+SETUP_NODE = re.compile(r"actions/setup-node@[0-9a-f]{40}\s+#\s+v\d+(?:\.\d+){1,2}")
 
 
 class WorkflowContractTests(unittest.TestCase):
@@ -62,7 +59,12 @@ class WorkflowContractTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
         gates = workflow[workflow.index("  gates:"):workflow.index("  artifacts:")]
         self.assertSetsUpNode(gates, "the tag gates job must set up Node")
-        self.assertIn("node-version: '22'", gates)
+        self.assertIn("node-version-file: app/.nvmrc", gates)
+        self.assertIn("working-directory: app", gates)
+        self.assertLess(
+            gates.index("pnpm install --frozen-lockfile --ignore-scripts"),
+            gates.index('python3 -m unittest discover -s "$suite"'),
+        )
         for suite in (
             "tools/deploy/tests",
             "tools/reference-model/tests",
@@ -88,6 +90,7 @@ class WorkflowContractTests(unittest.TestCase):
         build_node = workflow.index("Build the release node")
         fetch = workflow.index("tools/env/fetch-binaries.sh")
         generate = workflow.index("tools/env/generate-relay-specs.sh")
+        generate_client = workflow.index("tools/deploy/generate-client-chain-spec.sh")
         prewarm = workflow.index(
             'npx --yes "@acala-network/chopsticks@${CHOPSTICKS_VERSION}" --help >/dev/null'
         )
@@ -95,7 +98,8 @@ class WorkflowContractTests(unittest.TestCase):
         assemble = workflow.index("python3 tools/release/assemble-release.py")
         self.assertLess(build_node, fetch)
         self.assertLess(fetch, generate)
-        self.assertLess(generate, prewarm)
+        self.assertLess(generate, generate_client)
+        self.assertLess(generate_client, prewarm)
         self.assertLess(prewarm, produce)
         self.assertLess(produce, assemble)
         self.assertSetsUpNode(workflow, "the release workflow must set up Node")
@@ -129,15 +133,42 @@ class WorkflowContractTests(unittest.TestCase):
             "&& inputs.runtime_profile || '' }}",
             workflow,
         )
-        self.assertIn('tools/release/build-runtime.sh "$RELEASE_WORK/runtime" "$primary_profile"', workflow)
         self.assertIn(
-            'tools/release/build-runtime.sh "$RELEASE_WORK/runtime/recovery" "$recovery_profile"',
+            'tools/release/build-runtime-oci.sh "$RELEASE_WORK/runtime" "$primary_profile"',
             workflow,
         )
+        self.assertIn(
+            'recovery_profile=$(python3 "$profile_tool" --profile "$primary_profile" '
+            '--field recovery_profile)',
+            (ROOT / "tools/release/build-runtime-oci.sh").read_text(encoding="utf-8"),
+        )
+        self.assertNotIn("tools/release/build-runtime.sh", workflow)
         self.assertIn(
             '--recovery-metadata "$RELEASE_WORK/runtime/recovery/metadata.scale"',
             workflow,
         )
+
+    def test_release_specs_and_drills_embed_the_oci_primary_without_host_rebuild(
+        self,
+    ) -> None:
+        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        runtime = '--runtime-wasm "$RELEASE_WORK/runtime/runtime.wasm"'
+        deploy = workflow.index("tools/deploy/generate-chain-specs.sh")
+        environments = workflow.index("tools/env/generate-relay-specs.sh")
+        extract = workflow.index("python3 tools/release/extract-metadata.py")
+        self.assertEqual(workflow.count(runtime), 2)
+        self.assertIn(runtime, workflow[deploy:environments])
+        self.assertIn(runtime, workflow[environments:extract])
+
+        # Primary extraction deliberately boots the canonical spec, so its
+        # existing :code↔--wasm comparison also proves the generated spec used
+        # the shipped OCI bytes. Recovery has no canonical genesis spec and
+        # therefore embeds its own separately shipped Wasm in a temporary copy.
+        recovery_extract = workflow.index(
+            '--wasm "$RELEASE_WORK/runtime/recovery/runtime.wasm"'
+        )
+        self.assertNotIn("--embed-wasm", workflow[extract:recovery_extract])
+        self.assertIn("--embed-wasm", workflow[recovery_extract:])
 
     def test_standing_gate_runs_explicit_runtime_profile_matrix(self) -> None:
         script = (ROOT / "tools/ci/rust-workspace-gates.sh").read_text(

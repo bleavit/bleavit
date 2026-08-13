@@ -79,11 +79,17 @@ impl pallet_bleavit_client::Config for Runtime {
     // Reference default: only root/governance may spend the shared sovereign
     // account. Widening this grants every matching caller spending authority.
     type SpendingOrigin = EnsureRoot<AccountId>;
+    // Retiring old report bodies also advances a permanent replay floor.
+    type ReportPruneOrigin = EnsureRoot<AccountId>;
     type OnReport = MyDecisionRule;
     type MaxReports = MaxReports;
     type WeightInfo = pallet_bleavit_client::weights::SubstrateWeight<Runtime>;
 }
 ```
+
+The portable `SubstrateWeight` is conservative and appropriate for this reference harness. A
+production client runtime MUST generate and bind its own benchmark weights before launch; do not
+copy the fallback as production evidence merely because it fits this example's block budget.
 
 `RegistrationFeeBuffer` is a conservative envelope for the live service fee and floor; it is not a
 second protocol tariff. `WindowLead` absorbs delivery latency before the pallet derives the remote
@@ -96,6 +102,13 @@ origin lets every matching caller choose costly questions and consume the client
 `OnReport::weight()` must be a measured upper bound for the complete callback. Under-declaring the
 handler is unsafe; return actual handler weight through `PostDispatchInfo` when it is available so
 the pallet can refund the difference.
+
+`MaxReports` bounds retained report bodies, not the lifetime of the integration. Once client
+governance's retention/finality policy makes old pushes obsolete, call
+`prune_reports(through_question_id)`. The pallet advances a permanent replay floor and removes
+bodies at or below the cutoff; delayed or replayed pushes at or below that floor can never execute
+`OnReport` again. `ReportPruneOrigin` therefore belongs to governance and must not be widened to an
+ordinary signer.
 
 ## 3. Ask, open, and seal
 
@@ -122,7 +135,7 @@ BleavitClient::seal(origin, question_id)?;
 ```
 
 There is no call-site fee arithmetic, metadata lookup, SCALE encoder, or XCM authoring. A rejected
-request returns one of the pallet's `CLIENT-001`…`CLIENT-016` errors locally, or the deterministic
+request returns one of the pallet's `CLIENT-001`…`CLIENT-019` errors locally, or the deterministic
 architecture-16 service error in the remote message result.
 
 ## 4. Trust the answer

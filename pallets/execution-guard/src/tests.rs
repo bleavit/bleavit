@@ -6,7 +6,7 @@ use frame_support::{
     assert_noop, assert_ok,
     dispatch::{DispatchClass, DispatchErrorWithPostInfo, GetDispatchInfo, Pays, PostDispatchInfo},
     traits::Hooks,
-    weights::Weight,
+    weights::{constants::RocksDbWeight, Weight},
 };
 use futarchy_primitives::{keeper::CrankClass, DispatchOutcomeCode, RejectReason};
 use parity_scale_codec::Encode;
@@ -2141,10 +2141,104 @@ fn sq_127_application_anchor_replaces_recovery_anchor_and_survives_until_complet
         assert_ok!(GuardPallet::do_try_state());
 
         MigrationCursorExists::set(false);
-        GuardPallet::migration_completed();
+        let _ = GuardPallet::migration_completed();
         MigrationHalt::<Test>::put(false);
         assert!(PreMigrationAnchor::<Test>::get().is_none());
         assert_ok!(GuardPallet::do_try_state());
+    });
+}
+
+#[test]
+fn recovery_image_release_failure_uses_the_halt_bridge_and_retries_until_repaired() {
+    new_test_ext().execute_with(|| {
+        let recovery_hash = hash(b"recovery-release-retry");
+        RecoveryImage::<Test>::put(RecoveryImageCommitment {
+            pid: 1,
+            primary_hash: hash(b"primary"),
+            hash: recovery_hash,
+            len: 32,
+            target_spec_version: 2,
+            attestation_id: 7,
+            committed_at: 1,
+        });
+        RecoveryPins::set(vec![recovery_hash]);
+        PendingAnchorCapture::<Test>::put(true);
+        RecoveryUnpinRefuses::set(true);
+
+        let failed_weight = GuardPallet::on_initialize(System::block_number());
+        assert_eq!(
+            failed_weight,
+            RocksDbWeight::get()
+                .reads(8)
+                .saturating_add(TEST_RECOVERY_IMAGE_UNPIN_WEIGHT),
+        );
+
+        assert!(PendingAnchorCapture::<Test>::get());
+        assert!(RecoveryImage::<Test>::exists());
+        assert!(RecoveryImageReleaseHalted::get());
+        assert!(MigrationHalt::<Test>::get());
+
+        // Operator repair makes the same bounded cleanup succeed on the next
+        // block. Only then are both the dedicated source and aggregate halt
+        // cleared and the one-shot capture latch consumed.
+        RecoveryUnpinRefuses::set(false);
+        let repaired_weight = GuardPallet::on_initialize(System::block_number().saturating_add(1));
+        assert_eq!(
+            repaired_weight,
+            RocksDbWeight::get()
+                .reads_writes(8, 2)
+                .saturating_add(TEST_RECOVERY_IMAGE_UNPIN_WEIGHT),
+        );
+
+        assert!(!PendingAnchorCapture::<Test>::get());
+        assert!(!RecoveryImage::<Test>::exists());
+        assert!(!RecoveryImageReleaseHalted::get());
+        assert!(!MigrationHalt::<Test>::get());
+    });
+}
+
+#[test]
+fn completed_migration_release_failure_remains_retryable_after_capture_latch_is_gone() {
+    new_test_ext().execute_with(|| {
+        let recovery_hash = hash(b"completed-recovery-release-retry");
+        RecoveryImage::<Test>::put(RecoveryImageCommitment {
+            pid: 1,
+            primary_hash: hash(b"primary"),
+            hash: recovery_hash,
+            len: 32,
+            target_spec_version: 2,
+            attestation_id: 7,
+            committed_at: 1,
+        });
+        RecoveryPins::set(vec![recovery_hash]);
+        PreMigrationAnchor::<Test>::put((1, [9; 32]));
+        RecoveryUnpinRefuses::set(true);
+
+        let failed_weight = GuardPallet::migration_completed();
+        assert_eq!(
+            failed_weight,
+            RocksDbWeight::get()
+                .reads_writes(1, 1)
+                .saturating_add(TEST_RECOVERY_IMAGE_UNPIN_WEIGHT),
+        );
+
+        assert!(PreMigrationAnchor::<Test>::get().is_none());
+        assert!(!PendingAnchorCapture::<Test>::get());
+        assert!(RecoveryImageReleaseHalted::get());
+        assert!(MigrationHalt::<Test>::get());
+
+        RecoveryUnpinRefuses::set(false);
+        let repaired_weight = GuardPallet::on_initialize(System::block_number().saturating_add(1));
+        assert_eq!(
+            repaired_weight,
+            RocksDbWeight::get()
+                .reads_writes(8, 1)
+                .saturating_add(TEST_RECOVERY_IMAGE_UNPIN_WEIGHT),
+        );
+
+        assert!(!RecoveryImage::<Test>::exists());
+        assert!(!RecoveryImageReleaseHalted::get());
+        assert!(!MigrationHalt::<Test>::get());
     });
 }
 

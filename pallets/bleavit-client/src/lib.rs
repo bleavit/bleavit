@@ -9,8 +9,6 @@
 //! XCM instruction or reads Bleavit metadata. Spec: architecture 16 §2/§3/§5,
 //! architecture 09 §6.5, and contract v22 §4a/§12.
 
-extern crate alloc;
-
 use bleavit_client_abi::{
     build_ingress_program, ClientIngressCall, ClientRule, IngressBuildError, RegisterInput,
 };
@@ -37,6 +35,9 @@ pub use pallet::*;
 pub use weights::WeightInfo;
 
 pub mod weights;
+
+#[cfg(feature = "runtime-benchmarks")]
+mod benchmarking;
 
 /// The exact report payload delivered by the v22 egress ABI.
 pub use futarchy_primitives::ReportView;
@@ -210,6 +211,11 @@ pub mod pallet {
         /// Local application action on a verified report.
         type OnReport: OnReport;
 
+        /// Governance origin that may retire locally retained report bodies.
+        /// Pruning advances a permanent replay floor before freeing capacity;
+        /// widening this origin can permanently reject a delayed report.
+        type ReportPruneOrigin: EnsureOrigin<Self::RuntimeOrigin>;
+
         /// Bound retained report rows so this reusable pallet cannot grow
         /// unbounded state on a client chain.
         #[pallet::constant]
@@ -225,6 +231,12 @@ pub mod pallet {
     pub type Reports<T: Config> =
         CountedStorageMap<_, Blake2_128Concat, u64, ReportView, OptionQuery>;
 
+    /// Greatest report id deliberately retired by client governance. Report
+    /// bodies may be removed, but the monotone floor preserves replay refusal.
+    #[pallet::storage]
+    #[pallet::getter(fn reports_pruned_through)]
+    pub type ReportsPrunedThrough<T: Config> = StorageValue<_, u64, ValueQuery>;
+
     #[pallet::event]
     #[pallet::generate_deposit(pub(super) fn deposit_event)]
     pub enum Event<T: Config> {
@@ -236,6 +248,9 @@ pub mod pallet {
             question_id: u64,
             provenance_hash: H256,
         },
+        /// Client governance retired at most `removed` report bodies and
+        /// permanently rejects later delivery at or below `through`.
+        ReportsPruned { through: u64, removed: u32 },
     }
 
     #[pallet::error]
@@ -279,6 +294,13 @@ pub mod pallet {
         ReportHandlerRejected,
         /// CLIENT-016: the retained report invariant failed.
         TryStateViolation,
+        /// CLIENT-017: report pruning requires its configured governance
+        /// origin, which is separate from the shared-account spending origin.
+        BadReportPruneOrigin,
+        /// CLIENT-018: this report is at or below the durable replay floor.
+        ReportPruned,
+        /// CLIENT-019: the pruning cutoff did not advance the replay floor.
+        ReportPruneNotAdvanced,
     }
 
     #[pallet::hooks]
@@ -309,6 +331,10 @@ pub mod pallet {
                     sp_io::hashing::blake2_256,
                 ),
                 Error::<T>::InvalidReportProvenance
+            );
+            ensure!(
+                report.question_id > ReportsPrunedThrough::<T>::get(),
+                Error::<T>::ReportPruned
             );
             ensure!(
                 !Reports::<T>::contains_key(report.question_id),
@@ -390,6 +416,44 @@ pub mod pallet {
                 action: Action::Seal,
                 message_id,
             });
+            Ok(())
+        }
+
+        /// Retire report bodies through an inclusive question-id cutoff.
+        ///
+        /// The cutoff advances before capacity is released and remains after
+        /// the bodies are gone, so replay cannot turn pruning into duplicate
+        /// `OnReport` execution. A client must choose the cutoff only after its
+        /// own finality/retention policy says every older delivery is obsolete.
+        #[pallet::call_index(4)]
+        #[pallet::weight(T::WeightInfo::prune_reports(T::MaxReports::get()))]
+        pub fn prune_reports(origin: OriginFor<T>, through: u64) -> DispatchResult {
+            T::ReportPruneOrigin::ensure_origin(origin)
+                .map_err(|_| Error::<T>::BadReportPruneOrigin)?;
+            ensure!(
+                through > ReportsPrunedThrough::<T>::get(),
+                Error::<T>::ReportPruneNotAdvanced
+            );
+            ensure!(
+                Reports::<T>::count() <= T::MaxReports::get(),
+                Error::<T>::TryStateViolation
+            );
+
+            ReportsPrunedThrough::<T>::put(through);
+            let mut removed = 0u32;
+            // `translate` is the CountedStorageMap-supported removal walk. In
+            // particular, it updates the generated counter without mutating a
+            // live `iter_keys` iterator (whose results FRAME documents as
+            // undefined under concurrent mutation).
+            Reports::<T>::translate::<ReportView, _>(|question_id, report| {
+                if question_id <= through {
+                    removed = removed.saturating_add(1);
+                    None
+                } else {
+                    Some(report)
+                }
+            });
+            Self::deposit_event(Event::ReportsPruned { through, removed });
             Ok(())
         }
     }
@@ -494,7 +558,8 @@ pub mod pallet {
                 ));
             }
             for (_, report) in Reports::<T>::iter() {
-                if report.client_id != T::ClientId::get()
+                if report.question_id <= ReportsPrunedThrough::<T>::get()
+                    || report.client_id != T::ClientId::get()
                     || !question_service_core::verify_report_view_provenance(
                         &report,
                         sp_io::hashing::blake2_256,

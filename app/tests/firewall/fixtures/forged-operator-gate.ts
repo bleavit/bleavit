@@ -1,6 +1,6 @@
 // expect-error: TS2739 — 11 §11.4 rule 1: the operator gate is structural, not a convention
 // MUST FAIL: `OperatorGate.window` is a `GatePassed`, whose brand is a module-private
-// `unique symbol` only `gate()` can mint. A screen that could assemble an "already gated"
+// `unique symbol` production code cannot mint. A screen that could assemble an "already gated"
 // value by hand would be able to enable any §11.8 submit control without a refresh — which
 // is the bypass §11.4 rule 1 exists to make unreachable, and exactly the shape the operator
 // consoles were in before F17 (each enabled its own button on a module-local check).

@@ -4,7 +4,7 @@ Every refusal is deterministic. The client-side pallet and TypeScript facade use
 vocabulary; Bleavit uses the architecture-16 service vocabulary. No integration needs a support
 channel to identify a missed precondition.
 
-## Client pallet: `CLIENT-001`…`CLIENT-016`
+## Client pallet: `CLIENT-001`…`CLIENT-019`
 
 | Code | Refusal |
 |---|---|
@@ -24,6 +24,9 @@ channel to identify a missed precondition.
 | CLIENT-014 | `ReportCapacityReached` |
 | CLIENT-015 | `ReportHandlerRejected` — local writes roll back |
 | CLIENT-016 | `TryStateViolation` |
+| CLIENT-017 | `BadReportPruneOrigin` — pruning requires the configured governance origin |
+| CLIENT-018 | `ReportPruned` — the report is at or below the durable replay floor |
+| CLIENT-019 | `ReportPruneNotAdvanced` — the requested cutoff did not advance the replay floor |
 
 ## Hosted service refusals
 

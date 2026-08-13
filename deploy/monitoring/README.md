@@ -26,6 +26,13 @@ python3 tools/monitoring/relay_finality_monitor.py \
   --relay-url wss://YOUR_RELAY_RPC --bind 127.0.0.1:9620 --interval 30
 ```
 
+The attestation monitor's configuration pins the Bleavit genesis hash and names
+at least three operator-distinct RPC endpoints. Remote endpoints must use WSS;
+plaintext WS is accepted only on loopback. Every configured endpoint must agree
+exactly on genesis, finalized block and raw `ReleaseChannel` bytes on every poll.
+This is an interim fail-closed transport quorum, **not** a storage-proof or
+finality-proof verifier; colluding RPC operators can still return the same lie.
+
 The relay finality monitor is deliberately a **separate process on a separate
 relay endpoint** (SQ-283): a relay GRANDPA stall freezes every parachain-anchored
 series, including the chain exporter's own finalized-head loop, so it must not
@@ -38,7 +45,8 @@ returns 0/2 (success/operational failure). The attestation monitor returns 0
 for a verified release, 1 for an integrity mismatch, and 2 for configuration,
 transport, or decode failure. Its loop checks on every observed finalized
 `ReleaseChannel` change and at the configured interval; validation rejects an
-interval above 3,600 seconds. Between full checks it resolves the configured
+interval above 3,600 seconds. Between full checks it polls the exact RPC quorum
+at the required operator-selected cadence and resolves the configured
 ArNS name through every gateway on each finalized head, so a repoint triggers a
 full check and the 600-block channel-update lag advances continuously. Because no on-chain
 observable marks the repoint block, 12 §6.3 ("Two observables this table left
@@ -46,7 +54,10 @@ implicit") anchors that lag at the first finalized head where the gateway
 majority and `ReleaseChannel.manifest_txid` disagree — which also starts the
 clock when the gateways reach no strict majority at all, since an
 inconsistently resolvable name is not a healthy state. The metric and alert use
-that observed height explicitly.
+that observed height explicitly. This majority is only the deterministic lag
+timestamp anchor: any individual resolver dissent increments
+`bleavit_release_monitor_resolver_divergent_gateways` and fails the integrity
+verdict.
 
 Point Prometheus at [prometheus.yml](prometheus/prometheus.yml), mount
 [bleavit-alerts.yml](prometheus/rules/bleavit-alerts.yml) under
@@ -165,41 +176,93 @@ per-operator probe exporter that feeds this series — it is a declared seam
 today, so the rule is specified but cannot fire — and any stricter per-operator
 shortfall sub-alerts.
 
-## Attestation configuration and provisional release schema
+## Attestation configuration and release schema
 
 Copy [attestation-monitor.example.toml](attestation-monitor.example.toml) and
-replace all placeholders. At least three independently operated gateways and
-one or more node WebSocket endpoints are required. Resource limits and the
-release-key signature minimum are explicitly operator-supplied because the
-architecture does not fix them. The three release-integrity webhook sets are
-mandatory. Public minisign keys use [keyring.example.toml](keyring.example.toml)
-as a shape guide; it contains no usable key or secret.
+replace all placeholders. At least three independently operated gateways and at
+least three independently operated RPC endpoints are required. Every gateway
+and RPC carries a stable operator identifier; identifiers must be distinct in
+their respective set, and normalized origins may not repeat. Those mechanical
+checks catch aliases, not false declarations of organizational independence.
+Each gateway also supplies explicit immutable-TXID and canonical-name root URL
+templates. They must address the browser-visible root itself; the monitor binds
+both responses to the path manifest's listed `index.path` bytes and does not
+infer a root from the per-file `{path}` API.
+Resource limits, RPC poll cadence, and the release-key signature minimum are
+explicitly operator-supplied because the architecture does not fix them. The
+three release-integrity webhook sets are mandatory. Their URLs are credentials:
+the monitor never logs a URL or exception text on delivery failure, only the
+logical channel and a redacted failure class/status. Public minisign keys use
+[keyring.example.toml](keyring.example.toml) as a shape guide; every key carries
+an `organization` stable identifier, and the file contains no usable key or
+secret.
 
 The deployment requirement is **at least two independent monitor operators,
 disjoint from ArNS controllers** (12 §2.2/§5.2/§6.5). Software cannot prove
 natural-person or organizational disjointness; the signer registry and
 operations ceremony must enforce it.
 
-Until O1 freezes `release.json`, the adapter expects
-`schema = "bleavit.release.provisional.v1"` with:
+The adapter consumes the app producer's canonical
+`schema = "bleavit.app-release.v1"` document. The monitoring-critical fields use
+the producer's camelCase names:
 
-- `manifest_txid`, `keyring_generation`, and
-  `supported_spec_version = {min, max}`;
-- `files`, a path → lowercase SHA-256 map covering every manifest path except
-  `release.json` itself (the signed document cannot contain its own hash);
-- `release_signatures` and `attestations`, lists of `{txid = ...}`-equivalent
-  JSON objects whose raw Arweave transactions contain minisign signatures over
-  `SHA256(release.json)`.
+- `arweaveManifestTxId` is the pass-1 asset manifest **M**;
+- `perFileHashes` is the non-empty path → lowercase SHA-256 map for every
+  asset in M; it excludes `release.json` because the signed document cannot hash
+  itself;
+- `specVersionRange = {primary, recovery}` carries the adjacent runtime pair;
+- `keyringGeneration` selects the release/attestor key generation; and
+- `readiness.productionReady` must be `true` for an unattended production
+  verdict.
 
-Detached signatures are outside the served path manifest, avoiding a circular
-file-hash/signature dependency. The monitor fetches the whole path manifest by
-resolved TXID and by name through every gateway, compares all copies, fetches
-detached signature transactions through every gateway, supports minisign `Ed`
-and `ED` (BLAKE2b-512 prehash), requires the configured release-key minimum and
-at least two distinct valid attestor keys, applies the on-chain revocation mask,
-and binds the keyring generation and manifest TXID to `ReleaseChannel`. O1 can
-replace only this extraction/fetch adapter; the verdict core already accepts
-format-agnostic maps/blobs/keyrings/channel bytes.
+There are no snake_case or provisional-schema aliases. A document using the old
+monitor-only shape is rejected instead of being interpreted as a release.
+
+Credential TXIDs deliberately do **not** appear in those signed bytes. After
+uploading the final `release.json` and its detached credentials, produce the
+independent deterministic index:
+
+```sh
+python3 tools/monitoring/credential_index.py \
+  --release-json release.json \
+  --final-manifest FINAL_MANIFEST_TXID \
+  --release-signature RELEASE_SIGNATURE_TXID_1 \
+  --release-signature RELEASE_SIGNATURE_TXID_2 \
+  --attestation ATTESTATION_TXID_1 \
+  --attestation ATTESTATION_TXID_2 \
+  --output release-credentials.json
+```
+
+Upload `release-credentials.json`, then provision its Arweave TXID and the
+producer's printed SHA-256 into `credential_index_txid` and
+`credential_index_sha256` through an authenticated operator-controlled channel
+that is independent of ArNS, the gateways, and the served bundle. Publish the
+same two pins in the release notes as a redundant public record; that copy is
+not the monitor's trust root. The example deliberately uses invalid placeholders
+and configuration validation also rejects all-zero pins. The
+index schema is `bleavit.release-credentials.v1`: it binds
+`release_json_sha256` and the explicitly supplied final-manifest **M′**
+`manifest_txid` to separate `release_signatures` and `attestations` TXID lists.
+Its exact field set is strict; unknown/duplicate fields, duplicate transaction
+IDs, cross-role reuse, or fewer than two entries per credential role are
+rejected. M′ is what ArNS and `ReleaseChannel` identify, and it must differ from
+the asset manifest M named by `release.json`. The monitor fetches the exact
+configured index TXID through every gateway, requires byte equality and the
+out-of-band SHA-256 pin, and refuses a release/index/channel binding mismatch.
+
+Detached signatures and the index stay outside both release path manifests,
+avoiding the circular file-hash/signature dependency. The monitor fetches M
+from `arweaveManifestTxId` and M′ from every resolved TXID through every gateway,
+requires M's paths to equal `perFileHashes` and M′'s paths to equal M plus
+`release.json`, then compares the asset routes under both manifests and the
+browser-visible final/name routes. It verifies both root routes against M′'s
+manifest-selected index and treats even one resolver disagreement as an
+integrity failure. It fetches detached signature transactions through every
+gateway, supports
+minisign `Ed` and `ED` (BLAKE2b-512 prehash), requires the configured
+release-key minimum and attestations from at least two distinct organizations,
+applies the on-chain revocation mask, and binds `keyringGeneration` and final M′
+to `ReleaseChannel` while keeping asset M distinct.
 
 ## Privacy boundary
 

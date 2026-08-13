@@ -19,9 +19,10 @@ import {
   requireCapability,
 } from '@bleavit/signing';
 import type { RawPayloadPresentation, SigningRequest } from '@bleavit/signing';
-import { declaredCoverageIds, gate } from '@bleavit/transaction-builder';
+import { declaredCoverageIds } from '@bleavit/transaction-builder';
 import type { GatePassed, TxPreparation } from '@bleavit/transaction-builder';
 import type { CompatClassification } from '@bleavit/descriptors';
+import { gateForTest } from './gate-fixture.ts';
 
 /**
  * The compat verdict this fixture gates against — 10 §3.2's `full` row.
@@ -62,6 +63,7 @@ const transport = (respond: Respond) => {
 
 const PREP: TxPreparation = {
   scaleHex: PAYLOAD,
+  signingAccount: ALICE,
   builtFor: { specVersion: 2, metadataHash: `0x${'ab'.repeat(32)}` },
   preparedAt: { chain: TEST_CHAIN, blockHash: `0x${'22'.repeat(32)}`, blockNumber: 41 },
   requires: ['P-1'],
@@ -75,10 +77,10 @@ const PREP: TxPreparation = {
  * gate rather than written — the same discipline `fees.test.ts` follows, and the reason
  * `as unknown as` is banned workspace-wide (10 §2.1).
  */
-const WINDOW: GatePassed = (() => {
+const WINDOW: GatePassed = await (async () => {
   const at = { chain: TEST_CHAIN, blockHash: `0x${'11'.repeat(32)}` as const, blockNumber: 42 };
   // Every obligation `P-1` imposes, not one result naming the row: coverage is per clause.
-  const outcome = gate(
+  const outcome = await gateForTest(
     PREP,
     at,
     PREP.builtFor,
@@ -103,7 +105,7 @@ const shown = (seen: readonly RawPayloadPresentation[], index = 0): RawPayloadPr
   return presentation;
 };
 
-const request = (): SigningRequest => ({ prep: PREP, window: WINDOW, account: ALICE });
+const request = (): SigningRequest => ({ window: WINDOW });
 
 test('the transport is handed exactly the prepared payload', async () => {
   // The single property the whole module exists for: no edit between presentation and
@@ -167,13 +169,11 @@ test('a wrong length is refused, on both sides of the accepted band', async () =
   await assert.rejects(() => transport('0xabc').adapter.sign(request()), RawSignatureError);
 });
 
-test('metadata-hash stays refused — and the reason is now verified, not pending', async () => {
-  // Was "FE-P6 is unresolved, assume nothing". SQ-594/V-122 settled the load-bearing half by
-  // reading the pinned `frame-metadata-hash-extension`: the digest comes from a compile-time
-  // env var this runtime's build never sets, so mode 1 is rejected `CannotLookup` ON CHAIN.
-  // Granting the capability would build transactions the chain is guaranteed to refuse, and
-  // the user would meet that failure after signing on a hardware wallet. Milestone B21.
-  // The load-bearing refusal: the device's own decode is what makes air-gapped signing
+test('metadata-hash stays refused until a real device proves the display half', async () => {
+  // B21 closed the chain half: the runtime embeds an RFC-78 digest and the release pipeline
+  // compares it with an independent recomputation from booted metadata. That establishes
+  // mode-1 validity, not what any wallet displays. The remaining load-bearing refusal is the
+  // device's own decode, which is what makes air-gapped signing
   // better than blind signing, and whether a Ledger Generic App does it for a custom
   // chain is unverified. A surface that claimed it would claim exactly that property.
   const { adapter } = transport(SIG64);

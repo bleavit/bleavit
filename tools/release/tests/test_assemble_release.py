@@ -12,6 +12,7 @@ from pathlib import Path
 
 
 TOOLS = Path(__file__).resolve().parents[1]
+ROOT = TOOLS.parents[1]
 SCRIPT = TOOLS / "assemble-release.py"
 SPEC = importlib.util.spec_from_file_location("assemble_release", SCRIPT)
 assert SPEC is not None and SPEC.loader is not None
@@ -44,7 +45,8 @@ class AssembleReleaseTests(unittest.TestCase):
         wasm = self.runtime / "runtime.wasm"
         wasm.write_bytes(b"wasm-release-bytes")
         metadata = self.runtime / "metadata.scale"
-        metadata.write_bytes(b"metadata")
+        metadata.write_bytes((ROOT / "app/fixtures/chain-feed/2/metadata.scale").read_bytes())
+        rfc78_digest = ASSEMBLE.metadata_hash(metadata, "VIT", 12)
         wasm_hash = sha256(wasm)
         (self.runtime / "runtime-info.json").write_text(
             json.dumps(
@@ -57,29 +59,74 @@ class AssembleReleaseTests(unittest.TestCase):
                     "wasm_file_sha256": wasm_hash,
                     "on_chain_wasm_sha256": wasm_hash,
                     "metadata_sha256": sha256(metadata),
+                    "rfc78_merkleized_metadata_hash": rfc78_digest,
+                    "embedded_rfc78_metadata_hash": rfc78_digest,
+                    "rfc78_status": (
+                        "enabled and independently recomputed from metadata.scale"
+                    ),
                 }
             ),
             encoding="utf-8",
         )
         build_info = {
-            "schema": "bleavit.runtime-build.v2",
+            "schema": "bleavit.runtime-build.v3",
             "git_commit": "a" * 40,
             "toolchain": "1.89.0",
             "host_triple": "x86_64-unknown-linux-gnu",
-            "cargo_version": "cargo 1.89.0",
-            "rustc_version": "rustc 1.89.0",
+            "cargo_version": "cargo 1.89.0 (fixture)",
+            "rustc_version": "rustc 1.89.0 (fixture)",
+            "source_date_epoch": 1,
             "runtime_profile": "bootstrap",
             "base_profile": "bootstrap",
             "recovery": False,
             "cargo_default_features": False,
-            "cargo_features": ["std", "substrate-wasm-builder", "bootstrap"],
+            "cargo_features": [
+                "std",
+                "substrate-wasm-builder",
+                "metadata-hash",
+                "bootstrap",
+            ],
             "multi_block_migrations": "normal",
             "recipe": (
                 "cargo build -p bleavit-runtime --release --no-default-features "
-                "--features std,substrate-wasm-builder,bootstrap --locked"
+                "--features std,substrate-wasm-builder,metadata-hash,bootstrap --locked"
             ),
             "profile_verification": None,
-            "reproducibility_scope": "same toolchain + same source => same bytes",
+            "rfc78_metadata_hash": {
+                "enabled": True,
+                "token_symbol": "VIT",
+                "token_decimals": 12,
+                "source": "RUNTIME_METADATA_HASH embedded by substrate-wasm-builder",
+            },
+            "build_environment": {
+                "image": (
+                    "docker.io/paritytech/ci-unified@sha256:"
+                    "a697eab780f23ed77a5d4da75b56480a757ea5deb04f3bfcb3e879b0e0d9e99e"
+                ),
+                "image_id": (
+                    "sha256:f10f87f1326650e0ef6db0a9184d15d08256f402bb5f5c85624f6f4c741473e7"
+                ),
+                "kind": "oci",
+                "platform": "linux/amd64",
+                "upstream_tag": "bullseye-1.88.0-2025-06-27-v202511141243",
+            },
+            "reproducibility_scope": (
+                "same source + canonical recipe + exact OCI image digest => same runtime "
+                "bytes; independent runtime byte comparison is not yet automated"
+            ),
+            "normalized_environment": {
+                "CARGO_HOME": "/cargo-home",
+                "CARGO_INCREMENTAL": "0",
+                "CARGO_TARGET_DIR": "/target",
+                "CARGO_TERM_COLOR": "never",
+                "HOME": "/build-home",
+                "LANG": "C.UTF-8",
+                "LC_ALL": "C.UTF-8",
+                "RUSTUP_HOME": "/rustup-home",
+                "SOURCE_DATE_EPOCH": "1",
+                "TZ": "UTC",
+                "WASM_BUILD_WORKSPACE_HINT": "/src",
+            },
             "wasm": {"sha256": wasm_hash, "size": wasm.stat().st_size},
         }
         (self.runtime / "build-info.json").write_text(
@@ -216,7 +263,8 @@ class AssembleReleaseTests(unittest.TestCase):
         wasm = recovery / "runtime.wasm"
         wasm.write_bytes(b"paired-terminal-recovery")
         metadata = recovery / "metadata.scale"
-        metadata.write_bytes(b"recovery-metadata")
+        metadata.write_bytes((ROOT / "app/fixtures/chain-feed/3/metadata.scale").read_bytes())
+        rfc78_digest = ASSEMBLE.metadata_hash(metadata, "VIT", 12)
         wasm_hash = sha256(wasm)
         build_info = json.loads(
             (self.runtime / "build-info.json").read_text(encoding="utf-8")
@@ -228,6 +276,7 @@ class AssembleReleaseTests(unittest.TestCase):
                 "cargo_features": [
                     "std",
                     "substrate-wasm-builder",
+                    "metadata-hash",
                     "bootstrap",
                     "recovery",
                 ],
@@ -252,6 +301,9 @@ class AssembleReleaseTests(unittest.TestCase):
             "wasm_file_sha256": wasm_hash,
             "on_chain_wasm_sha256": wasm_hash,
             "metadata_sha256": sha256(metadata),
+            "rfc78_merkleized_metadata_hash": rfc78_digest,
+            "embedded_rfc78_metadata_hash": rfc78_digest,
+            "rfc78_status": "enabled and independently recomputed from metadata.scale",
         }
         (recovery / "runtime-info.json").write_text(
             json.dumps(runtime_info), encoding="utf-8"
@@ -432,6 +484,7 @@ class AssembleReleaseTests(unittest.TestCase):
                 "cargo_features": [
                     "std",
                     "substrate-wasm-builder",
+                    "metadata-hash",
                     "bootstrap",
                 ],
                 "multi_block_migrations": "normal",
@@ -454,7 +507,7 @@ class AssembleReleaseTests(unittest.TestCase):
         report = (output / "readiness-report.md").read_text(encoding="utf-8")
         self.assertIn("Runtime profile: `bootstrap`", report)
         self.assertIn(
-            "Cargo features: `std,substrate-wasm-builder,bootstrap` "
+            "Cargo features: `std,substrate-wasm-builder,metadata-hash,bootstrap` "
             "(default features disabled)",
             report,
         )
@@ -503,6 +556,25 @@ class AssembleReleaseTests(unittest.TestCase):
         invalid["host_triple"] = ""
         errors = ASSEMBLE.validate_build_info(invalid)
         self.assertIn("build-info.host_triple must be a non-empty string", errors)
+
+    def test_runtime_build_image_mismatch_is_integrity_corruption(self) -> None:
+        build_info_path = self.runtime / "build-info.json"
+        invalid = json.loads(build_info_path.read_text(encoding="utf-8"))
+        invalid["build_environment"]["image"] = (
+            "docker.io/paritytech/ci-unified@sha256:" + "0" * 64
+        )
+        build_info_path.write_text(json.dumps(invalid), encoding="utf-8")
+        result = self.run_assemble(self.root / "image-mismatch", allow_missing=True)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        manifest = json.loads(
+            (self.root / "image-mismatch/release-manifest.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        reasons = "\n".join(
+            item["reason"] for item in manifest["readiness"]["corruption"]
+        )
+        self.assertIn("build-info.build_environment", reasons)
 
     def test_environment_evidence_validator_hashes_every_packaged_file(self) -> None:
         self.zombienet.mkdir()
@@ -732,6 +804,51 @@ class AssembleReleaseTests(unittest.TestCase):
         reasons = [item["reason"] for item in manifest["readiness"]["corruption"]]
         self.assertTrue(
             any("metadata_sha256" in reason for reason in reasons), reasons
+        )
+
+    def test_embedded_rfc78_mismatch_fails_even_allow_missing(self) -> None:
+        runtime_info_path = self.runtime / "runtime-info.json"
+        runtime_info = json.loads(runtime_info_path.read_text(encoding="utf-8"))
+        runtime_info["embedded_rfc78_metadata_hash"] = "0x" + "ff" * 32
+        runtime_info_path.write_text(json.dumps(runtime_info), encoding="utf-8")
+        output = self.root / "corrupt-rfc78"
+        result = self.run_assemble(output, allow_missing=True)
+        self.assertNotEqual(result.returncode, 0)
+        manifest = json.loads((output / "release-manifest.json").read_text())
+        reasons = [item["reason"] for item in manifest["readiness"]["corruption"]]
+        self.assertTrue(
+            any("embedded_rfc78_metadata_hash" in reason for reason in reasons),
+            reasons,
+        )
+
+    def test_independently_computed_rfc78_mismatch_fails_even_allow_missing(self) -> None:
+        runtime_info_path = self.runtime / "runtime-info.json"
+        runtime_info = json.loads(runtime_info_path.read_text(encoding="utf-8"))
+        runtime_info["rfc78_merkleized_metadata_hash"] = "0x" + "ff" * 32
+        runtime_info_path.write_text(json.dumps(runtime_info), encoding="utf-8")
+        output = self.root / "corrupt-independent-rfc78"
+        result = self.run_assemble(output, allow_missing=True)
+        self.assertNotEqual(result.returncode, 0)
+        manifest = json.loads((output / "release-manifest.json").read_text())
+        reasons = [item["reason"] for item in manifest["readiness"]["corruption"]]
+        self.assertTrue(
+            any("rfc78_merkleized_metadata_hash" in reason for reason in reasons),
+            reasons,
+        )
+
+    def test_malformed_rfc78_config_is_reported_as_corruption(self) -> None:
+        build_info_path = self.runtime / "build-info.json"
+        build_info = json.loads(build_info_path.read_text(encoding="utf-8"))
+        build_info["rfc78_metadata_hash"]["token_decimals"] = None
+        build_info_path.write_text(json.dumps(build_info), encoding="utf-8")
+        output = self.root / "malformed-rfc78-config"
+        result = self.run_assemble(output, allow_missing=True)
+        self.assertNotEqual(result.returncode, 0)
+        manifest = json.loads((output / "release-manifest.json").read_text())
+        reasons = [item["reason"] for item in manifest["readiness"]["corruption"]]
+        self.assertTrue(
+            any("cannot independently recompute shipped RFC-78 digest" in reason for reason in reasons),
+            reasons,
         )
 
     def test_commit_mismatch_is_corruption_in_strict_and_gap_in_dry_run(self) -> None:

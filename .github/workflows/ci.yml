@@ -29,7 +29,7 @@ jobs:
       # benefit; stock runners have ~14 GB free against a ~35 GB build.
       CARGO_INCREMENTAL: 0
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Free runner disk space (the workspace build needs ~35 GB)
         run: |
           set -euo pipefail
@@ -38,11 +38,11 @@ jobs:
             /usr/local/.ghcup /usr/share/swift /opt/hostedtoolcache/CodeQL
           sudo docker image prune --all --force > /dev/null 2>&1 || true
           df -h /
-      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: dtolnay/rust-toolchain@1d1eb14921d9c2d8ea575663e5fe3a0b57868a05 # 1.89.0
         with:
           components: rustfmt, clippy
           targets: wasm32-unknown-unknown, wasm32v1-none
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Install native build dependencies
         run: sudo apt-get update && sudo apt-get install -y libclang-dev protobuf-compiler
       - name: Rust workspace, runtime wasm, try-runtime, and runtime-benchmarks-test gates
@@ -52,12 +52,12 @@ jobs:
     name: Fuzzing (15 §4.5)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@master
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # nightly-2025-11-24
         with:
           toolchain: nightly-2025-11-24
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: fuzz
       - name: Install cargo-fuzz
@@ -69,10 +69,10 @@ jobs:
     name: Supply chain
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.89.0
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@1d1eb14921d9c2d8ea575663e5fe3a0b57868a05 # 1.89.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.12'
       - name: Check lockfiles, RustSec, GHSA-only, npm, and unsound advisories
@@ -82,12 +82,23 @@ jobs:
     name: Reference model
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.12'
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: app/.nvmrc
+      - name: Install RFC-78 helper dependency
+        working-directory: app
+        run: |
+          corepack enable
+          corepack install
+          pnpm install --frozen-lockfile --ignore-scripts
       - name: Install monitoring tooling dependency
         run: pip install pyyaml==6.0.2
+      - name: Third-party Actions are immutable and review-labelled (TH-44)
+        run: python3 tools/release/check-workflow-action-pins.py
       - name: Run reference model tests
         run: PYTHONPATH=reference-model/src python3 -m unittest discover -s reference-model/tests
       - name: Run economic-simulation tests
@@ -110,8 +121,8 @@ jobs:
     name: Documentation links
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.12'
       - name: Check local Markdown links
@@ -222,8 +233,8 @@ jobs:
     name: Model checking (TLC)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-java@v5.7.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
         with:
           distribution: temurin
           java-version: '17'
@@ -255,9 +266,9 @@ jobs:
       matrix:
         suite: [ledger, market, constitution, welfare, rewards, containment]
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.89.0
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@1d1eb14921d9c2d8ea575663e5fe3a0b57868a05 # 1.89.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
       - name: Install native build dependencies
         run: sudo apt-get update && sudo apt-get install -y libclang-dev protobuf-compiler
       - name: Run property suites at full case count
@@ -267,10 +278,10 @@ jobs:
     name: Weight regression
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - uses: actions/setup-python@v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.12'
       - name: Test weight regression gate
@@ -290,13 +301,13 @@ jobs:
     name: Benchmark smoke
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@1d1eb14921d9c2d8ea575663e5fe3a0b57868a05 # 1.89.0
         with:
           # substrate-wasm-builder needs the Wasm runtime target on a clean runner.
           targets: wasm32v1-none
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-python@v7
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.12'
       - name: Install native build dependencies
@@ -339,26 +350,50 @@ jobs:
   app:
     name: App (Track F)
     runs-on: ubuntu-latest
+    # 12 §1.1's build environment is the linux/amd64 manifest, not the
+    # mutable hosted-runner image beneath it.  This child digest (rather than a
+    # multi-architecture index) fixes the bytes the build actually executes.
+    container:
+      image: node@sha256:bb6834c0669aa71cbc8d94606561a721adf489f6b93d7b8b825f0cf1b498c2c4 # node:22.18.0-bookworm, linux/amd64
+    defaults:
+      run:
+        shell: bash
+    env:
+      # repro-manifest.ts records both values under environment.substantive.
+      ImageOS: debian-bookworm
+      ImageVersion: sha256:bb6834c0669aa71cbc8d94606561a721adf489f6b93d7b8b825f0cf1b498c2c4
+      # The container uid does not own the mounted checkout. Scope Git trust to
+      # this one exact path for every release subprocess (epoch, dirty-tree and
+      # source-commit checks) without mutating the runner's global config.
+      GIT_CONFIG_COUNT: 1
+      GIT_CONFIG_KEY_0: safe.directory
+      GIT_CONFIG_VALUE_0: ${{ github.workspace }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
-        with:
-          # app/.nvmrc is the single home of the Node pin. It deliberately does NOT
-          # live in tools/env/pins.env: that file is 15 §4.7's exact-key manifest for
-          # digest-pinned *test-environment* binaries, and the app's build toolchain
-          # is 12 §1.1. Putting it there conflated two specs and the env validator
-          # was right to refuse it.
-          node-version-file: app/.nvmrc
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Fix SOURCE_DATE_EPOCH from the checked-out commit
+        # Export the exact commit time that 12 §1.1 makes part of the build recipe.
+        # Job-scoped Git config above also covers later status/rev-parse subprocesses.
+        run: |
+          set -euo pipefail
+          repo="$GITHUB_WORKSPACE"
+          source_date_epoch=$(git -C "$repo" show -s --format=%ct HEAD)
+          [[ "$source_date_epoch" =~ ^[0-9]+$ ]]
+          echo "SOURCE_DATE_EPOCH=$source_date_epoch" >> "$GITHUB_ENV"
       - name: Enable corepack (pnpm pin comes from packageManager)
         working-directory: app
         # corepack reads `packageManager` from package.json, so the pin has exactly
         # one home and there is nothing to cross-check against.
         run: corepack enable && corepack install
-      - name: Assert the Node pin and the engines range agree
+      - name: Assert the container Node, .nvmrc, and engines range agree
         working-directory: app
         run: |
           set -euo pipefail
           pinned=$(cat .nvmrc)
+          actual=$(node --version)
+          if [[ "$actual" != "v$pinned" ]]; then
+            echo "container Node $actual does not match .nvmrc $pinned" >&2
+            exit 1
+          fi
           node -e "
             const {engines}=require('./package.json');
             const semver=process.argv[1];
@@ -367,7 +402,7 @@ jobs:
             if(!engines.node.includes(semver) && !engines.node.includes('>='+semver)) {
               console.error(\`.nvmrc \${semver} not admitted by engines.node \${engines.node}\`); process.exit(1);
             }
-            console.log(\`.nvmrc \${semver} agrees with engines.node \${engines.node}\`);
+            console.log(\`container Node and .nvmrc \${semver} agree with engines.node \${engines.node}\`);
           " "$pinned"
       - name: Install (frozen lockfile)
         working-directory: app
@@ -884,20 +919,9 @@ jobs:
           # everything.
           pnpm run check:artifact-budget
           pnpm run check:artifact-budget:witness
-          # 10 §9.4's first-meaningful-render row — Lighthouse over the tree the
-          # first line emitted, on §9.4's own reference hardware. Same step for
-          # the same reason. Chrome comes from the runner image (Google Chrome is
-          # preinstalled on ubuntu-24.04, verified against the image manifest,
-          # V-180); the gate FAILS rather than skipping when it cannot start one,
-          # because a skipped measurement is an unenforced budget. The witness is one
-          # further run against a 1 ms threshold that MUST be refused — the only thing
-          # that distinguishes a gate which measured and passed from one that stopped
-          # comparing, since both print the same green line.
-          pnpm run check:render-budget
-          pnpm run check:render-budget:witness
           # F22, in the same step and for the same reason. The desktop shell embeds
           # `dist/` and the assertion is that what it embeds IS the attested tree, so
-          # this reads the tree the two lines above just produced, against the
+          # this reads the tree the first lines produced, against the
           # `release.json` they just wrote. Three directions, and the third is the one a
           # manifest-driven loop cannot see: a file in the tree that nothing signed.
           # It also checks the shell's own configuration, because a byte-identity claim
@@ -919,12 +943,28 @@ jobs:
         # and `release-reproducibility` below compares them. `if-no-files-found: error`
         # because an absent manifest would leave the comparison job with one input and no
         # reason to think anything was missing.
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-repro-manifest-app
           if-no-files-found: error
           retention-days: 7
           path: app/release-out/repro-manifest.json
+
+      - name: Install Chromium after recording the pinned build environment
+        # Chromium is only a test driver. Installing it after release:manifest keeps
+        # mutable Debian repository state out of the environment identity claimed for
+        # the release build itself.
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends chromium
+      - name: First-meaningful-render budget and witness (10 §9.4)
+        # The gate fails rather than skipping when Chromium cannot start. The witness
+        # repeats it at a 1 ms threshold and MUST be refused, distinguishing a real
+        # measurement from a comparator that silently stopped enforcing the budget.
+        working-directory: app
+        env:
+          CHROME_PATH: /usr/bin/chromium
+        run: pnpm run check:render-budget && pnpm run check:render-budget:witness
 
       - name: Platform adapter and the capability lattice (F22, app-code rule 10; 10 §10.1)
         # The fail-closed lattice: an unproven capability is ABSENT and absence carries the
@@ -980,10 +1020,9 @@ jobs:
   # dependency tree can never perturb the runtime's `=`-exact `polkadot-stable2606` pins
   # (app-code rule 15), and the `rust` job above therefore never compiles any of this.
   #
-  # **It is also 12 §1.1's second build environment (F13)**, and that is not a coincidence
-  # of scheduling: this job already builds the release tree from its own checkout on its own
-  # runner because the shell cannot link without it, so the second independent build the
-  # specification requires already existed and only its evidence was missing.
+  # **It is also 12 §1.1's second build environment (F13).** Its release build runs in
+  # a different digest-pinned OS image from `app`; the nested checkout separately varies
+  # the absolute-path axis used by the recorded reproducibility measurement.
   desktop-shell:
     # The display name is deliberately unchanged even though the job's role grew: this
     # string is what branch protection matches a required check against, and renaming it
@@ -991,17 +1030,25 @@ jobs:
     # no longer describes what it does.
     name: Desktop shell (F22)
     runs-on: ubuntu-latest
+    container:
+      image: node@sha256:216faa77bcaea2715ad19c8b8becc6ae7f786a43812455c4209891049134cdf2 # node:22.18.0-trixie, linux/amd64
+    defaults:
+      run:
+        shell: bash
     env:
       CARGO_INCREMENTAL: 0
+      ImageOS: debian-trixie
+      ImageVersion: sha256:216faa77bcaea2715ad19c8b8becc6ae7f786a43812455c4209891049134cdf2
+      GIT_CONFIG_COUNT: 1
+      GIT_CONFIG_KEY_0: safe.directory
+      GIT_CONFIG_VALUE_0: ${{ github.workspace }}/second-environment
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # **The stated difference between the two environments (12 §1.1).**
           #
-          # GitHub gives both jobs the same runner image, the same Node pin and the same
-          # pnpm pin, so without this they would differ only in which virtual machine ran
-          # them — a repeatability check wearing a reproducibility check's name, and
-          # indistinguishable from the real thing in a green log.
+          # The digest-pinned Debian base already differs from `app`; this second,
+          # independent axis keeps the recorded absolute-path-depth measurement too.
           #
           # Absolute build path is the axis 12 §1.1's own recorded measurement varied
           # ("two builds at different absolute path depths with separate stores"), and it
@@ -1014,12 +1061,21 @@ jobs:
           # when the two manifests agree on every recorded axis, so deleting this line
           # turns the gate red rather than quietly weakening it.
           path: second-environment
-      - uses: actions/setup-node@v7
-        with:
-          node-version-file: second-environment/app/.nvmrc
+      - name: Fix SOURCE_DATE_EPOCH from the checked-out commit
+        # Match the app job's derivation while retaining this environment's distinct
+        # checkout depth. Job-scoped trust covers every later release subprocess too.
+        run: |
+          set -euo pipefail
+          repo="$GITHUB_WORKSPACE/second-environment"
+          source_date_epoch=$(git -C "$repo" show -s --format=%ct HEAD)
+          [[ "$source_date_epoch" =~ ^[0-9]+$ ]]
+          echo "SOURCE_DATE_EPOCH=$source_date_epoch" >> "$GITHUB_ENV"
       - name: Enable corepack (pnpm pin comes from packageManager)
         working-directory: second-environment/app
         run: corepack enable && corepack install
+      - name: Assert the container Node matches .nvmrc
+        working-directory: second-environment/app
+        run: test "$(node --version)" = "v$(cat .nvmrc)"
       - name: Install (frozen lockfile)
         working-directory: second-environment/app
         run: pnpm install --frozen-lockfile
@@ -1044,7 +1100,7 @@ jobs:
           pnpm run release:build
           pnpm run release:manifest -- --environment desktop-shell
       - name: Publish this environment's release digests (12 §1.1, INV-FE-10; F13)
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-repro-manifest-desktop-shell
           if-no-files-found: error
@@ -1054,14 +1110,14 @@ jobs:
         # webkit2gtk 4.1 + GTK3 + libsoup3 are what `tauri`/`wry` link against on Linux.
         # Pinned to the 4.1 line because Tauri 2 dropped 4.0 (01 §9 pins Tauri 2.x).
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          apt-get update
+          apt-get install -y \
             libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
             librsvg2-dev libsoup-3.0-dev patchelf
-      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: dtolnay/rust-toolchain@1d1eb14921d9c2d8ea575663e5fe3a0b57868a05 # 1.89.0
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: second-environment/app
       - name: Formatting
@@ -1121,15 +1177,15 @@ jobs:
     runs-on: ubuntu-latest
     needs: [app, desktop-shell]
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.12'
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: release-repro-manifest-app
           path: repro/app
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: release-repro-manifest-desktop-shell
           path: repro/desktop-shell
@@ -1151,11 +1207,11 @@ jobs:
     name: Environment definitions
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.12'
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '22'
       - name: Install environment validator dependencies
@@ -1185,8 +1241,8 @@ jobs:
     name: Generated limit coverage
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.12'
       - name: Run limit-coverage checker tests

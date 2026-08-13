@@ -191,6 +191,21 @@ undefined behavior cannot disappear from release evidence.
 
 Per-commit CI job and release-blocking `release.yml` leg.
 
+## Workflow provenance (14 §3.6 TH-44) — `tools/release/check-workflow-action-pins.py`
+
+Every third-party `uses:` entry in every committed workflow must name a full
+40-hex commit SHA and carry a human-readable version comment. Mutable major tags
+had left the release publisher, artifact upload/download steps, toolchain setup
+and even checkout able to execute different code without any repository diff
+(SR-15). Pinning only the release job is insufficient: an unpinned producer can
+poison an artifact a pinned publisher faithfully releases.
+
+The checker derives the workflow set from `.github/workflows/`, rejects dynamic
+or local-looking exceptions it does not understand, and is wired into ordinary
+CI. `tools/release/tests/test_workflow_action_pins.py` carries both mutable-tag
+and missing-label witnesses so a parser that silently stops recognizing `uses:`
+cannot report green.
+
 ## Tooling suites
 
 `python3 -m unittest discover -s <dir>` over `tools/deploy/tests`,

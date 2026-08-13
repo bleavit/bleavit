@@ -419,6 +419,18 @@ def validate_prerequisites(
             require_file(specs / name, f"generated chain spec {name}")
     if zombienet_suites:
         require_executable(zombienet_binary, "Zombienet binary")
+        # Require what each selected topology will actually boot, not a
+        # hand-maintained subset.  In particular, the hosted-service drills
+        # include a second, test-only client parachain whose separately built
+        # chain spec is not one of the primary Bleavit release specs.
+        for suite in zombienet_suites:
+            for path in suite_declared_chain_specs(root, suite):
+                label = (
+                    path.relative_to(root.resolve())
+                    if path.is_relative_to(root.resolve())
+                    else path
+                )
+                require_file(path, f"suite {suite.identifier} chain spec {label}")
         for name in (
             "polkadot",
             "polkadot-prepare-worker",
@@ -525,10 +537,25 @@ TOPOLOGY_CHAIN_SPEC = re.compile(
 )
 #: The drill's `Network:` header, naming the topology it boots.
 DRILL_NETWORK = re.compile(r"^\s*Network:\s*(\S+)\s*$", re.MULTILINE)
-#: Chain specs this repository builds from its own runtime. Relay, Asset Hub
-#: and Coretime specs come from the pinned Paseo tree and carry a different
-#: `:code` by construction, so binding them to `runtime.wasm` would be wrong.
-BLEAVIT_SPEC_PREFIX = "bleavit-"
+#: Environment specs whose genesis ``:code`` must equal the shipped primary
+#: runtime.  Exact names are deliberate: ``bleavit-client-local.json`` is a
+#: separately built client-parachain harness, while the two fast specs carry a
+#: test-only runtime.  A broad ``bleavit-`` prefix would bind all three to the
+#: primary and make every hosted-service release suite fail before it spawned.
+PRIMARY_RUNTIME_SPEC_NAMES = frozenset(
+    {
+        "bleavit-drill.json",
+        "bleavit-drill-raw.json",
+        "bleavit-drill-migration.json",
+    }
+)
+NON_PRIMARY_BLEAVIT_SPEC_NAMES = frozenset(
+    {
+        "bleavit-client-local.json",
+        "bleavit-drill-fast.json",
+        "bleavit-drill-fast-coretime.json",
+    }
+)
 
 
 def resolve_declared_path(root: Path, declared: str, context: str) -> Path:
@@ -551,16 +578,51 @@ def resolve_declared_path(root: Path, declared: str, context: str) -> Path:
     return resolved
 
 
+def suite_declared_chain_specs(root: Path, suite: "Suite") -> list[Path]:
+    """Resolve every chain spec the selected Zombienet suite actually boots."""
+    if suite.kind != "zombienet":
+        return []
+    drill_path = suite.path if suite.path.is_absolute() else root / suite.path
+    try:
+        drill = drill_path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise EvidenceError(
+            f"15 §5: cannot read drill {suite.identifier}: {error}"
+        ) from error
+    network = DRILL_NETWORK.search(drill)
+    if network is None:
+        raise EvidenceError(
+            f"15 §5: drill {suite.identifier} declares no Network: topology, "
+            "so the chain specs it boots cannot be checked"
+        )
+    topology = resolve_declared_path(root, network.group(1), f"drill {suite.identifier}")
+    try:
+        text = topology.read_text(encoding="utf-8")
+    except OSError as error:
+        raise EvidenceError(
+            f"15 §5: cannot read topology {network.group(1)} for suite "
+            f"{suite.identifier}: {error}"
+        ) from error
+    declared = TOPOLOGY_CHAIN_SPEC.findall(text)
+    if not declared:
+        raise EvidenceError(
+            f"15 §5: suite {suite.identifier} topology {network.group(1)} "
+            "declares no chain specs"
+        )
+    context = f"topology {network.group(1)}"
+    return [resolve_declared_path(root, path, context) for path in declared]
+
+
 def suite_chain_specs(root: Path, suites: Iterable["Suite"]) -> list[Path]:
-    """The Bleavit chain specs the *selected* suites actually boot.
+    """The primary-runtime chain specs the *selected* suites actually boot.
 
     Derived per suite rather than hardcoded. The fixed pair bound exactly two
     files, but `06-pb-migration` boots `bleavit-drill-migration.json` and the
-    compressed-timing drills boot `bleavit-drill-fast*.json` — none of which
-    appeared anywhere in this file. The emitted `bleavit.env-evidence.v1` then
-    asserted that, for example, the 09 §3.2 PB-MIGRATION path had been
-    exercised *on the release runtime* without ever having verified that the
-    spec it ran against carried the release runtime's code.
+    hosted-service drills also boot `bleavit-client-local.json`.  Only the
+    former carries the shipped primary.  The client harness and compressed-
+    timing specs are recognized explicitly but excluded from the primary-Wasm
+    comparison; an unknown `bleavit-*` name fails closed instead of inheriting
+    either classification by convention.
 
     Returns the resolved **paths**, not their basenames. Every topology in the
     tree happens to keep its specs in `zombienet/specs/out`, but reducing a
@@ -573,50 +635,46 @@ def suite_chain_specs(root: Path, suites: Iterable["Suite"]) -> list[Path]:
     paths: dict[Path, None] = {}
     for suite in suites:
         if suite.kind == "zombienet":
-            drill_path = suite.path if suite.path.is_absolute() else root / suite.path
-            try:
-                drill = drill_path.read_text(encoding="utf-8")
-            except OSError as error:
-                raise EvidenceError(
-                    f"15 §5: cannot read drill {suite.identifier}: {error}"
-                ) from error
-            network = DRILL_NETWORK.search(drill)
-            if network is None:
-                raise EvidenceError(
-                    f"15 §5: drill {suite.identifier} declares no Network: topology, "
-                    "so the chain spec it boots cannot be bound to the release runtime"
-                )
-            topology = resolve_declared_path(
-                root, network.group(1), f"drill {suite.identifier}"
-            )
-            try:
-                text = topology.read_text(encoding="utf-8")
-            except OSError as error:
-                raise EvidenceError(
-                    f"15 §5: cannot read topology {network.group(1)} for suite "
-                    f"{suite.identifier}: {error}"
-                ) from error
-            spec_paths = TOPOLOGY_CHAIN_SPEC.findall(text)
-            context = f"topology {network.group(1)}"
+            spec_paths = suite_declared_chain_specs(root, suite)
         elif suite.kind == "chopsticks":
             # Every scenario is required to fork exactly `CHOPSTICKS_GENESIS`
             # (validated where the config is loaded), so its spec set is that
             # one file — already in the base pair below.
-            spec_paths = [CHOPSTICKS_GENESIS]
-            context = f"suite {suite.identifier}"
+            spec_paths = [
+                resolve_declared_path(
+                    root, CHOPSTICKS_GENESIS, f"suite {suite.identifier}"
+                )
+            ]
         else:
             continue
 
-        matched = False
+        recognized = False
+        primary = False
         for spec_path in spec_paths:
-            if not PurePosixPath(spec_path).name.startswith(BLEAVIT_SPEC_PREFIX):
+            name = spec_path.name
+            if not name.startswith("bleavit-"):
                 continue
-            paths.setdefault(resolve_declared_path(root, spec_path, context), None)
-            matched = True
-        if not matched:
+            if name in PRIMARY_RUNTIME_SPEC_NAMES:
+                paths.setdefault(spec_path, None)
+                recognized = True
+                primary = True
+            elif name in NON_PRIMARY_BLEAVIT_SPEC_NAMES:
+                recognized = True
+            else:
+                raise EvidenceError(
+                    f"15 §5: suite {suite.identifier} names unclassified Bleavit "
+                    f"chain spec {name!r}; classify its runtime before evidence runs"
+                )
+        if not recognized:
             raise EvidenceError(
                 f"15 §5: suite {suite.identifier} names no Bleavit chain spec, so "
                 "nothing binds its run to the release runtime"
+            )
+        if suite.tier == "release" and not primary:
+            raise EvidenceError(
+                f"15 §5: release-tier suite {suite.identifier} names no primary "
+                "Bleavit chain spec; separate test runtimes cannot bind the run "
+                "to the shipped runtime"
             )
     return sorted(paths)
 

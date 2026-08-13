@@ -81,10 +81,28 @@ export const HOST_SDK_PACKAGES = '@tauri-apps|@parity/product-sdk';
  *
  * The general statement, worth keeping in one place: **dependency-cruiser records any
  * specifier it cannot resolve verbatim.** Always match both the specifier a source file
- * writes and the path it would resolve to.
+ * writes and the path it would resolve to. When a capability can also be reached by a
+ * relative source import, pass that source path too: `./testing.js` resolves to
+ * `src/testing.ts` and otherwise walks around a rule naming only the public subpath and dist.
  */
-export const WORKSPACE_SUBPATH = (specifier: string, distPath: string): string =>
-  `^${specifier.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}($|/)|^${distPath}`;
+export const WORKSPACE_SUBPATH = (
+  specifier: string,
+  distPath: string,
+  sourcePath?: string,
+): string =>
+  `^${specifier.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}($|/)|^${distPath}` +
+  (sourcePath === undefined ? '' : `|^${sourcePath}`);
+
+/**
+ * The module that contains the quarantined pure `GatePassed` evaluator.
+ *
+ * Withholding it from the package root and forbidding `/testing` imports are insufficient on
+ * their own: a relative cross-package import resolves straight to this source module and exposes
+ * every exported value in it. Shared with the witness so the production rule and its liveness
+ * proof cannot drift onto different spellings.
+ */
+export const TRANSACTION_BUILDER_MACHINE_MODULE =
+  '^packages/transaction-builder/(src|dist)/machine($|\\.)';
 
 /**
  * `polkadot-api`, minus the two subpaths that are only a signer.

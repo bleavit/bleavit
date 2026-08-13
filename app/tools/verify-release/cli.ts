@@ -375,12 +375,13 @@ function assertTxid(value: string, what: string): string {
 }
 
 /**
- * The transaction ids `release.json` names for its signatures and attestations.
+ * Legacy extension transaction ids an externally authored `release.json` may carry.
  *
- * The field names are the ones `tools/monitoring/attestation_monitor.py` already reads, so the
- * two independent implementations of this check cannot drift into two spellings. They remain
- * O1-provisional, and **this repository's producer cannot fill them** — see `credentials`
- * below, which is why they are one source here rather than the only one.
+ * These are not part of the canonical `bleavit.app-release.v1` producer contract and the
+ * unattended monitor deliberately ignores them: that path consumes the independently pinned
+ * credential index. The interactive verifier continues to accept them only as an additional
+ * operator-visible input for older externally authored documents. A repository-produced release
+ * names credentials through `--signature` and `--attestation` as explained below.
  */
 function signatureTxids(document: unknown, field: string): string[] {
   const rows = isRecord(document) ? document[field] : undefined;
@@ -421,8 +422,8 @@ function signatureTxids(document: unknown, field: string): string[] {
  * 12 §1.4 gate 4 publishes them: *"release notes list the immutable TXID, attestation TXIDs,
  * and the multi-gateway URL set"*. So they are operator-supplied, like `--arweave` and
  * `--release-json` already are, and a verifier reading the release notes has them. The
- * document-embedded arrays stay as a second source, because that is the provisional contract
- * the §5.2 monitor reads and the two must not drift into two spellings.
+ * document-embedded arrays stay as a legacy extension source for the interactive verifier only.
+ * They are not a monitor trust root and no repository producer emits them.
  *
  * Zero credentials still refuses — by counting, at the floors — but it says so in its own
  * words first, so "this release published no signatures" and "you named none" are never the

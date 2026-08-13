@@ -42,10 +42,13 @@ the owning pallet's state, dispatch behavior, and `try-state` result decide that
    population as the counted `Epoch::Proposals` pipeline. Inspect
    [`IntakeQueue`, `Proposals`, `RecentCohortSummaries`, and `ResourceLocks`](../../pallets/epoch/src/lib.rs)
    separately rather than adding unrelated occupancies.
-3. For market or ledger pressure, inspect `Market::Markets` and the ledger's
-   `Vaults`, `BaselineVaults`, `Positions`, `PositionCount`, and `PositionTotals`.
-   Confirm whether the alert is a count ceiling, an economic storage bound, or a
-   per-value encoded-size/PoV concern before choosing a cleanup path.
+3. For market or ledger pressure, inspect the physical `Market::Markets` count
+   against `MaxAllStoredMarkets`, then inspect primary live, external live, primary
+   retained, and external retained occupancy against their four independent bounds.
+   Also inspect the ledger's `Vaults`, `BaselineVaults`, `Positions`,
+   `PositionCount`, and `PositionTotals`. Confirm whether the alert is a partition
+   ceiling, an economic storage bound, or a per-value encoded-size/PoV concern
+   before choosing a cleanup path.
 4. Check the owning pallet's recent lifecycle events and terminal-state age.
    Determine whether normal bounded cleanup is progressing, stalled, or blocked
    by an archive-delay or settlement precondition. Do not invent a pruning call

@@ -81,6 +81,7 @@
     "check:covered-history:witness": "node tools/check-covered-history.ts --witness"
   },
   "devDependencies": {
+    "@polkadot-api/merkleize-metadata": "1.2.3",
     "@polkadot-api/substrate-bindings": "0.20.3",
     "@tailwindcss/vite": "4.3.3",
     "@types/node": "22.18.12",

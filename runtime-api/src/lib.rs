@@ -5,10 +5,17 @@
 //!
 //! The frozen 16-method [`FutarchyApi`] surface is specified by the integration
 //! contract (02 §3). The separate [`telemetry`] module is monitoring-only and
-//! explicitly outside that contract (12 §6.3). Both are read-only, bounded, and
-//! shared with their respective clients.
+//! [`release_metadata`] is release-evidence-only; both are explicitly outside
+//! that contract (12 §6.3 and §1 respectively). All are read-only and bounded.
 
+pub mod release_metadata;
 pub mod telemetry;
+
+pub use release_metadata::runtime_decl_for_release_metadata_api;
+#[cfg(feature = "std")]
+pub use release_metadata::ReleaseMetadataApi;
+#[cfg(not(feature = "std"))]
+pub use runtime_decl_for_release_metadata_api::ReleaseMetadataApi;
 
 #[cfg(not(feature = "std"))]
 pub use runtime_decl_for_telemetry_api::TelemetryApi;

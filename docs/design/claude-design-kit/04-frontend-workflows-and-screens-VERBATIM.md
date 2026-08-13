@@ -1,6 +1,10 @@
 > **DERIVED COPY for design-tool context — DO NOT EDIT.**
 > Verbatim copy of `docs/architecture/11-frontend-workflows.md` (the source of truth),
-> regenerated 2026-08-08 for the SQ-1011 ruling (F26), which added one clause to **E4**: a
+> regenerated 2026-08-12 for the SQ-1058 remediation: the production
+> `refreshAndGate(prep, nominalConnection)` boundary accepts no executable evidence callbacks and
+> stays fail-closed until its closed metadata-derived evaluator owns every key, decoder and
+> predicate; a future passing proof must bind the exact preparation and frozen signing bytes/account.
+> The previous regeneration was 2026-08-08 for the SQ-1011 ruling (F26), which added one clause to **E4**: a
 > compatibility probe that could not complete at all is a third outcome, distinct from a
 > single unprobed surface and from `read-only-incompatible` — code `FE-COMPAT-003`, no mode
 > named, no surface listed, and a retry rather than a newer release as its recovery. The
@@ -111,7 +115,7 @@ An external tool's own output — its prose, its charts, its explanations — is
 
 Carried forward from FE §17.1–§17.3, §17.5, §17.7–§17.8 with the fee repair of D-12:
 
-- **Signers.** Injected PJS-compatible extensions via `polkadot-api/pjs-signer`, whose exports are **pinned (FE-P1, 2026-08-03)**: `getInjectedExtensions(): string[]`, `connectInjectedExtension(name, dappName?): Promise<InjectedExtension>` and `getPolkadotSignerFromPjs(address, signPayload, signRaw): PolkadotSigner`. Raw-payload flow (QR/hex + metadata-hash mode) for air-gapped and hardware signers **[VERIFY whether a Ledger app blind-signs when a chain offers no digest — FE-P6's device half; the chain half is settled and the chain is the blocker (SQ-594, milestone B21)]**. Note that PAPI signs `CheckMetadataHash` as **mode 0 (Disabled)** on every in-app path and offers no option for mode 1 other than `customSignedExtensions` (FE-P1), so metadata-hash signing is a deliberate build rather than a flag. Multisig via `Multisig.as_multi` with approval state read from `Multisig.Multisigs`; proxies supported as call wrappers under the same precondition system, with the delegation itself read from **`Proxy.Proxies(real)`** ([02](02-integration-contract.md) §7.6, contract v27).
+- **Signers.** Injected PJS-compatible extensions via `polkadot-api/pjs-signer`, whose exports are **pinned (FE-P1, 2026-08-03)**: `getInjectedExtensions(): string[]`, `connectInjectedExtension(name, dappName?): Promise<InjectedExtension>` and `getPolkadotSignerFromPjs(address, signPayload, signRaw): PolkadotSigner`. Raw-payload flow (QR/hex + metadata-hash mode) for air-gapped and hardware signers **[VERIFY whether a Ledger app verifies Bleavit's digest and renders the call rather than blind-signing — FE-P6's remaining device half]**. B21 closes the chain half: every release runtime embeds the RFC-78 metadata digest and release extraction independently recomputes it. PAPI still signs `CheckMetadataHash` as **mode 0 (Disabled)** on every in-app path and offers no option for mode 1 other than `customSignedExtensions` (FE-P1), so metadata-hash signing remains a deliberate raw/hardware path, not a flag or a capability inferred merely from chain support. Multisig via `Multisig.as_multi` with approval state read from `Multisig.Multisigs`; proxies supported as call wrappers under the same precondition system, with the delegation itself read from **`Proxy.Proxies(real)`** ([02](02-integration-contract.md) §7.6, contract v27).
 - **A wrapper splits identity, and the delegation is its own precondition (SQ-590).** `Proxy.proxy` executes the inner call as `real` and `Multisig.as_multi` as the derived multisig account, while the **signer** still pays the fee and owns the nonce — so every clause below carries the subject it is about, and resolving one account for both questions checks the wrong one. The proxy case adds a check no other row covers: *may this signer act for `real` at all?* Evaluating the table against `real` is correct and, on its own, **passes green for a delegation that does not exist** — the runtime then refuses with `NotProxy` after the user has signed. The client MUST therefore read `Proxy.Proxies(real)` and require a delegation naming **this signer** as `delegate`, whose **stored** `proxy_type` covers the call and whose `delay` is zero (a non-zero delay makes bare `proxy` unreachable — `Unannounced`). A caller-supplied proxy type satisfies nothing: the claim is the part that must come from the chain. An unrecognised `ProxyType` variant is **unproven, never permissive** (INV-FE-12), and an *unperformed* read is distinct from an *empty* one — empty means nobody may act for this account, unread means the client does not know, and collapsing them makes a missing check look like a passed one.
 - **Lifecycle.** Draft → Prepared(at B) → Refreshing → {Blocked | AwaitingSignature(at B′)} → Broadcast → InBestBlock → **Finalized** (only success state) | Dropped | Retracted. Post-finalization the app decodes the extrinsic's events to distinguish inclusion from call success and renders dispatch errors with human text (e.g. `market.buy failed: MaxCostExceeded — you paid nothing`).
 - **Mortality/nonce.** Era 64 blocks from B′ (256 for raw-external); nonce from finalized `System.Account(who).nonce` at B′ plus tracked in-flight increments; phase-boundary proximity warning when a relevant boundary is < 25 blocks away.
@@ -124,14 +128,26 @@ Carried forward from FE §17.1–§17.3, §17.5, §17.7–§17.8 with the fee re
 ## 11.4 Pre-sign refresh (INV-FE-2)
 
 ```ts
-export async function refreshAndGate<T>(prep: TxPreparation<T>): Promise<Gate> {
-  const at = await client.getFinalizedBlock();                 // B' — single pin
-  const rt = await api.runtimeVersionAt(at.hash);              // compat gate (doc 10)
+export async function refreshAndGate(
+  prep: TxPreparation,
+  nominalConnection: ChainHeadConnection,
+): Promise<Gate> {
+  const reader = await FinalizedReader.open(nominalConnection);
+  const at = reader.at;                                        // B' — single pin
+  const rt = await ownedRuntimeVersionAt(reader);               // compat gate (doc 10)
   if (rt.spec_version !== prep.builtFor.specVersion) return blocked('FE-TX-007', rt);
-  const results = await Promise.all(prep.preconditions.map(p => p.evaluateAt(at.hash)));
+  const results = await ownedEvaluator.evaluateDeclaredRows(prep, at.hash);
   const failed = results.filter(r => !r.ok);
   return failed.length ? blocked('FE-TX-004', failed /* diff view */)
-                       : proceed({ at, results });
+                       : proceed({
+                           at,
+                           prep,
+                           authorization: Object.freeze({
+                             scaleHex: prep.scaleHex,
+                             account: prep.signingAccount,
+                           }),
+                           results,
+                         });
 }
 ```
 
@@ -142,6 +158,21 @@ Rules (normative):
 3. Expected/actual values render in the confirm screen; expert mode shows raw keys and SCALE values (INV-FE-14).
 4. Provider/local-index data never satisfies any precondition (INV-FE-3); every row reads chain state.
 5. A precondition failure shows a diff (expected vs. actual at B′) and returns to Draft with form state preserved.
+6. A passing proof names the exact `TxPreparation` it evaluated and freezes the signing target
+   `{scaleHex, account}` from that preparation. Every signer consumes those bound bytes/account,
+   never parallel request fields; the reducer and signer boundary reject a proof paired with another
+   preparation or a preparation mutated after gating.
+
+**Fail-closed implementation floor (normative).** The evaluator above is a closed internal table:
+it owns every metadata-derived key and argument encoder, decoder, compatibility check and row
+predicate. A caller supplies only the preparation's declared choices and the nominal connection
+object — never executable read/decode/evaluation callbacks, precondition verdicts or a third
+argument. Until that closed table is complete, `refreshAndGate(prep, nominalConnection)` MUST still
+open its own fresh finalized pin and observe the finalized runtime, then return a named `FE-TX-004`
+blocked outcome; it MUST NOT mint a passing gate. A genuine but irrelevant read, or an arbitrary
+value derived from one, proves none of the declared rows. This is a safe staging state under
+INV-FE-12, not satisfaction of rules 1–5: signing remains unavailable until every exact read above
+is implemented.
 
 ---
 
