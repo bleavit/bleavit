@@ -5,7 +5,7 @@
   "metadata_version": 15,
   "missing": [],
   "mode": "chainHead-v1",
-  "pinned_block": "0x8e74aa0e022279c9f3053a9ce205773bd850ec7ef409776ce653eea5731ac609",
+  "pinned_block": "0xb0e4742f706c684738fbbadd31ad07752e5ac9e44df8427f271f9daad41e2260",
   "recorded": [
     "api.account_positions",
     "api.bond_quote",

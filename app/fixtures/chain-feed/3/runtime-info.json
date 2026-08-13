@@ -56,7 +56,7 @@
   ],
   "metadata_sha256": "0f36a82b23cf197a3eb21d67485a79ac44a875a634cab559764e24d226b7e4c2",
   "metadata_version": 15,
-  "on_chain_wasm_sha256": "93090dd34b38a0a2d75a3e38547332520e7cdc7facb1f314c8865f35f9a3c952",
+  "on_chain_wasm_sha256": "c70a3c548b31e37eb0201fded4564ede38058f612ef342ad979d46fbc820eadd",
   "rfc78_merkleized_metadata_hash": "0x71fc8c0d90bf2e1af66abea13c39da8edefba570f42fb70a98b9b1dd24d18aa8",
   "rfc78_status": "enabled and independently recomputed from metadata.scale",
   "runtime_profile": "bootstrap-recovery",
@@ -70,6 +70,6 @@
     "tokenSymbol": "VIT"
   },
   "transaction_version": 1,
-  "wasm_file_sha256": "93090dd34b38a0a2d75a3e38547332520e7cdc7facb1f314c8865f35f9a3c952",
-  "wasm_sha256": "93090dd34b38a0a2d75a3e38547332520e7cdc7facb1f314c8865f35f9a3c952"
+  "wasm_file_sha256": "c70a3c548b31e37eb0201fded4564ede38058f612ef342ad979d46fbc820eadd",
+  "wasm_sha256": "c70a3c548b31e37eb0201fded4564ede38058f612ef342ad979d46fbc820eadd"
 }

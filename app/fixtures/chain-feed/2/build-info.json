@@ -15,7 +15,7 @@
     "bootstrap"
   ],
   "cargo_version": "cargo 1.89.0 (c24e10642 2025-06-23)",
-  "git_commit": "a4983e858fe6f079885d19bf82eba254eac8cdc8",
+  "git_commit": "13eaabc6d72bea702218c4c8ec2d8b40968be1bf",
   "host_triple": "x86_64-unknown-linux-gnu",
   "multi_block_migrations": "normal",
   "normalized_environment": {
@@ -27,7 +27,7 @@
     "LANG": "C.UTF-8",
     "LC_ALL": "C.UTF-8",
     "RUSTUP_HOME": "/rustup-home",
-    "SOURCE_DATE_EPOCH": "1786572199",
+    "SOURCE_DATE_EPOCH": "1786584941",
     "TZ": "UTC",
     "WASM_BUILD_WORKSPACE_HINT": "/src"
   },
@@ -45,11 +45,11 @@
   "rustc_verbose_version": "rustc 1.89.0 (29483883e 2025-08-04)\nbinary: rustc\ncommit-hash: 29483883eed69d5fb4db01964cdf2af4d86e9cb2\ncommit-date: 2025-08-04\nhost: x86_64-unknown-linux-gnu\nrelease: 1.89.0\nLLVM version: 20.1.7",
   "rustc_version": "rustc 1.89.0 (29483883e 2025-08-04)",
   "schema": "bleavit.runtime-build.v3",
-  "source_date_epoch": 1786572199,
+  "source_date_epoch": 1786584941,
   "toolchain": "1.89.0",
   "wasm": {
     "path": "runtime.wasm",
-    "sha256": "1955a75d216ca44533179a18c6e617564a83a235ff99d31d14848a8447e30c05",
-    "size": 1921941
+    "sha256": "2fa46f4626626f3d8abd7e038e14c714affc01a3f644a2f80aa0845936265d3b",
+    "size": 1921975
   }
 }

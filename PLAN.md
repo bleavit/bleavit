@@ -34,9 +34,12 @@ Legend: ⬜ pending · 🔨 active · ✅ done · ⛔ blocked
 > ownership prevented deterministic app epoch derivation, one benchmark-only
 > Rust import was unconditional, the public-XCM router change left generated
 > `pallet_xcm` weights stale, and a newly published unpatched `extract-zip`
-> advisory needed an evidence-backed tooling-only waiver. All four fixes and the
-> committed-fidelity weight regeneration are in the final verification/artifact
-> refresh loop before one replacement push.
+> advisory needed an evidence-backed tooling-only waiver. All four fixes, two
+> latent affected-suite fixture repairs and the committed-fidelity weight
+> regeneration are committed at `13eaabc6`. The paired runtime/feed artifacts
+> were regenerated from that exact source with zero assembly corruption and all
+> focused gates green. Remaining work is the artifact/status commit, one branch
+> push and the replacement CI handoff.
 
 > **PARKED: 2026-08-09 — Track F's code is complete; four milestones wait on
 > external inputs.** F1 needs the user's SQ-940 ruling plus a device lab/live
