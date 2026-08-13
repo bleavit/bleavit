@@ -4863,7 +4863,9 @@ fn external_pair_creation_and_seed_refuse_wrong_domain_or_funder_atomically() {
             E::WrongFundingDomain
         );
 
-        let another_question = QUESTION + 20;
+        // Keep the question on the three-id service-family boundary so this
+        // case reaches the independent reserved-funder guard.
+        let another_question = QUESTION + 21;
         assert_noop!(
             Market::create_external_pair(
                 signed(ALICE),

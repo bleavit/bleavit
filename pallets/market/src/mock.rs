@@ -10,10 +10,12 @@ use frame_support::{
     PalletId,
 };
 use frame_system::{EnsureSigned, RawOrigin};
+#[cfg(feature = "runtime-benchmarks")]
+use futarchy_primitives::QuestionId;
 use futarchy_primitives::{
     bounds,
     keeper::{CrankClass, KeeperRebateSink},
-    kernel, Balance, MarketId, QuestionId,
+    kernel, Balance, MarketId,
 };
 use parity_scale_codec::{Decode, Encode};
 use sp_runtime::{traits::AccountIdConversion, BuildStorage};

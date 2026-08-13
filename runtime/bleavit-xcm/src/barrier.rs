@@ -386,15 +386,16 @@ where
     }
 }
 
-/// The exact pre-N8 barrier (09 §6.1).
+/// The exact non-client legacy barrier (09 §6.1).
 ///
 /// Pre-paid local execution may consume weight credit; remote execution must otherwise be a
 /// known query response, paid from an accepted origin, or a version subscription from one.
 /// There is deliberately no unpaid-execution allow path and no superuser conversion.
 ///
 /// Keep this composition explicit: N8's frozen differential uses it as the
-/// before-side oracle and proves that client ingress is a pure extension for
-/// every program without `Transact`.
+/// non-client oracle and proves that client ingress is a pure extension for
+/// every program without `Transact`. Shared deny components may move only with
+/// an authorized security amendment and a reviewed frozen-source digest.
 pub type LegacyBleavitBarrier<
     ResponseHandler,
     UniversalLocation,

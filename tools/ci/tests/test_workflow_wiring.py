@@ -284,6 +284,51 @@ class WorkflowWiring(unittest.TestCase):
                     "fail for a reason that names the wrong thing",
                 )
 
+    def test_release_builders_fix_the_commit_epoch_before_building(self) -> None:
+        """Container ownership must not make the deterministic recipe depend on Git trust.
+
+        The app container mounted the checkout under a different uid, so the release
+        tool's otherwise-correct `git show` fallback failed with dubious ownership.
+        Both builders now export the same commit-derived value before `release:build`,
+        using job-scoped exact-path trust rather than a global safe-directory exemption.
+        """
+        jobs = load("ci.yml")["jobs"]
+        repositories = {
+            "app": ("$GITHUB_WORKSPACE", "${{ github.workspace }}"),
+            "desktop-shell": (
+                "$GITHUB_WORKSPACE/second-environment",
+                "${{ github.workspace }}/second-environment",
+            ),
+        }
+        for name, (repository, trusted_path) in repositories.items():
+            with self.subTest(name):
+                job = jobs[name]
+                self.assertEqual(job["env"].get("GIT_CONFIG_COUNT"), 1)
+                self.assertEqual(job["env"].get("GIT_CONFIG_KEY_0"), "safe.directory")
+                self.assertEqual(job["env"].get("GIT_CONFIG_VALUE_0"), trusted_path)
+                steps = job["steps"]
+                epoch_steps = [
+                    (index, step)
+                    for index, step in enumerate(steps)
+                    if "SOURCE_DATE_EPOCH=" in (step.get("run") or "")
+                ]
+                self.assertEqual(len(epoch_steps), 1, f"{name} must export one fixed epoch")
+                epoch_index, epoch_step = epoch_steps[0]
+                build_index = next(
+                    index
+                    for index, step in enumerate(steps)
+                    if "pnpm run release:build" in (step.get("run") or "")
+                )
+                command = epoch_step["run"]
+                self.assertLess(epoch_index, build_index)
+                self.assertIn(f'repo="{repository}"', command)
+                self.assertIn("show -s --format=%ct HEAD", command)
+                self.assertIn('>> "$GITHUB_ENV"', command)
+                self.assertTrue(
+                    any("pnpm run release:manifest" in (step.get("run") or "") for step in steps),
+                    f"{name} must exercise later git rev-parse through inherited exact-path trust",
+                )
+
     def test_the_two_environments_are_named_apart(self) -> None:
         """One id twice is one environment, and the checker refuses it — but it would refuse
         it *in CI*, having already spent two full builds getting there."""

@@ -76,3 +76,40 @@ reason = "build-and-measurement tooling only, proven absent from the built dist/
 blocked_by = "lighthouse 12.8.2 -> @sentry/node 9.47.1 -> @opentelemetry/core \"^1.30.1\" (hard dependency; the fix is 2.8.0, outside the range)"
 clears_when = "app/tools/render-budget moves to lighthouse >= 13.4.1, which resolves @opentelemetry/core 2.10.0 — gated on re-ruling 10 §9.4's binding to Lighthouse 12.8.2 and on a green check:render-budget under the new major"
 triaged = "2026-08-07"
+
+[[waiver]]
+id = "GHSA-jmr9-qjv8-65gv"
+aliases = ["CVE-2026-56876"]
+package = "extract-zip"
+version = "2.0.1"
+severity = "high"
+reaches_bundle = "no"
+# `extract-zip` accepts a symlink target that escapes the destination directory.
+# GitHub reviewed the advisory on 2026-08-12 and lists every published release
+# (`<= 2.0.1`) as affected, with no patched version.
+#
+# CONTAINMENT — VERIFIED 2026-08-13:
+#
+#   1. `pnpm -C app why -r extract-zip` names one path in one of the 50 workspace
+#      projects: @bleavit/render-budget -> lighthouse 12.8.2 -> puppeteer-core
+#      24.43.1 -> @puppeteer/browsers 2.13.2 -> extract-zip 2.0.1.
+#   2. Lighthouse is declared only by `app/tools/render-budget/package.json`.
+#      `app/.npmrc` uses the isolated linker, so this dependency is not resolvable
+#      from the application packages.
+#   3. CI installs Chromium through Debian after the release manifest is recorded;
+#      it does not ask Puppeteer to download or unpack a browser. The render gate
+#      launches that exact `/usr/bin/chromium` through `chrome-launcher` and passes
+#      its path in `CHROME_PATH`, so the affected extraction code is not executed.
+#   4. A release build followed by a recursive search of `app/dist` contains none
+#      of `extract-zip`, `@puppeteer/browsers`, `puppeteer` or `lighthouse`. The SBOM
+#      still discloses the workspace tool dependency, as it should.
+#
+# Residual risk is confined to a future tooling change that starts using
+# @puppeteer/browsers to unpack an attacker-controlled archive. The current gate's
+# explicit Debian installation and CHROME_PATH make that precondition unreachable;
+# a dependency or workflow change must re-triage because this waiver is version-keyed
+# and the exit condition below is mechanically checked for staleness.
+reason = "Lighthouse-only measurement dependency; isolated from app packages, absent from dist, and its browser-extraction path is not executed"
+blocked_by = "lighthouse 12.8.2 -> puppeteer-core 24.43.1 -> @puppeteer/browsers 2.13.2 -> extract-zip 2.0.1; GitHub lists no patched extract-zip release"
+clears_when = "extract-zip publishes a non-affected version admitted by @puppeteer/browsers, or Lighthouse/Puppeteer removes extract-zip from the measurement-tool graph"
+triaged = "2026-08-13"

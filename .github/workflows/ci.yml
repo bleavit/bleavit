@@ -362,8 +362,23 @@ jobs:
       # repro-manifest.ts records both values under environment.substantive.
       ImageOS: debian-bookworm
       ImageVersion: sha256:bb6834c0669aa71cbc8d94606561a721adf489f6b93d7b8b825f0cf1b498c2c4
+      # The container uid does not own the mounted checkout. Scope Git trust to
+      # this one exact path for every release subprocess (epoch, dirty-tree and
+      # source-commit checks) without mutating the runner's global config.
+      GIT_CONFIG_COUNT: 1
+      GIT_CONFIG_KEY_0: safe.directory
+      GIT_CONFIG_VALUE_0: ${{ github.workspace }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Fix SOURCE_DATE_EPOCH from the checked-out commit
+        # Export the exact commit time that 12 §1.1 makes part of the build recipe.
+        # Job-scoped Git config above also covers later status/rev-parse subprocesses.
+        run: |
+          set -euo pipefail
+          repo="$GITHUB_WORKSPACE"
+          source_date_epoch=$(git -C "$repo" show -s --format=%ct HEAD)
+          [[ "$source_date_epoch" =~ ^[0-9]+$ ]]
+          echo "SOURCE_DATE_EPOCH=$source_date_epoch" >> "$GITHUB_ENV"
       - name: Enable corepack (pnpm pin comes from packageManager)
         working-directory: app
         # corepack reads `packageManager` from package.json, so the pin has exactly
@@ -1024,6 +1039,9 @@ jobs:
       CARGO_INCREMENTAL: 0
       ImageOS: debian-trixie
       ImageVersion: sha256:216faa77bcaea2715ad19c8b8becc6ae7f786a43812455c4209891049134cdf2
+      GIT_CONFIG_COUNT: 1
+      GIT_CONFIG_KEY_0: safe.directory
+      GIT_CONFIG_VALUE_0: ${{ github.workspace }}/second-environment
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1043,6 +1061,15 @@ jobs:
           # when the two manifests agree on every recorded axis, so deleting this line
           # turns the gate red rather than quietly weakening it.
           path: second-environment
+      - name: Fix SOURCE_DATE_EPOCH from the checked-out commit
+        # Match the app job's derivation while retaining this environment's distinct
+        # checkout depth. Job-scoped trust covers every later release subprocess too.
+        run: |
+          set -euo pipefail
+          repo="$GITHUB_WORKSPACE/second-environment"
+          source_date_epoch=$(git -C "$repo" show -s --format=%ct HEAD)
+          [[ "$source_date_epoch" =~ ^[0-9]+$ ]]
+          echo "SOURCE_DATE_EPOCH=$source_date_epoch" >> "$GITHUB_ENV"
       - name: Enable corepack (pnpm pin comes from packageManager)
         working-directory: second-environment/app
         run: corepack enable && corepack install

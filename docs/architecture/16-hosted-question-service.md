@@ -1357,9 +1357,13 @@ refusal and none can undo the already-published report.
 Carried here because they are properties of *this boundary*; [15](./15-invariants-and-testing.md)
 owns the regime.
 
-- **The highest-value single test in the batch:** a differential against a **frozen copy** of today's
-  three deny components, asserting that for any program *without* a `Transact`, the barrier's decision
-  is byte-identical. That is what proves the change is a pure extension rather than a rewrite.
+- **The highest-value single test in the batch:** a differential against a **frozen copy** of the
+  current non-client legacy branch's three deny components, asserting that for any program *without*
+  a `Transact`, the barrier's decision is byte-identical. The frozen branch includes later authorized
+  security amendments to those shared deny components (such as 09 §6.1's closed instruction
+  allowlist); its source digest moves only with the owning decision record. That is what proves the
+  client shape is a pure extension rather than a rewrite without pretending the shared legacy
+  policy can never be hardened.
 - **PT-9 — domain segregation.** No operation on one ledger instance changes any storage, balance or
   invariant reading of the other.
 - **PT-10 — external-outcome containment.** Replay a Bleavit-only scenario; replay it again with

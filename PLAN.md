@@ -30,7 +30,13 @@ Legend: ⬜ pending · 🔨 active · ✅ done · ⛔ blocked
 > exact commit, with zero assembly corruption and their focused gates green.
 > The generated-artifact/status closure is committed at `40475015`. Current
 > `main`'s single app plan-consumer repair has been integrated and its overlap
-> gates pass; remaining work is the merge push and PR CI handoff.
+> gates pass. Draft-PR CI then exposed four closure defects: container checkout
+> ownership prevented deterministic app epoch derivation, one benchmark-only
+> Rust import was unconditional, the public-XCM router change left generated
+> `pallet_xcm` weights stale, and a newly published unpatched `extract-zip`
+> advisory needed an evidence-backed tooling-only waiver. All four fixes and the
+> committed-fidelity weight regeneration are in the final verification/artifact
+> refresh loop before one replacement push.
 
 > **PARKED: 2026-08-09 — Track F's code is complete; four milestones wait on
 > external inputs.** F1 needs the user's SQ-940 ruling plus a device lab/live
