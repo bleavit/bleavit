@@ -33,7 +33,7 @@
  * answer the day zombienet is repackaged on a Node in the admissible major.
  *
  * Major **equality** rather than "at least", because `app/package.json` pins `engines.node` to
- * one closed band (`>=22.18.0 <23`). The floor is `app/.nvmrc`, which is the same file `ci.yml`
+ * one closed band (`>=22.19.0 <23`). The floor is `app/.nvmrc`, which is the same file `ci.yml`
  * feeds to `actions/setup-node`, so the drill cannot ask for a Node that CI does not install.
  *
  * @param {string} pinned  the `x.y.z` from `app/.nvmrc`

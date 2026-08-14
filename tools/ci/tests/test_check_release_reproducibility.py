@@ -74,7 +74,7 @@ def manifest(
         "environment": {
             "id": environment_id,
             "substantive": {
-                "node": "v22.18.0",
+                "node": "v22.19.0",
                 "pnpm": "10.23.0",
                 "platform": "linux",
                 "arch": "x64",

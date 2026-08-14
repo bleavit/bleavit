@@ -5,8 +5,13 @@
   "type": "module",
   "packageManager": "pnpm@10.23.0",
   "engines": {
-    "node": ">=22.18.0 <23",
+    "node": ">=22.19.0 <23",
     "pnpm": ">=10.23.0 <11"
+  },
+  "pnpm": {
+    "overrides": {
+      "nanoid": "3.3.18"
+    }
   },
   "scripts": {
     "dev": "vite",

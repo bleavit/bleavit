@@ -153,7 +153,7 @@ async function chainFacts(networkInfo, nodeName) {
  * The floor comes from `app/.nvmrc`, which is the same file `ci.yml` feeds to
  * `actions/setup-node`, so the drill cannot ask for a Node that CI does not install. Major
  * equality rather than *at least*, because `app/package.json` pins `engines.node` to
- * `">=22.18.0 <23"` — one band, deliberately closed at both ends.
+ * `">=22.19.0 <23"` — one band, deliberately closed at both ends.
  */
 function systemNode() {
   const pinned = fs.readFileSync(path.join(ROOT, "app", ".nvmrc"), "utf8").trim();

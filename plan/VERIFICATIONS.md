@@ -227,3 +227,4 @@
 | V-387 | [**PR #220 N10/N11 review repairs**](verifications/V-387.md) | 2026-08-02 | B7 |
 | V-388 | [**The manifest froze under half of what docs 10/11 tell the client to r…](verifications/V-388.md) | 2026-08-04 | — |
 | V-389 | [**`System.Events` cannot be frozen by expansion: its layout is 2,265,78…](verifications/V-389.md) | 2026-08-04 | — |
+| V-390 | [**The Dependabot paths are removed: Lighthouse 13.4.1 drops `extract-zi…](verifications/V-390.md) | 2026-08-14 | F14 |
