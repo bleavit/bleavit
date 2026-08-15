@@ -84,10 +84,10 @@ test('the digest commits to the path, so a rename is not a reproduction', () => 
 });
 
 test('pnpm reports its version through the user agent it sets', () => {
-  assert.equal(pnpmVersionFrom('pnpm/10.23.0 npm/? node/v22.18.0 linux x64'), '10.23.0');
+  assert.equal(pnpmVersionFrom('pnpm/10.23.0 npm/? node/v22.19.0 linux x64'), '10.23.0');
   // Read rather than spawned, so `null` is the honest answer when this ran under something
   // that is not pnpm — never a guessed version, which would enter a comparison as a value.
-  assert.equal(pnpmVersionFrom('npm/10.9.0 node/v22.18.0 linux x64'), null);
+  assert.equal(pnpmVersionFrom('npm/10.9.0 node/v22.19.0 linux x64'), null);
   assert.equal(pnpmVersionFrom(null), null);
 });
 

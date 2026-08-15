@@ -13,33 +13,14 @@ Legend: ⬜ pending · 🔨 active · ✅ done · ⛔ blocked
 
 ## Current focus
 
-> **ACTIVE: 2026-08-13 — remediate the whole-repository security review in
-> draft PR #304.** The immutable review checkpoint is published at commit
-> `3b70e09e`; all 15 findings have implementation fixes in the local commit series.
-> A final independent pass also closed two late source blockers: the signing gate
-> now has no caller-controlled evidence port and stays fail-closed until its closed
-> evaluator exists, while the monitor consumes the real app release schema and
-> distinguishes asset manifest M from final manifest M′. The first genuine
-> artifact pass then caught a downstream host rebuild substituting different
-> Wasm into canonical and drill specs; both generators now carry the exact OCI
-> primary end to end. Its closure review also made the N10 client-para spec an
-> explicit release prerequisite while keeping that separate runtime out of the
-> primary-Wasm binding. The source closure is committed at `a4983e85`; the
-> digest-pinned primary/recovery pair, v31 chain feed, chainHead fixtures,
-> descriptors and downstream generated consumers have been regenerated from that
-> exact commit, with zero assembly corruption and their focused gates green.
-> The generated-artifact/status closure is committed at `40475015`. Current
-> `main`'s single app plan-consumer repair has been integrated and its overlap
-> gates pass. Draft-PR CI then exposed four closure defects: container checkout
-> ownership prevented deterministic app epoch derivation, one benchmark-only
-> Rust import was unconditional, the public-XCM router change left generated
-> `pallet_xcm` weights stale, and a newly published unpatched `extract-zip`
-> advisory needed an evidence-backed tooling-only waiver. All four fixes, two
-> latent affected-suite fixture repairs and the committed-fidelity weight
-> regeneration are committed at `13eaabc6`. The paired runtime/feed artifacts
-> were regenerated from that exact source with zero assembly corruption and all
-> focused gates green. Remaining work is the artifact/status commit, one branch
-> push and the replacement CI handoff.
+> **ACTIVE: 2026-08-14 — PR #304 is merged; its Dependabot follow-up is fixed in
+> the working tree.** Lighthouse 13.4.1 removes the vulnerable `extract-zip` and
+> old telemetry paths, transitive `nanoid` is constrained to patched 3.3.18, the
+> Node floor and immutable CI images move to 22.19.0, and the full supply-chain
+> gate reports zero npm advisories. SQ-1006 is resolved under V-390. The repair is
+> on `codex/dependabot-remediation`; its local commit excludes and now permanently
+> ignores the derived `.pnpm-store/`. The remaining handoff is the user's corrected
+> branch push and PR creation.
 
 > **PARKED: 2026-08-09 — Track F's code is complete; four milestones wait on
 > external inputs.** F1 needs the user's SQ-940 ruling plus a device lab/live

@@ -354,14 +354,14 @@ jobs:
     # mutable hosted-runner image beneath it.  This child digest (rather than a
     # multi-architecture index) fixes the bytes the build actually executes.
     container:
-      image: node@sha256:bb6834c0669aa71cbc8d94606561a721adf489f6b93d7b8b825f0cf1b498c2c4 # node:22.18.0-bookworm, linux/amd64
+      image: node@sha256:f2bf1588ef7e8dd183d9e4cb4330a0d952204b7348ead42afb1aab11f9c4911b # node:22.19.0-bookworm, linux/amd64
     defaults:
       run:
         shell: bash
     env:
       # repro-manifest.ts records both values under environment.substantive.
       ImageOS: debian-bookworm
-      ImageVersion: sha256:bb6834c0669aa71cbc8d94606561a721adf489f6b93d7b8b825f0cf1b498c2c4
+      ImageVersion: sha256:f2bf1588ef7e8dd183d9e4cb4330a0d952204b7348ead42afb1aab11f9c4911b
       # The container uid does not own the mounted checkout. Scope Git trust to
       # this one exact path for every release subprocess (epoch, dirty-tree and
       # source-commit checks) without mutating the runner's global config.
@@ -1031,14 +1031,14 @@ jobs:
     name: Desktop shell (F22)
     runs-on: ubuntu-latest
     container:
-      image: node@sha256:216faa77bcaea2715ad19c8b8becc6ae7f786a43812455c4209891049134cdf2 # node:22.18.0-trixie, linux/amd64
+      image: node@sha256:1761517e3ab8303e487fe7a657bf50fb7e06e7ca47a23c632c1bfe8a9c49af00 # node:22.19.0-trixie, linux/amd64
     defaults:
       run:
         shell: bash
     env:
       CARGO_INCREMENTAL: 0
       ImageOS: debian-trixie
-      ImageVersion: sha256:216faa77bcaea2715ad19c8b8becc6ae7f786a43812455c4209891049134cdf2
+      ImageVersion: sha256:1761517e3ab8303e487fe7a657bf50fb7e06e7ca47a23c632c1bfe8a9c49af00
       GIT_CONFIG_COUNT: 1
       GIT_CONFIG_KEY_0: safe.directory
       GIT_CONFIG_VALUE_0: ${{ github.workspace }}/second-environment

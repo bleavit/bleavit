@@ -11,10 +11,10 @@
  * ## What is measured, and why it is FCP
  *
  * §9.4 budgets *"First meaningful render (shell)"*. Lighthouse's own
- * `first-meaningful-paint` audit is retained in the config for backwards compatibility and
- * **produces no `numericValue`** in 12.8.2 — measured, not assumed (V-179) — so binding to
- * it would be binding to `undefined`, which is the FE-P1 trap in its purest form: a gate
- * that measured nothing and reported a comfortable number. **First Contentful Paint** is
+ * `first-meaningful-paint` audit produced no `numericValue` in 12.8.2 and is absent from
+ * 13.4.1's performance config — measured, not assumed (V-179, V-390) — so binding to it
+ * would be binding to nothing, which is the FE-P1 trap in its purest form: a gate that
+ * measured nothing and reported a comfortable number. **First Contentful Paint** is
  * the metric that answers *"has the shell put anything on screen"*, and it is the one the
  * row is about: 10 §3.2 lists what renders before a chain connection exists, and this
  * document's `<div id="app">` is empty until the entry chunk executes, so FCP **is** the
@@ -38,7 +38,8 @@
  *   `desktopDense4G` network, but its own `cpuSlowdownMultiplier` is **1**, not 4
  *   (verified against the installed 12.8.2, V-179). §9.4 asks for a mid-2023 laptop at
  *   **4× throttle**, so the multiplier is overridden to 4 and the override is asserted
- *   back out of the report — see the anti-vacuity notes below.
+ *   back out of the report — see the anti-vacuity notes below. Lighthouse 13.4.1 retains
+ *   the same preset values (V-390).
  *
  * *"Lighthouse's own preset is the reference device"* is a claim about a dependency, so
  * it is **checked at run time, not asserted**: `assertReferenceHardware` requires the
@@ -245,6 +246,27 @@ interface Profile {
 }
 
 /**
+ * Resolve the two named preset screens and fail closed if Lighthouse stops exporting either.
+ *
+ * Lighthouse 13.4.1 types the preset map as open-ended, so a property access is optional even
+ * though the current package exports both names. Checking that shape once is better than a
+ * non-null assertion: a future rename would otherwise become a TypeError rather than the
+ * actionable reference-hardware refusal this gate promises.
+ */
+function referenceScreenMetrics() {
+  const mobile = lighthouseConstants.screenEmulationMetrics.mobile;
+  const desktop = lighthouseConstants.screenEmulationMetrics.desktop;
+  if (mobile === undefined || desktop === undefined) {
+    fail(
+      "Lighthouse no longer exports both `mobile` and `desktop` screen-emulation presets. " +
+        '10 §9.4 publishes two reference profiles, so re-derive them before accepting this ' +
+        'dependency instead of measuring an unnamed fallback.',
+    );
+  }
+  return { mobile, desktop };
+}
+
+/**
  * Lighthouse's presets must still *be* the hardware §9.4 names.
  *
  * Reading the presets rather than transcribing them removes one failure — a copied number
@@ -254,7 +276,8 @@ interface Profile {
  * fails rather than being measured under the old label.
  */
 function assertReferenceHardware(): void {
-  const { screenEmulationMetrics, userAgents, throttling } = lighthouseConstants;
+  const { userAgents, throttling } = lighthouseConstants;
+  const screens = referenceScreenMetrics();
   if (!userAgents.mobile.toLowerCase().includes(MOBILE_REFERENCE_DEVICE.toLowerCase())) {
     fail(
       `Lighthouse's default mobile preset no longer emulates a ${MOBILE_REFERENCE_DEVICE}-class ` +
@@ -264,11 +287,11 @@ function assertReferenceHardware(): void {
         'keep reporting the old label over a new phone.',
     );
   }
-  if (!screenEmulationMetrics.mobile.mobile || screenEmulationMetrics.desktop.mobile) {
+  if (!screens.mobile.mobile || screens.desktop.mobile) {
     fail(
       "Lighthouse's screen-emulation presets no longer separate mobile from desktop " +
-        `(mobile.mobile=${screenEmulationMetrics.mobile.mobile}, ` +
-        `desktop.mobile=${screenEmulationMetrics.desktop.mobile}). §9.4 budgets two form ` +
+        `(mobile.mobile=${screens.mobile.mobile}, ` +
+        `desktop.mobile=${screens.desktop.mobile}). §9.4 budgets two form ` +
         'factors and this gate would be running the same one twice.',
     );
   }
@@ -296,7 +319,8 @@ function assertReferenceHardware(): void {
  */
 function profiles(): readonly Profile[] {
   assertReferenceHardware();
-  const { screenEmulationMetrics, userAgents, throttling } = lighthouseConstants;
+  const { userAgents, throttling } = lighthouseConstants;
+  const screens = referenceScreenMetrics();
   return [
     {
       label: 'desktop',
@@ -304,7 +328,7 @@ function profiles(): readonly Profile[] {
       hardFailMs: DESKTOP_HARD_FAIL_MS,
       settings: {
         formFactor: 'desktop',
-        screenEmulation: screenEmulationMetrics.desktop,
+        screenEmulation: screens.desktop,
         emulatedUserAgent: userAgents.desktop,
         // §9.4's "mid-2023 laptop 4× throttle". The preset's own multiplier is 1; the
         // override is asserted back out of the report below, because a settings key a
@@ -322,7 +346,7 @@ function profiles(): readonly Profile[] {
         // Moto G Power (2022) emulation, its user agent, Slow 4G and 4× CPU. Taken
         // unmodified — an override here would be this file inventing a device.
         formFactor: 'mobile',
-        screenEmulation: screenEmulationMetrics.mobile,
+        screenEmulation: screens.mobile,
         emulatedUserAgent: userAgents.mobile,
         throttling: throttling.mobileSlow4G,
       },

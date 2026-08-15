@@ -118,7 +118,7 @@ function environmentValue(name: string): string | null {
 }
 
 /**
- * `pnpm` reports itself in `npm_config_user_agent` (`pnpm/10.23.0 npm/? node/v22.18.0 …`)
+ * `pnpm` reports itself in `npm_config_user_agent` (`pnpm/10.23.0 npm/? node/v22.19.0 …`)
  * whenever it is the thing running this script, which under `pnpm run release:manifest` it
  * always is. Read rather than spawned: `pnpm --version` would be a second process to learn
  * something the first one already said, and it would report whichever pnpm is on `PATH`
