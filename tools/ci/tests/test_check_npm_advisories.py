@@ -233,7 +233,6 @@ class BundleReachabilityTests(unittest.TestCase):
 
     def test_every_committed_waiver_declares_containment(self) -> None:
         waivers = checker.load_waivers(WAIVERS)
-        self.assertTrue(waivers, "the committed waiver file declares nothing")
         for key, row in waivers.items():
             self.assertEqual(row["reaches_bundle"], "no", key)
 
@@ -260,12 +259,9 @@ class WaiverSchemaTests(unittest.TestCase):
                 checker.load_waivers(waivers)
         self.assertIn("duplicate waiver", str(caught.exception))
 
-    def test_the_committed_waiver_file_loads(self) -> None:
+    def test_the_committed_waiver_file_is_empty_after_remediation(self) -> None:
         waivers = checker.load_waivers(WAIVERS)
-        self.assertIn(
-            ("GHSA-8988-4f7v-96qf", "@opentelemetry/core", "1.30.1"),
-            waivers,
-        )
+        self.assertEqual(waivers, {})
 
     def test_the_compat_parser_agrees_with_tomllib(self) -> None:
         """The local gate runs 3.10 and CI runs 3.12, so the two parsers must
@@ -274,7 +270,7 @@ class WaiverSchemaTests(unittest.TestCase):
         if checker.tomllib is None:
             self.skipTest("tomllib requires Python 3.11+")
         with WAIVERS.open("rb") as handle:
-            expected = checker.tomllib.load(handle)["waiver"]
+            expected = checker.tomllib.load(handle).get("waiver", [])
         actual = checker.parse_waivers_toml_compat(WAIVERS.read_text(encoding="utf-8"))
         self.assertEqual(actual, expected)
 

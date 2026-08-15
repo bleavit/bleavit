@@ -288,4 +288,6 @@
 | 2026-08-12 | [Metadata-hash mode 1 is bound to the final runtime artifact](decisions/2026/08/2026-08-12.md#metadata-hash-mode-1-is-bound-to-the-final-runtime-artifact) | This session implementing the… |
 | 2026-08-12 | [Reusable client report retention has an explicit bounded lifecycle](decisions/2026/08/2026-08-12.md#reusable-client-report-retention-has-an-explicit-bounded-lifecycle) | This session under R-1 (imple… |
 | 2026-08-13 | [10 §9.3's raw metadata measurement follows the exact-source feed](decisions/2026/08/2026-08-13.md#10-93s-raw-metadata-measurement-follows-the-exact-source-feed) | Session, under R-1 (spec ruli… |
+| 2026-08-14 | [Lighthouse 13.4.1 retains FCP and the published reference profiles](decisions/2026/08/2026-08-14.md#lighthouse-1341-retains-fcp-and-the-published-reference-profiles) | Session, under R-1 (spec ruli… |
+| 2026-08-14 | [Patched npm versions replace advisory waivers](decisions/2026/08/2026-08-14.md#patched-npm-versions-replace-advisory-waivers) | Session, under 14 §3.6 TH-44… |
 

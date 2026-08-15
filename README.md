@@ -104,7 +104,7 @@ editable rather than guarded — see rule R-1 in [AGENTS.md](AGENTS.md).
 | Tool | Version | Where the pin lives |
 |---|---|---|
 | Rust | 1.89.0, with the two wasm targets | [`rust-toolchain.toml`](rust-toolchain.toml) — `rustup` reads it for you |
-| Node.js | 22.18.0 | [`app/.nvmrc`](app/.nvmrc) |
+| Node.js | 22.19.0 | [`app/.nvmrc`](app/.nvmrc) |
 | pnpm | 10.23.0, through corepack | `packageManager` in `app/package.json` |
 | Python | 3.12 | [`.github/workflows/ci.yml`](.github/workflows/ci.yml) |
 

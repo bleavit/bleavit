@@ -140,7 +140,6 @@
 | SQ-1003 | [**06 §3.2's authority matrix writes five guardian extrinsic…](questions/SQ-1003.md) | 06 §3.2; 11 §11.8.2 | 2026-08-07 | B7 |
 | SQ-1004 | [**11 §11.5's P-13 says *"round open"* and no reading of it…](questions/SQ-1004.md) | 11 §11.5; 07 §5 | 2026-08-07 | B7 |
 | SQ-1005 | [**10 §5.2's compatibility classifier has no producer for ei…](questions/SQ-1005.md) | 10 §5.2; 11 §11.9.1; 15 §2 | 2026-08-07 | X |
-| SQ-1006 | [**10 §9.4 binds a published render budget to Lighthouse 12.…](questions/SQ-1006.md) | 10 §9.4; 15 §4.5 | 2026-08-07 | B7 |
 | SQ-1007 | [**`reaches_bundle` is the npm supply-chain gate's load-bear…](questions/SQ-1007.md) | 15 §4.5 | 2026-08-07 | X |
 | SQ-1008 | [**The supply-chain gate's ecosystem coverage is enumerated,…](questions/SQ-1008.md) | 15 §4.5 | 2026-08-07 | X |
 | SQ-1009 | [**12 §1.1's recipe requires `SOURCE_DATE_EPOCH` fixed and t…](questions/SQ-1009.md) | 12 §1.1; 15 §4.8 | 2026-08-07 | X |
@@ -589,6 +588,7 @@
 | SQ-983 | [**Can a live indexer ever supply a chart row, and if so in…](questions/SQ-983.md) | 10 §7, §8.2, §8.5.2 | 2026-08-07 | none |
 | SQ-984 | [**Does `GET /range` page ascending only, and does that matc…](questions/SQ-984.md) | 10 §8.5.2, §6.4 | 2026-08-07 | none |
 | SQ-995 | [**`app/package.json` carried `0.0.0`, which `build.ts` refu…](questions/SQ-995.md) | 12 §1.1, §1.2, §1.4, §1.6; 02 §13 rule 8 | 2026-08-07 (F11 readines… | none |
+| SQ-1006 | [**RULED 2026-08-14 — adopt Lighthouse 13.4.1, retain FCP as…](questions/SQ-1006.md) | 10 §9.4; 15 §4.5 | 2026-08-07 | none |
 | SQ-1011 | [**10 §3.1's boot machine has no edge for a `CompatCheck` th…](questions/SQ-1011.md) | 10 §3.1/§3.2 | 2026-08-08 | none |
 | SQ-1012 | [**10 §5.2's foreign lattice has the same hole one chain ove…](questions/SQ-1012.md) | 02 §7.7; 10 §5.2 | 2026-08-08 | none |
 | SQ-1013 | [**11 §11.9.1's Asset Hub compat row needs two smoldot chain…](questions/SQ-1013.md) | 10 §9.3/§9.4; 11 §11.9.1 | 2026-08-08 | none |

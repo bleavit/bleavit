@@ -72,27 +72,27 @@ test('the pkg Node is rejected on `process.pkg`, not on its version', () => {
   // The whole point of testing `process.pkg` as well as the version: the day zombienet is
   // repackaged on a Node in the admissible major, a version-only rule starts accepting it and
   // the drill silently runs the client under an interpreter that reads ESM as CommonJS.
-  assert.equal(rules.admissibleNode('22.18.0', 'v22.18.0', 'undefined'), true);
-  assert.equal(rules.admissibleNode('22.18.0', 'v22.18.0', 'object'), false, 'a pkg binary in the pinned version was accepted');
-  assert.equal(rules.admissibleNode('22.18.0', 'v18.5.0', 'object'), false);
+  assert.equal(rules.admissibleNode('22.19.0', 'v22.19.0', 'undefined'), true);
+  assert.equal(rules.admissibleNode('22.19.0', 'v22.19.0', 'object'), false, 'a pkg binary in the pinned version was accepted');
+  assert.equal(rules.admissibleNode('22.19.0', 'v18.5.0', 'object'), false);
 });
 
 test('the band is closed at both ends, because `engines.node` is', () => {
-  // `app/package.json` pins ">=22.18.0 <23" — one band, deliberately closed. "At least the
+  // `app/package.json` pins ">=22.19.0 <23" — one band, deliberately closed. "At least the
   // floor" would admit Node 23, which is not a Node CI installs.
-  assert.equal(rules.admissibleNode('22.18.0', 'v22.18.1', 'undefined'), true);
-  assert.equal(rules.admissibleNode('22.18.0', 'v22.19.0', 'undefined'), true);
-  assert.equal(rules.admissibleNode('22.18.0', 'v23.0.0', 'undefined'), false, 'the next major was admitted');
-  assert.equal(rules.admissibleNode('22.18.0', 'v22.17.9', 'undefined'), false, 'below the floor was admitted');
-  assert.equal(rules.admissibleNode('22.18.0', 'v18.5.0', 'undefined'), false, 'Node 18 was admitted');
+  assert.equal(rules.admissibleNode('22.19.0', 'v22.19.1', 'undefined'), true);
+  assert.equal(rules.admissibleNode('22.19.0', 'v22.20.0', 'undefined'), true);
+  assert.equal(rules.admissibleNode('22.19.0', 'v23.0.0', 'undefined'), false, 'the next major was admitted');
+  assert.equal(rules.admissibleNode('22.19.0', 'v22.18.9', 'undefined'), false, 'below the floor was admitted');
+  assert.equal(rules.admissibleNode('22.19.0', 'v18.5.0', 'undefined'), false, 'Node 18 was admitted');
 });
 
 test('a version that is not one is rejected rather than parsed into something', () => {
   for (const version of ['', 'v22', 'v22.18', 'twenty-two', 'v22.x.0']) {
-    assert.equal(rules.admissibleNode('22.18.0', version, 'undefined'), false, `accepted ${JSON.stringify(version)}`);
+    assert.equal(rules.admissibleNode('22.19.0', version, 'undefined'), false, `accepted ${JSON.stringify(version)}`);
   }
   // …and a pin this suite cannot read is loud, because it decides every answer above.
-  assert.throws(() => rules.admissibleNode('22.18', 'v22.18.0', 'undefined'), /does not hold an x\.y\.z version/);
+  assert.throws(() => rules.admissibleNode('22.19', 'v22.19.0', 'undefined'), /does not hold an x\.y\.z version/);
 });
 
 /* -------------------------------------------------------- defect 2: the report is not stdout */

@@ -49,6 +49,7 @@ explainer/test-results/
 # Track F — the canonical client at app/ (10 §10.1). The pnpm store and build
 # output are derived; the lockfile is NOT ignored — 12 §1.1 installs from it
 # with --frozen-lockfile, and INV-FE-10's two-environment gate depends on it.
+.pnpm-store/
 app/node_modules/
 app/**/node_modules/
 app/dist/
