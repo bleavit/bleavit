@@ -22,8 +22,8 @@ prometheus = { version = "0.14.0", default-features = false }
 rand = "0.10.2"
 serde = { version = "1.0.228", features = ["derive"] }
 scale-info = { version = "2.11.6", features = ["derive"] }
-subxt = "0.50.2"
-subxt-signer = { version = "0.50.2", features = ["sr25519", "subxt"] }
+subxt = "0.51.0"
+subxt-signer = { version = "0.51.0", features = ["sr25519", "subxt"] }
 tokio = { version = "1.49.0", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 toml = "1.1.3"
 tracing = "0.1.44"
